@@ -21,7 +21,8 @@ use omq_proto::proto::SocketType;
 
 #[cfg(not(feature = "priority"))]
 use crate::transport::driver::DriverCommand;
-use crate::socket::inner::DirectIoState;
+#[cfg(not(feature = "priority"))]
+use crate::socket::inner::{DirectIoState, FLAT_THRESHOLD};
 
 use super::handle::Socket;
 use super::inner::PeerOut;
@@ -45,6 +46,7 @@ use super::inner::PeerOut;
 /// parked in `select_biased!` (`driver_in_select == true`). When the driver is
 /// actively looping (steps 1-3), it will drain the queue naturally on its next
 /// step-3 pass — no spurious wakeup needed.
+#[cfg(not(feature = "priority"))]
 fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
     const DIRECT_CAP: usize = 512 * 1024;
 
@@ -58,7 +60,12 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         if eq.total_bytes() >= DIRECT_CAP {
             return Ok(false);
         }
-        eq.encode_and_push(msg);
+        let msg_total: usize = msg.parts().iter().map(omq_proto::Payload::len).sum();
+        if msg_total < FLAT_THRESHOLD {
+            eq.encode_and_push_flat(msg);
+        } else {
+            eq.encode_and_push(msg);
+        }
         drop(eq);
         if state.driver_in_select.load(Ordering::Relaxed) {
             state.transmit_ready.notify(1);
@@ -66,7 +73,38 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         return Ok(true);
     }
 
-    // Transform active: must go through the codec (compression lives there).
+    // Passthrough-transform fast path: lz4+tcp / zstd+tcp with message
+    // parts below the compression threshold.  All parts will be encoded
+    // as `SENTINEL_PLAIN | payload` regardless — no actual compression.
+    // We bypass the codec async-mutex and encode directly into
+    // `encoded_queue` just like the no-transform path, but prepend the
+    // 4-byte plaintext sentinel to each part payload.
+    if let Some((ref sentinel, threshold)) = state.transform_passthrough
+        && state.handshake_done.load(Ordering::Relaxed)
+        && msg.parts().iter().all(|p| p.len() < threshold)
+    {
+        let Ok(mut eq) = state.encoded_queue.try_lock() else {
+            return Ok(false);
+        };
+        if eq.total_bytes() >= DIRECT_CAP {
+            return Ok(false);
+        }
+        let prefix_len = sentinel.len();
+        let msg_total: usize = msg.parts().iter().map(|p| p.len() + prefix_len).sum();
+        if msg_total < FLAT_THRESHOLD {
+            eq.encode_and_push_prefixed_flat(sentinel, msg);
+        } else {
+            eq.encode_and_push_prefixed(sentinel, msg);
+        }
+        drop(eq);
+        if state.driver_in_select.load(Ordering::Relaxed) {
+            state.transmit_ready.notify(1);
+        }
+        return Ok(true);
+    }
+
+    // Transform active with large or dict-aware messages: must go through
+    // the codec (compression runs inside `codec.send_message`).
     let Some(mut io) = state.peer_io.try_lock() else {
         return Ok(false);
     };

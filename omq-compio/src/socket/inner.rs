@@ -151,21 +151,44 @@ pub(super) enum PeerOut {
 
 pub(super) type WirePeerHandle = Arc<RwLock<flume::Sender<DriverCommand>>>;
 
+/// Messages smaller than this (total payload bytes across all parts)
+/// are packed into `flat_buf` instead of pushing header+payload as
+/// separate `Bytes` chunks. This reduces `write_vectored` iovec count
+/// from 2N to 1 for a batch of N small messages — the dominant win at
+/// 128 B and 512 B message sizes.
+#[cfg_attr(feature = "priority", allow(dead_code))]
+pub(crate) const FLAT_THRESHOLD: usize = 1024;
+
 /// Per-peer outbound queue for the direct-encode fast path.
 ///
-/// The sender encodes ZMTP frames directly into this `VecDeque<Bytes>`
-/// (headers via inline framing, payload via `Bytes::clone` Arc bumps).
+/// The sender encodes ZMTP frames directly into this queue (headers via
+/// inline framing, payload via `Bytes::clone` Arc bumps for large msgs,
+/// or direct copy into `flat_buf` for small msgs).
 /// The driver drains it in step 3b via `write_vectored`. Only active
 /// when `DirectIoState::has_transform == false` and the handshake is
 /// done. Avoids `clone_transmit_chunks` + `advance_transmit` on every
 /// flush — eliminating two codec-lock acquisitions and N Arc bumps per
 /// `write_vectored` call on the small-message hot path.
+///
+/// Two encoding sub-paths:
+/// - Small messages (total < `FLAT_THRESHOLD`): bytes copied into
+///   `flat_buf`. Drained as a single `Bytes` chunk → 1 iovec for N msgs.
+/// - Large messages (total ≥ `FLAT_THRESHOLD`): header + payload pushed
+///   as separate `Bytes` into `chunks`. Ordering invariant: large
+///   encodes flush `flat_buf` → `chunks` first so wire order is exact.
 pub(crate) struct EncodedQueue {
     chunks: VecDeque<Bytes>,
     total_bytes: usize,
     /// Header scratch buffer — reused across frames (zero alloc after
     /// warm-up). `split().freeze()` hands ownership to the chunk list.
+    #[cfg_attr(feature = "priority", allow(dead_code))]
     scratch: BytesMut,
+    /// Flat accumulation buffer for small messages. Bytes are copied in
+    /// directly (header + payload in one contiguous region). Drained as
+    /// a single `Bytes` chunk in `drain_into_vec`, reducing iovec count.
+    /// Pre-allocated at 128 KiB; retained across drains via `split()`.
+    #[cfg_attr(feature = "priority", allow(dead_code))]
+    flat_buf: BytesMut,
 }
 
 impl std::fmt::Debug for EncodedQueue {
@@ -183,15 +206,63 @@ impl EncodedQueue {
             chunks: VecDeque::with_capacity(32),
             total_bytes: 0,
             scratch: BytesMut::with_capacity(9),
+            flat_buf: BytesMut::with_capacity(128 * 1024),
         }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.chunks.is_empty()
+        self.chunks.is_empty() && self.flat_buf.is_empty()
     }
 
+    /// Flush `flat_buf` into `chunks` as one contiguous `Bytes` chunk.
+    /// Must be called before encoding a large message so that wire order
+    /// matches insertion order (small msgs before this large one).
+    #[cfg_attr(feature = "priority", allow(dead_code))]
+    fn flush_flat_to_chunks(&mut self) {
+        if !self.flat_buf.is_empty() {
+            // split() takes all flat_buf bytes and leaves it empty (retaining capacity).
+            // total_bytes is unchanged: the bytes are still in the queue, just in chunks now.
+            self.chunks.push_back(self.flat_buf.split().freeze());
+        }
+    }
+
+    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) fn total_bytes(&self) -> usize {
         self.total_bytes
+    }
+
+    /// Encode a small ZMTP message (total payload < `FLAT_THRESHOLD`) into
+    /// `flat_buf` by copying all header and payload bytes contiguously.
+    /// Amortises many small messages into one `write_vectored` iovec entry.
+    #[cfg_attr(feature = "priority", allow(dead_code))]
+    pub(crate) fn encode_and_push_flat(&mut self, msg: &omq_proto::message::Message) {
+        let parts = msg.parts();
+        let n = parts.len();
+        let before = self.flat_buf.len();
+        for (i, part) in parts.iter().enumerate() {
+            let more = i + 1 < n;
+            let flags = u8::from(more);
+            let payload_len = part.len();
+            if payload_len > 255 {
+                self.flat_buf.extend_from_slice(&[
+                    flags | 0x02,
+                    (payload_len >> 56) as u8,
+                    (payload_len >> 48) as u8,
+                    (payload_len >> 40) as u8,
+                    (payload_len >> 32) as u8,
+                    (payload_len >> 24) as u8,
+                    (payload_len >> 16) as u8,
+                    (payload_len >> 8) as u8,
+                    payload_len as u8,
+                ]);
+            } else {
+                self.flat_buf.extend_from_slice(&[flags, payload_len as u8]);
+            }
+            for b in part.chunks() {
+                self.flat_buf.extend_from_slice(b);
+            }
+        }
+        self.total_bytes += self.flat_buf.len() - before;
     }
 
     /// Encode a ZMTP message (NULL mechanism, no transform) directly into
@@ -200,7 +271,12 @@ impl EncodedQueue {
     ///
     /// Frame header: `[flags: u8, size: u8]` for short (≤ 255 byte) frames;
     /// `[flags | FLAG_LONG, size: u64_be]` for long frames.
+    ///
+    /// Flushes `flat_buf` to `chunks` first to maintain wire ordering
+    /// when small and large messages are interleaved.
+    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) fn encode_and_push(&mut self, msg: &omq_proto::message::Message) {
+        self.flush_flat_to_chunks();
         let parts = msg.parts();
         let n = parts.len();
         for (i, part) in parts.iter().enumerate() {
@@ -233,15 +309,110 @@ impl EncodedQueue {
         }
     }
 
-    /// Drain up to `max_chunks` entries into a `Vec<Bytes>` for `write_vectored`.
-    /// Decrements `total_bytes` by the byte count of drained chunks (restored
-    /// via `put_back_unwritten` on a partial write).
-    pub(crate) fn drain_into_vec(&mut self, max_chunks: usize) -> Vec<Bytes> {
+    /// Like `encode_and_push_flat` but prepends `prefix` to each part payload.
+    #[cfg_attr(feature = "priority", allow(dead_code))]
+    pub(crate) fn encode_and_push_prefixed_flat(
+        &mut self,
+        prefix: &Bytes,
+        msg: &omq_proto::message::Message,
+    ) {
+        let parts = msg.parts();
+        let n = parts.len();
+        let prefix_len = prefix.len();
+        let before = self.flat_buf.len();
+        for (i, part) in parts.iter().enumerate() {
+            let more = i + 1 < n;
+            let flags = u8::from(more);
+            let payload_len = part.len() + prefix_len;
+            if payload_len > 255 {
+                self.flat_buf.extend_from_slice(&[
+                    flags | 0x02,
+                    (payload_len >> 56) as u8,
+                    (payload_len >> 48) as u8,
+                    (payload_len >> 40) as u8,
+                    (payload_len >> 32) as u8,
+                    (payload_len >> 24) as u8,
+                    (payload_len >> 16) as u8,
+                    (payload_len >> 8) as u8,
+                    payload_len as u8,
+                ]);
+            } else {
+                self.flat_buf.extend_from_slice(&[flags, payload_len as u8]);
+            }
+            self.flat_buf.extend_from_slice(prefix);
+            for b in part.chunks() {
+                self.flat_buf.extend_from_slice(b);
+            }
+        }
+        self.total_bytes += self.flat_buf.len() - before;
+    }
+
+    /// Like [`encode_and_push`] but prepends a fixed-length `prefix`
+    /// (e.g. `SENTINEL_PLAIN = [0,0,0,0]`) to each part payload.
+    /// Used by the passthrough-transform fast path so lz4+tcp and
+    /// zstd+tcp messages below the compression threshold skip the
+    /// codec async-mutex and use the same sync-Mutex path as plain tcp.
+    ///
+    /// `payload_len` in the ZMTP frame header = `prefix.len() + part.len()`.
+    ///
+    /// Flushes `flat_buf` to `chunks` first to maintain wire ordering.
+    #[cfg_attr(feature = "priority", allow(dead_code))]
+    pub(crate) fn encode_and_push_prefixed(
+        &mut self,
+        prefix: &Bytes,
+        msg: &omq_proto::message::Message,
+    ) {
+        self.flush_flat_to_chunks();
+        let parts = msg.parts();
+        let n = parts.len();
+        let prefix_len = prefix.len();
+        for (i, part) in parts.iter().enumerate() {
+            let more = i + 1 < n;
+            let flags = u8::from(more);
+            let payload_len = part.len() + prefix_len;
+            self.scratch.clear();
+            if payload_len > 255 {
+                self.scratch.extend_from_slice(&[
+                    flags | 0x02,
+                    (payload_len >> 56) as u8,
+                    (payload_len >> 48) as u8,
+                    (payload_len >> 40) as u8,
+                    (payload_len >> 32) as u8,
+                    (payload_len >> 24) as u8,
+                    (payload_len >> 16) as u8,
+                    (payload_len >> 8) as u8,
+                    payload_len as u8,
+                ]);
+            } else {
+                self.scratch.extend_from_slice(&[flags, payload_len as u8]);
+            }
+            let header = self.scratch.split().freeze();
+            self.total_bytes += header.len();
+            self.chunks.push_back(header);
+            self.total_bytes += prefix_len;
+            self.chunks.push_back(prefix.clone());
+            for b in part.chunks() {
+                self.total_bytes += b.len();
+                self.chunks.push_back(b.clone());
+            }
+        }
+    }
+
+    /// Drain up to `max_chunks` entries into `buf` for `write_vectored`.
+    /// Drains `chunks` first, then appends `flat_buf` as one final entry
+    /// (so N small messages → 1 iovec instead of 2N). Decrements
+    /// `total_bytes` by the byte count of everything drained.
+    pub(crate) fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         let take = max_chunks.min(self.chunks.len());
-        let v: Vec<Bytes> = self.chunks.drain(..take).collect();
-        let drained: usize = v.iter().map(Bytes::len).sum();
-        self.total_bytes = self.total_bytes.saturating_sub(drained);
-        v
+        let chunk_bytes: usize = self.chunks.iter().take(take).map(Bytes::len).sum();
+        buf.extend(self.chunks.drain(..take));
+        self.total_bytes = self.total_bytes.saturating_sub(chunk_bytes);
+
+        if !self.flat_buf.is_empty() && buf.len() < max_chunks {
+            let flat = self.flat_buf.split().freeze();
+            self.total_bytes = self.total_bytes.saturating_sub(flat.len());
+            buf.push(flat);
+        }
     }
 
     /// After a partial write, return the unwritten suffix of `returned` to
@@ -323,10 +494,20 @@ pub(crate) struct DirectIoState {
     pub(crate) handshake_done: AtomicBool,
     /// True when an active `MessageTransform` (lz4, zstd) is installed.
     /// The direct-encode fast path falls back to the codec when this is
-    /// set — compression runs inside `codec.send_message`, not here.
+    /// set — unless `transform_passthrough` is also set (see below).
+    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) has_transform: bool,
+    /// When `has_transform` and the transform will always use
+    /// `SENTINEL_PLAIN` for parts smaller than `threshold` bytes,
+    /// this holds `(sentinel_bytes, threshold)`. The sender can then
+    /// encode sub-threshold messages directly into `encoded_queue` via
+    /// `encode_and_push_prefixed`, bypassing the codec async-mutex.
+    /// `None` when a dict is installed or auto-train is active.
+    #[cfg_attr(feature = "priority", allow(dead_code))]
+    pub(crate) transform_passthrough: Option<(Bytes, usize)>,
     /// Direct-encode queue. Sender encodes ZMTP frames here; driver
-    /// drains them in step 3b. Only used when `!has_transform`.
+    /// drains them in step 3b. Used when `!has_transform` OR when the
+    /// message qualifies for `transform_passthrough`.
     pub(crate) encoded_queue: Mutex<EncodedQueue>,
     /// Set by the driver just before parking in `select_biased!`, cleared
     /// at the top of each loop iteration. Sender skips `transmit_ready`
@@ -349,6 +530,7 @@ impl DirectIoState {
         writer: WireWriter,
         poll_fd: Arc<PollFd<socket2::Socket>>,
         has_transform: bool,
+        transform_passthrough: Option<(Bytes, usize)>,
     ) -> Arc<Self> {
         Arc::new(Self {
             peer_io,
@@ -362,6 +544,7 @@ impl DirectIoState {
             hb_epoch: Instant::now(),
             handshake_done: AtomicBool::new(false),
             has_transform,
+            transform_passthrough,
             encoded_queue: Mutex::new(EncodedQueue::new()),
             driver_in_select: AtomicBool::new(false),
         })

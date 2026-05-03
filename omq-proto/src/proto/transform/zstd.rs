@@ -173,6 +173,18 @@ impl ZstdTransform {
         self
     }
 
+    /// Per-part size below which `encode` is guaranteed to use
+    /// `SENTINEL_PLAIN` (no actual compression). `None` when a send-side
+    /// dictionary is installed, or auto-train is active (either could
+    /// change the compression threshold mid-connection).
+    pub fn passthrough_threshold(&self) -> Option<usize> {
+        if self.send_dict.is_none() && self.train.is_none() {
+            Some(MIN_COMPRESS_NO_DICT)
+        } else {
+            None
+        }
+    }
+
     /// Construct with a send-side dictionary. Errors if the dict is
     /// empty or larger than [`MAX_DICT_BYTES`].
     pub fn with_send_dict(dict: Bytes) -> Result<Self> {

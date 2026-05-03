@@ -227,6 +227,8 @@ pub(crate) async fn run_connection(
     // handed to compio's read by move and returned via `BufResult`,
     // so no copy on the hot path.
     let mut read_buf: Vec<u8> = Vec::with_capacity(READ_BUF_BYTES);
+    // Reused across iterations to avoid per-drain Vec allocation.
+    let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
 
     let mut pending_cmds: VecDeque<DriverCommand> = VecDeque::new();
     let mut deadline: Option<Instant> = handshake_timeout.map(|t| Instant::now() + t);
@@ -250,6 +252,16 @@ pub(crate) async fn run_connection(
     // handshake. Empty until then. Tag each inbound Message with it
     // so identity-routing sockets (ROUTER) can recover the source.
     let mut peer_identity = bytes::Bytes::new();
+
+    // Whether the codec received new bytes this iteration (set in read_ready
+    // arm; cleared at top of loop). Guards step 1: post-handshake, step 1
+    // is a no-op unless new bytes arrived.
+    let mut codec_has_input = true; // conservative until handshake clears it
+    // Whether the codec's pending-transmit buffer was dirtied this iteration
+    // (set in cmd/shared/hb arms; cleared when step 3a finds it empty).
+    // Guards step 3a: post-handshake, step 3a is a no-op on the plain-tcp
+    // send-only fast path where nothing encodes into the codec.
+    let mut codec_maybe_dirty = true; // conservative until step 3a clears it
 
     loop {
         use futures::FutureExt;
@@ -277,73 +289,78 @@ pub(crate) async fn run_connection(
             }
         }
 
-        // 1) Drain parsed events. Lock briefly, capture everything
-        //    we'll dispatch outside; drain pending_cmds into the
-        //    codec the moment the handshake completes (so writes
-        //    can land in step 3 of the same iteration).
-        let drained: SmallVec<[Drained; 8]> = {
-            let mut io = peer_io.lock().await;
-            let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
-            while let Some(ev) = io.codec.poll_event() {
-                match ev {
-                    Event::HandshakeSucceeded {
-                        peer_minor,
-                        peer_properties,
-                    } => {
-                        if !io.handshake_done {
-                            io.handshake_done = true;
-                            state.handshake_done.store(true, Ordering::Relaxed);
-                            deadline = None;
-                            if let Some(iv) = hb_interval {
-                                hb_next = Some(Instant::now() + iv);
-                            }
-                            peer_identity = peer_properties.identity.clone().unwrap_or_default();
-                            // Drain pre-handshake commands into the
-                            // codec now that we're allowed to send.
-                            while let Some(cmd) = pending_cmds.pop_front() {
-                                match cmd {
-                                    DriverCommand::SendMessage(m) => {
-                                        if let Some(t) = io.transform.as_mut() {
-                                            for wire in t.encode(&m)? {
-                                                io.codec.send_message(&wire)?;
-                                            }
-                                        } else {
-                                            io.codec.send_message(&m)?;
-                                        }
-                                    }
-                                    DriverCommand::SendCommand(c) => {
-                                        io.codec.send_command(&c)?;
-                                    }
-                                    DriverCommand::Close => closing = true,
+        // 1) Drain parsed events. Skipped post-handshake when no new bytes
+        //    arrived this iteration — `poll_event` would return None
+        //    immediately, and acquiring the async mutex is not free.
+        let drained: SmallVec<[Drained; 8]> =
+            if !state.handshake_done.load(Ordering::Relaxed) || codec_has_input {
+                codec_has_input = false; // consumed; re-set by read_ready arm
+                let mut io = peer_io.lock().await;
+                let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
+                while let Some(ev) = io.codec.poll_event() {
+                    match ev {
+                        Event::HandshakeSucceeded {
+                            peer_minor,
+                            peer_properties,
+                        } => {
+                            if !io.handshake_done {
+                                io.handshake_done = true;
+                                state.handshake_done.store(true, Ordering::Relaxed);
+                                deadline = None;
+                                if let Some(iv) = hb_interval {
+                                    hb_next = Some(Instant::now() + iv);
                                 }
+                                peer_identity =
+                                    peer_properties.identity.clone().unwrap_or_default();
+                                // Drain pre-handshake commands into the
+                                // codec now that we're allowed to send.
+                                while let Some(cmd) = pending_cmds.pop_front() {
+                                    match cmd {
+                                        DriverCommand::SendMessage(m) => {
+                                            if let Some(t) = io.transform.as_mut() {
+                                                for wire in t.encode(&m)? {
+                                                    io.codec.send_message(&wire)?;
+                                                }
+                                            } else {
+                                                io.codec.send_message(&m)?;
+                                            }
+                                        }
+                                        DriverCommand::SendCommand(c) => {
+                                            io.codec.send_command(&c)?;
+                                        }
+                                        DriverCommand::Close => closing = true,
+                                    }
+                                }
+                                codec_maybe_dirty = true; // pending_cmds flushed into codec
+                                out.push(Drained::Handshake {
+                                    peer_minor,
+                                    peer_properties,
+                                });
                             }
-                            out.push(Drained::Handshake {
-                                peer_minor,
-                                peer_properties,
-                            });
                         }
+                        Event::Message(m) => {
+                            // Compression transport: decode the wire
+                            // payload back to plaintext before delivery.
+                            // `None` means the wire message was a dict
+                            // shipment consumed at the transport layer -
+                            // don't surface it.
+                            let m = if let Some(t) = io.transform.as_mut() {
+                                match t.decode(m)? {
+                                    Some(plain) => plain,
+                                    None => continue,
+                                }
+                            } else {
+                                m
+                            };
+                            out.push(Drained::Msg(m));
+                        }
+                        Event::Command(c) => out.push(Drained::Cmd(c)),
                     }
-                    Event::Message(m) => {
-                        // Compression transport: decode the wire
-                        // payload back to plaintext before delivery.
-                        // `None` means the wire message was a dict
-                        // shipment consumed at the transport layer -
-                        // don't surface it.
-                        let m = if let Some(t) = io.transform.as_mut() {
-                            match t.decode(m)? {
-                                Some(plain) => plain,
-                                None => continue,
-                            }
-                        } else {
-                            m
-                        };
-                        out.push(Drained::Msg(m));
-                    }
-                    Event::Command(c) => out.push(Drained::Cmd(c)),
                 }
-            }
-            out
-        };
+                out
+            } else {
+                SmallVec::new()
+            };
 
         // 2) Dispatch drained events outside the lock.
         for de in drained {
@@ -460,10 +477,12 @@ pub(crate) async fn run_connection(
         }
 
         // 3a) Flush codec buffer — used for transforms, cmd-channel messages,
-        //     heartbeat PINGs, and pre-handshake traffic. The codec lock is
-        //     released before write_vectored so the fast-path sender can
-        //     encode into `encoded_queue` while I/O is in flight.
-        let wrote_from_codec = {
+        //     heartbeat PINGs, and pre-handshake traffic. Skipped
+        //     post-handshake when nothing has dirtied the codec this
+        //     iteration; acquiring the async mutex is not free.
+        let wrote_from_codec = if !state.handshake_done.load(Ordering::Relaxed)
+            || codec_maybe_dirty
+        {
             let chunks = {
                 let io = peer_io.lock().await;
                 if io.codec.has_pending_transmit() {
@@ -473,6 +492,7 @@ pub(crate) async fn run_connection(
                     }
                     c
                 } else {
+                    codec_maybe_dirty = false; // confirmed clean
                     Vec::new()
                 }
             }; // codec lock released
@@ -487,25 +507,32 @@ pub(crate) async fn run_connection(
                 peer_io.lock().await.codec.advance_transmit(written);
                 true
             }
+        } else {
+            false
         };
         if wrote_from_codec {
             continue;
         }
 
         // 3b) Flush EncodedQueue — fast-path direct encodes from the sender.
-        //     Drains the queue by moving chunks (no Arc bumps), then
-        //     write_vectored. On partial write, unwritten chunks are returned
-        //     to the front of the queue for the next iteration.
+        //     Drains the queue into `drain_buf` (reused across iterations to
+        //     avoid per-drain Vec allocation), then write_vectored. On partial
+        //     write, unwritten chunks are returned to the front of the queue.
         let wrote_from_eq = {
-            let chunks = {
+            drain_buf.clear();
+            {
                 let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-                eq.drain_into_vec(1024)
-            };
-            if chunks.is_empty() {
+                eq.drain_into_vec(&mut drain_buf, 1024);
+            }
+            if drain_buf.is_empty() {
                 false
             } else {
-                let (res, returned) = state.writer.lock().await.write_vectored(chunks).await;
+                let tmp = std::mem::take(&mut drain_buf);
+                let (res, returned) = state.writer.lock().await.write_vectored(tmp).await;
                 let written = res.map_err(Error::Io)?;
+                if written == 0 {
+                    return Ok(());
+                }
                 let total_drained: usize = returned.iter().map(Bytes::len).sum();
                 if written < total_drained {
                     state
@@ -513,9 +540,8 @@ pub(crate) async fn run_connection(
                         .lock()
                         .expect("encoded_queue")
                         .put_back_unwritten(returned, written);
-                }
-                if written == 0 {
-                    return Ok(());
+                } else {
+                    drain_buf = returned; // reuse allocation on clean flush
                 }
                 true
             }
@@ -637,6 +663,7 @@ pub(crate) async fn run_connection(
                 {
                     let mut io = peer_io.lock().await;
                     let _ = io.codec.send_command(&ping);
+                    codec_maybe_dirty = true;
                 }
                 if let Some(iv) = hb_interval {
                     hb_next = Some(Instant::now() + iv);
@@ -686,6 +713,11 @@ pub(crate) async fn run_connection(
                         drop(io);
                         read_buf = filled;
                         read_buf.clear();
+                        codec_has_input = true;
+                        // handle_input may auto-generate output (e.g. PONG
+                        // in response to PING) — mark codec dirty so step 3a
+                        // flushes it before try_direct_recv can race it.
+                        codec_maybe_dirty = true;
                     }
                 }
             }
@@ -713,6 +745,7 @@ pub(crate) async fn run_connection(
                                 }
                                 DriverCommand::Close => closing = true,
                             }
+                            codec_maybe_dirty = true;
                         } else {
                             pending_cmds.push_back(cmd);
                         }
@@ -746,8 +779,10 @@ pub(crate) async fn run_connection(
                             for wire in t.encode(&m)? {
                                 io.codec.send_message(&wire)?;
                             }
+                            codec_maybe_dirty = true;
                         } else {
                             io.codec.send_message(&m)?;
+                            codec_maybe_dirty = true;
                         }
                         io.codec.pending_transmit_size() >= cap
                     };
@@ -756,9 +791,12 @@ pub(crate) async fn run_connection(
                 }
             }
             () = transmit_ready_fut.fuse() => {
-                // Fast-path sender encoded data directly into the
-                // codec buffer while we were parked. Loop back to
-                // step 3 to flush it.
+                // Fast-path sender encoded data while we were parked.
+                // Two sub-cases: encoded_queue (handled by step 3b) or
+                // codec-direct (transform path; handled by step 3a).
+                // We can't distinguish them here, so mark codec dirty
+                // conservatively — step 3a will clear it if empty.
+                codec_maybe_dirty = true;
             }
         }
     }

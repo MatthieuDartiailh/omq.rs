@@ -51,6 +51,43 @@ pub enum MessageTransform {
 }
 
 impl MessageTransform {
+    /// Returns `(sentinel, threshold)` when this transform will always
+    /// emit a plaintext-passthrough sentinel for message parts smaller
+    /// than `threshold` bytes — no actual compression, just a prefix.
+    /// `None` means a dictionary or auto-train is active and the
+    /// threshold may change mid-connection.
+    ///
+    /// Callers can use this to encode passthrough messages directly
+    /// (bypassing the codec mutex) for a significant throughput gain on
+    /// small messages.
+    ///
+    /// # Invariant for implementors
+    ///
+    /// Return `None` for any configuration where the effective threshold
+    /// can decrease mid-connection (e.g. zstd auto-train installs a dict
+    /// after the first N messages, dropping the threshold from ~512 B to
+    /// ~32 B). If `Some(threshold)` is returned once, `DirectIoState`
+    /// stores it immutably for the lifetime of the connection and uses it
+    /// to bypass the codec mutex on the hot send path. A stale (too high)
+    /// threshold would silently produce uncompressed frames where the
+    /// receiver expects compressed ones.
+    // TODO: make this invariant structural — e.g. have the transform
+    // clear/invalidate `DirectIoState::transform_passthrough` when a dict
+    // is installed mid-connection, rather than relying on every
+    // `passthrough_threshold()` implementation being conservative.
+    pub fn passthrough_info(&self) -> Option<(bytes::Bytes, usize)> {
+        #[allow(unused)]
+        const SENTINEL: &[u8] = &[0u8, 0, 0, 0];
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(t) => Some((bytes::Bytes::from_static(SENTINEL), t.passthrough_threshold()?)),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => Some((bytes::Bytes::from_static(SENTINEL), t.passthrough_threshold()?)),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!("MessageTransform is uninhabited without lz4/zstd features"),
+        }
+    }
+
     /// Build the per-connection transform implied by an endpoint
     /// scheme. Returns `None` for plain `tcp://` / `ipc://` /
     /// `inproc://` / `udp://`, or for compression schemes whose

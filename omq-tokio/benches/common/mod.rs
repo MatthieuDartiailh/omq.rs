@@ -72,13 +72,15 @@ pub(crate) fn sizes() -> Vec<usize> {
 
 pub(crate) fn transports() -> Vec<String> {
     if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
-        s.split(',').map(|t| t.trim().to_string()).collect()
-    } else {
-        DEFAULT_TRANSPORTS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect()
+        return s.split(',').map(|t| t.trim().to_string()).collect();
     }
+    #[allow(unused_mut)]
+    let mut ts: Vec<String> = DEFAULT_TRANSPORTS.iter().map(|s| (*s).to_string()).collect();
+    #[cfg(feature = "lz4")]
+    ts.push("lz4+tcp".to_string());
+    #[cfg(feature = "zstd")]
+    ts.push("zstd+tcp".to_string());
+    ts
 }
 
 pub(crate) fn peers_override() -> Option<Vec<usize>> {

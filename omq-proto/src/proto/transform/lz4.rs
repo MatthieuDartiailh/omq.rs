@@ -163,6 +163,17 @@ impl Lz4Transform {
         self
     }
 
+    /// Per-part size below which `encode` is guaranteed to use
+    /// `SENTINEL_PLAIN` (no actual compression). `None` when a send-side
+    /// dictionary is installed — the threshold then depends on the dict.
+    pub fn passthrough_threshold(&self) -> Option<usize> {
+        if self.send_dict.is_none() {
+            Some(MIN_COMPRESS_NO_DICT)
+        } else {
+            None
+        }
+    }
+
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
         let mut out: TransformedOut = SmallVec::new();
         if let Some(dict) = self.send_dict.as_ref()

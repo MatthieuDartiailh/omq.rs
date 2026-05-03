@@ -126,6 +126,9 @@ pub(super) fn install_accepted_wire_peer(
     let transform =
         omq_proto::proto::transform::MessageTransform::for_endpoint(&endpoint, &inner.options);
     let has_transform = transform.is_some();
+    let transform_passthrough = transform
+        .as_ref()
+        .and_then(omq_proto::proto::transform::MessageTransform::passthrough_info);
     let peer_io = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
@@ -133,7 +136,8 @@ pub(super) fn install_accepted_wire_peer(
         reader,
         transform,
     );
-    let state = DirectIoState::new(peer_io, writer, Arc::new(poll_fd), has_transform);
+    let state =
+        DirectIoState::new(peer_io, writer, Arc::new(poll_fd), has_transform, transform_passthrough);
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);
     let slot_idx = {

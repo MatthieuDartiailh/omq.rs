@@ -144,6 +144,9 @@ async fn dial_supervisor_tcp(
         let transform =
             omq_proto::proto::transform::MessageTransform::for_endpoint(&wrapper, &inner.options);
         let has_transform = transform.is_some();
+        let transform_passthrough = transform
+            .as_ref()
+            .and_then(omq_proto::proto::transform::MessageTransform::passthrough_info);
         let (reader, writer) = stream.into_split();
         let peer_io = crate::transport::driver::build_peer_io(
             role,
@@ -152,7 +155,13 @@ async fn dial_supervisor_tcp(
             reader.into(),
             transform,
         );
-        let state = DirectIoState::new(peer_io, writer.into(), Arc::new(poll_fd), has_transform);
+        let state = DirectIoState::new(
+            peer_io,
+            writer.into(),
+            Arc::new(poll_fd),
+            has_transform,
+            transform_passthrough,
+        );
         *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
 
         let idx = if let Some(idx) = slot_idx {
@@ -308,7 +317,7 @@ async fn dial_supervisor_ipc(
             reader.into(),
             None,
         );
-        let state = DirectIoState::new(peer_io, writer.into(), Arc::new(poll_fd), false);
+        let state = DirectIoState::new(peer_io, writer.into(), Arc::new(poll_fd), false, None);
         *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
 
         let idx = if let Some(idx) = slot_idx {
