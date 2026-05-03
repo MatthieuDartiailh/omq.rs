@@ -13,7 +13,12 @@ use omq_proto::message::Message;
 use omq_proto::proto::transform::MessageTransform;
 use omq_proto::proto::{Command, Connection, Event};
 
-const READ_BUF_SIZE: usize = 8 * 1024;
+const READ_BUF_SIZE: usize = 64 * 1024;
+
+/// Max messages one shared-queue batch encodes before flushing.
+const SHARED_MAX_BATCH_MSGS: usize = 256;
+/// Max bytes one shared-queue batch encodes before flushing.
+const SHARED_MAX_BATCH_BYTES: usize = 512 * 1024;
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
@@ -84,6 +89,11 @@ where
     /// [`Event::Message`]s before forwarding. Used by `lz4+tcp://` and
     /// `zstd+tcp://`. `None` for plain transports.
     transform: Option<MessageTransform>,
+    /// Shared round-robin send queue. When set, the driver reads outbound
+    /// messages directly from this flume channel (bypassing the pump task
+    /// hop through `inbox`). `None` for non-round-robin socket types and
+    /// for the `priority` feature path.
+    shared_msg_rx: Option<flume::Receiver<Message>>,
 }
 
 impl<T> ConnectionDriver<T>
@@ -127,6 +137,7 @@ where
             cancel,
             config,
             transform: None,
+            shared_msg_rx: None,
         }
     }
 
@@ -135,6 +146,14 @@ where
     #[must_use]
     pub fn with_transform(mut self, transform: MessageTransform) -> Self {
         self.transform = Some(transform);
+        self
+    }
+
+    /// Provide the shared round-robin send queue. The driver polls this
+    /// directly after handshake, eliminating the pump-task intermediary.
+    #[must_use]
+    pub fn with_shared_rx(mut self, rx: flume::Receiver<Message>) -> Self {
+        self.shared_msg_rx = Some(rx);
         self
     }
 
@@ -166,6 +185,7 @@ where
             cancel,
             config,
             mut transform,
+            shared_msg_rx,
         } = self;
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
@@ -230,19 +250,54 @@ where
 
                 cmd = inbox.recv() => match cmd {
                     Some(DriverCommand::SendMessage(m)) => {
-                        if let Some(t) = transform.as_mut() {
-                            for wire in t.encode(&m)? {
-                                codec.send_message(&wire)?;
-                            }
-                        } else {
-                            codec.send_message(&m)?;
-                        }
+                        encode_one(&m, &mut transform, &mut codec)?;
                     }
                     Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
                     Some(DriverCommand::Close) | None => {
                         // Drain any outbound bytes already queued before returning.
                         drain_writes(&mut writer, &mut codec).await.ok();
                         return Ok(());
+                    }
+                },
+
+                // Direct shared-queue arm: batch-encodes up to
+                // SHARED_MAX_BATCH_MSGS messages per wakeup then flushes
+                // them all in one or a few write_vectored calls.
+                msg = async {
+                    if let Some(ref rx) = shared_msg_rx {
+                        rx.recv_async().await.ok()
+                    } else {
+                        std::future::pending().await
+                    }
+                }, if codec.is_ready() => {
+                    match msg {
+                        None => {
+                            // Shared queue disconnected — socket is shutting down.
+                            drain_writes(&mut writer, &mut codec).await.ok();
+                            return Ok(());
+                        }
+                        Some(first) => {
+                            encode_one(&first, &mut transform, &mut codec)?;
+                            let mut count = 1usize;
+                            let mut bytes = first.byte_len();
+                            if let Some(ref rx) = shared_msg_rx {
+                                while count < SHARED_MAX_BATCH_MSGS
+                                    && bytes < SHARED_MAX_BATCH_BYTES
+                                {
+                                    match rx.try_recv() {
+                                        Ok(next) => {
+                                            bytes += next.byte_len();
+                                            encode_one(&next, &mut transform, &mut codec)?;
+                                            count += 1;
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                            while codec.has_pending_transmit() {
+                                flush_once(&mut writer, &mut codec).await?;
+                            }
+                        }
                     }
                 },
 
@@ -272,6 +327,23 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
         Some(t) => tokio::time::sleep_until(t.into()).await,
         None => std::future::pending::<()>().await,
     }
+}
+
+/// Encode one application message through the optional transform, then into
+/// the codec's outbound queue.
+fn encode_one(
+    msg: &Message,
+    transform: &mut Option<MessageTransform>,
+    codec: &mut Connection,
+) -> Result<()> {
+    if let Some(t) = transform.as_mut() {
+        for wire in t.encode(msg)? {
+            codec.send_message(&wire)?;
+        }
+    } else {
+        codec.send_message(msg)?;
+    }
+    Ok(())
 }
 
 /// One write attempt. Uses `write_vectored` so multi-chunk frame

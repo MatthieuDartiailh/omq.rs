@@ -916,6 +916,11 @@ impl SocketDriver {
             Some(t) => driver.with_transform(t),
             None => driver,
         };
+        #[cfg(not(feature = "priority"))]
+        let driver = match self.send_strategy.shared_rx() {
+            Some(rx) => driver.with_shared_rx(rx),
+            None => driver,
+        };
 
         // Insert the peer BEFORE spawning the driver task. Once
         // spawned, the driver may run on another worker before this
@@ -1076,9 +1081,10 @@ impl SocketDriver {
                         p.ident.clone(),
                     )
                 };
-                let _ = (endpoint, peer_ident);
+                let _ = endpoint;
                 #[cfg(feature = "priority")]
                 {
+                    let _ = peer_ident;
                     let prio = self
                         .peers
                         .get(&peer_id)
@@ -1091,8 +1097,12 @@ impl SocketDriver {
                     );
                 }
                 #[cfg(not(feature = "priority"))]
-                self.send_strategy
-                    .connection_added(peer_id, handle.clone(), identity.clone());
+                self.send_strategy.connection_added(
+                    peer_id,
+                    handle.clone(),
+                    identity.clone(),
+                    matches!(peer_ident, PeerIdent::Inproc(_)),
+                );
                 self.recv_strategy.connection_added(peer_id, identity);
                 // SUB / XSUB: replay our current subscriptions to the new peer.
                 if supports_subscribe(self.socket_type) {

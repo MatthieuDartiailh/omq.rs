@@ -104,10 +104,11 @@ impl SendStrategy {
         peer_id: u64,
         handle: DriverHandle,
         peer_identity: Bytes,
+        is_inproc: bool,
     ) {
         match self {
             Self::None => {}
-            Self::RoundRobin(s) => s.connection_added(peer_id, handle),
+            Self::RoundRobin(s) => s.connection_added(peer_id, handle, is_inproc),
             Self::FanOut(s) => s.connection_added(peer_id, handle),
             Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity),
         }
@@ -178,6 +179,18 @@ impl SendStrategy {
     pub(crate) fn peer_leave(&self, peer_id: u64, group: &[u8]) {
         if let Self::FanOut(s) = self {
             s.peer_leave(peer_id, group);
+        }
+    }
+
+    /// Returns a clone of the round-robin shared receive queue, if this
+    /// socket type uses round-robin send. `None` for fan-out, identity,
+    /// and no-send strategies. The connection driver polls this directly
+    /// after handshake instead of going through a pump task.
+    #[cfg(not(feature = "priority"))]
+    pub(crate) fn shared_rx(&self) -> Option<flume::Receiver<omq_proto::message::Message>> {
+        match self {
+            Self::RoundRobin(s) => Some(s.shared_rx()),
+            _ => None,
         }
     }
 

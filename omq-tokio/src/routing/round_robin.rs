@@ -19,19 +19,17 @@
 //! / `Closed` peers are skipped instantly - no HWM-stall on a dead
 //! high-priority pipe. Mirrors the omq-compio implementation.
 
-#[cfg(not(feature = "priority"))]
-use std::collections::HashMap;
 #[cfg(feature = "priority")]
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicUsize, Ordering},
 };
 
-#[cfg(not(feature = "priority"))]
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{DriverCommand, DriverHandle};
+use crate::engine::DriverHandle;
+#[cfg(feature = "priority")]
+use crate::engine::DriverCommand;
 #[cfg(feature = "priority")]
 use omq_proto::error::Error;
 use omq_proto::error::Result;
@@ -40,14 +38,6 @@ use omq_proto::options::Options;
 
 #[cfg(not(feature = "priority"))]
 use super::drop_queue::DropQueue;
-
-/// Max messages a single pump batches before yielding. Used only by the
-/// non-priority shared-queue path; the priority path doesn't have pumps.
-#[cfg(not(feature = "priority"))]
-pub(crate) const MAX_BATCH_MSGS: usize = 256;
-/// Max bytes a single pump batches before yielding.
-#[cfg(not(feature = "priority"))]
-pub(crate) const MAX_BATCH_BYTES: usize = 512 * 1024;
 
 /// Cloneable handle for submitting messages into a [`RoundRobinSend`].
 #[cfg(not(feature = "priority"))]
@@ -64,20 +54,17 @@ impl Submitter {
 }
 
 /// Round-robin send strategy.
+///
+/// A single shared flume queue feeds all connection drivers directly.
+/// Each driver polls `shared_rx` inside its own select! loop after the
+/// ZMTP handshake completes, eliminating the pump-task intermediary and
+/// the per-message inbox hop that it implied.
 #[cfg(not(feature = "priority"))]
 #[derive(Debug)]
 pub(crate) struct RoundRobinSend {
     queue: DropQueue,
     shared_rx: flume::Receiver<Message>,
-    pumps: HashMap<u64, PumpEntry>,
     root_cancel: CancellationToken,
-}
-
-#[cfg(not(feature = "priority"))]
-#[derive(Debug)]
-struct PumpEntry {
-    cancel: CancellationToken,
-    _task: JoinHandle<()>,
 }
 
 #[cfg(not(feature = "priority"))]
@@ -88,31 +75,32 @@ impl RoundRobinSend {
         Self {
             queue,
             shared_rx,
-            pumps: HashMap::new(),
             root_cancel: CancellationToken::new(),
         }
     }
 
-    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle) {
-        let cancel = self.root_cancel.child_token();
-        let rx = self.shared_rx.clone();
-        let pump_cancel = cancel.clone();
-        let task = tokio::spawn(async move {
-            pump(rx, handle, pump_cancel).await;
-        });
-        self.pumps.insert(
-            peer_id,
-            PumpEntry {
-                cancel,
-                _task: task,
-            },
-        );
+    /// Returns a clone of the shared receive end. Each connection driver
+    /// calls this once and holds the clone for the lifetime of the connection.
+    pub(crate) fn shared_rx(&self) -> flume::Receiver<Message> {
+        self.shared_rx.clone()
     }
 
-    pub(crate) fn connection_removed(&mut self, peer_id: u64) {
-        if let Some(entry) = self.pumps.remove(&peer_id) {
-            entry.cancel.cancel();
+    pub(crate) fn connection_added(&mut self, _peer_id: u64, handle: DriverHandle, is_inproc: bool) {
+        if is_inproc {
+            // inproc_peer_driver reads from inbox (mpsc), not from shared_rx
+            // (flume). Spawn a forwarding pump. The pump self-cancels when the
+            // peer's inbox closes (driver exits) or root_cancel fires (shutdown).
+            let rx = self.shared_rx.clone();
+            let cancel = self.root_cancel.child_token();
+            tokio::spawn(super::pump::drain(rx, handle, cancel));
         }
+        // Byte-stream: driver reads from shared_rx directly; no pump needed.
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn connection_removed(&mut self, _peer_id: u64) {
+        // Byte-stream drivers self-cancel via their CancellationToken.
+        // Inproc pumps self-cancel when peer inbox closes (driver exits).
     }
 
     /// Cloneable handle for enqueuing from a spawned task. Lets the socket
@@ -307,35 +295,3 @@ impl RoundRobinSend {
     }
 }
 
-/// Per-peer pump. Races other pumps for the next message; once a message is
-/// in hand, opportunistically drains up to the batch cap before yielding.
-#[cfg(not(feature = "priority"))]
-async fn pump(rx: flume::Receiver<Message>, peer: DriverHandle, cancel: CancellationToken) {
-    loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => return,
-            res = rx.recv_async() => {
-                let Ok(mut msg) = res else { return; };
-                let mut count = 0usize;
-                let mut bytes = 0usize;
-                loop {
-                    let m_bytes = msg.byte_len();
-                    if peer.inbox.send(DriverCommand::SendMessage(msg)).await.is_err() {
-                        return;
-                    }
-                    count += 1;
-                    bytes += m_bytes;
-                    if count >= MAX_BATCH_MSGS || bytes >= MAX_BATCH_BYTES {
-                        break;
-                    }
-                    match rx.try_recv() {
-                        Ok(next) => msg = next,
-                        Err(_) => break,
-                    }
-                }
-                tokio::task::yield_now().await;
-            }
-        }
-    }
-}
