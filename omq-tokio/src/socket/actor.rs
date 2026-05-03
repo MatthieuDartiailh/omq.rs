@@ -804,6 +804,18 @@ impl SocketDriver {
                         });
                     }
                 }
+                // REQ: reset the send/recv alternation flag so the socket
+                // can issue a fresh request on reconnect.
+                // REP: reset only when no other peer remains; clearing a
+                // stale envelope when the client that sent the pending
+                // request drops is safe and prevents permanent wedge.
+                match self.socket_type {
+                    SocketType::Req => self.type_state.on_peer_disconnected(),
+                    SocketType::Rep if self.peers.is_empty() => {
+                        self.type_state.on_peer_disconnected();
+                    }
+                    _ => {}
+                }
             }
         }
     }

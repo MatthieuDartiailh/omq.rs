@@ -33,6 +33,17 @@ impl TypeState {
         Self::default()
     }
 
+    /// Reset state after the active peer disconnects.
+    ///
+    /// For REQ: clears `req_awaiting_reply` so the socket can issue a
+    /// new request once the peer reconnects.  For REP: discards a
+    /// stale saved envelope so the socket can recv the next client's
+    /// request without first calling send.
+    pub fn on_peer_disconnected(&mut self) {
+        self.req_awaiting_reply = false;
+        self.rep_envelope = None;
+    }
+
     /// Transform the outgoing message per the socket type. Returns the
     /// transformed message or an alternation-violation error.
     pub fn pre_send(&mut self, t: SocketType, msg: Message) -> Result<Message> {

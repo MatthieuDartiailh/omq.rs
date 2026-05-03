@@ -157,7 +157,7 @@ pub(super) type WirePeerHandle = Arc<RwLock<flume::Sender<DriverCommand>>>;
 /// from 2N to 1 for a batch of N small messages — the dominant win at
 /// 128 B and 512 B message sizes.
 #[cfg_attr(feature = "priority", allow(dead_code))]
-pub(crate) const FLAT_THRESHOLD: usize = 1024;
+pub(crate) const FLAT_THRESHOLD: usize = 32 * 1024;
 
 /// Per-peer outbound queue for the direct-encode fast path.
 ///

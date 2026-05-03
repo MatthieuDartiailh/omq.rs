@@ -310,5 +310,27 @@ pub(super) fn spawn_wire_driver(
                 reason,
             });
         }
+        // REQ: reset the send/recv alternation flag so the socket can
+        // issue a fresh request once reconnected.
+        // REP: reset only when no other peer remains, preventing the
+        // socket from being permanently wedged with a stale envelope.
+        let should_reset = match socket_type {
+            SocketType::Req => true,
+            SocketType::Rep => {
+                let peers = inner_for_exit.out_peers.read().expect("peers lock");
+                !peers
+                    .iter()
+                    .any(|s| s.connection_id != connection_id
+                        && s.info.read().expect("info lock").is_some())
+            }
+            _ => false,
+        };
+        if should_reset {
+            inner_for_exit
+                .type_state
+                .lock()
+                .expect("type_state lock")
+                .on_peer_disconnected();
+        }
     })
 }

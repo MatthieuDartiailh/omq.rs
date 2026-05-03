@@ -72,6 +72,11 @@ impl Drop for ClaimGuard<'_> {
 #[derive(Clone)]
 pub struct Socket {
     inner: Arc<SocketInner>,
+    /// Sentinel held only by user-facing `Socket` handles, never by internal
+    /// tasks (drivers, dial supervisors, accept loops). When the last `Socket`
+    /// drops, `Arc::strong_count` reaches 1 and `Drop` cancels the background
+    /// tasks so TCP connections are torn down and peer-side drivers see EOF.
+    user_life: Arc<()>,
 }
 
 impl std::fmt::Debug for Socket {
@@ -79,6 +84,28 @@ impl std::fmt::Debug for Socket {
         f.debug_struct("Socket")
             .field("socket_type", &self.inner.socket_type)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        // Cancel background tasks when the last user handle drops. Dial
+        // supervisors hold Arc<SocketInner> clones independently of
+        // _user_life, so without this they keep TCP connections alive even
+        // after all user Sockets are gone. That prevents peer-side drivers
+        // from ever seeing EOF, causing them to keep their shared_msg_rx
+        // clones and steal messages meant for other peers.
+        if Arc::strong_count(&self.user_life) == 1 {
+            if let Ok(mut d) = self.inner.dialers.write() {
+                d.clear();
+            }
+            if let Ok(mut l) = self.inner.listeners.write() {
+                l.clear();
+            }
+            if let Ok(mut u) = self.inner.udp_dialers.write() {
+                u.clear();
+            }
+        }
     }
 }
 
@@ -92,6 +119,7 @@ impl Socket {
         );
         Self {
             inner: SocketInner::new(socket_type, options),
+            user_life: Arc::new(()),
         }
     }
 

@@ -6,10 +6,27 @@
 //! - REP strict alternation: send without prior recv errors.
 //! - REP envelope restore lets ROUTER-style clients (DEALER) talk to a
 //!   REP server.
+//! - REP survives a client disconnect mid-cycle and serves the next client.
 
+use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::time::Duration;
 
+use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Error, Message, Options, Socket, SocketType};
+
+fn loopback_port() -> u16 {
+    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+fn tcp_ep(port: u16) -> Endpoint {
+    Endpoint::Tcp {
+        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
+        port,
+    }
+}
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
@@ -124,4 +141,49 @@ async fn dealer_to_rep_envelope() {
     assert_eq!(reply.len(), 2);
     assert!(reply.parts()[0].is_empty());
     assert_eq!(reply.parts()[1].coalesce(), &b"world"[..]);
+}
+
+#[tokio::test]
+async fn rep_survives_client_disconnect_mid_cycle() {
+    // REP receives a request; the client drops before REP sends the
+    // reply.  REP must clear its stale envelope and serve the next
+    // client correctly.
+    let port = loopback_port();
+
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(tcp_ep(port)).await.unwrap();
+
+    // First client: sends a request then drops immediately.
+    {
+        let req1 = Socket::new(SocketType::Req, Options::default());
+        req1.connect(tcp_ep(port)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        req1.send(Message::single("drop-me")).await.unwrap();
+
+        // Let REP receive the request (stale envelope now held).
+        let _ = tokio::time::timeout(Duration::from_millis(300), rep.recv()).await;
+        // req1 drops here: connection closes before REP replies.
+    }
+
+    // Give REP time to detect the disconnect and clear the stale envelope.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Second client: full roundtrip must succeed.
+    let req2 = Socket::new(SocketType::Req, Options::default());
+    req2.connect(tcp_ep(port)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    req2.send(Message::single("real")).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_millis(500), rep.recv())
+        .await
+        .expect("REP did not receive second client's request")
+        .unwrap();
+    assert_eq!(got.parts()[0].coalesce().as_ref(), b"real");
+
+    rep.send(Message::single("reply")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_millis(500), req2.recv())
+        .await
+        .expect("REQ2 did not receive reply")
+        .unwrap();
+    assert_eq!(reply.parts()[0].coalesce().as_ref(), b"reply");
 }

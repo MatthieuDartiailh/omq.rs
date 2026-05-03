@@ -1,13 +1,29 @@
 //! Multi-peer PUSH / PULL integration tests and work-stealing demo.
 
+use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
+}
+
+fn loopback_port() -> u16 {
+    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+fn tcp_ep(port: u16) -> Endpoint {
+    Endpoint::Tcp {
+        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
+        port,
+    }
 }
 
 #[compio::test]
@@ -231,4 +247,38 @@ async fn push_send_before_peer_connects_queues() {
         let expected = format!("early-{i}");
         assert_eq!(m.parts()[0].coalesce(), expected.as_bytes());
     }
+}
+
+#[compio::test]
+async fn push_delivers_to_alive_peer_after_dead_slot() {
+    // PUSH binds; PULL1 connects (slot 0), then disconnects (slot stays
+    // dead in out_peers), then PULL2 connects (slot 1). PUSH sends —
+    // the message must reach PULL2 via the shared queue even though
+    // peer_count == 2 (dead slot + alive slot).
+    let port = loopback_port();
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.bind(tcp_ep(port)).await.unwrap();
+
+    // Slot 0: connect, send one message, then drop.
+    {
+        let pull1 = Socket::new(SocketType::Pull, Options::default());
+        pull1.connect(tcp_ep(port)).await.unwrap();
+        compio::time::sleep(Duration::from_millis(50)).await;
+        push.send(Message::single("first")).await.unwrap();
+        let _ = compio::time::timeout(Duration::from_millis(200), pull1.recv()).await;
+        // pull1 drops here — slot 0 becomes dead.
+    }
+    compio::time::sleep(Duration::from_millis(500)).await;
+
+    // Slot 1: alive peer.
+    let pull2 = Socket::new(SocketType::Pull, Options::default());
+    pull2.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    push.send(Message::single("second")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), pull2.recv())
+        .await
+        .expect("pull2 did not receive message after dead slot")
+        .unwrap();
+    assert_eq!(m.parts()[0].coalesce().as_ref(), b"second");
 }
