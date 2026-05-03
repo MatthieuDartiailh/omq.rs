@@ -40,10 +40,10 @@ async fn main() {
             println!(
                 "  {:>6}  {:>10.2}  {:>10.2}  {:>10.2}  {:>10.2}",
                 format!("{size}B"),
-                cell.p50_us,
-                cell.p99_us,
-                cell.p999_us,
-                cell.max_us,
+                cell.p50,
+                cell.p99,
+                cell.p999,
+                cell.max,
             );
             append_jsonl(&transport, size, cell);
         }
@@ -51,11 +51,12 @@ async fn main() {
     }
 }
 
+#[derive(Clone, Copy)]
 struct LatencyCell {
-    p50_us: f64,
-    p99_us: f64,
-    p999_us: f64,
-    max_us: f64,
+    p50: f64,
+    p99: f64,
+    p999: f64,
+    max: f64,
 }
 
 fn percentile(sorted: &[u64], p: f64) -> f64 {
@@ -80,10 +81,10 @@ fn append_jsonl(transport: &str, msg_size: usize, c: LatencyCell) {
         pattern = PATTERN,
         transport = transport,
         msg_size = msg_size,
-        p50 = c.p50_us,
-        p99 = c.p99_us,
-        p999 = c.p999_us,
-        max = c.max_us,
+        p50 = c.p50,
+        p99 = c.p99,
+        p999 = c.p999,
+        max = c.max,
     );
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{row}");
@@ -134,9 +135,9 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> LatencyCell {
 
     rtts.sort_unstable();
     LatencyCell {
-        p50_us: percentile(&rtts, 50.0),
-        p99_us: percentile(&rtts, 99.0),
-        p999_us: percentile(&rtts, 99.9),
-        max_us: *rtts.last().unwrap_or(&0) as f64 / 1_000.0,
+        p50: percentile(&rtts, 50.0),
+        p99: percentile(&rtts, 99.0),
+        p999: percentile(&rtts, 99.9),
+        max: *rtts.last().unwrap_or(&0) as f64 / 1_000.0,
     }
 }

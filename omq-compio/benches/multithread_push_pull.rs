@@ -1,4 +1,4 @@
-//! Multi-runtime PUSH/PULL: N bound PUSHes × M connecting PULLs, one
+//! Multi-runtime PUSH/PULL: N bound `PUSH` sockets × M connecting `PULL` sockets, one
 //! compio runtime per thread. TCP only, small messages (≤ 2 KiB).
 //!
 //! Two topologies are benchmarked (both using all 4 vCPUs):
@@ -85,15 +85,11 @@ fn run_cell(
                             pull.connect(ep.clone()).await.expect("pull connect");
                         }
                         while !stop.load(Ordering::Relaxed) {
-                            match compio::time::timeout(
+                            let _ = compio::time::timeout(
                                 Duration::from_millis(10),
                                 pull.recv(),
                             )
-                            .await
-                            {
-                                Ok(Ok(_)) => {}
-                                _ => {}
-                            }
+                            .await;
                         }
                     });
             })

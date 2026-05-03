@@ -1,4 +1,4 @@
-//! Double-close idempotency: calling close() on two clones of the same socket
+//! Double-close idempotency: calling `close()` on two clones of the same socket
 //! must not panic, deadlock, or return a hard error.
 
 use std::time::Duration;

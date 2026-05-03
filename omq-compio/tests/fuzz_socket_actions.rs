@@ -33,7 +33,7 @@ fn rng(label: &str) -> StdRng {
     // collide with `AddrInUse`.
     let mut h: u64 = seed;
     for b in label.as_bytes() {
-        h = h.wrapping_mul(0x100000001b3).wrapping_add(*b as u64);
+        h = h.wrapping_mul(0x0100_0000_01b3).wrapping_add(u64::from(*b));
     }
     StdRng::seed_from_u64(h)
 }

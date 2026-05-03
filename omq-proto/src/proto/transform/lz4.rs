@@ -144,7 +144,7 @@ impl Lz4Encoder {
         })
     }
 
-    /// Set the decompression-size budget (used only for passthrough_threshold).
+    /// Set the decompression-size budget (used only for `passthrough_threshold`).
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;

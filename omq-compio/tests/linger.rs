@@ -1,4 +1,4 @@
-//! Linger: close() with linger > 0 drains all queued messages before
+//! Linger: `close()` with linger > 0 drains all queued messages before
 //! returning.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
@@ -27,6 +27,8 @@ fn inproc_ep(name: &str) -> Endpoint {
 
 #[compio::test]
 async fn linger_nonzero_drains_queued_messages_inproc() {
+    const N: u32 = 20;
+
     let ep = inproc_ep("linger-drain-inproc-cmp");
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(ep.clone()).await.unwrap();
@@ -37,8 +39,6 @@ async fn linger_nonzero_drains_queued_messages_inproc() {
     );
     push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
-
-    const N: u32 = 20;
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -62,6 +62,8 @@ async fn linger_nonzero_drains_queued_messages_inproc() {
 
 #[compio::test]
 async fn linger_nonzero_drains_queued_messages_tcp() {
+    const N: u32 = 50;
+
     let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(tcp_ep(port)).await.unwrap();
@@ -72,8 +74,6 @@ async fn linger_nonzero_drains_queued_messages_tcp() {
     );
     push.connect(tcp_ep(port)).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
-
-    const N: u32 = 50;
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -99,6 +99,8 @@ async fn linger_nonzero_drains_queued_messages_tcp() {
 async fn linger_forever_waits_until_drained() {
     // Receiver runs concurrently (compio::runtime::spawn) so close()
     // can block on drain without deadlocking.
+    const N: u32 = 20;
+
     let ep = inproc_ep("linger-forever-cmp");
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(ep.clone()).await.unwrap();
@@ -106,8 +108,6 @@ async fn linger_forever_waits_until_drained() {
     let push = Socket::new(SocketType::Push, Options::default().linger_forever());
     push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
-
-    const N: u32 = 20;
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -140,12 +140,12 @@ async fn linger_forever_waits_until_drained() {
 
 #[compio::test]
 async fn linger_completes_within_timeout_after_peer_disconnect() {
+    const LINGER: Duration = Duration::from_millis(300);
+
     let port = loopback_port();
 
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(tcp_ep(port)).await.unwrap();
-
-    const LINGER: Duration = Duration::from_millis(300);
     let push = Socket::new(SocketType::Push, Options::default().linger(LINGER));
     push.connect(tcp_ep(port)).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;

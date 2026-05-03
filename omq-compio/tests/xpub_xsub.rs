@@ -2,7 +2,7 @@
 //! - SUB → PUB: SUBSCRIBE / CANCEL drives PUB-side filtering.
 //! - SUB → XPUB: SUBSCRIBE surfaces as a `\x01<topic>` message at
 //!   `XPUB.recv()`, CANCEL as `\x00<topic>`.
-//! - XSUB → XPUB: XSUB.subscribe() sends SUBSCRIBE commands upstream.
+//! - XSUB → XPUB: `XSUB.subscribe()` sends SUBSCRIBE commands upstream.
 //! - ZMTP 3.0 compatibility: PUB accepts `\x01<topic>` data-frame subscriptions.
 
 use std::time::Duration;
@@ -217,6 +217,7 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
 
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     std::thread::spawn(move || {
+        use std::io::Read;
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -225,7 +226,6 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
         stream.write_all(&zmtp30_sub_greeting()).unwrap();
 
         let mut peer_greeting = [0u8; 64];
-        use std::io::Read;
         stream.read_exact(&mut peer_greeting).unwrap();
 
         stream.write_all(SUB_READY).unwrap();
@@ -237,11 +237,8 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
 
         let _ = sub_sent_tx.send(());
 
-        match read_zmtp_frame(&mut stream) {
-            body => {
-                let _ = result_tx.send(body);
-            }
-        }
+        let body = read_zmtp_frame(&mut stream);
+        let _ = result_tx.send(body);
     });
 
     compio::time::timeout(Duration::from_secs(2), sub_sent_rx.recv_async())

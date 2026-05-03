@@ -2,7 +2,7 @@
 //! - SUB → PUB: SUBSCRIBE / CANCEL drives PUB-side filtering.
 //! - SUB → XPUB: SUBSCRIBE surfaces as a `\x01<topic>` message at
 //!   `XPUB.recv()`, CANCEL as `\x00<topic>`.
-//! - XSUB → XPUB: XSUB.subscribe() sends SUBSCRIBE commands upstream.
+//! - XSUB → XPUB: `XSUB.subscribe()` sends SUBSCRIBE commands upstream.
 //! - ZMTP 3.0 compatibility: PUB accepts `\x01<topic>` data-frame subscriptions
 //!   from legacy peers that do not use the SUBSCRIBE command.
 
@@ -102,9 +102,10 @@ async fn xpub_surfaces_subscribe_messages() {
 async fn xsub_subscribe_filters_messages_from_xpub() {
     // XSUB.subscribe() sends a ZMTP SUBSCRIBE command to connected XPUB.
     // XPUB should then only forward matching messages to the XSUB.
-    let xpub = omq_tokio::Socket::new(omq_tokio::SocketType::XPub, omq_tokio::Options::default());
-    let mut xmon = xpub.monitor();
-    xpub.bind(tcp_loopback(0)).await.unwrap();
+    let pub_socket =
+        omq_tokio::Socket::new(omq_tokio::SocketType::XPub, omq_tokio::Options::default());
+    let mut xmon = pub_socket.monitor();
+    pub_socket.bind(tcp_loopback(0)).await.unwrap();
     let port = match tokio::time::timeout(Duration::from_secs(1), xmon.recv())
         .await
         .unwrap()
@@ -116,12 +117,13 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
         other => panic!("{other:?}"),
     };
 
-    let xsub = omq_tokio::Socket::new(omq_tokio::SocketType::XSub, omq_tokio::Options::default());
-    xsub.connect(tcp_loopback(port)).await.unwrap();
-    xsub.subscribe("news.").await.unwrap();
+    let sub_socket =
+        omq_tokio::Socket::new(omq_tokio::SocketType::XSub, omq_tokio::Options::default());
+    sub_socket.connect(tcp_loopback(port)).await.unwrap();
+    sub_socket.subscribe("news.").await.unwrap();
 
     // Consume the subscription notification at XPUB.
-    let sub_notif = tokio::time::timeout(Duration::from_secs(2), xpub.recv())
+    let sub_notif = tokio::time::timeout(Duration::from_secs(2), pub_socket.recv())
         .await
         .unwrap()
         .unwrap();
@@ -129,10 +131,14 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let _ = xpub.send(omq_tokio::Message::single("news.alpha")).await;
-        let _ = xpub.send(omq_tokio::Message::single("sports.beta")).await;
+        let _ = pub_socket
+            .send(omq_tokio::Message::single("news.alpha"))
+            .await;
+        let _ = pub_socket
+            .send(omq_tokio::Message::single("sports.beta"))
+            .await;
         if let Ok(Ok(m)) =
-            tokio::time::timeout(Duration::from_millis(20), xsub.recv()).await
+            tokio::time::timeout(Duration::from_millis(20), sub_socket.recv()).await
         {
             let bytes = m.parts()[0].coalesce();
             assert!(
@@ -227,6 +233,7 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
 
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     std::thread::spawn(move || {
+        use std::io::Read;
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -237,7 +244,6 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
 
         // Read peer greeting (64 bytes).
         let mut peer_greeting = [0u8; 64];
-        use std::io::Read;
         stream.read_exact(&mut peer_greeting).unwrap();
 
         // Send READY as SUB.
@@ -254,11 +260,8 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
         let _ = sub_sent_tx.send(());
 
         // Read the first published message.
-        match read_zmtp_frame(&mut stream) {
-            body => {
-                let _ = result_tx.send(body);
-            }
-        }
+        let body = read_zmtp_frame(&mut stream);
+        let _ = result_tx.send(body);
     });
 
     // Wait for the raw peer to send its subscription.

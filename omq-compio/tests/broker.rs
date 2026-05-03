@@ -1,7 +1,7 @@
 //! Broker pattern: ROUTER (frontend) ↔ DEALER (backend) ↔ REP (worker).
 //!
-//! Message envelope at the ROUTER level: [client_id | "" | body]
-//! Message envelope at the DEALER/REP level: [client_id | "" | body]
+//! Message envelope at the ROUTER level: [`client_id` | "" | body]
+//! Message envelope at the DEALER/REP level: [`client_id` | "" | body]
 //! REP delivers [body] to the application and re-wraps on reply.
 
 use std::time::Duration;
@@ -34,17 +34,17 @@ async fn router_dealer_rep_single_cycle() {
     let router_c = router.clone();
     let dealer_c = dealer.clone();
     let broker = compio::runtime::spawn(async move {
-        let req_msg = compio::time::timeout(Duration::from_secs(2), router_c.recv())
+        let request = compio::time::timeout(Duration::from_secs(2), router_c.recv())
             .await
             .expect("router recv timed out")
             .unwrap();
-        dealer_c.send(req_msg).await.unwrap();
+        dealer_c.send(request).await.unwrap();
 
-        let rep_msg = compio::time::timeout(Duration::from_secs(2), dealer_c.recv())
+        let reply = compio::time::timeout(Duration::from_secs(2), dealer_c.recv())
             .await
             .expect("dealer recv timed out")
             .unwrap();
-        router_c.send(rep_msg).await.unwrap();
+        router_c.send(reply).await.unwrap();
     });
 
     req.send(Message::single("work")).await.unwrap();
@@ -67,6 +67,8 @@ async fn router_dealer_rep_single_cycle() {
 
 #[compio::test]
 async fn router_dealer_rep_multiple_rounds() {
+    const ROUNDS: usize = 5;
+
     let frontend = inproc("broker-rounds-fe-cmp");
     let backend = inproc("broker-rounds-be-cmp");
 
@@ -83,8 +85,6 @@ async fn router_dealer_rep_multiple_rounds() {
     rep.connect(backend).await.unwrap();
 
     compio::time::sleep(Duration::from_millis(50)).await;
-
-    const ROUNDS: usize = 5;
 
     let rep_task = compio::runtime::spawn(async move {
         for _ in 0..ROUNDS {
@@ -103,16 +103,16 @@ async fn router_dealer_rep_multiple_rounds() {
     let dealer_c = dealer.clone();
     let broker_task = compio::runtime::spawn(async move {
         for _ in 0..ROUNDS {
-            let req_msg = compio::time::timeout(Duration::from_secs(2), router_c.recv())
+            let request = compio::time::timeout(Duration::from_secs(2), router_c.recv())
                 .await
                 .unwrap()
                 .unwrap();
-            dealer_c.send(req_msg).await.unwrap();
-            let rep_msg = compio::time::timeout(Duration::from_secs(2), dealer_c.recv())
+            dealer_c.send(request).await.unwrap();
+            let reply = compio::time::timeout(Duration::from_secs(2), dealer_c.recv())
                 .await
                 .unwrap()
                 .unwrap();
-            router_c.send(rep_msg).await.unwrap();
+            router_c.send(reply).await.unwrap();
         }
     });
 
@@ -158,25 +158,25 @@ async fn router_dealer_rep_two_concurrent_clients() {
 
     // Broker + worker process two request/reply cycles sequentially.
     for _ in 0..2 {
-        let req_msg = compio::time::timeout(Duration::from_secs(3), router.recv())
+        let request = compio::time::timeout(Duration::from_secs(3), router.recv())
             .await
             .expect("router recv timed out")
             .unwrap();
-        dealer.send(req_msg).await.unwrap();
+        dealer.send(request).await.unwrap();
 
         let m = compio::time::timeout(Duration::from_secs(3), rep.recv())
             .await
             .expect("rep recv timed out")
             .unwrap();
-        let mut reply = b"ok-".to_vec();
-        reply.extend_from_slice(&m.parts()[0].coalesce());
-        rep.send(Message::single(reply)).await.unwrap();
+        let mut ok = b"ok-".to_vec();
+        ok.extend_from_slice(&m.parts()[0].coalesce());
+        rep.send(Message::single(ok)).await.unwrap();
 
-        let rep_msg = compio::time::timeout(Duration::from_secs(3), dealer.recv())
+        let reply = compio::time::timeout(Duration::from_secs(3), dealer.recv())
             .await
             .expect("dealer recv timed out")
             .unwrap();
-        router.send(rep_msg).await.unwrap();
+        router.send(reply).await.unwrap();
     }
 
     // Each client must now have its reply queued.

@@ -350,7 +350,7 @@ mod mech_fuzz {
 
     /// Wrap a body as a long-form COMMAND frame: flags=0x06 (CMD|LONG)
     /// + 8-byte size + body. Long form covers all command sizes
-    /// without us guessing whether short form fits.
+    ///   without us guessing whether short form fits.
     fn long_command_frame(body: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(9 + body.len());
         out.push(0b0000_0110); // COMMAND | LONG

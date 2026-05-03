@@ -174,6 +174,8 @@ async fn identity_propagates_on_handshake() {
 
 #[compio::test]
 async fn unbounded_send_hwm_accepts_large_burst() {
+    const N: usize = 2_000;
+
     let ep = inproc_ep("opt-unbounded-send-cmp");
     let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(4096));
     pull.bind(ep.clone()).await.unwrap();
@@ -182,17 +184,13 @@ async fn unbounded_send_hwm_accepts_large_burst() {
     push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(30)).await;
 
-    const N: usize = 2_000;
     for i in 0..N {
         push.send(Message::single(format!("m{i}"))).await.unwrap();
     }
 
     let mut received = 0usize;
-    loop {
-        match compio::time::timeout(Duration::from_millis(500), pull.recv()).await {
-            Ok(Ok(_)) => received += 1,
-            _ => break,
-        }
+    while let Ok(Ok(_)) = compio::time::timeout(Duration::from_millis(500), pull.recv()).await {
+        received += 1;
     }
     assert!(
         received >= N / 2,
@@ -202,6 +200,8 @@ async fn unbounded_send_hwm_accepts_large_burst() {
 
 #[compio::test]
 async fn unbounded_recv_hwm_accepts_large_burst() {
+    const N: usize = 2_000;
+
     let ep = inproc_ep("opt-unbounded-recv-cmp");
     let pull = Socket::new(SocketType::Pull, Options::default().unbounded_recv());
     pull.bind(ep.clone()).await.unwrap();
@@ -210,17 +210,13 @@ async fn unbounded_recv_hwm_accepts_large_burst() {
     push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(30)).await;
 
-    const N: usize = 2_000;
     for i in 0..N {
         push.send(Message::single(format!("m{i}"))).await.unwrap();
     }
 
     let mut received = 0usize;
-    loop {
-        match compio::time::timeout(Duration::from_millis(500), pull.recv()).await {
-            Ok(Ok(_)) => received += 1,
-            _ => break,
-        }
+    while let Ok(Ok(_)) = compio::time::timeout(Duration::from_millis(500), pull.recv()).await {
+        received += 1;
     }
     assert!(
         received >= N / 2,

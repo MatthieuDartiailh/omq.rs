@@ -1,16 +1,16 @@
 #![cfg(feature = "fuzz")]
-//! Sequence-fuzz the SocketDriver's user-facing command path. Drives
+//! Sequence-fuzz the `SocketDriver`'s user-facing command path. Drives
 //! a SUB and a PUB through random orderings of bind/connect/
 //! subscribe/unsubscribe/recv/etc., asserting nothing panics and
 //! that connection state stays consistent.
 //!
 //! This is the kind of harness that would have caught the
-//! apply_subscription race fixed in commit 29e7d0b: SUB calling
+//! `apply_subscription` race fixed in commit 29e7d0b: SUB calling
 //! subscribe between Connected event landing and ZMTP handshake
-//! completing produced a Protocol("send_command before handshake")
+//! completing produced a `Protocol("send_command before handshake")`
 //! that tore both stream halves down.
 //!
-//! Set OMQ_FUZZ_SEED to reproduce a specific run.
+//! Set `OMQ_FUZZ_SEED` to reproduce a specific run.
 
 use std::time::Duration;
 

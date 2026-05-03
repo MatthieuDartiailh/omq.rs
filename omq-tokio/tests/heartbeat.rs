@@ -170,7 +170,7 @@ async fn heartbeat_detects_silent_peer() {
         match tokio::time::timeout(Duration::from_secs(2), mon.recv())
             .await
             .ok()
-            .and_then(|r| r.ok())
+            .and_then(std::result::Result::ok)
         {
             Some(MonitorEvent::HandshakeSucceeded { .. }) => break true,
             Some(_) => {}

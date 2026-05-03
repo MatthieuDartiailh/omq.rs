@@ -1,4 +1,4 @@
-//! Double-close idempotency: calling close() on two clones of the same socket
+//! Double-close idempotency: calling `close()` on two clones of the same socket
 //! must not panic, deadlock, or return a hard error. The second close sees the
 //! driver already gone and returns Ok(()).
 

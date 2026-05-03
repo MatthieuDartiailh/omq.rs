@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn current_key_stable_within_interval() {
-        let r = CookieKeyring::with_interval(Duration::from_secs(60));
+        let r = CookieKeyring::with_interval(Duration::from_mins(1));
         let k1 = r.current_key();
         let k2 = r.current_key();
         assert_eq!(k1, k2);

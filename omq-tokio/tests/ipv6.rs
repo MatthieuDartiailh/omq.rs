@@ -1,4 +1,4 @@
-//! IPv6 actual connections: bind and dial over [::1].
+//! IPv6 actual connections: bind and dial over `[::1]`.
 //!
 //! Tests are skipped silently when IPv6 is unavailable on the host
 //! (CI containers, minimal kernel builds, macOS without IPv6 loopback).

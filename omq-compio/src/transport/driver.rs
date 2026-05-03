@@ -751,7 +751,6 @@ pub(crate) async fn run_connection(
                     } else {
                         let (res, filled) = io.reader.read(buf).await;
                         match res {
-                            Ok(0) => return Ok(()),
                             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                 // try_direct_recv consumed the data between our POLL_ADD
                                 // firing and this READ completing. Not fatal — loop back
@@ -761,7 +760,7 @@ pub(crate) async fn run_connection(
                                 read_buf.clear();
                                 codec_maybe_dirty = true;
                             }
-                            Err(_) => return Ok(()),
+                            Ok(0) | Err(_) => return Ok(()),
                             Ok(n) => {
                                 state.last_input_nanos.store(
                                     state.hb_epoch.elapsed().as_nanos() as u64,

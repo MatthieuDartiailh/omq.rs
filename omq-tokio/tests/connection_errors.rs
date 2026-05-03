@@ -128,9 +128,7 @@ async fn reconnect_after_ipc_peer_restarts() {
         if pull2.bind(ep.clone()).await.is_ok() {
             break;
         }
-        if Instant::now() > deadline {
-            panic!("could not rebind IPC endpoint");
-        }
+        assert!(Instant::now() <= deadline, "could not rebind IPC endpoint");
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 

@@ -125,11 +125,10 @@ async fn push_reverts_to_remaining_after_peer_disconnect() {
     }
 
     let mut got = 0usize;
-    loop {
-        match compio::time::timeout(Duration::from_millis(300), pull_inproc.recv()).await {
-            Ok(Ok(_)) => got += 1,
-            _ => break,
-        }
+    while let Ok(Ok(_)) =
+        compio::time::timeout(Duration::from_millis(300), pull_inproc.recv()).await
+    {
+        got += 1;
     }
     assert!(
         got >= AFTER,

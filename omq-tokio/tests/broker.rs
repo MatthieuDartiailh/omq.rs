@@ -4,8 +4,8 @@
 //! proxy. The broker forwards request envelopes intact so that REP's
 //! save-restore round-trip delivers replies back to the correct REQ client.
 //!
-//! Message envelope at the ROUTER level: [client_id | "" | body]
-//! Message envelope at the DEALER/REP level: [client_id | "" | body]
+//! Message envelope at the ROUTER level: [`client_id` | "" | body]
+//! Message envelope at the DEALER/REP level: [`client_id` | "" | body]
 //! REP delivers [body] to the application and re-wraps on reply.
 
 use std::time::Duration;
@@ -39,17 +39,17 @@ async fn router_dealer_rep_single_cycle() {
     let router_c = router.clone();
     let dealer_c = dealer.clone();
     let broker = tokio::spawn(async move {
-        let req_msg = tokio::time::timeout(Duration::from_secs(2), router_c.recv())
+        let request = tokio::time::timeout(Duration::from_secs(2), router_c.recv())
             .await
             .expect("router recv timed out")
             .unwrap();
-        dealer_c.send(req_msg).await.unwrap();
+        dealer_c.send(request).await.unwrap();
 
-        let rep_msg = tokio::time::timeout(Duration::from_secs(2), dealer_c.recv())
+        let reply = tokio::time::timeout(Duration::from_secs(2), dealer_c.recv())
             .await
             .expect("dealer recv timed out")
             .unwrap();
-        router_c.send(rep_msg).await.unwrap();
+        router_c.send(reply).await.unwrap();
     });
 
     req.send(Message::single("work")).await.unwrap();
@@ -72,6 +72,8 @@ async fn router_dealer_rep_single_cycle() {
 
 #[tokio::test]
 async fn router_dealer_rep_multiple_rounds() {
+    const ROUNDS: usize = 5;
+
     let frontend = inproc("broker-rounds-fe-tok");
     let backend = inproc("broker-rounds-be-tok");
 
@@ -89,18 +91,16 @@ async fn router_dealer_rep_multiple_rounds() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    const ROUNDS: usize = 5;
-
     // Each round is fully sequential: REQ→ROUTER→DEALER→REP→DEALER→ROUTER→REQ.
     for i in 0..ROUNDS {
         req.send(Message::single(format!("job-{i}"))).await.unwrap();
 
         // Broker: forward request ROUTER→DEALER.
-        let req_msg = tokio::time::timeout(Duration::from_secs(2), router.recv())
+        let request = tokio::time::timeout(Duration::from_secs(2), router.recv())
             .await
             .expect("router recv timed out")
             .unwrap();
-        dealer.send(req_msg).await.unwrap();
+        dealer.send(request).await.unwrap();
 
         // Worker: receive request and reply.
         let m = tokio::time::timeout(Duration::from_secs(2), rep.recv())
@@ -108,16 +108,16 @@ async fn router_dealer_rep_multiple_rounds() {
             .expect("rep recv timed out")
             .unwrap();
         let body = m.parts()[0].coalesce().to_vec();
-        let mut reply = b"ack:".to_vec();
-        reply.extend_from_slice(&body);
-        rep.send(Message::single(reply)).await.unwrap();
+        let mut ack = b"ack:".to_vec();
+        ack.extend_from_slice(&body);
+        rep.send(Message::single(ack)).await.unwrap();
 
         // Broker: forward reply DEALER→ROUTER.
-        let rep_msg = tokio::time::timeout(Duration::from_secs(2), dealer.recv())
+        let reply = tokio::time::timeout(Duration::from_secs(2), dealer.recv())
             .await
             .expect("dealer recv timed out")
             .unwrap();
-        router.send(rep_msg).await.unwrap();
+        router.send(reply).await.unwrap();
 
         // Client: receive reply.
         let r = tokio::time::timeout(Duration::from_secs(2), req.recv())
@@ -157,25 +157,25 @@ async fn router_dealer_rep_two_concurrent_clients() {
 
     // Broker + worker process two request/reply cycles sequentially.
     for _ in 0..2 {
-        let req_msg = tokio::time::timeout(Duration::from_secs(3), router.recv())
+        let request = tokio::time::timeout(Duration::from_secs(3), router.recv())
             .await
             .expect("router recv timed out")
             .unwrap();
-        dealer.send(req_msg).await.unwrap();
+        dealer.send(request).await.unwrap();
 
         let m = tokio::time::timeout(Duration::from_secs(3), rep.recv())
             .await
             .expect("rep recv timed out")
             .unwrap();
-        let mut reply = b"ok-".to_vec();
-        reply.extend_from_slice(&m.parts()[0].coalesce());
-        rep.send(Message::single(reply)).await.unwrap();
+        let mut ok = b"ok-".to_vec();
+        ok.extend_from_slice(&m.parts()[0].coalesce());
+        rep.send(Message::single(ok)).await.unwrap();
 
-        let rep_msg = tokio::time::timeout(Duration::from_secs(3), dealer.recv())
+        let reply = tokio::time::timeout(Duration::from_secs(3), dealer.recv())
             .await
             .expect("dealer recv timed out")
             .unwrap();
-        router.send(rep_msg).await.unwrap();
+        router.send(reply).await.unwrap();
     }
 
     // Each client must now have its reply queued.

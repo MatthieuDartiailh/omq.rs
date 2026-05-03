@@ -1,4 +1,4 @@
-//! Linger: close() with linger > 0 drains all queued messages before
+//! Linger: `close()` with linger > 0 drains all queued messages before
 //! returning. Exercises the send-queue drain path that linger=0 (the
 //! default) never touches.
 
@@ -28,6 +28,8 @@ fn inproc_ep(name: &str) -> Endpoint {
 
 #[tokio::test]
 async fn linger_nonzero_drains_queued_messages_inproc() {
+    const N: u32 = 20;
+
     let ep = inproc_ep("linger-drain-inproc-tok");
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(ep.clone()).await.unwrap();
@@ -38,8 +40,6 @@ async fn linger_nonzero_drains_queued_messages_inproc() {
     );
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-
-    const N: u32 = 20;
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -64,6 +64,8 @@ async fn linger_nonzero_drains_queued_messages_inproc() {
 
 #[tokio::test]
 async fn linger_nonzero_drains_queued_messages_tcp() {
+    const N: u32 = 50;
+
     let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(tcp_ep(port)).await.unwrap();
@@ -74,8 +76,6 @@ async fn linger_nonzero_drains_queued_messages_tcp() {
     );
     push.connect(tcp_ep(port)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-
-    const N: u32 = 50;
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -102,6 +102,8 @@ async fn linger_forever_waits_until_drained() {
     // linger_forever (None) means "wait indefinitely until queue drains".
     // The receiver runs concurrently in a spawned task so that close()
     // can block until the queue is empty without deadlocking.
+    const N: u32 = 20;
+
     let ep = inproc_ep("linger-forever-tok");
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(ep.clone()).await.unwrap();
@@ -109,8 +111,6 @@ async fn linger_forever_waits_until_drained() {
     let push = Socket::new(SocketType::Push, Options::default().linger_forever());
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-
-    const N: u32 = 20;
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
             .await
@@ -173,12 +173,12 @@ async fn linger_completes_within_timeout_after_peer_disconnect() {
     // Queued messages cannot be delivered after the peer disconnects.
     // close() with a finite linger must return within the linger window
     // rather than hanging indefinitely waiting for a peer that is gone.
+    const LINGER: Duration = Duration::from_millis(300);
+
     let port = loopback_port();
 
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(tcp_ep(port)).await.unwrap();
-
-    const LINGER: Duration = Duration::from_millis(300);
     let push = Socket::new(SocketType::Push, Options::default().linger(LINGER));
     push.connect(tcp_ep(port)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;

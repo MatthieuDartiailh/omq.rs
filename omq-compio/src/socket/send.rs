@@ -22,10 +22,10 @@ use omq_proto::proto::SocketType;
 #[cfg(not(feature = "priority"))]
 use crate::transport::driver::DriverCommand;
 #[cfg(not(feature = "priority"))]
-use crate::socket::inner::{DirectIoState, FLAT_THRESHOLD};
+use crate::socket::inner::{DirectIoState, FLAT_THRESHOLD, PeerSlot};
 
 use super::handle::Socket;
-use super::inner::{PeerOut, PeerSlot};
+use super::inner::PeerOut;
 
 /// Liveness check for round-robin / priority pickers. A wire peer's
 /// driver clears its `direct_io` handle on exit (see
@@ -619,7 +619,7 @@ impl Socket {
             | SocketType::Rep
             | SocketType::Client
             | SocketType::Scatter
-            | SocketType::Channel => self.try_send_round_robin(msg),
+            | SocketType::Channel => self.try_send_round_robin(&msg),
             SocketType::Router | SocketType::Server | SocketType::Peer => {
                 self.try_send_identity_routed(&msg)
             }
@@ -639,13 +639,13 @@ impl Socket {
     }
 
     #[cfg(not(feature = "priority"))]
-    fn try_send_round_robin(&self, msg: Message) -> Result<()> {
+    fn try_send_round_robin(&self, msg: &Message) -> Result<()> {
         let inner = self.inner();
         let peers = inner.out_peers.read().expect("peers lock");
         if peers.is_empty() {
             if inner.options.conflate {
                 drop(peers);
-                return self.conflate_shared_queue_send(msg);
+                return self.conflate_shared_queue_send(msg.clone());
             }
             return Err(Error::WouldBlock);
         }
@@ -653,7 +653,7 @@ impl Socket {
         let chosen = peers[idx].out.clone();
         let peer_count = peers.len();
         drop(peers);
-        self.try_slow_round_robin(&chosen, msg, peer_count)
+        self.try_slow_round_robin(&chosen, msg.clone(), peer_count)
     }
 
     #[cfg(not(feature = "priority"))]
@@ -720,8 +720,8 @@ impl Socket {
     }
 
     #[cfg(feature = "priority")]
-    fn try_send_round_robin(&self, msg: Message) -> Result<()> {
-        match self.try_send_priority_walk(&msg) {
+    fn try_send_round_robin(&self, msg: &Message) -> Result<()> {
+        match self.try_send_priority_walk(msg) {
             PriorityOutcome::Sent => Ok(()),
             PriorityOutcome::AwaitOn(_) | PriorityOutcome::NoLivePeers => Err(Error::WouldBlock),
         }

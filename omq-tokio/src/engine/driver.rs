@@ -20,7 +20,7 @@ const SHARED_MAX_BATCH_MSGS: usize = 256;
 /// Max bytes one shared-queue batch encodes before flushing.
 const SHARED_MAX_BATCH_BYTES: usize = 512 * 1024;
 /// Messages whose total payload is below this threshold are packed
-/// contiguously into a flat BytesMut instead of going through
+/// contiguously into a flat `BytesMut` instead of going through
 /// `Connection::send_message` + `transmit_chunks`. This eliminates the
 /// per-flush `Vec<IoSlice>` allocation and lets the kernel receive a
 /// single contiguous buffer instead of scattered iovecs. Benchmarks show
@@ -493,7 +493,7 @@ fn encode_one(
 /// Encode one message via the flat path (NULL mechanism, no transform)
 /// or the codec path (transform active or message too large for flat).
 ///
-/// Flat path (msg.byte_len() < FLAT_THRESHOLD && use_flat):
+/// Flat path (`msg.byte_len()` < `FLAT_THRESHOLD` && `use_flat`):
 ///   Copies ZMTP header + payload bytes directly into `flat_buf`. No
 ///   allocation; the caller writes `flat_buf` to the wire as one chunk.
 ///

@@ -1,13 +1,13 @@
 //! Two-process TCP throughput peer for omq-compio.
 //!
 //! Usage:
-//!   bench_peer push <port> <msg_size_bytes>
-//!   bench_peer pull <port> <msg_size_bytes> <duration_secs>
+//!   `bench_peer` push \<port\> \<`msg_size_bytes`\>
+//!   `bench_peer` pull \<port\> \<`msg_size_bytes`\> \<`duration_secs`\>
 //!
-//! Push: binds tcp://127.0.0.1:<port>, sends <msg_size> byte messages forever.
-//! Pull: connects, warms up for 500 ms, then counts messages for <duration>
+//! Push: binds <tcp://127.0.0.1>:\<port\>, sends \<`msg_size`\> byte messages forever.
+//! Pull: connects, warms up for 500 ms, then counts messages for \<duration\>
 //!       seconds and prints one line to stdout:
-//!         <count> <elapsed_secs> <msg_size>
+//!         \<count\> \<`elapsed_secs`\> \<`msg_size`\>
 
 use std::time::{Duration, Instant};
 
