@@ -16,14 +16,15 @@ use std::time::{Duration, Instant};
 
 use omq_compio::{Endpoint, IpcPath};
 
-pub(crate) const DEFAULT_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
+pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 32_768];
+pub(crate) const ALL_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
 pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 
 pub(crate) const PRIME_ITERS: usize = 2_000;
 pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
 pub(crate) const WARMUP_MIN_ITERS: usize = 1_000;
 pub(crate) const ROUND_DURATION: Duration = Duration::from_millis(500);
-pub(crate) const ROUNDS: usize = 1;
+pub(crate) const ROUNDS: usize = 3;
 pub(crate) const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) fn results_path() -> PathBuf {
@@ -50,10 +51,12 @@ pub(crate) fn run_id() -> String {
 
 pub(crate) fn sizes() -> Vec<usize> {
     if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
-        s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
-    } else {
-        DEFAULT_SIZES.to_vec()
+        return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
     }
+    if std::env::args().any(|a| a == "--all-sizes") {
+        return ALL_SIZES.to_vec();
+    }
+    DEFAULT_SIZES.to_vec()
 }
 
 pub(crate) fn transports() -> Vec<String> {
@@ -155,7 +158,7 @@ pub(crate) async fn wait_subscribed(pub_: &omq_compio::Socket, subs: &[&omq_comp
     }
 }
 
-pub(crate) async fn measure_best_of<F, Fut>(msg_size: usize, align: usize, burst: F) -> Cell
+pub(crate) async fn measure_median_of<F, Fut>(msg_size: usize, align: usize, burst: F) -> Cell
 where
     F: Fn(usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -176,16 +179,14 @@ where
         n = n.saturating_mul(4);
     };
 
-    let mut best: Option<Duration> = None;
+    let mut times = Vec::with_capacity(ROUNDS);
     for _ in 0..ROUNDS {
         let t = Instant::now();
         burst(final_n).await;
-        let elapsed = t.elapsed();
-        if best.is_none_or(|b| elapsed < b) {
-            best = Some(elapsed);
-        }
+        times.push(t.elapsed());
     }
-    let elapsed = best.unwrap();
+    times.sort_unstable();
+    let elapsed = times[ROUNDS / 2];
     let mbps = (final_n * msg_size) as f64 / elapsed.as_secs_f64() / 1_000_000.0;
     let msgs_s = final_n as f64 / elapsed.as_secs_f64();
     Cell {

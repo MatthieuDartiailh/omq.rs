@@ -15,10 +15,14 @@ use std::time::{Duration, Instant};
 
 use omq_tokio::{Endpoint, IpcPath};
 
-/// Geometric ×4 sweep: 128 B → 128 KiB. The 512 KiB cell is dropped
-/// from the default to keep wall time near a minute; opt back in via
-/// `OMQ_BENCH_SIZES=...,524288`.
-pub(crate) const DEFAULT_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
+/// Default size sweep: three points that cover the small/medium/large
+/// knee of the throughput curve. Pass `--all-sizes` to the bench binary
+/// (or set `OMQ_BENCH_SIZES`) for the full geometric sweep.
+pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 32_768];
+
+/// Full geometric ×4 sweep: 32 B → 128 KiB. Enabled via `--all-sizes`
+/// or `OMQ_BENCH_SIZES=32,128,...`.
+pub(crate) const ALL_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
 
 /// Override with env `OMQ_BENCH_TRANSPORTS=inproc,tcp`.
 pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
@@ -36,9 +40,9 @@ pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
 pub(crate) const WARMUP_MIN_ITERS: usize = 1_000;
 
 /// Per-cell timed budget. `ROUND_DURATION` × ROUNDS ≈ wall time per cell.
-/// One round at 500 ms each gets the suite done in ~1.5 min total.
+/// Three rounds at 500 ms each; the median is reported to reduce noise.
 pub(crate) const ROUND_DURATION: Duration = Duration::from_millis(500);
-pub(crate) const ROUNDS: usize = 1;
+pub(crate) const ROUNDS: usize = 3;
 
 /// Hard ceiling per cell. Longer than ~prime + warmup + ROUNDS×duration
 /// is almost certainly a hang or a transport bug.
@@ -69,10 +73,12 @@ pub(crate) fn run_id() -> String {
 
 pub(crate) fn sizes() -> Vec<usize> {
     if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
-        s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
-    } else {
-        DEFAULT_SIZES.to_vec()
+        return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
     }
+    if std::env::args().any(|a| a == "--all-sizes") {
+        return ALL_SIZES.to_vec();
+    }
+    DEFAULT_SIZES.to_vec()
 }
 
 pub(crate) fn transports() -> Vec<String> {
@@ -184,11 +190,11 @@ pub(crate) async fn wait_subscribed(pub_: &omq_tokio::Socket, subs: &[&omq_tokio
     }
 }
 
-/// Run prime + calibration + ROUNDS × timed bursts of `burst(n)`.
-/// Returns the best (lowest wall-clock) of the timed runs along with
-/// the final `n` (messages per timed burst). `align` rounds n to a
+/// Run prime + calibration + ROUNDS timed bursts of `burst(n)`.
+/// Returns the median-duration run. Median is more stable than best-of
+/// under tokio's work-stealing scheduler noise. `align` rounds n to a
 /// multiple of the sender count so per-sender splits stay even.
-pub(crate) async fn measure_best_of<F, Fut>(msg_size: usize, align: usize, burst: F) -> Cell
+pub(crate) async fn measure_median_of<F, Fut>(msg_size: usize, align: usize, burst: F) -> Cell
 where
     F: Fn(usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -209,16 +215,14 @@ where
         n = n.saturating_mul(4);
     };
 
-    let mut best: Option<Duration> = None;
+    let mut times = Vec::with_capacity(ROUNDS);
     for _ in 0..ROUNDS {
         let t = Instant::now();
         burst(final_n).await;
-        let elapsed = t.elapsed();
-        if best.is_none_or(|b| elapsed < b) {
-            best = Some(elapsed);
-        }
+        times.push(t.elapsed());
     }
-    let elapsed = best.unwrap();
+    times.sort_unstable();
+    let elapsed = times[ROUNDS / 2];
     let mbps = (final_n * msg_size) as f64 / elapsed.as_secs_f64() / 1_000_000.0;
     let msgs_s = final_n as f64 / elapsed.as_secs_f64();
     Cell {

@@ -82,5 +82,5 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         }
     };
 
-    common::measure_best_of(size, pushes.len(), burst).await
+    common::measure_median_of(size, pushes.len(), burst).await
 }
