@@ -2,6 +2,9 @@
 //! - SUB → PUB: SUBSCRIBE / CANCEL drives PUB-side filtering.
 //! - SUB → XPUB: SUBSCRIBE surfaces as a `\x01<topic>` message at
 //!   `XPUB.recv()`, CANCEL as `\x00<topic>`.
+//! - XSUB → XPUB: XSUB.subscribe() sends SUBSCRIBE commands upstream.
+//! - ZMTP 3.0 compatibility: PUB accepts `\x01<topic>` data-frame subscriptions
+//!   from legacy peers that do not use the SUBSCRIBE command.
 
 use std::time::Duration;
 
@@ -93,4 +96,198 @@ async fn xpub_surfaces_subscribe_messages() {
         .unwrap();
     let body = m.parts()[0].coalesce();
     assert_eq!(&body[..], b"\x01foo.");
+}
+
+#[tokio::test]
+async fn xsub_subscribe_filters_messages_from_xpub() {
+    // XSUB.subscribe() sends a ZMTP SUBSCRIBE command to connected XPUB.
+    // XPUB should then only forward matching messages to the XSUB.
+    let xpub = omq_tokio::Socket::new(omq_tokio::SocketType::XPub, omq_tokio::Options::default());
+    let mut xmon = xpub.monitor();
+    xpub.bind(tcp_loopback(0)).await.unwrap();
+    let port = match tokio::time::timeout(Duration::from_secs(1), xmon.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        omq_tokio::MonitorEvent::Listening {
+            endpoint: omq_tokio::Endpoint::Tcp { port, .. },
+        } => port,
+        other => panic!("{other:?}"),
+    };
+
+    let xsub = omq_tokio::Socket::new(omq_tokio::SocketType::XSub, omq_tokio::Options::default());
+    xsub.connect(tcp_loopback(port)).await.unwrap();
+    xsub.subscribe("news.").await.unwrap();
+
+    // Consume the subscription notification at XPUB.
+    let sub_notif = tokio::time::timeout(Duration::from_secs(2), xpub.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&sub_notif.parts()[0].coalesce()[..], b"\x01news.");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let _ = xpub.send(omq_tokio::Message::single("news.alpha")).await;
+        let _ = xpub.send(omq_tokio::Message::single("sports.beta")).await;
+        if let Ok(Ok(m)) =
+            tokio::time::timeout(Duration::from_millis(20), xsub.recv()).await
+        {
+            let bytes = m.parts()[0].coalesce();
+            assert!(
+                bytes.starts_with(b"news."),
+                "XSUB received non-subscribed message: {bytes:?}"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "XSUB never received its subscribed messages"
+        );
+    }
+}
+
+#[tokio::test]
+async fn xsub_send_returns_protocol_error() {
+    // XSUB has no send strategy for normal messages; send() should error.
+    // This documents the current limitation: the XSUB-as-proxy pattern
+    // (forwarding \x01<topic> messages via xsub.send()) is not yet supported.
+    let xsub = omq_tokio::Socket::new(omq_tokio::SocketType::XSub, omq_tokio::Options::default());
+    let r = xsub
+        .send(omq_tokio::Message::single(b"\x01topic".as_ref()))
+        .await;
+    assert!(
+        matches!(r, Err(omq_tokio::Error::Protocol(_))),
+        "XSUB send should return Protocol error; got {r:?}"
+    );
+}
+
+// Raw ZMTP bytes for a ZMTP 3.0 SUB greeting and READY command.
+fn zmtp30_sub_greeting() -> [u8; 64] {
+    let mut g = [0u8; 64];
+    g[0] = 0xFF;
+    g[9] = 0x7F;
+    g[10] = 3; // major = 3
+    g[11] = 0; // minor = 0 → ZMTP 3.0
+    g[12..16].copy_from_slice(b"NULL");
+    g
+}
+
+// READY command as a SUB socket (body = 25 bytes).
+const SUB_READY: &[u8] = &[
+    0x04, 0x19, // short COMMAND, body = 25 bytes
+    0x05, b'R', b'E', b'A', b'D', b'Y', // name_len=5, "READY"
+    0x0B, b'S', b'o', b'c', b'k', b'e', b't', b'-', b'T', b'y', b'p', b'e', // "Socket-Type"
+    0x00, 0x00, 0x00, 0x03, // value length = 3
+    b'S', b'U', b'B', // "SUB"
+];
+
+fn read_zmtp_frame(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    let mut flags = [0u8; 1];
+    stream.read_exact(&mut flags).unwrap();
+    let body_len = if flags[0] & 0x02 != 0 {
+        let mut len_buf = [0u8; 8];
+        stream.read_exact(&mut len_buf).unwrap();
+        u64::from_be_bytes(len_buf) as usize
+    } else {
+        let mut len_buf = [0u8; 1];
+        stream.read_exact(&mut len_buf).unwrap();
+        len_buf[0] as usize
+    };
+    let mut body = vec![0u8; body_len];
+    stream.read_exact(&mut body).unwrap();
+    body
+}
+
+#[tokio::test]
+async fn pub_accepts_zmtp30_message_form_subscribe() {
+    // A raw ZMTP 3.0 SUB peer connects to PUB. Instead of sending a SUBSCRIBE
+    // command (ZMTP 3.1+), it sends a DATA frame with \x01<topic> (ZMTP 3.0
+    // message-form subscription). PUB must honour this and route matching messages.
+    use std::io::Write;
+
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
+
+    let pub_ =
+        omq_tokio::Socket::new(omq_tokio::SocketType::Pub, omq_tokio::Options::default());
+    pub_.bind(tcp_loopback(port)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    // Synchronisation: raw peer signals when subscription frame is sent.
+    let (sub_sent_tx, sub_sent_rx) = tokio::sync::oneshot::channel::<()>();
+    // Result: the first message body the raw peer receives.
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+
+    let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+
+        // Send ZMTP 3.0 greeting (minor = 0).
+        stream.write_all(&zmtp30_sub_greeting()).unwrap();
+
+        // Read peer greeting (64 bytes).
+        let mut peer_greeting = [0u8; 64];
+        use std::io::Read;
+        stream.read_exact(&mut peer_greeting).unwrap();
+
+        // Send READY as SUB.
+        stream.write_all(SUB_READY).unwrap();
+
+        // Read peer's READY.
+        let _ = read_zmtp_frame(&mut stream);
+
+        // Send \x01foo as a message-form subscription (ZMTP 3.0 style).
+        let sub_frame: &[u8] = &[0x00, 0x04, 0x01, b'f', b'o', b'o']; // DATA \x01foo
+        stream.write_all(sub_frame).unwrap();
+
+        // Signal that the subscription is sent.
+        let _ = sub_sent_tx.send(());
+
+        // Read the first published message.
+        match read_zmtp_frame(&mut stream) {
+            body => {
+                let _ = result_tx.send(body);
+            }
+        }
+    });
+
+    // Wait for the raw peer to send its subscription.
+    tokio::time::timeout(Duration::from_secs(2), sub_sent_rx)
+        .await
+        .expect("raw peer never sent subscription")
+        .unwrap();
+
+    // Give PUB actor time to process the message-form subscription.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send a matching and a non-matching message.
+    pub_
+        .send(omq_tokio::Message::single("foo.topic.1"))
+        .await
+        .unwrap();
+    pub_
+        .send(omq_tokio::Message::single("bar.other"))
+        .await
+        .unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(3), result_rx)
+        .await
+        .expect("raw peer never received a message")
+        .unwrap();
+
+    assert!(
+        received.starts_with(b"foo."),
+        "ZMTP 3.0 message-form subscription must route 'foo.*' messages; \
+         got: {received:?}"
+    );
 }

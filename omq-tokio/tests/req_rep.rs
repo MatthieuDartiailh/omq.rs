@@ -187,3 +187,38 @@ async fn rep_survives_client_disconnect_mid_cycle() {
         .unwrap();
     assert_eq!(reply.parts()[0].coalesce().as_ref(), b"reply");
 }
+
+#[tokio::test]
+async fn req_rep_1000_cycles_tcp() {
+    // 1 000 sequential request-reply cycles over TCP.
+    // Scales beyond inproc to reveal framing races, backpressure issues,
+    // and timer/wake latency at real socket throughput.
+    const CYCLES: usize = 1_000;
+    let port = loopback_port();
+
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(tcp_ep(port)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(tcp_ep(port)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let rep_task = tokio::spawn(async move {
+        for _ in 0..CYCLES {
+            let m = rep.recv().await.unwrap();
+            rep.send(m).await.unwrap(); // echo
+        }
+    });
+
+    for i in 0..CYCLES {
+        req.send(Message::single(format!("{i}"))).await.unwrap();
+        let r = tokio::time::timeout(Duration::from_secs(5), req.recv())
+            .await
+            .unwrap_or_else(|_| panic!("cycle {i} timed out"))
+            .unwrap();
+        let expected = format!("{i}");
+        assert_eq!(r.parts()[0].coalesce(), expected.as_bytes(), "cycle {i}");
+    }
+
+    rep_task.await.unwrap();
+}

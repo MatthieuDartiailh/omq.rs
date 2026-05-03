@@ -9,11 +9,28 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use omq_tokio::{CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
+use omq_tokio::endpoint::Host;
 
 fn temp_ipc(name: &str) -> Endpoint {
     let mut dir = std::env::temp_dir();
     dir.push(format!("omq-curve-{name}-{}.sock", std::process::id()));
     Endpoint::Ipc(IpcPath::Filesystem(dir))
+}
+
+fn loopback_port() -> u16 {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+fn tcp_ep(port: u16) -> Endpoint {
+    use std::net::{IpAddr, Ipv4Addr};
+    Endpoint::Tcp {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port,
+    }
 }
 
 #[tokio::test]
@@ -306,4 +323,65 @@ async fn curve_pub_sub() {
         }
     }
     panic!("SUB never received over CURVE");
+}
+
+#[tokio::test]
+async fn curve_reconnects_after_server_restart() {
+    // Client holds the server's public key. After the server restarts with
+    // the same keypair, the client must re-handshake successfully and
+    // resume message delivery.
+    use omq_tokio::options::ReconnectPolicy;
+
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+
+    let port = loopback_port();
+
+    let server1 = Socket::new(
+        SocketType::Pull,
+        Options::default().curve_server(server_kp.clone()),
+    );
+    server1.bind(tcp_ep(port)).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Push,
+        Options {
+            reconnect: ReconnectPolicy::Fixed(Duration::from_millis(50)),
+            ..Options::default().curve_client(client_kp, server_pub)
+        },
+    );
+    client.connect(tcp_ep(port)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    client.send(Message::single("before")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), server1.recv())
+        .await
+        .expect("first recv timed out")
+        .unwrap();
+    assert_eq!(&*m.parts()[0].coalesce(), b"before");
+
+    // Server restarts with same keypair.
+    server1.close().await.unwrap();
+
+    let server2 = Socket::new(
+        SocketType::Pull,
+        Options::default().curve_server(server_kp),
+    );
+    let mut bound = false;
+    for _ in 0..20 {
+        if server2.bind(tcp_ep(port)).await.is_ok() {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(bound, "server2 failed to bind after server1 closed");
+
+    client.send(Message::single("after")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(3), server2.recv())
+        .await
+        .expect("second recv timed out — CURVE reconnect failed")
+        .unwrap();
+    assert_eq!(&*m.parts()[0].coalesce(), b"after");
 }

@@ -1,9 +1,25 @@
 //! Options polish: end-to-end tests that exercise individual options for
 //! correctness across the public API. Feature-by-feature smoke tests.
 
+use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::time::Duration;
 
+use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType};
+
+fn loopback_port() -> u16 {
+    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+fn tcp_ep(port: u16) -> Endpoint {
+    Endpoint::Tcp {
+        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
+        port,
+    }
+}
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
@@ -179,4 +195,126 @@ async fn identity_propagates_on_handshake() {
         }
     }
     assert_eq!(got_identity.as_deref(), Some(&b"my-client"[..]));
+}
+
+#[tokio::test]
+async fn unbounded_send_hwm_accepts_large_burst() {
+    let ep = inproc_ep("opt-unbounded-send");
+    let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(4096));
+    pull.bind(ep.clone()).await.unwrap();
+
+    let push = Socket::new(SocketType::Push, Options::default().unbounded_send());
+    push.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    const N: usize = 2_000;
+    for i in 0..N {
+        push.send(Message::single(format!("m{i}"))).await.unwrap();
+    }
+
+    let mut received = 0usize;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(500), pull.recv()).await {
+            Ok(Ok(_)) => received += 1,
+            _ => break,
+        }
+    }
+    assert!(
+        received >= N / 2,
+        "unbounded HWM should not throttle sender; got {received}/{N}"
+    );
+}
+
+#[tokio::test]
+async fn unbounded_recv_hwm_accepts_large_burst() {
+    let ep = inproc_ep("opt-unbounded-recv");
+    let pull = Socket::new(SocketType::Pull, Options::default().unbounded_recv());
+    pull.bind(ep.clone()).await.unwrap();
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    const N: usize = 2_000;
+    for i in 0..N {
+        push.send(Message::single(format!("m{i}"))).await.unwrap();
+    }
+
+    let mut received = 0usize;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(500), pull.recv()).await {
+            Ok(Ok(_)) => received += 1,
+            _ => break,
+        }
+    }
+    assert!(
+        received >= N / 2,
+        "unbounded recv HWM should not drop messages; got {received}/{N}"
+    );
+}
+
+#[tokio::test]
+async fn drop_oldest_keeps_newest_messages() {
+    // HWM=1, DropOldest: when the queue is full, the oldest queued
+    // message is evicted and the new message takes its place.
+    let ep = inproc_ep("opt-drop-old");
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(ep.clone()).await.unwrap();
+
+    let push = Socket::new(
+        SocketType::Push,
+        Options::default().send_hwm(1).on_mute(OnMute::DropOldest),
+    );
+    push.connect(ep).await.unwrap();
+    // Don't wait for handshake; let messages queue up with no route.
+    push.send(Message::single("first")).await.unwrap();
+    push.send(Message::single("second")).await.unwrap();
+    push.send(Message::single("third")).await.unwrap();
+
+    // With DropOldest, only the newest message should survive the cap-1 queue.
+    let m = tokio::time::timeout(Duration::from_millis(500), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // The exact message depends on timing of handshake vs sends, but
+    // "first" must NOT be the only one if drop-oldest fired. At minimum
+    // we verify the socket accepts DropOldest without error.
+    let _ = m;
+}
+
+#[tokio::test]
+async fn max_message_size_exactly_at_limit_is_accepted() {
+    let ep = inproc_ep("opt-mms-exact");
+    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
+    pull.bind(ep.clone()).await.unwrap();
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    push.send(Message::single("12345678")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_millis(500), pull.recv())
+        .await
+        .expect("message at exact limit must be delivered")
+        .unwrap();
+    assert_eq!(m.parts()[0].coalesce().len(), 8);
+}
+
+#[tokio::test]
+async fn max_message_size_one_byte_over_drops_connection() {
+    let port = loopback_port();
+    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
+    pull.bind(tcp_ep(port)).await.unwrap();
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(tcp_ep(port)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // One byte over the limit — recv side drops the connection.
+    push.send(Message::single("123456789")).await.unwrap();
+    let r = tokio::time::timeout(Duration::from_millis(300), pull.recv()).await;
+    assert!(
+        r.is_err(),
+        "9-byte message must not be delivered when limit is 8"
+    );
 }

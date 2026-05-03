@@ -18,17 +18,22 @@ pub(crate) struct DropQueue {
 
 impl DropQueue {
     /// Create a new queue with the given capacity and policy. The returned
-    /// [`flume::Receiver`] is cloned per pump.
+    /// [`flume::Receiver`] is cloned per pump. Pass `usize::MAX` for
+    /// unbounded (uses `flume::unbounded` to avoid internal overflow).
     pub(crate) fn new(capacity: usize, policy: OnMute) -> (Self, flume::Receiver<Message>) {
-        let cap = capacity.max(1);
-        let (tx, rx) = flume::bounded(cap);
+        let (tx, rx) = if capacity == usize::MAX {
+            flume::unbounded()
+        } else {
+            flume::bounded(capacity.max(1))
+        };
+        let rx2 = rx.clone();
         (
             Self {
                 tx,
-                rx: rx.clone(),
+                rx,
                 policy,
             },
-            rx,
+            rx2,
         )
     }
 

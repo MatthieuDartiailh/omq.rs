@@ -38,7 +38,7 @@ pub(super) fn install_inproc_peer(
     connection_id: u64,
     #[cfg(feature = "priority")] priority: u8,
 ) {
-    let our_identity = inner.options.identity.clone();
+    let our_identity = inner.inproc_identity.clone();
     let peer_identity = conn.peer.identity.clone();
     let snap = conn.peer.clone();
     let info = PeerInfo {

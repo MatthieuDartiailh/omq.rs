@@ -725,33 +725,59 @@ pub(crate) async fn run_connection(
                     // fired too, and reading here would steal the
                     // kernel data, hanging the recv future on its
                     // subsequent read SQE.
-                    if state.recv_claim.load(Ordering::Acquire) == 1 {
+                    // Two reasons to bail before READ and loop back:
+                    //   (a) recv_claim flipped to 1 between our snapshot
+                    //       and now — must not steal bytes from the
+                    //       direct-recv path.
+                    //   (b) try_direct_encode enqueued outbound data
+                    //       (encoded_queue, or codec-direct on the
+                    //       transform path) between our POLL_ADD firing
+                    //       and us reaching here, with driver_in_select
+                    //       = false so no transmit_ready notify was
+                    //       sent. Entering io.reader.read().await with
+                    //       outbound pending would park indefinitely
+                    //       under IORING_FEAT_FAST_POLL (the kernel
+                    //       re-polls the fd internally instead of
+                    //       surfacing EAGAIN), stranding the payload.
+                    // Either way: drop the lock, mark codec dirty so
+                    // step 3a re-checks, loop. The FD stays readable
+                    // so the next iteration re-arms POLL_ADD.
+                    let outbound_pending = io.codec.has_pending_transmit()
+                        || !state.encoded_queue.lock().expect("encoded_queue").is_empty();
+                    if state.recv_claim.load(Ordering::Acquire) == 1 || outbound_pending {
                         drop(io);
                         read_buf = buf;
-                        // A sender may have encoded into the codec via
-                        // try_direct_encode while we were yielded at
-                        // peer_io.lock() with driver_in_select=false,
-                        // so no transmit_ready notification was sent.
                         codec_maybe_dirty = true;
                     } else {
                         let (res, filled) = io.reader.read(buf).await;
-                        let n = match res {
-                            Ok(0) | Err(_) => return Ok(()),
-                            Ok(n) => n,
-                        };
-                        state.last_input_nanos.store(
-                            state.hb_epoch.elapsed().as_nanos() as u64,
-                            Ordering::Relaxed,
-                        );
-                        io.codec.handle_input(&filled[..n])?;
-                        drop(io);
-                        read_buf = filled;
-                        read_buf.clear();
-                        codec_has_input = true;
-                        // handle_input may auto-generate output (e.g. PONG
-                        // in response to PING) — mark codec dirty so step 3a
-                        // flushes it before try_direct_recv can race it.
-                        codec_maybe_dirty = true;
+                        match res {
+                            Ok(0) => return Ok(()),
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                // try_direct_recv consumed the data between our POLL_ADD
+                                // firing and this READ completing. Not fatal — loop back
+                                // and re-subscribe to read_ready on the next iteration.
+                                drop(io);
+                                read_buf = filled;
+                                read_buf.clear();
+                                codec_maybe_dirty = true;
+                            }
+                            Err(_) => return Ok(()),
+                            Ok(n) => {
+                                state.last_input_nanos.store(
+                                    state.hb_epoch.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                                io.codec.handle_input(&filled[..n])?;
+                                drop(io);
+                                read_buf = filled;
+                                read_buf.clear();
+                                codec_has_input = true;
+                                // handle_input may auto-generate output (e.g. PONG
+                                // in response to PING) — mark codec dirty so step 3a
+                                // flushes it before try_direct_recv can race it.
+                                codec_maybe_dirty = true;
+                            }
+                        }
                     }
                 }
             }

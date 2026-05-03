@@ -189,6 +189,7 @@ where
         result
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn run_inner(self) -> Result<()> {
         let Self {
             stream,
@@ -247,7 +248,52 @@ where
 
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => return Ok(()),
+                () = cancel.cancelled() => {
+                    // Mirror DriverCommand::Close: drain whatever is
+                    // already enqueued (inbox + shared queue) and flush
+                    // to the wire so the last sent message reaches the
+                    // peer even when the user-side Drop took the
+                    // cancel-only fast path (no linger round-trip via
+                    // the actor). Without this, a `rep.send(...)` whose
+                    // bytes were handed to the actor but not yet picked
+                    // up by the driver gets discarded on Drop.
+                    let use_flat = encoder.is_none() && !codec.has_frame_transform();
+                    while let Ok(cmd) = inbox.try_recv() {
+                        match cmd {
+                            DriverCommand::SendMessage(msg) => {
+                                let _ = encode_flat_or_codec(
+                                    &msg,
+                                    &mut encoder,
+                                    &mut codec,
+                                    use_flat,
+                                    &mut flat_buf,
+                                    &mut writer,
+                                ).await;
+                            }
+                            DriverCommand::SendCommand(c) => {
+                                let _ = codec.send_command(&c);
+                            }
+                            DriverCommand::Close => break,
+                        }
+                    }
+                    if let Some(ref rx) = shared_msg_rx {
+                        while let Ok(msg) = rx.try_recv() {
+                            let _ = encode_flat_or_codec(
+                                &msg,
+                                &mut encoder,
+                                &mut codec,
+                                use_flat,
+                                &mut flat_buf,
+                                &mut writer,
+                            ).await;
+                        }
+                    }
+                    if !flat_buf.is_empty() {
+                        let _ = writer.write_all(&flat_buf.split()).await;
+                    }
+                    drain_writes(&mut writer, &mut codec).await.ok();
+                    return Ok(());
+                }
 
                 // Handshake deadline; disabled once handshake completes.
                 () = sleep_until_opt(handshake_deadline), if handshake_deadline.is_some() => {

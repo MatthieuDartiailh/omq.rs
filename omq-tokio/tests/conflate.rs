@@ -136,6 +136,55 @@ async fn push_conflate_keeps_only_latest() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn radio_conflate_keeps_only_latest_per_group() {
+    // RADIO + conflate: per-peer queue cap-1. DISH should receive only a
+    // subset of the flooded messages (conflate drops all but the latest).
+    let ep = inproc("conflate-radio-dish");
+    let radio = Socket::new(SocketType::Radio, Options::default().conflate(true));
+    radio.bind(ep.clone()).await.unwrap();
+
+    let dish = Socket::new(SocketType::Dish, Options::default());
+    dish.connect(ep).await.unwrap();
+    dish.join("weather").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    const N: u32 = 5_000;
+    for i in 0..N {
+        radio
+            .send(Message::multipart([
+                String::from("weather"),
+                format!("msg-{i:05}"),
+            ]))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut received = Vec::new();
+    while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), dish.recv()).await {
+        let body = msg.parts()[1].coalesce();
+        received.push(String::from_utf8_lossy(&body).into_owned());
+        if received.len() >= N as usize {
+            break;
+        }
+    }
+
+    assert!(
+        received.len() < N as usize,
+        "radio conflate dropped nothing; sent {N}, received {}",
+        received.len()
+    );
+    let nums: Vec<u32> = received
+        .iter()
+        .filter_map(|s| s.strip_prefix("msg-").and_then(|n| n.parse::<u32>().ok()))
+        .collect();
+    let max = *nums.iter().max().unwrap_or(&0);
+    let min = *nums.iter().min().unwrap_or(&0);
+    let gaps = (max - min + 1) as usize > nums.len();
+    assert!(gaps, "expected gaps in received sequence, got {nums:?}");
+}
+
 #[test]
 #[should_panic(expected = "Options::conflate(true)")]
 fn conflate_panics_on_req() {

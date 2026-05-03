@@ -171,3 +171,55 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
 
     let _ = flood.await;
 }
+
+#[compio::test]
+async fn exponential_backoff_retry_in_grows() {
+    use omq_compio::MonitorEvent;
+
+    let port = loopback_port();
+
+    let push = Socket::new(
+        SocketType::Push,
+        Options {
+            reconnect: ReconnectPolicy::Exponential {
+                min: Duration::from_millis(20),
+                max: Duration::from_millis(200),
+            },
+            ..Default::default()
+        },
+    );
+    let mut mon = push.monitor();
+    push.connect(tcp_ep(port)).await.unwrap();
+
+    let mut delays: Vec<Duration> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while delays.len() < 4 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for ConnectDelayed events"
+        );
+        let evt = compio::time::timeout(Duration::from_secs(2), mon.recv())
+            .await
+            .expect("timed out waiting for ConnectDelayed event")
+            .unwrap();
+        if let MonitorEvent::ConnectDelayed { retry_in, .. } = evt {
+            delays.push(retry_in);
+        }
+    }
+
+    for (i, &d) in delays.iter().enumerate() {
+        assert!(
+            d >= Duration::from_millis(20),
+            "delay[{i}] = {d:?} is below min (20 ms)"
+        );
+    }
+    for i in 1..delays.len() {
+        assert!(
+            delays[i] >= delays[i - 1],
+            "delay[{i}] = {:?} decreased from delay[{}] = {:?}",
+            delays[i],
+            i - 1,
+            delays[i - 1]
+        );
+    }
+}

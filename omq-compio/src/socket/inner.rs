@@ -36,6 +36,11 @@ use crate::transport::peer_io::{SharedPeerIo, WireWriter};
 pub(super) struct SocketInner {
     pub(super) socket_type: SocketType,
     pub(super) options: Options,
+    /// Stable identity for inproc peer tagging. Equal to `options.identity`
+    /// when one is set; otherwise a 9-byte auto-generated value (leading 0x00
+    /// matches libzmq's auto-identity convention). ROUTER sockets use this to
+    /// identify peers that have no explicit identity.
+    pub(super) inproc_identity: Bytes,
     pub(super) out_peers: RwLock<Vec<PeerSlot>>,
     pub(super) in_tx: flume::Sender<InprocFrame>,
     pub(super) in_rx: flume::Receiver<InprocFrame>,
@@ -707,14 +712,17 @@ impl PeerOut {
 
 impl SocketInner {
     pub(super) fn new(socket_type: SocketType, options: Options) -> Arc<Self> {
-        let recv_cap = options.recv_hwm.unwrap_or(1024).max(16) as usize;
-        let (in_tx, in_rx) = flume::bounded::<InprocFrame>(recv_cap);
+        let (in_tx, in_rx) = match options.recv_hwm {
+            None => flume::unbounded::<InprocFrame>(),
+            Some(hwm) => flume::bounded::<InprocFrame>((hwm as usize).max(16)),
+        };
         // Conflate forces cap-1 with drain-before-send semantics so that only
         // the latest message survives in the queue at any point in time.
-        let send_cap = if options.conflate {
-            1
+        // None (unbounded_send) → unbounded shared queue.
+        let send_cap: Option<usize> = if options.conflate {
+            Some(1)
         } else {
-            options.send_hwm.unwrap_or(1024).max(16) as usize
+            options.send_hwm.map(|h| (h as usize).max(16))
         };
         // With the `priority` feature, round-robin types use per-peer
         // outbound queues instead of one shared queue (so try_send
@@ -728,14 +736,29 @@ impl SocketInner {
         ) = (None, None);
         #[cfg(not(feature = "priority"))]
         let (shared_send_tx, shared_send_rx) = if is_round_robin_send(socket_type) {
-            let (tx, rx) = flume::bounded::<Message>(send_cap);
+            let (tx, rx) = match send_cap {
+                Some(cap) => flume::bounded::<Message>(cap),
+                None => flume::unbounded::<Message>(),
+            };
             (Some(tx), Some(rx))
         } else {
             (None, None)
         };
         let _ = send_cap;
+        let inproc_identity = if options.identity.is_empty() {
+            static COUNTER: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut buf = Vec::with_capacity(9);
+            buf.push(0u8); // libzmq auto-identity leading null
+            buf.extend_from_slice(&n.to_be_bytes());
+            Bytes::from(buf)
+        } else {
+            options.identity.clone()
+        };
         Arc::new(Self {
             socket_type,
+            inproc_identity,
             options,
             out_peers: RwLock::new(Vec::new()),
             in_tx,
@@ -763,7 +786,7 @@ impl SocketInner {
     pub(super) fn snapshot(&self) -> InprocPeerSnapshot {
         InprocPeerSnapshot {
             socket_type: self.socket_type,
-            identity: self.options.identity.clone(),
+            identity: self.inproc_identity.clone(),
         }
     }
 

@@ -167,3 +167,46 @@ async fn linger_zero_returns_immediately_on_close() {
         "linger=0 close took too long: {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn linger_completes_within_timeout_after_peer_disconnect() {
+    // Queued messages cannot be delivered after the peer disconnects.
+    // close() with a finite linger must return within the linger window
+    // rather than hanging indefinitely waiting for a peer that is gone.
+    let port = loopback_port();
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(tcp_ep(port)).await.unwrap();
+
+    const LINGER: Duration = Duration::from_millis(300);
+    let push = Socket::new(SocketType::Push, Options::default().linger(LINGER));
+    push.connect(tcp_ep(port)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Queue up messages; let the peer receive a few then disconnect.
+    for i in 0u32..50 {
+        push.send(Message::single(i.to_be_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+
+    // Drain a handful so the connection is live, then drop the peer.
+    for _ in 0..5 {
+        let _ = tokio::time::timeout(Duration::from_millis(200), pull.recv()).await;
+    }
+    pull.close().await.unwrap();
+
+    // close() must return within linger + generous slack; it must not block
+    // until the linger timeout if the underlying queue could be drained sooner
+    // (and it must not hang indefinitely if the peer is gone).
+    let t0 = std::time::Instant::now();
+    tokio::time::timeout(LINGER + Duration::from_millis(500), push.close())
+        .await
+        .expect("close() hung past linger timeout after peer disconnect")
+        .unwrap();
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed <= LINGER + Duration::from_millis(500),
+        "close took {elapsed:?}, expected ≤ linger({LINGER:?}) + 500 ms"
+    );
+}

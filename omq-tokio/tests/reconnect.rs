@@ -164,3 +164,58 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
 
     let _ = flood.await;
 }
+
+#[tokio::test]
+async fn exponential_backoff_retry_in_grows() {
+    // ConnectDelayed monitor events carry the configured retry_in duration.
+    // With ExponentialPolicy{min, max}, successive retry_in values must be
+    // non-decreasing and at least as large as `min`.
+    use omq_tokio::MonitorEvent;
+
+    let port = loopback_port();
+    // Nothing is listening; every dial attempt will fail immediately.
+
+    let push = Socket::new(
+        SocketType::Push,
+        Options {
+            reconnect: ReconnectPolicy::Exponential {
+                min: Duration::from_millis(20),
+                max: Duration::from_millis(200),
+            },
+            ..Default::default()
+        },
+    );
+    let mut mon = push.monitor();
+    push.connect(tcp_ep(port)).await.unwrap();
+
+    // Collect the first 4 ConnectDelayed events.
+    let mut delays: Vec<Duration> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while delays.len() < 4 {
+        let evt = tokio::time::timeout_at(deadline, mon.recv())
+            .await
+            .expect("timed out waiting for ConnectDelayed events")
+            .unwrap();
+        if let MonitorEvent::ConnectDelayed { retry_in, .. } = evt {
+            delays.push(retry_in);
+        }
+    }
+
+    // Each retry_in must be >= min.
+    for (i, &d) in delays.iter().enumerate() {
+        assert!(
+            d >= Duration::from_millis(20),
+            "delay[{i}] = {d:?} is below min (20 ms)"
+        );
+    }
+    // Delays must be non-decreasing (exponential growth or plateau at max).
+    for i in 1..delays.len() {
+        assert!(
+            delays[i] >= delays[i - 1],
+            "delay[{i}] = {:?} decreased from delay[{}] = {:?}",
+            delays[i],
+            i - 1,
+            delays[i - 1]
+        );
+    }
+}

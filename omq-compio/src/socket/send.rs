@@ -25,7 +25,24 @@ use crate::transport::driver::DriverCommand;
 use crate::socket::inner::{DirectIoState, FLAT_THRESHOLD};
 
 use super::handle::Socket;
-use super::inner::PeerOut;
+use super::inner::{PeerOut, PeerSlot};
+
+/// Liveness check for round-robin / priority pickers. A wire peer's
+/// driver clears its `direct_io` handle on exit (see
+/// `socket/install.rs`); routing to a dead wire slot would silently
+/// drop the message into `shared_send_tx` with no consumer. An inproc
+/// peer has no driver — its sender is always live until the receiver
+/// disconnects.
+#[cfg(not(feature = "priority"))]
+fn peer_alive(p: &PeerSlot) -> bool {
+    match &p.out {
+        PeerOut::Inproc { sender, .. } => !sender.is_disconnected(),
+        PeerOut::Wire(_) => p
+            .direct_io
+            .as_ref()
+            .is_some_and(|h| h.read().expect("direct_io handle lock").is_some()),
+    }
+}
 
 /// Encode `msg` for this peer without going through the driver's cmd channel.
 /// Returns `true` if encoded and the driver was (conditionally) notified,
@@ -204,12 +221,13 @@ impl Socket {
             }
             SocketType::Pub | SocketType::XPub => self.send_pub_filtered(msg).await,
             SocketType::Radio => self.send_radio(msg).await,
-            SocketType::XSub => self.send_fan_out(msg).await,
-            SocketType::Pull | SocketType::Sub | SocketType::Dish | SocketType::Gather => {
-                Err(Error::Protocol(format!(
-                    "send is not supported on recv-only socket type {st:?}"
-                )))
-            }
+            SocketType::Pull
+            | SocketType::Sub
+            | SocketType::XSub
+            | SocketType::Dish
+            | SocketType::Gather => Err(Error::Protocol(format!(
+                "send is not supported on recv-only socket type {st:?}"
+            ))),
         }
     }
 
@@ -240,13 +258,32 @@ impl Socket {
                     }
                     None
                 } else {
-                    let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed) % peers.len();
-                    let p = &peers[idx];
-                    // Snapshot direct-io state for the single-peer fast path.
-                    let direct = p.direct_io.as_ref().and_then(|h| {
-                        h.read().expect("direct_io handle lock").clone()
-                    });
-                    Some((p.out.clone(), peers.len(), direct))
+                    // Skip dead wire peers (driver exited → direct_io
+                    // cleared) when at least one alive peer exists.
+                    // Otherwise routing would keep landing on a dead
+                    // slot whose only fallback is shared_send_tx — fine
+                    // when *all* peers are dead (the shared-queue
+                    // back-pressure path that handshake_timeout tests
+                    // depend on) but lossy in the mixed-transport case
+                    // where shared_send_tx has no consumer at all.
+                    let n = peers.len();
+                    let any_alive = peers.iter().any(peer_alive);
+                    let mut chosen_slot = None;
+                    for _ in 0..n {
+                        let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed) % n;
+                        let p = &peers[idx];
+                        if any_alive && !peer_alive(p) {
+                            continue;
+                        }
+                        chosen_slot = Some(p);
+                        break;
+                    }
+                    chosen_slot.map(|p| {
+                        let direct = p.direct_io.as_ref().and_then(|h| {
+                            h.read().expect("direct_io handle lock").clone()
+                        });
+                        (p.out.clone(), n, direct)
+                    })
                 }
             };
             if let Some((chosen, peer_count, direct)) = chosen {
@@ -480,13 +517,6 @@ impl Socket {
         out.send(body).await
     }
 
-    async fn send_fan_out(&self, msg: Message) -> Result<()> {
-        let targets = self.snapshot_peers_now();
-        for peer in targets {
-            let _ = peer.send(msg.clone()).await;
-        }
-        Ok(())
-    }
 
     /// RADIO: each message must be `[group, body]`. Fan out to every
     /// UDP dialer as one datagram, and to each TCP/IPC peer that has
@@ -598,15 +628,13 @@ impl Socket {
                 Ok(())
             }
             SocketType::Radio => self.try_send_radio(&msg),
-            SocketType::XSub => {
-                self.try_send_fan_out(&msg);
-                Ok(())
-            }
-            SocketType::Pull | SocketType::Sub | SocketType::Dish | SocketType::Gather => {
-                Err(Error::Protocol(format!(
-                    "send is not supported on recv-only socket type {st:?}"
-                )))
-            }
+            SocketType::Pull
+            | SocketType::Sub
+            | SocketType::XSub
+            | SocketType::Dish
+            | SocketType::Gather => Err(Error::Protocol(format!(
+                "send is not supported on recv-only socket type {st:?}"
+            ))),
         }
     }
 
@@ -780,10 +808,4 @@ impl Socket {
         Ok(())
     }
 
-    fn try_send_fan_out(&self, msg: &Message) {
-        let peers = self.inner().out_peers.read().expect("peers lock");
-        for p in peers.iter() {
-            let _ = p.out.try_send_immediate(msg.clone());
-        }
-    }
 }

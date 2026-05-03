@@ -129,3 +129,172 @@ async fn rep_survives_client_disconnect_mid_cycle() {
         .unwrap();
     assert_eq!(reply.parts()[0].coalesce().as_ref(), b"reply");
 }
+
+#[compio::test]
+async fn req_rep_1000_cycles_tcp() {
+    const CYCLES: usize = 1_000;
+    let port = loopback_port();
+
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(tcp_ep(port)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    let rep_task = compio::runtime::spawn(async move {
+        for _ in 0..CYCLES {
+            let m = rep.recv().await.unwrap();
+            rep.send(m).await.unwrap();
+        }
+    });
+
+    for i in 0..CYCLES {
+        req.send(Message::single(format!("{i}"))).await.unwrap();
+        let r = compio::time::timeout(Duration::from_secs(5), req.recv())
+            .await
+            .unwrap_or_else(|_| panic!("cycle {i} timed out"))
+            .unwrap();
+        let expected = format!("{i}");
+        assert_eq!(r.parts()[0].coalesce(), expected.as_bytes(), "cycle {i}");
+    }
+
+    rep_task.await.unwrap();
+}
+
+#[compio::test]
+async fn req_rep_roundtrip_sequential_ipv4() {
+    // Same as ipv6_req_rep but with IPv4 - tests the sequential (non-spawned) pattern.
+    let port = loopback_port();
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(tcp_ep(port)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    req.send(Message::single("ping")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+
+    rep.send(Message::single("pong")).await.unwrap();
+    let r = compio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+}
+
+#[compio::test]
+async fn req_rep_roundtrip_sequential_with_yield() {
+    // Test if yielding between rep.send and req.recv fixes the deadlock.
+    let port = loopback_port();
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(tcp_ep(port)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    req.send(Message::single("ping")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+
+    rep.send(Message::single("pong")).await.unwrap();
+    // Explicit yield to let REP's driver flush encoded_queue.
+    compio::time::sleep(Duration::from_millis(1)).await;
+    let r = compio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+}
+
+#[compio::test]
+async fn req_rep_roundtrip_sequential_with_long_yield() {
+    let port = loopback_port();
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(tcp_ep(port)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    req.send(Message::single("ping")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+
+    rep.send(Message::single("pong")).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+    let r = compio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+}
+
+#[compio::test]
+async fn req_rep_roundtrip_sequential_spawned_recv() {
+    // Pattern: sequential but req.recv() in a spawned task
+    let port = loopback_port();
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(tcp_ep(port)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    req.send(Message::single("ping")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+
+    rep.send(Message::single("pong")).await.unwrap();
+
+    let req_c = req.clone();
+    let recv_task = compio::runtime::spawn(async move {
+        compio::time::timeout(Duration::from_secs(2), req_c.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    let r = recv_task.await.unwrap();
+    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+}
+
+#[compio::test]
+async fn req_rep_sequential_longer_timeout() {
+    let port = loopback_port();
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(tcp_ep(port)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    req.send(Message::single("ping")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(5), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+
+    rep.send(Message::single("pong")).await.unwrap();
+    // 10 second timeout - if req.recv() eventually succeeds it's a scheduling issue
+    let r = compio::time::timeout(Duration::from_secs(10), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+}

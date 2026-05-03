@@ -137,3 +137,38 @@ async fn linger_forever_waits_until_drained() {
         assert_eq!(v, i as u32, "message {i} out of order or missing");
     }
 }
+
+#[compio::test]
+async fn linger_completes_within_timeout_after_peer_disconnect() {
+    let port = loopback_port();
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(tcp_ep(port)).await.unwrap();
+
+    const LINGER: Duration = Duration::from_millis(300);
+    let push = Socket::new(SocketType::Push, Options::default().linger(LINGER));
+    push.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    for i in 0u32..50 {
+        push.send(Message::single(i.to_be_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+
+    for _ in 0..5 {
+        let _ = compio::time::timeout(Duration::from_millis(200), pull.recv()).await;
+    }
+    pull.close().await.unwrap();
+
+    let t0 = std::time::Instant::now();
+    compio::time::timeout(LINGER + Duration::from_millis(500), push.close())
+        .await
+        .expect("close() hung past linger timeout after peer disconnect")
+        .unwrap();
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed <= LINGER + Duration::from_millis(500),
+        "close took {elapsed:?}, expected <= linger({LINGER:?}) + 500 ms"
+    );
+}

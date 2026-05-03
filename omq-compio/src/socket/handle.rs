@@ -1146,7 +1146,18 @@ impl Socket {
                         return Err(Error::Io(e));
                     }
                     Ok(n) => {
-                        io.codec.handle_input(&filled[..n])?;
+                        if io.codec.handle_input(&filled[..n]).is_err() {
+                            // Codec rejected input (e.g. MessageTooLarge).
+                            // Mirror the driver: drop this connection
+                            // silently rather than surfacing a codec-level
+                            // protocol error to the user. Notify eof_signal
+                            // so the driver — parked on it while our claim
+                            // is held — wakes and exits cleanly. Falling
+                            // through to recv()'s in_rx loop lets recv keep
+                            // waiting on other peers.
+                            state.eof_signal.notify(usize::MAX);
+                            return Ok(None);
+                        }
                         state.last_input_nanos.store(
                             state.hb_epoch.elapsed().as_nanos() as u64,
                             Ordering::Relaxed,

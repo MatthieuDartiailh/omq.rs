@@ -101,6 +101,15 @@ async fn pub_conflate_keeps_only_latest_per_subscriber() {
     // intentionally empty — ignored
 }
 
+/// RADIO conflate on compio is subject to the same single-thread limitation
+/// as PUB conflate: the DISH cannot drain concurrently with a tight send loop.
+#[compio::test]
+#[ignore = "single-threaded compio cannot emulate concurrent dish drain; \
+             see tracking issue for compio FanOut conflate"]
+async fn radio_conflate_keeps_only_latest_per_group() {
+    // intentionally empty — ignored
+}
+
 #[test]
 #[should_panic(expected = "Options::conflate(true)")]
 fn conflate_panics_on_req() {
