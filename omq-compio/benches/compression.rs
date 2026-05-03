@@ -87,12 +87,13 @@ mod inner {
 
         let peer_counts = common::peers_override();
         let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
+        let sizes = common::sizes();
 
         let mut seq = 0usize;
         for transport in TRANSPORTS {
             for &peers in peer_counts {
                 common::print_subheader(transport, peers);
-                for &approx_size in &[128usize, 256, 512, 1024, 2048, 4096, 16384] {
+                for &approx_size in &sizes {
                     seq += 1;
                     let payload = json_payload(approx_size);
                     let actual = payload.len();
@@ -184,7 +185,7 @@ mod inner {
                 } else {
                     zstd_dict.clone()
                 };
-                for &approx_size in &[128usize, 256, 512, 1024, 2048] {
+                for &approx_size in &sizes {
                     seq += 1;
                     let payload = json_payload(approx_size);
                     let actual = payload.len();
