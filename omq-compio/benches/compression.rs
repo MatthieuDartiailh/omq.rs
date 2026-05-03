@@ -39,7 +39,8 @@ mod inner {
 
     #[allow(clippy::too_many_lines)]
     async fn async_main() {
-        use omq_proto::proto::transform::{Lz4Transform, ZstdTransform};
+        use omq_proto::proto::transform::lz4::Lz4Encoder;
+        use omq_proto::proto::transform::zstd::ZstdEncoder;
         common::print_header("PUSH/PULL - JSON payloads (virtual throughput)");
         println!("note: loopback has no bandwidth scarcity, so compression's CPU");
         println!("cost dominates over its wire-byte savings. The compression ratio");
@@ -68,8 +69,8 @@ mod inner {
                         .sum::<usize>()
                 })
             };
-            let lz4_n = encoded_len(Lz4Transform::new().encode(&m).unwrap());
-            let zstd_n = encoded_len(ZstdTransform::new().encode(&m).unwrap());
+            let lz4_n = encoded_len(Lz4Encoder::new().encode(&m).unwrap());
+            let zstd_n = encoded_len(ZstdEncoder::new().encode(&m).unwrap());
             let lz4_ratio = plain.len() as f64 / lz4_n as f64;
             let zstd_ratio = plain.len() as f64 / zstd_n as f64;
             println!(
@@ -151,13 +152,13 @@ mod inner {
                 })
             };
             let lz4_n = encoded_len(
-                Lz4Transform::with_send_dict(lz4_dict.clone())
+                Lz4Encoder::with_send_dict(lz4_dict.clone())
                     .unwrap()
                     .encode(&m)
                     .unwrap(),
             );
             let zstd_n = encoded_len(
-                ZstdTransform::with_send_dict(zstd_dict.clone())
+                ZstdEncoder::with_send_dict(zstd_dict.clone())
                     .unwrap()
                     .encode(&m)
                     .unwrap(),
@@ -216,7 +217,8 @@ mod inner {
     /// payload (excluding ZMTP frame headers, which are small and
     /// constant).
     fn wire_size(transport: &str, plain: &Bytes, dict: Option<&Bytes>) -> usize {
-        use omq_proto::proto::transform::{Lz4Transform, ZstdTransform};
+        use omq_proto::proto::transform::lz4::Lz4Encoder;
+        use omq_proto::proto::transform::zstd::ZstdEncoder;
         let m = omq_compio::Message::single(plain.clone());
         let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
             out.last().map_or(plain.len(), |m| {
@@ -229,15 +231,15 @@ mod inner {
         match transport {
             "lz4+tcp" => {
                 let mut t = match dict {
-                    Some(d) => Lz4Transform::with_send_dict(d.clone()).unwrap(),
-                    None => Lz4Transform::new(),
+                    Some(d) => Lz4Encoder::with_send_dict(d.clone()).unwrap(),
+                    None => Lz4Encoder::new(),
                 };
                 encoded_len(t.encode(&m).unwrap())
             }
             "zstd+tcp" => {
                 let mut t = match dict {
-                    Some(d) => ZstdTransform::with_send_dict(d.clone()).unwrap(),
-                    None => ZstdTransform::new(),
+                    Some(d) => ZstdEncoder::with_send_dict(d.clone()).unwrap(),
+                    None => ZstdEncoder::new(),
                 };
                 encoded_len(t.encode(&m).unwrap())
             }

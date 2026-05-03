@@ -123,21 +123,29 @@ pub(super) fn install_accepted_wire_peer(
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
     let peer_groups = radio_side_peer_groups(inner.socket_type);
-    let transform =
-        omq_proto::proto::transform::MessageTransform::for_endpoint(&endpoint, &inner.options);
-    let has_transform = transform.is_some();
-    let transform_passthrough = transform
-        .as_ref()
-        .and_then(omq_proto::proto::transform::MessageTransform::passthrough_info);
+    let (encoder, decoder, has_transform, transform_passthrough) =
+        match omq_proto::proto::transform::MessageEncoder::for_endpoint(&endpoint, &inner.options) {
+            Some((enc, dec)) => {
+                let pt = enc.passthrough_info();
+                (Some(enc), Some(dec), true, pt)
+            }
+            None => (None, None, false, None),
+        };
     let peer_io = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
         &inner.options,
         reader,
-        transform,
+        decoder,
     );
-    let state =
-        DirectIoState::new(peer_io, writer, Arc::new(poll_fd), has_transform, transform_passthrough);
+    let state = DirectIoState::new(
+        peer_io,
+        writer,
+        Arc::new(poll_fd),
+        has_transform,
+        transform_passthrough,
+        encoder,
+    );
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);
     let slot_idx = {

@@ -89,6 +89,29 @@ impl Payload {
         self.chunks.iter().all(Bytes::is_empty)
     }
 
+    /// Single-chunk fast path: `Some(&Bytes)` iff the payload holds exactly
+    /// one chunk. Returns `None` for empty or multi-chunk payloads.
+    pub fn as_bytes(&self) -> Option<&Bytes> {
+        (self.chunks.len() == 1).then(|| &self.chunks[0])
+    }
+
+    /// Borrow as a contiguous byte slice when possible. Returns `Some(&[u8])`
+    /// for empty (yields `&[]`) and single-chunk payloads; `None` for
+    /// multi-chunk. Use `coalesce()` if you need flat bytes regardless.
+    pub fn as_slice(&self) -> Option<&[u8]> {
+        match self.chunks.len() {
+            0 => Some(&[]),
+            1 => Some(&self.chunks[0]),
+            _ => None,
+        }
+    }
+
+    /// `true` iff the payload is single-chunk or empty; equivalent to
+    /// `as_slice().is_some()`.
+    pub fn is_contiguous(&self) -> bool {
+        self.chunks.len() <= 1
+    }
+
     /// Returns the payload as a single contiguous `Bytes`.
     ///
     /// O(1) refcount increment when the payload is already single-chunk or
@@ -135,6 +158,14 @@ impl From<Vec<u8>> for Payload {
 impl From<String> for Payload {
     fn from(s: String) -> Self {
         Self::from_bytes(Bytes::from(s))
+    }
+}
+
+impl From<Payload> for Bytes {
+    /// Equivalent to `payload.coalesce()`. Free for single-chunk payloads
+    /// (Arc-bump only); allocates and copies for multi-chunk.
+    fn from(p: Payload) -> Bytes {
+        p.coalesce()
     }
 }
 
@@ -353,6 +384,61 @@ mod tests {
         let p: Payload = "hello".into();
         assert_eq!(p.len(), 5);
         assert_eq!(p.coalesce(), &b"hello"[..]);
+    }
+
+    #[test]
+    fn payload_as_bytes_single_chunk_returns_some() {
+        let b = Bytes::from_static(b"hello");
+        let p = Payload::from_bytes(b.clone());
+        let got = p.as_bytes().expect("single chunk");
+        assert!(std::ptr::addr_eq(got.as_ptr(), b.as_ptr()));
+    }
+
+    #[test]
+    fn payload_as_bytes_empty_returns_none() {
+        let p = Payload::new();
+        assert!(p.as_bytes().is_none());
+    }
+
+    #[test]
+    fn payload_as_bytes_multi_chunk_returns_none() {
+        let p = Payload::from_chunks([Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
+        assert!(p.as_bytes().is_none());
+    }
+
+    #[test]
+    fn payload_as_slice_empty_returns_empty_slice() {
+        let p = Payload::new();
+        assert_eq!(p.as_slice(), Some(&[][..]));
+    }
+
+    #[test]
+    fn payload_as_slice_single_chunk_borrows() {
+        let b = Bytes::from_static(b"world");
+        let p = Payload::from_bytes(b.clone());
+        assert_eq!(p.as_slice(), Some(&b"world"[..]));
+    }
+
+    #[test]
+    fn payload_as_slice_multi_chunk_returns_none() {
+        let p = Payload::from_chunks([Bytes::from_static(b"x"), Bytes::from_static(b"y")]);
+        assert!(p.as_slice().is_none());
+    }
+
+    #[test]
+    fn payload_into_bytes_via_from() {
+        let b = Bytes::from_static(b"roundtrip");
+        let p = Payload::from_bytes(b.clone());
+        let got: Bytes = p.into();
+        assert_eq!(got, b);
+    }
+
+    #[test]
+    fn payload_is_contiguous() {
+        assert!(Payload::new().is_contiguous());
+        assert!(Payload::from_bytes(Bytes::from_static(b"x")).is_contiguous());
+        let multi = Payload::from_chunks([Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
+        assert!(!multi.is_contiguous());
     }
 
     #[test]

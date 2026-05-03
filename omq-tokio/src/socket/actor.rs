@@ -31,7 +31,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::{Options, ReconnectPolicy};
 use omq_proto::proto::connection::{ConnectionConfig, Role};
-use omq_proto::proto::transform::MessageTransform;
+use omq_proto::proto::transform::MessageEncoder;
 use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
 
 use crate::engine::{ConnectionDriver, DriverConfig, DriverHandle};
@@ -924,8 +924,8 @@ impl SocketDriver {
             child_cancel.clone(),
             driver_cfg,
         );
-        let driver = match MessageTransform::for_endpoint(&endpoint, &self.options) {
-            Some(t) => driver.with_transform(t),
+        let driver = match MessageEncoder::for_endpoint(&endpoint, &self.options) {
+            Some((enc, dec)) => driver.with_encoder(enc).with_decoder(dec),
             None => driver,
         };
         #[cfg(not(feature = "priority"))]

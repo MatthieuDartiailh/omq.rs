@@ -11,6 +11,12 @@
 //! Transforms are sans-I/O. They take a `Message` and return one or more
 //! transformed `Message`s; or take a wire-level `Message` and return
 //! `None` (consumed at transport, e.g. dict shipment) or `Some(plaintext)`.
+//!
+//! The encode and decode state are disjoint: `MessageEncoder` owns the
+//! outbound compressor, `MessageDecoder` owns the inbound decompressor.
+//! This split lets the compio backend hold the encoder under its own
+//! async mutex (separate from the read-loop lock) so dict-compressed
+//! sends no longer contend with the reader.
 
 #[cfg(any(feature = "lz4", feature = "zstd"))]
 mod common;
@@ -20,9 +26,9 @@ pub mod lz4;
 pub mod zstd;
 
 #[cfg(feature = "lz4")]
-pub use lz4::Lz4Transform;
+pub use lz4::{Lz4Decoder, Lz4Encoder};
 #[cfg(feature = "zstd")]
-pub use zstd::ZstdTransform;
+pub use zstd::{ZstdDecoder, ZstdEncoder};
 
 use smallvec::SmallVec;
 
@@ -36,45 +42,32 @@ use crate::options::Options;
 /// payload).
 pub type TransformedOut = SmallVec<[Message; 2]>;
 
-/// Sum-typed message transform installed per-connection. New transports
-/// (future schemes) extend this enum; per-connection state lives in
-/// the variants. Variants are cfg-gated to their features - when both
-/// `lz4` and `zstd` are off the enum is uninhabited and constructing a
-/// `MessageTransform` is impossible (which is exactly what we want:
-/// no transform endpoints can be parsed without those features).
+/// Send-side message transform. New transports extend this enum; per-connection
+/// state lives in the variants. Variants are cfg-gated to their features.
 #[derive(Debug)]
-pub enum MessageTransform {
+pub enum MessageEncoder {
     #[cfg(feature = "lz4")]
-    Lz4(Lz4Transform),
+    Lz4(Lz4Encoder),
     #[cfg(feature = "zstd")]
-    Zstd(ZstdTransform),
+    Zstd(ZstdEncoder),
 }
 
-impl MessageTransform {
-    /// Returns `(sentinel, threshold)` when this transform will always
-    /// emit a plaintext-passthrough sentinel for message parts smaller
-    /// than `threshold` bytes — no actual compression, just a prefix.
-    /// `None` means a dictionary or auto-train is active and the
-    /// threshold may change mid-connection.
+/// Receive-side message transform. Symmetric to [`MessageEncoder`].
+#[derive(Debug)]
+pub enum MessageDecoder {
+    #[cfg(feature = "lz4")]
+    Lz4(Lz4Decoder),
+    #[cfg(feature = "zstd")]
+    Zstd(ZstdDecoder),
+}
+
+impl MessageEncoder {
+    /// Returns `(sentinel, threshold)` when this encoder will always emit a
+    /// plaintext-passthrough sentinel for parts smaller than `threshold` bytes.
+    /// `None` when a dictionary or auto-train is active (threshold can change).
     ///
-    /// Callers can use this to encode passthrough messages directly
-    /// (bypassing the codec mutex) for a significant throughput gain on
-    /// small messages.
-    ///
-    /// # Invariant for implementors
-    ///
-    /// Return `None` for any configuration where the effective threshold
-    /// can decrease mid-connection (e.g. zstd auto-train installs a dict
-    /// after the first N messages, dropping the threshold from ~512 B to
-    /// ~32 B). If `Some(threshold)` is returned once, `DirectIoState`
-    /// stores it immutably for the lifetime of the connection and uses it
-    /// to bypass the codec mutex on the hot send path. A stale (too high)
-    /// threshold would silently produce uncompressed frames where the
-    /// receiver expects compressed ones.
-    // TODO: make this invariant structural — e.g. have the transform
-    // clear/invalidate `DirectIoState::transform_passthrough` when a dict
-    // is installed mid-connection, rather than relying on every
-    // `passthrough_threshold()` implementation being conservative.
+    /// Callers cache this at handshake time and bypass the encoder mutex for
+    /// sub-threshold messages.
     pub fn passthrough_info(&self) -> Option<(bytes::Bytes, usize)> {
         #[allow(unused)]
         const SENTINEL: &[u8] = &[0u8, 0, 0, 0];
@@ -84,41 +77,46 @@ impl MessageTransform {
             #[cfg(feature = "zstd")]
             Self::Zstd(t) => Some((bytes::Bytes::from_static(SENTINEL), t.passthrough_threshold()?)),
             #[cfg(not(any(feature = "lz4", feature = "zstd")))]
-            _ => unreachable!("MessageTransform is uninhabited without lz4/zstd features"),
+            _ => unreachable!("MessageEncoder is uninhabited without lz4/zstd features"),
         }
     }
 
-    /// Build the per-connection transform implied by an endpoint
-    /// scheme. Returns `None` for plain `tcp://` / `ipc://` /
-    /// `inproc://` / `udp://`, or for compression schemes whose
-    /// feature isn't compiled in. Picks up `Options::compression_dict`
-    /// and (zstd only) `Options::compression_auto_train` /
-    /// `Options::max_message_size`.
+    /// Build the per-connection encoder+decoder pair implied by an endpoint
+    /// scheme. Returns `None` for plain `tcp://` / `ipc://` / `inproc://` /
+    /// `udp://`. Picks up `Options::compression_dict` and (zstd only)
+    /// `Options::compression_auto_train` / `Options::max_message_size`.
     #[allow(unused_variables)]
-    pub fn for_endpoint(endpoint: &Endpoint, options: &Options) -> Option<Self> {
+    pub fn for_endpoint(
+        endpoint: &Endpoint,
+        options: &Options,
+    ) -> Option<(Self, MessageDecoder)> {
         match endpoint {
             #[cfg(feature = "lz4")]
             Endpoint::Lz4Tcp { .. } => {
-                let lz4 = match options.compression_dict.clone() {
-                    Some(d) => Lz4Transform::with_send_dict(d)
+                use lz4::{Lz4Decoder, Lz4Encoder};
+                let enc = match options.compression_dict.clone() {
+                    Some(d) => Lz4Encoder::with_send_dict(d)
                         .expect("compression_dict validated at Options::compression_dict"),
-                    None => Lz4Transform::new(),
+                    None => Lz4Encoder::new(),
                 }
                 .with_max_message_size(options.max_message_size);
-                Some(MessageTransform::Lz4(lz4))
+                let dec = Lz4Decoder::new().with_max_message_size(options.max_message_size);
+                Some((MessageEncoder::Lz4(enc), MessageDecoder::Lz4(dec)))
             }
             #[cfg(feature = "zstd")]
             Endpoint::ZstdTcp { .. } => {
-                let mut zstd = match options.compression_dict.clone() {
-                    Some(d) => ZstdTransform::with_send_dict(d)
+                use zstd::{ZstdDecoder, ZstdEncoder};
+                let mut enc = match options.compression_dict.clone() {
+                    Some(d) => ZstdEncoder::with_send_dict(d)
                         .expect("compression_dict validated at Options::compression_dict"),
-                    None => ZstdTransform::new(),
+                    None => ZstdEncoder::new(),
                 }
                 .with_max_message_size(options.max_message_size);
                 if options.compression_auto_train && options.compression_dict.is_none() {
-                    zstd = zstd.with_auto_train();
+                    enc = enc.with_auto_train();
                 }
-                Some(MessageTransform::Zstd(zstd))
+                let dec = ZstdDecoder::new().with_max_message_size(options.max_message_size);
+                Some((MessageEncoder::Zstd(enc), MessageDecoder::Zstd(dec)))
             }
             _ => None,
         }
@@ -134,11 +132,13 @@ impl MessageTransform {
             #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => {
                 let _ = msg;
-                unreachable!("MessageTransform is uninhabited without lz4/zstd features")
+                unreachable!("MessageEncoder is uninhabited without lz4/zstd features")
             }
         }
     }
+}
 
+impl MessageDecoder {
     /// Transform an inbound wire message. `None` means the message was
     /// consumed by the transport (dict shipment) and must not surface.
     #[cfg_attr(
@@ -154,7 +154,7 @@ impl MessageTransform {
             #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => {
                 let _ = msg;
-                unreachable!("MessageTransform is uninhabited without lz4/zstd features")
+                unreachable!("MessageDecoder is uninhabited without lz4/zstd features")
             }
         }
     }

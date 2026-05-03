@@ -103,22 +103,34 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         return Ok(true);
     }
 
-    // Transform active with large or dict-aware messages: must go through
-    // the codec (compression runs inside `codec.send_message`).
-    let Some(mut io) = state.peer_io.try_lock() else {
+    // Transform active with large or dict-aware messages: encode via the
+    // encoder mutex (separate from peer_io) then push into encoded_queue.
+    // This avoids contending with the read loop on peer_io.
+    let Some(mut enc_guard) = state.encoder.try_lock() else {
         return Ok(false);
     };
-    if !io.handshake_done {
+    if !state.handshake_done.load(Ordering::Relaxed) {
         return Ok(false);
     }
-    if io.codec.pending_transmit_size() >= DIRECT_CAP {
+    let enc = enc_guard.as_mut().expect("has_transform set but no encoder");
+    let wires = enc.encode(msg)?;
+    drop(enc_guard);
+
+    let Ok(mut eq) = state.encoded_queue.try_lock() else {
+        return Ok(false);
+    };
+    if eq.total_bytes() >= DIRECT_CAP {
         return Ok(false);
     }
-    let t = io.transform.as_mut().expect("has_transform set but PeerIo has no transform");
-    for wire in t.encode(msg)? {
-        io.codec.send_message(&wire)?;
+    for wire in &wires {
+        let total: usize = wire.parts().iter().map(omq_proto::Payload::len).sum();
+        if total < FLAT_THRESHOLD {
+            eq.encode_and_push_flat(wire);
+        } else {
+            eq.encode_and_push(wire);
+        }
     }
-    drop(io);
+    drop(eq);
     if state.driver_in_select.load(Ordering::Relaxed) {
         state.transmit_ready.notify(1);
     }

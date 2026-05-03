@@ -288,10 +288,10 @@ fn fuzz_z85_decode() {
 #[test]
 fn fuzz_lz4_decode() {
     use omq_compio::message::Message;
-    use omq_compio::proto::transform::lz4::Lz4Transform;
+    use omq_compio::proto::transform::lz4::Lz4Decoder;
     let mut rng = rng();
     for i in 0..iters() / 4 {
-        let mut tx = Lz4Transform::new();
+        let mut tx = Lz4Decoder::new();
         // Build a random message with 1..=4 random parts.
         let n_parts = rng.gen_range(1..=4);
         let mut msg = Message::new();
@@ -310,10 +310,10 @@ fn fuzz_lz4_decode() {
 #[test]
 fn fuzz_zstd_decode() {
     use omq_compio::message::Message;
-    use omq_compio::proto::transform::zstd::ZstdTransform;
+    use omq_compio::proto::transform::zstd::ZstdDecoder;
     let mut rng = rng();
     for i in 0..iters() / 4 {
-        let mut tx = ZstdTransform::new();
+        let mut tx = ZstdDecoder::new();
         let n_parts = rng.gen_range(1..=4);
         let mut msg = Message::new();
         for _ in 0..n_parts {

@@ -969,8 +969,8 @@ impl Socket {
         while let Some(ev) = io.codec.poll_event() {
             match ev {
                 Event::Message(m) => {
-                    let m = if let Some(t) = io.transform.as_mut() {
-                        match t.decode(m)? {
+                    let m = if let Some(dec) = io.decoder.as_mut() {
+                        match dec.decode(m)? {
                             Some(plain) => plain,
                             None => continue,
                         }

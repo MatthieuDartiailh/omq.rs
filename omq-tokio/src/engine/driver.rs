@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
-use omq_proto::proto::transform::MessageTransform;
+use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
 const READ_BUF_SIZE: usize = 64 * 1024;
@@ -92,11 +92,10 @@ where
     peer_id: u64,
     cancel: CancellationToken,
     config: DriverConfig,
-    /// Optional per-connection message transform. Applied to outbound user
-    /// messages before [`Connection::send_message`] and to inbound
-    /// [`Event::Message`]s before forwarding. Used by `lz4+tcp://` and
-    /// `zstd+tcp://`. `None` for plain transports.
-    transform: Option<MessageTransform>,
+    /// Send-side message encoder (`lz4+tcp://`, `zstd+tcp://`).
+    encoder: Option<MessageEncoder>,
+    /// Receive-side message decoder. Symmetric to `encoder`.
+    decoder: Option<MessageDecoder>,
     /// Shared round-robin send queue. When set, the driver reads outbound
     /// messages directly from this flume channel (bypassing the pump task
     /// hop through `inbox`). `None` for non-round-robin socket types and
@@ -144,16 +143,23 @@ where
             peer_id,
             cancel,
             config,
-            transform: None,
+            encoder: None,
+            decoder: None,
             shared_msg_rx: None,
         }
     }
 
-    /// Install a per-connection message transform. Used by compression
-    /// transports.
+    /// Install the send-side encoder. Used by compression transports.
     #[must_use]
-    pub fn with_transform(mut self, transform: MessageTransform) -> Self {
-        self.transform = Some(transform);
+    pub fn with_encoder(mut self, encoder: MessageEncoder) -> Self {
+        self.encoder = Some(encoder);
+        self
+    }
+
+    /// Install the receive-side decoder. Used by compression transports.
+    #[must_use]
+    pub fn with_decoder(mut self, decoder: MessageDecoder) -> Self {
+        self.decoder = Some(decoder);
         self
     }
 
@@ -192,7 +198,8 @@ where
             peer_id,
             cancel,
             config,
-            mut transform,
+            mut encoder,
+            mut decoder,
             shared_msg_rx,
         } = self;
         let (mut reader, mut writer) = split(stream);
@@ -223,8 +230,8 @@ where
             // 1. Drain parsed events. Backpressure via the shared
             //    peer-out channel.
             while let Some(ev) = codec.poll_event() {
-                let ev = match (transform.as_mut(), ev) {
-                    (Some(t), Event::Message(m)) => match t.decode(m)? {
+                let ev = match (decoder.as_mut(), ev) {
+                    (Some(dec), Event::Message(m)) => match dec.decode(m)? {
                         Some(plain) => Event::Message(plain),
                         None => continue, // dict shipment consumed at transport
                     },
@@ -266,10 +273,10 @@ where
                         // inbox with try_recv after the first message so
                         // the priority path also benefits from flat-buf and
                         // issues one write per batch instead of one per msg.
-                        let use_flat = transform.is_none() && !codec.has_frame_transform();
+                        let use_flat = encoder.is_none() && !codec.has_frame_transform();
                         encode_flat_or_codec(
                             &first,
-                            &mut transform,
+                            &mut encoder,
                             &mut codec,
                             use_flat,
                             &mut flat_buf,
@@ -285,7 +292,7 @@ where
                                     bytes += next.byte_len();
                                     encode_flat_or_codec(
                                         &next,
-                                        &mut transform,
+                                        &mut encoder,
                                         &mut codec,
                                         use_flat,
                                         &mut flat_buf,
@@ -345,10 +352,10 @@ where
                             // encode directly into flat_buf (contiguous bytes)
                             // rather than codec.out_chunks (Vec<IoSlice> per flush).
                             let use_flat =
-                                transform.is_none() && !codec.has_frame_transform();
+                                encoder.is_none() && !codec.has_frame_transform();
                             encode_flat_or_codec(
                                 &first,
-                                &mut transform,
+                                &mut encoder,
                                 &mut codec,
                                 use_flat,
                                 &mut flat_buf,
@@ -366,7 +373,7 @@ where
                                             bytes += next.byte_len();
                                             encode_flat_or_codec(
                                                 &next,
-                                                &mut transform,
+                                                &mut encoder,
                                                 &mut codec,
                                                 use_flat,
                                                 &mut flat_buf,
@@ -424,11 +431,11 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 /// the codec's outbound queue.
 fn encode_one(
     msg: &Message,
-    transform: &mut Option<MessageTransform>,
+    encoder: &mut Option<MessageEncoder>,
     codec: &mut Connection,
 ) -> Result<()> {
-    if let Some(t) = transform.as_mut() {
-        for wire in t.encode(msg)? {
+    if let Some(enc) = encoder.as_mut() {
+        for wire in enc.encode(msg)? {
             codec.send_message(&wire)?;
         }
     } else {
@@ -449,7 +456,7 @@ fn encode_one(
 ///   `encode_one` which puts chunks into `codec.out_chunks`.
 async fn encode_flat_or_codec<W>(
     msg: &Message,
-    transform: &mut Option<MessageTransform>,
+    encoder: &mut Option<MessageEncoder>,
     codec: &mut Connection,
     use_flat: bool,
     flat_buf: &mut BytesMut,
@@ -464,7 +471,7 @@ where
         if !flat_buf.is_empty() {
             writer.write_all(&flat_buf.split()).await?;
         }
-        encode_one(msg, transform, codec)?;
+        encode_one(msg, encoder, codec)?;
     }
     Ok(())
 }

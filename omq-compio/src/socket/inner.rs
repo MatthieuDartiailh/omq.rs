@@ -24,6 +24,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
+use omq_proto::proto::transform::MessageEncoder;
 use omq_proto::subscription::SubscriptionSet;
 use omq_proto::type_state::TypeState;
 
@@ -492,19 +493,24 @@ pub(crate) struct DirectIoState {
     /// codec lock) once `HandshakeSucceeded` fires. Read by the fast-path
     /// sender to skip the codec-mutex acquisition pre-handshake.
     pub(crate) handshake_done: AtomicBool,
-    /// True when an active `MessageTransform` (lz4, zstd) is installed.
-    /// The direct-encode fast path falls back to the codec when this is
-    /// set — unless `transform_passthrough` is also set (see below).
+    /// True when a `MessageEncoder` (lz4, zstd) is installed.
+    /// The direct-encode fast path uses the encoder mutex path when set —
+    /// unless `transform_passthrough` is also set (passthrough bypasses both).
     #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) has_transform: bool,
-    /// When `has_transform` and the transform will always use
-    /// `SENTINEL_PLAIN` for parts smaller than `threshold` bytes,
-    /// this holds `(sentinel_bytes, threshold)`. The sender can then
-    /// encode sub-threshold messages directly into `encoded_queue` via
-    /// `encode_and_push_prefixed`, bypassing the codec async-mutex.
+    /// When `has_transform` and the encoder will always use `SENTINEL_PLAIN`
+    /// for parts smaller than `threshold` bytes, this holds
+    /// `(sentinel_bytes, threshold)`. The sender can encode sub-threshold
+    /// messages directly into `encoded_queue` via `encode_and_push_prefixed`,
+    /// bypassing the encoder mutex entirely.
     /// `None` when a dict is installed or auto-train is active.
     #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
+    /// Send-side message encoder (lz4 / zstd). Behind its own async mutex so
+    /// the sender can lock it independently of `peer_io` (the read-loop lock),
+    /// eliminating dict-compressed send contention with the reader.
+    /// `None` when `has_transform == false`.
+    pub(crate) encoder: async_lock::Mutex<Option<MessageEncoder>>,
     /// Direct-encode queue. Sender encodes ZMTP frames here; driver
     /// drains them in step 3b. Used when `!has_transform` OR when the
     /// message qualifies for `transform_passthrough`.
@@ -531,6 +537,7 @@ impl DirectIoState {
         poll_fd: Arc<PollFd<socket2::Socket>>,
         has_transform: bool,
         transform_passthrough: Option<(Bytes, usize)>,
+        encoder: Option<MessageEncoder>,
     ) -> Arc<Self> {
         Arc::new(Self {
             peer_io,
@@ -545,6 +552,7 @@ impl DirectIoState {
             handshake_done: AtomicBool::new(false),
             has_transform,
             transform_passthrough,
+            encoder: async_lock::Mutex::new(encoder),
             encoded_queue: Mutex::new(EncodedQueue::new()),
             driver_in_select: AtomicBool::new(false),
         })

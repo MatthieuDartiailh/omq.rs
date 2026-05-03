@@ -15,7 +15,7 @@ use omq_proto::subscription::SubscriptionSet;
 // Helpers shared with omq-tokio live in `omq-proto`:
 //   omq_proto::endpoint::reject_encrypted_inproc
 //   Endpoint::underlying_tcp / .rewrap_tcp / .scheme / .is_tcp_family
-//   omq_proto::proto::transform::MessageTransform::for_endpoint
+//   omq_proto::proto::transform::MessageEncoder::for_endpoint
 pub(crate) use omq_proto::endpoint::reject_encrypted_inproc;
 
 mod dial;
@@ -26,7 +26,7 @@ mod send;
 
 pub use handle::Socket;
 
-pub(crate) use inner::DirectIoState;
+pub(crate) use inner::{DirectIoState, FLAT_THRESHOLD};
 
 /// Per-peer cmd channel capacity, sized off `Options::send_hwm`.
 /// When conflate is enabled the shared send queue is cap-1 (drain-before-send),

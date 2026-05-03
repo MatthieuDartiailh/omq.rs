@@ -26,7 +26,7 @@ use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream, UnixStream};
 
 use omq_proto::proto::connection::Connection;
-use omq_proto::proto::transform::MessageTransform;
+use omq_proto::proto::transform::MessageDecoder;
 
 /// Wire reader half. One variant per concrete transport. Static
 /// dispatch via `match` inside `read` - no `Box<dyn ...>`, no
@@ -121,16 +121,20 @@ impl From<OwnedWriteHalf<UnixStream>> for WireWriter {
     }
 }
 
-/// Per-peer codec + reader + transform, intended to live behind a
+/// Per-peer codec + reader + decoder, intended to live behind a
 /// shared async mutex.
 ///
 /// The writer half lives separately in [`DirectIoState::writer`] so
 /// the driver can release the codec lock before calling
 /// `write_vectored` — that lets the fast-path sender encode the next
 /// message while the I/O is in flight.
+///
+/// The encoder lives in [`DirectIoState::encoder`] under its own
+/// async mutex so it can be locked independently of this (reader-side)
+/// lock, eliminating contention between the sender and the read loop.
 pub(crate) struct PeerIo {
     pub(crate) codec: Connection,
-    pub(crate) transform: Option<MessageTransform>,
+    pub(crate) decoder: Option<MessageDecoder>,
     pub(crate) reader: WireReader,
     /// Flipped to `true` once `Event::HandshakeSucceeded` has been
     /// observed. The direct send fast path bails out (falling back to

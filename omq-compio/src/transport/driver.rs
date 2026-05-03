@@ -32,7 +32,7 @@ use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::command::PeerProperties;
 use omq_proto::proto::connection::{Connection, ConnectionConfig, Role};
-use omq_proto::proto::transform::MessageTransform;
+use omq_proto::proto::transform::MessageDecoder;
 use omq_proto::proto::{Command, Event, SocketType};
 use omq_proto::subscription::SubscriptionSet;
 
@@ -166,17 +166,20 @@ async fn handle_sub_cmd(
 /// [`DirectIoState::writer`] so the codec lock can be released before
 /// `write_vectored`, letting the fast-path sender encode while I/O is
 /// in flight.
+///
+/// The encoder is stored separately in [`DirectIoState::encoder`]; only
+/// the decoder lives here alongside the codec + reader.
 pub(crate) fn build_peer_io(
     role: Role,
     socket_type: SocketType,
     options: &Options,
     reader: WireReader,
-    transform: Option<MessageTransform>,
+    decoder: Option<MessageDecoder>,
 ) -> SharedPeerIo {
     let codec = make_codec(role, socket_type, options);
     Arc::new(async_lock::Mutex::new(PeerIo {
         codec,
-        transform,
+        decoder,
         reader,
         handshake_done: false,
     }))
@@ -312,14 +315,35 @@ pub(crate) async fn run_connection(
                                 }
                                 peer_identity =
                                     peer_properties.identity.clone().unwrap_or_default();
-                                // Drain pre-handshake commands into the
-                                // codec now that we're allowed to send.
+                                // Drain pre-handshake commands now that we're
+                                // allowed to send. Non-transform cmds go into
+                                // the codec; transform msgs use the encoder
+                                // mutex (separate from peer_io). In compio's
+                                // cooperative runtime, try_lock on the encoder
+                                // always succeeds here (no other task runs
+                                // while we hold peer_io).
                                 while let Some(cmd) = pending_cmds.pop_front() {
                                     match cmd {
                                         DriverCommand::SendMessage(m) => {
-                                            if let Some(t) = io.transform.as_mut() {
-                                                for wire in t.encode(&m)? {
-                                                    io.codec.send_message(&wire)?;
+                                            if state.has_transform {
+                                                let mut enc = state.encoder
+                                                    .try_lock()
+                                                    .expect("encoder uncontended during handshake drain");
+                                                let wires = enc.as_mut()
+                                                    .expect("has_transform but no encoder")
+                                                    .encode(&m)?;
+                                                drop(enc);
+                                                let mut eq = state.encoded_queue
+                                                    .lock()
+                                                    .expect("encoded_queue");
+                                                for wire in &wires {
+                                                    let total: usize = wire.parts().iter()
+                                                        .map(omq_proto::Payload::len).sum();
+                                                    if total < crate::socket::FLAT_THRESHOLD {
+                                                        eq.encode_and_push_flat(wire);
+                                                    } else {
+                                                        eq.encode_and_push(wire);
+                                                    }
                                                 }
                                             } else {
                                                 io.codec.send_message(&m)?;
@@ -331,7 +355,7 @@ pub(crate) async fn run_connection(
                                         DriverCommand::Close => closing = true,
                                     }
                                 }
-                                codec_maybe_dirty = true; // pending_cmds flushed into codec
+                                codec_maybe_dirty = true;
                                 out.push(Drained::Handshake {
                                     peer_minor,
                                     peer_properties,
@@ -344,8 +368,8 @@ pub(crate) async fn run_connection(
                             // `None` means the wire message was a dict
                             // shipment consumed at the transport layer -
                             // don't surface it.
-                            let m = if let Some(t) = io.transform.as_mut() {
-                                match t.decode(m)? {
+                            let m = if let Some(dec) = io.decoder.as_mut() {
+                                match dec.decode(m)? {
                                     Some(plain) => plain,
                                     None => continue,
                                 }
@@ -737,29 +761,53 @@ pub(crate) async fn run_connection(
                     Err(_) => return Ok(()),
                 };
                 while let Some(cmd) = next.take() {
-                    let cap_reached = {
-                        let mut io = peer_io.lock().await;
-                        if io.handshake_done {
-                            match cmd {
-                                DriverCommand::SendMessage(m) => {
-                                    if let Some(t) = io.transform.as_mut() {
-                                        for wire in t.encode(&m)? {
-                                            io.codec.send_message(&wire)?;
+                    let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
+                        match cmd {
+                            DriverCommand::SendMessage(m) => {
+                                if state.has_transform {
+                                    // Encoder path: independent of peer_io.
+                                    let mut enc = state.encoder.lock().await;
+                                    let wires = enc.as_mut()
+                                        .expect("has_transform but no encoder")
+                                        .encode(&m)?;
+                                    drop(enc);
+                                    let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                                    let cr = eq.total_bytes() >= cap;
+                                    for wire in &wires {
+                                        let total: usize = wire.parts().iter()
+                                            .map(omq_proto::Payload::len).sum();
+                                        if total < crate::socket::FLAT_THRESHOLD {
+                                            eq.encode_and_push_flat(wire);
+                                        } else {
+                                            eq.encode_and_push(wire);
                                         }
-                                    } else {
-                                        io.codec.send_message(&m)?;
                                     }
+                                    cr
+                                } else {
+                                    let mut io = peer_io.lock().await;
+                                    io.codec.send_message(&m)?;
+                                    let cr = io.codec.pending_transmit_size() >= cap;
+                                    drop(io);
+                                    codec_maybe_dirty = true;
+                                    cr
                                 }
-                                DriverCommand::SendCommand(c) => {
-                                    io.codec.send_command(&c)?;
-                                }
-                                DriverCommand::Close => closing = true,
                             }
-                            codec_maybe_dirty = true;
-                        } else {
-                            pending_cmds.push_back(cmd);
+                            DriverCommand::SendCommand(c) => {
+                                let mut io = peer_io.lock().await;
+                                io.codec.send_command(&c)?;
+                                let cr = io.codec.pending_transmit_size() >= cap;
+                                drop(io);
+                                codec_maybe_dirty = true;
+                                cr
+                            }
+                            DriverCommand::Close => {
+                                closing = true;
+                                false
+                            }
                         }
-                        io.codec.pending_transmit_size() >= cap
+                    } else {
+                        pending_cmds.push_back(cmd);
+                        false
                     };
                     if cap_reached { break; }
                     next = inbox.try_recv().ok();
@@ -768,10 +816,9 @@ pub(crate) async fn run_connection(
             msg = shared_fut.fuse() => {
                 // Pre-handshake msgs queue up in pending_cmds (drained
                 // when handshake completes). Post-handshake we drain
-                // the shared queue greedily until codec hits the batch
-                // cap - fewer wakes, more amortization in writev.
-                // None: queue closed (socket closing) - stop selecting on it
-                // but keep running until pending writes flush + Close lands.
+                // the shared queue greedily until codec/queue hits the
+                // batch cap.
+                // None: queue closed (socket closing) - stop selecting on it.
                 let Some(m) = msg else {
                     shared_closed = true;
                     continue;
@@ -781,20 +828,37 @@ pub(crate) async fn run_connection(
                     .as_ref()
                     .expect("shared_fut only ready when rx is Some");
                 while let Some(m) = next.take() {
-                    let cap_reached = {
-                        let mut io = peer_io.lock().await;
-                        if !io.handshake_done {
-                            pending_cmds.push_back(DriverCommand::SendMessage(m));
-                        } else if let Some(t) = io.transform.as_mut() {
-                            for wire in t.encode(&m)? {
-                                io.codec.send_message(&wire)?;
+                    let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
+                        if state.has_transform {
+                            // Encoder path: independent of peer_io.
+                            let mut enc = state.encoder.lock().await;
+                            let wires = enc.as_mut()
+                                .expect("has_transform but no encoder")
+                                .encode(&m)?;
+                            drop(enc);
+                            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                            let cr = eq.total_bytes() >= cap;
+                            for wire in &wires {
+                                let total: usize = wire.parts().iter()
+                                    .map(omq_proto::Payload::len).sum();
+                                if total < crate::socket::FLAT_THRESHOLD {
+                                    eq.encode_and_push_flat(wire);
+                                } else {
+                                    eq.encode_and_push(wire);
+                                }
                             }
-                            codec_maybe_dirty = true;
+                            cr
                         } else {
+                            let mut io = peer_io.lock().await;
                             io.codec.send_message(&m)?;
+                            let cr = io.codec.pending_transmit_size() >= cap;
+                            drop(io);
                             codec_maybe_dirty = true;
+                            cr
                         }
-                        io.codec.pending_transmit_size() >= cap
+                    } else {
+                        pending_cmds.push_back(DriverCommand::SendMessage(m));
+                        false
                     };
                     if cap_reached { break; }
                     next = shared.try_recv().ok();

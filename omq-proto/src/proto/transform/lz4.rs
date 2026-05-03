@@ -75,33 +75,26 @@ unsafe extern "C" {
     fn LZ4_resetStream(stream: *mut lz4_sys::LZ4StreamEncode);
 }
 
-/// Per-connection LZ4 state.
-pub struct Lz4Transform {
+/// Send-side per-connection LZ4 state.
+pub struct Lz4Encoder {
     /// Outbound dict, validated at construction. Shipped on the first
     /// `encode` call and used to compress every subsequent part.
     send_dict: Option<Bytes>,
     /// Whether the send-side dict has been written to the wire yet.
     send_dict_shipped: bool,
-    /// Inbound dict installed on receipt of the peer's LZ4D shipment.
-    recv_dict: Option<Bytes>,
-    /// Decompression budget, in bytes. `None` = use the absolute ceiling.
-    /// Enforced on the sum of decompressed sizes across one ZMTP
-    /// multipart message (RFC §7).
+    /// Decompression budget copy for passthrough-threshold calculation.
     max_message_size: Option<usize>,
-    /// Reusable compression output buffer. Sticky alloc after the
-    /// first encode keeps the hot path out of the allocator.
+    /// Reusable compression output buffer.
     out_buf: Vec<u8>,
-    /// Cached LZ4 compress stream for dict-aware compression. Lazily
-    /// created on first dict encode; freed on drop.
+    /// Cached LZ4 compress stream for dict-aware compression.
     stream: *mut lz4_sys::LZ4StreamEncode,
 }
 
-// LZ4 streams are pure data; no thread-locals or globals are touched
-// by `LZ4_compress_fast_continue` / `LZ4_loadDict`.
-unsafe impl Send for Lz4Transform {}
-unsafe impl Sync for Lz4Transform {}
+// LZ4 streams are pure data; no thread-locals or globals are touched.
+unsafe impl Send for Lz4Encoder {}
+unsafe impl Sync for Lz4Encoder {}
 
-impl Drop for Lz4Transform {
+impl Drop for Lz4Encoder {
     fn drop(&mut self) {
         if !self.stream.is_null() {
             unsafe { lz4_sys::LZ4_freeStream(self.stream) };
@@ -109,12 +102,11 @@ impl Drop for Lz4Transform {
     }
 }
 
-impl Default for Lz4Transform {
+impl Default for Lz4Encoder {
     fn default() -> Self {
         Self {
             send_dict: None,
             send_dict_shipped: false,
-            recv_dict: None,
             max_message_size: None,
             out_buf: Vec::new(),
             stream: std::ptr::null_mut(),
@@ -122,18 +114,17 @@ impl Default for Lz4Transform {
     }
 }
 
-impl std::fmt::Debug for Lz4Transform {
+impl std::fmt::Debug for Lz4Encoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Lz4Transform")
+        f.debug_struct("Lz4Encoder")
             .field("send_dict", &self.send_dict.as_ref().map(Bytes::len))
             .field("send_dict_shipped", &self.send_dict_shipped)
-            .field("recv_dict", &self.recv_dict.as_ref().map(Bytes::len))
             .field("max_message_size", &self.max_message_size)
             .finish_non_exhaustive()
     }
 }
 
-impl Lz4Transform {
+impl Lz4Encoder {
     pub fn new() -> Self {
         Self::default()
     }
@@ -147,16 +138,13 @@ impl Lz4Transform {
         Ok(Self {
             send_dict: Some(dict),
             send_dict_shipped: false,
-            recv_dict: None,
             max_message_size: None,
             out_buf: Vec::new(),
             stream: std::ptr::null_mut(),
         })
     }
 
-    /// Set the decompression-size budget. The transform refuses to
-    /// allocate or decompress past this many bytes per ZMTP message
-    /// (RFC §7). `None` means use the absolute ceiling.
+    /// Set the decompression-size budget (used only for passthrough_threshold).
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;
@@ -190,62 +178,7 @@ impl Lz4Transform {
         Ok(out)
     }
 
-    pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
-        let mut out = Message::new();
-        let parts = msg.into_parts();
-        let multipart = parts.len() > 1;
-        // RFC §7: cap on the *total decompressed size* across all parts of
-        // a single ZMTP message, shrinking as we decode each part. `None`
-        // means unlimited.
-        let mut budget_left = self.max_message_size;
-        for (idx, part) in parts.into_iter().enumerate() {
-            let bytes = part.coalesce();
-            if bytes.len() < 4 {
-                return Err(Error::Protocol(
-                    "lz4 part shorter than 4-byte sentinel".into(),
-                ));
-            }
-            let sentinel: [u8; 4] = bytes[..4].try_into().unwrap();
-            match sentinel {
-                SENTINEL_PLAIN => {
-                    let body_len = bytes.len() - 4;
-                    take_budget(&mut budget_left, body_len)?;
-                    out.push_part(Payload::from_bytes(bytes.slice(4..)));
-                }
-                SENTINEL_LZ4B => {
-                    out.push_part(decode_lz4b(
-                        &bytes[4..],
-                        self.recv_dict.as_ref(),
-                        &mut budget_left,
-                    )?);
-                }
-                SENTINEL_LZ4D => {
-                    if multipart || idx != 0 {
-                        return Err(Error::Protocol(
-                            "LZ4D dict shipment must be a single-part message".into(),
-                        ));
-                    }
-                    if self.recv_dict.is_some() {
-                        return Err(Error::Protocol(
-                            "LZ4D shipped twice on the same connection".into(),
-                        ));
-                    }
-                    let dict = bytes.slice(4..);
-                    validate_dict(&dict, "LZ4", MAX_DICT_BYTES)?;
-                    self.recv_dict = Some(dict);
-                    return Ok(None);
-                }
-                _ => {
-                    return Err(Error::Protocol("unknown lz4 sentinel".into()));
-                }
-            }
-        }
-        Ok(Some(out))
-    }
-
-    // lz4 caps inputs at 2 GiB (LZ4_MAX_INPUT_SIZE < i32::MAX), so the
-    // usize-to-i32 casts feeding the FFI never wrap on 32- or 64-bit
-    // targets. Per-fn allow rather than refactoring every FFI call.
+    // lz4 caps inputs at 2 GiB, so the usize-to-i32 casts never wrap.
     #[allow(clippy::cast_possible_wrap)]
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
         let plain = part.coalesce();
@@ -317,6 +250,78 @@ impl Lz4Transform {
     }
 }
 
+/// Receive-side per-connection LZ4 state.
+#[derive(Default, Debug)]
+pub struct Lz4Decoder {
+    /// Inbound dict installed on receipt of the peer's LZ4D shipment.
+    recv_dict: Option<Bytes>,
+    /// Decompression budget, in bytes. `None` = use the absolute ceiling.
+    max_message_size: Option<usize>,
+}
+
+impl Lz4Decoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the decompression-size budget (RFC §7).
+    #[must_use]
+    pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
+        self.max_message_size = max;
+        self
+    }
+
+    pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
+        let mut out = Message::new();
+        let parts = msg.into_parts();
+        let multipart = parts.len() > 1;
+        let mut budget_left = self.max_message_size;
+        for (idx, part) in parts.into_iter().enumerate() {
+            let bytes = part.coalesce();
+            if bytes.len() < 4 {
+                return Err(Error::Protocol(
+                    "lz4 part shorter than 4-byte sentinel".into(),
+                ));
+            }
+            let sentinel: [u8; 4] = bytes[..4].try_into().unwrap();
+            match sentinel {
+                SENTINEL_PLAIN => {
+                    let body_len = bytes.len() - 4;
+                    take_budget(&mut budget_left, body_len)?;
+                    out.push_part(Payload::from_bytes(bytes.slice(4..)));
+                }
+                SENTINEL_LZ4B => {
+                    out.push_part(decode_lz4b(
+                        &bytes[4..],
+                        self.recv_dict.as_ref(),
+                        &mut budget_left,
+                    )?);
+                }
+                SENTINEL_LZ4D => {
+                    if multipart || idx != 0 {
+                        return Err(Error::Protocol(
+                            "LZ4D dict shipment must be a single-part message".into(),
+                        ));
+                    }
+                    if self.recv_dict.is_some() {
+                        return Err(Error::Protocol(
+                            "LZ4D shipped twice on the same connection".into(),
+                        ));
+                    }
+                    let dict = bytes.slice(4..);
+                    validate_dict(&dict, "LZ4", MAX_DICT_BYTES)?;
+                    self.recv_dict = Some(dict);
+                    return Ok(None);
+                }
+                _ => {
+                    return Err(Error::Protocol("unknown lz4 sentinel".into()));
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+}
+
 #[allow(clippy::cast_possible_wrap)]
 fn decode_lz4b(body: &[u8], dict: Option<&Bytes>, budget: &mut Option<usize>) -> Result<Payload> {
     if body.len() < 8 {
@@ -328,7 +333,6 @@ fn decode_lz4b(body: &[u8], dict: Option<&Bytes>, budget: &mut Option<usize>) ->
     let block = &body[8..];
     let decompressed_size = usize::try_from(declared)
         .map_err(|_| Error::Protocol("LZ4B declared size exceeds usize".into()))?;
-    // Bound the allocation BEFORE we vec![0u8; ...] (RFC §9.4).
     take_budget(budget, decompressed_size)?;
     let block_len = i32::try_from(block.len())
         .map_err(|_| Error::Protocol("LZ4B block length exceeds i32".into()))?;
@@ -372,8 +376,8 @@ mod tests {
 
     #[allow(clippy::needless_pass_by_value)]
     fn rt(msg: Message) -> Message {
-        let mut enc = Lz4Transform::new();
-        let mut dec = Lz4Transform::new();
+        let mut enc = Lz4Encoder::new();
+        let mut dec = Lz4Decoder::new();
         let wire = enc.encode(&msg).unwrap();
         assert_eq!(wire.len(), 1, "no-dict slice always emits 1 wire message");
         let plain = dec.decode(wire.into_iter().next().unwrap()).unwrap();
@@ -396,7 +400,7 @@ mod tests {
 
     #[test]
     fn small_part_uses_plaintext_sentinel() {
-        let mut enc = Lz4Transform::new();
+        let mut enc = Lz4Encoder::new();
         let msg = Message::single("hello");
         let wire = enc.encode(&msg).unwrap();
         let bytes = wire[0].parts()[0].coalesce();
@@ -408,7 +412,7 @@ mod tests {
     fn large_compressible_part_uses_lz4b() {
         let plain = vec![0x41u8; 4096];
         let msg = Message::single(plain.clone());
-        let mut enc = Lz4Transform::new();
+        let mut enc = Lz4Encoder::new();
         let wire = enc.encode(&msg).unwrap();
         let bytes = wire[0].parts()[0].coalesce();
         assert_eq!(&bytes[..4], b"LZ4B");
@@ -416,7 +420,7 @@ mod tests {
         assert_eq!(declared as usize, plain.len());
         assert!(bytes.len() - 12 < plain.len() / 4);
 
-        let mut dec = Lz4Transform::new();
+        let mut dec = Lz4Decoder::new();
         let out = dec
             .decode(wire.into_iter().next().unwrap())
             .unwrap()
@@ -431,10 +435,10 @@ mod tests {
             plain.push(((i as u32).wrapping_mul(2_654_435_761) >> 24) as u8);
         }
         let msg = Message::single(plain.clone());
-        let mut enc = Lz4Transform::new();
+        let mut enc = Lz4Encoder::new();
         let wire = enc.encode(&msg).unwrap();
         let bytes = wire[0].parts()[0].coalesce();
-        let mut dec = Lz4Transform::new();
+        let mut dec = Lz4Decoder::new();
         let out = dec
             .decode(wire.into_iter().next().unwrap())
             .unwrap()
@@ -451,10 +455,10 @@ mod tests {
             Bytes::from(big.clone()),
             Bytes::from_static(b"trailer"),
         ]);
-        let mut enc = Lz4Transform::new();
+        let mut enc = Lz4Encoder::new();
         let wire = enc.encode(&msg).unwrap();
         assert_eq!(wire[0].len(), 3);
-        let mut dec = Lz4Transform::new();
+        let mut dec = Lz4Decoder::new();
         let out = dec
             .decode(wire.into_iter().next().unwrap())
             .unwrap()
@@ -467,7 +471,7 @@ mod tests {
 
     #[test]
     fn rejects_short_part() {
-        let mut dec = Lz4Transform::new();
+        let mut dec = Lz4Decoder::new();
         let m = Message::single(Bytes::from_static(b"abc"));
         let err = dec.decode(m).unwrap_err();
         assert!(matches!(err, Error::Protocol(_)));
@@ -475,7 +479,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_sentinel() {
-        let mut dec = Lz4Transform::new();
+        let mut dec = Lz4Decoder::new();
         let m = Message::single(Bytes::from_static(b"NOPE-payload"));
         let err = dec.decode(m).unwrap_err();
         assert!(matches!(err, Error::Protocol(_)));
@@ -484,7 +488,7 @@ mod tests {
     #[test]
     fn dict_first_send_emits_shipment_then_user_message() {
         let dict = Bytes::from_static(b"abracadabra-this-is-a-shared-prefix");
-        let mut enc = Lz4Transform::with_send_dict(dict.clone()).unwrap();
+        let mut enc = Lz4Encoder::with_send_dict(dict.clone()).unwrap();
         let wire = enc.encode(&Message::single("ping")).unwrap();
         assert_eq!(wire.len(), 2, "first send: dict ship + user message");
         // First wire message is the dict ship: single-part LZ4D | dict.
@@ -499,7 +503,7 @@ mod tests {
     #[test]
     fn dict_subsequent_sends_skip_shipment() {
         let dict = Bytes::from_static(b"some-dict-bytes-here");
-        let mut enc = Lz4Transform::with_send_dict(dict).unwrap();
+        let mut enc = Lz4Encoder::with_send_dict(dict).unwrap();
         let _first = enc.encode(&Message::single("a")).unwrap();
         let second = enc.encode(&Message::single("b")).unwrap();
         assert_eq!(second.len(), 1, "subsequent sends: user message only");
@@ -513,8 +517,8 @@ mod tests {
         let plain = vec![b'q'; 64];
         let msg = Message::single(plain.clone());
 
-        let mut enc = Lz4Transform::with_send_dict(dict.clone()).unwrap();
-        let mut dec = Lz4Transform::with_send_dict(dict).unwrap();
+        let mut enc = Lz4Encoder::with_send_dict(dict.clone()).unwrap();
+        let mut dec = Lz4Decoder::new();
         let wire = enc.encode(&msg).unwrap();
         assert_eq!(wire.len(), 2);
 
@@ -534,7 +538,7 @@ mod tests {
     #[test]
     fn rejects_second_lz4d_shipment() {
         let dict = Bytes::from_static(b"first-dict");
-        let mut dec = Lz4Transform::new();
+        let mut dec = Lz4Decoder::new();
         // First shipment: accepted.
         let m1 = build_dict_shipment(SENTINEL_LZ4D, &dict);
         assert!(dec.decode(m1).unwrap().is_none());
@@ -546,23 +550,22 @@ mod tests {
 
     #[test]
     fn rejects_empty_dict() {
-        let err = Lz4Transform::with_send_dict(Bytes::new()).unwrap_err();
+        let err = Lz4Encoder::with_send_dict(Bytes::new()).unwrap_err();
         assert!(matches!(err, Error::Protocol(_)));
     }
 
     #[test]
     fn rejects_oversized_dict() {
         let big = Bytes::from(vec![0u8; MAX_DICT_BYTES + 1]);
-        let err = Lz4Transform::with_send_dict(big).unwrap_err();
+        let err = Lz4Encoder::with_send_dict(big).unwrap_err();
         assert!(matches!(err, Error::Protocol(_)));
     }
 
     #[test]
     fn budget_unset_means_unlimited() {
-        // Encode a moderately large payload; no budget set; must decode.
         let plain = vec![b'k'; 100_000];
-        let mut enc = Lz4Transform::new();
-        let mut dec = Lz4Transform::new();
+        let mut enc = Lz4Encoder::new();
+        let mut dec = Lz4Decoder::new();
         let wire = enc.encode(&Message::single(plain.clone())).unwrap();
         let out = dec
             .decode(wire.into_iter().next().unwrap())
@@ -574,11 +577,10 @@ mod tests {
     #[test]
     fn budget_lz4b_declared_size_check_runs_before_alloc() {
         let plain = vec![b'k'; 4096];
-        let mut enc = Lz4Transform::new();
+        let mut enc = Lz4Encoder::new();
         let wire = enc.encode(&Message::single(plain.clone())).unwrap();
 
-        // Tight budget: smaller than the declared decompressed size.
-        let mut dec = Lz4Transform::new().with_max_message_size(Some(1024));
+        let mut dec = Lz4Decoder::new().with_max_message_size(Some(1024));
         let err = dec.decode(wire.into_iter().next().unwrap()).unwrap_err();
         assert!(
             matches!(err, Error::MessageTooLarge { .. }),
@@ -588,25 +590,22 @@ mod tests {
 
     #[test]
     fn budget_plaintext_part_check() {
-        // Plaintext sentinel bypasses LZ4B but still counts against budget.
         let plain = vec![b'k'; 100];
-        let mut enc = Lz4Transform::new();
+        let mut enc = Lz4Encoder::new();
         let wire = enc.encode(&Message::single(plain.clone())).unwrap();
 
-        let mut dec = Lz4Transform::new().with_max_message_size(Some(50));
+        let mut dec = Lz4Decoder::new().with_max_message_size(Some(50));
         let err = dec.decode(wire.into_iter().next().unwrap()).unwrap_err();
         assert!(matches!(err, Error::MessageTooLarge { .. }));
     }
 
     #[test]
     fn budget_dict_shipment_does_not_count() {
-        // Per RFC §6.4: dict shipments are transport overhead, not
-        // messages. A tight budget must not reject the LZ4D part.
         let dict = Bytes::from(vec![b'd'; 4096]);
-        let mut enc = Lz4Transform::with_send_dict(dict.clone()).unwrap();
+        let mut enc = Lz4Encoder::with_send_dict(dict.clone()).unwrap();
         let wire = enc.encode(&Message::single("ok")).unwrap();
 
-        let mut dec = Lz4Transform::new().with_max_message_size(Some(8));
+        let mut dec = Lz4Decoder::new().with_max_message_size(Some(8));
         // First wire message is the dict ship - must be accepted silently.
         let consumed = dec.decode(wire[0].clone()).unwrap();
         assert!(consumed.is_none());
