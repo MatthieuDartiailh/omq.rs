@@ -1271,6 +1271,13 @@ impl Socket {
     }
 
     fn matches_subscription(&self, msg: &Message) -> bool {
+        // Fast path: types that accept all messages skip the lock entirely.
+        if !matches!(
+            self.inner.socket_type,
+            SocketType::Sub | SocketType::XSub | SocketType::Dish
+        ) {
+            return true;
+        }
         match self.inner.socket_type {
             SocketType::Sub | SocketType::XSub => {
                 let topic = msg

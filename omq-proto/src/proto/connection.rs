@@ -712,6 +712,61 @@ impl Connection {
         matches!(self.state, State::Ready)
     }
 
+    /// Whether a frame-level crypto transform (CURVE, BLAKE3ZMQ) is active.
+    /// When false, frames are plain ZMTP DATA; callers may encode directly
+    /// into their own flat buffer via [`send_message_flat`] rather than going
+    /// through [`send_message`] + [`transmit_chunks`].
+    pub fn has_frame_transform(&self) -> bool {
+        #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+        {
+            self.transform.is_some()
+        }
+        #[cfg(not(any(feature = "curve", feature = "blake3zmq")))]
+        {
+            false
+        }
+    }
+
+    /// Encode `msg` as ZMTP DATA frames directly into `flat_buf` without
+    /// touching `out_chunks`. Only valid post-handshake and when no
+    /// frame-level transform is active (use [`has_frame_transform`] to check).
+    /// The caller is responsible for writing `flat_buf` contents to the wire.
+    ///
+    /// This path copies header + payload bytes contiguously, amortising many
+    /// small messages into a single write instead of building a
+    /// `Vec<IoSlice>` per message.
+    pub fn send_message_flat(&self, msg: &Message, flat_buf: &mut BytesMut) {
+        debug_assert!(self.is_ready(), "send_message_flat before handshake");
+        debug_assert!(
+            !self.has_frame_transform(),
+            "send_message_flat called with frame transform active"
+        );
+        let parts = msg.parts();
+        let n = parts.len();
+        for (i, part) in parts.iter().enumerate() {
+            let more = i + 1 < n;
+            let payload_len = part.len();
+            if payload_len > frame::MAX_SHORT_FRAME_SIZE {
+                flat_buf.extend_from_slice(&[
+                    frame::FLAG_LONG | u8::from(more),
+                    (payload_len >> 56) as u8,
+                    (payload_len >> 48) as u8,
+                    (payload_len >> 40) as u8,
+                    (payload_len >> 32) as u8,
+                    (payload_len >> 24) as u8,
+                    (payload_len >> 16) as u8,
+                    (payload_len >> 8) as u8,
+                    payload_len as u8,
+                ]);
+            } else {
+                flat_buf.extend_from_slice(&[u8::from(more), payload_len as u8]);
+            }
+            for chunk in part.chunks() {
+                flat_buf.extend_from_slice(chunk);
+            }
+        }
+    }
+
     /// Permanently close the connection; further input is rejected.
     pub fn close(&mut self) {
         self.state = State::Closed;

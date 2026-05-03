@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use omq_compio::{Endpoint, IpcPath};
 
-pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 512, 2_048, 8_192, 32_768, 131_072];
+pub(crate) const DEFAULT_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
 pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 
 pub(crate) const PRIME_ITERS: usize = 2_000;
@@ -29,7 +29,12 @@ pub(crate) const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) fn results_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("benches");
-    p.push("results.jsonl");
+    let suffix = std::env::var("OMQ_BENCH_RESULTS_SUFFIX").unwrap_or_default();
+    if suffix.is_empty() {
+        p.push("results.jsonl");
+    } else {
+        p.push(format!("results_{suffix}.jsonl"));
+    }
     p
 }
 

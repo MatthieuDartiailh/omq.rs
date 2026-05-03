@@ -73,3 +73,7 @@ harness = false
 name = "multithread_push_pull"
 harness = false
 
+[[bench]]
+name = "latency"
+harness = false
+

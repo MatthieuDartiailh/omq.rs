@@ -678,7 +678,12 @@ pub(crate) async fn run_connection(
                     // (recv may have released; we'll grab reads
                     // again).
                     if recv_active {
-                        // Claim state flipped - reloop.
+                        // Claim state flipped - reloop. A sender may have
+                        // encoded directly into the codec (via try_direct_encode)
+                        // between the previous select and now; that transmit_ready
+                        // notification may have been consumed by the now-dropped
+                        // listener. Force step 3a to check the codec.
+                        codec_maybe_dirty = true;
                     } else {
                         return Ok(());
                     }
@@ -699,6 +704,11 @@ pub(crate) async fn run_connection(
                     if state.recv_claim.load(Ordering::Acquire) == 1 {
                         drop(io);
                         read_buf = buf;
+                        // A sender may have encoded into the codec via
+                        // try_direct_encode while we were yielded at
+                        // peer_io.lock() with driver_in_select=false,
+                        // so no transmit_ready notification was sent.
+                        codec_maybe_dirty = true;
                     } else {
                         let (res, filled) = io.reader.read(buf).await;
                         let n = match res {

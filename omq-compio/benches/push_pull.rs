@@ -14,7 +14,7 @@ use bytes::Bytes;
 use omq_compio::{Message, Options, Socket, SocketType};
 
 const PATTERN: &str = "push_pull";
-const PEER_COUNTS: &[usize] = &[1, 3];
+const PEER_COUNTS: &[usize] = &[1, 3, 8];
 
 #[compio::main]
 async fn main() {

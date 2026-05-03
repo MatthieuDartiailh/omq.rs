@@ -1,0 +1,143 @@
+//! REQ/REP round-trip latency: p50 / p99 / p999 per transport × size.
+//! Serial ping-pong (one request in-flight at a time).
+
+#[path = "common/mod.rs"]
+mod common;
+
+use std::io::Write as _;
+use std::time::Instant;
+
+use bytes::Bytes;
+use omq_tokio::{Message, Options, Socket, SocketType};
+
+const PATTERN: &str = "latency";
+
+fn latency_transports() -> Vec<String> {
+    if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
+        return s.split(',').map(|t| t.trim().to_string()).collect();
+    }
+    vec!["inproc".to_string(), "ipc".to_string(), "tcp".to_string()]
+}
+
+const SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
+const WARMUP_ITERS: usize = 1_000;
+const ITERS: usize = 10_000;
+
+fn main() {
+    let rt = common::build_runtime();
+    rt.block_on(async {
+        common::print_header("REQ/REP Latency (serial ping-pong)");
+        let mut seq = 0usize;
+        for transport in latency_transports() {
+            println!("--- {transport} ---");
+            println!(
+                "  {:>6}  {:>10}  {:>10}  {:>10}  {:>10}",
+                "size", "p50 µs", "p99 µs", "p999 µs", "max µs"
+            );
+            for &size in SIZES {
+                seq += 1;
+                let label = format!("{transport}/{size}B");
+                let cell = common::with_timeout(&label, run_cell(&transport, size, seq)).await;
+                println!(
+                    "  {:>6}  {:>10.2}  {:>10.2}  {:>10.2}  {:>10.2}",
+                    format!("{size}B"),
+                    cell.p50_us,
+                    cell.p99_us,
+                    cell.p999_us,
+                    cell.max_us,
+                );
+                append_jsonl(&transport, size, cell);
+            }
+            println!();
+        }
+    });
+}
+
+struct LatencyCell {
+    p50_us: f64,
+    p99_us: f64,
+    p999_us: f64,
+    max_us: f64,
+}
+
+fn percentile(sorted: &[u64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
+    sorted[idx] as f64 / 1_000.0
+}
+
+fn append_jsonl(transport: &str, msg_size: usize, c: LatencyCell) {
+    if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
+        return;
+    }
+    let path = common::results_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let row = format!(
+        r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":1,"msg_size":{msg_size},"p50_us":{p50},"p99_us":{p99},"p999_us":{p999},"max_us":{max}}}"#,
+        run = common::run_id(),
+        pattern = PATTERN,
+        transport = transport,
+        msg_size = msg_size,
+        p50 = c.p50_us,
+        p99 = c.p99_us,
+        p999 = c.p999_us,
+        max = c.max_us,
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{row}");
+    }
+}
+
+async fn run_cell(transport: &str, size: usize, seq: usize) -> LatencyCell {
+    let ep = common::endpoint(transport, seq);
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(ep.clone()).await.expect("bind REP");
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep.clone()).await.expect("connect REQ");
+    if transport != "inproc" {
+        common::wait_connected(&[&req]).await;
+    }
+
+    let rep = std::sync::Arc::new(rep);
+    let req = std::sync::Arc::new(req);
+    let payload = Bytes::from(vec![b'x'; size]);
+
+    let responder = {
+        let rep = rep.clone();
+        tokio::spawn(async move {
+            while let Ok(m) = rep.recv().await {
+                if rep.send(m).await.is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    for _ in 0..WARMUP_ITERS {
+        req.send(Message::single(payload.clone())).await.unwrap();
+        let _ = req.recv().await.unwrap();
+    }
+
+    let mut rtts: Vec<u64> = Vec::with_capacity(ITERS);
+    for _ in 0..ITERS {
+        let t = Instant::now();
+        req.send(Message::single(payload.clone())).await.unwrap();
+        let _ = req.recv().await.unwrap();
+        rtts.push(t.elapsed().as_nanos() as u64);
+    }
+
+    responder.abort();
+
+    rtts.sort_unstable();
+    LatencyCell {
+        p50_us: percentile(&rtts, 50.0),
+        p99_us: percentile(&rtts, 99.0),
+        p999_us: percentile(&rtts, 99.9),
+        max_us: *rtts.last().unwrap_or(&0) as f64 / 1_000.0,
+    }
+}

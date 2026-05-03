@@ -18,7 +18,7 @@ use omq_tokio::{Endpoint, IpcPath};
 /// Geometric ×4 sweep: 128 B → 128 KiB. The 512 KiB cell is dropped
 /// from the default to keep wall time near a minute; opt back in via
 /// `OMQ_BENCH_SIZES=...,524288`.
-pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 512, 2_048, 8_192, 32_768, 131_072];
+pub(crate) const DEFAULT_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
 
 /// Override with env `OMQ_BENCH_TRANSPORTS=inproc,tcp`.
 pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
@@ -48,7 +48,12 @@ pub(crate) const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) fn results_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("benches");
-    p.push("results.jsonl");
+    let suffix = std::env::var("OMQ_BENCH_RESULTS_SUFFIX").unwrap_or_default();
+    if suffix.is_empty() {
+        p.push("results.jsonl");
+    } else {
+        p.push(format!("results_{suffix}.jsonl"));
+    }
     p
 }
 

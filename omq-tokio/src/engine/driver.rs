@@ -3,7 +3,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, split};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -19,6 +19,14 @@ const READ_BUF_SIZE: usize = 64 * 1024;
 const SHARED_MAX_BATCH_MSGS: usize = 256;
 /// Max bytes one shared-queue batch encodes before flushing.
 const SHARED_MAX_BATCH_BYTES: usize = 512 * 1024;
+/// Messages whose total payload is below this threshold are packed
+/// contiguously into a flat BytesMut instead of going through
+/// `Connection::send_message` + `transmit_chunks`. This eliminates the
+/// per-flush `Vec<IoSlice>` allocation and lets the kernel receive a
+/// single contiguous buffer instead of scattered iovecs. Benchmarks show
+/// dramatic throughput gains up through ~8 KiB; above ~32 KiB the
+/// mandatory memcpy cost overtakes the benefit, so 32 KiB is the cap.
+const FLAT_THRESHOLD: usize = 32 * 1024;
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
@@ -189,6 +197,10 @@ where
         } = self;
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
+        // Flat accumulation buffer: small outbound messages are packed here
+        // contiguously (no Vec<IoSlice> allocation per flush). Pre-allocated
+        // at 128 KiB; BytesMut::split() drains it while retaining capacity.
+        let mut flat_buf = BytesMut::with_capacity(128 * 1024);
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> =
             config.handshake_timeout.map(|d| last_input + d);
@@ -249,8 +261,60 @@ where
                 }
 
                 cmd = inbox.recv() => match cmd {
-                    Some(DriverCommand::SendMessage(m)) => {
-                        encode_one(&m, &mut transform, &mut codec)?;
+                    Some(DriverCommand::SendMessage(first)) => {
+                        // Batch-encode like the shared_msg_rx arm: drain
+                        // inbox with try_recv after the first message so
+                        // the priority path also benefits from flat-buf and
+                        // issues one write per batch instead of one per msg.
+                        let use_flat = transform.is_none() && !codec.has_frame_transform();
+                        encode_flat_or_codec(
+                            &first,
+                            &mut transform,
+                            &mut codec,
+                            use_flat,
+                            &mut flat_buf,
+                            &mut writer,
+                        )
+                        .await?;
+                        let mut count = 1usize;
+                        let mut bytes = first.byte_len();
+                        let mut closing = false;
+                        while count < SHARED_MAX_BATCH_MSGS && bytes < SHARED_MAX_BATCH_BYTES {
+                            match inbox.try_recv() {
+                                Ok(DriverCommand::SendMessage(next)) => {
+                                    bytes += next.byte_len();
+                                    encode_flat_or_codec(
+                                        &next,
+                                        &mut transform,
+                                        &mut codec,
+                                        use_flat,
+                                        &mut flat_buf,
+                                        &mut writer,
+                                    )
+                                    .await?;
+                                    count += 1;
+                                }
+                                Ok(DriverCommand::SendCommand(c)) => {
+                                    codec.send_command(&c)?;
+                                    break;
+                                }
+                                Ok(DriverCommand::Close) => {
+                                    closing = true;
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        if !flat_buf.is_empty() {
+                            writer.write_all(&flat_buf.split()).await?;
+                        }
+                        while codec.has_pending_transmit() {
+                            flush_once(&mut writer, &mut codec).await?;
+                        }
+                        if closing {
+                            drain_writes(&mut writer, &mut codec).await.ok();
+                            return Ok(());
+                        }
                     }
                     Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
                     Some(DriverCommand::Close) | None => {
@@ -277,7 +341,20 @@ where
                             return Ok(());
                         }
                         Some(first) => {
-                            encode_one(&first, &mut transform, &mut codec)?;
+                            // Use the flat path when no transform is active:
+                            // encode directly into flat_buf (contiguous bytes)
+                            // rather than codec.out_chunks (Vec<IoSlice> per flush).
+                            let use_flat =
+                                transform.is_none() && !codec.has_frame_transform();
+                            encode_flat_or_codec(
+                                &first,
+                                &mut transform,
+                                &mut codec,
+                                use_flat,
+                                &mut flat_buf,
+                                &mut writer,
+                            )
+                            .await?;
                             let mut count = 1usize;
                             let mut bytes = first.byte_len();
                             if let Some(ref rx) = shared_msg_rx {
@@ -287,13 +364,27 @@ where
                                     match rx.try_recv() {
                                         Ok(next) => {
                                             bytes += next.byte_len();
-                                            encode_one(&next, &mut transform, &mut codec)?;
+                                            encode_flat_or_codec(
+                                                &next,
+                                                &mut transform,
+                                                &mut codec,
+                                                use_flat,
+                                                &mut flat_buf,
+                                                &mut writer,
+                                            )
+                                            .await?;
                                             count += 1;
                                         }
                                         Err(_) => break,
                                     }
                                 }
                             }
+                            // Flush any remaining flat_buf (small messages from
+                            // the tail of the batch) in one write_all call.
+                            if !flat_buf.is_empty() {
+                                writer.write_all(&flat_buf.split()).await?;
+                            }
+                            // Flush any large messages encoded via the codec path.
                             while codec.has_pending_transmit() {
                                 flush_once(&mut writer, &mut codec).await?;
                             }
@@ -342,6 +433,38 @@ fn encode_one(
         }
     } else {
         codec.send_message(msg)?;
+    }
+    Ok(())
+}
+
+/// Encode one message via the flat path (NULL mechanism, no transform)
+/// or the codec path (transform active or message too large for flat).
+///
+/// Flat path (msg.byte_len() < FLAT_THRESHOLD && use_flat):
+///   Copies ZMTP header + payload bytes directly into `flat_buf`. No
+///   allocation; the caller writes `flat_buf` to the wire as one chunk.
+///
+/// Codec path (transform active or large message):
+///   Flushes `flat_buf` first (to maintain wire order) then calls
+///   `encode_one` which puts chunks into `codec.out_chunks`.
+async fn encode_flat_or_codec<W>(
+    msg: &Message,
+    transform: &mut Option<MessageTransform>,
+    codec: &mut Connection,
+    use_flat: bool,
+    flat_buf: &mut BytesMut,
+    writer: &mut W,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if use_flat && msg.byte_len() < FLAT_THRESHOLD {
+        codec.send_message_flat(msg, flat_buf);
+    } else {
+        if !flat_buf.is_empty() {
+            writer.write_all(&flat_buf.split()).await?;
+        }
+        encode_one(msg, transform, codec)?;
     }
     Ok(())
 }
