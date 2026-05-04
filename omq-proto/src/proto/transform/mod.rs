@@ -28,7 +28,7 @@ pub mod zstd;
 #[cfg(feature = "lz4")]
 pub use lz4::{Lz4Decoder, Lz4Encoder};
 #[cfg(feature = "zstd")]
-pub use zstd::{ZstdDecoder, ZstdEncoder};
+pub use zstd::{ZstdDecoder, ZstdEncoder, train_zdict};
 
 use smallvec::SmallVec;
 

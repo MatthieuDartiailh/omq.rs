@@ -5,8 +5,18 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use omq_proto::proto::transform::train_zdict;
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+
+/// Train a small ZDICT-format dict from 200 copies of `seed`. Used by
+/// the static-dict tests so the bytes pass `with_send_dict`'s ZDICT
+/// magic check (added when zstd dict shipment was made wire-compatible
+/// with omq-zstd Ruby).
+fn make_test_dict(seed: &[u8]) -> Bytes {
+    let samples: Vec<&[u8]> = (0..200).map(|_| seed).collect();
+    train_zdict(&samples, 8 * 1024).expect("train_zdict")
+}
 
 async fn pull_on_loopback() -> (Socket, Endpoint) {
     let pull = Socket::new(SocketType::Pull, Options::default());
@@ -90,7 +100,7 @@ async fn multipart_roundtrip() {
 
 #[tokio::test]
 async fn dict_roundtrip_small_payload() {
-    let dict = Bytes::from_static(b"omq-omq-omq-omq-omq-omq-omq-omq-shared-prefix");
+    let dict = make_test_dict(b"omq-omq-omq-omq-omq-omq-omq-omq-shared-prefix\n");
 
     let opts = || Options::default().compression_dict(dict.clone());
     let pull = Socket::new(SocketType::Pull, opts());
@@ -148,4 +158,87 @@ async fn many_messages_in_a_row() {
             .unwrap();
         assert_eq!(m.parts()[0].as_bytes(), format!("m-{i}").as_bytes());
     }
+}
+
+// Reconnect: decoder fresh per connection, re-accepts dict shipment without
+// "shipped twice" error. Push 1 ships dict → 5 msgs; push 2 ships same
+// dict (fresh encoder) → 5 msgs. All 10 must arrive.
+#[tokio::test]
+async fn static_dict_survives_reconnect() {
+    let dict = make_test_dict(b"omq-shared-dict-prefix-payload\n");
+    let push_opts = || {
+        Options::default()
+            .compression_dict(dict.clone())
+            .linger(Duration::from_secs(2))
+    };
+    let (pull, ep) = pull_on_loopback().await;
+    let payload = vec![b'z'; 100]; // > 64 B with-dict threshold
+
+    for _ in 0..2 {
+        let push = Socket::new(SocketType::Push, push_opts());
+        push.connect(ep.clone()).await.unwrap();
+        for _ in 0..5 {
+            push.send(Message::single(payload.clone())).await.unwrap();
+        }
+        push.close().await.unwrap();
+    }
+
+    for _ in 0..10 {
+        let m = tokio::time::timeout(Duration::from_secs(3), pull.recv())
+            .await
+            .expect("timed out waiting for message")
+            .expect("recv error");
+        assert_eq!(m.parts()[0].as_bytes().to_vec(), payload);
+    }
+}
+
+// Reconnect after auto-train fires. First connection accumulates > 100 KiB of
+// samples, training fires, dict shipped, compressed messages follow. Second
+// connection starts with a fresh encoder (auto-train re-starts from zero);
+// all messages from both connections must be received correctly.
+#[tokio::test]
+async fn auto_train_survives_reconnect() {
+    let (pull, ep) = pull_on_loopback().await;
+
+    // 1 000-byte messages: < TRAIN_MAX_SAMPLE_LEN (1 024), so collected as
+    // training samples. Byte limit (100 KiB) fires at message 103.
+    let make_payload = |i: usize| -> Vec<u8> {
+        let prefix = format!("{i:05}|");
+        let mut v = prefix.into_bytes();
+        v.extend(b"omq-zstd-auto-train-reconnect-test-payload-".iter().cycle().take(1000 - v.len()));
+        v
+    };
+
+    // First connection: triggers training, then sends a few dict-compressed msgs.
+    const FIRST: usize = 120; // > 103 training trigger point
+    {
+        let push = Socket::new(SocketType::Push, Options::default().linger(Duration::from_secs(4)));
+        push.connect(ep.clone()).await.unwrap();
+        for i in 0..FIRST {
+            push.send(Message::single(make_payload(i))).await.unwrap();
+        }
+        push.close().await.unwrap();
+    }
+
+    // Second connection: fresh encoder, auto-train starts from scratch.
+    // 20 msgs = 20 KiB, well below training threshold; sent as compressed
+    // without dict (1 000 B > 512 B MIN_COMPRESS_NO_DICT).
+    const SECOND: usize = 20;
+    {
+        let push = Socket::new(SocketType::Push, Options::default().linger(Duration::from_secs(2)));
+        push.connect(ep.clone()).await.unwrap();
+        for i in 0..SECOND {
+            push.send(Message::single(make_payload(i))).await.unwrap();
+        }
+        push.close().await.unwrap();
+    }
+
+    let mut got = 0;
+    while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(5), pull.recv()).await {
+        got += 1;
+        if got == FIRST + SECOND {
+            break;
+        }
+    }
+    assert_eq!(got, FIRST + SECOND);
 }

@@ -6,7 +6,10 @@
 //! ```text
 //! 00 00 00 00              uncompressed plaintext follows
 //! 28 B5 2F FD              the wire part IS a Zstandard frame
-//! 37 A4 30 EC              dict shipment (single-part ZMTP message)
+//! 37 A4 30 EC              dict shipment (single-part ZMTP message);
+//!                          the 4 bytes ARE the dict's ZDICT magic, not
+//!                          a separate sentinel — the wire payload IS
+//!                          the dict, ZDICT_MAGIC and all.
 //! ```
 //!
 //! Differences from LZ4:
@@ -38,12 +41,15 @@ use crate::message::{Message, Payload};
 
 use super::TransformedOut;
 use super::common::{
-    ENVELOPE_PLAIN, SENTINEL_PLAIN, build_dict_shipment, plaintext_payload, take_budget,
-    validate_dict,
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, plaintext_payload, take_budget, validate_dict,
 };
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
-const SENTINEL_DICT: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
+/// Discriminator for a dict-shipment ZMTP message. Numerically equal to
+/// `ZDICT_MAGIC`: a well-formed Zstd dictionary always starts with these
+/// 4 bytes, so the wire payload IS the dict — there is no separate
+/// sentinel prefix to strip on decode (interop with omq-zstd Ruby).
+const SENTINEL_DICT: [u8; 4] = ZDICT_MAGIC;
 
 /// RFC §5.5 thresholds.
 const MIN_COMPRESS_NO_DICT: usize = 512;
@@ -72,7 +78,32 @@ const USER_DICT_ID_MIN: u32 = 32_768;
 const USER_DICT_ID_MAX: u32 = 0x7FFF_FFFF;
 
 /// ZDICT magic at offset 0 of a trained dict.
-const ZDICT_MAGIC: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
+pub(super) const ZDICT_MAGIC: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
+
+/// Train a ZDICT-format Zstd dictionary from a corpus of plaintext
+/// samples. Returns `None` when the trainer rejects the corpus (samples
+/// too uniform, total too small to extract structure). The returned
+/// bytes start with [`ZDICT_MAGIC`] and can be passed directly to
+/// [`Options::compression_dict`] or [`ZstdEncoder::with_send_dict`].
+///
+/// `capacity` caps the trained dict size; pass [`MAX_DICT_BYTES`] for
+/// the protocol-permitted maximum, or a smaller value (e.g. 8 KiB) to
+/// match the auto-train default.
+pub fn train_zdict(samples: &[&[u8]], capacity: usize) -> Option<Bytes> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    let mut sizes: Vec<usize> = Vec::with_capacity(samples.len());
+    for s in samples {
+        buf.extend_from_slice(s);
+        sizes.push(s.len());
+    }
+    let mut dict = vec![0u8; capacity];
+    let n = zstd_safe::train_from_buffer(&mut dict, &buf, &sizes).ok()?;
+    dict.truncate(n);
+    Some(Bytes::from(dict))
+}
 
 struct TrainState {
     samples: Vec<Bytes>,
@@ -153,8 +184,18 @@ impl ZstdEncoder {
     }
 
     /// Construct with a send-side dictionary.
+    ///
+    /// The dict bytes must be in standard Zstd ZDICT format (starting
+    /// with `ZDICT_MAGIC`). The dict is shipped on-wire as-is, which
+    /// requires the first 4 bytes to also act as the dict-shipment
+    /// discriminator. Mirrors Ruby `OMQ::Transport::ZstdTcp::Codec`.
     pub fn with_send_dict(dict: Bytes) -> Result<Self> {
         validate_dict(&dict, "Zstd", MAX_DICT_BYTES)?;
+        if dict.len() < 4 || dict[..4] != ZDICT_MAGIC {
+            return Err(Error::Protocol(
+                "Zstd dictionary must start with ZDICT magic (0x37 0xA4 0x30 0xEC)".into(),
+            ));
+        }
         let mut s = Self::new();
         s.send_dict = Some(dict);
         Ok(s)
@@ -184,7 +225,9 @@ impl ZstdEncoder {
         if let Some(dict) = self.send_dict.clone()
             && !self.send_dict_shipped
         {
-            out.push(build_dict_shipment(SENTINEL_DICT, &dict));
+            // The dict bytes start with ZDICT_MAGIC, which IS the wire
+            // discriminator — no separate sentinel prefix.
+            out.push(Message::single(dict));
             self.send_dict_shipped = true;
         }
         let mut wire = Message::new();
@@ -349,9 +392,13 @@ impl ZstdDecoder {
                         "zstd dict shipped twice on the same connection".into(),
                     ));
                 }
-                let dict = bytes.slice(4..);
-                validate_dict(&dict, "Zstd", MAX_DICT_BYTES)?;
-                self.recv_dict = Some(dict);
+                // The 4-byte sentinel IS the dict's leading ZDICT_MAGIC:
+                // the wire payload is the dict in full. Stripping the
+                // first 4 bytes corrupts it for `decompress_using_dict`
+                // and breaks interop with peers that ship the dict raw
+                // (omq-zstd Ruby).
+                validate_dict(&bytes, "Zstd", MAX_DICT_BYTES)?;
+                self.recv_dict = Some(bytes);
                 return Ok(None);
             } else {
                 return Err(Error::Protocol("unknown zstd sentinel".into()));
@@ -455,27 +502,60 @@ mod tests {
         assert_eq!(declared, Some(plain.len() as u64));
     }
 
+    /// Build bytes that pass the ZDICT_MAGIC sanity check but never reach
+    /// `load_dictionary` (i.e. only `with_send_dict` validation runs).
+    /// Use this for tests that exercise the wire/sentinel path, not real
+    /// compression.
+    fn synthetic_dict(body: &[u8]) -> Bytes {
+        let mut out = Vec::with_capacity(4 + body.len());
+        out.extend_from_slice(&ZDICT_MAGIC);
+        out.extend_from_slice(body);
+        Bytes::from(out)
+    }
+
+    /// Train a real ZDICT-format dictionary from a small synthetic corpus.
+    /// Used by tests that actually compress with the dict (`load_dictionary`
+    /// rejects malformed bytes even when ZDICT_MAGIC is present).
+    fn trained_dict() -> Bytes {
+        let samples: Vec<&[u8]> = (0..200)
+            .map(|_| &b"the-quick-brown-fox-jumps-over-the-lazy-dog\n"[..])
+            .collect();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut sizes: Vec<usize> = Vec::with_capacity(samples.len());
+        for s in &samples {
+            buf.extend_from_slice(s);
+            sizes.push(s.len());
+        }
+        let mut dict = vec![0u8; 8192];
+        let n = zstd_safe::train_from_buffer(&mut dict, &buf, &sizes)
+            .expect("train_from_buffer");
+        dict.truncate(n);
+        Bytes::from(dict)
+    }
+
     #[test]
     fn dict_first_send_emits_shipment() {
-        let dict = Bytes::from_static(b"a-shared-prefix-of-some-bytes-yeah");
+        let dict = synthetic_dict(b"a-shared-prefix-of-some-bytes-yeah");
         let mut enc = ZstdEncoder::with_send_dict(dict.clone()).unwrap();
         let wire = enc.encode(&Message::single("hi")).unwrap();
         assert_eq!(wire.len(), 2);
         let ship = wire[0].parts()[0].as_bytes();
-        assert_eq!(&ship[..4], &SENTINEL_DICT);
-        assert_eq!(&ship[4..], &dict[..]);
+        // The wire payload IS the dict in full — first 4 bytes are the
+        // dict's own ZDICT_MAGIC, doubling as the wire discriminator.
+        assert_eq!(ship.as_ref(), &dict[..]);
     }
 
     #[test]
     fn dict_aware_roundtrip() {
-        let dict = Bytes::from(vec![b'q'; 1024]);
-        let plain = vec![b'q'; 80];
+        let dict = trained_dict();
+        let plain = b"the-quick-brown-fox-jumps-over-the-lazy-dog\n".repeat(2);
         let msg = Message::single(plain.clone());
 
         let mut enc = ZstdEncoder::with_send_dict(dict.clone()).unwrap();
         let mut dec = ZstdDecoder::new();
         let wire = enc.encode(&msg).unwrap();
         assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0].parts()[0].as_bytes().as_ref(), &dict[..]);
 
         let consumed = dec.decode(wire[0].clone()).unwrap();
         assert!(consumed.is_none());
@@ -502,18 +582,30 @@ mod tests {
 
     #[test]
     fn rejects_second_dict() {
-        let dict = Bytes::from_static(b"first-dict");
+        let dict1 = synthetic_dict(b"first-dict");
+        let dict2 = synthetic_dict(b"second-dict");
         let mut dec = ZstdDecoder::new();
-        let m1 = build_dict_shipment(SENTINEL_DICT, &dict);
-        assert!(dec.decode(m1).unwrap().is_none());
-        let m2 = build_dict_shipment(SENTINEL_DICT, &Bytes::from_static(b"second-dict"));
-        assert!(matches!(dec.decode(m2).unwrap_err(), Error::Protocol(_)));
+        assert!(dec.decode(Message::single(dict1)).unwrap().is_none());
+        assert!(matches!(
+            dec.decode(Message::single(dict2)).unwrap_err(),
+            Error::Protocol(_)
+        ));
     }
 
     #[test]
     fn rejects_oversized_dict() {
-        let big = Bytes::from(vec![0u8; MAX_DICT_BYTES + 1]);
+        let big = synthetic_dict(&vec![0u8; MAX_DICT_BYTES]);
         let err = ZstdEncoder::with_send_dict(big).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
+    }
+
+    #[test]
+    fn rejects_dict_without_zdict_magic() {
+        // No ZDICT_MAGIC prefix → with_send_dict refuses; matches the
+        // omq-zstd Ruby behaviour and prevents shipping bytes that
+        // can't be parsed as a dict.
+        let bad = Bytes::from_static(b"NOT_A_REAL_ZSTD_DICT_XXXX");
+        let err = ZstdEncoder::with_send_dict(bad).unwrap_err();
         assert!(matches!(err, Error::Protocol(_)));
     }
 
@@ -533,7 +625,7 @@ mod tests {
 
     #[test]
     fn dict_shipment_does_not_count_budget() {
-        let dict = Bytes::from(vec![b'd'; 4096]);
+        let dict = synthetic_dict(&vec![b'd'; 4092]);
         let mut enc = ZstdEncoder::with_send_dict(dict.clone()).unwrap();
         let wire = enc.encode(&Message::single("ok")).unwrap();
 
@@ -597,7 +689,7 @@ mod tests {
 
     #[test]
     fn auto_train_disabled_when_static_dict_present() {
-        let dict = Bytes::from(vec![b'a'; 1024]);
+        let dict = trained_dict();
         let enc = ZstdEncoder::with_send_dict(dict).unwrap().with_auto_train();
         assert!(enc.train.is_none(), "static dict should disable auto-train");
     }

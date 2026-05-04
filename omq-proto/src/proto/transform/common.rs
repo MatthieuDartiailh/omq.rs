@@ -10,7 +10,9 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::message::{Message, Payload};
+#[cfg(feature = "lz4")]
+use crate::message::Message;
+use crate::message::Payload;
 
 /// Plaintext-passthrough sentinel. Identical for every compression
 /// transport so a peer that doesn't recognize the upper sentinel can
@@ -70,7 +72,11 @@ pub(super) fn validate_dict(dict: &Bytes, label: &str, max_bytes: usize) -> Resu
 }
 
 /// Build a single-part ZMTP message carrying a dict shipment:
-/// `sentinel | dict_bytes`.
+/// `sentinel | dict_bytes`. Used by transports whose dict body is
+/// arbitrary (lz4) and therefore needs an explicit sentinel prefix.
+/// Zstd does not use this — its dict bodies always begin with
+/// `ZDICT_MAGIC`, which doubles as the wire discriminator.
+#[cfg(feature = "lz4")]
 pub(super) fn build_dict_shipment(sentinel: [u8; 4], dict: &Bytes) -> Message {
     let mut frame = BytesMut::with_capacity(4 + dict.len());
     frame.extend_from_slice(&sentinel);

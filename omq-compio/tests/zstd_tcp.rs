@@ -7,6 +7,16 @@ use std::time::Duration;
 use bytes::Bytes;
 use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_proto::proto::transform::train_zdict;
+
+/// Train a small ZDICT-format dict from 200 copies of `seed`. Used by
+/// the static-dict tests so the bytes pass `with_send_dict`'s ZDICT
+/// magic check (added when zstd dict shipment was made wire-compatible
+/// with omq-zstd Ruby).
+fn make_test_dict(seed: &[u8]) -> Bytes {
+    let samples: Vec<&[u8]> = (0..200).map(|_| seed).collect();
+    train_zdict(&samples, 8 * 1024).expect("train_zdict")
+}
 
 async fn pull_on_loopback() -> (Socket, Endpoint) {
     let pull = Socket::new(SocketType::Pull, Options::default());
@@ -110,6 +120,76 @@ async fn zstd_linger_drains_before_close() {
         got += 1;
     }
     assert_eq!(got, N, "linger did not drain all messages: got {got}/{N}");
+}
+
+#[compio::test]
+async fn static_dict_survives_reconnect() {
+    let dict = make_test_dict(b"omq-shared-dict-prefix-payload\n");
+    let push_opts = || {
+        Options::default()
+            .compression_dict(dict.clone())
+            .linger(Duration::from_secs(2))
+    };
+    let (pull, ep) = pull_on_loopback().await;
+    let payload = vec![b'z'; 100]; // > 64 B with-dict threshold
+
+    for _ in 0..2 {
+        let push = Socket::new(SocketType::Push, push_opts());
+        push.connect(ep.clone()).await.unwrap();
+        for _ in 0..5 {
+            push.send(Message::single(payload.clone())).await.unwrap();
+        }
+        push.close().await.unwrap();
+    }
+
+    for _ in 0..10 {
+        let m = compio::time::timeout(Duration::from_secs(3), pull.recv())
+            .await
+            .expect("timed out")
+            .expect("recv error");
+        assert_eq!(m.parts()[0].as_bytes().to_vec(), payload);
+    }
+}
+
+#[compio::test]
+async fn auto_train_survives_reconnect() {
+    let (pull, ep) = pull_on_loopback().await;
+
+    let make_payload = |i: usize| -> Vec<u8> {
+        let prefix = format!("{i:05}|");
+        let mut v = prefix.into_bytes();
+        v.extend(b"omq-zstd-auto-train-reconnect-test-payload-".iter().cycle().take(1000 - v.len()));
+        v
+    };
+
+    const FIRST: usize = 120;
+    {
+        let push = Socket::new(SocketType::Push, Options::default().linger(Duration::from_secs(4)));
+        push.connect(ep.clone()).await.unwrap();
+        for i in 0..FIRST {
+            push.send(Message::single(make_payload(i))).await.unwrap();
+        }
+        push.close().await.unwrap();
+    }
+
+    const SECOND: usize = 20;
+    {
+        let push = Socket::new(SocketType::Push, Options::default().linger(Duration::from_secs(2)));
+        push.connect(ep.clone()).await.unwrap();
+        for i in 0..SECOND {
+            push.send(Message::single(make_payload(i))).await.unwrap();
+        }
+        push.close().await.unwrap();
+    }
+
+    let mut got = 0;
+    while let Ok(Ok(_)) = compio::time::timeout(Duration::from_millis(500), pull.recv()).await {
+        got += 1;
+        if got == FIRST + SECOND {
+            break;
+        }
+    }
+    assert_eq!(got, FIRST + SECOND);
 }
 
 #[compio::test]
