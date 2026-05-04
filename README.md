@@ -1,5 +1,10 @@
 # ØMQ.rs
 
+[![CI](https://github.com/paddor/omq.rs/actions/workflows/ci.yml/badge.svg)](https://github.com/paddor/omq.rs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/omq?color=e9573f)](https://crates.io/crates/omq)
+[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-%3E%3D%201.93-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+
 > **3.1M msg/s** inproc | **2.12M msg/s** ipc | **2.07M msg/s** tcp
 >
 > **5.4 µs** inproc latency | **20.4 µs** ipc | **28.4 µs** tcp
