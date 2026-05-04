@@ -58,6 +58,13 @@ The public `Socket` API is identical, verified in lockstep by per-
 backend `coverage_matrix` test suites plus a cross-runtime
 `interop_compio` ZMTP-on-the-wire suite.
 
+## Benchmarks
+
+- [BENCHMARKS.md](BENCHMARKS.md): throughput / latency / compression tables
+  across transports, message sizes, and backends (omq-compio vs omq-tokio).
+- [COMPARISONS.md](COMPARISONS.md): two-process TCP benchmarks against
+  libzmq and zmq.rs.
+
 ## Design highlights
 
 - **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)): byte-in / events-
@@ -113,8 +120,6 @@ backend `coverage_matrix` test suites plus a cross-runtime
   use the same direct-encode path as plain TCP, with the 4-byte
   plaintext sentinel prepended.
 
-See [BENCHMARKS.md](BENCHMARKS.md) for numbers.
-
 ## Tests
 
 77 integration test files across `omq-proto`, `omq-compio`, and
@@ -167,11 +172,6 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 > third-party review. Use **CURVE** (RFC 26) for production / regulated
 > workloads. Audits welcome - open an issue if you can help fund or
 > conduct one.
-
-## Benchmarks
-
-See [BENCHMARKS.md](BENCHMARKS.md) for throughput / latency / compression
-tables across transports, sizes, and backends.
 
 ## License
 
