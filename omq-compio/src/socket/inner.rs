@@ -496,6 +496,13 @@ pub(crate) struct DirectIoState {
     /// unless `transform_passthrough` is also set (passthrough bypasses both).
     #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) has_transform: bool,
+    /// True when a cryptographic mechanism (CURVE, BLAKE3ZMQ) is in use.
+    /// The direct-encode fast path must be skipped entirely for crypto
+    /// connections: encryption runs inside the codec's `send_message`, not
+    /// via `encode_and_push*`. Writing raw frames here would bypass
+    /// encryption and cause the peer to reject or silently discard them.
+    #[cfg_attr(feature = "priority", allow(dead_code))]
+    pub(crate) uses_crypto: bool,
     /// When `has_transform` and the encoder will always use `SENTINEL_PLAIN`
     /// for parts smaller than `threshold` bytes, this holds
     /// `(sentinel_bytes, threshold)`. The sender can encode sub-threshold
@@ -536,6 +543,7 @@ impl DirectIoState {
         has_transform: bool,
         transform_passthrough: Option<(Bytes, usize)>,
         encoder: Option<MessageEncoder>,
+        uses_crypto: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             peer_io,
@@ -549,6 +557,7 @@ impl DirectIoState {
             hb_epoch: Instant::now(),
             handshake_done: AtomicBool::new(false),
             has_transform,
+            uses_crypto,
             transform_passthrough,
             encoder: async_lock::Mutex::new(encoder),
             encoded_queue: Mutex::new(EncodedQueue::new()),

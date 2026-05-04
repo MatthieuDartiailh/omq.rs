@@ -152,6 +152,10 @@ async fn dial_supervisor_tcp(
                 }
                 None => (None, None, false, None),
             };
+        let uses_crypto = !matches!(
+            inner.options.mechanism,
+            omq_proto::options::MechanismConfig::Null
+        );
         let (reader, writer) = stream.into_split();
         let peer_io = crate::transport::driver::build_peer_io(
             role,
@@ -167,6 +171,7 @@ async fn dial_supervisor_tcp(
             has_transform,
             transform_passthrough,
             encoder,
+            uses_crypto,
         );
         *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
 
@@ -315,6 +320,10 @@ async fn dial_supervisor_ipc(
             *set.write().expect("peer_sub lock") = SubscriptionSet::new();
         }
 
+        let uses_crypto = !matches!(
+            inner.options.mechanism,
+            omq_proto::options::MechanismConfig::Null
+        );
         let (reader, writer) = stream.into_split();
         let peer_io = crate::transport::driver::build_peer_io(
             role,
@@ -323,8 +332,15 @@ async fn dial_supervisor_ipc(
             reader.into(),
             None,
         );
-        let state =
-            DirectIoState::new(peer_io, writer.into(), Arc::new(poll_fd), false, None, None);
+        let state = DirectIoState::new(
+            peer_io,
+            writer.into(),
+            Arc::new(poll_fd),
+            false,
+            None,
+            None,
+            uses_crypto,
+        );
         *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
 
         let idx = if let Some(idx) = slot_idx {

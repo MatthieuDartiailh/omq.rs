@@ -131,6 +131,10 @@ pub(super) fn install_accepted_wire_peer(
             }
             None => (None, None, false, None),
         };
+    let uses_crypto = !matches!(
+        inner.options.mechanism,
+        omq_proto::options::MechanismConfig::Null
+    );
     let peer_io = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
@@ -145,6 +149,7 @@ pub(super) fn install_accepted_wire_peer(
         has_transform,
         transform_passthrough,
         encoder,
+        uses_crypto,
     );
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);

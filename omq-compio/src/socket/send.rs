@@ -67,6 +67,11 @@ fn peer_alive(p: &PeerSlot) -> bool {
 fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
     const DIRECT_CAP: usize = 512 * 1024;
 
+    // Crypto connections must go through the codec's send_message.
+    if state.uses_crypto {
+        return Ok(false);
+    }
+
     if !state.has_transform {
         if !state.handshake_done.load(Ordering::Relaxed) {
             return Ok(false);
