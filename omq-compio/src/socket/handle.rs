@@ -1175,6 +1175,15 @@ impl Socket {
                             state.hb_epoch.elapsed().as_nanos() as u64,
                             Ordering::Relaxed,
                         );
+                        // Signal to the driver that we drained the kernel
+                        // buffer. The driver checks this before entering
+                        // `reader.read(buf).await` in the `read_ready` arm
+                        // to avoid blocking on an empty buffer when its
+                        // PollOnce SQE fired while we held `peer_io`.
+                        #[cfg(feature = "priority")]
+                        state
+                            .drain_generation
+                            .fetch_add(1, Ordering::Release);
                     }
                 }
                 // Codec lock released; writer lock acquired below.

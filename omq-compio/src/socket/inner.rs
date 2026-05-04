@@ -525,6 +525,17 @@ pub(crate) struct DirectIoState {
     /// notification when `false` — the driver is actively processing and
     /// will drain `encoded_queue` on its own next step-3b pass.
     pub(crate) driver_in_select: AtomicBool,
+    /// Incremented by `try_direct_recv` after each successful TCP read
+    /// (under the `peer_io` lock, before releasing it). The driver
+    /// snapshots this before entering `select_biased!` and bails from
+    /// the `read_ready` arm without reading when the value has changed —
+    /// meaning `try_direct_recv` drained the kernel buffer between the
+    /// PollOnce SQE firing and the driver acquiring `peer_io`. Without
+    /// this, the driver would enter `reader.read(buf).await` on an empty
+    /// buffer and block until the peer sends again (deadlock for
+    /// sequential REQ/REP under the `priority` feature).
+    #[cfg(feature = "priority")]
+    pub(crate) drain_generation: AtomicU64,
 }
 
 impl std::fmt::Debug for DirectIoState {
@@ -562,6 +573,8 @@ impl DirectIoState {
             encoder: async_lock::Mutex::new(encoder),
             encoded_queue: Mutex::new(EncodedQueue::new()),
             driver_in_select: AtomicBool::new(false),
+            #[cfg(feature = "priority")]
+            drain_generation: AtomicU64::new(0),
         })
     }
 }

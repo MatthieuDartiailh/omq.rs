@@ -671,6 +671,14 @@ pub(crate) async fn run_connection(
         // that window (cooperative runtime). Any `notify` from a
         // sender that runs inside the select is captured.
         let transmit_ready_fut = state.transmit_ready.listen();
+        // Snapshot before polling read_ready_fut (which submits the
+        // PollOnce SQE). If try_direct_recv reads from the kernel buffer
+        // between now and when we acquire peer_io in the read_ready arm,
+        // it increments drain_generation and we bail instead of blocking
+        // on an empty buffer (priority feature only; non-priority sends
+        // always set outbound_pending via encoded_queue).
+        #[cfg(feature = "priority")]
+        let pre_drain_gen = state.drain_generation.load(Ordering::Acquire);
         futures::pin_mut!(read_ready_fut);
         futures::pin_mut!(eof_fut);
         futures::pin_mut!(cmd_fut);
@@ -741,7 +749,7 @@ pub(crate) async fn run_connection(
                     // fired too, and reading here would steal the
                     // kernel data, hanging the recv future on its
                     // subsequent read SQE.
-                    // Two reasons to bail before READ and loop back:
+                    // Three reasons to bail before READ and loop back:
                     //   (a) recv_claim flipped to 1 between our snapshot
                     //       and now — must not steal bytes from the
                     //       direct-recv path.
@@ -755,12 +763,32 @@ pub(crate) async fn run_connection(
                     //       under IORING_FEAT_FAST_POLL (the kernel
                     //       re-polls the fd internally instead of
                     //       surfacing EAGAIN), stranding the payload.
+                    //   (c) [priority only] try_direct_recv drained the
+                    //       kernel buffer between our PollOnce SQE firing
+                    //       and us acquiring peer_io here. Under the
+                    //       priority feature sends go to the cmd inbox
+                    //       (not encoded_queue), so outbound_pending is
+                    //       false even though a SendMessage is waiting.
+                    //       Entering read().await would block forever
+                    //       (FAST_POLL re-polls internally on empty buffer).
+                    //       drain_generation, incremented by try_direct_recv
+                    //       after each read, detects this race.
                     // Either way: drop the lock, mark codec dirty so
                     // step 3a re-checks, loop. The FD stays readable
                     // so the next iteration re-arms POLL_ADD.
                     let outbound_pending = io.codec.has_pending_transmit()
                         || !state.encoded_queue.lock().expect("encoded_queue").is_empty();
-                    if state.recv_claim.load(Ordering::Acquire) == 1 || outbound_pending {
+                    #[cfg(feature = "priority")]
+                    let drained_by_direct_recv = state
+                        .drain_generation
+                        .load(Ordering::Acquire)
+                        != pre_drain_gen;
+                    #[cfg(not(feature = "priority"))]
+                    let drained_by_direct_recv = false;
+                    if state.recv_claim.load(Ordering::Acquire) == 1
+                        || outbound_pending
+                        || drained_by_direct_recv
+                    {
                         drop(io);
                         read_buf = buf;
                         codec_maybe_dirty = true;
