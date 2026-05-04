@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
 use omq_tokio::options::ReconnectPolicy;
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
 fn loopback_port() -> u16 {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -118,6 +118,7 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
             ..Default::default()
         },
     );
+    let mut mon = push.monitor();
     push.connect(tcp_ep(port)).await.unwrap();
 
     // Confirm handshake before flooding.
@@ -155,7 +156,27 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
     }
     assert!(bound, "pull2 failed to bind after pull1 was dropped");
 
-    // Push must have reconnected; this send must reach pull2.
+    // Wait for the second handshake on the push side. Without this, a `send`
+    // racing the disconnect can be committed to the dying peer's queue and
+    // lost (ZMQ semantic: messages queued for a vanished peer are dropped on
+    // the floor; non-priority mode happens to survive because its shared
+    // queue spans drivers, but the priority path's per-peer inbox does not).
+    // Synchronising on the new HandshakeSucceeded means the next send routes
+    // to the live peer, exercising "reconnects and resumes delivery" without
+    // depending on in-flight survival.
+    let mut handshakes = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handshakes < 2 {
+        let evt = tokio::time::timeout_at(deadline, mon.recv())
+            .await
+            .expect("timed out waiting for second HandshakeSucceeded")
+            .unwrap();
+        if matches!(evt, MonitorEvent::HandshakeSucceeded { .. }) {
+            handshakes += 1;
+        }
+    }
+
+    // Push has reconnected; this send must reach pull2.
     push.send(Message::single("after")).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), pull2.recv())
         .await

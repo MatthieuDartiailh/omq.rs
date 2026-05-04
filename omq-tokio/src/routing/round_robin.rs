@@ -18,6 +18,19 @@
 //! `Full` (await `send` on the highest-priority alive). `Disconnected`
 //! / `Closed` peers are skipped instantly - no HWM-stall on a dead
 //! high-priority pipe. Mirrors the omq-compio implementation.
+//!
+//! **In-flight loss on disconnect (priority).** Because each send is
+//! committed to a specific peer's inbox before the wire write happens,
+//! a send that races a TCP teardown can land in the dying peer's queue
+//! and be dropped when the driver exits. This is the standard ZMQ
+//! "messages queued for a vanished peer are lost" semantic — strict
+//! per-pipe priority needs per-pipe queues, and per-pipe queues can't
+//! migrate across peers without giving up the ordering. Default mode
+//! sidesteps it because its shared queue spans drivers; callers that
+//! need delivery confirmation across reconnects must layer it on top
+//! (`MonitorEvent::HandshakeSucceeded` / app-level acks). See
+//! `tests/reconnect.rs::peer_drop_mid_send_is_handled_cleanly` for
+//! how the test suite synchronises on this.
 
 #[cfg(feature = "priority")]
 use std::sync::{
