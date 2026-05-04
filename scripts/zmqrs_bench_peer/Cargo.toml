@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "zmqrs_bench_peer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "zmqrs_bench_peer"
+path = "src/main.rs"
+
+[dependencies]
+zeromq = "0.4"
+tokio = { version = "1", features = ["full"] }
+bytes = "1"

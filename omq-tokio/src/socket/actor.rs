@@ -201,6 +201,7 @@ pub(crate) struct SocketDriver {
 }
 
 impl SocketDriver {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         socket_type: SocketType,
         options: Options,
@@ -208,11 +209,11 @@ impl SocketDriver {
         recv_tx: async_channel::Sender<Message>,
         cancel: CancellationToken,
         monitor: MonitorPublisher,
+        send_strategy: SendStrategy,
+        send_submitter: SendSubmitter,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
-        let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
-        let send_submitter = send_strategy.submitter();
         let recv_strategy = RecvStrategy::for_socket_type(socket_type, recv_tx.clone());
         Self {
             socket_type,
@@ -934,6 +935,16 @@ impl SocketDriver {
             None => driver,
         };
 
+        // Recv bypass: for socket types whose recv path is a plain fair-queue
+        // delivery with no per-type post-processing, route messages directly
+        // from the connection driver into the user-facing recv channel,
+        // skipping the actor's event loop.
+        let driver = if can_bypass_actor_recv(self.socket_type) {
+            driver.with_recv_direct(self.recv_tx.clone())
+        } else {
+            driver
+        };
+
         // Insert the peer BEFORE spawning the driver task. Once
         // spawned, the driver may run on another worker before this
         // function returns; if it finishes (e.g. the peer immediately
@@ -1318,6 +1329,25 @@ impl SocketDriver {
             SocketType::Req | SocketType::Rep | SocketType::Dish
         )
     }
+}
+
+/// Whether this socket type can receive messages directly from the connection
+/// driver into the user-facing recv channel, bypassing the actor's event loop.
+/// Safe when the recv path is a plain fair-queue delivery with no
+/// per-socket-type post-processing (no `type_state.post_recv` transform,
+/// no identity-prefix prepending).
+fn can_bypass_actor_recv(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Pull
+            | SocketType::Dealer
+            | SocketType::Sub
+            | SocketType::XSub
+            | SocketType::Pair
+            | SocketType::Client
+            | SocketType::Channel
+            | SocketType::Gather
+    )
 }
 
 /// Extract a `SocketAddr` from a `PeerIdent` where applicable. None for inproc

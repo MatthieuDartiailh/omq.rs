@@ -14,6 +14,7 @@ use omq_proto::proto::SocketType;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
+use crate::routing::{SendStrategy, SendSubmitter};
 
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
 /// driver task. Close happens via the explicit [`Socket::close`] method
@@ -30,6 +31,9 @@ struct Inner {
     recv_rx: async_channel::Receiver<Message>,
     monitor: MonitorPublisher,
     root_cancel: CancellationToken,
+    /// Pre-built submitter for socket types that bypass the actor on send.
+    /// Cloned from the `SendStrategy` before the driver is spawned.
+    send_submitter: SendSubmitter,
 }
 
 impl Socket {
@@ -52,6 +56,11 @@ impl Socket {
         let (recv_tx, recv_rx) =
             async_channel::bounded::<Message>(options.recv_hwm.unwrap_or(1024).max(16) as usize);
         let monitor = MonitorPublisher::new();
+        // Build the send strategy here so we can hand a submitter clone to
+        // `Inner` for the actor-bypass fast path, while the strategy itself
+        // moves into the driver.
+        let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
+        let send_submitter = send_strategy.submitter();
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -59,6 +68,8 @@ impl Socket {
             recv_tx,
             cancel.clone(),
             monitor.clone(),
+            send_strategy,
+            send_submitter.clone(),
         );
         spawn_driver(driver);
         Self {
@@ -68,6 +79,7 @@ impl Socket {
                 recv_rx,
                 monitor,
                 root_cancel: cancel,
+                send_submitter,
             }),
         }
     }
@@ -138,13 +150,26 @@ impl Socket {
     /// Send a message. Awaits until the message has been accepted by a ready
     /// peer's driver inbox (not waited-on-wire).
     pub async fn send(&self, msg: Message) -> Result<()> {
-        let (ack, rx) = oneshot::channel();
-        self.inner
-            .cmd_tx
-            .send(SocketCommand::Send { msg, ack })
-            .await
-            .map_err(|_| Error::Closed)?;
-        rx.await.map_err(|_| Error::Closed)?
+        match self.inner.socket_type {
+            SocketType::Req | SocketType::Rep => {
+                // TypeState::pre_send is stateful (alternation + envelope).
+                // Must go through the actor.
+                let (ack, rx) = oneshot::channel();
+                self.inner
+                    .cmd_tx
+                    .send(SocketCommand::Send { msg, ack })
+                    .await
+                    .map_err(|_| Error::Closed)?;
+                rx.await.map_err(|_| Error::Closed)?
+            }
+            _ => {
+                // pre_send is either a no-op identity transform or a pure
+                // frame-count check with no mutable TypeState. Bypass the
+                // actor: inline check + direct submitter.
+                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
+                self.inner.send_submitter.send(msg).await
+            }
+        }
     }
 
     /// Non-blocking send. Returns `Err(Error::WouldBlock)` if the socket's
@@ -311,6 +336,27 @@ impl Socket {
             Ok(res) => res,
             Err(_) => Ok(()),
         }
+    }
+}
+
+/// Validate frame count for socket types that enforce a fixed count but whose
+/// `TypeState::pre_send` has no mutable side effects. This mirrors the check
+/// inside `TypeState::pre_send` for the relevant types so the actor-bypass
+/// send path still surfaces the same protocol errors.
+fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
+    match t {
+        SocketType::Client | SocketType::Scatter | SocketType::Gather | SocketType::Channel
+            if msg.len() != 1 =>
+        {
+            Err(Error::Protocol(format!(
+                "{t:?} socket requires single-part messages (got {})",
+                msg.len()
+            )))
+        }
+        SocketType::Server if msg.len() != 2 => Err(Error::Protocol(
+            "SERVER socket requires [routing_id, body] (2 parts)".into(),
+        )),
+        _ => Ok(()),
     }
 }
 

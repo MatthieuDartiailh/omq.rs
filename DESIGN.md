@@ -614,6 +614,75 @@ Both backends use a 64 KiB read buffer. With 8 KiB a 32 KiB message required 4
 syscalls; with 64 KiB it fits in one. The filled buffer is consumed inline (no
 `buf.clone()` that would memcpy the whole payload).
 
+### `SocketDriver` actor + hot-path bypass
+
+The tokio backend wraps each `Socket` in a `SocketDriver` task — an actor in
+the textbook sense: it owns mutable state nobody else can touch, and the
+outside world communicates with it via channels.
+
+**State the actor owns:**
+- `HashMap<PeerId, PeerInfo>` — every connected peer (TCP/IPC/inproc/UDP),
+  including each peer's outbound flume `Sender`, monitor handle, codec config.
+- `TypeState` — REQ/REP alternation flag, ROUTER identity-prefix table, DISH
+  group memberships, XPUB subscription trie, conflate flag.
+- `SendStrategy` + `RecvStrategy` — round-robin, fan-out, identity-route,
+  fair-queue policy.
+- bind/connect/disconnect bookkeeping — listener tasks, dialer tasks,
+  reconnect timers.
+
+**Channels in:** `cmd_tx: mpsc::Sender<SocketCommand>` (Bind, Connect, Send,
+Subscribe, …) from user handles; `peer_out: mpsc::Sender<(PeerId, PeerOut)>`
+(Connected, Disconnected, Event(msg)) from connection drivers.
+
+This is the same shape `tokio-tungstenite`, `redis-rs`, and `quinn` use: a
+single task serializes mutation of state that has many concurrent sources of
+input. It's the right pattern for **rare, stateful, multi-source events** —
+bind, connect, subscribe, identity-route lookups, monitor fan-out, HWM
+accounting, conflate, priority tiers.
+
+**It is not the right pattern for the per-message hot path** when no actor
+state actually mutates per-message. For PUSH/DEALER/PUB/PAIR/CLIENT/SCATTER/
+CHANNEL send, `TypeState::pre_send` is identity or a stateless frame-count
+assert. For PULL/DEALER/SUB/XSUB/PAIR/CLIENT/CHANNEL/GATHER recv,
+`TypeState::post_recv` is identity. Routing those messages through the actor
+means `cmd_tx.send(...).await` + per-message `tokio::spawn` + oneshot ack
++ flume push (~3 context switches) on send, and an extra mpsc hop through
+`peer_out` on recv — all to deliver a message the actor will only forward
+unchanged.
+
+**Send bypass (`Socket::send`).** For non-REQ/REP sockets, the handle reads
+a `SendSubmitter` clone (lock-free MPMC over flume) directly out of `Inner`
+and pushes the message in. Frame-count validation that lived inside
+`pre_send` is mirrored inline so protocol errors (e.g. `CLIENT` with multipart
+input) still surface. REQ/REP keep going through the actor because their
+`pre_send` flips the alternation bit — real per-message state mutation that
+must be serialized against concurrent `Socket` clones.
+
+**Recv bypass (`ConnectionDriver`).** For socket types whose recv path is
+plain fair-queue delivery, the connection driver gets a clone of the
+user-facing `recv_tx: async_channel::Sender<Message>` and pushes
+`Event::Message` straight into it, skipping `peer_out` and the actor's event
+loop. Per-peer ordering is preserved because a single driver task delivers
+in TCP order; backpressure still works because `recv_tx` is bounded
+(`recv_hwm`) and a full channel blocks the driver's read loop, halting TCP
+reads. Types that need post-processing keep going through the actor:
+
+| Bypassed (recv) | Through actor (recv) | Reason |
+|---|---|---|
+| Pull, Dealer, Sub, XSub, Pair, Client, Channel, Gather | Rep, Router, Server, Peer | Identity-prefix prepending |
+|  | Dish | Group membership filter |
+|  | XPub | Subscribe-as-message (0x01/0x00) parsing |
+
+**Result.** PUSH/PULL TCP loopback at 128 B: 84k → 4.0M msg/s (≈48× on the
+hop count alone, before multi-core gains). The actor still owns peer-table
+mutations and connection lifecycle — it's just no longer on the per-message
+path for the common send/recv cases.
+
+This is structurally why omq-tokio outperforms zmq.rs (also tokio-based): both
+runtimes are work-stealing across all cores, but zmq.rs routes every message
+through its socket actor's mpsc inbox; omq-tokio routes only the messages
+that have actor state to mutate.
+
 ---
 
 ## Performance summary
@@ -626,6 +695,8 @@ syscalls; with 64 KiB it fits in one. The filled buffer is consumed inline (no
 | Codec-skip guards (`codec_has_input`, `codec_maybe_dirty`) | compio `transport/driver.rs` | Skips `async PeerIo` mutex acquire on iterations where codec state didn't change |
 | Drain-vec reuse | compio `transport/driver.rs` | Same `Vec<Bytes>` cleared + reused across flushes; no per-flush heap alloc |
 | Direct shared-queue arm; pump-task elimination | tokio `engine/driver.rs`, `routing/round_robin.rs` | 3 task hops → 1 for TCP/IPC; pump still used for inproc |
+| Actor bypass on send (non-REQ/REP) | tokio `socket/handle.rs` | `Socket::send` skips actor: ~3 context switches → 1 flume push |
+| Actor bypass on recv (fair-queue types) | tokio `engine/driver.rs`, `socket/actor.rs` | `ConnectionDriver` pushes `recv_tx` directly; skips actor event loop |
 | `WireReader`/`WireWriter` enums (static dispatch) | `transport/peer_io.rs` | Eliminates `Box<dyn>` heap alloc and vtable indirection per read/write |
 | Writer lock separate from codec lock | compio `socket/inner.rs` | Encoder + I/O overlap; codec lock released before `write_vectored` |
 | Encoder lock separate from `PeerIo` | compio `socket/inner.rs` | Sender encodes compress-transform messages concurrently with driver reads; no lock contention on the read/write boundary |
@@ -782,6 +853,48 @@ read-path lock on `PeerIo` no longer blocks the sender.
 Additionally, `Payload` gained ergonomic zero-copy accessors (`as_bytes`,
 `as_slice`, `is_contiguous`) so callers can inspect single-chunk payloads without
 coalescing.
+
+### Phase 8 — tokio: actor bypass on send + recv hot paths (`ebf2542`)
+
+After Phase 6 stripped the pump-task hop, profiling the remaining tokio gap to
+zmq.rs showed the per-message cost was now dominated by the **actor itself**:
+`Socket::send` round-tripping through `cmd_tx → SocketCommand::Send → spawn →
+flume push → oneshot ack` (~3 context switches), plus inbound messages going
+`ConnectionDriver → peer_out → SocketDriver event loop → recv_tx` (~1 extra
+hop). The actor existed to serialize state mutation, but PUSH/DEALER/PUB/PAIR/
+CLIENT/SCATTER/CHANNEL `pre_send` and PULL/DEALER/SUB/XSUB/PAIR/CLIENT/CHANNEL/
+GATHER `post_recv` are identity or stateless frame-count checks — nothing to
+serialize.
+
+**Send bypass.** `Inner` gained a `SendSubmitter` clone (built from the
+`SendStrategy` before the driver is spawned). `Socket::send` matches on
+socket type: REQ/REP go through `cmd_tx` as before (alternation bit
+mutates); everything else inline-validates frame count and pushes straight
+into the submitter. `SendSubmitter` is already lock-free MPMC over flume,
+so concurrent cloned `Socket` handles are fine.
+
+**Recv bypass.** `ConnectionDriver` gained `recv_direct:
+Option<async_channel::Sender<Message>>`. When set (via
+`with_recv_direct(recv_tx.clone())`), the event-drain loop pushes
+`Event::Message` straight into the user-facing recv channel and skips
+`peer_out`. The actor still receives `Connected`/`Disconnected` events on
+`peer_out` so peer-table bookkeeping is unaffected. Types that need
+post-processing (Rep/Router/Server/Peer identity prefix, Dish group filter,
+XPub subscribe parsing) keep `recv_direct = None` and go through the actor.
+
+**Numbers (TCP loopback, single PUSH/PULL):**
+
+| Size | omq-tokio before | omq-tokio after | zmq.rs |
+|------|------------------|-----------------|--------|
+| 128 B | 84k msg/s | 4.03M msg/s | 304k |
+| 2 KiB | 72k msg/s | 1.72M msg/s | 263k |
+
+The 48× lift at 128 B is hop-count savings; the multi-core parallelism that
+tokio always had is now exposed because the actor is no longer the
+serialization bottleneck. zmq.rs runs the same tokio multi-thread runtime but
+routes every message through its socket actor's mpsc inbox — that's why
+omq-tokio (13.2×) widens versus zmq.rs even though omq-compio's single-core
+io_uring path lands at 9.2× on the same wire.
 
 ### What was tried and abandoned
 

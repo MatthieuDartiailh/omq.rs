@@ -40,11 +40,11 @@ kicks in - take ±25 % at 8 KiB+ as a rough envelope.
 | Size | inproc | ipc | tcp | lz4+tcp | zstd+tcp |
 |---|---|---|---|---|---|
 | 32 B | 2.82M / 90.2 MB/s | 1.95M / 62.4 MB/s | 1.95M / 62.4 MB/s | 1.65M / 52.9 MB/s | 1.34M / 42.8 MB/s |
-| 128 B | 2.80M / 358 MB/s | 1.67M / 214 MB/s | 1.68M / 216 MB/s | 1.48M / 189 MB/s | 99.9k / 12.8 MB/s |
+| 128 B | 2.82M / 361 MB/s | 1.71M / 219 MB/s | 1.70M / 218 MB/s | 1.54M / 198 MB/s | 104k / 13.3 MB/s |
 | 512 B | 2.81M / 1.44 GB/s | 1.24M / 636 MB/s | 1.25M / 638 MB/s | 964k / 494 MB/s | 103k / 52.8 MB/s |
-| 2 KiB | 2.82M / 5.78 GB/s | 796k / 1.63 GB/s | 810k / 1.66 GB/s | 704k / 1.44 GB/s | 410k / 841 MB/s |
+| 2 KiB | 2.86M / 5.86 GB/s | 816k / 1.67 GB/s | 820k / 1.68 GB/s | 747k / 1.53 GB/s | 416k / 851 MB/s |
 | 8 KiB | 2.78M / 22.8 GB/s | 371k / 3.04 GB/s | 348k / 2.85 GB/s | 355k / 2.90 GB/s | 252k / 2.06 GB/s |
-| 32 KiB | 2.81M / 92.1 GB/s | 121k / 3.96 GB/s | 114k / 3.75 GB/s | 115k / 3.77 GB/s | 98.4k / 3.22 GB/s |
+| 32 KiB | 2.78M / 91.2 GB/s | 124k / 4.06 GB/s | 109k / 3.57 GB/s | 118k / 3.88 GB/s | 101k / 3.30 GB/s |
 | 128 KiB | 2.81M / 368.7 GB/s | 31.1k / 4.08 GB/s | 29.1k / 3.82 GB/s | 30.0k / 3.93 GB/s | 29.7k / 3.90 GB/s |
 
 <!-- END push_pull_compio_1peer -->
@@ -153,25 +153,25 @@ of plaintext.
 | transport | size | omq-compio | omq-tokio |
 |---|---|---|---|
 | inproc | 32 B | 5.7 µs (177k) | 87.3 µs (11.5k) |
-| inproc | 128 B | 5.7 µs (175k) | 30.0 µs (33.3k) |
+| inproc | 128 B | 5.6 µs (179k) | 30.9 µs (32.3k) |
 | inproc | 512 B | 5.7 µs (174k) | 31.9 µs (31.3k) |
-| inproc | 2 KiB | 5.7 µs (176k) | 28.7 µs (34.8k) |
+| inproc | 2 KiB | 5.6 µs (179k) | 30.4 µs (32.9k) |
 | inproc | 8 KiB | 5.7 µs (176k) | 30.6 µs (32.7k) |
-| inproc | 32 KiB | 5.7 µs (176k) | 58.6 µs (17.1k) |
+| inproc | 32 KiB | 5.6 µs (179k) | 30.5 µs (32.8k) |
 | inproc | 128 KiB | 5.8 µs (174k) | 29.9 µs (33.5k) |
 | ipc | 32 B | 19.9 µs (50.3k) | 54.3 µs (18.4k) |
-| ipc | 128 B | 19.8 µs (50.4k) | 54.1 µs (18.5k) |
+| ipc | 128 B | 20.5 µs (48.8k) | 53.5 µs (18.7k) |
 | ipc | 512 B | 19.8 µs (50.4k) | 133 µs (7.5k) |
-| ipc | 2 KiB | 21.0 µs (47.5k) | 58.5 µs (17.1k) |
+| ipc | 2 KiB | 21.9 µs (45.6k) | 59.7 µs (16.8k) |
 | ipc | 8 KiB | 24.2 µs (41.4k) | 62.9 µs (15.9k) |
-| ipc | 32 KiB | 30.1 µs (33.3k) | 70.1 µs (14.3k) |
+| ipc | 32 KiB | 32.1 µs (31.1k) | 71.3 µs (14.0k) |
 | ipc | 128 KiB | 72.7 µs (13.8k) | 100 µs (10.0k) |
 | tcp | 32 B | 27.4 µs (36.6k) | 62.2 µs (16.1k) |
-| tcp | 128 B | 27.4 µs (36.5k) | 69.9 µs (14.3k) |
+| tcp | 128 B | 30.0 µs (33.4k) | 69.2 µs (14.5k) |
 | tcp | 512 B | 27.7 µs (36.1k) | 75.5 µs (13.2k) |
-| tcp | 2 KiB | 28.7 µs (34.9k) | 66.3 µs (15.1k) |
+| tcp | 2 KiB | 31.3 µs (31.9k) | 72.1 µs (13.9k) |
 | tcp | 8 KiB | 31.2 µs (32.0k) | 76.0 µs (13.2k) |
-| tcp | 32 KiB | 38.6 µs (25.9k) | 162 µs (6.2k) |
+| tcp | 32 KiB | 42.0 µs (23.8k) | 92.3 µs (10.8k) |
 | tcp | 128 KiB | 87.7 µs (11.4k) | 121 µs (8.2k) |
 
 <!-- END req_rep_latency -->
@@ -195,27 +195,27 @@ All values are µs wall time. Compression transports add per-frame codec overhea
 <!-- BEGIN latency_percentiles -->
 | transport | size | compio p50 | compio p99 | compio p999 | tokio p50 | tokio p99 | tokio p999 |
 |---|---|---|---|---|---|---|---|
-| inproc | 32 B | 5.47 µs | 8.42 µs | 27.1 µs | 27.6 µs | 35.0 µs | 41.0 µs |
-| inproc | 128 B | 5.63 µs | 5.74 µs | 11.2 µs | 29.1 µs | 38.0 µs | 50.8 µs |
-| inproc | 512 B | 5.61 µs | 5.83 µs | 21.7 µs | 30.1 µs | 43.2 µs | 80.6 µs |
-| inproc | 2 KiB | 5.66 µs | 5.93 µs | 21.7 µs | 33.7 µs | 282 µs | 341 µs |
-| inproc | 8 KiB | 5.71 µs | 6.09 µs | 36.0 µs | 30.0 µs | 38.1 µs | 46.2 µs |
-| inproc | 32 KiB | 5.72 µs | 6.08 µs | 35.7 µs | 30.3 µs | 39.3 µs | 48.9 µs |
-| inproc | 128 KiB | 5.75 µs | 6.02 µs | 24.1 µs | 29.7 µs | 40.4 µs | 95.2 µs |
-| ipc | 32 B | 20.8 µs | 34.0 µs | 58.3 µs | 56.3 µs | 841 µs | 933 µs |
-| ipc | 128 B | 20.7 µs | 34.0 µs | 57.7 µs | 53.0 µs | 92.7 µs | 112 µs |
-| ipc | 512 B | 21.6 µs | 34.8 µs | 59.0 µs | 54.2 µs | 854 µs | 962 µs |
-| ipc | 2 KiB | 22.3 µs | 35.5 µs | 59.6 µs | 55.0 µs | 76.5 µs | 104 µs |
-| ipc | 8 KiB | 25.9 µs | 39.7 µs | 63.6 µs | 62.7 µs | 110 µs | 173 µs |
-| ipc | 32 KiB | 32.4 µs | 46.6 µs | 72.9 µs | 68.5 µs | 919 µs | 1.0 ms |
-| ipc | 128 KiB | 78.2 µs | 102 µs | 139 µs | 97.8 µs | 1.1 ms | 1.2 ms |
-| tcp | 32 B | 29.1 µs | 36.6 µs | 67.6 µs | 63.7 µs | 120 µs | 176 µs |
-| tcp | 128 B | 29.4 µs | 37.2 µs | 66.7 µs | 64.3 µs | 117 µs | 272 µs |
-| tcp | 512 B | 28.6 µs | 56.2 µs | 840 µs | 65.6 µs | 897 µs | 975 µs |
-| tcp | 2 KiB | 29.3 µs | 51.6 µs | 71.6 µs | 63.5 µs | 121 µs | 181 µs |
-| tcp | 8 KiB | 31.8 µs | 38.2 µs | 60.2 µs | 66.3 µs | 142 µs | 227 µs |
-| tcp | 32 KiB | 39.0 µs | 46.9 µs | 66.0 µs | 92.1 µs | 1.1 ms | 1.2 ms |
-| tcp | 128 KiB | 86.9 µs | 139 µs | 146 µs | 126 µs | 1.2 ms | 1.3 ms |
+| inproc | 32 B | 5.83 µs | 6.04 µs | 14.8 µs | 29.6 µs | 40.8 µs | 71.9 µs |
+| inproc | 128 B | 5.69 µs | 5.81 µs | 14.0 µs | 30.2 µs | 40.8 µs | 64.8 µs |
+| inproc | 512 B | 5.52 µs | 5.80 µs | 24.3 µs | 30.7 µs | 40.7 µs | 52.5 µs |
+| inproc | 2 KiB | 5.49 µs | 9.77 µs | 36.3 µs | 30.8 µs | 40.5 µs | 49.3 µs |
+| inproc | 8 KiB | 5.48 µs | 18.8 µs | 38.9 µs | 29.4 µs | 45.9 µs | 78.9 µs |
+| inproc | 32 KiB | 5.56 µs | 5.71 µs | 24.2 µs | 29.0 µs | 40.9 µs | 60.8 µs |
+| inproc | 128 KiB | 5.58 µs | 5.69 µs | 12.5 µs | 28.4 µs | 41.2 µs | 75.9 µs |
+| ipc | 32 B | 19.5 µs | 38.1 µs | 57.6 µs | 55.5 µs | 93.0 µs | 121 µs |
+| ipc | 128 B | 19.8 µs | 38.6 µs | 65.2 µs | 52.0 µs | 74.7 µs | 116 µs |
+| ipc | 512 B | 20.0 µs | 38.9 µs | 56.6 µs | 56.0 µs | 105 µs | 123 µs |
+| ipc | 2 KiB | 20.8 µs | 58.4 µs | 99.5 µs | 56.8 µs | 98.0 µs | 428 µs |
+| ipc | 8 KiB | 24.9 µs | 43.1 µs | 57.4 µs | 61.3 µs | 107 µs | 215 µs |
+| ipc | 32 KiB | 29.8 µs | 52.1 µs | 76.0 µs | 69.6 µs | 108 µs | 180 µs |
+| ipc | 128 KiB | 72.0 µs | 118 µs | 150 µs | 100 µs | 123 µs | 155 µs |
+| tcp | 32 B | 28.6 µs | 49.9 µs | 74.9 µs | 64.3 µs | 898 µs | 972 µs |
+| tcp | 128 B | 28.0 µs | 47.4 µs | 73.8 µs | 64.2 µs | 115 µs | 150 µs |
+| tcp | 512 B | 27.9 µs | 46.9 µs | 67.5 µs | 65.8 µs | 119 µs | 169 µs |
+| tcp | 2 KiB | 29.1 µs | 48.3 µs | 71.9 µs | 66.8 µs | 119 µs | 267 µs |
+| tcp | 8 KiB | 31.8 µs | 50.8 µs | 72.1 µs | 70.1 µs | 124 µs | 355 µs |
+| tcp | 32 KiB | 39.2 µs | 66.1 µs | 98.6 µs | 91.9 µs | 1.0 ms | 1.2 ms |
+| tcp | 128 KiB | 88.0 µs | 108 µs | 143 µs | 124 µs | 155 µs | 267 µs |
 | lz4+tcp | 32 B | 28.5 µs | 35.2 µs | 48.3 µs | — | — | — |
 | lz4+tcp | 128 B | 28.3 µs | 35.9 µs | 54.4 µs | — | — | — |
 
@@ -355,17 +355,58 @@ roughly where `write_vectored` batching of multi-chunk frames pays off
 vs. libzmq's separate `send()` per frame segment. Run
 `./scripts/bench_compare.sh --update-benchmarks` to refresh this table.
 
+## zmq.rs vs omq-tokio vs omq-compio (two-process TCP)
+
+Two separate processes on the same machine, TCP loopback. `bench_peer
+push` binds and sends forever; `bench_peer pull` connects, warms up for
+500 ms, then counts for 3 seconds. The zmq.rs peer is built from
+`scripts/zmqrs_bench_peer/` (zeromq crate, tokio runtime); the
+omq-tokio peer is `omq-tokio/src/bin/bench_peer_tokio.rs`; the
+omq-compio peer is the same binary used in the libzmq comparison above.
+
+**Threading model is asymmetric, by design:**
+
+- **omq-compio is single-threaded** — one io_uring runtime on one core.
+  Multi-core deployments instantiate one runtime per worker thread
+  (typically pinned via `RuntimeBuilder::thread_affinity`); this bench
+  is one runtime, so the compio column is "what one core can do."
+- **omq-tokio uses the multi-thread tokio runtime** — work-stealing
+  across all cores. zmq.rs (also tokio-based) does the same. So the
+  zmq.rs ↔ omq-tokio comparison is apples-to-apples (same runtime,
+  same thread model), while the omq-compio column is intentionally
+  CPU-constrained.
+
+Unlike libzmq (which spawns a dedicated I/O thread alongside the app
+thread), zmq.rs drives I/O on the same tokio executor as the send/recv
+loop — structurally closer to omq-tokio than to libzmq.
+
+<!-- BEGIN zmqrs_comparison -->
+| Size | zmq.rs msg/s | zmq.rs MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × | omq-compio msg/s | omq-compio MB/s | compio × |
+|-------|-------------|------------|----------------|---------------|---------|-----------------|----------------|---------|
+| 128 B | 304k | 39 MB/s | 4.03M | 516 MB/s | **13.2×** | 2.81M | 360 MB/s | **9.2×** |
+| 512 B | 284k | 146 MB/s | 3.31M | 1.7 GB/s | **11.7×** | 2.18M | 1.1 GB/s | **7.7×** |
+| 2 KiB | 263k | 538 MB/s | 1.72M | 3.5 GB/s | **6.6×** | 1.37M | 2.8 GB/s | **5.2×** |
+| 8 KiB | 204k | 1.7 GB/s | 479k | 3.9 GB/s | **2.3×** | 550k | 4.5 GB/s | **2.7×** |
+| 32 KiB | 130k | 4.2 GB/s | 104k | 3.4 GB/s | 0.80× | 161k | 5.3 GB/s | **1.2×** |
+| 128 KiB | 32k | 4.2 GB/s | 42k | 5.5 GB/s | **1.3×** | 45k | 5.9 GB/s | **1.4×** |
+
+<!-- END zmqrs_comparison -->
+
+Run `./scripts/bench_compare_zmqrs.sh --update-benchmarks` to populate
+this table. Requires Rust toolchain; no system packages needed (zeromq
+is pure Rust).
+
 ## Backend comparison: PUSH/PULL throughput, single peer
 
 <!-- BEGIN backend_comparison -->
 | Size | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
 |---|---|---|---|---|---|---|
 | 32 B | 2.82M | 170k | 1.95M | 358k | 1.95M | 123k |
-| 128 B | 2.80M | 369k | 1.67M | 363k | 1.68M | 445k |
+| 128 B | 2.67M | 1.13M | 1.71M | 3.99M | 1.58M | 4.25M |
 | 512 B | 2.81M | 426k | 1.24M | 359k | 1.25M | 421k |
-| 2 KiB | 2.82M | 148k | 796k | 378k | 810k | 131k |
+| 2 KiB | 2.92M | 722k | 803k | 1.26M | 762k | 1.73M |
 | 8 KiB | 2.78M | 447k | 371k | 362k | 348k | 371k |
-| 32 KiB | 2.81M | 182k | 121k | 106k | 114k | 98.2k |
+| 32 KiB | 2.84M | 845k | 121k | 152k | 109k | 97.5k |
 | 128 KiB | 2.81M | 412k | 31.1k | 35.8k | 29.1k | 10.5k |
 
 <!-- END backend_comparison -->
@@ -390,11 +431,11 @@ multi-thread runtime gains from overlapping sender tasks on wire transports.
 | Size | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
 |---|---|---|---|---|---|---|
 | 32 B | 2.81M | 225k | 1.92M | 876k | 1.89M | 612k |
-| 128 B | 2.80M | 215k | 1.67M | 417k | 1.64M | 208k |
+| 128 B | 2.86M | 948k | 1.71M | 4.82M | 1.57M | 3.22M |
 | 512 B | 2.79M | 214k | 1.22M | 711k | 1.20M | 799k |
-| 2 KiB | 2.81M | 212k | 793k | 629k | 733k | 496k |
+| 2 KiB | 2.88M | 927k | 800k | 1.73M | 713k | 2.26M |
 | 8 KiB | 2.79M | 226k | 379k | 614k | 304k | 604k |
-| 32 KiB | 2.81M | 209k | 140k | 106k | 105k | 88.3k |
+| 32 KiB | 2.89M | 1.01M | 137k | 290k | 98.9k | 162k |
 | 128 KiB | 2.82M | 478k | 35.6k | 88.8k | 25.1k | 49.6k |
 
 <!-- END push_pull_8peer -->
@@ -466,4 +507,6 @@ OMQ_BENCH_SIZES=128,2048,32768 \
 # Two-process libzmq vs omq comparison (requires libzmq installed):
 # build: gcc scripts/libzmq_bench_peer.c -o scripts/libzmq_bench_peer -lzmq
 # then run scripts/bench_compare.sh
+# Two-process zmq.rs vs omq comparison (pure Rust, no system packages):
+# ./scripts/bench_compare_zmqrs.sh
 ```

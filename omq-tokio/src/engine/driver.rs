@@ -101,6 +101,12 @@ where
     /// hop through `inbox`). `None` for non-round-robin socket types and
     /// for the `priority` feature path.
     shared_msg_rx: Option<flume::Receiver<Message>>,
+    /// Direct recv channel. When set, inbound `Event::Message` frames are
+    /// pushed straight into the user-facing recv channel without going through
+    /// the `SocketDriver` actor's event loop. Only set for socket types where
+    /// the recv path is a plain fair-queue delivery with no per-type
+    /// post-processing (no `TypeState::post_recv`, no identity-prefix).
+    recv_direct: Option<async_channel::Sender<Message>>,
 }
 
 impl<T> ConnectionDriver<T>
@@ -146,6 +152,7 @@ where
             encoder: None,
             decoder: None,
             shared_msg_rx: None,
+            recv_direct: None,
         }
     }
 
@@ -168,6 +175,17 @@ where
     #[must_use]
     pub fn with_shared_rx(mut self, rx: flume::Receiver<Message>) -> Self {
         self.shared_msg_rx = Some(rx);
+        self
+    }
+
+    /// Install a direct recv channel. When set, inbound `Event::Message`
+    /// frames are pushed straight into the user-facing recv channel, bypassing
+    /// the `SocketDriver` actor's event loop. Only valid for socket types
+    /// whose recv path is a plain fair-queue delivery with no per-type
+    /// post-processing.
+    #[must_use]
+    pub fn with_recv_direct(mut self, tx: async_channel::Sender<Message>) -> Self {
+        self.recv_direct = Some(tx);
         self
     }
 
@@ -202,6 +220,7 @@ where
             mut encoder,
             mut decoder,
             shared_msg_rx,
+            recv_direct,
         } = self;
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
@@ -229,7 +248,7 @@ where
             }
 
             // 1. Drain parsed events. Backpressure via the shared
-            //    peer-out channel.
+            //    peer-out channel (or, for bypass types, the direct recv channel).
             while let Some(ev) = codec.poll_event() {
                 let ev = match (decoder.as_mut(), ev) {
                     (Some(dec), Event::Message(m)) => match dec.decode(m)? {
@@ -238,8 +257,17 @@ where
                     },
                     (_, ev) => ev,
                 };
-                if peer_out.send((peer_id, PeerOut::Event(ev))).await.is_err() {
-                    return Ok(());
+                match (recv_direct.as_ref(), ev) {
+                    (Some(tx), Event::Message(m)) => {
+                        if tx.send(m).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    (_, ev) => {
+                        if peer_out.send((peer_id, PeerOut::Event(ev))).await.is_err() {
+                            return Ok(());
+                        }
+                    }
                 }
             }
 
