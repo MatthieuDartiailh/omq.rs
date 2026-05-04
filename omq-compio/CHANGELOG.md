@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.2...omq-compio-v0.2.3) - 2026-05-04
+
+### Fixed
+
+- *(compio)* hold writer lock across the full snapshot → write → advance
+  flush sequence on both the driver's step-3a path and the recv-direct path
+  (`Socket::recv` → `handle.rs`). Previously both paths acquired the writer
+  lock only at write time; a concurrent heartbeat PING could be cloned by
+  both, written twice, and then over-advanced, panicking in
+  `advance_transmit`.
+
 ## [0.2.2](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.1...omq-compio-v0.2.2) - 2026-05-04
 
 ### Fixed
