@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use omq_compio::{Endpoint, IpcPath};
 
-pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 32_768];
+pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 8_192];
 pub(crate) const ALL_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
 pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 

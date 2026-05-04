@@ -18,7 +18,7 @@ use omq_tokio::{Endpoint, IpcPath};
 /// Default size sweep: three points that cover the small/medium/large
 /// knee of the throughput curve. Pass `--all-sizes` to the bench binary
 /// (or set `OMQ_BENCH_SIZES`) for the full geometric sweep.
-pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 32_768];
+pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 8_192];
 
 /// Full geometric ×4 sweep: 32 B → 128 KiB. Enabled via `--all-sizes`
 /// or `OMQ_BENCH_SIZES=32,128,...`.

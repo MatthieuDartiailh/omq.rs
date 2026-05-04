@@ -33,7 +33,7 @@ OptionParser.new do |o|
   o.on('--all-features',     'Enable lz4,zstd,curve,blake3zmq (not priority; use --with-priority)') {
     options[:features] = 'lz4 zstd curve blake3zmq'
   }
-  o.on('--all-sizes',        'Full 32 B–128 KiB size sweep (default: 128 B/2 KiB/32 KiB)') {
+  o.on('--all-sizes',        'Full 32 B–128 KiB size sweep (default: 128 B/2 KiB/8 KiB)') {
     options[:all_sizes] = true
   }
   o.on('--with-priority',    'Also run push_pull with priority (→ results_priority.jsonl)') {
@@ -44,6 +44,9 @@ end.parse!
 
 run_id = options[:id] || Time.now.strftime('%Y-%m-%dT%H:%M:%SZ')
 ENV['OMQ_BENCH_RUN_ID'] = run_id
+# Use the env-var path for --all-sizes so the flag isn't forwarded to libtest
+# (which errors on unrecognised options when cargo bench runs lib unit tests).
+ENV['OMQ_BENCH_SIZES'] = '32,128,512,2048,8192,32768,131072' if options[:all_sizes]
 
 puts "=== bench run #{run_id} ==="
 
@@ -52,7 +55,6 @@ options[:backends].each do |backend|
   cmd   = %w[cargo bench -p] + [crate]
   cmd  += ['--features', options[:features]] if options[:features]
   cmd  += ['--bench',    options[:bench]]    if options[:bench]
-  cmd  += ['--', '--all-sizes']              if options[:all_sizes]
 
   puts "\n--- #{crate} ---"
   system(*cmd, chdir: ROOT) || abort("#{crate} bench failed")
@@ -64,7 +66,6 @@ if options[:with_priority]
     crate = "omq-#{backend}"
     feat  = [options[:features], 'priority'].compact.join(' ')
     cmd   = %w[cargo bench -p] + [crate, '--features', feat, '--bench', 'push_pull']
-    cmd  += ['--', '--all-sizes'] if options[:all_sizes]
     puts "\n--- #{crate} (priority) ---"
     system(*cmd, chdir: ROOT) || abort("#{crate} priority bench failed")
   end

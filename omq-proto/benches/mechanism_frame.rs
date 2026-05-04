@@ -27,7 +27,18 @@ use std::time::Instant;
 use chacha20_blake3::ChaCha20Blake3;
 use crypto_box::{SalsaBox, SecretKey, aead::Aead};
 
-const SIZES: &[usize] = &[64, 256, 1024, 4096, 16384, 65536];
+const DEFAULT_SIZES: &[usize] = &[128, 2_048, 8_192];
+const ALL_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
+
+fn sizes() -> Vec<usize> {
+    if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
+        return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+    }
+    if std::env::args().any(|a| a == "--all-sizes") {
+        return ALL_SIZES.to_vec();
+    }
+    DEFAULT_SIZES.to_vec()
+}
 
 /// Target wall-time per cell. The bench picks an iteration count that
 /// roughly hits this - large payloads run fewer iters, small ones run
@@ -62,8 +73,9 @@ fn main() {
     let salsa = SalsaBox::new(&secret_b.public_key(), &secret_a);
     let nonce_curve = crypto_box::Nonce::from(black_box([0x22u8; 24]));
 
-    let mut rows = Vec::with_capacity(SIZES.len());
-    for &size in SIZES {
+    let active_sizes = sizes();
+    let mut rows = Vec::with_capacity(active_sizes.len());
+    for size in active_sizes {
         let plain = vec![0xACu8; size];
 
         let null_ns = bench(|| {

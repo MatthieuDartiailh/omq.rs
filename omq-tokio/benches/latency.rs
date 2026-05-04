@@ -19,7 +19,6 @@ fn latency_transports() -> Vec<String> {
     vec!["inproc".to_string(), "ipc".to_string(), "tcp".to_string()]
 }
 
-const SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
 const WARMUP_ITERS: usize = 1_000;
 const ITERS: usize = 10_000;
 
@@ -34,7 +33,7 @@ fn main() {
                 "  {:>6}  {:>10}  {:>10}  {:>10}  {:>10}",
                 "size", "p50 µs", "p99 µs", "p999 µs", "max µs"
             );
-            for &size in SIZES {
+            for size in common::sizes() {
                 seq += 1;
                 let label = format!("{transport}/{size}B");
                 let cell = common::with_timeout(&label, run_cell(&transport, size, seq)).await;

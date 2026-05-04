@@ -57,7 +57,7 @@ fn run_cell(
         .map(|i| common::endpoint("tcp", seq * push_n + i))
         .collect();
 
-    // Barrier: all PUSH threads synchronise here after warmup.
+    // Barrier: all PUSH threads synchronize here after warmup.
     let start = Arc::new(Barrier::new(push_n));
     let stop = Arc::new(AtomicBool::new(false));
 

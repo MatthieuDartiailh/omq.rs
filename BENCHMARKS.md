@@ -33,7 +33,7 @@ shape between transports and sizes should hold.
 
 Numbers below are single 0.5 s timed runs per cell; the small-size
 wire columns vary ±10 % run-to-run (cache / scheduling jitter on a
-single core). Larger sizes vary more once kernel send-buffer behaviour
+single core). Larger sizes vary more once kernel send-buffer behavior
 kicks in - take ±25 % at 8 KiB+ as a rough envelope.
 
 <!-- BEGIN push_pull_compio_1peer -->
@@ -309,9 +309,9 @@ collapsed that into per-call inline encoding + writev, so a hot
 single-producer loop did one syscall per message instead of one
 syscall per N messages. The recv-side win from Stage 5 was kept
 because RTT reduction there doesn't depend on changing the send
-path; the send-side fast path was reverted in favour of restoring
+path; the send-side fast path was reverted in favor of restoring
 producer/writer pipelining. The lesson: latency wins on bypass-the-
-hop optimisations can mask big throughput regressions when the hop
+hop optimizations can mask big throughput regressions when the hop
 was implicitly batching.
 
 The omq-tokio IPC numbers are still untouched. Tokio's send path goes
@@ -470,14 +470,14 @@ is better.
 |64 KiB   |   47.1 GB/s     |              557 MB/s    |             **1.43 GB/s**   |
 
 > **Security note on BLAKE3ZMQ.** This mechanism is omq-native and has
-> **not been independently security audited.** It's modelled on Noise
+> **not been independently security audited.** It's modeled on Noise
 > XX with BLAKE3 transcript hashing, X25519 key exchange, and
 > ChaCha20-BLAKE3 AEAD, but novel cryptographic constructions need
 > third-party review before they should be trusted for anything that
 > matters. If you have security or compliance requirements, use
 > **CURVE** (RFC 26 / NaCl XSalsa20Poly1305 - well-reviewed and what
 > libzmq ships). Independent audits of BLAKE3ZMQ are very welcome - if
-> you or your organisation can fund or conduct one, please open an
+> you or your organization can fund or conduct one, please open an
 > issue on the repo.
 
 Numbers are stock `cargo bench` (no `-C target-cpu=native`). omq-proto
