@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/paddor/omq.rs/compare/omq-proto-v0.2.1...omq-proto-v0.2.2) - 2026-05-04
+
+### Changed
+
+- *(blake3zmq)* switch `chacha20-blake3` dep from a git-pinned fork to
+  crates.io v0.9.11 (paddor/chacha20-blake3). The fork inlines the `chacha`
+  subcrate and carries `#[target_feature(enable = "avx2/avx512")]`
+  annotations; full AVX2 throughput (~1 GiB/s) requires
+  `RUSTFLAGS="-C target-cpu=native"` at build time; scalar path runs
+  ~55 MiB/s without it.
+
 ## [0.2.1](https://github.com/paddor/omq.rs/releases/tag/omq-proto-v0.2.1) - 2026-05-04
 
 ### Added
