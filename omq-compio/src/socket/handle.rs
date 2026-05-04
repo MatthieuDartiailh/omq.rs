@@ -1182,11 +1182,16 @@ impl Socket {
                 filled
             };
             // Flush any codec output from handle_input (e.g. auto-PONGs).
-            // Use the writer lock, not the codec lock, so the codec lock
-            // is free during the async write — mirrors the driver's
-            // flush path. The driver is parked on recv_state_changed
-            // while the claim is held, so it won't race us on the writer.
+            // Acquire the writer lock FIRST and hold it across the entire
+            // snapshot → write → advance sequence; the driver's step 3a
+            // flush follows the same discipline. Without that serialization,
+            // the driver's heartbeat PING (enqueued under the codec lock and
+            // flushed in step 3a) could be cloned by both paths and written
+            // twice, then double-advanced, panicking in `advance_transmit`.
+            // The driver path (when its select-arm fires while we hold the
+            // claim) blocks on `state.writer` until we drop our guard.
             loop {
+                let mut writer = state.writer.lock().await;
                 let chunks = {
                     let io = state.peer_io.lock().await;
                     if !io.codec.has_pending_transmit() {
@@ -1201,7 +1206,7 @@ impl Socket {
                 if chunks.is_empty() {
                     break;
                 }
-                let (res, _returned) = state.writer.lock().await.write_vectored(chunks).await;
+                let (res, _returned) = writer.write_vectored(chunks).await;
                 let written = res.map_err(Error::Io)?;
                 if written == 0 {
                     state.eof_signal.notify(usize::MAX);

@@ -507,8 +507,17 @@ pub(crate) async fn run_connection(
         //     heartbeat PINGs, and pre-handshake traffic. Skipped
         //     post-handshake when nothing has dirtied the codec this
         //     iteration; acquiring the async mutex is not free.
+        //
+        //     The writer lock is acquired FIRST and held across the entire
+        //     snapshot → write → advance critical section. The recv-direct
+        //     path (`Socket::recv` → handle.rs flush) follows the same
+        //     discipline. This serializes the two flush paths so they can't
+        //     both clone-and-write the same codec bytes (which would
+        //     duplicate output on the wire and over-advance the codec,
+        //     panicking in `advance_transmit`).
         let wrote_from_codec = if !state.handshake_done.load(Ordering::Relaxed) || codec_maybe_dirty
         {
+            let mut writer = state.writer.lock().await;
             let chunks = {
                 let io = peer_io.lock().await;
                 if io.codec.has_pending_transmit() {
@@ -521,11 +530,11 @@ pub(crate) async fn run_connection(
                     codec_maybe_dirty = false; // confirmed clean
                     Vec::new()
                 }
-            }; // codec lock released
+            }; // codec lock released; writer lock still held
             if chunks.is_empty() {
                 false
             } else {
-                let (res, _returned) = state.writer.lock().await.write_vectored(chunks).await;
+                let (res, _returned) = writer.write_vectored(chunks).await;
                 let written = res.map_err(Error::Io)?;
                 if written == 0 {
                     return Ok(());
