@@ -117,7 +117,7 @@ fn roundtrip_single_frame_message() {
     match ev {
         Event::Message(m) => {
             assert_eq!(m.len(), 1);
-            assert_eq!(m.parts()[0].coalesce(), &b"hello"[..]);
+            assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
         }
         _ => panic!("expected Message"),
     }
@@ -136,9 +136,9 @@ fn roundtrip_multipart_message() {
     match pull.poll_event().unwrap() {
         Event::Message(m) => {
             assert_eq!(m.len(), 3);
-            assert_eq!(m.parts()[0].coalesce(), &b"a"[..]);
-            assert_eq!(m.parts()[1].coalesce(), &b"bb"[..]);
-            assert_eq!(m.parts()[2].coalesce(), &b"ccc"[..]);
+            assert_eq!(m.parts()[0].as_bytes(), &b"a"[..]);
+            assert_eq!(m.parts()[1].as_bytes(), &b"bb"[..]);
+            assert_eq!(m.parts()[2].as_bytes(), &b"ccc"[..]);
         }
         _ => panic!(),
     }
@@ -278,7 +278,7 @@ fn curve_handshake_and_message_roundtrip() {
     let ev = server.poll_event().expect("message event");
     match ev {
         Event::Message(m) => {
-            assert_eq!(m.parts()[0].coalesce(), &b"encrypted hello"[..]);
+            assert_eq!(m.parts()[0].as_bytes(), &b"encrypted hello"[..]);
         }
         other => panic!("unexpected event: {other:?}"),
     }

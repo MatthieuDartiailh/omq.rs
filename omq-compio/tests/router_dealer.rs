@@ -51,8 +51,8 @@ async fn router_addresses_dealer_by_identity() {
         .expect("router recv timeout")
         .unwrap();
     assert_eq!(r.parts().len(), 2);
-    assert_eq!(r.parts()[0].coalesce(), &b"dealer-1"[..]);
-    assert_eq!(r.parts()[1].coalesce(), &b"hello"[..]);
+    assert_eq!(r.parts()[0].as_bytes(), &b"dealer-1"[..]);
+    assert_eq!(r.parts()[1].as_bytes(), &b"hello"[..]);
 
     // ROUTER replies by prefixing the dealer identity.
     let mut reply = Message::new();
@@ -64,7 +64,7 @@ async fn router_addresses_dealer_by_identity() {
         .await
         .expect("dealer recv timeout")
         .unwrap();
-    assert_eq!(d.parts()[0].coalesce(), &b"world"[..]);
+    assert_eq!(d.parts()[0].as_bytes(), &b"world"[..]);
 }
 
 #[compio::test]

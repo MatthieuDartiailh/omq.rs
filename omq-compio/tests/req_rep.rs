@@ -33,7 +33,7 @@ async fn req_rep_roundtrip_over_tcp() {
     let rep_handle = compio::runtime::spawn(async move {
         for _ in 0..3 {
             let m = rep_clone.recv().await.unwrap();
-            let body = m.parts()[0].coalesce();
+            let body = m.parts()[0].as_bytes();
             let mut reply = body.to_vec();
             reply.extend_from_slice(b"-pong");
             rep_clone.send(Message::single(reply)).await.unwrap();
@@ -48,7 +48,7 @@ async fn req_rep_roundtrip_over_tcp() {
             .expect("recv timeout")
             .unwrap();
         let want = format!("{body}-pong");
-        assert_eq!(r.parts()[0].coalesce(), want.as_bytes());
+        assert_eq!(r.parts()[0].as_bytes(), want.as_bytes());
     }
     let _ = rep_handle.await;
 }
@@ -120,14 +120,14 @@ async fn rep_survives_client_disconnect_mid_cycle() {
         .await
         .expect("REP did not receive second client's request")
         .unwrap();
-    assert_eq!(got.parts()[0].coalesce().as_ref(), b"real");
+    assert_eq!(got.parts()[0].as_bytes().as_ref(), b"real");
 
     rep.send(Message::single("reply")).await.unwrap();
     let reply = compio::time::timeout(Duration::from_millis(500), req2.recv())
         .await
         .expect("REQ2 did not receive reply")
         .unwrap();
-    assert_eq!(reply.parts()[0].coalesce().as_ref(), b"reply");
+    assert_eq!(reply.parts()[0].as_bytes().as_ref(), b"reply");
 }
 
 #[compio::test]
@@ -156,7 +156,7 @@ async fn req_rep_1000_cycles_tcp() {
             .unwrap_or_else(|_| panic!("cycle {i} timed out"))
             .unwrap();
         let expected = format!("{i}");
-        assert_eq!(r.parts()[0].coalesce(), expected.as_bytes(), "cycle {i}");
+        assert_eq!(r.parts()[0].as_bytes(), expected.as_bytes(), "cycle {i}");
     }
 
     rep_task.await.unwrap();
@@ -178,14 +178,14 @@ async fn req_rep_roundtrip_sequential_ipv4() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"ping"[..]);
 
     rep.send(Message::single("pong")).await.unwrap();
     let r = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+    assert_eq!(r.parts()[0].as_bytes(), &b"pong"[..]);
 }
 
 #[compio::test]
@@ -204,7 +204,7 @@ async fn req_rep_roundtrip_sequential_with_yield() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"ping"[..]);
 
     rep.send(Message::single("pong")).await.unwrap();
     // Explicit yield to let REP's driver flush encoded_queue.
@@ -213,7 +213,7 @@ async fn req_rep_roundtrip_sequential_with_yield() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+    assert_eq!(r.parts()[0].as_bytes(), &b"pong"[..]);
 }
 
 #[compio::test]
@@ -231,7 +231,7 @@ async fn req_rep_roundtrip_sequential_with_long_yield() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"ping"[..]);
 
     rep.send(Message::single("pong")).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
@@ -239,7 +239,7 @@ async fn req_rep_roundtrip_sequential_with_long_yield() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+    assert_eq!(r.parts()[0].as_bytes(), &b"pong"[..]);
 }
 
 #[compio::test]
@@ -258,7 +258,7 @@ async fn req_rep_roundtrip_sequential_spawned_recv() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"ping"[..]);
 
     rep.send(Message::single("pong")).await.unwrap();
 
@@ -270,7 +270,7 @@ async fn req_rep_roundtrip_sequential_spawned_recv() {
             .unwrap()
     });
     let r = recv_task.await.unwrap();
-    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+    assert_eq!(r.parts()[0].as_bytes(), &b"pong"[..]);
 }
 
 #[compio::test]
@@ -288,7 +288,7 @@ async fn req_rep_sequential_longer_timeout() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"ping"[..]);
 
     rep.send(Message::single("pong")).await.unwrap();
     // 10 second timeout - if req.recv() eventually succeeds it's a scheduling issue
@@ -296,5 +296,5 @@ async fn req_rep_sequential_longer_timeout() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+    assert_eq!(r.parts()[0].as_bytes(), &b"pong"[..]);
 }

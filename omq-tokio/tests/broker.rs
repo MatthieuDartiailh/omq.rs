@@ -58,14 +58,14 @@ async fn router_dealer_rep_single_cycle() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(work.parts()[0].coalesce(), &b"work"[..]);
+    assert_eq!(work.parts()[0].as_bytes(), &b"work"[..]);
     rep.send(Message::single("done")).await.unwrap();
 
     let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.parts()[0].coalesce(), &b"done"[..]);
+    assert_eq!(reply.parts()[0].as_bytes(), &b"done"[..]);
 
     broker.await.unwrap();
 }
@@ -107,7 +107,7 @@ async fn router_dealer_rep_multiple_rounds() {
             .await
             .expect("rep recv timed out")
             .unwrap();
-        let body = m.parts()[0].coalesce().to_vec();
+        let body = m.parts()[0].as_bytes().to_vec();
         let mut ack = b"ack:".to_vec();
         ack.extend_from_slice(&body);
         rep.send(Message::single(ack)).await.unwrap();
@@ -124,7 +124,7 @@ async fn router_dealer_rep_multiple_rounds() {
             .await
             .expect("req recv timed out")
             .unwrap();
-        let got = r.parts()[0].coalesce();
+        let got = r.parts()[0].as_bytes();
         let expected = format!("ack:job-{i}");
         assert_eq!(&*got, expected.as_bytes(), "round {i} mismatch");
     }
@@ -168,7 +168,7 @@ async fn router_dealer_rep_two_concurrent_clients() {
             .expect("rep recv timed out")
             .unwrap();
         let mut ok = b"ok-".to_vec();
-        ok.extend_from_slice(&m.parts()[0].coalesce());
+        ok.extend_from_slice(&m.parts()[0].as_bytes());
         rep.send(Message::single(ok)).await.unwrap();
 
         let reply = tokio::time::timeout(Duration::from_secs(3), dealer.recv())
@@ -184,14 +184,14 @@ async fn router_dealer_rep_two_concurrent_clients() {
         .expect("req1 recv timed out")
         .unwrap()
         .parts()[0]
-        .coalesce()
+        .as_bytes()
         .to_vec();
     let r2 = tokio::time::timeout(Duration::from_secs(3), req2.recv())
         .await
         .expect("req2 recv timed out")
         .unwrap()
         .parts()[0]
-        .coalesce()
+        .as_bytes()
         .to_vec();
 
     assert!(r1.starts_with(b"ok-"), "req1 got bad reply: {r1:?}");

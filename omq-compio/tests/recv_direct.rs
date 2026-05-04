@@ -45,7 +45,7 @@ async fn cancel_recv_mid_wait_then_recv_succeeds() {
         .await
         .expect("warm-up timeout")
         .unwrap();
-    assert_eq!(warm.parts()[0].coalesce(), &b"warm-up"[..]);
+    assert_eq!(warm.parts()[0].as_bytes(), &b"warm-up"[..]);
 
     // Abandon recv() mid-flight: it has claimed the recv slot,
     // entered the read_ready/in_rx select, and is parked. Drop
@@ -58,7 +58,7 @@ async fn cancel_recv_mid_wait_then_recv_succeeds() {
         .await
         .expect("second recv timeout")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"after-cancel"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"after-cancel"[..]);
 }
 
 /// Two concurrent `recv()` callers on the same Socket. Only one
@@ -91,7 +91,7 @@ async fn two_concurrent_recv_callers_share_messages() {
         let mut got = Vec::new();
         for _ in 0..(N / 2) {
             let m = pull_a.recv().await.unwrap();
-            got.push(m.parts()[0].coalesce().to_vec());
+            got.push(m.parts()[0].as_bytes().to_vec());
         }
         got
     });
@@ -100,7 +100,7 @@ async fn two_concurrent_recv_callers_share_messages() {
         let mut got = Vec::new();
         for _ in 0..(N / 2) {
             let m = pull_b.recv().await.unwrap();
-            got.push(m.parts()[0].coalesce().to_vec());
+            got.push(m.parts()[0].as_bytes().to_vec());
         }
         got
     });
@@ -153,5 +153,5 @@ async fn heartbeat_keeps_connection_alive_under_direct_recv() {
     let m = pull_handle.await.unwrap();
     assert!(m.is_ok(), "recv timed out (heartbeat dropped connection)");
     let m = m.unwrap().unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"after-idle"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"after-idle"[..]);
 }

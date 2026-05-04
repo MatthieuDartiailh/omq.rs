@@ -41,7 +41,7 @@ impl Submitter {
         if parts.is_empty() {
             return Err(Error::Unroutable);
         }
-        let identity = parts[0].coalesce();
+        let identity = parts[0].as_bytes();
 
         // Snapshot the destination queue under a short lock.
         let queue: Option<DropQueue> = {

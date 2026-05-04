@@ -87,7 +87,7 @@ async fn max_message_size_rejects_oversize() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().len(), 8);
+    assert_eq!(m.parts()[0].as_bytes().len(), 8);
 
     // Over budget: connection drops on the recv side. Subsequent recv
     // either returns a delayed message or errors -- we don't assert
@@ -147,7 +147,7 @@ async fn try_recv_returns_buffered_message() {
     push.send(Message::single("hello")).await.unwrap();
     tokio::task::yield_now().await;
     let msg = pull.try_recv().unwrap();
-    assert_eq!(&*msg.parts()[0].coalesce(), b"hello");
+    assert_eq!(&*msg.parts()[0].as_bytes(), b"hello");
 }
 
 #[tokio::test]
@@ -293,7 +293,7 @@ async fn max_message_size_exactly_at_limit_is_accepted() {
         .await
         .expect("message at exact limit must be delivered")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().len(), 8);
+    assert_eq!(m.parts()[0].as_bytes().len(), 8);
 }
 
 #[tokio::test]

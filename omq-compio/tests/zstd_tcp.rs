@@ -47,7 +47,7 @@ async fn zstd_small_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"hello over zstd"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hello over zstd"[..]);
 }
 
 #[compio::test]
@@ -62,7 +62,7 @@ async fn zstd_large_compressible_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(&m.parts()[0].coalesce()[..], &payload[..]);
+    assert_eq!(&m.parts()[0].as_bytes()[..], &payload[..]);
 }
 
 #[compio::test]
@@ -79,9 +79,9 @@ async fn zstd_multipart_message_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(m.len(), 3);
-    assert_eq!(m.parts()[0].coalesce(), &b"a"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"bb"[..]);
-    assert_eq!(m.parts()[2].coalesce(), &b"ccc"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"a"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"bb"[..]);
+    assert_eq!(m.parts()[2].as_bytes(), &b"ccc"[..]);
 }
 
 #[compio::test]
@@ -110,7 +110,7 @@ async fn zstd_auto_train_end_to_end() {
 
     let mut got = 0usize;
     while let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), pull.recv()).await {
-        assert_eq!(m.parts()[0].coalesce(), &sample[..]);
+        assert_eq!(m.parts()[0].as_bytes(), &sample[..]);
         got += 1;
     }
     assert!(

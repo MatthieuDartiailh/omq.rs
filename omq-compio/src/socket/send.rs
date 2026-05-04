@@ -490,7 +490,7 @@ impl Socket {
         if parts.is_empty() {
             return Err(Error::Unroutable);
         }
-        let identity = parts[0].coalesce();
+        let identity = parts[0].as_bytes();
         let target = {
             let table = self
                 .inner()
@@ -529,8 +529,8 @@ impl Socket {
                 "RADIO socket requires [group, body] (2 parts)".into(),
             ));
         }
-        let group = parts[0].coalesce();
-        let body = parts[1].coalesce();
+        let group = parts[0].as_bytes();
+        let body = parts[1].as_bytes();
         let udp_socks: Vec<Arc<compio::net::UdpSocket>> = self
             .inner()
             .udp_dialers
@@ -574,7 +574,7 @@ impl Socket {
         let topic = msg
             .parts()
             .first()
-            .map(omq_proto::Payload::coalesce)
+            .map(omq_proto::Payload::as_bytes)
             .unwrap_or_default();
         let targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
@@ -732,7 +732,7 @@ impl Socket {
         if parts.is_empty() {
             return Err(Error::Unroutable);
         }
-        let identity = parts[0].coalesce();
+        let identity = parts[0].as_bytes();
         let target = {
             let table = self
                 .inner()
@@ -763,7 +763,7 @@ impl Socket {
         let topic = msg
             .parts()
             .first()
-            .map(omq_proto::Payload::coalesce)
+            .map(omq_proto::Payload::as_bytes)
             .unwrap_or_default();
         let targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
@@ -790,7 +790,7 @@ impl Socket {
                 "RADIO socket requires [group, body] (2 parts)".into(),
             ));
         }
-        let group = parts[0].coalesce();
+        let group = parts[0].as_bytes();
         let stream_targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers

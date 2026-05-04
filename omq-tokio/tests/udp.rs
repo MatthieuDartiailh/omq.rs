@@ -56,8 +56,8 @@ async fn radio_to_dish_matching_group_delivers() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"weather"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"sunny"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"weather"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"sunny"[..]);
 }
 
 #[tokio::test]
@@ -86,8 +86,8 @@ async fn dish_filters_unjoined_groups_locally() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"weather"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"rain"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"weather"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"rain"[..]);
 
     // No further message should arrive (the "news" datagram was dropped
     // by the receiver-side filter).
@@ -127,7 +127,7 @@ async fn dish_join_after_send_picks_up_subsequent_messages() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[1].coalesce(), &b"delivered"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"delivered"[..]);
 }
 
 #[tokio::test]

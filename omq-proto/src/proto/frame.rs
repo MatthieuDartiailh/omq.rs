@@ -207,7 +207,7 @@ mod tests {
         let mut buf = BytesMut::from(&[0x00, 0x03, b'a', b'b', b'c'][..]);
         let f = try_decode_frame(&mut buf).unwrap().unwrap();
         assert_eq!(f.flags, FrameFlags::LAST);
-        assert_eq!(f.payload.coalesce(), &b"abc"[..]);
+        assert_eq!(f.payload.as_bytes(), &b"abc"[..]);
         assert!(buf.is_empty());
     }
 
@@ -251,7 +251,7 @@ mod tests {
         encode_frame(&f, &mut buf);
         let decoded = try_decode_frame(&mut buf).unwrap().unwrap();
         assert_eq!(decoded.payload.len(), 1024);
-        assert_eq!(decoded.payload.coalesce(), payload.as_slice());
+        assert_eq!(decoded.payload.as_bytes(), payload.as_slice());
         assert!(buf.is_empty());
     }
 

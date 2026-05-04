@@ -50,7 +50,7 @@ async fn connect_retries_until_listener_appears() {
         .await
         .expect("recv timeout")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"eventually"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"eventually"[..]);
 }
 
 #[tokio::test]
@@ -77,7 +77,7 @@ async fn reconnect_after_peer_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(&*m.parts()[0].coalesce(), b"before");
+    assert_eq!(&*m.parts()[0].as_bytes(), b"before");
 
     // Peer restarts: close cleanly so the actor tears down.
     pull1.close().await.unwrap();
@@ -99,7 +99,7 @@ async fn reconnect_after_peer_restart() {
         .await
         .expect("recv after peer restart timed out")
         .unwrap();
-    assert_eq!(&*m.parts()[0].coalesce(), b"after");
+    assert_eq!(&*m.parts()[0].as_bytes(), b"after");
 }
 
 #[tokio::test]

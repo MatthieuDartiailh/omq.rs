@@ -1168,7 +1168,7 @@ impl SocketDriver {
                 if matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
                     && msg.parts().len() == 1
                 {
-                    let body = msg.parts()[0].coalesce();
+                    let body = msg.parts()[0].as_bytes();
                     if let Some((tag, prefix)) = body.split_first() {
                         match tag {
                             0x01 => {
@@ -1480,11 +1480,11 @@ mod tests {
 
         client.send(Message::single("hello")).await.unwrap();
         let msg = server.recv().await.unwrap();
-        assert_eq!(msg.parts()[0].coalesce(), &b"hello"[..]);
+        assert_eq!(msg.parts()[0].as_bytes(), &b"hello"[..]);
 
         server.send(Message::single("world")).await.unwrap();
         let msg = client.recv().await.unwrap();
-        assert_eq!(msg.parts()[0].coalesce(), &b"world"[..]);
+        assert_eq!(msg.parts()[0].as_bytes(), &b"world"[..]);
 
         client.close().await.unwrap();
         server.close().await.unwrap();
@@ -1508,7 +1508,7 @@ mod tests {
 
         send_task.await.unwrap().unwrap();
         let msg = server.recv().await.unwrap();
-        assert_eq!(msg.parts()[0].coalesce(), &b"early"[..]);
+        assert_eq!(msg.parts()[0].as_bytes(), &b"early"[..]);
     }
 
     #[tokio::test]

@@ -422,7 +422,7 @@ pub(crate) async fn run_connection(
                     if matches!(socket_type, SocketType::Pub | SocketType::XPub)
                         && m.parts().len() == 1
                     {
-                        let body = m.parts()[0].coalesce();
+                        let body = m.parts()[0].as_bytes();
                         if let Some((tag, prefix)) = body.split_first() {
                             let cmd = match tag {
                                 0x01 => {

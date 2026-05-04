@@ -39,11 +39,16 @@ pub(super) fn take_budget(budget: &mut Option<usize>, take: usize) -> Result<()>
 /// Build the plaintext-sentinel-prefixed payload for a part the
 /// transform decided not to compress (below threshold, or compressed
 /// envelope wasn't a net saving).
+///
+/// Produces a single-chunk `Payload`: `[SENTINEL_PLAIN | plain_bytes]`.
 pub(super) fn plaintext_payload(plain: Bytes) -> Payload {
     if plain.is_empty() {
         return Payload::from_bytes(Bytes::from_static(&SENTINEL_PLAIN));
     }
-    Payload::from_chunks([Bytes::from_static(&SENTINEL_PLAIN), plain])
+    let mut buf = BytesMut::with_capacity(ENVELOPE_PLAIN + plain.len());
+    buf.extend_from_slice(&SENTINEL_PLAIN);
+    buf.extend_from_slice(&plain);
+    Payload::from_bytes(buf.freeze())
 }
 
 /// Validate a send-side or received dictionary against the transport's

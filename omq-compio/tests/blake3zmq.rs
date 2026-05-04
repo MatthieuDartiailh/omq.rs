@@ -43,7 +43,7 @@ async fn blake3zmq_push_pull_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"hello over blake3zmq"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hello over blake3zmq"[..]);
 }
 
 // =====================================================================
@@ -73,13 +73,13 @@ async fn blake3zmq_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
+    assert_eq!(q.parts()[0].as_bytes(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
     let a = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
+    assert_eq!(a.parts()[0].as_bytes(), &b"a"[..]);
 }
 
 #[compio::test]
@@ -108,8 +108,8 @@ async fn blake3zmq_dealer_router() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"d1"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"hi"[..]);
 }
 
 #[compio::test]
@@ -134,7 +134,7 @@ async fn blake3zmq_pub_sub() {
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.parts()[0].coalesce(), &b"hello"[..]);
+            assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
             return;
         }
     }

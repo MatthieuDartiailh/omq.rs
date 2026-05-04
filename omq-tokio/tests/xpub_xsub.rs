@@ -51,14 +51,14 @@ async fn pub_filters_by_subscriber_prefix() {
         if !news_got
             && let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), news.recv()).await
         {
-            let bytes = m.parts()[0].coalesce();
+            let bytes = m.parts()[0].as_bytes();
             assert!(bytes.starts_with(b"news."), "news got non-news: {bytes:?}");
             news_got = true;
         }
         if !sports_got
             && let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), sports.recv()).await
         {
-            let bytes = m.parts()[0].coalesce();
+            let bytes = m.parts()[0].as_bytes();
             assert!(
                 bytes.starts_with(b"sports."),
                 "sports got non-sports: {bytes:?}"
@@ -94,7 +94,7 @@ async fn xpub_surfaces_subscribe_messages() {
         .await
         .unwrap()
         .unwrap();
-    let body = m.parts()[0].coalesce();
+    let body = m.parts()[0].as_bytes();
     assert_eq!(&body[..], b"\x01foo.");
 }
 
@@ -127,7 +127,7 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(&sub_notif.parts()[0].coalesce()[..], b"\x01news.");
+    assert_eq!(&sub_notif.parts()[0].as_bytes()[..], b"\x01news.");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -140,7 +140,7 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
         if let Ok(Ok(m)) =
             tokio::time::timeout(Duration::from_millis(20), sub_socket.recv()).await
         {
-            let bytes = m.parts()[0].coalesce();
+            let bytes = m.parts()[0].as_bytes();
             assert!(
                 bytes.starts_with(b"news."),
                 "XSUB received non-subscribed message: {bytes:?}"

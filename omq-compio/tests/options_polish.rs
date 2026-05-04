@@ -77,7 +77,7 @@ async fn max_message_size_rejects_oversize() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().len(), 8);
+    assert_eq!(m.parts()[0].as_bytes().len(), 8);
 
     push.send(Message::single("123456789")).await.unwrap();
     let r = compio::time::timeout(Duration::from_millis(200), pull.recv()).await;
@@ -129,7 +129,7 @@ async fn try_recv_returns_buffered_message() {
     // Yield so the inproc frame is forwarded through in_tx/in_rx.
     let _ = compio::runtime::spawn(async {}).await;
     let msg = pull.try_recv().unwrap();
-    assert_eq!(&*msg.parts()[0].coalesce(), b"hello");
+    assert_eq!(&*msg.parts()[0].as_bytes(), b"hello");
 }
 
 #[compio::test]
@@ -261,7 +261,7 @@ async fn max_message_size_exactly_at_limit_is_accepted() {
         .await
         .expect("message at exact limit must be delivered")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().len(), 8);
+    assert_eq!(m.parts()[0].as_bytes().len(), 8);
 }
 
 #[compio::test]

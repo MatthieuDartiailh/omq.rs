@@ -65,7 +65,7 @@ async fn disconnect_after_connect_succeeds() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"hi"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hi"[..]);
 
     push.disconnect(tcp_loopback(port)).await.unwrap();
     // Idempotency check: a second disconnect of the same endpoint is

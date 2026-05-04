@@ -48,7 +48,7 @@ async fn blake3zmq_push_pull_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"hello over blake3zmq"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hello over blake3zmq"[..]);
 }
 
 #[tokio::test]
@@ -77,7 +77,7 @@ async fn blake3zmq_multiple_messages_keep_counter_synced() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(got.parts()[0].coalesce(), msg.as_bytes());
+        assert_eq!(got.parts()[0].as_bytes(), msg.as_bytes());
     }
 }
 
@@ -110,7 +110,7 @@ async fn blake3zmq_long_payload_uses_long_frame_aad() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"short"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"short"[..]);
 
     // Long (1 KiB).
     let plaintext = vec![b'L'; 1024];
@@ -122,7 +122,7 @@ async fn blake3zmq_long_payload_uses_long_frame_aad() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().to_vec(), plaintext);
+    assert_eq!(m.parts()[0].as_bytes().to_vec(), plaintext);
 
     // Mix again.
     client.send(Message::single("short again")).await.unwrap();
@@ -130,7 +130,7 @@ async fn blake3zmq_long_payload_uses_long_frame_aad() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"short again"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"short again"[..]);
 }
 
 #[tokio::test]
@@ -172,9 +172,9 @@ async fn blake3zmq_multipart_message_delivered_atomically() {
         .unwrap()
         .unwrap();
     assert_eq!(got.len(), 3);
-    assert_eq!(got.parts()[0].coalesce(), &b"part1"[..]);
-    assert_eq!(got.parts()[1].coalesce(), &b"middle"[..]);
-    assert_eq!(got.parts()[2].coalesce(), &b"final"[..]);
+    assert_eq!(got.parts()[0].as_bytes(), &b"part1"[..]);
+    assert_eq!(got.parts()[1].as_bytes(), &b"middle"[..]);
+    assert_eq!(got.parts()[2].as_bytes(), &b"final"[..]);
 
     // No second message is queued - recv should time out.
     let extra = tokio::time::timeout(Duration::from_millis(150), server.recv()).await;
@@ -238,8 +238,8 @@ async fn blake3zmq_encrypts_subscribe_command() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m1.parts()[1].coalesce(), &b"sunny"[..]);
-    assert_eq!(m2.parts()[1].coalesce(), &b"rain"[..]);
+    assert_eq!(m1.parts()[1].as_bytes(), &b"sunny"[..]);
+    assert_eq!(m2.parts()[1].as_bytes(), &b"rain"[..]);
 
     // No third message - `news` was filtered by the subscription.
     let extra = tokio::time::timeout(Duration::from_millis(150), sub_socket.recv()).await;
@@ -314,7 +314,7 @@ async fn blake3zmq_authenticator_admits_known_client() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"authed"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"authed"[..]);
     assert!(
         saw_callback.load(Ordering::SeqCst),
         "authenticator must run"
@@ -381,13 +381,13 @@ async fn blake3zmq_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
+    assert_eq!(q.parts()[0].as_bytes(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
     let a = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
+    assert_eq!(a.parts()[0].as_bytes(), &b"a"[..]);
 }
 
 #[tokio::test]
@@ -416,8 +416,8 @@ async fn blake3zmq_dealer_router() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"d1"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"hi"[..]);
 }
 
 #[tokio::test]
@@ -442,7 +442,7 @@ async fn blake3zmq_pub_sub() {
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.parts()[0].coalesce(), &b"hello"[..]);
+            assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
             return;
         }
     }

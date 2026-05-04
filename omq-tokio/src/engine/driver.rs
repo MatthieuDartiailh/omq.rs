@@ -691,7 +691,7 @@ mod tests {
         let ev = server_events.recv().await.unwrap();
         match ev {
             Event::Message(m) => {
-                assert_eq!(m.parts()[0].coalesce(), &b"hello"[..]);
+                assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
             }
             _ => panic!("unexpected {ev:?}"),
         }

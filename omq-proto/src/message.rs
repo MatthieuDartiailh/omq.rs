@@ -1,9 +1,13 @@
 //! Message, Frame, and Payload types.
 //!
-//! `Payload` is a multi-chunk container so layers that prepend fixed prefixes
-//! (compression sentinels, CURVE nonces) can do so without a memcpy: prepend a
-//! static `Bytes` in front of the user payload, let gather I/O (`writev`) stitch
-//! them together at kernel level.
+//! `Payload` is a chunk list (`SmallVec<[Bytes; PAYLOAD_INLINE_CHUNKS]>`) that
+//! covers two shapes inline:
+//!
+//! - **Single-chunk** (overwhelmingly common): a user `Bytes`, encrypted
+//!   ciphertext, or a compression-transform output that baked its sentinel
+//!   prefix into the same buffer.
+//! - **Multi-chunk** (rare): raw `Payload::from_chunks` calls; these spill to
+//!   the heap and are coalesced on the send path via `writev`.
 //!
 //! A `Frame` is one ZMTP wire unit: flags plus a `Payload`. A `Message` is a
 //! logical sequence of parts where each part maps to one data Frame on the wire.
@@ -13,16 +17,15 @@ use smallvec::SmallVec;
 
 /// Number of inline chunks in a `Payload` before spilling to the heap.
 ///
-/// Sized to fit every realistic frame body produced by the codec and
-/// transforms inline:
-/// - 1 chunk for the overwhelming majority (user `Bytes`, codec output,
-///   encrypted ciphertext)
-/// - 2 chunks for compression transforms (`[sentinel, body]` - see
-///   `proto::transform::lz4` / `zstd`)
+/// One inline chunk covers every realistic frame body:
+/// - User `Bytes`, codec output, encrypted ciphertext — all single-chunk.
+/// - Compression transforms produce single-chunk payloads (sentinel
+///   prepended into the output buffer before freezing; no split needed).
 ///
 /// `Bytes` is 32 B in `bytes` 1.x (ptr/len/data/vtable), so this puts
-/// `Payload` at ~72 B inline.
-pub const PAYLOAD_INLINE_CHUNKS: usize = 2;
+/// `Payload` at ~40 B inline.  `from_chunks` with 2+ chunks still works
+/// but heap-allocates; that path is intentionally uncommon.
+pub const PAYLOAD_INLINE_CHUNKS: usize = 1;
 
 /// A frame payload, possibly composed of multiple `Bytes` chunks that are
 /// concatenated on the wire.
@@ -89,15 +92,36 @@ impl Payload {
         self.chunks.iter().all(Bytes::is_empty)
     }
 
-    /// Single-chunk fast path: `Some(&Bytes)` iff the payload holds exactly
-    /// one chunk. Returns `None` for empty or multi-chunk payloads.
-    pub fn as_bytes(&self) -> Option<&Bytes> {
+    /// Zero-copy single-chunk borrow: `Some(&Bytes)` iff the payload holds
+    /// exactly one chunk.  Returns `None` for empty or multi-chunk payloads.
+    /// Use [`as_bytes`](Self::as_bytes) when you always need a `Bytes`.
+    pub fn as_chunk(&self) -> Option<&Bytes> {
         (self.chunks.len() == 1).then(|| &self.chunks[0])
+    }
+
+    /// Returns the payload as a single contiguous `Bytes`.
+    ///
+    /// O(1) refcount increment for single-chunk or empty payloads.
+    /// Allocates and copies only for multi-chunk payloads (uncommon; see
+    /// [`PAYLOAD_INLINE_CHUNKS`]).
+    pub fn as_bytes(&self) -> Bytes {
+        match self.chunks.len() {
+            0 => Bytes::new(),
+            1 => self.chunks[0].clone(),
+            _ => {
+                let mut out = BytesMut::with_capacity(self.len());
+                for c in &self.chunks {
+                    out.extend_from_slice(c);
+                }
+                out.freeze()
+            }
+        }
     }
 
     /// Borrow as a contiguous byte slice when possible. Returns `Some(&[u8])`
     /// for empty (yields `&[]`) and single-chunk payloads; `None` for
-    /// multi-chunk. Use `coalesce()` if you need flat bytes regardless.
+    /// multi-chunk. Use [`as_bytes`](Self::as_bytes) if you need flat bytes
+    /// regardless.
     pub fn as_slice(&self) -> Option<&[u8]> {
         match self.chunks.len() {
             0 => Some(&[]),
@@ -112,23 +136,6 @@ impl Payload {
         self.chunks.len() <= 1
     }
 
-    /// Returns the payload as a single contiguous `Bytes`.
-    ///
-    /// O(1) refcount increment when the payload is already single-chunk or
-    /// empty. Otherwise one allocation and a concatenating copy.
-    pub fn coalesce(&self) -> Bytes {
-        match self.chunks.len() {
-            0 => Bytes::new(),
-            1 => self.chunks[0].clone(),
-            _ => {
-                let mut out = BytesMut::with_capacity(self.len());
-                for c in &self.chunks {
-                    out.extend_from_slice(c);
-                }
-                out.freeze()
-            }
-        }
-    }
 }
 
 impl From<Bytes> for Payload {
@@ -162,10 +169,10 @@ impl From<String> for Payload {
 }
 
 impl From<Payload> for Bytes {
-    /// Equivalent to `payload.coalesce()`. Free for single-chunk payloads
+    /// Equivalent to `payload.as_bytes()`. Free for single-chunk payloads
     /// (Arc-bump only); allocates and copies for multi-chunk.
     fn from(p: Payload) -> Bytes {
-        p.coalesce()
+        p.as_bytes()
     }
 }
 
@@ -332,23 +339,23 @@ mod tests {
         assert_eq!(p.len(), 0);
         assert!(p.is_empty());
         assert_eq!(p.chunk_count(), 0);
-        assert_eq!(p.coalesce(), Bytes::new());
+        assert_eq!(p.as_bytes(), Bytes::new());
     }
 
     #[test]
-    fn payload_single_chunk_coalesce_is_zero_copy() {
+    fn payload_single_chunk_as_bytes_is_zero_copy() {
         let b = Bytes::from_static(b"hello");
         let p = Payload::from_bytes(b.clone());
         assert_eq!(p.len(), 5);
         assert_eq!(p.chunk_count(), 1);
-        let coalesced = p.coalesce();
-        assert_eq!(coalesced, b);
+        let got = p.as_bytes();
+        assert_eq!(got, b);
         // Same ptr proves refcount-only, no copy.
-        assert!(std::ptr::addr_eq(coalesced.as_ptr(), b.as_ptr()));
+        assert!(std::ptr::addr_eq(got.as_ptr(), b.as_ptr()));
     }
 
     #[test]
-    fn payload_multi_chunk_coalesce_concats() {
+    fn payload_multi_chunk_as_bytes_concats() {
         let p = Payload::from_chunks([
             Bytes::from_static(b"foo"),
             Bytes::from_static(b"bar"),
@@ -356,7 +363,7 @@ mod tests {
         ]);
         assert_eq!(p.chunk_count(), 3);
         assert_eq!(p.len(), 9);
-        assert_eq!(p.coalesce(), &b"foobarbaz"[..]);
+        assert_eq!(p.as_bytes(), &b"foobarbaz"[..]);
     }
 
     #[test]
@@ -383,27 +390,48 @@ mod tests {
     fn payload_from_static_str() {
         let p: Payload = "hello".into();
         assert_eq!(p.len(), 5);
-        assert_eq!(p.coalesce(), &b"hello"[..]);
+        assert_eq!(p.as_bytes(), &b"hello"[..]);
     }
 
     #[test]
-    fn payload_as_bytes_single_chunk_returns_some() {
+    fn payload_as_chunk_single_chunk_returns_some() {
         let b = Bytes::from_static(b"hello");
         let p = Payload::from_bytes(b.clone());
-        let got = p.as_bytes().expect("single chunk");
+        let got = p.as_chunk().expect("single chunk");
         assert!(std::ptr::addr_eq(got.as_ptr(), b.as_ptr()));
     }
 
     #[test]
-    fn payload_as_bytes_empty_returns_none() {
+    fn payload_as_chunk_empty_returns_none() {
         let p = Payload::new();
-        assert!(p.as_bytes().is_none());
+        assert!(p.as_chunk().is_none());
     }
 
     #[test]
-    fn payload_as_bytes_multi_chunk_returns_none() {
+    fn payload_as_chunk_multi_chunk_returns_none() {
         let p = Payload::from_chunks([Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
-        assert!(p.as_bytes().is_none());
+        assert!(p.as_chunk().is_none());
+    }
+
+    #[test]
+    fn payload_as_bytes_empty_returns_empty() {
+        let p = Payload::new();
+        assert_eq!(p.as_bytes(), Bytes::new());
+    }
+
+    #[test]
+    fn payload_as_bytes_single_chunk_is_zero_copy() {
+        let b = Bytes::from_static(b"hello");
+        let p = Payload::from_bytes(b.clone());
+        let got = p.as_bytes();
+        assert_eq!(got, b);
+        assert!(std::ptr::addr_eq(got.as_ptr(), b.as_ptr()));
+    }
+
+    #[test]
+    fn payload_as_bytes_multi_chunk_coalesces() {
+        let p = Payload::from_chunks([Bytes::from_static(b"foo"), Bytes::from_static(b"bar")]);
+        assert_eq!(p.as_bytes(), &b"foobar"[..]);
     }
 
     #[test]

@@ -45,7 +45,7 @@ async fn small_plaintext_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"hello"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
 }
 
 #[tokio::test]
@@ -61,7 +61,7 @@ async fn large_compressible_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().to_vec(), plain);
+    assert_eq!(m.parts()[0].as_bytes().to_vec(), plain);
 }
 
 #[tokio::test]
@@ -83,9 +83,9 @@ async fn multipart_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(m.len(), 3);
-    assert_eq!(m.parts()[0].coalesce(), &b"hdr"[..]);
-    assert_eq!(m.parts()[1].coalesce().to_vec(), big);
-    assert_eq!(m.parts()[2].coalesce(), &b"tail"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hdr"[..]);
+    assert_eq!(m.parts()[1].as_bytes().to_vec(), big);
+    assert_eq!(m.parts()[2].as_bytes(), &b"tail"[..]);
 }
 
 #[tokio::test]
@@ -127,7 +127,7 @@ async fn dict_roundtrip_small_payload() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(m.parts()[0].coalesce().to_vec(), plain);
+        assert_eq!(m.parts()[0].as_bytes().to_vec(), plain);
     }
 }
 
@@ -146,6 +146,6 @@ async fn many_messages_in_a_row() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(m.parts()[0].coalesce(), format!("m-{i}").as_bytes());
+        assert_eq!(m.parts()[0].as_bytes(), format!("m-{i}").as_bytes());
     }
 }

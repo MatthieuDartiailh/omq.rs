@@ -112,8 +112,8 @@ pub(crate) fn spawn_radio_sender(
                         if parts.len() != 2 {
                             continue;
                         }
-                        let group = parts[0].coalesce();
-                        let body = parts[1].coalesce();
+                        let group = parts[0].as_bytes();
+                        let body = parts[1].as_bytes();
                         if let Ok(dgram) = udp::encode_datagram(&group, &body) {
                             // Best-effort fire-and-forget; UDP errors
                             // (ECONNREFUSED, ENETUNREACH) are silently

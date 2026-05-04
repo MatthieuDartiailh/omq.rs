@@ -1322,7 +1322,7 @@ impl Socket {
                 let topic = msg
                     .parts()
                     .first()
-                    .map(omq_proto::Payload::coalesce)
+                    .map(omq_proto::Payload::as_bytes)
                     .unwrap_or_default();
                 self.inner
                     .subscriptions
@@ -1338,7 +1338,7 @@ impl Socket {
                 let group = msg
                     .parts()
                     .first()
-                    .map(omq_proto::Payload::coalesce)
+                    .map(omq_proto::Payload::as_bytes)
                     .unwrap_or_default();
                 self.inner
                     .joined_groups

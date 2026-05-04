@@ -346,7 +346,7 @@ impl Socket {
         let mut parts: Vec<Bytes> = msg
             .into_parts()
             .into_iter()
-            .map(|p| p.coalesce())
+            .map(|p| p.as_bytes())
             .collect();
         let head = if parts.is_empty() {
             Bytes::new()

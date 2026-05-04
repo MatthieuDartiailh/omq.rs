@@ -18,7 +18,7 @@
 //! dicts are 1..=8192 bytes and shipped at most once per direction per
 //! connection.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
@@ -181,7 +181,7 @@ impl Lz4Encoder {
     // lz4 caps inputs at 2 GiB, so the usize-to-i32 casts never wrap.
     #[allow(clippy::cast_possible_wrap)]
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
-        let plain = part.coalesce();
+        let plain = part.as_bytes();
         let threshold = if self.send_dict.is_some() {
             MIN_COMPRESS_WITH_DICT
         } else {
@@ -198,8 +198,10 @@ impl Lz4Encoder {
             )));
         }
         let max = bound as usize;
-        if self.out_buf.len() < max {
-            self.out_buf.resize(max, 0);
+        // Reserve ENVELOPE_LZ4B bytes at the front for the header; compress
+        // into out_buf[ENVELOPE_LZ4B..] so both land in one allocation.
+        if self.out_buf.len() < ENVELOPE_LZ4B + max {
+            self.out_buf.resize(ENVELOPE_LZ4B + max, 0);
         }
         let n = match self.send_dict.as_ref() {
             Some(dict) => {
@@ -215,7 +217,7 @@ impl Lz4Encoder {
                     LZ4_compress_fast_continue(
                         self.stream,
                         plain.as_ptr(),
-                        self.out_buf.as_mut_ptr(),
+                        self.out_buf[ENVELOPE_LZ4B..].as_mut_ptr(),
                         plain.len() as i32,
                         bound,
                         1,
@@ -225,7 +227,7 @@ impl Lz4Encoder {
             None => unsafe {
                 lz4_sys::LZ4_compress_default(
                     plain.as_ptr().cast(),
-                    self.out_buf.as_mut_ptr().cast(),
+                    self.out_buf[ENVELOPE_LZ4B..].as_mut_ptr().cast(),
                     plain.len() as i32,
                     bound,
                 )
@@ -240,13 +242,13 @@ impl Lz4Encoder {
         if n + ENVELOPE_LZ4B >= plain.len() + ENVELOPE_PLAIN {
             return Ok(plaintext_payload(plain));
         }
-        let mut header = BytesMut::with_capacity(ENVELOPE_LZ4B);
-        header.extend_from_slice(&SENTINEL_LZ4B);
-        header.extend_from_slice(&(plain.len() as u64).to_le_bytes());
-        Ok(Payload::from_chunks([
-            header.freeze(),
-            Bytes::copy_from_slice(&self.out_buf[..n]),
-        ]))
+        // Fill the 12-byte header prefix in-place; freeze the whole range
+        // into a single-chunk Payload (one allocation, no extra copy).
+        self.out_buf[..4].copy_from_slice(&SENTINEL_LZ4B);
+        self.out_buf[4..ENVELOPE_LZ4B].copy_from_slice(&(plain.len() as u64).to_le_bytes());
+        Ok(Payload::from_bytes(Bytes::copy_from_slice(
+            &self.out_buf[..ENVELOPE_LZ4B + n],
+        )))
     }
 }
 
@@ -277,7 +279,7 @@ impl Lz4Decoder {
         let multipart = parts.len() > 1;
         let mut budget_left = self.max_message_size;
         for (idx, part) in parts.into_iter().enumerate() {
-            let bytes = part.coalesce();
+            let bytes = part.as_bytes();
             if bytes.len() < 4 {
                 return Err(Error::Protocol(
                     "lz4 part shorter than 4-byte sentinel".into(),
@@ -388,7 +390,7 @@ mod tests {
     fn small_plaintext_roundtrip() {
         let msg = Message::single("hello");
         let out = rt(msg);
-        assert_eq!(out.parts()[0].coalesce(), &b"hello"[..]);
+        assert_eq!(out.parts()[0].as_bytes(), &b"hello"[..]);
     }
 
     #[test]
@@ -403,7 +405,7 @@ mod tests {
         let mut enc = Lz4Encoder::new();
         let msg = Message::single("hello");
         let wire = enc.encode(&msg).unwrap();
-        let bytes = wire[0].parts()[0].coalesce();
+        let bytes = wire[0].parts()[0].as_bytes();
         assert_eq!(&bytes[..4], &SENTINEL_PLAIN);
         assert_eq!(&bytes[4..], &b"hello"[..]);
     }
@@ -414,7 +416,7 @@ mod tests {
         let msg = Message::single(plain.clone());
         let mut enc = Lz4Encoder::new();
         let wire = enc.encode(&msg).unwrap();
-        let bytes = wire[0].parts()[0].coalesce();
+        let bytes = wire[0].parts()[0].as_bytes();
         assert_eq!(&bytes[..4], b"LZ4B");
         let declared = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
         assert_eq!(declared as usize, plain.len());
@@ -425,7 +427,7 @@ mod tests {
             .decode(wire.into_iter().next().unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(out.parts()[0].coalesce().to_vec(), plain);
+        assert_eq!(out.parts()[0].as_bytes().to_vec(), plain);
     }
 
     #[test]
@@ -437,13 +439,13 @@ mod tests {
         let msg = Message::single(plain.clone());
         let mut enc = Lz4Encoder::new();
         let wire = enc.encode(&msg).unwrap();
-        let bytes = wire[0].parts()[0].coalesce();
+        let bytes = wire[0].parts()[0].as_bytes();
         let mut dec = Lz4Decoder::new();
         let out = dec
             .decode(wire.into_iter().next().unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(out.parts()[0].coalesce().to_vec(), plain);
+        assert_eq!(out.parts()[0].as_bytes().to_vec(), plain);
         assert!(bytes[..4] == SENTINEL_PLAIN || bytes[..4] == SENTINEL_LZ4B);
     }
 
@@ -464,9 +466,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(out.len(), 3);
-        assert_eq!(out.parts()[0].coalesce(), &b"meta"[..]);
-        assert_eq!(out.parts()[1].coalesce().to_vec(), big);
-        assert_eq!(out.parts()[2].coalesce(), &b"trailer"[..]);
+        assert_eq!(out.parts()[0].as_bytes(), &b"meta"[..]);
+        assert_eq!(out.parts()[1].as_bytes().to_vec(), big);
+        assert_eq!(out.parts()[2].as_bytes(), &b"trailer"[..]);
     }
 
     #[test]
@@ -493,7 +495,7 @@ mod tests {
         assert_eq!(wire.len(), 2, "first send: dict ship + user message");
         // First wire message is the dict ship: single-part LZ4D | dict.
         assert_eq!(wire[0].len(), 1);
-        let ship = wire[0].parts()[0].coalesce();
+        let ship = wire[0].parts()[0].as_bytes();
         assert_eq!(&ship[..4], b"LZ4D");
         assert_eq!(&ship[4..], &dict[..]);
         // Second wire message is the user message itself.
@@ -528,10 +530,10 @@ mod tests {
 
         // Then the user message decodes against the installed dict.
         let recovered = dec.decode(wire[1].clone()).unwrap().unwrap();
-        assert_eq!(recovered.parts()[0].coalesce().to_vec(), plain);
+        assert_eq!(recovered.parts()[0].as_bytes().to_vec(), plain);
 
         // Confirm the user payload used LZ4B (dict made it worthwhile).
-        let body = wire[1].parts()[0].coalesce();
+        let body = wire[1].parts()[0].as_bytes();
         assert_eq!(&body[..4], b"LZ4B");
     }
 
@@ -571,7 +573,7 @@ mod tests {
             .decode(wire.into_iter().next().unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(out.parts()[0].coalesce().to_vec(), plain);
+        assert_eq!(out.parts()[0].as_bytes().to_vec(), plain);
     }
 
     #[test]
@@ -611,6 +613,6 @@ mod tests {
         assert!(consumed.is_none());
         // Second wire message is "ok" (plaintext, 2 B) - fits in 8 B budget.
         let m = dec.decode(wire[1].clone()).unwrap().unwrap();
-        assert_eq!(m.parts()[0].coalesce(), &b"ok"[..]);
+        assert_eq!(m.parts()[0].as_bytes(), &b"ok"[..]);
     }
 }

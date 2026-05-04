@@ -59,8 +59,8 @@ async fn radio_to_dish_matching_group_delivers() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"weather"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"sunny"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"weather"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"sunny"[..]);
 }
 
 #[compio::test]
@@ -88,8 +88,8 @@ async fn dish_filters_unjoined_groups_locally() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"weather"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"rain"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"weather"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"rain"[..]);
 
     // The "news" datagram must not surface.
     let third = compio::time::timeout(Duration::from_millis(100), dish.recv()).await;
@@ -125,7 +125,7 @@ async fn dish_leave_drops_subsequent_messages() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[1].coalesce(), &b"first"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"first"[..]);
 
     dish.leave("weather").await.unwrap();
     radio

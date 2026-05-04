@@ -290,7 +290,7 @@ impl Connection {
         // would name-dispatch known names (e.g. "READY") and try to parse a
         // property list, but mechanisms like CURVE encrypt that body and
         // ship it under the same wire name -- only the mechanism knows how.
-        let cmd = decode_command_raw(frame.payload.coalesce())?;
+        let cmd = decode_command_raw(frame.payload.as_bytes())?;
         let mut cmds = Vec::new();
         let step = self.mechanism.on_command(cmd, &mut cmds)?;
         self.write_outbound_commands(&cmds);
@@ -336,7 +336,7 @@ impl Connection {
         // data.
         #[cfg(feature = "blake3zmq")]
         if let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut() {
-            let ciphertext = frame.payload.coalesce();
+            let ciphertext = frame.payload.as_bytes();
             let aad = blake3zmq_aad(frame.flags, ciphertext.len());
             let plaintext = tx.decrypt(&aad, &ciphertext)?;
             let plaintext = Bytes::from(plaintext);
@@ -356,7 +356,7 @@ impl Connection {
         // the plaintext if its inner shape begins with a command name.
         #[cfg(feature = "curve")]
         if let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() {
-            let body = frame.payload.coalesce();
+            let body = frame.payload.as_bytes();
             if body.len() >= CURVE_MESSAGE_PREFIX.len()
                 && &body[..CURVE_MESSAGE_PREFIX.len()] == CURVE_MESSAGE_PREFIX
             {
@@ -374,7 +374,7 @@ impl Connection {
         }
 
         if frame.flags.command {
-            let cmd = command::decode(frame.payload.coalesce())?;
+            let cmd = command::decode(frame.payload.as_bytes())?;
             self.handle_post_handshake_command(cmd);
             return Ok(true);
         }
@@ -568,7 +568,7 @@ impl Connection {
         let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() else {
             unreachable!("send_part_curve called without curve transform");
         };
-        let plaintext = part.coalesce();
+        let plaintext = part.as_bytes();
         let body = tx.encrypt_message(more, &plaintext)?;
         let mut wire = BytesMut::with_capacity(8 + body.len());
         wire.put_u8(b"MESSAGE".len() as u8);
@@ -604,7 +604,7 @@ impl Connection {
         } else {
             crate::message::FrameFlags::LAST
         };
-        let plaintext = part.coalesce();
+        let plaintext = part.as_bytes();
         let aad = blake3zmq_aad(flags, plaintext.len() + TAG_LEN);
         let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut() else {
             unreachable!("send_part_blake3zmq called without blake3zmq transform");

@@ -146,7 +146,7 @@ impl TypeState {
                 };
                 let mut envelope = Vec::with_capacity(delim_idx);
                 for p in parts.iter().take(delim_idx) {
-                    envelope.push(p.coalesce());
+                    envelope.push(p.as_bytes());
                 }
                 let mut body = Message::new();
                 for p in parts.iter().skip(delim_idx + 1) {
@@ -172,7 +172,7 @@ mod tests {
             .unwrap();
         assert_eq!(out.len(), 2);
         assert!(out.parts()[0].is_empty());
-        assert_eq!(out.parts()[1].coalesce(), &b"body"[..]);
+        assert_eq!(out.parts()[1].as_bytes(), &b"body"[..]);
     }
 
     #[test]
@@ -190,7 +190,7 @@ mod tests {
         let reply = Message::multipart(["", "reply"]);
         let got = s.post_recv(SocketType::Req, reply).unwrap().unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got.parts()[0].coalesce(), &b"reply"[..]);
+        assert_eq!(got.parts()[0].as_bytes(), &b"reply"[..]);
         s.pre_send(SocketType::Req, Message::single("b")).unwrap();
     }
 
@@ -218,13 +218,13 @@ mod tests {
         let mut s = TypeState::new();
         let req = Message::multipart(["id-a", "", "body"]);
         let got = s.post_recv(SocketType::Rep, req).unwrap().unwrap();
-        assert_eq!(got.parts()[0].coalesce(), &b"body"[..]);
+        assert_eq!(got.parts()[0].as_bytes(), &b"body"[..]);
 
         let reply = s.pre_send(SocketType::Rep, Message::single("ok")).unwrap();
         assert_eq!(reply.len(), 3);
-        assert_eq!(reply.parts()[0].coalesce(), &b"id-a"[..]);
+        assert_eq!(reply.parts()[0].as_bytes(), &b"id-a"[..]);
         assert!(reply.parts()[1].is_empty());
-        assert_eq!(reply.parts()[2].coalesce(), &b"ok"[..]);
+        assert_eq!(reply.parts()[2].as_bytes(), &b"ok"[..]);
     }
 
     #[test]
@@ -240,15 +240,15 @@ mod tests {
         let req = Message::multipart(["id1", "id2", "", "b1", "b2"]);
         let got = s.post_recv(SocketType::Rep, req).unwrap().unwrap();
         assert_eq!(got.len(), 2);
-        assert_eq!(got.parts()[0].coalesce(), &b"b1"[..]);
-        assert_eq!(got.parts()[1].coalesce(), &b"b2"[..]);
+        assert_eq!(got.parts()[0].as_bytes(), &b"b1"[..]);
+        assert_eq!(got.parts()[1].as_bytes(), &b"b2"[..]);
 
         let reply = s.pre_send(SocketType::Rep, Message::single("r")).unwrap();
         assert_eq!(reply.len(), 4);
-        assert_eq!(reply.parts()[0].coalesce(), &b"id1"[..]);
-        assert_eq!(reply.parts()[1].coalesce(), &b"id2"[..]);
+        assert_eq!(reply.parts()[0].as_bytes(), &b"id1"[..]);
+        assert_eq!(reply.parts()[1].as_bytes(), &b"id2"[..]);
         assert!(reply.parts()[2].is_empty());
-        assert_eq!(reply.parts()[3].coalesce(), &b"r"[..]);
+        assert_eq!(reply.parts()[3].as_bytes(), &b"r"[..]);
     }
 
     #[test]
@@ -256,8 +256,8 @@ mod tests {
         let mut s = TypeState::new();
         let m = Message::single("x");
         let out = s.pre_send(SocketType::Push, m.clone()).unwrap();
-        assert_eq!(out.parts()[0].coalesce(), m.parts()[0].coalesce());
+        assert_eq!(out.parts()[0].as_bytes(), m.parts()[0].as_bytes());
         let got = s.post_recv(SocketType::Pull, m.clone()).unwrap().unwrap();
-        assert_eq!(got.parts()[0].coalesce(), m.parts()[0].coalesce());
+        assert_eq!(got.parts()[0].as_bytes(), m.parts()[0].as_bytes());
     }
 }

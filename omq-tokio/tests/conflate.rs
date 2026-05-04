@@ -64,7 +64,7 @@ async fn pub_conflate_keeps_only_latest_per_subscriber() {
 
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), sub.recv()).await {
-        let body = msg.parts()[0].coalesce();
+        let body = msg.parts()[0].as_bytes();
         received.push(String::from_utf8_lossy(&body).into_owned());
         if received.len() >= N as usize {
             break;
@@ -115,7 +115,7 @@ async fn push_conflate_keeps_only_latest() {
 
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(200), pull.recv()).await {
-        received.push(String::from_utf8_lossy(&msg.parts()[0].coalesce()).into_owned());
+        received.push(String::from_utf8_lossy(&msg.parts()[0].as_bytes()).into_owned());
         if received.len() >= 5 {
             break;
         }
@@ -163,7 +163,7 @@ async fn radio_conflate_keeps_only_latest_per_group() {
 
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), dish.recv()).await {
-        let body = msg.parts()[1].coalesce();
+        let body = msg.parts()[1].as_bytes();
         received.push(String::from_utf8_lossy(&body).into_owned());
         if received.len() >= N as usize {
             break;

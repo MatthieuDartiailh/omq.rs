@@ -54,7 +54,7 @@ async fn server_survives_pre_handshake_drop() {
         .await
         .expect("recv timed out after rude clients")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().as_ref(), b"alive");
+    assert_eq!(m.parts()[0].as_bytes().as_ref(), b"alive");
 }
 
 #[compio::test]
@@ -86,7 +86,7 @@ async fn server_survives_mid_session_abrupt_drop() {
         .await
         .expect("recv timed out after abrupt drop")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().as_ref(), b"second");
+    assert_eq!(m.parts()[0].as_bytes().as_ref(), b"second");
 }
 
 #[compio::test]
@@ -116,5 +116,5 @@ async fn abrupt_reset_mid_greeting_does_not_wedge_server() {
         .await
         .expect("recv timed out after partial-greeting peer")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce().as_ref(), b"ok");
+    assert_eq!(m.parts()[0].as_bytes().as_ref(), b"ok");
 }

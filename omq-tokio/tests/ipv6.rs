@@ -51,7 +51,7 @@ async fn ipv6_push_pull() {
         .await
         .expect("ipv6 push/pull timed out")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"hello v6"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hello v6"[..]);
 }
 
 #[tokio::test]
@@ -70,14 +70,14 @@ async fn ipv6_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"ping"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"ping"[..]);
 
     rep.send(Message::single("pong")).await.unwrap();
     let r = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.parts()[0].coalesce(), &b"pong"[..]);
+    assert_eq!(r.parts()[0].as_bytes(), &b"pong"[..]);
 }
 
 #[tokio::test]
@@ -97,7 +97,7 @@ async fn ipv6_pub_sub() {
         if let Ok(Ok(m)) =
             tokio::time::timeout(Duration::from_millis(20), sub.recv()).await
         {
-            assert_eq!(m.parts()[0].coalesce(), &b"v6msg"[..]);
+            assert_eq!(m.parts()[0].as_bytes(), &b"v6msg"[..]);
             return;
         }
         assert!(std::time::Instant::now() < deadline, "ipv6 pub/sub timed out");
@@ -123,6 +123,6 @@ async fn ipv6_dealer_router() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"v6-cli"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"v6-msg"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"v6-cli"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"v6-msg"[..]);
 }

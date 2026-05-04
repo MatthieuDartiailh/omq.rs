@@ -44,9 +44,9 @@ async fn pub_sub_simple_prefix_match() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got1.parts()[0].coalesce(), &b"news.sports"[..]);
-    assert_eq!(got1.parts()[1].coalesce(), &b"ball scores"[..]);
-    assert_eq!(got2.parts()[0].coalesce(), &b"news.tech"[..]);
+    assert_eq!(got1.parts()[0].as_bytes(), &b"news.sports"[..]);
+    assert_eq!(got1.parts()[1].as_bytes(), &b"ball scores"[..]);
+    assert_eq!(got2.parts()[0].as_bytes(), &b"news.tech"[..]);
 
     let third = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(third.is_err(), "non-matching message must not be delivered");
@@ -77,7 +77,7 @@ async fn pub_sub_late_subscriber_misses_earlier() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"post-subscribe"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"post-subscribe"[..]);
 
     let other = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
@@ -105,7 +105,7 @@ async fn pub_sub_subscribe_all_with_empty_prefix() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(m.parts()[0].coalesce(), expected.as_bytes());
+        assert_eq!(m.parts()[0].as_bytes(), expected.as_bytes());
     }
 }
 
@@ -131,7 +131,7 @@ async fn pub_sub_unsubscribe() {
         .await
         .unwrap()
         .unwrap();
-    let got = [m1.parts()[0].coalesce(), m2.parts()[0].coalesce()];
+    let got = [m1.parts()[0].as_bytes(), m2.parts()[0].as_bytes()];
     assert!(got.contains(&bytes::Bytes::from_static(b"apple")));
     assert!(got.contains(&bytes::Bytes::from_static(b"banana")));
 
@@ -144,7 +144,7 @@ async fn pub_sub_unsubscribe() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"apricot"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"apricot"[..]);
 
     let other = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
@@ -169,7 +169,7 @@ async fn sub_replays_subscriptions_on_new_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"x.hello"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"x.hello"[..]);
     let other = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
 }

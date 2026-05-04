@@ -177,7 +177,7 @@ impl ZstdEncoder {
 
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
         for part in msg.parts() {
-            self.maybe_train(&part.coalesce());
+            self.maybe_train(&part.as_bytes());
         }
 
         let mut out: TransformedOut = SmallVec::new();
@@ -233,7 +233,7 @@ impl ZstdEncoder {
     }
 
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
-        let plain = part.coalesce();
+        let plain = part.as_bytes();
         let threshold = if self.send_dict.is_some() {
             MIN_COMPRESS_WITH_DICT
         } else {
@@ -324,7 +324,7 @@ impl ZstdDecoder {
         let multipart = parts.len() > 1;
         let mut budget_left = self.max_message_size;
         for (idx, part) in parts.into_iter().enumerate() {
-            let bytes = part.coalesce();
+            let bytes = part.as_bytes();
             if bytes.len() < 4 {
                 return Err(Error::Protocol(
                     "zstd part shorter than 4-byte sentinel".into(),
@@ -424,7 +424,7 @@ mod tests {
     fn small_part_uses_plaintext_sentinel() {
         let mut enc = ZstdEncoder::new();
         let wire = enc.encode(&Message::single("hello")).unwrap();
-        let bytes = wire[0].parts()[0].coalesce();
+        let bytes = wire[0].parts()[0].as_bytes();
         assert_eq!(&bytes[..4], &SENTINEL_PLAIN);
         assert_eq!(&bytes[4..], &b"hello"[..]);
     }
@@ -434,7 +434,7 @@ mod tests {
         let plain = vec![b'A'; 4096];
         let mut enc = ZstdEncoder::new();
         let wire = enc.encode(&Message::single(plain.clone())).unwrap();
-        let bytes = wire[0].parts()[0].coalesce();
+        let bytes = wire[0].parts()[0].as_bytes();
         assert_eq!(&bytes[..4], &ZSTD_MAGIC);
 
         let mut dec = ZstdDecoder::new();
@@ -442,7 +442,7 @@ mod tests {
             .decode(wire.into_iter().next().unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(out.parts()[0].coalesce().to_vec(), plain);
+        assert_eq!(out.parts()[0].as_bytes().to_vec(), plain);
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         let plain = vec![b'A'; 4096];
         let mut enc = ZstdEncoder::new();
         let wire = enc.encode(&Message::single(plain.clone())).unwrap();
-        let bytes = wire[0].parts()[0].coalesce();
+        let bytes = wire[0].parts()[0].as_bytes();
         let declared = zstd_safe::get_frame_content_size(&bytes).unwrap();
         assert_eq!(declared, Some(plain.len() as u64));
     }
@@ -461,7 +461,7 @@ mod tests {
         let mut enc = ZstdEncoder::with_send_dict(dict.clone()).unwrap();
         let wire = enc.encode(&Message::single("hi")).unwrap();
         assert_eq!(wire.len(), 2);
-        let ship = wire[0].parts()[0].coalesce();
+        let ship = wire[0].parts()[0].as_bytes();
         assert_eq!(&ship[..4], &SENTINEL_DICT);
         assert_eq!(&ship[4..], &dict[..]);
     }
@@ -481,7 +481,7 @@ mod tests {
         assert!(consumed.is_none());
 
         let recovered = dec.decode(wire[1].clone()).unwrap().unwrap();
-        assert_eq!(recovered.parts()[0].coalesce().to_vec(), plain);
+        assert_eq!(recovered.parts()[0].as_bytes().to_vec(), plain);
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
         let consumed = dec.decode(wire[0].clone()).unwrap();
         assert!(consumed.is_none());
         let m = dec.decode(wire[1].clone()).unwrap().unwrap();
-        assert_eq!(m.parts()[0].coalesce(), &b"ok"[..]);
+        assert_eq!(m.parts()[0].as_bytes(), &b"ok"[..]);
     }
 
     #[test]
@@ -554,7 +554,7 @@ mod tests {
             let wire = enc.encode(&Message::single(sample.as_slice())).unwrap();
             for part in wire {
                 if let Some(out) = dec.decode(part).unwrap() {
-                    assert_eq!(out.parts()[0].coalesce(), &sample[..]);
+                    assert_eq!(out.parts()[0].as_bytes(), &sample[..]);
                     roundtripped += 1;
                 }
             }
@@ -577,7 +577,7 @@ mod tests {
         let mut got_payload = false;
         for part in wire {
             if let Some(out) = dec.decode(part).unwrap() {
-                assert_eq!(out.parts()[0].coalesce(), &sample[..]);
+                assert_eq!(out.parts()[0].as_bytes(), &sample[..]);
                 got_payload = true;
             }
         }

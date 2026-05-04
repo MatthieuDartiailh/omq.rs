@@ -169,7 +169,7 @@ async fn ruby_push_to_rust_pull(t: Transport) {
             .expect("recv timed out")
             .unwrap();
         assert_eq!(
-            msg.parts()[0].coalesce(),
+            msg.parts()[0].as_bytes(),
             format!("from-ruby-{i}").as_bytes()
         );
     }
@@ -219,7 +219,7 @@ async fn rust_req_to_ruby_rep(t: Transport) {
             .await
             .expect("reply timed out")
             .unwrap();
-        assert_eq!(reply.parts()[0].coalesce(), payload.as_bytes());
+        assert_eq!(reply.parts()[0].as_bytes(), payload.as_bytes());
     }
 
     let status = tokio::task::spawn_blocking(move || child.wait().unwrap())
@@ -336,8 +336,8 @@ async fn rust_router_sees_ruby_dealer_identity(t: Transport) {
         .expect("router recv timed out")
         .unwrap();
     assert_eq!(got.len(), 2, "router message is [identity, body]");
-    assert_eq!(got.parts()[0].coalesce(), &b"worker-7"[..]);
-    assert_eq!(got.parts()[1].coalesce(), &b"from-dealer"[..]);
+    assert_eq!(got.parts()[0].as_bytes(), &b"worker-7"[..]);
+    assert_eq!(got.parts()[1].as_bytes(), &b"from-dealer"[..]);
 
     // Ruby DEALER with `-n 1` exits after a single send; reap it.
     let _ = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())

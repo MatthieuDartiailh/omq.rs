@@ -72,6 +72,6 @@ pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
 pub fn parts_to_pylist<'py>(py: Python<'py>, msg: Message) -> Bound<'py, PyList> {
     let parts = msg.into_parts();
     let items: Vec<Bound<'py, PyBytes>> =
-        parts.into_iter().map(|p| PyBytes::new_bound(py, &p.coalesce())).collect();
+        parts.into_iter().map(|p| PyBytes::new_bound(py, &p.as_bytes())).collect();
     PyList::new_bound(py, items)
 }

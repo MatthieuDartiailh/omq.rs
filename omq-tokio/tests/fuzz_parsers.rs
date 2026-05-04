@@ -203,7 +203,7 @@ fn fuzz_frame_roundtrip() {
         let decoded = decoded.expect("must produce a frame");
         assert_eq!(decoded.flags.more, more, "more bit");
         assert_eq!(decoded.flags.command, command, "command bit");
-        assert_eq!(decoded.payload.coalesce(), bytes, "payload mismatch");
+        assert_eq!(decoded.payload.as_bytes(), bytes, "payload mismatch");
         assert!(out.is_empty(), "decoder left {} bytes pending", out.len());
         if i % 50_000 == 0 {
             eprintln!("frame_roundtrip iter {i}");

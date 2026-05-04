@@ -58,7 +58,7 @@ impl Submitter {
                         "RADIO send requires [group, body] (2 parts)".into(),
                     ));
                 }
-                let group_bytes = parts[0].coalesce();
+                let group_bytes = parts[0].as_bytes();
                 if group_bytes.len() > u8::MAX as usize {
                     return Err(Error::Protocol(
                         "RADIO group name too long (max 255 bytes)".into(),
@@ -236,6 +236,6 @@ impl FanOutSend {
 fn first_frame_bytes(msg: &Message) -> Bytes {
     msg.parts()
         .first()
-        .map(omq_proto::Payload::coalesce)
+        .map(omq_proto::Payload::as_bytes)
         .unwrap_or_default()
 }

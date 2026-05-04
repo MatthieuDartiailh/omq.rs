@@ -67,7 +67,7 @@ async fn push_pull_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"hi"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hi"[..]);
 }
 
 async fn req_rep_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
@@ -80,13 +80,13 @@ async fn req_rep_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
+    assert_eq!(q.parts()[0].as_bytes(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
     let a = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
+    assert_eq!(a.parts()[0].as_bytes(), &b"a"[..]);
 }
 
 async fn dealer_router_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
@@ -103,8 +103,8 @@ async fn dealer_router_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"d1"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"hi"[..]);
 }
 
 async fn pair_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
@@ -117,7 +117,7 @@ async fn pair_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"x"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"x"[..]);
 }
 
 async fn pub_sub_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
@@ -130,7 +130,7 @@ async fn pub_sub_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.parts()[0].coalesce(), &b"hello"[..]);
+            assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
             return;
         }
     }
@@ -151,8 +151,8 @@ async fn client_server_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"c1"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"ping"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"c1"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"ping"[..]);
 }
 
 async fn scatter_gather_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
@@ -166,7 +166,7 @@ async fn scatter_gather_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"m"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"m"[..]);
 }
 
 async fn channel_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
@@ -180,7 +180,7 @@ async fn channel_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"hi"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"hi"[..]);
 }
 
 async fn peer_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
@@ -200,8 +200,8 @@ async fn peer_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"pb"[..]);
-    assert_eq!(m.parts()[1].coalesce(), &b"hi a"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"pb"[..]);
+    assert_eq!(m.parts()[1].as_bytes(), &b"hi a"[..]);
 }
 
 // =====================================================================

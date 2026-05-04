@@ -29,7 +29,7 @@ async fn ipc_push_pull_single_message() {
         .await
         .expect("recv timeout")
         .unwrap();
-    assert_eq!(m.parts()[0].coalesce(), &b"over-ipc"[..]);
+    assert_eq!(m.parts()[0].as_bytes(), &b"over-ipc"[..]);
 }
 
 #[compio::test]
@@ -53,6 +53,6 @@ async fn ipc_push_pull_burst() {
             .expect("recv timeout")
             .unwrap();
         let want = format!("m-{i:04}");
-        assert_eq!(m.parts()[0].coalesce(), want.as_bytes());
+        assert_eq!(m.parts()[0].as_bytes(), want.as_bytes());
     }
 }
