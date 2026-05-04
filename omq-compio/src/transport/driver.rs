@@ -744,22 +744,7 @@ pub(crate) async fn run_connection(
                     // so the next iteration re-arms POLL_ADD.
                     let outbound_pending = io.codec.has_pending_transmit()
                         || !state.encoded_queue.lock().expect("encoded_queue").is_empty();
-                    // Pending inbox / shared cmds are consumed in step 4 by the
-                    // cmd_fut / shared_fut arms but only when the driver re-enters
-                    // select_biased!. If we'd otherwise commit to a blocking
-                    // `reader.read(buf).await` here while a SendMessage is
-                    // already in `inbox` and the kernel buffer was just drained
-                    // by a concurrent direct-recv, the read SQE pends until the
-                    // peer writes — never, in a strict-priority REQ/REP
-                    // sequential roundtrip. Bail and re-enter select instead.
-                    let work_pending = !inbox.is_empty()
-                        || shared_msg_rx
-                            .as_ref()
-                            .is_some_and(|rx| !rx.is_empty());
-                    if state.recv_claim.load(Ordering::Acquire) == 1
-                        || outbound_pending
-                        || work_pending
-                    {
+                    if state.recv_claim.load(Ordering::Acquire) == 1 || outbound_pending {
                         drop(io);
                         read_buf = buf;
                         codec_maybe_dirty = true;
