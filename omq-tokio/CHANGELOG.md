@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.1...omq-tokio-v0.2.2) - 2026-05-04
+
+### Fixed
+
+- *(tokio)* sync reconnect test on second handshake under priority — the
+  `peer_drop_mid_send_is_handled_cleanly` test was racing the disconnect
+  with its post-reconnect send, surfacing under `--features priority`
+  because the per-pipe inbox can't survive its peer's exit. Test-only
+  change; no library behavior change. The standard ZMQ "messages queued
+  for a vanished peer are lost" semantic is now documented in the
+  priority-mode block of `routing/round_robin.rs`.
+
 ## [0.2.1](https://github.com/paddor/omq.rs/releases/tag/omq-tokio-v0.2.1) - 2026-05-04
 
 ### Added
