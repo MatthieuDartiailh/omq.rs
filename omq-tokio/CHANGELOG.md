@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.2...omq-tokio-v0.2.3) - 2026-05-05
+
+### Fixed
+
+- *(tokio)* keep race-arrived peers spawned during `begin_close()` linger
+  drain. When a TCP handshake completed after `closing = true` was set,
+  the actor's `Connected`/`Accepted` arms used to drop the peer entirely,
+  leaving messages already in the outbound queue unsent (incl. zstd dict
+  shipments). Now the peer is spawned whenever the send-strategy queue
+  is non-empty; teardown still cancels it once drained or linger expires.
+
+### Changed
+
+- *(deps)* require `omq-proto = 0.2.3` for the wire-compatible zstd dict
+  shipment (see omq-proto CHANGELOG 0.2.3).
+
 ## [0.2.2](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.1...omq-tokio-v0.2.2) - 2026-05-04
 
 ### Fixed
