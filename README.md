@@ -1,5 +1,9 @@
 # ØMQ.rs
 
+> **3.1M msg/s** inproc | **2.12M msg/s** ipc | **2.07M msg/s** tcp
+>
+> **5.4 µs** inproc latency | **20.4 µs** ipc | **28.4 µs** tcp
+
 Pure Rust ZeroMQ implementation. Wire-compatible with libzmq. All 11
 standard socket types plus 8 draft types, TCP / IPC / inproc / UDP
 transports, NULL / CURVE / blake3zmq mechanisms, `lz4+tcp://` and
@@ -44,6 +48,24 @@ backend `coverage_matrix` test suites plus a cross-runtime
 - **Multi-chunk frame payloads** (`Payload = SmallVec<[Bytes; 2]>`,
   `Message = SmallVec<[Payload; 3]>`): layers prepend static prefixes
   without copying, kernel stitches chunks via `writev` / `sendmsg`.
+- **Patricia-trie subscription matcher** (`omq-proto/src/subscription.rs`):
+  PUB-side filter is O(M) on topic length, not O(N×M) on subscription count —
+  scales to millions of subscriptions without degrading per-message match cost.
+- **zstd dictionary auto-training** (`zstd+tcp://`): trains an 8 KiB
+  compression dictionary from the first 1 000 messages or 100 KiB of
+  plaintext, ships it to the peer once, then drops the compression
+  threshold from 512 B to 64 B — making tiny messages compress
+  profitably for the rest of the connection.
+- **Inproc bypasses ZMTP codec**: peers exchange a pre-computed
+  `InprocPeerSnapshot` (socket type + identity) at connect, skipping
+  READY command marshalling entirely — no serialization overhead on
+  same-process message passing.
+- **Identity collision detection**: duplicate identities on
+  identity-routed sockets (ROUTER / SERVER / PEER) are rejected with
+  `Error::IdentityCollision` rather than silently clobbering routing.
+- **Encrypted inproc rejected at parse time**: `inproc://` combined
+  with CURVE or BLAKE3ZMQ is a parse-time error, not a silent
+  misconfiguration.
 - **Monitor** as a socket-like `Stream` with owned `PeerInfo` context on
   every event.
 - **Python binding** ([`bindings/pyomq`](bindings/pyomq/)): PyO3 wrapper
@@ -112,12 +134,13 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `zstd`            | `zstd+tcp://` compression transport               | `zstd-safe` (vends `libzstd`; needs `cc`) |
 | `priority`        | Strict per-pipe priority on `Socket::connect_with`| -                                |
 
-† **BLAKE3ZMQ has not been independently security audited.** It's an
-omq-native construction (Noise XX + BLAKE3 + X25519 + ChaCha20-BLAKE3)
-and should not be relied on for anything that matters until it has had
-third-party review. Use **CURVE** (RFC 26) for production / regulated
-workloads. Audits welcome - open an issue if you can help fund or
-conduct one.
+> [!WARNING]
+> **BLAKE3ZMQ has not been independently security audited.** It's an
+> omq-native construction (Noise XX + BLAKE3 + X25519 + ChaCha20-BLAKE3)
+> and should not be relied on for anything that matters until it has had
+> third-party review. Use **CURVE** (RFC 26) for production / regulated
+> workloads. Audits welcome - open an issue if you can help fund or
+> conduct one.
 
 ## Benchmarks
 
