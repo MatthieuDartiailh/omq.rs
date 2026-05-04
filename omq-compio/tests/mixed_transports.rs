@@ -77,7 +77,10 @@ async fn push_distributes_across_inproc_and_tcp() {
     let _ = h2.await;
 
     let total = inproc_count.load(Ordering::SeqCst) + tcp_count.load(Ordering::SeqCst);
-    assert_eq!(total, N, "all {N} messages must arrive across both transports");
+    assert_eq!(
+        total, N,
+        "all {N} messages must arrive across both transports"
+    );
     assert!(
         inproc_count.load(Ordering::SeqCst) > 0,
         "inproc peer received nothing"
@@ -107,7 +110,9 @@ async fn push_reverts_to_remaining_after_peer_disconnect() {
     compio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..INIT {
-        push.send(Message::single(format!("init-{i}"))).await.unwrap();
+        push.send(Message::single(format!("init-{i}")))
+            .await
+            .unwrap();
     }
     compio::time::sleep(Duration::from_millis(100)).await;
 

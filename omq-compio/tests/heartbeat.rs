@@ -21,11 +21,8 @@ fn null_greeting_as_client() -> [u8; 64] {
 }
 
 const PULL_READY: &[u8] = &[
-    0x04, 0x1A,
-    0x05, b'R', b'E', b'A', b'D', b'Y',
-    0x0B, b'S', b'o', b'c', b'k', b'e', b't', b'-', b'T', b'y', b'p', b'e',
-    0x00, 0x00, 0x00, 0x04,
-    b'P', b'U', b'L', b'L',
+    0x04, 0x1A, 0x05, b'R', b'E', b'A', b'D', b'Y', 0x0B, b'S', b'o', b'c', b'k', b'e', b't', b'-',
+    b'T', b'y', b'p', b'e', 0x00, 0x00, 0x00, 0x04, b'P', b'U', b'L', b'L',
 ];
 
 fn loopback_port() -> u16 {
@@ -147,6 +144,9 @@ async fn heartbeat_detects_silent_peer() {
     .await
     .unwrap_or(false);
 
-    assert!(disconnected, "PUSH did not evict the silent peer within heartbeat timeout");
+    assert!(
+        disconnected,
+        "PUSH did not evict the silent peer within heartbeat timeout"
+    );
     let _ = silent.join();
 }

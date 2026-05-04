@@ -12,8 +12,8 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 use omq_tokio::endpoint::Host;
+use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 use std::net::Ipv4Addr;
 
 fn tcp_ep(port: u16) -> Endpoint {

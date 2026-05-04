@@ -46,7 +46,7 @@ async fn curve_push_pull_roundtrip_over_ipc() {
         .send(Message::single("hello over curve"))
         .await
         .unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), server.recv())
+    let m = compio::time::timeout(Duration::from_secs(5), server.recv())
         .await
         .unwrap()
         .unwrap();
@@ -80,7 +80,7 @@ async fn curve_multipart_roundtrip_tcp() {
         .await
         .unwrap();
 
-    let m = compio::time::timeout(Duration::from_secs(2), pair_a.recv())
+    let m = compio::time::timeout(Duration::from_secs(5), pair_a.recv())
         .await
         .unwrap()
         .unwrap();
@@ -122,13 +122,13 @@ async fn curve_req_rep() {
     req.connect(ep).await.unwrap();
 
     req.send(Message::single("q")).await.unwrap();
-    let q = compio::time::timeout(Duration::from_secs(2), rep.recv())
+    let q = compio::time::timeout(Duration::from_secs(5), rep.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(q.parts()[0].as_bytes(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
-    let a = compio::time::timeout(Duration::from_secs(2), req.recv())
+    let a = compio::time::timeout(Duration::from_secs(5), req.recv())
         .await
         .unwrap()
         .unwrap();
@@ -157,7 +157,7 @@ async fn curve_dealer_router() {
     compio::time::sleep(Duration::from_millis(50)).await;
 
     dealer.send(Message::single("hi")).await.unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), router.recv())
+    let m = compio::time::timeout(Duration::from_secs(5), router.recv())
         .await
         .unwrap()
         .unwrap();

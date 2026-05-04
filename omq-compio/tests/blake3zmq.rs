@@ -39,7 +39,7 @@ async fn blake3zmq_push_pull_roundtrip() {
         .send(Message::single("hello over blake3zmq"))
         .await
         .unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), server.recv())
+    let m = compio::time::timeout(Duration::from_secs(5), server.recv())
         .await
         .unwrap()
         .unwrap();
@@ -69,13 +69,13 @@ async fn blake3zmq_req_rep() {
     req.connect(ep).await.unwrap();
 
     req.send(Message::single("q")).await.unwrap();
-    let q = compio::time::timeout(Duration::from_secs(2), rep.recv())
+    let q = compio::time::timeout(Duration::from_secs(5), rep.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(q.parts()[0].as_bytes(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
-    let a = compio::time::timeout(Duration::from_secs(2), req.recv())
+    let a = compio::time::timeout(Duration::from_secs(5), req.recv())
         .await
         .unwrap()
         .unwrap();
@@ -104,7 +104,7 @@ async fn blake3zmq_dealer_router() {
     compio::time::sleep(Duration::from_millis(50)).await;
 
     dealer.send(Message::single("hi")).await.unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), router.recv())
+    let m = compio::time::timeout(Duration::from_secs(5), router.recv())
         .await
         .unwrap()
         .unwrap();

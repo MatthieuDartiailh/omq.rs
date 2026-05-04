@@ -27,14 +27,7 @@ impl DropQueue {
             flume::bounded(capacity.max(1))
         };
         let rx2 = rx.clone();
-        (
-            Self {
-                tx,
-                rx,
-                policy,
-            },
-            rx2,
-        )
+        (Self { tx, rx, policy }, rx2)
     }
 
     /// Submit a message. Behaviour depends on policy:

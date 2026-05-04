@@ -295,96 +295,99 @@ pub(crate) async fn run_connection(
         // 1) Drain parsed events. Skipped post-handshake when no new bytes
         //    arrived this iteration — `poll_event` would return None
         //    immediately, and acquiring the async mutex is not free.
-        let drained: SmallVec<[Drained; 8]> =
-            if !state.handshake_done.load(Ordering::Relaxed) || codec_has_input {
-                codec_has_input = false; // consumed; re-set by read_ready arm
-                let mut io = peer_io.lock().await;
-                let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
-                while let Some(ev) = io.codec.poll_event() {
-                    match ev {
-                        Event::HandshakeSucceeded {
-                            peer_minor,
-                            peer_properties,
-                        } => {
-                            if !io.handshake_done {
-                                io.handshake_done = true;
-                                state.handshake_done.store(true, Ordering::Relaxed);
-                                deadline = None;
-                                if let Some(iv) = hb_interval {
-                                    hb_next = Some(Instant::now() + iv);
-                                }
-                                peer_identity =
-                                    peer_properties.identity.clone().unwrap_or_default();
-                                // Drain pre-handshake commands now that we're
-                                // allowed to send. Non-transform cmds go into
-                                // the codec; transform msgs use the encoder
-                                // mutex (separate from peer_io). In compio's
-                                // cooperative runtime, try_lock on the encoder
-                                // always succeeds here (no other task runs
-                                // while we hold peer_io).
-                                while let Some(cmd) = pending_cmds.pop_front() {
-                                    match cmd {
-                                        DriverCommand::SendMessage(m) => {
-                                            if state.has_transform {
-                                                let mut enc = state.encoder
-                                                    .try_lock()
-                                                    .expect("encoder uncontended during handshake drain");
-                                                let wires = enc.as_mut()
-                                                    .expect("has_transform but no encoder")
-                                                    .encode(&m)?;
-                                                drop(enc);
-                                                let mut eq = state.encoded_queue
-                                                    .lock()
-                                                    .expect("encoded_queue");
-                                                for wire in &wires {
-                                                    let total: usize = wire.parts().iter()
-                                                        .map(omq_proto::Payload::len).sum();
-                                                    if total < crate::socket::FLAT_THRESHOLD {
-                                                        eq.encode_and_push_flat(wire);
-                                                    } else {
-                                                        eq.encode_and_push(wire);
-                                                    }
-                                                }
-                                            } else {
-                                                io.codec.send_message(&m)?;
-                                            }
-                                        }
-                                        DriverCommand::SendCommand(c) => {
-                                            io.codec.send_command(&c)?;
-                                        }
-                                        DriverCommand::Close => closing = true,
-                                    }
-                                }
-                                codec_maybe_dirty = true;
-                                out.push(Drained::Handshake {
-                                    peer_minor,
-                                    peer_properties,
-                                });
+        let drained: SmallVec<[Drained; 8]> = if !state.handshake_done.load(Ordering::Relaxed)
+            || codec_has_input
+        {
+            codec_has_input = false; // consumed; re-set by read_ready arm
+            let mut io = peer_io.lock().await;
+            let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
+            while let Some(ev) = io.codec.poll_event() {
+                match ev {
+                    Event::HandshakeSucceeded {
+                        peer_minor,
+                        peer_properties,
+                    } => {
+                        if !io.handshake_done {
+                            io.handshake_done = true;
+                            state.handshake_done.store(true, Ordering::Relaxed);
+                            deadline = None;
+                            if let Some(iv) = hb_interval {
+                                hb_next = Some(Instant::now() + iv);
                             }
-                        }
-                        Event::Message(m) => {
-                            // Compression transport: decode the wire
-                            // payload back to plaintext before delivery.
-                            // `None` means the wire message was a dict
-                            // shipment consumed at the transport layer -
-                            // don't surface it.
-                            let m = if let Some(dec) = io.decoder.as_mut() {
-                                match dec.decode(m)? {
-                                    Some(plain) => plain,
-                                    None => continue,
+                            peer_identity = peer_properties.identity.clone().unwrap_or_default();
+                            // Drain pre-handshake commands now that we're
+                            // allowed to send. Non-transform cmds go into
+                            // the codec; transform msgs use the encoder
+                            // mutex (separate from peer_io). In compio's
+                            // cooperative runtime, try_lock on the encoder
+                            // always succeeds here (no other task runs
+                            // while we hold peer_io).
+                            while let Some(cmd) = pending_cmds.pop_front() {
+                                match cmd {
+                                    DriverCommand::SendMessage(m) => {
+                                        if state.has_transform {
+                                            let mut enc = state.encoder.try_lock().expect(
+                                                "encoder uncontended during handshake drain",
+                                            );
+                                            let wires = enc
+                                                .as_mut()
+                                                .expect("has_transform but no encoder")
+                                                .encode(&m)?;
+                                            drop(enc);
+                                            let mut eq =
+                                                state.encoded_queue.lock().expect("encoded_queue");
+                                            for wire in &wires {
+                                                let total: usize = wire
+                                                    .parts()
+                                                    .iter()
+                                                    .map(omq_proto::Payload::len)
+                                                    .sum();
+                                                if total < crate::socket::FLAT_THRESHOLD {
+                                                    eq.encode_and_push_flat(wire);
+                                                } else {
+                                                    eq.encode_and_push(wire);
+                                                }
+                                            }
+                                        } else {
+                                            io.codec.send_message(&m)?;
+                                        }
+                                    }
+                                    DriverCommand::SendCommand(c) => {
+                                        io.codec.send_command(&c)?;
+                                    }
+                                    DriverCommand::Close => closing = true,
                                 }
-                            } else {
-                                m
-                            };
-                            out.push(Drained::Msg(m));
+                            }
+                            codec_maybe_dirty = true;
+                            out.push(Drained::Handshake {
+                                peer_minor,
+                                peer_properties,
+                            });
                         }
-                        Event::Command(c) => out.push(Drained::Cmd(c)),
                     }
+                    Event::Message(m) => {
+                        // Compression transport: decode the wire
+                        // payload back to plaintext before delivery.
+                        // `None` means the wire message was a dict
+                        // shipment consumed at the transport layer -
+                        // don't surface it.
+                        let m = if let Some(dec) = io.decoder.as_mut() {
+                            match dec.decode(m)? {
+                                Some(plain) => plain,
+                                None => continue,
+                            }
+                        } else {
+                            m
+                        };
+                        out.push(Drained::Msg(m));
+                    }
+                    Event::Command(c) => out.push(Drained::Cmd(c)),
                 }
-                out
-            } else {
-                SmallVec::new()
-            };
+            }
+            out
+        } else {
+            SmallVec::new()
+        };
 
         // 2) Dispatch drained events outside the lock.
         for de in drained {
@@ -504,8 +507,7 @@ pub(crate) async fn run_connection(
         //     heartbeat PINGs, and pre-handshake traffic. Skipped
         //     post-handshake when nothing has dirtied the codec this
         //     iteration; acquiring the async mutex is not free.
-        let wrote_from_codec = if !state.handshake_done.load(Ordering::Relaxed)
-            || codec_maybe_dirty
+        let wrote_from_codec = if !state.handshake_done.load(Ordering::Relaxed) || codec_maybe_dirty
         {
             let chunks = {
                 let io = peer_io.lock().await;
@@ -612,7 +614,12 @@ pub(crate) async fn run_connection(
         // the flag, check encoded_queue one last time to close the race where
         // the sender encoded but saw driver_in_select=false and skipped notify.
         state.driver_in_select.store(true, Ordering::Relaxed);
-        if !state.encoded_queue.lock().expect("encoded_queue").is_empty() {
+        if !state
+            .encoded_queue
+            .lock()
+            .expect("encoded_queue")
+            .is_empty()
+        {
             continue;
         }
 

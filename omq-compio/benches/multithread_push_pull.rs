@@ -35,13 +35,7 @@ fn main() {
             let cell = run_cell(push_n, pull_n, size, seq)
                 .unwrap_or_else(|e| panic!("{label} panicked: {e:?}"));
             common::print_cell(size, cell);
-            common::append_jsonl(
-                "multithread_push_pull",
-                "tcp",
-                push_n * pull_n,
-                size,
-                cell,
-            );
+            common::append_jsonl("multithread_push_pull", "tcp", push_n * pull_n, size, cell);
         }
         println!();
     }
@@ -85,11 +79,8 @@ fn run_cell(
                             pull.connect(ep.clone()).await.expect("pull connect");
                         }
                         while !stop.load(Ordering::Relaxed) {
-                            let _ = compio::time::timeout(
-                                Duration::from_millis(10),
-                                pull.recv(),
-                            )
-                            .await;
+                            let _ =
+                                compio::time::timeout(Duration::from_millis(10), pull.recv()).await;
                         }
                     });
             })
@@ -164,5 +155,10 @@ fn run_cell(
     let elapsed = Duration::from_nanos(max_nanos);
     let mbps = (total_n * size) as f64 / elapsed.as_secs_f64() / 1_000_000.0;
     let msgs_s = total_n as f64 / elapsed.as_secs_f64();
-    Ok(common::Cell { n: total_n, elapsed, mbps, msgs_s })
+    Ok(common::Cell {
+        n: total_n,
+        elapsed,
+        mbps,
+        msgs_s,
+    })
 }

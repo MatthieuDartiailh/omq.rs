@@ -64,7 +64,10 @@ pub(crate) fn transports() -> Vec<String> {
         return s.split(',').map(|t| t.trim().to_string()).collect();
     }
     #[allow(unused_mut)]
-    let mut ts: Vec<String> = DEFAULT_TRANSPORTS.iter().map(|s| (*s).to_string()).collect();
+    let mut ts: Vec<String> = DEFAULT_TRANSPORTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     #[cfg(feature = "lz4")]
     ts.push("lz4+tcp".to_string());
     #[cfg(feature = "zstd")]

@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::FutureExt as _;
-use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 use omq_compio::endpoint::Host;
+use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 use std::net::Ipv4Addr;
 
 fn tcp_ep(port: u16) -> Endpoint {

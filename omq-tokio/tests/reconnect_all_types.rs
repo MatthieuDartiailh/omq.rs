@@ -4,7 +4,7 @@
 //! REQ/REP, PUB/SUB, DEALER/ROUTER, and PAIR all survive a listener
 //! restart and resume correct message flow.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
@@ -12,10 +12,10 @@ use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    19_000 + (n % 500)
 }
 
 fn tcp_ep(port: u16) -> Endpoint {

@@ -20,9 +20,9 @@ use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
 #[cfg(not(feature = "priority"))]
-use crate::transport::driver::DriverCommand;
-#[cfg(not(feature = "priority"))]
 use crate::socket::inner::{DirectIoState, FLAT_THRESHOLD, PeerSlot};
+#[cfg(not(feature = "priority"))]
+use crate::transport::driver::DriverCommand;
 
 use super::handle::Socket;
 use super::inner::PeerOut;
@@ -129,7 +129,9 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
     if !state.handshake_done.load(Ordering::Relaxed) {
         return Ok(false);
     }
-    let enc = enc_guard.as_mut().expect("has_transform set but no encoder");
+    let enc = enc_guard
+        .as_mut()
+        .expect("has_transform set but no encoder");
     let wires = enc.encode(msg)?;
     drop(enc_guard);
 
@@ -279,9 +281,10 @@ impl Socket {
                         break;
                     }
                     chosen_slot.map(|p| {
-                        let direct = p.direct_io.as_ref().and_then(|h| {
-                            h.read().expect("direct_io handle lock").clone()
-                        });
+                        let direct = p
+                            .direct_io
+                            .as_ref()
+                            .and_then(|h| h.read().expect("direct_io handle lock").clone());
                         (p.out.clone(), n, direct)
                     })
                 }
@@ -516,7 +519,6 @@ impl Socket {
         }
         out.send(body).await
     }
-
 
     /// RADIO: each message must be `[group, body]`. Fan out to every
     /// UDP dialer as one datagram, and to each TCP/IPC peer that has
@@ -807,5 +809,4 @@ impl Socket {
         }
         Ok(())
     }
-
 }

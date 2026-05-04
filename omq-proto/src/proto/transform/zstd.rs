@@ -598,9 +598,7 @@ mod tests {
     #[test]
     fn auto_train_disabled_when_static_dict_present() {
         let dict = Bytes::from(vec![b'a'; 1024]);
-        let enc = ZstdEncoder::with_send_dict(dict)
-            .unwrap()
-            .with_auto_train();
+        let enc = ZstdEncoder::with_send_dict(dict).unwrap().with_auto_train();
         assert!(enc.train.is_none(), "static dict should disable auto-train");
     }
 }

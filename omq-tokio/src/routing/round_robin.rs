@@ -27,9 +27,9 @@ use std::sync::{
 
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::DriverHandle;
 #[cfg(feature = "priority")]
 use crate::engine::DriverCommand;
+use crate::engine::DriverHandle;
 #[cfg(feature = "priority")]
 use omq_proto::error::Error;
 use omq_proto::error::Result;
@@ -85,7 +85,12 @@ impl RoundRobinSend {
         self.shared_rx.clone()
     }
 
-    pub(crate) fn connection_added(&mut self, _peer_id: u64, handle: DriverHandle, is_inproc: bool) {
+    pub(crate) fn connection_added(
+        &mut self,
+        _peer_id: u64,
+        handle: DriverHandle,
+        is_inproc: bool,
+    ) {
         if is_inproc {
             // inproc_peer_driver reads from inbox (mpsc), not from shared_rx
             // (flume). Spawn a forwarding pump. The pump self-cancels when the
@@ -307,4 +312,3 @@ impl RoundRobinSend {
         true
     }
 }
-

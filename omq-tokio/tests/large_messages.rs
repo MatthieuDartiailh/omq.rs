@@ -41,8 +41,16 @@ async fn push_pull_large(size_bytes: usize) {
         .expect("large message recv timed out")
         .unwrap();
     let got = m.parts()[0].as_bytes();
-    assert_eq!(got.len(), size_bytes, "payload length mismatch at {size_bytes} B");
-    assert_eq!(&*got, &payload[..], "payload data corrupted at {size_bytes} B");
+    assert_eq!(
+        got.len(),
+        size_bytes,
+        "payload length mismatch at {size_bytes} B"
+    );
+    assert_eq!(
+        &*got,
+        &payload[..],
+        "payload data corrupted at {size_bytes} B"
+    );
 }
 
 #[tokio::test]

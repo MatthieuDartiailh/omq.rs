@@ -450,8 +450,7 @@ impl Connection {
                     payload: Payload::from_bytes(Bytes::from(ciphertext)),
                 };
                 let plen = f.payload.len();
-                self.out_bytes_total +=
-                    frame::header_len_for(plen) + plen;
+                self.out_bytes_total += frame::header_len_for(plen) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
                 continue;
             }
@@ -477,8 +476,7 @@ impl Connection {
                     payload: Payload::from_bytes(wire.freeze()),
                 };
                 let plen = f.payload.len();
-                self.out_bytes_total +=
-                    frame::header_len_for(plen) + plen;
+                self.out_bytes_total += frame::header_len_for(plen) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
                 continue;
             }
@@ -488,8 +486,7 @@ impl Connection {
                 payload: Payload::from_bytes(body.freeze()),
             };
             let plen = f.payload.len();
-            self.out_bytes_total +=
-                frame::header_len_for(plen) + plen;
+            self.out_bytes_total += frame::header_len_for(plen) + plen;
             frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         }
     }
@@ -537,8 +534,7 @@ impl Connection {
                     payload: p.clone(),
                 };
                 let plen = f.payload.len();
-                self.out_bytes_total +=
-                    frame::header_len_for(plen) + plen;
+                self.out_bytes_total += frame::header_len_for(plen) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
             }
         }
@@ -584,8 +580,7 @@ impl Connection {
             payload: Payload::from_bytes(wire.freeze()),
         };
         let plen = f.payload.len();
-        self.out_bytes_total +=
-            frame::header_len_for(plen) + plen;
+        self.out_bytes_total += frame::header_len_for(plen) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         Ok(())
     }
@@ -615,8 +610,7 @@ impl Connection {
             payload: Payload::from_bytes(Bytes::from(ciphertext)),
         };
         let plen = f.payload.len();
-        self.out_bytes_total +=
-            frame::header_len_for(plen) + plen;
+        self.out_bytes_total += frame::header_len_for(plen) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         Ok(())
     }

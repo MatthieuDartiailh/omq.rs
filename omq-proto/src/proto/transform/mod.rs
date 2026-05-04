@@ -73,9 +73,15 @@ impl MessageEncoder {
         const SENTINEL: &[u8] = &[0u8, 0, 0, 0];
         match self {
             #[cfg(feature = "lz4")]
-            Self::Lz4(t) => Some((bytes::Bytes::from_static(SENTINEL), t.passthrough_threshold()?)),
+            Self::Lz4(t) => Some((
+                bytes::Bytes::from_static(SENTINEL),
+                t.passthrough_threshold()?,
+            )),
             #[cfg(feature = "zstd")]
-            Self::Zstd(t) => Some((bytes::Bytes::from_static(SENTINEL), t.passthrough_threshold()?)),
+            Self::Zstd(t) => Some((
+                bytes::Bytes::from_static(SENTINEL),
+                t.passthrough_threshold()?,
+            )),
             #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => unreachable!("MessageEncoder is uninhabited without lz4/zstd features"),
         }
@@ -86,10 +92,7 @@ impl MessageEncoder {
     /// `udp://`. Picks up `Options::compression_dict` and (zstd only)
     /// `Options::compression_auto_train` / `Options::max_message_size`.
     #[allow(unused_variables)]
-    pub fn for_endpoint(
-        endpoint: &Endpoint,
-        options: &Options,
-    ) -> Option<(Self, MessageDecoder)> {
+    pub fn for_endpoint(endpoint: &Endpoint, options: &Options) -> Option<(Self, MessageDecoder)> {
         match endpoint {
             #[cfg(feature = "lz4")]
             Endpoint::Lz4Tcp { .. } => {

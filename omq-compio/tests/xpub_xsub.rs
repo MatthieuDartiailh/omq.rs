@@ -158,9 +158,7 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
 #[compio::test]
 async fn xsub_send_returns_protocol_error() {
     let xsub = Socket::new(SocketType::XSub, Options::default());
-    let r = xsub
-        .send(Message::single(b"\x01topic".as_ref()))
-        .await;
+    let r = xsub.send(Message::single(b"\x01topic".as_ref())).await;
     assert!(
         matches!(r, Err(omq_compio::Error::Protocol(_))),
         "XSUB send should return Protocol error; got {r:?}"
@@ -178,11 +176,8 @@ fn zmtp30_sub_greeting() -> [u8; 64] {
 }
 
 const SUB_READY: &[u8] = &[
-    0x04, 0x19,
-    0x05, b'R', b'E', b'A', b'D', b'Y',
-    0x0B, b'S', b'o', b'c', b'k', b'e', b't', b'-', b'T', b'y', b'p', b'e',
-    0x00, 0x00, 0x00, 0x03,
-    b'S', b'U', b'B',
+    0x04, 0x19, 0x05, b'R', b'E', b'A', b'D', b'Y', 0x0B, b'S', b'o', b'c', b'k', b'e', b't', b'-',
+    b'T', b'y', b'p', b'e', 0x00, 0x00, 0x00, 0x03, b'S', b'U', b'B',
 ];
 
 fn read_zmtp_frame(stream: &mut std::net::TcpStream) -> Vec<u8> {

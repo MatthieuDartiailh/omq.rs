@@ -137,8 +137,7 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
         let _ = pub_socket
             .send(omq_tokio::Message::single("sports.beta"))
             .await;
-        if let Ok(Ok(m)) =
-            tokio::time::timeout(Duration::from_millis(20), sub_socket.recv()).await
+        if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), sub_socket.recv()).await
         {
             let bytes = m.parts()[0].as_bytes();
             assert!(
@@ -221,8 +220,7 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
         p
     };
 
-    let pub_ =
-        omq_tokio::Socket::new(omq_tokio::SocketType::Pub, omq_tokio::Options::default());
+    let pub_ = omq_tokio::Socket::new(omq_tokio::SocketType::Pub, omq_tokio::Options::default());
     pub_.bind(tcp_loopback(port)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
@@ -274,12 +272,10 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Send a matching and a non-matching message.
-    pub_
-        .send(omq_tokio::Message::single("foo.topic.1"))
+    pub_.send(omq_tokio::Message::single("foo.topic.1"))
         .await
         .unwrap();
-    pub_
-        .send(omq_tokio::Message::single("bar.other"))
+    pub_.send(omq_tokio::Message::single("bar.other"))
         .await
         .unwrap();
 

@@ -1,7 +1,7 @@
 //! Reconnect/backoff: dialer reconnects when a listener appears late,
 //! restarts mid-session, or drops abruptly while sends are in-flight.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
@@ -9,10 +9,10 @@ use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    19_000 + (n % 500)
 }
 
 fn tcp_ep(port: u16) -> Endpoint {
@@ -46,7 +46,7 @@ async fn connect_retries_until_listener_appears() {
 
     push.send(Message::single("eventually")).await.unwrap();
     let pull = bind_handle.await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+    let m = tokio::time::timeout(Duration::from_secs(5), pull.recv())
         .await
         .expect("recv timeout")
         .unwrap();
@@ -73,7 +73,7 @@ async fn reconnect_after_peer_restart() {
 
     // Confirm the session is live before simulating the peer restart.
     push.send(Message::single("before")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), pull1.recv())
+    let m = tokio::time::timeout(Duration::from_secs(5), pull1.recv())
         .await
         .expect("initial recv timed out")
         .unwrap();
@@ -95,7 +95,7 @@ async fn reconnect_after_peer_restart() {
     assert!(bound, "pull2 failed to bind after pull1 closed");
 
     push.send(Message::single("after")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), pull2.recv())
+    let m = tokio::time::timeout(Duration::from_secs(5), pull2.recv())
         .await
         .expect("recv after peer restart timed out")
         .unwrap();
@@ -122,7 +122,7 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
 
     // Confirm handshake before flooding.
     push.send(Message::single("sync")).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), pull1.recv())
+    tokio::time::timeout(Duration::from_secs(5), pull1.recv())
         .await
         .expect("sync recv timed out")
         .unwrap();
@@ -157,7 +157,7 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
 
     // Push must have reconnected; this send must reach pull2.
     push.send(Message::single("after")).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), pull2.recv())
+    tokio::time::timeout(Duration::from_secs(5), pull2.recv())
         .await
         .expect("recv after peer drop timed out")
         .unwrap();

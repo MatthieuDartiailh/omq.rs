@@ -201,4 +201,3 @@ async fn dealer_router_reconnect_after_router_restart() {
     assert_eq!(got2.parts()[0].as_bytes().as_ref(), b"d1");
     assert_eq!(got2.parts()[1].as_bytes().as_ref(), b"after");
 }
-

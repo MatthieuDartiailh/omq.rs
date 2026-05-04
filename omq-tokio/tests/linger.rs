@@ -58,7 +58,11 @@ async fn linger_nonzero_drains_queued_messages_inproc() {
             .expect("recv timed out")
             .unwrap();
         let bytes: [u8; 4] = m.parts()[0].as_bytes().as_ref().try_into().unwrap();
-        assert_eq!(u32::from_be_bytes(bytes), i, "message {i} out of order or missing");
+        assert_eq!(
+            u32::from_be_bytes(bytes),
+            i,
+            "message {i} out of order or missing"
+        );
     }
 }
 
@@ -93,7 +97,11 @@ async fn linger_nonzero_drains_queued_messages_tcp() {
             .expect("recv timed out")
             .unwrap();
         let bytes: [u8; 4] = m.parts()[0].as_bytes().as_ref().try_into().unwrap();
-        assert_eq!(u32::from_be_bytes(bytes), i, "message {i} out of order or missing");
+        assert_eq!(
+            u32::from_be_bytes(bytes),
+            i,
+            "message {i} out of order or missing"
+        );
     }
 }
 

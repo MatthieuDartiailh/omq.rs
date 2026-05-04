@@ -8,8 +8,8 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use omq_tokio::{CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
 use omq_tokio::endpoint::Host;
+use omq_tokio::{CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
     let mut dir = std::env::temp_dir();
@@ -364,10 +364,7 @@ async fn curve_reconnects_after_server_restart() {
     // Server restarts with same keypair.
     server1.close().await.unwrap();
 
-    let server2 = Socket::new(
-        SocketType::Pull,
-        Options::default().curve_server(server_kp),
-    );
+    let server2 = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     let mut bound = false;
     for _ in 0..20 {
         if server2.bind(tcp_ep(port)).await.is_ok() {

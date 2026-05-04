@@ -87,7 +87,11 @@ fn append_jsonl(transport: &str, msg_size: usize, c: LatencyCell) {
         p999 = c.p999,
         max = c.max,
     );
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{row}");
     }
 }

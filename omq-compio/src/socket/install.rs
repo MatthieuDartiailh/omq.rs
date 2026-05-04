@@ -326,10 +326,9 @@ pub(super) fn spawn_wire_driver(
             SocketType::Req => true,
             SocketType::Rep => {
                 let peers = inner_for_exit.out_peers.read().expect("peers lock");
-                !peers
-                    .iter()
-                    .any(|s| s.connection_id != connection_id
-                        && s.info.read().expect("info lock").is_some())
+                !peers.iter().any(|s| {
+                    s.connection_id != connection_id && s.info.read().expect("info lock").is_some()
+                })
             }
             _ => false,
         };

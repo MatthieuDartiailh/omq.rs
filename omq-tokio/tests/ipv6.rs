@@ -94,13 +94,14 @@ async fn ipv6_pub_sub() {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let _ = pub_.send(Message::single("v6msg")).await;
-        if let Ok(Ok(m)) =
-            tokio::time::timeout(Duration::from_millis(20), sub.recv()).await
-        {
+        if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), sub.recv()).await {
             assert_eq!(m.parts()[0].as_bytes(), &b"v6msg"[..]);
             return;
         }
-        assert!(std::time::Instant::now() < deadline, "ipv6 pub/sub timed out");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ipv6 pub/sub timed out"
+        );
     }
 }
 

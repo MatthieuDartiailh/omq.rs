@@ -135,7 +135,6 @@ impl Payload {
     pub fn is_contiguous(&self) -> bool {
         self.chunks.len() <= 1
     }
-
 }
 
 impl From<Bytes> for Payload {

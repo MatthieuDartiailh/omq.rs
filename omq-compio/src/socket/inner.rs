@@ -739,8 +739,7 @@ impl SocketInner {
         };
         let _ = send_cap;
         let inproc_identity = if options.identity.is_empty() {
-            static COUNTER: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(1);
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut buf = Vec::with_capacity(9);
             buf.push(0u8); // libzmq auto-identity leading null

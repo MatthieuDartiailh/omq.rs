@@ -1315,11 +1315,7 @@ impl Socket {
         // `inner.closed` and exit without reconnecting once their
         // driver's JoinHandle resolves (which it already has, or will
         // very shortly — the cancel lands at a yield point only).
-        self.inner
-            .dialers
-            .write()
-            .expect("dialers lock")
-            .clear();
+        self.inner.dialers.write().expect("dialers lock").clear();
         {
             let mut peers = self.inner.out_peers.write().expect("peers lock");
             peers.clear();
