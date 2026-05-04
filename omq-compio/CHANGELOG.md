@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.1...omq-compio-v0.2.2) - 2026-05-04
+
+### Fixed
+
+- *(compio)* skip the `try_direct_encode` fast path on crypto connections.
+  The fast path writes raw frames into the wire-side buffer, bypassing the
+  codec's `send_message` — for CURVE / BLAKE3ZMQ that meant shipping
+  plaintext to encrypted peers, which then rejected or silently discarded
+  the frames. Adds a `uses_crypto` flag on `DirectIoState` and short-
+  circuits the fast path when set.
+
 ## [0.2.1](https://github.com/paddor/omq.rs/releases/tag/omq-compio-v0.2.1) - 2026-05-04
 
 ### Added
