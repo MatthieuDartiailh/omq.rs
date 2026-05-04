@@ -41,6 +41,15 @@ around 32 KiB, where the smaller WRITEV calls outweigh the codec cost.
 On compressible traffic (e.g. JSON events), the crossover is much
 earlier - see the JSON compression bench below.
 
+lz4+tcp and zstd+tcp numbers here use `Options::default()` — **no
+compression dictionary**. Without a dict, the compression threshold is
+512 B: frames smaller than that are passed through as plaintext (only a
+4-byte `SENTINEL_PLAIN` header is added). The slowdown vs plain TCP at
+small sizes (32 B–128 B) comes from missing the EncodedQueue send-bypass
+(transform paths use the codec-mutex path instead), not from compression
+work. With a pre-trained dict the threshold drops to 32 B (lz4) / 64 B
+(zstd) — see "With a pre-trained dict" below.
+
 ## Compression on realistic JSON payloads (omq-compio, 1 peer)
 
 Payload is a JSON event-log record (timestamps, trace ids, repeated

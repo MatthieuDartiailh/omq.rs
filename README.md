@@ -25,6 +25,31 @@ push.connect("tcp://127.0.0.1:5555".parse()?).await?;
 push.send(Message::single("hi")).await?;
 ```
 
+Pub/sub with `lz4+tcp://` compression (add `omq = { features = ["lz4"] }`):
+
+```rust
+use omq::{Message, Options, Socket, SocketType};
+use std::time::Duration;
+
+// Publisher binds; subscriber connects — standard ZMQ pattern.
+let publisher = Socket::new(SocketType::Pub, Options::default());
+publisher.bind("lz4+tcp://127.0.0.1:5556".parse()?).await?;
+
+let subscriber = Socket::new(SocketType::Sub, Options::default());
+subscriber.connect("lz4+tcp://127.0.0.1:5556".parse()?).await?;
+subscriber.subscribe("news.").await?; // prefix match
+
+// SUBSCRIBE travels from sub to pub over the wire; give it a moment.
+tokio::time::sleep(Duration::from_millis(50)).await;
+
+publisher.send(Message::multipart(["news.sports", "ball scores"])).await?;
+publisher.send(Message::multipart(["weather", "sunny"])).await?; // filtered out
+
+let m = subscriber.recv().await?; // only "news.sports" arrives
+assert_eq!(m.parts()[0].as_bytes(), &b"news.sports"[..]);
+assert_eq!(m.parts()[1].as_bytes(), &b"ball scores"[..]);
+```
+
 `omq` is a thin facade. The default `compio-backend` feature pulls in
 [`omq-compio`](omq-compio/) (single-thread io_uring/IOCP); the
 `tokio-backend` feature swaps in [`omq-tokio`](omq-tokio/) (multi-thread
@@ -35,17 +60,17 @@ backend `coverage_matrix` test suites plus a cross-runtime
 
 ## Design highlights
 
+- **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)): byte-in / events-
+  out state machine, no async, no traits on the hot path.
 - **Per-socket HWM with work-stealing send pumps** on round-robin patterns
   (PUSH / DEALER / REQ / PAIR / CLIENT / CHANNEL / SCATTER); per-connection
   queues on fan-out (PUB / XPUB / RADIO) and identity-routed patterns
   (ROUTER / REP / SERVER / PEER).
-- **Optional strict per-pipe priority** (`priority` Cargo feature) on
+- **Optional strict per-pipe priority** (experimental `priority` Cargo feature) on
   `Socket::connect_with(endpoint, ConnectOpts { priority })` - nanomsg-
   style 1..=255 (lower = higher priority). Round-robin send always
   prefers the highest-priority alive peer; lower tiers only run when
   higher are blocked or disconnected.
-- **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)): byte-in / events-
-  out state machine, no async, no traits on the hot path.
 - **Multi-chunk frame payloads** (`Payload = SmallVec<[Bytes; 2]>`,
   `Message = SmallVec<[Payload; 3]>`): layers prepend static prefixes
   without copying, kernel stitches chunks via `writev` / `sendmsg`.
@@ -102,7 +127,7 @@ default subset in a few seconds.
   spawns the other backend and round-trips over the wire.
 - **Mechanism interop**: against pyzmq (CURVE) and the author's
   pure-Ruby ZMTP impl
-  ([OMQ Ruby](https://github.com/paddor/omq.rb)).
+  ([OMQ Ruby](https://github.com/paddor/omq).
 - **Fuzz** (`tests/fuzz_*.rs`): ~1 M iterations of randomized socket
   actions and parser inputs per suite. Gated behind `fuzz`; run by
   `scripts/test-all.sh` unless `OMQ_SKIP_FUZZ=1`.
