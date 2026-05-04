@@ -4,9 +4,10 @@
 >
 > **5.4 µs** inproc latency | **20.4 µs** ipc | **28.4 µs** tcp
 
-Pure Rust ZeroMQ implementation. Wire-compatible with libzmq. All 11
-standard socket types plus 8 draft types, TCP / IPC / inproc / UDP
-transports, NULL / CURVE / blake3zmq mechanisms, `lz4+tcp://` and
+Pure Rust ZeroMQ implementation. Wire-compatible with libzmq, but faster at all
+message sizes. All 11 standard socket types plus 8 draft types, inproc / IPC /
+TCP transports, UDP transport (RADIO/DISH only), NULL / CURVE / BLAKE3ZMQ
+mechanisms, `lz4+tcp://` and
 `zstd+tcp://` compression transports.
 
 ## Install
