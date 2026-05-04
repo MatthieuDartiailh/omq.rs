@@ -45,7 +45,7 @@ use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader};
 /// bytes we stop pulling more from the inbox and let writev flush.
 /// 1 MiB folds large messages into bigger writev calls without
 /// outgrowing typical kernel TCP send buffers. Smaller caps (e.g.
-/// 256 KiB) under-utilise writev for 32 KiB+ messages and let the
+/// 256 KiB) under-utilize writev for 32 KiB+ messages and let the
 /// per-syscall overhead dominate; larger caps add latency without
 /// extra throughput once the kernel send buffer is the bottleneck.
 /// Override at runtime via `OMQ_BATCH_BYTES`.
@@ -244,7 +244,7 @@ pub(crate) async fn run_connection(
     // immediately; we let the codec drain pending_cmds (post-
     // handshake), flush every transmit chunk to the wire, and then
     // exit. Socket::close caps the wall-clock budget, so a stuck
-    // peer gets force-cancelled there.
+    // peer gets force-canceled there.
     let mut closing = false;
     // Set once `shared_msg_rx` has returned None - the socket's
     // shared send queue closed (the socket is on its way down).
@@ -587,7 +587,7 @@ pub(crate) async fn run_connection(
         //    iterations.
         //
         //    `PollFd::read_ready` is cancellation-safe (the underlying
-        //    io_uring `PollOnce` SQE can be cancelled cleanly), so we
+        //    io_uring `PollOnce` SQE can be canceled cleanly), so we
         //    can drop it when another arm wins the race. Once it
         //    fires, we do an inline `reader.read(buf).await` - kernel
         //    data is already queued, the SQE completes immediately,
@@ -744,7 +744,22 @@ pub(crate) async fn run_connection(
                     // so the next iteration re-arms POLL_ADD.
                     let outbound_pending = io.codec.has_pending_transmit()
                         || !state.encoded_queue.lock().expect("encoded_queue").is_empty();
-                    if state.recv_claim.load(Ordering::Acquire) == 1 || outbound_pending {
+                    // Pending inbox / shared cmds are consumed in step 4 by the
+                    // cmd_fut / shared_fut arms but only when the driver re-enters
+                    // select_biased!. If we'd otherwise commit to a blocking
+                    // `reader.read(buf).await` here while a SendMessage is
+                    // already in `inbox` and the kernel buffer was just drained
+                    // by a concurrent direct-recv, the read SQE pends until the
+                    // peer writes — never, in a strict-priority REQ/REP
+                    // sequential roundtrip. Bail and re-enter select instead.
+                    let work_pending = !inbox.is_empty()
+                        || shared_msg_rx
+                            .as_ref()
+                            .is_some_and(|rx| !rx.is_empty());
+                    if state.recv_claim.load(Ordering::Acquire) == 1
+                        || outbound_pending
+                        || work_pending
+                    {
                         drop(io);
                         read_buf = buf;
                         codec_maybe_dirty = true;

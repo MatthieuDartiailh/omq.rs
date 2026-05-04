@@ -14,9 +14,9 @@ use omq_proto::backoff::next_delay;
 use omq_proto::error::Result;
 use omq_proto::options::ReconnectPolicy;
 
-/// Outcome of a cancelled backoff loop.
+/// Outcome of a canceled backoff loop.
 #[derive(Debug)]
-pub enum Cancelled {
+pub enum Canceled {
     /// The cancellation token fired before we connected.
     Token,
     /// The policy is [`ReconnectPolicy::Disabled`] and we exhausted the
@@ -25,7 +25,7 @@ pub enum Cancelled {
 }
 
 /// Keep trying to connect. Returns the established stream on success, or
-/// [`Cancelled`] if the cancellation token fired (or the policy was
+/// [`Canceled`] if the cancellation token fired (or the policy was
 /// [`ReconnectPolicy::Disabled`] and we failed once).
 ///
 /// The first attempt happens immediately; subsequent attempts wait per the
@@ -39,7 +39,7 @@ pub async fn dial_with_backoff<F, Fut, S>(
     policy: ReconnectPolicy,
     cancel: &CancellationToken,
     mut on_delay: impl FnMut(Duration, u32),
-) -> std::result::Result<S, Cancelled>
+) -> std::result::Result<S, Canceled>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<S>>,
@@ -47,18 +47,18 @@ where
     let mut attempt: u32 = 0;
     loop {
         if cancel.is_cancelled() {
-            return Err(Cancelled::Token);
+            return Err(Canceled::Token);
         }
         match dial().await {
             Ok(stream) => return Ok(stream),
             Err(_err) => {
                 attempt = attempt.saturating_add(1);
                 let Some(delay) = next_delay(&policy, attempt) else {
-                    return Err(Cancelled::PolicyDisabled);
+                    return Err(Canceled::PolicyDisabled);
                 };
                 on_delay(delay, attempt);
                 tokio::select! {
-                    () = cancel.cancelled() => return Err(Cancelled::Token),
+                    () = cancel.cancelled() => return Err(Canceled::Token),
                     () = sleep(delay) => {}
                 }
             }

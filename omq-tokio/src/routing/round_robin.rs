@@ -151,11 +151,17 @@ impl std::fmt::Debug for Submitter {
 #[cfg(feature = "priority")]
 impl Submitter {
     /// Walk peers in priority order; `try_send` on each peer's driver
-    /// inbox. Returns Ok on first success. Falls through Full / Closed
-    /// to lower priorities. If every alive peer's queue is Full,
-    /// `send().await`s on the highest-priority alive (back-pressure).
-    /// All peers Closed or no peers at all → wait for a peer-set
-    /// change notification, then retry.
+    /// inbox. Returns Ok on first success.
+    ///
+    /// **Strict precedence:** within each tier, attempt every peer
+    /// (round-robin start). On any `Ok`, return `Sent`. If every peer
+    /// in this tier is `Full` (queues saturated, peers alive), back-
+    /// pressure on the first `Full` peer in this tier — never fall
+    /// through to a lower-priority tier when the higher tier is alive
+    /// but back-pressured. Only when every peer in a tier is `Closed`
+    /// do we advance to the next tier. If every peer at every tier is
+    /// `Closed` (or no peers at all), wait for a peer-set change
+    /// notification and retry.
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         loop {
             let snapshot: Vec<PriorityPeer> = {
@@ -171,7 +177,7 @@ impl Submitter {
                 continue;
             }
             let rr = self.rr_index.fetch_add(1, Ordering::Relaxed);
-            let mut highest_alive: Option<DriverHandle> = None;
+            let mut tier_back_pressure: Option<DriverHandle> = None;
             let mut i = 0;
             while i < snapshot.len() {
                 let prio = snapshot[i].priority;
@@ -181,6 +187,8 @@ impl Submitter {
                 }
                 let tier_size = j - i;
                 let offset = rr % tier_size;
+                let mut tier_full: Option<DriverHandle> = None;
+                let mut tier_has_alive = false;
                 for k in 0..tier_size {
                     let peer = &snapshot[i + (offset + k) % tier_size];
                     match peer
@@ -190,16 +198,21 @@ impl Submitter {
                     {
                         Ok(()) => return Ok(()),
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            if highest_alive.is_none() {
-                                highest_alive = Some(peer.handle.clone());
+                            tier_has_alive = true;
+                            if tier_full.is_none() {
+                                tier_full = Some(peer.handle.clone());
                             }
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
                     }
                 }
+                if tier_has_alive {
+                    tier_back_pressure = tier_full;
+                    break;
+                }
                 i = j;
             }
-            if let Some(h) = highest_alive {
+            if let Some(h) = tier_back_pressure {
                 return h
                     .inbox
                     .send(DriverCommand::SendMessage(msg))

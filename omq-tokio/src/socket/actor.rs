@@ -23,7 +23,7 @@ use crate::routing::{
     RecvStrategy, SendStrategy, SendSubmitter, max_peer_count, supports_groups, supports_subscribe,
 };
 use crate::transport::{
-    Cancelled, InprocConn, InprocFrame, InprocPeerSnapshot, PeerIdent, dial_with_backoff,
+    Canceled, InprocConn, InprocFrame, InprocPeerSnapshot, PeerIdent, dial_with_backoff,
 };
 use omq_proto::endpoint::Endpoint;
 use omq_proto::endpoint::reject_encrypted_inproc;
@@ -411,7 +411,7 @@ impl SocketDriver {
     }
 
     /// Tear down dialer(s) targeting `endpoint`. The dial loop, including
-    /// any in-flight reconnect backoff, is cancelled. Already-handshaked
+    /// any in-flight reconnect backoff, is canceled. Already-handshaked
     /// peers from this dialer are not closed (they belong to `peers` and
     /// outlive the dialer). Returns `Error::Unroutable` if no dialer
     /// matches.
@@ -706,7 +706,7 @@ impl SocketDriver {
                         })
                         .await;
                 }
-                Err(Cancelled::Token | Cancelled::PolicyDisabled) => {
+                Err(Canceled::Token | Canceled::PolicyDisabled) => {
                     let _ = tx.send(InternalEvent::ConnectGaveUp).await;
                 }
             }
@@ -1164,7 +1164,7 @@ impl SocketDriver {
                 // Legacy ZMTP 3.0 SUBSCRIBE/CANCEL: a single-frame
                 // message whose body starts with 0x01 / 0x00. pyzmq
                 // XSUB and older libzmq paths emit these instead of
-                // the 3.1 wire commands. PUB/XPUB must honour both.
+                // the 3.1 wire commands. PUB/XPUB must honor both.
                 if matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
                     && msg.parts().len() == 1
                 {

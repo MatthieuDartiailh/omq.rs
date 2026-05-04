@@ -50,8 +50,8 @@ async fn cancel_recv_mid_wait_then_recv_succeeds() {
     // Abandon recv() mid-flight: it has claimed the recv slot,
     // entered the read_ready/in_rx select, and is parked. Drop
     // forces a Drop on the ClaimGuard which must release the claim.
-    let cancelled = compio::time::timeout(Duration::from_millis(100), pull.recv()).await;
-    assert!(cancelled.is_err(), "first recv should have timed out");
+    let canceled = compio::time::timeout(Duration::from_millis(100), pull.recv()).await;
+    assert!(canceled.is_err(), "first recv should have timed out");
 
     push.send(Message::single("after-cancel")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())

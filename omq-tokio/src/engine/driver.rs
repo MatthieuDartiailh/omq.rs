@@ -190,7 +190,7 @@ where
     }
 
     /// Run the driver to completion. Returns:
-    /// - `Ok(())` on clean shutdown (peer EOF, cancelled, `Close` command,
+    /// - `Ok(())` on clean shutdown (peer EOF, canceled, `Close` command,
     ///   inbox dropped).
     /// - `Err(_)` on protocol violations, I/O errors, or codec errors.
     ///
