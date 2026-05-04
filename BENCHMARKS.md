@@ -50,6 +50,37 @@ small sizes (32 B–128 B) comes from missing the EncodedQueue send-bypass
 work. With a pre-trained dict the threshold drops to 32 B (lz4) / 64 B
 (zstd) — see "With a pre-trained dict" below.
 
+## Backend comparison: PUSH/PULL throughput, single peer
+
+<!-- BEGIN backend_comparison -->
+| Size | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
+|---|---|---|---|---|---|---|
+| 32 B | 3.10M | 1.15M | 2.12M | 4.42M | 2.07M | 4.44M |
+| 128 B | 3.08M | 1.09M | 1.93M | 4.61M | 1.88M | 2.62M |
+| 512 B | 3.08M | 1.21M | 1.32M | 3.78M | 1.29M | 3.61M |
+| 2 KiB | 3.12M | 1.15M | 853k | 971k | 854k | 1.84M |
+| 8 KiB | 3.17M | 805k | 388k | 459k | 357k | 559k |
+| 32 KiB | 3.12M | 699k | 119k | 106k | 110k | 97.9k |
+| 128 KiB | 3.11M | 669k | 29.8k | 38.6k | 28.0k | 39.5k |
+
+<!-- END backend_comparison -->
+
+Numbers are msg/s. compio wins at every size on every transport on
+this hardware: io_uring + the direct-routing path beats tokio's
+mio/epoll syscall path even where syscall overhead amortizes at
+large sizes. Wins narrow at very-large sizes where syscall cost is
+the same on both backends. **Note that compio here is one core
+versus tokio's whole box** - see the caveat at the top of this
+document. Tokio's lead grows on multi-peer fan-in (its multi-thread
+runtime overlaps senders across cores); a multi-runtime compio
+deployment lifts wire throughput another 20-40%.
+
+## Cross-library comparisons
+
+See [COMPARISONS.md](COMPARISONS.md) for two-process TCP benchmarks against
+libzmq and zmq.rs. Run `./scripts/compare_libzmq.sh --update-benchmarks` or
+`./scripts/compare_zmqrs.sh --update-benchmarks` to refresh those tables.
+
 ## Compression on realistic JSON payloads (omq-compio, 1 peer)
 
 Payload is a JSON event-log record (timestamps, trace ids, repeated
@@ -284,37 +315,6 @@ through the SocketDriver actor + per-send submit task + per-peer pump
 runtime hides some of the cost by overlapping send/recv on different
 workers. Stage 1's single-wire-peer bypass would port to tokio's
 `routing/round_robin.rs`; tracked as a follow-up.
-
-## Cross-library comparisons
-
-See [COMPARISONS.md](COMPARISONS.md) for two-process TCP benchmarks against
-libzmq and zmq.rs. Run `./scripts/compare_libzmq.sh --update-benchmarks` or
-`./scripts/compare_zmqrs.sh --update-benchmarks` to refresh those tables.
-
-## Backend comparison: PUSH/PULL throughput, single peer
-
-<!-- BEGIN backend_comparison -->
-| Size | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
-|---|---|---|---|---|---|---|
-| 32 B | 3.10M | 1.15M | 2.12M | 4.42M | 2.07M | 4.44M |
-| 128 B | 3.08M | 1.09M | 1.93M | 4.61M | 1.88M | 2.62M |
-| 512 B | 3.08M | 1.21M | 1.32M | 3.78M | 1.29M | 3.61M |
-| 2 KiB | 3.12M | 1.15M | 853k | 971k | 854k | 1.84M |
-| 8 KiB | 3.17M | 805k | 388k | 459k | 357k | 559k |
-| 32 KiB | 3.12M | 699k | 119k | 106k | 110k | 97.9k |
-| 128 KiB | 3.11M | 669k | 29.8k | 38.6k | 28.0k | 39.5k |
-
-<!-- END backend_comparison -->
-
-Numbers are msg/s. compio wins at every size on every transport on
-this hardware: io_uring + the direct-routing path beats tokio's
-mio/epoll syscall path even where syscall overhead amortizes at
-large sizes. Wins narrow at very-large sizes where syscall cost is
-the same on both backends. **Note that compio here is one core
-versus tokio's whole box** - see the caveat at the top of this
-document. Tokio's lead grows on multi-peer fan-in (its multi-thread
-runtime overlaps senders across cores); a multi-runtime compio
-deployment lifts wire throughput another 20-40%.
 
 ## PUSH/PULL throughput, 8 peers
 
