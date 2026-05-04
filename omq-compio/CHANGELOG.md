@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.3...omq-compio-v0.2.5) - 2026-05-04
+
+### Fixed
+
+- *(compio)* fix deadlock in sequential REQ/REP under the `priority` feature.
+  The driver's PollOnce SQE could fire while `try_direct_recv` concurrently
+  held `peer_io` and drained the kernel buffer; by the time the driver
+  acquired the lock `recv_claim` had returned to 0 and `outbound_pending` was
+  false (priority sends go to the cmd inbox, not `encoded_queue`), so the
+  driver entered a blocking `reader.read()` on an empty buffer while
+  `SendMessage(pong)` sat unprocessed in the inbox. Fixed by adding a
+  `drain_generation` counter to `DirectIoState` (priority feature only):
+  `try_direct_recv` increments it after each successful read; the driver
+  snapshots it before `select_biased!` and bails if it changed, re-entering
+  select so the cmd arm can fire.
+
 ## [0.2.3](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.2...omq-compio-v0.2.3) - 2026-05-04
 
 ### Fixed
