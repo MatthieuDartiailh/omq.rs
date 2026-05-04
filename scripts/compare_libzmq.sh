@@ -3,9 +3,9 @@
 # TCP loopback, small messages. Each cell: 3 s timed window after 500 ms warmup.
 #
 # Usage:
-#   ./scripts/bench_compare.sh                   # print table to stdout
-#   ./scripts/bench_compare.sh --update-benchmarks  # update BENCHMARKS.md section
-#   ./scripts/bench_compare.sh [port]            # override base port (default 15555)
+#   ./scripts/compare_libzmq.sh                   # print table to stdout
+#   ./scripts/compare_libzmq.sh --update-benchmarks  # update COMPARISONS.md section
+#   ./scripts/compare_libzmq.sh [port]            # override base port (default 15555)
 
 set -euo pipefail
 
@@ -126,7 +126,7 @@ echo ""
 # ---------- --update-benchmarks ----------
 
 if [ "$UPDATE_BENCHMARKS" = true ]; then
-    BENCHMARKS="$REPO/BENCHMARKS.md"
+    BENCHMARKS="$REPO/COMPARISONS.md"
     MARKER="libzmq_comparison"
 
     # Build markdown table

@@ -16,7 +16,13 @@ fn latency_transports() -> Vec<String> {
     if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
         return s.split(',').map(|t| t.trim().to_string()).collect();
     }
-    vec!["inproc".to_string(), "ipc".to_string(), "tcp".to_string()]
+    #[allow(unused_mut)]
+    let mut ts = vec!["inproc".to_string(), "ipc".to_string(), "tcp".to_string()];
+    #[cfg(feature = "lz4")]
+    ts.push("lz4+tcp".to_string());
+    #[cfg(feature = "zstd")]
+    ts.push("zstd+tcp".to_string());
+    ts
 }
 
 const WARMUP_ITERS: usize = 1_000;

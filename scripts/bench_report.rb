@@ -191,31 +191,6 @@ if options[:update_benchmarks]
     out
   end
 
-  # req_rep_latency — both backends, req_rep, peers=1
-  build_req_rep_latency = lambda do
-    transports = %w[inproc ipc tcp]
-    sizes = SIZE_LABELS.keys.select do |s|
-      transports.any? do |t|
-        latest.call('compio', 'req_rep', t, 1, s) || latest.call('tokio', 'req_rep', t, 1, s)
-      end
-    end
-    return "\n(no req_rep data)\n" if sizes.empty?
-
-    out = +"\n"
-    out << "| transport | size | omq-compio | omq-tokio |\n"
-    out << "|---|---|---|---|\n"
-    transports.each do |t|
-      sizes.each do |sz|
-        c  = latency_cell(latest.call('compio', 'req_rep', t, 1, sz))
-        tk = latency_cell(latest.call('tokio',  'req_rep', t, 1, sz))
-        next if c == '—' && tk == '—'
-        out << "| #{t} | #{size_label(sz)} | #{c} | #{tk} |\n"
-      end
-    end
-    out << "\n"
-    out
-  end
-
   # backend_comparison — both backends, push_pull, peers=1
   build_backend_comparison = lambda do
     transports = %w[inproc ipc tcp]
@@ -345,7 +320,6 @@ if options[:update_benchmarks]
 
   bm = File.read(BENCHMARKS_PATH)
   bm = replace_block.call(bm, 'push_pull_compio_1peer', build_push_pull_compio.call)
-  bm = replace_block.call(bm, 'req_rep_latency',        build_req_rep_latency.call)
   bm = replace_block.call(bm, 'backend_comparison',     build_backend_comparison.call)
   bm = replace_block.call(bm, 'latency_percentiles',    build_latency_percentiles.call)
   bm = replace_block.call(bm, 'push_pull_8peer',        build_push_pull_8peer.call)

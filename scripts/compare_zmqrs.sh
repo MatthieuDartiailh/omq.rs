@@ -8,9 +8,9 @@
 # same thread model). omq-compio runs on a single io_uring thread for contrast.
 #
 # Usage:
-#   ./scripts/bench_compare_zmqrs.sh                   # print table to stdout
-#   ./scripts/bench_compare_zmqrs.sh --update-benchmarks  # update BENCHMARKS.md section
-#   ./scripts/bench_compare_zmqrs.sh [port]            # override base port (default 15655)
+#   ./scripts/compare_zmqrs.sh                   # print table to stdout
+#   ./scripts/compare_zmqrs.sh --update-benchmarks  # update COMPARISONS.md section
+#   ./scripts/compare_zmqrs.sh [port]            # override base port (default 15655)
 
 set -euo pipefail
 
@@ -148,7 +148,7 @@ echo ""
 # ---------- --update-benchmarks ----------
 
 if [ "$UPDATE_BENCHMARKS" = true ]; then
-    BENCHMARKS="$REPO/BENCHMARKS.md"
+    BENCHMARKS="$REPO/COMPARISONS.md"
     MARKER="zmqrs_comparison"
 
     MD=""
