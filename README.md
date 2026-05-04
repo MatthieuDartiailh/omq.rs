@@ -63,12 +63,28 @@ The public `Socket` API is identical, verified in lockstep by per-
 backend `coverage_matrix` test suites plus a cross-runtime
 `interop_compio` ZMTP-on-the-wire suite.
 
-## Benchmarks
+## Cargo features
 
-- [BENCHMARKS.md](BENCHMARKS.md): throughput / latency / compression tables
-  across transports, message sizes, and backends (omq-compio vs omq-tokio).
-- [COMPARISONS.md](COMPARISONS.md): two-process TCP benchmarks against
-  libzmq and zmq.rs.
+All optional. Default build is the smallest deploy: NULL mechanism +
+TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
+
+| feature           | what it adds                                      | extra deps                       |
+|-------------------|---------------------------------------------------|----------------------------------|
+| `compio-backend`  | (default) compio io_uring/IOCP backend            | -                                |
+| `tokio-backend`   | tokio multi-thread backend                        | -                                |
+| `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
+| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
+| `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4-sys` |
+| `zstd`            | `zstd+tcp://` compression transport ([RFC](https://github.com/paddor/omq-zstd/blob/main/RFC.md)) | `zstd-safe` (vends `libzstd`; needs `cc`) |
+| `priority`        | Strict per-pipe priority on `Socket::connect_with`| -                                |
+
+> [!WARNING]
+> **BLAKE3ZMQ has not been independently security audited.** It's an
+> omq-native construction (Noise XX + BLAKE3 + X25519 + ChaCha20-BLAKE3)
+> and should not be relied on for anything that matters until it has had
+> third-party review. Use **CURVE** (RFC 26) for production / regulated
+> workloads. Audits welcome - open an issue if you can help fund or
+> conduct one.
 
 ## Design highlights
 
@@ -127,7 +143,7 @@ backend `coverage_matrix` test suites plus a cross-runtime
 
 ## Tests
 
-77 integration test files across `omq-proto`, `omq-compio`, and
+81 integration test files across `omq-proto`, `omq-compio`, and
 `omq-tokio`; ~700 tests total. `cargo test --workspace` runs the
 default subset in a few seconds.
 
@@ -135,9 +151,10 @@ default subset in a few seconds.
   × every supported transport on each backend.
 - **Cross-runtime interop** (`omq-tokio/tests/interop_compio.rs`):
   spawns the other backend and round-trips over the wire.
-- **Mechanism interop**: against pyzmq (CURVE) and the author's
+- **External interop**: against pyzmq (CURVE) and the author's
   pure-Ruby ZMTP impl
-  ([OMQ Ruby](https://github.com/paddor/omq).
+  ([OMQ Ruby](https://github.com/paddor/omq)) over plain TCP, lz4, and
+  zstd transports.
 - **Fuzz** (`tests/fuzz_*.rs`): ~1 M iterations of randomized socket
   actions and parser inputs per suite. Gated behind `fuzz`; run by
   `scripts/test-all.sh` unless `OMQ_SKIP_FUZZ=1`.
@@ -145,6 +162,13 @@ default subset in a few seconds.
   pyzmq drop-in compatibility.
 
 `scripts/test-all.sh` runs every feature combination on both backends.
+
+## Benchmarks
+
+- [BENCHMARKS.md](BENCHMARKS.md): throughput / latency / compression tables
+  across transports, message sizes, and backends (omq-compio vs omq-tokio).
+- [COMPARISONS.md](COMPARISONS.md): two-process TCP benchmarks against
+  libzmq and zmq.rs.
 
 ## Platform support
 
@@ -154,29 +178,6 @@ Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
 ## Requirements
 
 - Rust 1.93 or newer (edition 2024).
-
-## Cargo features
-
-All optional. Default build is the smallest deploy: NULL mechanism +
-TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
-
-| feature           | what it adds                                      | extra deps                       |
-|-------------------|---------------------------------------------------|----------------------------------|
-| `compio-backend`  | (default) compio io_uring/IOCP backend            | -                                |
-| `tokio-backend`   | tokio multi-thread backend                        | -                                |
-| `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
-| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
-| `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4-sys` |
-| `zstd`            | `zstd+tcp://` compression transport ([RFC](https://github.com/paddor/omq-zstd/blob/main/RFC.md)) | `zstd-safe` (vends `libzstd`; needs `cc`) |
-| `priority`        | Strict per-pipe priority on `Socket::connect_with`| -                                |
-
-> [!WARNING]
-> **BLAKE3ZMQ has not been independently security audited.** It's an
-> omq-native construction (Noise XX + BLAKE3 + X25519 + ChaCha20-BLAKE3)
-> and should not be relied on for anything that matters until it has had
-> third-party review. Use **CURVE** (RFC 26) for production / regulated
-> workloads. Audits welcome - open an issue if you can help fund or
-> conduct one.
 
 ## License
 
