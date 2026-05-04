@@ -91,7 +91,7 @@ impl Drop for Blake3ZmqSecretKey {
 
 /// BLAKE3ZMQ runtime state.
 ///
-/// Holds the role (server/client) and a lazily-initialised handshake
+/// Holds the role (server/client) and a lazily-initialized handshake
 /// state machine. The state machine is built in `start` so we have
 /// the greeting bytes for `h0`.
 pub struct Blake3ZmqMechanism {

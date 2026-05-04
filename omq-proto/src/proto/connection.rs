@@ -451,7 +451,7 @@ impl Connection {
                 };
                 let plen = f.payload.len();
                 self.out_bytes_total +=
-                    (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
+                    frame::header_len_for(plen) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
                 continue;
             }
@@ -478,7 +478,7 @@ impl Connection {
                 };
                 let plen = f.payload.len();
                 self.out_bytes_total +=
-                    (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
+                    frame::header_len_for(plen) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
                 continue;
             }
@@ -489,12 +489,12 @@ impl Connection {
             };
             let plen = f.payload.len();
             self.out_bytes_total +=
-                (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
+                frame::header_len_for(plen) + plen;
             frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         }
     }
 
-    /// Queue an application message. Parts serialise in order; the last part
+    /// Queue an application message. Parts serialize in order; the last part
     /// carries `MORE=0` and the rest `MORE=1`.
     ///
     /// When a security mechanism has installed a frame transform (CURVE),
@@ -538,7 +538,7 @@ impl Connection {
                 };
                 let plen = f.payload.len();
                 self.out_bytes_total +=
-                    (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
+                    frame::header_len_for(plen) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
             }
         }
@@ -585,7 +585,7 @@ impl Connection {
         };
         let plen = f.payload.len();
         self.out_bytes_total +=
-            (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
+            frame::header_len_for(plen) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         Ok(())
     }
@@ -616,7 +616,7 @@ impl Connection {
         };
         let plen = f.payload.len();
         self.out_bytes_total +=
-            (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
+            frame::header_len_for(plen) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         Ok(())
     }
@@ -732,7 +732,7 @@ impl Connection {
     /// frame-level transform is active (use [`has_frame_transform`] to check).
     /// The caller is responsible for writing `flat_buf` contents to the wire.
     ///
-    /// This path copies header + payload bytes contiguously, amortising many
+    /// This path copies header + payload bytes contiguously, amortizing many
     /// small messages into a single write instead of building a
     /// `Vec<IoSlice>` per message.
     pub fn send_message_flat(&self, msg: &Message, flat_buf: &mut BytesMut) {

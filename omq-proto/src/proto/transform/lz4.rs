@@ -188,7 +188,7 @@ impl Lz4Encoder {
             MIN_COMPRESS_NO_DICT
         };
         if plain.len() < threshold {
-            return Ok(plaintext_payload(plain));
+            return Ok(plaintext_payload(&plain));
         }
         let bound = unsafe { lz4_sys::LZ4_compressBound(plain.len() as i32) };
         if bound <= 0 {
@@ -240,7 +240,7 @@ impl Lz4Encoder {
         // RFC §5.4: passthrough if the compressed envelope is no smaller
         // than the plaintext envelope.
         if n + ENVELOPE_LZ4B >= plain.len() + ENVELOPE_PLAIN {
-            return Ok(plaintext_payload(plain));
+            return Ok(plaintext_payload(&plain));
         }
         // Fill the 12-byte header prefix in-place; freeze the whole range
         // into a single-chunk Payload (one allocation, no extra copy).

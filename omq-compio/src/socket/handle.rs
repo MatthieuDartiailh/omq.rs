@@ -69,6 +69,9 @@ impl Drop for ClaimGuard<'_> {
     }
 }
 
+/// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
+/// driver tasks. Close happens via the explicit [`Socket::close`] method
+/// (the last handle drop cancels the background tasks without draining).
 #[derive(Clone)]
 pub struct Socket {
     inner: Arc<SocketInner>,
@@ -110,6 +113,10 @@ impl Drop for Socket {
 }
 
 impl Socket {
+    /// Create a new socket of the given type with the given options. Background
+    /// tasks (listener accept loops, dial supervisors, per-connection drivers)
+    /// are spawned lazily by [`bind`](Self::bind) and [`connect`](Self::connect)
+    /// on the current compio runtime.
     pub fn new(socket_type: SocketType, options: Options) -> Self {
         assert!(
             !options.conflate || crate::socket::supports_conflate(socket_type),
@@ -130,6 +137,7 @@ impl Socket {
         &self.inner
     }
 
+    /// The socket type this handle was created with.
     pub fn socket_type(&self) -> SocketType {
         self.inner.socket_type
     }
@@ -140,11 +148,13 @@ impl Socket {
         self.inner.monitor.subscribe()
     }
 
+    /// Bind to an endpoint. Returns once the listener is active (or, for UDP
+    /// DISH, once the socket is bound and the recv loop is spawned).
     pub async fn bind(&self, endpoint: Endpoint) -> Result<()> {
         reject_encrypted_inproc(&endpoint, &self.inner.options.mechanism)?;
         // The Lz4Tcp / ZstdTcp arms are gated on this crate's own
         // feature; Cargo feature unification can still surface those
-        // variants (e.g. when a workspace neighbour enables `omq-proto/lz4`
+        // variants (e.g. when a workspace neighbor enables `omq-proto/lz4`
         // for its own tests but pulls us in as a dev-dep without our lz4),
         // so we add a wildcard runtime fallback.
         #[allow(unreachable_patterns)]
@@ -362,6 +372,9 @@ impl Socket {
         Ok(())
     }
 
+    /// Queue a connect attempt. Returns immediately; the background dial
+    /// supervisor handles the initial connect and any retries per the
+    /// configured [`ReconnectPolicy`](omq_proto::ReconnectPolicy).
     pub async fn connect(&self, endpoint: Endpoint) -> Result<()> {
         self.connect_inner(
             endpoint,
@@ -1221,7 +1234,7 @@ impl Socket {
         // Cancel listener tasks immediately — they hold Arc<SocketInner>
         // and keep the OS port alive. Dialer tasks are deferred until
         // after the linger drain below: each dialer supervisor awaits its
-        // driver's JoinHandle, so cancelling the supervisor early would
+        // driver's JoinHandle, so canceling the supervisor early would
         // also cancel the driver before it has flushed pending sends to
         // the wire. Dialer supervisors check `inner.closed` after their
         // driver exits and exit without reconnecting.

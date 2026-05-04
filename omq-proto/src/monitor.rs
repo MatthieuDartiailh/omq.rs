@@ -91,7 +91,7 @@ pub enum MonitorEvent {
 pub enum PeerCommandKind {
     /// The peer sent ZMTP `ERROR { reason }`.
     Error { reason: String },
-    /// The peer sent an extension command we don't recognise.
+    /// The peer sent an extension command we don't recognize.
     Unknown { name: Bytes, body: Bytes },
 }
 
@@ -115,7 +115,7 @@ pub struct ConnectionStatus {
 pub enum DisconnectReason {
     /// Peer closed the TCP/IPC/inproc stream.
     PeerClosed,
-    /// We cancelled (e.g. on socket close or reconnect).
+    /// We canceled (e.g. on socket close or reconnect).
     LocalClose,
     /// Timeout, protocol violation, or I/O error.
     Error(String),

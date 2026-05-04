@@ -138,6 +138,7 @@ async fn push_conflate_keeps_only_latest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn radio_conflate_keeps_only_latest_per_group() {
+    const N: u32 = 5_000;
     // RADIO + conflate: per-peer queue cap-1. DISH should receive only a
     // subset of the flooded messages (conflate drops all but the latest).
     let ep = inproc("conflate-radio-dish");
@@ -149,7 +150,6 @@ async fn radio_conflate_keeps_only_latest_per_group() {
     dish.join("weather").await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    const N: u32 = 5_000;
     for i in 0..N {
         radio
             .send(Message::multipart([

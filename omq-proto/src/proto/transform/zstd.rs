@@ -240,7 +240,7 @@ impl ZstdEncoder {
             MIN_COMPRESS_NO_DICT
         };
         if plain.len() < threshold {
-            return Ok(plaintext_payload(plain));
+            return Ok(plaintext_payload(&plain));
         }
 
         if !self.cctx_configured {
@@ -269,7 +269,7 @@ impl ZstdEncoder {
             .compress2(&mut self.out_buf[..bound], &plain)
             .map_err(zstd_err)?;
         if n >= plain.len() - ENVELOPE_PLAIN {
-            return Ok(plaintext_payload(plain));
+            return Ok(plaintext_payload(&plain));
         }
         Ok(Payload::from_bytes(Bytes::copy_from_slice(
             &self.out_buf[..n],

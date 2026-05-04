@@ -162,7 +162,6 @@ pub(super) type WirePeerHandle = Arc<RwLock<flume::Sender<DriverCommand>>>;
 /// separate `Bytes` chunks. This reduces `write_vectored` iovec count
 /// from 2N to 1 for a batch of N small messages — the dominant win at
 /// 128 B and 512 B message sizes.
-#[cfg_attr(feature = "priority", allow(dead_code))]
 pub(crate) const FLAT_THRESHOLD: usize = 32 * 1024;
 
 /// Per-peer outbound queue for the direct-encode fast path.
@@ -187,13 +186,11 @@ pub(crate) struct EncodedQueue {
     total_bytes: usize,
     /// Header scratch buffer — reused across frames (zero alloc after
     /// warm-up). `split().freeze()` hands ownership to the chunk list.
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     scratch: BytesMut,
     /// Flat accumulation buffer for small messages. Bytes are copied in
     /// directly (header + payload in one contiguous region). Drained as
     /// a single `Bytes` chunk in `drain_into_vec`, reducing iovec count.
     /// Pre-allocated at 128 KiB; retained across drains via `split()`.
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     flat_buf: BytesMut,
 }
 
@@ -223,7 +220,6 @@ impl EncodedQueue {
     /// Flush `flat_buf` into `chunks` as one contiguous `Bytes` chunk.
     /// Must be called before encoding a large message so that wire order
     /// matches insertion order (small msgs before this large one).
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     fn flush_flat_to_chunks(&mut self) {
         if !self.flat_buf.is_empty() {
             // split() takes all flat_buf bytes and leaves it empty (retaining capacity).
@@ -232,7 +228,6 @@ impl EncodedQueue {
         }
     }
 
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) fn total_bytes(&self) -> usize {
         self.total_bytes
     }
@@ -240,7 +235,6 @@ impl EncodedQueue {
     /// Encode a small ZMTP message (total payload < `FLAT_THRESHOLD`) into
     /// `flat_buf` by copying all header and payload bytes contiguously.
     /// Amortises many small messages into one `write_vectored` iovec entry.
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) fn encode_and_push_flat(&mut self, msg: &omq_proto::message::Message) {
         let parts = msg.parts();
         let n = parts.len();
@@ -280,7 +274,6 @@ impl EncodedQueue {
     ///
     /// Flushes `flat_buf` to `chunks` first to maintain wire ordering
     /// when small and large messages are interleaved.
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) fn encode_and_push(&mut self, msg: &omq_proto::message::Message) {
         self.flush_flat_to_chunks();
         let parts = msg.parts();

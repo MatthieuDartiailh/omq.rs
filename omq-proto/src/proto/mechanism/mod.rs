@@ -135,10 +135,11 @@ pub struct MechanismPeerInfo {
 /// closure can be cloned through `MechanismConfig`.
 #[derive(Clone)]
 pub struct Authenticator(
-    // Field is read only by `allow()`, which is itself only called by
-    // the encrypting mechanism handshakes. Without those features the
-    // field is unread; allow it to keep the public type shape stable.
-    #[allow(dead_code)] Arc<dyn Fn(&MechanismPeerInfo) -> bool + Send + Sync>,
+    #[cfg_attr(
+        not(any(feature = "curve", feature = "blake3zmq")),
+        allow(dead_code, reason = "only encrypting mechanisms call allow()")
+    )]
+    Arc<dyn Fn(&MechanismPeerInfo) -> bool + Send + Sync>,
 );
 
 impl Authenticator {

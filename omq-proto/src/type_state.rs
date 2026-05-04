@@ -9,7 +9,7 @@
 //! send ...; REP: recv then send then recv ...).
 //!
 //! Pure / sans-IO. Both runtime backends embed this; backends own
-//! the synchronisation (mutex / actor-loop) appropriate to their
+//! the synchronization (mutex / actor-loop) appropriate to their
 //! Socket model.
 
 use bytes::Bytes;

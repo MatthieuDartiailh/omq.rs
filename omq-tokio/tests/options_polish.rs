@@ -125,7 +125,7 @@ async fn drop_newest_silently_discards_overflow() {
     let extra = tokio::time::timeout(Duration::from_millis(100), pull.recv()).await;
     // Best-effort: HWM=1 with DropNewest means at most a small handful
     // ever queue up; we just confirm we don't get all three immediately.
-    // (Exact behaviour around the handshake race is timing-dependent.)
+    // (Exact behavior around the handshake race is timing-dependent.)
     let _ = extra;
 }
 

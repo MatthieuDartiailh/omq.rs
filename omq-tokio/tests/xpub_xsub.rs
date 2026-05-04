@@ -211,7 +211,7 @@ fn read_zmtp_frame(stream: &mut std::net::TcpStream) -> Vec<u8> {
 async fn pub_accepts_zmtp30_message_form_subscribe() {
     // A raw ZMTP 3.0 SUB peer connects to PUB. Instead of sending a SUBSCRIBE
     // command (ZMTP 3.1+), it sends a DATA frame with \x01<topic> (ZMTP 3.0
-    // message-form subscription). PUB must honour this and route matching messages.
+    // message-form subscription). PUB must honor this and route matching messages.
     use std::io::Write;
 
     let port = {

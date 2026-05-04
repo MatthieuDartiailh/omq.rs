@@ -24,8 +24,9 @@ push.send(Message::single("hi")).await?;
 [`omq-compio`](omq-compio/) (single-thread io_uring/IOCP); the
 `tokio-backend` feature swaps in [`omq-tokio`](omq-tokio/) (multi-thread
 tokio + mio). The two are mutually exclusive — pick one at build time.
-The public `Socket` API is identical, verified in lockstep by the
-`coverage_matrix` and `interop_compio` test suites.
+The public `Socket` API is identical, verified in lockstep by per-
+backend `coverage_matrix` test suites plus a cross-runtime
+`interop_compio` ZMTP-on-the-wire suite.
 
 ## Design highlights
 
@@ -48,6 +49,45 @@ The public `Socket` API is identical, verified in lockstep by the
 - **Python binding** ([`bindings/pyomq`](bindings/pyomq/)): PyO3 wrapper
   over `omq-compio` with a sync API and an `asyncio`-compatible bridge.
 
+## Hot path
+
+- Single-peer wire send encodes directly into a per-peer outbound
+  queue under a `try_lock`, skipping the codec's async mutex.
+- Small frames (<32 KiB) pack contiguously into one `Bytes` chunk per
+  drain — one iovec entry for a batch of N small messages instead of
+  2N.
+- Direct-recv on supported socket types reads the FD inline, skipping
+  the driver's read-side task wake.
+- Frame headers come from a per-connection scratch `BytesMut`,
+  amortized to ~one allocation per 7 000 frames; payload chunks are
+  `Bytes::clone` (Arc bump) all the way to `writev` / `sendmsg`.
+- Under `lz4+tcp` / `zstd+tcp`, parts below the compression threshold
+  use the same direct-encode path as plain TCP, with the 4-byte
+  plaintext sentinel prepended.
+
+See [BENCHMARKS.md](BENCHMARKS.md) for numbers.
+
+## Tests
+
+77 integration test files across `omq-proto`, `omq-compio`, and
+`omq-tokio`; ~700 tests total. `cargo test --workspace` runs the
+default subset in a few seconds.
+
+- **Coverage matrix** (`tests/coverage_matrix.rs`): every socket type
+  × every supported transport on each backend.
+- **Cross-runtime interop** (`omq-tokio/tests/interop_compio.rs`):
+  spawns the other backend and round-trips over the wire.
+- **Mechanism interop**: against pyzmq (CURVE) and the author's
+  pure-Ruby ZMTP impl
+  ([OMQ Ruby](https://github.com/paddor/omq.rb)).
+- **Fuzz** (`tests/fuzz_*.rs`): ~1 M iterations of randomized socket
+  actions and parser inputs per suite. Gated behind `fuzz`; run by
+  `scripts/test-all.sh` unless `OMQ_SKIP_FUZZ=1`.
+- **pyomq**: maturin build + pytest, sync + `asyncio` surfaces plus
+  pyzmq drop-in compatibility.
+
+`scripts/test-all.sh` runs every feature combination on both backends.
+
 ## Platform support
 
 Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
@@ -55,7 +95,7 @@ Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
 
 ## Requirements
 
-- Rust 1.85 or newer (edition 2024).
+- Rust 1.93 or newer (edition 2024).
 
 ## Cargo features
 

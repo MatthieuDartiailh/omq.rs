@@ -23,6 +23,17 @@ pub const MAX_SHORT_FRAME_SIZE: usize = 255;
 /// Maximum header length across short and long frames (1 flags + 8 size).
 pub const MAX_FRAME_HEADER_LEN: usize = 9;
 
+/// Wire-frame header length for a payload of the given size: 2 bytes for short
+/// frames (`flags + u8 size`), 9 bytes for long frames (`flags + u64 size`).
+#[must_use]
+pub const fn header_len_for(payload_len: usize) -> usize {
+    if payload_len > MAX_SHORT_FRAME_SIZE {
+        MAX_FRAME_HEADER_LEN
+    } else {
+        2
+    }
+}
+
 /// Serialise a frame into `out`. Multi-chunk payloads are concatenated
 /// chunk by chunk into the contiguous buffer. Used by tests and any
 /// consumer that needs a single byte slice; the engine layer's gather
@@ -44,7 +55,7 @@ pub fn encode_frame(frame: &Frame, out: &mut BytesMut) {
 /// `scratch` is a per-connection `BytesMut` held by the caller. Each
 /// header (1-9 bytes) is written into it and then peeled off as a
 /// `Bytes` via `split()` - the underlying allocation is shared via
-/// Arc with all previously emitted headers, amortising allocs to one
+/// Arc with all previously emitted headers, amortizing allocs to one
 /// per ~7000 frames (64 KiB / 9). When `scratch` runs out of capacity
 /// we allocate a fresh 64 KiB chunk; the old allocation stays alive
 /// via the references held in `out_chunks` until those Bytes drop.

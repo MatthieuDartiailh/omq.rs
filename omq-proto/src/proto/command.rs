@@ -36,7 +36,7 @@ pub enum Command {
     Ready(PeerProperties),
     /// SUB/XSUB subscribed to this topic prefix.
     Subscribe(Bytes),
-    /// SUB/XSUB cancelled this topic prefix.
+    /// SUB/XSUB canceled this topic prefix.
     Cancel(Bytes),
     /// Heartbeat PING (ZMTP 3.1+).
     Ping {
@@ -45,13 +45,13 @@ pub enum Command {
     },
     /// Heartbeat PONG (ZMTP 3.1+), echoes the sender's context.
     Pong { context: Bytes },
-    /// Peer-signalled protocol error.
+    /// Peer-signaled protocol error.
     Error { reason: String },
     /// DISH joined a group (ZMTP 3.1+, draft).
     Join(Bytes),
     /// DISH left a group (ZMTP 3.1+, draft).
     Leave(Bytes),
-    /// Unrecognised command. Preserved so the peer can ignore politely.
+    /// Unrecognized command. Preserved so the peer can ignore politely.
     Unknown { name: Bytes, body: Bytes },
 }
 

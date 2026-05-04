@@ -10,8 +10,9 @@
 //! mio/tokio runtime. The two are mutually exclusive — enabling
 //! both is a compile error. The public `Socket` / `Endpoint` /
 //! `Options` / `Message` API is identical either way, verified in
-//! lockstep by the `coverage_matrix` and `interop_compio` test
-//! suites in the repository.
+//! lockstep by per-backend `coverage_matrix` test suites plus a
+//! cross-runtime `interop_compio` ZMTP-on-the-wire test in the
+//! repository.
 //!
 //! # Example
 //!

@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::message::{Message, Payload};
 
 /// Plaintext-passthrough sentinel. Identical for every compression
-/// transport so a peer that doesn't recognise the upper sentinel can
+/// transport so a peer that doesn't recognize the upper sentinel can
 /// still decode plaintext fall-backs.
 pub(super) const SENTINEL_PLAIN: [u8; 4] = [0, 0, 0, 0];
 
@@ -41,13 +41,13 @@ pub(super) fn take_budget(budget: &mut Option<usize>, take: usize) -> Result<()>
 /// envelope wasn't a net saving).
 ///
 /// Produces a single-chunk `Payload`: `[SENTINEL_PLAIN | plain_bytes]`.
-pub(super) fn plaintext_payload(plain: Bytes) -> Payload {
+pub(super) fn plaintext_payload(plain: &Bytes) -> Payload {
     if plain.is_empty() {
         return Payload::from_bytes(Bytes::from_static(&SENTINEL_PLAIN));
     }
     let mut buf = BytesMut::with_capacity(ENVELOPE_PLAIN + plain.len());
     buf.extend_from_slice(&SENTINEL_PLAIN);
-    buf.extend_from_slice(&plain);
+    buf.extend_from_slice(plain);
     Payload::from_bytes(buf.freeze())
 }
 

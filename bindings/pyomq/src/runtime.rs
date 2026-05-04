@@ -59,7 +59,7 @@ fn submit_chan() -> &'static flume::Sender<Job> {
     })
 }
 
-/// Build the compio runtime, honouring `OMQ_SQPOLL_IDLE_MS` if set.
+/// Build the compio runtime, honoring `OMQ_SQPOLL_IDLE_MS` if set.
 ///
 /// SQPOLL trades a constantly-spinning kernel thread for zero
 /// `io_uring_enter` syscalls in steady state. Only worth it for
