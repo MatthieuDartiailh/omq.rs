@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/paddor/omq.rs/compare/omq-proto-v0.2.2...omq-proto-v0.2.3) - 2026-05-05
+
+### Fixed
+
+- *(zstd)* dict shipment is now wire-compatible with `omq-zstd` Ruby.
+  The encoder used to prepend `SENTINEL_DICT` ahead of a dict body that
+  already begins with `ZDICT_MAGIC`, doubling the magic on the wire; the
+  decoder then stripped 4 bytes, so Rust↔Rust round-tripped only by
+  symmetric mistake. Ruby ships the dict raw (per RFC), so Ruby→Rust
+  dict-aware decompress failed at the first compressed message after
+  auto-train (~msg 256 at 100 KiB / 402 B). Encoder now ships
+  `Message::single(dict)`, decoder stores the whole received bytes, and
+  `ZstdEncoder::with_send_dict` requires the dict to start with
+  `ZDICT_MAGIC` (mirrors Ruby's `install_send_dict`).
+
+### Added
+
+- *(zstd)* public `omq_proto::proto::transform::train_zdict(samples, capacity)`
+  for callers that want to ship a static dict but only have a sample
+  corpus to train from. Returns ZDICT-format bytes accepted directly by
+  `Options::compression_dict` / `ZstdEncoder::with_send_dict`.
+
 ## [0.2.2](https://github.com/paddor/omq.rs/compare/omq-proto-v0.2.1...omq-proto-v0.2.2) - 2026-05-04
 
 ### Changed
