@@ -5,6 +5,7 @@
 **/*.rs.bk
 Cargo.lock
 Cargo.lock.bak
+!bindings/pyomq/Cargo.lock
 uv.lock
 .DS_Store
 /tmp/
