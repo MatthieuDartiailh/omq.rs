@@ -84,6 +84,33 @@ async fn zstd_multipart_message_roundtrip() {
     assert_eq!(m.parts()[2].as_bytes(), &b"ccc"[..]);
 }
 
+/// Regression: close() used to cancel the dialer supervisor task (and therefore
+/// the driver) before the linger drain completed, causing zero messages to be
+/// delivered. Verify that all sends queued before close() arrive on the peer.
+#[compio::test]
+async fn zstd_linger_drains_before_close() {
+    let (pull, ep) = pull_on_loopback().await;
+    let push = Socket::new(
+        SocketType::Push,
+        Options::default().linger(Duration::from_secs(2)),
+    );
+    push.connect(ep).await.unwrap();
+
+    const N: usize = 100;
+    let payload = Bytes::from(vec![b'Z'; 512]);
+    for _ in 0..N {
+        push.send(Message::single(payload.clone())).await.unwrap();
+    }
+    // close() must wait for the driver to flush all N messages before returning.
+    push.close().await.unwrap();
+
+    let mut got = 0usize;
+    while let Ok(Ok(_)) = compio::time::timeout(Duration::from_millis(200), pull.recv()).await {
+        got += 1;
+    }
+    assert_eq!(got, N, "linger did not drain all messages: got {got}/{N}");
+}
+
 #[compio::test]
 async fn zstd_auto_train_end_to_end() {
     // Pull side leaves auto-train off; push side opts in. Once the

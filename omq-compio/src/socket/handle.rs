@@ -1218,21 +1218,17 @@ impl Socket {
             .options
             .linger
             .map(|d| std::time::Instant::now() + d);
-        // Cancel listener and dialer tasks immediately. Dropping their
-        // JoinHandles tells the compio runtime to cancel the pending
-        // io_uring submissions (accept, connect, sleep). Without this,
-        // the tasks hold an Arc<SocketInner> reference and the cycle
-        // prevents the SocketInner from being freed even after close()
-        // returns, keeping OS ports and file descriptors live.
+        // Cancel listener tasks immediately — they hold Arc<SocketInner>
+        // and keep the OS port alive. Dialer tasks are deferred until
+        // after the linger drain below: each dialer supervisor awaits its
+        // driver's JoinHandle, so cancelling the supervisor early would
+        // also cancel the driver before it has flushed pending sends to
+        // the wire. Dialer supervisors check `inner.closed` after their
+        // driver exits and exit without reconnecting.
         self.inner
             .listeners
             .write()
             .expect("listeners lock")
-            .clear();
-        self.inner
-            .dialers
-            .write()
-            .expect("dialers lock")
             .clear();
         self.inner
             .udp_dialers
@@ -1301,6 +1297,16 @@ impl Socket {
             }
             compio::time::sleep(Duration::from_millis(5)).await;
         }
+        // Now that all drivers have flushed (or the linger deadline
+        // expired), cancel the dialer supervisor tasks. They check
+        // `inner.closed` and exit without reconnecting once their
+        // driver's JoinHandle resolves (which it already has, or will
+        // very shortly — the cancel lands at a yield point only).
+        self.inner
+            .dialers
+            .write()
+            .expect("dialers lock")
+            .clear();
         {
             let mut peers = self.inner.out_peers.write().expect("peers lock");
             peers.clear();

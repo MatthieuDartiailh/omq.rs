@@ -210,7 +210,7 @@ async fn dial_supervisor_tcp(
 
         let _ = driver_join.await;
 
-        if matches!(policy, ReconnectPolicy::Disabled) {
+        if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
             return;
         }
     }
@@ -367,7 +367,7 @@ async fn dial_supervisor_ipc(
 
         let _ = driver_join.await;
 
-        if matches!(policy, ReconnectPolicy::Disabled) {
+        if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
             return;
         }
     }
