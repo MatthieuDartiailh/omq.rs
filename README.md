@@ -165,9 +165,9 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `compio-backend`  | (default) compio io_uring/IOCP backend            | -                                |
 | `tokio-backend`   | tokio multi-thread backend                        | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
-| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism†           | `blake3`, `chacha20-blake3`, `x25519-dalek` |
-| `lz4`             | `lz4+tcp://` compression transport                | `lz4-sys`                       |
-| `zstd`            | `zstd+tcp://` compression transport               | `zstd-safe` (vends `libzstd`; needs `cc`) |
+| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
+| `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4-sys` |
+| `zstd`            | `zstd+tcp://` compression transport ([RFC](https://github.com/paddor/omq-zstd/blob/main/RFC.md)) | `zstd-safe` (vends `libzstd`; needs `cc`) |
 | `priority`        | Strict per-pipe priority on `Socket::connect_with`| -                                |
 
 > [!WARNING]
