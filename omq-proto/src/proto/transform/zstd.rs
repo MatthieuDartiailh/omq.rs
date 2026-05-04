@@ -527,8 +527,7 @@ mod tests {
             sizes.push(s.len());
         }
         let mut dict = vec![0u8; 8192];
-        let n = zstd_safe::train_from_buffer(&mut dict, &buf, &sizes)
-            .expect("train_from_buffer");
+        let n = zstd_safe::train_from_buffer(&mut dict, &buf, &sizes).expect("train_from_buffer");
         dict.truncate(n);
         Bytes::from(dict)
     }

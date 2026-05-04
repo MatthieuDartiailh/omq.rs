@@ -158,13 +158,21 @@ async fn auto_train_survives_reconnect() {
     let make_payload = |i: usize| -> Vec<u8> {
         let prefix = format!("{i:05}|");
         let mut v = prefix.into_bytes();
-        v.extend(b"omq-zstd-auto-train-reconnect-test-payload-".iter().cycle().take(1000 - v.len()));
+        v.extend(
+            b"omq-zstd-auto-train-reconnect-test-payload-"
+                .iter()
+                .cycle()
+                .take(1000 - v.len()),
+        );
         v
     };
 
     const FIRST: usize = 120;
     {
-        let push = Socket::new(SocketType::Push, Options::default().linger(Duration::from_secs(4)));
+        let push = Socket::new(
+            SocketType::Push,
+            Options::default().linger(Duration::from_secs(4)),
+        );
         push.connect(ep.clone()).await.unwrap();
         for i in 0..FIRST {
             push.send(Message::single(make_payload(i))).await.unwrap();
@@ -174,7 +182,10 @@ async fn auto_train_survives_reconnect() {
 
     const SECOND: usize = 20;
     {
-        let push = Socket::new(SocketType::Push, Options::default().linger(Duration::from_secs(2)));
+        let push = Socket::new(
+            SocketType::Push,
+            Options::default().linger(Duration::from_secs(2)),
+        );
         push.connect(ep.clone()).await.unwrap();
         for i in 0..SECOND {
             push.send(Message::single(make_payload(i))).await.unwrap();

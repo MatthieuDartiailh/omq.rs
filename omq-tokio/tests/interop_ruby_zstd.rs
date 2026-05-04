@@ -70,8 +70,7 @@ async fn ruby_push_zstd_tcp_sustained() {
     // shipment frame followed by compressed messages.
     //
     // `yes` produces a 134-char line; `* 3` → 402-byte payloads.
-    const PAYLOAD_UNIT: &str =
-        "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\
+    const PAYLOAD_UNIT: &str = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\
          yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
     let expected = PAYLOAD_UNIT.repeat(3);
 
