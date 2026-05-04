@@ -1,40 +1,25 @@
 # Benchmarks
 
-Numbers below are from a single sweep on Linux 6.12 (Debian 13) on an
-Intel Mac Mini 2018 (i7-8700B, 3.2 GHz, 4 vCPU), Rust 1.95.0,
-default features (no priority feature; priority mode trades work-
-stealing for per-peer queues - relevant for ordering, not throughput).
-Built with `cargo bench --release`. Each cell is one prime + warmup +
-0.5 s timed run. Sources: `omq-tokio/benches/` and `omq-compio/benches/`.
-Run yourself with `cargo bench` per crate. Bare-metal, modern CPUs, and
-tuned tokio runtimes will show different absolute numbers - relative
-shape between transports and sizes should hold.
+Linux 6.12 (Debian 13) VM on an Intel Mac Mini 2018 (i7-8700B, 3.2 GHz, 6
+vCPU), Rust 1.95.0, default features. Each cell is the median of 3 × 500 ms
+timed rounds after a prime + 100 ms warmup. Sources: `omq-tokio/benches/` and
+`omq-compio/benches/`. Run yourself with `cargo bench` per crate.
 
-> **One core for the compio numbers.** Every omq-compio bench in this
-> document runs PUSH and PULL inside a single `#[compio::main]`
-> runtime, which is single-threaded by design. Both peers share one
-> CPU; the omq-tokio numbers below have a multi-thread runtime
-> spreading work across `num_cpus::get()` worker threads. So the
-> compio column is "what one core can do" while the tokio column is
-> "what the whole box can do" - the comparison is wildly unfair to
-> compio on wire transports.
->
-> If your workload can drive sockets from independent task graphs
-> (per-shard ingestion, per-tenant dispatch, etc.), instantiate one
-> `compio::runtime::Runtime` per worker thread and pin it via
-> `RuntimeBuilder::thread_affinity(...)`. A two-runtime PUSH/PULL
-> probe on this hardware lifts TCP / IPC small-message rates by
-> roughly 20-40%; inproc is unchanged since there's no kernel work
-> to overlap. Multiple runtimes also unlock the natural thread-per-
-> core pattern (one acceptor + N pinned workers, sharded by identity
-> or hash) that libzmq and Seastar use to scale past one core.
+> **Compio numbers are one core.** All omq-compio benches run PUSH and
+> PULL inside a single `#[compio::main]` runtime (single-threaded by
+> design). The omq-tokio numbers use a multi-thread runtime across
+> `num_cpus::get()` workers — "what one core can do" vs "what the box
+> can do". To scale compio past one core, instantiate one
+> `compio::runtime::Runtime` per worker thread and pin via
+> `RuntimeBuilder::thread_affinity(...)`; on this hardware that lifts
+> small-message TCP / IPC throughput by roughly 20–40%.
 
 ## PUSH/PULL throughput by transport, single peer (omq-compio, one core)
 
-Numbers below are single 0.5 s timed runs per cell; the small-size
-wire columns vary ±10 % run-to-run (cache / scheduling jitter on a
-single core). Larger sizes vary more once kernel send-buffer behavior
-kicks in - take ±25 % at 8 KiB+ as a rough envelope.
+Median of 3 × 500 ms rounds per cell. Small-size wire columns still
+vary ±10 % run-to-run (cache / scheduling jitter on a single core);
+8 KiB+ varies more once kernel send-buffer behavior kicks in — ±25 %
+is a rough envelope.
 
 <!-- BEGIN push_pull_compio_1peer -->
 | Size | inproc | ipc | tcp | lz4+tcp | zstd+tcp |
@@ -339,12 +324,12 @@ separate `send()` calls for the frame header and each payload segment.
 <!-- BEGIN libzmq_comparison -->
 | Size | omq msg/s | omq MB/s | zmq msg/s | zmq MB/s | ratio |
 |-------|-----------|----------|-----------|----------|-------|
-| 128 B | 3.00M | 384 MB/s | 2.95M | 377 MB/s | 1.02× |
-| 512 B | 2.35M | 1.2 GB/s | 2.05M | 1.0 GB/s | **1.1×** |
-| 2 KiB | 1.44M | 3.0 GB/s | 648k | 1.3 GB/s | **2.2×** |
-| 8 KiB | 578k | 4.7 GB/s | 189k | 1.6 GB/s | **3.1×** |
-| 32 KiB | 153k | 5.0 GB/s | 72k | 2.4 GB/s | **2.1×** |
-| 128 KiB | 48k | 6.3 GB/s | 33k | 4.4 GB/s | **1.5×** |
+| 128 B | 3.24M | 415 MB/s | 3.00M | 384 MB/s | 1.08× |
+| 512 B | 2.40M | 1.2 GB/s | 1.96M | 1.0 GB/s | **1.2×** |
+| 2 KiB | 1.53M | 3.1 GB/s | 686k | 1.4 GB/s | **2.2×** |
+| 8 KiB | 515k | 4.2 GB/s | 187k | 1.5 GB/s | **2.8×** |
+| 32 KiB | 177k | 5.8 GB/s | 77k | 2.5 GB/s | **2.3×** |
+| 128 KiB | 48k | 6.3 GB/s | 34k | 4.5 GB/s | **1.4×** |
 
 <!-- END libzmq_comparison -->
 
@@ -383,12 +368,12 @@ loop — structurally closer to omq-tokio than to libzmq.
 <!-- BEGIN zmqrs_comparison -->
 | Size | zmq.rs msg/s | zmq.rs MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × | omq-compio msg/s | omq-compio MB/s | compio × |
 |-------|-------------|------------|----------------|---------------|---------|-----------------|----------------|---------|
-| 128 B | 304k | 39 MB/s | 4.03M | 516 MB/s | **13.2×** | 2.81M | 360 MB/s | **9.2×** |
-| 512 B | 284k | 146 MB/s | 3.31M | 1.7 GB/s | **11.7×** | 2.18M | 1.1 GB/s | **7.7×** |
-| 2 KiB | 263k | 538 MB/s | 1.72M | 3.5 GB/s | **6.6×** | 1.37M | 2.8 GB/s | **5.2×** |
-| 8 KiB | 204k | 1.7 GB/s | 479k | 3.9 GB/s | **2.3×** | 550k | 4.5 GB/s | **2.7×** |
-| 32 KiB | 130k | 4.2 GB/s | 104k | 3.4 GB/s | 0.80× | 161k | 5.3 GB/s | **1.2×** |
-| 128 KiB | 32k | 4.2 GB/s | 42k | 5.5 GB/s | **1.3×** | 45k | 5.9 GB/s | **1.4×** |
+| 128 B | 307k | 39 MB/s | 5.15M | 660 MB/s | **16.8×** | 3.24M | 414 MB/s | **10.5×** |
+| 512 B | 280k | 143 MB/s | 3.40M | 1.7 GB/s | **12.1×** | 2.36M | 1.2 GB/s | **8.4×** |
+| 2 KiB | 271k | 555 MB/s | 1.91M | 3.9 GB/s | **7.0×** | 1.49M | 3.1 GB/s | **5.5×** |
+| 8 KiB | 201k | 1.6 GB/s | 477k | 3.9 GB/s | **2.4×** | 586k | 4.8 GB/s | **2.9×** |
+| 32 KiB | 130k | 4.2 GB/s | 148k | 4.9 GB/s | **1.1×** | 176k | 5.8 GB/s | **1.4×** |
+| 128 KiB | 33k | 4.3 GB/s | 39k | 5.1 GB/s | **1.2×** | 46k | 6.0 GB/s | **1.4×** |
 
 <!-- END zmqrs_comparison -->
 

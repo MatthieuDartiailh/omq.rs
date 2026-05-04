@@ -23,10 +23,11 @@ const SHARED_MAX_BATCH_BYTES: usize = 512 * 1024;
 /// contiguously into a flat `BytesMut` instead of going through
 /// `Connection::send_message` + `transmit_chunks`. This eliminates the
 /// per-flush `Vec<IoSlice>` allocation and lets the kernel receive a
-/// single contiguous buffer instead of scattered iovecs. Benchmarks show
-/// dramatic throughput gains up through ~8 KiB; above ~32 KiB the
-/// mandatory memcpy cost overtakes the benefit, so 32 KiB is the cap.
-const FLAT_THRESHOLD: usize = 32 * 1024;
+/// single contiguous buffer instead of scattered iovecs. Sweep across
+/// 32–64 KiB on TCP loopback peaked at 48 KiB: 32 KiB messages jump
+/// from ~3.4 → ~5.0 GB/s vs the codec path, while 8 / 16 KiB stay flat
+/// and 64 KiB stays in the codec path where it belongs.
+const FLAT_THRESHOLD: usize = 48 * 1024;
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
