@@ -4,9 +4,9 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - Unreleased
+## [0.2.0] - 2026-05-04
 
-Initial pre-release. Three-crate Rust ZeroMQ implementation, wire-compatible
+First public release. Three-crate Rust ZeroMQ implementation, wire-compatible
 with libzmq. compio is the primary backend; omq-tokio is the cross-runtime
 alternative.
 
@@ -72,7 +72,7 @@ no C compiler required. Features: `curve`, `blake3zmq`, `lz4`, `zstd`,
 
 Typed builder over `Options`. `ReconnectPolicy::default()` is `Fixed(100ms)`
 matching libzmq's `ZMQ_RECONNECT_IVL`; `Exponential { min, max }` is opt-in.
-`OnMute` controls send-HWM behaviour: `Block` (default), `DropNewest`,
+`OnMute` controls send-HWM behavior: `Block` (default), `DropNewest`,
 `DropOldest`. Defaults differ from libzmq in two places: per-socket HWM
 semantics, conflate restricted to FanOut patterns.
 
