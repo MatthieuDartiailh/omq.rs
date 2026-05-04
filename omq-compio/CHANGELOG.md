@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.5...omq-compio-v0.2.6) - 2026-05-05
+
+### Changed
+
+- *(deps)* require `omq-proto = 0.2.3` for the wire-compatible zstd dict
+  shipment (see omq-proto CHANGELOG 0.2.3). compio's structurally
+  immune to the tokio-side linger race fixed in `omq-tokio = 0.2.3` —
+  no behaviour change in this crate beyond the dependency bump and
+  test-suite migration to `train_zdict` for the static-dict path.
+
 ## [0.2.5](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.3...omq-compio-v0.2.5) - 2026-05-04
 
 ### Fixed
