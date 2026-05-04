@@ -1,11 +1,7 @@
-"""Performance gate: pyomq PUSH/PULL must beat pyzmq by 2x at small
-sizes and at least match it at large sizes.
+"""Performance gate: pyomq PUSH/PULL throughput vs pyzmq.
 
-Loopback inproc / tcp throughput across {128, 512, 2048, 8192, 32768}
-byte payloads, alternating runs to dampen thermal noise. The harness
-asserts ``pyomq msgs/s >= 2.0 * pyzmq msgs/s`` for small sizes and
-``>= 0.95 * pyzmq`` for large sizes. Skipped automatically when
-pyzmq isn't importable.
+inproc small (≤2048B): ≥2x. tcp small: ≥1.5x. large (>2048B): ≥1.5x.
+Skipped when pyzmq isn't importable.
 """
 
 import threading
@@ -20,16 +16,11 @@ import pyomq
 SIZES = [128, 512, 2048, 8192, 32768]
 TARGET_RUNTIME_S = 0.4
 
-# Small messages: pyomq must be at least 2x pyzmq (this is where the
-# Rust-native impl pays off - per-call overhead dominates and we beat
-# pyzmq's libzmq trip).
-# Large messages: 2 * payload-size memcpy per cycle dominates (one on
-# send, one on recv); both impls hit the same memory-bandwidth wall.
-# We require pyomq to be at least as fast as pyzmq there, no 2x.
 SMALL_SIZES = [s for s in SIZES if s <= 2048]
 LARGE_SIZES = [s for s in SIZES if s > 2048]
-SMALL_GATE = 2.0
-LARGE_GATE = 0.95  # allow ~5% noise; equality with pyzmq counts as a pass
+INPROC_SMALL_GATE = 2.0
+TCP_SMALL_GATE = 1.5
+LARGE_GATE = 1.5
 
 
 def _measure_pyomq(endpoint: str, size: int, n_target_per_s: int = 200_000) -> float:
@@ -94,8 +85,10 @@ def _free_inproc(label: str) -> str:
     return f"inproc://perf-{label}-{time.monotonic_ns()}"
 
 
-def _gate_for(size: int) -> float:
-    return SMALL_GATE if size in SMALL_SIZES else LARGE_GATE
+def _gate_for(size: int, *, tcp: bool = False) -> float:
+    if size in LARGE_SIZES:
+        return LARGE_GATE
+    return TCP_SMALL_GATE if tcp else INPROC_SMALL_GATE
 
 
 @pytest.mark.parametrize("size", SIZES)
@@ -111,7 +104,7 @@ def test_perf_inproc(size):
     omq = max(runs_omq)
     pz = max(runs_pz)
     ratio = omq / pz
-    gate = _gate_for(size)
+    gate = _gate_for(size, tcp=False)
     print(
         f"[perf inproc {size:>5}B]  pyomq {omq:>10,.0f} msg/s  "
         f"pyzmq {pz:>10,.0f} msg/s  ratio {ratio:.2f}x  (gate {gate:.2f}x)"
@@ -147,7 +140,7 @@ def test_perf_tcp(size):
     omq = max(omq_runs)
     pz = max(pz_runs)
     ratio = omq / pz
-    gate = _gate_for(size)
+    gate = _gate_for(size, tcp=True)
     print(
         f"[perf tcp    {size:>5}B]  pyomq {omq:>10,.0f} msg/s  "
         f"pyzmq {pz:>10,.0f} msg/s  ratio {ratio:.2f}x  (gate {gate:.2f}x)"

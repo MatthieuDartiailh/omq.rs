@@ -5,6 +5,7 @@
 **/*.rs.bk
 Cargo.lock
 Cargo.lock.bak
+uv.lock
 .DS_Store
 /tmp/
 **/benches/results.jsonl
