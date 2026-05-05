@@ -88,7 +88,7 @@ speedup_str() {
 
 # ---------- version strings ----------
 
-ZMQRS_VERSION=$(cargo metadata --no-deps --format-version 1 \
+ZMQRS_VERSION=$(cargo metadata --format-version 1 \
     --manifest-path "$SCRIPT_DIR/zmqrs_bench_peer/Cargo.toml" 2>/dev/null \
     | python3 -c 'import sys,json; pkgs=json.load(sys.stdin)["packages"]; \
       print(next(p["version"] for p in pkgs if p["name"]=="zeromq"))' \

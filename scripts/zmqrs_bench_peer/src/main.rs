@@ -9,6 +9,8 @@
 //!       seconds and prints one line to stdout:
 //!         <count> <elapsed_secs> <msg_size>
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -62,23 +64,28 @@ async fn run_pull(port: u16, size: usize, duration: Duration) {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    // zeromq 0.6's PullSocket::recv stalls within a few thousand messages when
+    // wrapped in tokio::time::timeout per call, even when the timeout never
+    // fires. Spawn a recv task that runs to completion and time the window
+    // outside it instead of cancelling recv mid-flight.
+    let count = Arc::new(AtomicU64::new(0));
+    let count_recv = count.clone();
+    let recv_handle = tokio::spawn(async move {
+        loop {
+            if socket.recv().await.is_err() {
+                break;
+            }
+            count_recv.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
     let t0 = Instant::now();
-    let deadline = t0 + duration;
-    let mut count: u64 = 0;
-
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match tokio::time::timeout(remaining, socket.recv()).await {
-            Ok(Ok(_)) => count += 1,
-            _ => break,
-        }
-    }
-
+    tokio::time::sleep(duration).await;
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("{count} {elapsed:.6} {size}");
+    let final_count = count.load(Ordering::Relaxed);
+    recv_handle.abort();
+
+    println!("{final_count} {elapsed:.6} {size}");
     // zeromq spawns background tokio tasks that don't shut down cleanly on
     // socket drop; without this the runtime blocks in sigsuspend indefinitely,
     // keeping the pipe open and stalling the caller's command substitution.
