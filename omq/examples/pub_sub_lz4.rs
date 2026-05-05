@@ -14,7 +14,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     publisher.bind("lz4+tcp://127.0.0.1:5556".parse()?).await?;
 
     let subscriber = Socket::new(SocketType::Sub, Options::default());
-    subscriber.connect("lz4+tcp://127.0.0.1:5556".parse()?).await?;
+    subscriber
+        .connect("lz4+tcp://127.0.0.1:5556".parse()?)
+        .await?;
     subscriber.subscribe("news.").await?; // prefix match
 
     // SUBSCRIBE travels from sub to pub over the wire; give it a moment.

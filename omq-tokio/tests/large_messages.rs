@@ -123,7 +123,7 @@ async fn huge_messages_xxhash() {
     }
 
     for (i, expected) in hashes.iter().enumerate() {
-        let m = tokio::time::timeout(Duration::from_secs(120), pull.recv())
+        let m = tokio::time::timeout(Duration::from_mins(2), pull.recv())
             .await
             .unwrap_or_else(|_| panic!("recv timed out for message {i}"))
             .unwrap();
