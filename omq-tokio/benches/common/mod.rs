@@ -32,21 +32,43 @@ pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 pub(crate) const PRIME_ITERS: usize = 2_000;
 
 /// Calibration: keep doubling burst size until the timed run lasts at
-/// least this long, then extrapolate to a `ROUND_DURATION` budget.
+/// least this long, then extrapolate to the `round_duration()` budget.
 pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
 
 /// Lower bound on warmup `n` so noisy short bursts don't fool the rate
 /// estimate.
 pub(crate) const WARMUP_MIN_ITERS: usize = 1_000;
 
-/// Per-cell timed budget. `ROUND_DURATION` × ROUNDS ≈ wall time per cell.
-/// Three rounds at 500 ms each; the median is reported to reduce noise.
-pub(crate) const ROUND_DURATION: Duration = Duration::from_millis(500);
-pub(crate) const ROUNDS: usize = 3;
+/// Per-cell timed budget. Defaults give `round_duration() × rounds()`
+/// ≈ wall time per cell. Each cell reports the **min** wall time
+/// across rounds (= peak throughput, closest to the hardware ceiling).
+/// Override via env for longer overnight runs (`OMQ_BENCH_ROUND_MS`,
+/// `OMQ_BENCH_ROUNDS`).
+pub(crate) const DEFAULT_ROUND_DURATION: Duration = Duration::from_millis(500);
+pub(crate) const DEFAULT_ROUNDS: usize = 3;
 
-/// Hard ceiling per cell. Longer than ~prime + warmup + ROUNDS×duration
-/// is almost certainly a hang or a transport bug.
-pub(crate) const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) fn round_duration() -> Duration {
+    std::env::var("OMQ_BENCH_ROUND_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or(DEFAULT_ROUND_DURATION, Duration::from_millis)
+}
+
+pub(crate) fn rounds() -> usize {
+    std::env::var("OMQ_BENCH_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or(DEFAULT_ROUNDS)
+}
+
+/// Hard ceiling per cell. Scales with the configured round budget so
+/// long overnight runs don't trip the timeout.
+pub(crate) fn run_timeout() -> Duration {
+    let r = rounds() as u32;
+    let per = round_duration();
+    per.saturating_mul(r) + Duration::from_secs(10)
+}
 
 /// `omq/benches/results.jsonl`. One row per cell.
 pub(crate) fn results_path() -> PathBuf {
@@ -193,17 +215,19 @@ pub(crate) async fn wait_subscribed(pub_: &omq_tokio::Socket, subs: &[&omq_tokio
     }
 }
 
-/// Run prime + calibration + ROUNDS timed bursts of `burst(n)`.
-/// Returns the median-duration run. Median is more stable than best-of
-/// under tokio's work-stealing scheduler noise. `align` rounds n to a
-/// multiple of the sender count so per-sender splits stay even.
-pub(crate) async fn measure_median_of<F, Fut>(msg_size: usize, align: usize, burst: F) -> Cell
+/// Run prime + calibration + `rounds()` timed bursts of `burst(n)`.
+/// Returns the min-duration round (= peak throughput, the run least
+/// perturbed by scheduler/IRQ jitter). `align` rounds n to a multiple
+/// of the sender count so per-sender splits stay even.
+pub(crate) async fn measure_min_of<F, Fut>(msg_size: usize, align: usize, burst: F) -> Cell
 where
     F: Fn(usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     burst(PRIME_ITERS).await;
 
+    let round_dur = round_duration();
+    let n_rounds = rounds();
     let mut n = WARMUP_MIN_ITERS;
     let final_n = loop {
         let t = Instant::now();
@@ -211,21 +235,20 @@ where
         let elapsed = t.elapsed();
         if elapsed >= WARMUP_DURATION {
             let rate = n as f64 / elapsed.as_secs_f64();
-            let target = (rate * ROUND_DURATION.as_secs_f64()) as usize;
+            let target = (rate * round_dur.as_secs_f64()) as usize;
             let aligned = (target.max(WARMUP_MIN_ITERS) / align.max(1)) * align.max(1);
             break aligned.max(align.max(1));
         }
         n = n.saturating_mul(4);
     };
 
-    let mut times = Vec::with_capacity(ROUNDS);
-    for _ in 0..ROUNDS {
+    let mut times = Vec::with_capacity(n_rounds);
+    for _ in 0..n_rounds {
         let t = Instant::now();
         burst(final_n).await;
         times.push(t.elapsed());
     }
-    times.sort_unstable();
-    let elapsed = times[ROUNDS / 2];
+    let elapsed = *times.iter().min().expect("at least one round");
     let mbps = (final_n * msg_size) as f64 / elapsed.as_secs_f64() / 1_000_000.0;
     let msgs_s = final_n as f64 / elapsed.as_secs_f64();
     Cell {
@@ -325,7 +348,8 @@ pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
 /// Thin wrapper around `tokio::time::timeout` to enforce the per-cell
 /// hard ceiling. Panics on timeout with a recognisable message.
 pub(crate) async fn with_timeout<T>(label: &str, fut: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(RUN_TIMEOUT, fut)
+    let to = run_timeout();
+    tokio::time::timeout(to, fut)
         .await
-        .unwrap_or_else(|_| panic!("BENCH TIMEOUT: {label} exceeded {RUN_TIMEOUT:?}"))
+        .unwrap_or_else(|_| panic!("BENCH TIMEOUT: {label} exceeded {to:?}"))
 }

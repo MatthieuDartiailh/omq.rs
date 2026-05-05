@@ -123,7 +123,7 @@ fn run_cell(
                         start.wait();
 
                         let t0 = Instant::now();
-                        let end = t0 + common::ROUND_DURATION;
+                        let end = t0 + common::round_duration();
                         let mut n = 0usize;
                         while Instant::now() < end {
                             push.send(Message::single(payload.clone())).await.unwrap();

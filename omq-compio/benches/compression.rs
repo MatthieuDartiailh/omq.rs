@@ -336,7 +336,7 @@ mod inner {
             }
         };
 
-        common::measure_median_of(payload.len(), pushes.len(), burst).await
+        common::measure_min_of(payload.len(), pushes.len(), burst).await
     }
 
     /// Build a JSON-ish payload of approximately `target_bytes`. Repeats

@@ -1,9 +1,11 @@
 # Benchmarks
 
-Linux 6.12 (Debian 13) VM on an Intel Mac Mini 2018 (i7-8700B, 3.2 GHz, 6
-vCPU), Rust 1.95.0, default features. Each cell is the median of 3 × 500 ms
-timed rounds after a prime + 100 ms warmup. Sources: `omq-tokio/benches/` and
-`omq-compio/benches/`.
+Linux 6.12 (Debian 13) VM on an Intel Mac Mini 2018 (i7-8700B, 3.2 GHz
+base, turbo disabled, governor=performance, 6 vCPU), Rust 1.95.0,
+default features. Each cell is the **min wall time** across 3 × 500 ms
+timed rounds after a prime + 100 ms warmup — peak throughput, closest
+to the hardware ceiling and least perturbed by scheduler/IRQ jitter.
+Sources: `omq-tokio/benches/` and `omq-compio/benches/`.
 
 > **Compio numbers are one core.** All omq-compio benches run PUSH and
 > PULL inside a single `#[compio::main]` runtime (single-threaded by

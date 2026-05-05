@@ -77,5 +77,5 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         }
     };
 
-    common::measure_median_of(size, pushes.len(), burst).await
+    common::measure_min_of(size, pushes.len(), burst).await
 }
