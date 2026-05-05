@@ -22,12 +22,12 @@ separate `send()` calls for the frame header and each payload segment.
 <!-- BEGIN libzmq_comparison -->
 | Size | omq msg/s | omq MB/s | zmq msg/s | zmq MB/s | ratio |
 |-------|-----------|----------|-----------|----------|-------|
-| 128 B | 3.24M | 415 MB/s | 3.00M | 384 MB/s | 1.08× |
-| 512 B | 2.40M | 1.2 GB/s | 1.96M | 1.0 GB/s | **1.2×** |
-| 2 KiB | 1.53M | 3.1 GB/s | 686k | 1.4 GB/s | **2.2×** |
-| 8 KiB | 515k | 4.2 GB/s | 187k | 1.5 GB/s | **2.8×** |
-| 32 KiB | 177k | 5.8 GB/s | 77k | 2.5 GB/s | **2.3×** |
-| 128 KiB | 48k | 6.3 GB/s | 34k | 4.5 GB/s | **1.4×** |
+| 128 B | 3.27M | 418 MB/s | 3.10M | 397 MB/s | 1.05× |
+| 512 B | 2.36M | 1.2 GB/s | 2.06M | 1.1 GB/s | **1.1×** |
+| 2 KiB | 1.48M | 3.0 GB/s | 677k | 1.4 GB/s | **2.2×** |
+| 8 KiB | 567k | 4.6 GB/s | 181k | 1.5 GB/s | **3.1×** |
+| 32 KiB | 171k | 5.6 GB/s | 74k | 2.4 GB/s | **2.3×** |
+| 128 KiB | 45k | 5.9 GB/s | 34k | 4.4 GB/s | **1.3×** |
 
 <!-- END libzmq_comparison -->
 
@@ -66,12 +66,12 @@ loop — structurally closer to omq-tokio than to libzmq.
 <!-- BEGIN zmqrs_comparison -->
 | Size | zmq.rs msg/s | zmq.rs MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × | omq-compio msg/s | omq-compio MB/s | compio × |
 |-------|-------------|------------|----------------|---------------|---------|-----------------|----------------|---------|
-| 128 B | 307k | 39 MB/s | 5.15M | 660 MB/s | **16.8×** | 3.24M | 414 MB/s | **10.5×** |
-| 512 B | 280k | 143 MB/s | 3.40M | 1.7 GB/s | **12.1×** | 2.36M | 1.2 GB/s | **8.4×** |
-| 2 KiB | 271k | 555 MB/s | 1.91M | 3.9 GB/s | **7.0×** | 1.49M | 3.1 GB/s | **5.5×** |
-| 8 KiB | 201k | 1.6 GB/s | 477k | 3.9 GB/s | **2.4×** | 586k | 4.8 GB/s | **2.9×** |
-| 32 KiB | 130k | 4.2 GB/s | 148k | 4.9 GB/s | **1.1×** | 176k | 5.8 GB/s | **1.4×** |
-| 128 KiB | 33k | 4.3 GB/s | 39k | 5.1 GB/s | **1.2×** | 46k | 6.0 GB/s | **1.4×** |
+| 128 B | 299k | 38 MB/s | 5.06M | 648 MB/s | **17.0×** | 3.13M | 400 MB/s | **10.5×** |
+| 512 B | 331k | 169 MB/s | 3.86M | 2.0 GB/s | **11.7×** | 2.38M | 1.2 GB/s | **7.2×** |
+| 2 KiB | 286k | 586 MB/s | 1.98M | 4.1 GB/s | **6.9×** | 1.42M | 2.9 GB/s | **5.0×** |
+| 8 KiB | 204k | 1.7 GB/s | 503k | 4.1 GB/s | **2.5×** | 563k | 4.6 GB/s | **2.8×** |
+| 32 KiB | 130k | 4.3 GB/s | 151k | 4.9 GB/s | **1.2×** | 167k | 5.5 GB/s | **1.3×** |
+| 128 KiB | 33k | 4.3 GB/s | 44k | 5.7 GB/s | **1.3×** | 45k | 6.0 GB/s | **1.4×** |
 
 <!-- END zmqrs_comparison -->
 
