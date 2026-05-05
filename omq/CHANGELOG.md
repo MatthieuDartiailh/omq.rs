@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/paddor/omq.rs/compare/omq-v0.2.2...omq-v0.2.3) - 2026-05-05
+
+### Added
+
+- `pub_sub_lz4` example (`omq/examples/pub_sub_lz4.rs`): pub/sub over
+  `lz4+tcp://` with prefix-match subscribe. Run with
+  `cargo run -p omq --example pub_sub_lz4 --no-default-features --features tokio-backend,lz4`.
+
+### Changed
+
+- *(deps)* track `omq-compio = 0.2.8` to surface the io_uring multi-shot
+  recv migration and the recv-cancellation byte-stream fix to consumers
+  who depend on `omq` directly. See the omq-compio CHANGELOG for
+  details.
+
 ## [0.2.2](https://github.com/paddor/omq.rs/compare/omq-v0.2.1...omq-v0.2.2) - 2026-05-05
 
 ### Changed

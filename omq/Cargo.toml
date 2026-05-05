@@ -1,6 +1,6 @@
 [package]
 name = "omq"
-version = "0.2.2"
+version = "0.2.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -50,5 +50,5 @@ name = "pub_sub_lz4"
 required-features = ["tokio-backend", "lz4"]
 
 [dependencies]
-omq-compio = { path = "../omq-compio", version = "0.2.6", default-features = false, optional = true }
+omq-compio = { path = "../omq-compio", version = "0.2.8", default-features = false, optional = true }
 omq-tokio  = { path = "../omq-tokio",  version = "0.2.3", default-features = false, optional = true }
