@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Wire ordering between fast-path and cmd-channel sends. Once
+  `encoded_queue` exceeded the 512 KiB direct-write cap, subsequent
+  sends fell back to the per-peer cmd channel and were encoded into the
+  codec; the driver loop drains the codec (step 3a) before
+  `encoded_queue` (step 3b), so cmd-channel messages reached the wire
+  before earlier fast-path messages still sitting in the queue. User
+  messages now route through `encoded_queue` from both paths so a
+  single ordered queue carries them.
+- CURVE / BLAKE3ZMQ encryption no longer bypassed by the cmd-channel
+  arm. The above ordering fix initially routed every non-transform
+  send through `encoded_queue`, which writes raw plaintext frames;
+  crypto sockets must keep using `codec.send_message` so the active
+  mechanism wraps each frame as `nonce || ciphertext || mac`.
+
 ## [0.2.6](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.5...omq-compio-v0.2.6) - 2026-05-05
 
 ### Changed
