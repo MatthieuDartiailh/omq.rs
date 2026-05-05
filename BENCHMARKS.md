@@ -3,20 +3,15 @@
 Linux 6.12 (Debian 13) VM on an Intel Mac Mini 2018 (i7-8700B, 3.2 GHz, 6
 vCPU), Rust 1.95.0, default features. Each cell is the median of 3 × 500 ms
 timed rounds after a prime + 100 ms warmup. Sources: `omq-tokio/benches/` and
-`omq-compio/benches/`. Run yourself with `cargo bench` per crate.
+`omq-compio/benches/`.
 
 > **Compio numbers are one core.** All omq-compio benches run PUSH and
 > PULL inside a single `#[compio::main]` runtime (single-threaded by
 > design). The omq-tokio numbers use a multi-thread runtime across
 > `num_cpus::get()` workers — "what one core can do" vs "what the box
-> can do". To scale compio past one core, instantiate one
-> `compio::runtime::Runtime` per worker thread and pin via
-> `RuntimeBuilder::thread_affinity(...)`; on this hardware that lifts
-> small-message TCP / IPC throughput by roughly 20–40%.
+> can do".
 
 ## PUSH/PULL throughput by transport, single peer (omq-compio, one core)
-
-Median of 3 × 500 ms rounds per cell.
 
 <!-- BEGIN push_pull_compio_1peer -->
 | Size | inproc | ipc | tcp | lz4+tcp | zstd+tcp |
