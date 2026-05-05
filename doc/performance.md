@@ -616,11 +616,22 @@ neutralised, but not quite).
 
 A few directions that look promising but have not been measured yet:
 
-- **Multi-runtime compio for fan-in.** compio benches in
-  `BENCHMARKS.md` run on one core; tokio runs on the whole box. A
-  multi-runtime compio deployment with `RuntimeBuilder::thread_
-  affinity` per worker should lift wire throughput 20-40 % on
-  multi-peer fan-in. The bench harness does not exercise that shape.
+- **Multi-runtime for the remaining compio benches.** PUSH/PULL is
+  now multi-runtime (PULL on its own thread, PUSHes on another); the
+  numbers in `COMPARISONS.md` reflect that 2-core shape. PUB/SUB,
+  ROUTER/DEALER, and PAIR are still single-runtime and will gain
+  similar 20-40 % once converted. REQ/REP and latency are roundtrip
+  patterns where multi-runtime adds inter-thread overhead with no
+  throughput win, so they stay single-runtime.
+- **Zero-copy recv for very large messages.** At message sizes that
+  exceed the buf-ring slot, the codec extends its internal `BytesMut`
+  with `extend_from_slice` per chunk. Beyond ~1 MiB this dominates.
+  The fix is three coordinated changes: wrap each `BufferRef` as a
+  `Bytes` with a custom drop, switch the codec's input buffer to a
+  chunked `VecDeque<Bytes>`, and have `try_decode_frame` return a
+  multi-chunk `Payload` instead of a contiguous `Bytes`. Today the
+  workaround for known-large workloads is a bigger pool slot via
+  `with_omq_buffer_pool_sized` (see `compio.md`).
 - **Single-wire-peer bypass on tokio.** The compio fast path
   (sender encodes directly into a per-peer queue, skipping the
   per-peer command channel) has no equivalent on tokio yet. The

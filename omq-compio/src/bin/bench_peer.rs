@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures::FutureExt as _;
 use omq_compio::endpoint::Host;
-use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Message, Options, Socket, SocketType, build_default_runtime};
 use std::net::Ipv4Addr;
 
 fn tcp_ep(port: u16) -> Endpoint {
@@ -24,27 +24,29 @@ fn tcp_ep(port: u16) -> Endpoint {
     }
 }
 
-#[compio::main]
-async fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("push") => {
-            let port: u16 = args[2].parse().expect("port");
-            let size: usize = args[3].parse().expect("msg_size");
-            run_push(port, size).await;
+fn main() {
+    let rt = build_default_runtime().expect("compio runtime");
+    rt.block_on(async {
+        let args: Vec<String> = std::env::args().collect();
+        match args.get(1).map(String::as_str) {
+            Some("push") => {
+                let port: u16 = args[2].parse().expect("port");
+                let size: usize = args[3].parse().expect("msg_size");
+                run_push(port, size).await;
+            }
+            Some("pull") => {
+                let port: u16 = args[2].parse().expect("port");
+                let size: usize = args[3].parse().expect("msg_size");
+                let duration: f64 = args[4].parse().expect("duration_secs");
+                run_pull(port, size, Duration::from_secs_f64(duration)).await;
+            }
+            _ => {
+                eprintln!("usage: bench_peer push <port> <size>");
+                eprintln!("       bench_peer pull <port> <size> <duration_secs>");
+                std::process::exit(1);
+            }
         }
-        Some("pull") => {
-            let port: u16 = args[2].parse().expect("port");
-            let size: usize = args[3].parse().expect("msg_size");
-            let duration: f64 = args[4].parse().expect("duration_secs");
-            run_pull(port, size, Duration::from_secs_f64(duration)).await;
-        }
-        _ => {
-            eprintln!("usage: bench_peer push <port> <size>");
-            eprintln!("       bench_peer pull <port> <size> <duration_secs>");
-            std::process::exit(1);
-        }
-    }
+    });
 }
 
 async fn run_push(port: u16, size: usize) {

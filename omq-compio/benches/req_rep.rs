@@ -4,31 +4,33 @@
 mod common;
 
 use bytes::Bytes;
-use omq_compio::{Message, Options, Socket, SocketType};
+use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
 const PATTERN: &str = "req_rep";
 const PEER_COUNTS: &[usize] = &[1];
 
-#[compio::main]
-async fn main() {
-    common::print_header("REQ/REP");
-    let peer_counts = common::peers_override();
-    let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
+fn main() {
+    let rt = build_default_runtime().expect("compio runtime");
+    rt.block_on(async {
+        common::print_header("REQ/REP");
+        let peer_counts = common::peers_override();
+        let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
 
-    let mut seq = 0usize;
-    for transport in common::transports() {
-        for &peers in peer_counts {
-            common::print_subheader(&transport, peers);
-            for &size in &common::sizes() {
-                seq += 1;
-                let label = format!("{transport}/{peers}peer/{size}B");
-                let cell = common::with_timeout(&label, run_cell(&transport, size, seq)).await;
-                common::print_cell(size, cell);
-                common::append_jsonl(PATTERN, &transport, peers, size, cell);
+        let mut seq = 0usize;
+        for transport in common::transports() {
+            for &peers in peer_counts {
+                common::print_subheader(&transport, peers);
+                for &size in &common::sizes() {
+                    seq += 1;
+                    let label = format!("{transport}/{peers}peer/{size}B");
+                    let cell = common::with_timeout(&label, run_cell(&transport, size, seq)).await;
+                    common::print_cell(size, cell);
+                    common::append_jsonl(PATTERN, &transport, peers, size, cell);
+                }
+                println!();
             }
-            println!();
         }
-    }
+    });
 }
 
 async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {

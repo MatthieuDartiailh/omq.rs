@@ -632,6 +632,42 @@ kernel socket buffer are picked up by the new SQE -- nothing is lost.
 
 Linux >= 6.0 is required (multi-shot recv with provided buffers).
 
+### Pool sizing recipe
+
+The default 128 x 32 KiB pool (4 MiB per runtime) is tuned for the
+common ZMQ workload: messages up to ~32 KiB. For larger payloads,
+slot size matters: a message that does not fit in one slot is split
+across N slots and each slot is fed to the codec separately, so per-
+chunk overhead grows linearly in N. A bigger slot is the cheap fix.
+
+| Peak msg size | Recommended pool | Pool RAM per runtime |
+|---|---|---|
+| ≤ 32 KiB | `with_omq_buffer_pool()` (default 128 x 32 KiB) | 4 MiB |
+| ≤ 256 KiB | `with_omq_buffer_pool_sized(128, 256 * 1024)` | 32 MiB |
+| ≤ 1 MiB | `with_omq_buffer_pool_sized(64, 1024 * 1024)` | 64 MiB |
+| ≤ 16 MiB | `with_omq_buffer_pool_sized(16, 16 * 1024 * 1024)` | 256 MiB |
+| ≥ 100 MiB (one-off snapshots) | `with_omq_buffer_pool_sized(8, slot)` with `slot ≥ peak` | depends |
+
+Trade-offs:
+
+- **Slot size** sets how much of one message fits in one buffer. Slots
+  bigger than peak msg size waste bytes on every smaller message.
+- **Slot count** sets how many slots can be in flight before `ENOBUFS`
+  forces a rearm. More slots = better burst absorption but more pinned
+  RAM. A single high-rate connection rarely needs more than `2 × peak
+  inflight CQEs` worth of slots.
+- For very-large messages (≥ 100 MiB), a single-slot fit is impractical
+  (RAM cost). Until the codec switches to multi-chunk payload assembly,
+  one large message is split across slots and the codec extends its
+  internal buffer with `extend_from_slice`, which memcpys each chunk
+  and reallocates as the buffer grows. Plan accordingly:
+  `max_message_size` should bound the worst case, and the pool slot
+  size should fit the typical hot-path message.
+
+If you don't know your workload, start with the default; reads
+exceeding the slot size still work (each chunk produces its own CQE),
+just slower than a single-slot delivery would be.
+
 ## Concurrency model
 
 `omq-compio` is designed for **single-threaded compio runtimes**.

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `runtime.rs` module doc and `doc/compio.md` now include a pool sizing
+  recipe: a table mapping peak message size to recommended slot size and
+  pool RAM, with guidance on slot count trade-offs.
+
 ## [0.2.8](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.7...omq-compio-v0.2.8) - 2026-05-05
 
 ### Changed

@@ -11,8 +11,30 @@
 //! Apply [`ProactorBuilderExt::with_omq_buffer_pool`] before passing the
 //! `ProactorBuilder` to [`compio::runtime::RuntimeBuilder::with_proactor`]
 //! to use omq-compio's recommended sizing (128 buffers x 32 KiB =
-//! 4 MiB per runtime). For high-fan-out `PUB` or 10 `GbE` deployments,
-//! call [`ProactorBuilderExt::with_omq_buffer_pool_sized`] instead.
+//! 4 MiB per runtime). For larger messages or high-fan-out `PUB` /
+//! 10 `GbE` deployments, call
+//! [`ProactorBuilderExt::with_omq_buffer_pool_sized`] instead.
+//!
+//! ## Pool sizing recipe
+//!
+//! Slot size sets how much of one message fits in a single buffer.
+//! Messages bigger than the slot size are split across N slots and
+//! fed to the codec one chunk at a time, growing the codec's
+//! internal `BytesMut` with `extend_from_slice` on each. That cost
+//! is roughly linear in N, so the cheap fix for larger payloads is
+//! to grow the slot.
+//!
+//! | Peak msg size | Recommended pool | Pool RAM per runtime |
+//! |---|---|---|
+//! | ≤ 32 KiB | [`ProactorBuilderExt::with_omq_buffer_pool`] (default 128 x 32 KiB) | 4 MiB |
+//! | ≤ 256 KiB | `with_omq_buffer_pool_sized(128, 256 * 1024)` | 32 MiB |
+//! | ≤ 1 MiB | `with_omq_buffer_pool_sized(64, 1024 * 1024)` | 64 MiB |
+//! | ≤ 16 MiB | `with_omq_buffer_pool_sized(16, 16 * 1024 * 1024)` | 256 MiB |
+//!
+//! Slot count sets how many slots can be in flight before `ENOBUFS`
+//! forces a rearm. More slots = better burst absorption but more
+//! pinned RAM; one connection rarely needs more than ~2 × peak
+//! inflight CQEs worth of slots.
 //!
 //! Example:
 //!

@@ -8,7 +8,7 @@ use std::io::Write as _;
 use std::time::Instant;
 
 use bytes::Bytes;
-use omq_compio::{Message, Options, Socket, SocketType};
+use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
 const PATTERN: &str = "latency";
 
@@ -28,32 +28,34 @@ fn latency_transports() -> Vec<String> {
 const WARMUP_ITERS: usize = 1_000;
 const ITERS: usize = 10_000;
 
-#[compio::main]
-async fn main() {
-    common::print_header("REQ/REP Latency (serial ping-pong)");
-    let mut seq = 0usize;
-    for transport in latency_transports() {
-        println!("--- {transport} ---");
-        println!(
-            "  {:>6}  {:>10}  {:>10}  {:>10}  {:>10}",
-            "size", "p50 µs", "p99 µs", "p999 µs", "max µs"
-        );
-        for size in common::sizes() {
-            seq += 1;
-            let label = format!("{transport}/{size}B");
-            let cell = common::with_timeout(&label, run_cell(&transport, size, seq)).await;
+fn main() {
+    let rt = build_default_runtime().expect("compio runtime");
+    rt.block_on(async {
+        common::print_header("REQ/REP Latency (serial ping-pong)");
+        let mut seq = 0usize;
+        for transport in latency_transports() {
+            println!("--- {transport} ---");
             println!(
-                "  {:>6}  {:>10.2}  {:>10.2}  {:>10.2}  {:>10.2}",
-                format!("{size}B"),
-                cell.p50,
-                cell.p99,
-                cell.p999,
-                cell.max,
+                "  {:>6}  {:>10}  {:>10}  {:>10}  {:>10}",
+                "size", "p50 µs", "p99 µs", "p999 µs", "max µs"
             );
-            append_jsonl(&transport, size, cell);
+            for size in common::sizes() {
+                seq += 1;
+                let label = format!("{transport}/{size}B");
+                let cell = common::with_timeout(&label, run_cell(&transport, size, seq)).await;
+                println!(
+                    "  {:>6}  {:>10.2}  {:>10.2}  {:>10.2}  {:>10.2}",
+                    format!("{size}B"),
+                    cell.p50,
+                    cell.p99,
+                    cell.p999,
+                    cell.max,
+                );
+                append_jsonl(&transport, size, cell);
+            }
+            println!();
         }
-        println!();
-    }
+    });
 }
 
 #[derive(Clone, Copy)]
