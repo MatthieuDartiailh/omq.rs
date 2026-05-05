@@ -16,10 +16,7 @@ timed rounds after a prime + 100 ms warmup. Sources: `omq-tokio/benches/` and
 
 ## PUSH/PULL throughput by transport, single peer (omq-compio, one core)
 
-Median of 3 × 500 ms rounds per cell. Small-size wire columns still
-vary ±10 % run-to-run (cache / scheduling jitter on a single core);
-8 KiB+ varies more once kernel send-buffer behavior kicks in — ±25 %
-is a rough envelope.
+Median of 3 × 500 ms rounds per cell.
 
 <!-- BEGIN push_pull_compio_1peer -->
 | Size | inproc | ipc | tcp | lz4+tcp | zstd+tcp |
@@ -34,21 +31,12 @@ is a rough envelope.
 
 <!-- END push_pull_compio_1peer -->
 
-Note: large-payload "GB/s" on inproc reflects the zero-copy refcount-
-clone path - bytes never traverse the kernel. lz4 / zstd on
-incompressible payloads (random bytes) cross from overhead to net win
-around 32 KiB, where the smaller WRITEV calls outweigh the codec cost.
-On compressible traffic (e.g. JSON events), the crossover is much
-earlier - see the JSON compression bench below.
+Inproc "GB/s" at large payloads reflects zero-copy Arc-clone — no kernel
+traversal.
 
-lz4+tcp and zstd+tcp numbers here use `Options::default()` — **no
-compression dictionary**. Without a dict, the compression threshold is
-512 B: frames smaller than that are passed through as plaintext (only a
-4-byte `SENTINEL_PLAIN` header is added). The slowdown vs plain TCP at
-small sizes (32 B–128 B) comes from missing the EncodedQueue send-bypass
-(transform paths use the codec-mutex path instead), not from compression
-work. With a pre-trained dict the threshold drops to 32 B (lz4) / 64 B
-(zstd) — see "With a pre-trained dict" below.
+lz4+tcp and zstd+tcp use `Options::default()` — **no compression dictionary**.
+Without a dict, the threshold is 512 B (smaller frames pass as plaintext with a
+4-byte `SENTINEL_PLAIN` header).
 
 ## Backend comparison: PUSH/PULL throughput, single peer
 
@@ -65,11 +53,7 @@ work. With a pre-trained dict the threshold drops to 32 B (lz4) / 64 B
 
 <!-- END backend_comparison -->
 
-Numbers are msg/s. **Note that compio here is one core
-versus tokio's whole box** - see the caveat at the top of this
-document. Tokio's lead grows on multi-peer fan-in (its multi-thread
-runtime overlaps senders across cores); a multi-runtime compio
-deployment lifts wire throughput another 20-40%.
+Numbers are msg/s. **Compio = one core; tokio = whole box** (see caveat above).
 
 ## Cross-library comparisons
 
@@ -79,14 +63,10 @@ libzmq and zmq.rs. Run `./scripts/compare_libzmq.sh --update-benchmarks` or
 
 ## Compression on realistic JSON payloads (omq-compio, 1 peer)
 
-Payload is a JSON event-log record (timestamps, trace ids, repeated
-field names - typical eventing-pipeline traffic). Each cell shows
-**three rates**: `msgs/s · wire MB/s · virtual MB/s`, where wire MB/s
-is what the network actually carries (post-compression) and virtual
-MB/s is what the application sees (pre-compression). For plain `tcp`,
-wire == virtual.
+JSON event-log payload (timestamps, trace IDs, repeated field names). Cells
+show `msgs/s · wire MB/s · virtual MB/s`; for plain `tcp`, wire == virtual.
 
-Compression ratios on this template:
+Compression ratios:
 
 | size    | lz4     | zstd     |
 |---------|---------|----------|
@@ -97,11 +77,8 @@ Compression ratios on this template:
 | 4 KiB   | 4.92×   | 7.41×    |
 | 16 KiB  | 6.47×   | **12.87×** |
 
-\* Below 512 B the transform doesn't even attempt compression - frame
-envelope overhead doesn't amortize at small sizes, so both lz4 and
-zstd fall back to plaintext (0.97-0.98× reflects the 4-byte
-`SENTINEL_PLAIN` framing tax). A pre-trained dictionary moves that
-cutoff way down: 32 B for lz4, 64 B for zstd. See the next section.
+\* Below 512 B both codecs fall back to plaintext (0.97–0.98× = 4-byte
+`SENTINEL_PLAIN` tax). A pre-trained dict moves the cutoff further down (see below).
 
 Loopback throughput (msgs/s · wire MB/s · virtual MB/s):
 
@@ -114,27 +91,18 @@ Loopback throughput (msgs/s · wire MB/s · virtual MB/s):
 | 4 KiB | 558k / 2.29 GB/s           | 267k / 222 MB/s / 1.09 GB/s       | 115k / 63.4 MB/s / 469 MB/s       |
 | 16 KiB| 206k / 3.38 GB/s           | 103k / 262 MB/s / 1.69 GB/s       | 42.2k / 53.7 MB/s / 691 MB/s      |
 
-On loopback, plain TCP wins msgs/s - compression's CPU cost has no
-offsetting wire-bandwidth payoff because there's no bandwidth scarcity.
-**Look at the wire MB/s column** to predict behavior on a bandwidth-
-bounded link: at 16 KiB messages, lz4+tcp ships ~262 MB/s wire while
-delivering ~1.69 GB/s of application data. On a 1 Gbps WAN (~125 MB/s
-wire ceiling) plain `tcp` would deliver 125 MB/s of application data
-total - `lz4+tcp` would deliver ~808 MB/s and `zstd+tcp` ~1.61 GB/s.
-That's where compression earns its keep.
+Loopback: plain TCP wins msg/s (no bandwidth scarcity). **Wire MB/s column**
+predicts WAN behavior: at 16 KiB, lz4+tcp ships ~262 MB/s wire / ~1.69 GB/s
+virtual. On a 1 Gbps WAN (~125 MB/s ceiling): plain tcp ~125 MB/s, lz4+tcp ~808
+MB/s, zstd+tcp ~1.61 GB/s virtual throughput.
 
 ### With a pre-trained dict (small messages)
 
-For small messages, per-frame codec overhead (header bytes + cold
-codebook) can leave compression underwater. A pre-trained dictionary
-primes the codec with byte sequences from your message family, so
-even a 128 B record compresses heavily. Pass via
-`Options::compression_dict(Bytes)`; the dict is shipped to the peer
-on the first connection and reused for every subsequent frame.
+Dict primes the codec with message-family byte sequences so even 128 B records
+compress well. Pass via `Options::compression_dict(Bytes)`; shipped to peer on
+first connection, reused every frame.
 
-Compression ratios on the same JSON template, with a trained dict
-(zstd: 1.6 KiB trained from 200 sample records; lz4: 4 KiB
-representative buffer):
+Ratios on same JSON template (zstd: 1.6 KiB dict from 200 samples; lz4: 4 KiB buffer):
 
 | size  | lz4 (no dict) | lz4 (with dict) | zstd (no dict) | zstd (with dict) |
 |-------|---------------|-----------------|----------------|------------------|
@@ -157,12 +125,9 @@ Loopback throughput with the same dict (msgs/s · wire MB/s · virt MB/s):
 | 1 KiB | 331k / 30.1 MB/s / 339 MB/s     | 134k / 3.90 MB/s / 138 MB/s   |
 | 2 KiB | 298k / 71.9 MB/s / 611 MB/s     | 118k / 14.2 MB/s / 241 MB/s   |
 
-Same loopback caveat: CPU cost without bandwidth payoff. On a
-bandwidth-bounded link the wire-MB/s column is the actual link
-load and the virt-MB/s column is what the application gets out
-the other end. The auto-train mode (default on for `zstd+tcp`)
-reaches similar ratios after the first ~1000 messages or 100 KiB
-of plaintext.
+Loopback: same caveat as above. Wire MB/s = link load; virt MB/s = application
+throughput. `zstd+tcp` auto-trains by default, reaching similar ratios after
+~1000 messages or 100 KiB.
 
 ## REQ/REP round-trip latency (single peer)
 
@@ -214,9 +179,7 @@ All values are µs wall time. Compression transports add per-frame codec overhea
 
 ## PUSH/PULL throughput, 8 peers
 
-Same bench with 8 concurrent PUSH peers fanning into one PULL. inproc/ipc/tcp,
-both backends. compio scales linearly on inproc (lock-free flume); tokio's
-multi-thread runtime gains from overlapping sender tasks on wire transports.
+8 PUSH peers → 1 PULL, all transports, both backends. Numbers are msg/s.
 
 <!-- BEGIN push_pull_8peer -->
 | Size | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
@@ -231,14 +194,11 @@ multi-thread runtime gains from overlapping sender tasks on wire transports.
 
 <!-- END push_pull_8peer -->
 
-Numbers are msg/s.
-
 ## PUSH/PULL throughput, priority routing (single peer)
 
-Same as the single-peer backend comparison but compiled with the `priority` feature,
-which replaces work-stealing round-robin with strict per-pipe priority queues. This
-trades throughput for ordering guarantees — numbers here are lower but the relative
-shape between transports holds. Run with `bench_run.rb --with-priority` to update.
+Same as backend comparison but with `priority` feature (strict per-pipe
+queues). Lower throughput; transport-relative shape holds. Run with
+`bench_run.rb --with-priority` to update.
 
 <!-- BEGIN push_pull_priority -->
 (no push_pull priority data — run: bench_run.rb --with-priority)
@@ -246,10 +206,8 @@ shape between transports holds. Run with `bench_run.rb --with-priority` to updat
 
 ## Mechanism per-frame cost (sans-I/O)
 
-Per-frame cryptographic cost of sealing one ZMTP frame payload, as
-measured by `omq-proto/benches/mechanism_frame.rs`. Numbers are
-plaintext throughput in MB/s or GB/s (decimal, 10^6 / 10^9); higher
-is better.
+Per-frame seal cost from `omq-proto/benches/mechanism_frame.rs`. Plaintext
+throughput (MB/s or GB/s, decimal); higher is better.
 
 |  size   |   NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20-BLAKE3) |
 |--------:|----------------:|-------------------------:|----------------------------:|
@@ -270,14 +228,10 @@ is better.
 > you or your organization can fund or conduct one, please open an
 > issue on the repo.
 
-Numbers are stock `cargo bench` (no `-C target-cpu=native`). omq-proto
-pins a fork of `chacha20-blake3` adding `#[target_feature(enable =
-"avx2")]` annotations that let LLVM auto-vectorize the loops
-surrounding the explicit intrinsic calls. Without that patch,
-BLAKE3ZMQ runs ~20× slower (~50 MiB/s at bulk sizes) unless every
-downstream consumer rebuilds with `-C target-cpu=native`. `crypto_box`
-(CURVE) plateaus around ~557 MB/s either way: its salsa20
-implementation has no SIMD path. Reproduce with:
+Stock `cargo bench` (no `-C target-cpu=native`). omq-proto pins a
+`chacha20-blake3` fork with `#[target_feature(enable = "avx2")]` annotations;
+without them BLAKE3ZMQ drops to ~50 MiB/s at bulk sizes. CURVE plateaus at ~557
+MB/s regardless (salsa20 has no SIMD path). Reproduce:
 
 ```sh
 cargo bench -p omq-proto --bench mechanism_frame --features 'curve blake3zmq'
@@ -289,14 +243,18 @@ cargo bench -p omq-proto --bench mechanism_frame --features 'curve blake3zmq'
 cargo bench -p omq-compio --bench push_pull
 cargo bench -p omq-tokio  --bench push_pull
 cargo bench -p omq-compio --bench req_rep
+
+# Convenience:
+./scripts/bench_run.rb [--all-features] [--all-sizes]    # adds results to JSONL
+./scripts/bench_report.rb [--update-benchmarks]          # compares results
+
 # Override transports / sizes / peer counts via env:
-OMQ_BENCH_TRANSPORTS=tcp,lz4+tcp,zstd+tcp \
-OMQ_BENCH_PEERS=3 \
-OMQ_BENCH_SIZES=128,2048,32768 \
-  cargo bench -p omq-compio --bench push_pull
+OMQ_BENCH_TRANSPORTS=tcp,lz4+tcp,zstd+tcp OMQ_BENCH_PEERS=3 OMQ_BENCH_SIZES=128,2048,32768 cargo bench -p omq-compio --bench push_pull
+
 # Two-process libzmq vs omq comparison (requires libzmq installed):
 # build: gcc scripts/libzmq_bench_peer.c -o scripts/libzmq_bench_peer -lzmq
-# then run scripts/compare_libzmq.sh
+# then run scripts/compare_libzmq.sh [--update-benchmarks]
+
 # Two-process zmq.rs vs omq comparison (pure Rust, no system packages):
-# ./scripts/compare_zmqrs.sh
+# ./scripts/compare_zmqrs.sh [--update-benchmarks]
 ```

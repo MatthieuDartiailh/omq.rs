@@ -9,11 +9,12 @@
 >
 > **5.4 µs** inproc latency | **20.4 µs** ipc | **28.4 µs** tcp
 
-Pure Rust ZeroMQ implementation. Wire-compatible with libzmq, but faster at all
-message sizes. All 11 standard socket types plus 8 draft types, inproc / IPC /
-TCP transports, UDP transport (RADIO/DISH only), NULL / CURVE / BLAKE3ZMQ
-mechanisms, `lz4+tcp://` and
-`zstd+tcp://` compression transports.
+Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at all message sizes.
+
+- 11 standard socket types + 8 draft types
+- Transports: inproc / IPC / TCP; UDP (RADIO/DISH only)
+- Mechanisms: NULL / CURVE / BLAKE3ZMQ
+- Compression: `lz4+tcp://` and `zstd+tcp://`
 
 ## Install
 
@@ -55,13 +56,12 @@ assert_eq!(m.parts()[0].as_bytes(), &b"news.sports"[..]);
 assert_eq!(m.parts()[1].as_bytes(), &b"ball scores"[..]);
 ```
 
-`omq` is a thin facade. The default `compio-backend` feature pulls in
-[`omq-compio`](omq-compio/) (single-thread io_uring/IOCP); the
-`tokio-backend` feature swaps in [`omq-tokio`](omq-tokio/) (multi-thread
-tokio + mio). The two are mutually exclusive — pick one at build time.
-The public `Socket` API is identical, verified in lockstep by per-
-backend `coverage_matrix` test suites plus a cross-runtime
-`interop_compio` ZMTP-on-the-wire suite.
+`omq` is a thin facade — pick one backend at build time:
+
+- `compio-backend` (default): single-thread io_uring/IOCP ([`omq-compio`](omq-compio/))
+- `tokio-backend`: multi-thread tokio + mio ([`omq-tokio`](omq-tokio/))
+
+Identical public `Socket` API on both, verified by `coverage_matrix` + `interop_compio` test suites.
 
 ## Cargo features
 
