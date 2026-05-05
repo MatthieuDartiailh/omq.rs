@@ -1271,7 +1271,12 @@ impl Socket {
                     state.eof_signal.notify(usize::MAX);
                     return Err(Error::Closed);
                 }
-                state.peer_io.lock().expect("peer_io").codec.advance_transmit(written);
+                state
+                    .peer_io
+                    .lock()
+                    .expect("peer_io")
+                    .codec
+                    .advance_transmit(written);
             }
             // Loop back to drain the freshly-parsed events.
         }

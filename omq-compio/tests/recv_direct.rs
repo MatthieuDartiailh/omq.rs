@@ -201,13 +201,12 @@ fn recv_drop_during_select_does_not_desync() {
             let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
             let mut got: Vec<u32> = Vec::with_capacity(FRAMES as usize);
             while (got.len() as u32) < FRAMES {
-                seed = seed.wrapping_mul(6_364_136_223_846_793_005)
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
                     .wrapping_add(1_442_695_040_888_963_407);
                 let micros = (seed >> 56) * 200 / 256;
-                let outcome = compio::time::timeout(
-                    Duration::from_micros(micros),
-                    pull.recv(),
-                ).await;
+                let outcome =
+                    compio::time::timeout(Duration::from_micros(micros), pull.recv()).await;
                 if let Ok(msg) = outcome {
                     let m = msg.expect("recv ok");
                     let payload = m.parts()[0].as_bytes();

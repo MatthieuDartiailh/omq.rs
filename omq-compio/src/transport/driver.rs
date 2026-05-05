@@ -583,7 +583,11 @@ pub(crate) async fn run_connection(
                 if written == 0 {
                     return Ok(());
                 }
-                peer_io.lock().expect("peer_io").codec.advance_transmit(written);
+                peer_io
+                    .lock()
+                    .expect("peer_io")
+                    .codec
+                    .advance_transmit(written);
                 true
             }
         } else {
