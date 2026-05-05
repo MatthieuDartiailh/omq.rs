@@ -853,11 +853,21 @@ pub(crate) async fn run_connection(
                                     }
                                     cr
                                 } else {
-                                    let mut io = peer_io.lock().await;
-                                    io.codec.send_message(&m)?;
-                                    let cr = io.codec.pending_transmit_size() >= cap;
-                                    drop(io);
-                                    codec_maybe_dirty = true;
+                                    // Encode user messages into encoded_queue, not
+                                    // the codec, so wire ordering is preserved
+                                    // against the fast-path sender. Mixing the two
+                                    // queues for user data lets step 3a (codec)
+                                    // race ahead of step 3b (eq) when a fast-path
+                                    // send queued earlier still sits in eq.
+                                    let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                                    let cr = eq.total_bytes() >= cap;
+                                    let total: usize = m.parts().iter()
+                                        .map(omq_proto::Payload::len).sum();
+                                    if total < crate::socket::FLAT_THRESHOLD {
+                                        eq.encode_and_push_flat(&m);
+                                    } else {
+                                        eq.encode_and_push(&m);
+                                    }
                                     cr
                                 }
                             }
@@ -918,11 +928,18 @@ pub(crate) async fn run_connection(
                             }
                             cr
                         } else {
-                            let mut io = peer_io.lock().await;
-                            io.codec.send_message(&m)?;
-                            let cr = io.codec.pending_transmit_size() >= cap;
-                            drop(io);
-                            codec_maybe_dirty = true;
+                            // Same rationale as the cmd_fut arm above: encode
+                            // into encoded_queue so wire ordering matches the
+                            // fast-path sender's.
+                            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                            let cr = eq.total_bytes() >= cap;
+                            let total: usize = m.parts().iter()
+                                .map(omq_proto::Payload::len).sum();
+                            if total < crate::socket::FLAT_THRESHOLD {
+                                eq.encode_and_push_flat(&m);
+                            } else {
+                                eq.encode_and_push(&m);
+                            }
                             cr
                         }
                     } else {
