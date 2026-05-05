@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use omq_compio::endpoint::IpcPath;
+use omq_compio::options::ReconnectPolicy;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
@@ -30,6 +31,32 @@ async fn ipc_push_pull_single_message() {
         .expect("recv timeout")
         .unwrap();
     assert_eq!(m.parts()[0].as_bytes(), &b"over-ipc"[..]);
+}
+
+#[compio::test]
+async fn ipc_connect_before_bind() {
+    let ep = temp_ipc("connect-before-bind");
+
+    let push = Socket::new(
+        SocketType::Push,
+        Options {
+            reconnect: ReconnectPolicy::Fixed(Duration::from_millis(20)),
+            ..Default::default()
+        },
+    );
+    push.connect(ep.clone()).await.unwrap();
+
+    compio::time::sleep(Duration::from_millis(60)).await;
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(ep).await.unwrap();
+
+    push.send(Message::single("late-bind")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .expect("recv timed out after late bind")
+        .unwrap();
+    assert_eq!(m.parts()[0].as_bytes(), &b"late-bind"[..]);
 }
 
 #[compio::test]

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
@@ -72,6 +73,35 @@ async fn ipc_abstract_push_pull_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(m.parts()[0].as_bytes(), &b"hello over abstract ipc"[..]);
+}
+
+#[tokio::test]
+async fn ipc_connect_before_bind() {
+    // Connect before the socket file exists; the dialer must retry on ENOENT
+    // until the listener creates the file, then deliver the message.
+    let ep = temp_ipc("connect-before-bind");
+
+    let push = Socket::new(
+        SocketType::Push,
+        Options {
+            reconnect: ReconnectPolicy::Fixed(Duration::from_millis(20)),
+            ..Default::default()
+        },
+    );
+    push.connect(ep.clone()).await.unwrap();
+
+    // Let the dialer hit ENOENT a few times before binding.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(ep).await.unwrap();
+
+    push.send(Message::single("late-bind")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .expect("recv timed out after late bind")
+        .unwrap();
+    assert_eq!(m.parts()[0].as_bytes(), &b"late-bind"[..]);
 }
 
 #[tokio::test]

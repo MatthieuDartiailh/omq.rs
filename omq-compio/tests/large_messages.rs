@@ -96,6 +96,47 @@ async fn large_multipart_over_tcp() {
 }
 
 #[compio::test]
+async fn huge_messages_xxhash() {
+    use xxhash_rust::xxh3::xxh3_128;
+
+    const SIZES: [usize; 3] = [100 * 1024 * 1024, 200 * 1024 * 1024, 500 * 1024 * 1024];
+
+    let port = loopback_port();
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(tcp_ep(port)).await.unwrap();
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(tcp_ep(port)).await.unwrap();
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut hashes = [0u128; 3];
+    for (i, &size) in SIZES.iter().enumerate() {
+        let payload: Vec<u8> = (0u64..size as u64)
+            .map(|j| {
+                j.wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407)
+                    .to_be_bytes()[0]
+            })
+            .collect();
+        hashes[i] = xxh3_128(&payload);
+        push.send(Message::single(payload)).await.unwrap();
+    }
+
+    for (i, expected) in hashes.iter().enumerate() {
+        let m = compio::time::timeout(Duration::from_secs(120), pull.recv())
+            .await
+            .unwrap_or_else(|_| panic!("recv timed out for message {i}"))
+            .unwrap();
+        let got = m.parts()[0].as_bytes();
+        assert_eq!(got.len(), SIZES[i], "length mismatch on message {i}");
+        assert_eq!(
+            xxh3_128(&got),
+            *expected,
+            "xxh3-128 mismatch on message {i} — payload corrupted in transit"
+        );
+    }
+}
+
+#[compio::test]
 async fn large_message_back_to_back() {
     let size = 128 * 1024;
     let port = loopback_port();

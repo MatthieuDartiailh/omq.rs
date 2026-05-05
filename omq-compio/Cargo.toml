@@ -41,6 +41,7 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 
 [dev-dependencies]
 rand = "0.8"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Used by benches/compression.rs to train a zstd dict from sample
 # JSON records before driving the with-dict throughput cells.
 zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"] }
