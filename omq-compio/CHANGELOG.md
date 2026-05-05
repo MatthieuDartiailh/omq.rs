@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.7...omq-compio-v0.2.8) - 2026-05-05
+
 ### Changed
 
 - Recv path migrated to io_uring multi-shot recv against a registered
