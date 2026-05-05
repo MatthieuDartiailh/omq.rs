@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::num::NonZeroU8;
 use std::time::Duration;
 
-use omq_tokio::{ConnectOpts, Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{ConnectOpts, Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
 fn inproc(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
@@ -44,6 +44,7 @@ async fn inproc_strict_precedence() {
     pull_c.bind(inproc("prio-strict-c")).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
+    let mut mon = push.monitor();
     push.connect_with(inproc("prio-strict-a"), opts(1))
         .await
         .unwrap();
@@ -53,6 +54,13 @@ async fn inproc_strict_precedence() {
     push.connect_with(inproc("prio-strict-c"), opts(8))
         .await
         .unwrap();
+
+    // Wait for all 3 peers to register in the routing strategy.
+    // connect_with returns after the peer is queued, but the priority
+    // table is only populated on HandshakeSucceeded. Sending before all
+    // 3 are registered would let early msgs leak to a lower-priority
+    // peer that happened to handshake first.
+    wait_for_handshakes(&mut mon, 3).await;
 
     for _ in 0..1000u32 {
         push.send(Message::single("x")).await.unwrap();
@@ -185,6 +193,19 @@ async fn dead_high_priority_skipped() {
 
     let n = drain(&pull).await;
     assert_eq!(n, 100, "all sends must land at the alive priority-8 peer");
+}
+
+async fn wait_for_handshakes(mon: &mut omq_tokio::MonitorStream, n: usize) {
+    let mut got = 0;
+    while got < n {
+        let ev = tokio::time::timeout(Duration::from_secs(2), mon.recv())
+            .await
+            .expect("monitor timeout waiting for handshake")
+            .expect("monitor closed");
+        if matches!(ev, MonitorEvent::HandshakeSucceeded { .. }) {
+            got += 1;
+        }
+    }
 }
 
 async fn drain(s: &Socket) -> usize {
