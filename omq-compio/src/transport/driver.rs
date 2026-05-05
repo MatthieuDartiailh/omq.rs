@@ -852,13 +852,27 @@ pub(crate) async fn run_connection(
                                         }
                                     }
                                     cr
+                                } else if state.uses_crypto {
+                                    // Crypto must go through codec.send_message
+                                    // to be encrypted. The fast-path sender bails
+                                    // for crypto (try_direct_encode early-returns),
+                                    // so cmd-channel sends are the only outbound
+                                    // path here; wire ordering is naturally
+                                    // preserved.
+                                    let mut io = peer_io.lock().await;
+                                    io.codec.send_message(&m)?;
+                                    let cr = io.codec.pending_transmit_size() >= cap;
+                                    drop(io);
+                                    codec_maybe_dirty = true;
+                                    cr
                                 } else {
-                                    // Encode user messages into encoded_queue, not
-                                    // the codec, so wire ordering is preserved
-                                    // against the fast-path sender. Mixing the two
-                                    // queues for user data lets step 3a (codec)
-                                    // race ahead of step 3b (eq) when a fast-path
-                                    // send queued earlier still sits in eq.
+                                    // Plain non-transform: encode into
+                                    // encoded_queue, not the codec, so wire
+                                    // ordering is preserved against the fast-path
+                                    // sender. Mixing the two queues for user data
+                                    // lets step 3a (codec) race ahead of step 3b
+                                    // (eq) when a fast-path send queued earlier
+                                    // still sits in eq.
                                     let mut eq = state.encoded_queue.lock().expect("encoded_queue");
                                     let cr = eq.total_bytes() >= cap;
                                     let total: usize = m.parts().iter()
@@ -926,6 +940,15 @@ pub(crate) async fn run_connection(
                                     eq.encode_and_push(wire);
                                 }
                             }
+                            cr
+                        } else if state.uses_crypto {
+                            // See cmd_fut arm: crypto requires codec.send_message
+                            // for encryption.
+                            let mut io = peer_io.lock().await;
+                            io.codec.send_message(&m)?;
+                            let cr = io.codec.pending_transmit_size() >= cap;
+                            drop(io);
+                            codec_maybe_dirty = true;
                             cr
                         } else {
                             // Same rationale as the cmd_fut arm above: encode
