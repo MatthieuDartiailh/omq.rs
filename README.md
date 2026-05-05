@@ -147,6 +147,17 @@ default subset in a few seconds.
 - [COMPARISONS.md](COMPARISONS.md): two-process TCP benchmarks against
   libzmq and zmq.rs.
 
+## Documentation
+
+- [doc/architecture.md](doc/architecture.md): high-level tour of the
+  three-layer split, the two-queue socket model, and how the two
+  backends compare.
+- [doc/compio.md](doc/compio.md): compio backend internals (default).
+- [doc/tokio.md](doc/tokio.md): tokio backend internals.
+- [doc/performance.md](doc/performance.md): how omq beat libzmq -- a
+  technical article on the design choices and dead ends behind the
+  benchmark numbers.
+
 ## Platform support
 
 Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
@@ -155,6 +166,8 @@ Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
 ## Requirements
 
 - Rust 1.93 or newer (edition 2024).
+- `omq-compio`: Linux 6.0 or newer (io_uring multi-shot recv with
+  provided buffers).
 
 ## License
 
