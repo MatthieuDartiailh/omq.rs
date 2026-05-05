@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Recv path migrated to io_uring multi-shot recv against a registered
+  `BUF_RING`. One persistent SQE per connection; the kernel pulls a
+  buffer from the pool when bytes are ready and delivers a `BufferRef`
+  to the runtime stream. Dropping a `recv()` future no longer cancels
+  the SQE, so bytes are not lost on cancellation. The recv-claim and
+  poll-readiness scaffolding that worked around the old hazard is
+  gone. Requires Linux >= 6.0 (multi-shot recv with provided buffers).
+- `peer_io` is now a `std::sync::Mutex` rather than `async_lock::Mutex`.
+  The codec is driven from a single-thread runtime and the lock is
+  never held across `.await`, so the sync mutex never blocks waiting
+  on a parked holder. This is what keeps extract-buffer-and-feed
+  atomic in the recv path: there is no `.await` between pulling a
+  buffer and calling `handle_input`.
+- New `omq_compio::runtime::ProactorBuilderExt::with_omq_buffer_pool()`
+  helper sizes the runtime's buffer pool (128 x 32 KiB by default).
+  `omq_compio::build_default_runtime()` is the convenience entry
+  point. Bench harnesses and the binding now use it. External
+  consumers who build their own `Runtime` should call it too.
+
+### Fixed
+
+- Recv-future cancellation no longer corrupts the byte stream. Before
+  this change, dropping a `recv()` after the kernel had selected a
+  user-space buffer but before the consumer observed it could forfeit
+  those bytes, desyncing ZMTP framing on the next read. The new
+  multi-shot recv path keeps bytes queued in the `BUF_RING` across
+  consumer drops; the next `recv()` continues from the same byte
+  position.
+
 ## [0.2.7](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.6...omq-compio-v0.2.7) - 2026-05-05
 
 ### Fixed

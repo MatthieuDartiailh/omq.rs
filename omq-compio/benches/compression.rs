@@ -26,14 +26,14 @@ fn main() {
 mod inner {
     use super::common;
     use bytes::Bytes;
-    use omq_compio::{Message, Options, Socket, SocketType};
+    use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
     const PATTERN: &str = "compression_json";
     const PEER_COUNTS: &[usize] = &[1];
     const TRANSPORTS: &[&str] = &["tcp", "lz4+tcp", "zstd+tcp"];
 
     pub(super) fn compio_main() {
-        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+        let rt = build_default_runtime().expect("compio runtime");
         rt.block_on(async_main());
     }
 

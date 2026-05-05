@@ -71,6 +71,27 @@ async fn maybe_sleep_until(deadline: Option<Instant>) {
     }
 }
 
+/// Outcome of the driver's multi-shot recv stream arm. Materialising
+/// the cases as an enum lets us complete the
+/// extract-buffer-and-feed-codec sequence synchronously inside the
+/// arm (no `.await` between buffer extract and `handle_input`),
+/// preserving the cancellation-safety invariant: dropping the driver
+/// future at any earlier `.await` does not lose any kernel bytes.
+enum StreamArmOutcome {
+    /// `recv_active` was true and `recv_state_changed` fired (the
+    /// `recv()` direct path released the claim or transitioned).
+    ClaimFlipped,
+    /// `handle_input` consumed a non-empty buffer.
+    Fed,
+    /// Stream terminated cleanly (peer closed) or yielded an empty buffer.
+    Eof,
+    /// Codec rejected input as a protocol error.
+    ProtoErr(Error),
+    /// Stream errored. ENOBUFS is recoverable via re-arm; other errors
+    /// terminate the driver.
+    Err(std::io::Error),
+}
+
 #[derive(Debug)]
 pub enum DriverCommand {
     SendMessage(Message),
@@ -175,14 +196,16 @@ pub(crate) fn build_peer_io(
     options: &Options,
     reader: WireReader,
     decoder: Option<MessageDecoder>,
-) -> SharedPeerIo {
+) -> std::io::Result<(SharedPeerIo, crate::transport::peer_io::RecvStream)> {
+    let recv_stream = reader.build_recv_stream()?;
     let codec = make_codec(role, socket_type, options);
-    Arc::new(async_lock::Mutex::new(PeerIo {
+    let peer_io = Arc::new(std::sync::Mutex::new(PeerIo {
         codec,
         decoder,
         reader,
         handshake_done: false,
-    }))
+    }));
+    Ok((peer_io, recv_stream))
 }
 
 /// Drive one connection through the ZMTP codec. The reader, writer,
@@ -209,9 +232,7 @@ pub(crate) async fn run_connection(
     peer_snapshot_tx: Sender<InprocPeerSnapshot>,
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {
-    const READ_BUF_BYTES: usize = 64 * 1024;
     let peer_io: SharedPeerIo = state.peer_io.clone();
-    let poll_fd = state.poll_fd.clone();
     let handshake_timeout = options.handshake_timeout;
     let hb_interval = options.heartbeat_interval;
     let hb_timeout = options
@@ -222,14 +243,6 @@ pub(crate) async fn run_connection(
         .heartbeat_ttl
         .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
         .unwrap_or(0);
-
-    // Read buffer reused across iterations. Sized at 64 KiB so a
-    // 32 KiB ZMTP message lands in a single read (kernel loopback
-    // delivers up to ~64 KiB per read on a fresh buffer); historical
-    // 8 KiB caused 4 syscalls per 32 KiB message. The buffer is
-    // handed to compio's read by move and returned via `BufResult`,
-    // so no copy on the hot path.
-    let mut read_buf: Vec<u8> = Vec::with_capacity(READ_BUF_BYTES);
     // Reused across iterations to avoid per-drain Vec allocation.
     let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
 
@@ -281,7 +294,7 @@ pub(crate) async fn run_connection(
         // the handshake (or its own timeout); a stuck peer is bounded
         // by Socket::close's wall-clock budget.
         if closing {
-            let io = peer_io.lock().await;
+            let io = peer_io.lock().expect("peer_io");
             let eq = state.encoded_queue.lock().expect("encoded_queue");
             if io.handshake_done
                 && pending_cmds.is_empty()
@@ -295,11 +308,42 @@ pub(crate) async fn run_connection(
         // 1) Drain parsed events. Skipped post-handshake when no new bytes
         //    arrived this iteration — `poll_event` would return None
         //    immediately, and acquiring the async mutex is not free.
-        let drained: SmallVec<[Drained; 8]> = if !state.handshake_done.load(Ordering::Relaxed)
-            || codec_has_input
+        //
+        //    Post-handshake also skipped when the recv direct path
+        //    holds the claim: `try_direct_recv` is concurrently pulling
+        //    bytes via the multi-shot stream, feeding the codec, and
+        //    consuming user-visible events directly. Pushing those same
+        //    events to `in_rx` from here would deliver them to the user
+        //    twice (once via the channel path on the next `recv()`,
+        //    once via the direct path) and out-of-order with respect to
+        //    bytes that arrived after the claim was set. With drain
+        //    skipped under the claim, events stay in the codec for
+        //    `try_direct_recv` to consume in arrival order; when the
+        //    claim drops, the driver wakes via `recv_state_changed` and
+        //    drains anything left.
+        // Skip draining post-handshake when the recv direct path holds
+        // the claim. The user's `try_direct_recv` is concurrently
+        // pulling bytes via the multi-shot stream and consuming events
+        // directly from the codec; pushing to in_rx from here would
+        // race the inline drain and surface events out of arrival order
+        // (driver-pushed events trail user-consumed events even though
+        // they were parsed first). With drain skipped under the claim,
+        // events stay in the codec until either the user drains them
+        // inline or the claim drops.
+        // Skip draining post-handshake when the recv direct path holds
+        // the claim. The user's `try_direct_recv` is concurrently
+        // consuming events directly from the codec; if the driver also
+        // drained, the two paths would each pull their own subset of
+        // events and surface them out of FIFO order (driver-pushed
+        // events trail user-consumed events even though they were
+        // parsed first).
+        let post_handshake = state.handshake_done.load(Ordering::Relaxed);
+        let recv_claimed = state.recv_claim.load(Ordering::Acquire) == 1;
+        let drained: SmallVec<[Drained; 8]> = if !post_handshake
+            || (codec_has_input && !recv_claimed)
         {
-            codec_has_input = false; // consumed; re-set by read_ready arm
-            let mut io = peer_io.lock().await;
+            codec_has_input = false; // consumed; re-set by stream arm
+            let mut io = peer_io.lock().expect("peer_io");
             let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
             while let Some(ev) = io.codec.poll_event() {
                 match ev {
@@ -519,7 +563,7 @@ pub(crate) async fn run_connection(
         {
             let mut writer = state.writer.lock().await;
             let chunks = {
-                let io = peer_io.lock().await;
+                let io = peer_io.lock().expect("peer_io");
                 if io.codec.has_pending_transmit() {
                     let mut c = io.codec.clone_transmit_chunks();
                     if c.len() > 1024 {
@@ -539,7 +583,7 @@ pub(crate) async fn run_connection(
                 if written == 0 {
                     return Ok(());
                 }
-                peer_io.lock().await.codec.advance_transmit(written);
+                peer_io.lock().expect("peer_io").codec.advance_transmit(written);
                 true
             }
         } else {
@@ -632,19 +676,69 @@ pub(crate) async fn run_connection(
             continue;
         }
 
-        // Avoid per-iteration `event_listener::Listener` allocations
-        // when the recv claim isn't held. Most loop iterations on a
-        // throughput-bound PULL run with `recv_active == false` (the
-        // recv direct path peeks `in_rx` and falls back when the
-        // driver has buffered messages); creating + dropping two
-        // unused Listeners per iter would dominate the small-message
-        // hot path.
-        let read_ready_fut = async {
+        // Stream pull / claim change arm.
+        //
+        // When `recv_active` is `true`, `try_direct_recv` owns the read
+        // path; we just listen for the claim to flip back. When
+        // `recv_active` is `false`, we acquire `peer_io` first, then
+        // the recv-stream lock, pull the next `BufferRef`, and feed
+        // `handle_input` synchronously - all within this arm.
+        //
+        // Cancel-safety invariant: NO `.await` between extracting the
+        // `BufferRef` from the stream and feeding it to `handle_input`.
+        // Holding `peer_io` across the stream pull means we never need
+        // to re-acquire it after extracting; if the future is dropped
+        // at any earlier `.await`, the buffer was never extracted and
+        // the multi-shot SQE keeps the bytes in the BUF_RING for the
+        // next puller.
+        let stream_arm = async {
             if recv_active {
                 state.recv_state_changed.listen().await;
-                Err(())
+                StreamArmOutcome::ClaimFlipped
             } else {
-                poll_fd.read_ready().await.map_err(|_| ())
+                // Lock the recv_stream alone across the pull. peer_io
+                // is acquired only AFTER stream.next() returns, and is
+                // a sync mutex - so there is no `.await` between buffer
+                // extraction and `handle_input`. A future drop at
+                // `stream.next().await` cannot lose bytes (multi-shot
+                // SQE persists). A future drop after that point cannot
+                // happen because the rest is synchronous.
+                //
+                // Race recheck: between sampling `recv_active` at the
+                // top of the iteration and acquiring the stream lock,
+                // a recv() caller may have flipped `recv_claim` to 1.
+                // Re-check here so the driver does not pull bytes the
+                // claim now owns; the next loop iteration re-samples
+                // and parks on `recv_state_changed` instead.
+                let mut sguard = state.recv_stream.0.lock().await;
+                if state.recv_claim.load(Ordering::Acquire) == 1 {
+                    drop(sguard);
+                    state.recv_state_changed.listen().await;
+                    return StreamArmOutcome::ClaimFlipped;
+                }
+                let stream = sguard
+                    .as_mut()
+                    .expect("recv_stream initialized at bring-up");
+                let buf = futures::StreamExt::next(stream).await;
+                match buf {
+                    None => StreamArmOutcome::Eof,
+                    Some(Err(e)) => StreamArmOutcome::Err(e),
+                    Some(Ok(buf)) => {
+                        if buf.is_empty() {
+                            StreamArmOutcome::Eof
+                        } else {
+                            state.last_input_nanos.store(
+                                state.hb_epoch.elapsed().as_nanos() as u64,
+                                Ordering::Relaxed,
+                            );
+                            let mut io = peer_io.lock().expect("peer_io");
+                            match io.codec.handle_input(&buf[..]) {
+                                Ok(()) => StreamArmOutcome::Fed,
+                                Err(e) => StreamArmOutcome::ProtoErr(e),
+                            }
+                        }
+                    }
+                }
             }
         };
         let eof_fut = async {
@@ -671,15 +765,7 @@ pub(crate) async fn run_connection(
         // that window (cooperative runtime). Any `notify` from a
         // sender that runs inside the select is captured.
         let transmit_ready_fut = state.transmit_ready.listen();
-        // Snapshot before polling read_ready_fut (which submits the
-        // PollOnce SQE). If try_direct_recv reads from the kernel buffer
-        // between now and when we acquire peer_io in the read_ready arm,
-        // it increments drain_generation and we bail instead of blocking
-        // on an empty buffer (priority feature only; non-priority sends
-        // always set outbound_pending via encoded_queue).
-        #[cfg(feature = "priority")]
-        let pre_drain_gen = state.drain_generation.load(Ordering::Acquire);
-        futures::pin_mut!(read_ready_fut);
+        futures::pin_mut!(stream_arm);
         futures::pin_mut!(eof_fut);
         futures::pin_mut!(cmd_fut);
         futures::pin_mut!(timeout_fut);
@@ -709,7 +795,7 @@ pub(crate) async fn run_connection(
                     context: Bytes::new(),
                 };
                 {
-                    let mut io = peer_io.lock().await;
+                    let mut io = peer_io.lock().expect("peer_io");
                     let _ = io.codec.send_command(&ping);
                     codec_maybe_dirty = true;
                 }
@@ -717,110 +803,45 @@ pub(crate) async fn run_connection(
                     hb_next = Some(Instant::now() + iv);
                 }
             }
-            ready = read_ready_fut.fuse() => {
-                if ready.is_err() {
-                    // Either the read_ready FD probe failed (peer
-                    // closed) or the recv claim flipped state. In
-                    // the FD-error case, exit. In the
-                    // claim-changed case, just loop and re-evaluate
-                    // (recv may have released; we'll grab reads
-                    // again).
-                    if recv_active {
-                        // Claim state flipped - reloop. A sender may have
-                        // encoded directly into the codec (via try_direct_encode)
-                        // between the previous select and now; that transmit_ready
-                        // notification may have been consumed by the now-dropped
-                        // listener. Force step 3a to check the codec.
+            outcome = stream_arm.fuse() => {
+                match outcome {
+                    StreamArmOutcome::ClaimFlipped => {
+                        // A sender may have encoded directly into the
+                        // codec (via try_direct_encode) between the
+                        // previous select and now; that transmit_ready
+                        // notification may have been consumed by the
+                        // now-dropped listener. Force step 3a to check
+                        // the codec.
                         codec_maybe_dirty = true;
-                    } else {
-                        return Ok(());
                     }
-                } else {
-                    let buf = std::mem::replace(
-                        &mut read_buf,
-                        Vec::with_capacity(READ_BUF_BYTES),
-                    );
-                    let mut io = peer_io.lock().await;
-                    // Re-check claim under lock. Subtle race: the
-                    // recv direct caller may have flipped
-                    // `recv_claim` to 1 between our `recv_active`
-                    // snapshot and now. If so, we must NOT read -
-                    // the recv side's own `read_ready` SQE has
-                    // fired too, and reading here would steal the
-                    // kernel data, hanging the recv future on its
-                    // subsequent read SQE.
-                    // Three reasons to bail before READ and loop back:
-                    //   (a) recv_claim flipped to 1 between our snapshot
-                    //       and now — must not steal bytes from the
-                    //       direct-recv path.
-                    //   (b) try_direct_encode enqueued outbound data
-                    //       (encoded_queue, or codec-direct on the
-                    //       transform path) between our POLL_ADD firing
-                    //       and us reaching here, with driver_in_select
-                    //       = false so no transmit_ready notify was
-                    //       sent. Entering io.reader.read().await with
-                    //       outbound pending would park indefinitely
-                    //       under IORING_FEAT_FAST_POLL (the kernel
-                    //       re-polls the fd internally instead of
-                    //       surfacing EAGAIN), stranding the payload.
-                    //   (c) [priority only] try_direct_recv drained the
-                    //       kernel buffer between our PollOnce SQE firing
-                    //       and us acquiring peer_io here. Under the
-                    //       priority feature sends go to the cmd inbox
-                    //       (not encoded_queue), so outbound_pending is
-                    //       false even though a SendMessage is waiting.
-                    //       Entering read().await would block forever
-                    //       (FAST_POLL re-polls internally on empty buffer).
-                    //       drain_generation, incremented by try_direct_recv
-                    //       after each read, detects this race.
-                    // Either way: drop the lock, mark codec dirty so
-                    // step 3a re-checks, loop. The FD stays readable
-                    // so the next iteration re-arms POLL_ADD.
-                    let outbound_pending = io.codec.has_pending_transmit()
-                        || !state.encoded_queue.lock().expect("encoded_queue").is_empty();
-                    #[cfg(feature = "priority")]
-                    let drained_by_direct_recv = state
-                        .drain_generation
-                        .load(Ordering::Acquire)
-                        != pre_drain_gen;
-                    #[cfg(not(feature = "priority"))]
-                    let drained_by_direct_recv = false;
-                    if state.recv_claim.load(Ordering::Acquire) == 1
-                        || outbound_pending
-                        || drained_by_direct_recv
-                    {
-                        drop(io);
-                        read_buf = buf;
-                        codec_maybe_dirty = true;
-                    } else {
-                        let (res, filled) = io.reader.read(buf).await;
-                        match res {
-                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                // try_direct_recv consumed the data between our POLL_ADD
-                                // firing and this READ completing. Not fatal — loop back
-                                // and re-subscribe to read_ready on the next iteration.
-                                drop(io);
-                                read_buf = filled;
-                                read_buf.clear();
-                                codec_maybe_dirty = true;
-                            }
-                            Ok(0) | Err(_) => return Ok(()),
-                            Ok(n) => {
-                                state.last_input_nanos.store(
-                                    state.hb_epoch.elapsed().as_nanos() as u64,
-                                    Ordering::Relaxed,
-                                );
-                                io.codec.handle_input(&filled[..n])?;
-                                drop(io);
-                                read_buf = filled;
-                                read_buf.clear();
-                                codec_has_input = true;
-                                // handle_input may auto-generate output (e.g. PONG
-                                // in response to PING) — mark codec dirty so step 3a
-                                // flushes it before try_direct_recv can race it.
-                                codec_maybe_dirty = true;
-                            }
+                    StreamArmOutcome::Eof => return Ok(()),
+                    StreamArmOutcome::ProtoErr(e) => return Err(e),
+                    StreamArmOutcome::Err(e) => {
+                        // Linux ENOBUFS = 105. Multi-shot recv is
+                        // terminated by the kernel when the BUF_RING is
+                        // exhausted; rearm to keep draining. Other
+                        // errors (ECONNRESET, EPIPE, etc.) are fatal.
+                        if e.raw_os_error() != Some(105) {
+                            return Ok(());
                         }
+                        if state.recv_stream.rearm(&peer_io).await.is_err() {
+                            return Ok(());
+                        }
+                        codec_maybe_dirty = true;
+                    }
+                    StreamArmOutcome::Fed => {
+                        codec_has_input = true;
+                        // If the user set the claim while we were
+                        // parked on stream.next, notify so its
+                        // pull_and_feed select can break out and drain
+                        // the codec we just populated.
+                        if state.recv_claim.load(Ordering::Acquire) == 1 {
+                            state.recv_codec_ready.notify(usize::MAX);
+                        }
+                        // handle_input may auto-generate output (e.g. PONG
+                        // in response to PING) — mark codec dirty so step 3a
+                        // flushes it before try_direct_recv can race it.
+                        codec_maybe_dirty = true;
                     }
                 }
             }
@@ -859,7 +880,7 @@ pub(crate) async fn run_connection(
                                     // so cmd-channel sends are the only outbound
                                     // path here; wire ordering is naturally
                                     // preserved.
-                                    let mut io = peer_io.lock().await;
+                                    let mut io = peer_io.lock().expect("peer_io");
                                     io.codec.send_message(&m)?;
                                     let cr = io.codec.pending_transmit_size() >= cap;
                                     drop(io);
@@ -886,7 +907,7 @@ pub(crate) async fn run_connection(
                                 }
                             }
                             DriverCommand::SendCommand(c) => {
-                                let mut io = peer_io.lock().await;
+                                let mut io = peer_io.lock().expect("peer_io");
                                 io.codec.send_command(&c)?;
                                 let cr = io.codec.pending_transmit_size() >= cap;
                                 drop(io);
@@ -944,7 +965,7 @@ pub(crate) async fn run_connection(
                         } else if state.uses_crypto {
                             // See cmd_fut arm: crypto requires codec.send_message
                             // for encryption.
-                            let mut io = peer_io.lock().await;
+                            let mut io = peer_io.lock().expect("peer_io");
                             io.codec.send_message(&m)?;
                             let cr = io.codec.pending_transmit_size() >= cap;
                             drop(io);

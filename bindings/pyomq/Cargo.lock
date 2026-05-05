@@ -299,6 +299,7 @@ dependencies = [
  "compio-buf",
  "compio-driver",
  "compio-executor",
+ "compio-io",
  "compio-log",
  "compio-send-wrapper",
  "core_affinity",
@@ -858,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "omq-compio"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "async-lock",
  "bytes",
@@ -873,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "blake3",
  "bytes",

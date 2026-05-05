@@ -32,8 +32,7 @@ pub(crate) fn round_duration() -> Duration {
     std::env::var("OMQ_BENCH_ROUND_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_ROUND_DURATION)
+        .map_or(DEFAULT_ROUND_DURATION, Duration::from_millis)
 }
 
 /// Number of timed rounds per cell. Override with `OMQ_BENCH_ROUNDS`.

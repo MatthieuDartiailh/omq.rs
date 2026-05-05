@@ -33,11 +33,15 @@ pub use omq_proto::options;
 pub use omq_proto::proto;
 
 pub mod monitor;
+pub mod runtime;
 pub mod socket;
 pub mod transport;
 
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo,
+};
+pub use runtime::{
+    DEFAULT_BUFFER_POOL_COUNT, DEFAULT_BUFFER_POOL_LEN, ProactorBuilderExt, build_default_runtime,
 };
 pub use socket::Socket;

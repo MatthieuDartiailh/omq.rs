@@ -18,22 +18,40 @@
 //! read, which dominated PUSH/PULL throughput at small message
 //! sizes).
 
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use compio::BufResult;
-use compio::io::{AsyncRead, AsyncWrite};
-use compio::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream, UnixStream};
+use compio::driver::op::{RecvFlags, RecvMulti};
+use compio::driver::{BufferRef, ToSharedFd};
+use compio::io::AsyncWrite;
+use compio::net::{OwnedWriteHalf, TcpStream, UnixStream};
+use compio::runtime::fd::AsyncFd;
+use compio::runtime::{Runtime, submit_multi};
+use futures::Stream;
 
 use omq_proto::proto::connection::Connection;
 use omq_proto::proto::transform::MessageDecoder;
 
+/// Multi-shot recv stream type. Each `next().await` yields a
+/// [`BufferRef`] from the runtime's `BUF_RING` pool. The kernel keeps
+/// pulling from the same persistent SQE, so cancelling a consumer
+/// future does NOT cancel the SQE - bytes accumulate in the ring and
+/// are picked up by the next poll.
+pub(crate) type RecvStream = Pin<Box<dyn Stream<Item = io::Result<BufferRef>> + 'static>>;
+
 /// Wire reader half. One variant per concrete transport. Static
 /// dispatch via `match` inside `read` - no `Box<dyn ...>`, no
 /// per-call heap allocation.
+///
+/// Holds an [`AsyncFd`] (rather than `OwnedReadHalf`) so the recv path
+/// can use compio's managed-buffer / multi-shot recv APIs - those are
+/// implemented for `AsyncFd<T>` but not for `OwnedReadHalf<T>`.
 pub(crate) enum WireReader {
-    Tcp(OwnedReadHalf<TcpStream>),
-    Ipc(OwnedReadHalf<UnixStream>),
+    Tcp(AsyncFd<TcpStream>),
+    Ipc(AsyncFd<UnixStream>),
 }
 
 impl std::fmt::Debug for WireReader {
@@ -43,31 +61,40 @@ impl std::fmt::Debug for WireReader {
 }
 
 impl WireReader {
-    /// Read into the provided buffer; on completion the buffer is
-    /// returned alongside the result so callers can reuse the
-    /// allocation.
-    pub(crate) async fn read(&mut self, buf: Vec<u8>) -> (std::io::Result<usize>, Vec<u8>) {
+    /// Build a multi-shot recv stream backed by compio's `BUF_RING` pool.
+    ///
+    /// The returned stream owns its own [`SharedFd`] clone, so it does
+    /// not borrow from `self`; storing it elsewhere (e.g. on
+    /// `DirectIoState`) is safe.
+    ///
+    /// `len = 0` means each CQE delivers up to one full buffer's
+    /// worth (the per-buffer size configured on the runtime's
+    /// `ProactorBuilder`).
+    ///
+    /// [`SharedFd`]: compio::driver::SharedFd
+    pub(crate) fn build_recv_stream(&self) -> io::Result<RecvStream> {
+        let pool = Runtime::current().buffer_pool()?;
         match self {
-            Self::Tcp(r) => {
-                let BufResult(res, buf) = r.read(buf).await;
-                (res, buf)
+            Self::Tcp(fd) => {
+                let op = RecvMulti::new(fd.to_shared_fd(), &pool, 0, RecvFlags::empty())?;
+                Ok(Box::pin(submit_multi(op).into_managed(pool)))
             }
-            Self::Ipc(r) => {
-                let BufResult(res, buf) = r.read(buf).await;
-                (res, buf)
+            Self::Ipc(fd) => {
+                let op = RecvMulti::new(fd.to_shared_fd(), &pool, 0, RecvFlags::empty())?;
+                Ok(Box::pin(submit_multi(op).into_managed(pool)))
             }
         }
     }
 }
 
-impl From<OwnedReadHalf<TcpStream>> for WireReader {
-    fn from(r: OwnedReadHalf<TcpStream>) -> Self {
+impl From<AsyncFd<TcpStream>> for WireReader {
+    fn from(r: AsyncFd<TcpStream>) -> Self {
         Self::Tcp(r)
     }
 }
 
-impl From<OwnedReadHalf<UnixStream>> for WireReader {
-    fn from(r: OwnedReadHalf<UnixStream>) -> Self {
+impl From<AsyncFd<UnixStream>> for WireReader {
+    fn from(r: AsyncFd<UnixStream>) -> Self {
         Self::Ipc(r)
     }
 }
@@ -152,4 +179,11 @@ impl std::fmt::Debug for PeerIo {
     }
 }
 
-pub(crate) type SharedPeerIo = Arc<async_lock::Mutex<PeerIo>>;
+/// Sync mutex chosen deliberately. The `peer_io` codec is single-threaded
+/// (compio runtime is thread-pinned) and the discipline is "never hold
+/// `peer_io` across an `.await`". With that invariant the lock is only
+/// taken between yields, so `.lock()` cannot block waiting on a parked
+/// holder. This is what makes the recv path cancel-safe: between the
+/// stream pulling a `BufferRef` and `handle_input` consuming it, there
+/// is no `.await` — so a future drop in that window is impossible.
+pub(crate) type SharedPeerIo = Arc<std::sync::Mutex<PeerIo>>;

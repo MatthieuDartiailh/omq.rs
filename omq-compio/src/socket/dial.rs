@@ -156,18 +156,24 @@ async fn dial_supervisor_tcp(
             inner.options.mechanism,
             omq_proto::options::MechanismConfig::Null
         );
-        let (reader, writer) = stream.into_split();
-        let peer_io = crate::transport::driver::build_peer_io(
+        let read_clone = stream.clone();
+        let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
+            continue;
+        };
+        let (_, writer) = stream.into_split();
+        let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
             role,
             inner.socket_type,
             &inner.options,
-            reader.into(),
+            read_fd.into(),
             decoder,
-        );
+        ) else {
+            continue;
+        };
         let state = DirectIoState::new(
             peer_io,
             writer.into(),
-            Arc::new(poll_fd),
+            recv_stream,
             has_transform,
             transform_passthrough,
             encoder,
@@ -302,9 +308,6 @@ async fn dial_supervisor_ipc(
             compio::time::sleep(delay).await;
         };
         let Some(stream) = stream else { return };
-        let Ok(poll_fd) = stream.to_poll_fd() else {
-            continue;
-        };
         let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
         inner.monitor.publish(MonitorEvent::Connected {
             endpoint: endpoint.clone(),
@@ -324,18 +327,24 @@ async fn dial_supervisor_ipc(
             inner.options.mechanism,
             omq_proto::options::MechanismConfig::Null
         );
-        let (reader, writer) = stream.into_split();
-        let peer_io = crate::transport::driver::build_peer_io(
+        let read_clone = stream.clone();
+        let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
+            continue;
+        };
+        let (_, writer) = stream.into_split();
+        let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
             role,
             inner.socket_type,
             &inner.options,
-            reader.into(),
+            read_fd.into(),
             None,
-        );
+        ) else {
+            continue;
+        };
         let state = DirectIoState::new(
             peer_io,
             writer.into(),
-            Arc::new(poll_fd),
+            recv_stream,
             false,
             None,
             None,

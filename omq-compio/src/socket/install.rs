@@ -14,7 +14,6 @@
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
-use compio::runtime::fd::PollFd;
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::proto::SocketType;
@@ -111,7 +110,6 @@ pub(super) fn install_accepted_wire_peer(
     inner: &Arc<SocketInner>,
     reader: WireReader,
     writer: WireWriter,
-    poll_fd: PollFd<socket2::Socket>,
     role: omq_proto::proto::connection::Role,
     endpoint: Endpoint,
     connection_id: u64,
@@ -135,17 +133,19 @@ pub(super) fn install_accepted_wire_peer(
         inner.options.mechanism,
         omq_proto::options::MechanismConfig::Null
     );
-    let peer_io = crate::transport::driver::build_peer_io(
+    let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
         &inner.options,
         reader,
         decoder,
-    );
+    ) else {
+        return;
+    };
     let state = DirectIoState::new(
         peer_io,
         writer,
-        Arc::new(poll_fd),
+        recv_stream,
         has_transform,
         transform_passthrough,
         encoder,

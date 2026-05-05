@@ -66,14 +66,17 @@ fn submit_chan() -> &'static flume::Sender<Job> {
 /// throughput-bound workloads on a dedicated machine; off by default
 /// because the kernel poll thread eats a CPU core even when idle.
 fn build_compio_runtime() -> std::io::Result<compio::runtime::Runtime> {
+    use omq_compio::ProactorBuilderExt;
+
     let mut runtime_builder = compio::runtime::RuntimeBuilder::new();
+    let mut proactor = compio::driver::ProactorBuilder::new();
+    proactor.with_omq_buffer_pool();
     if let Ok(raw) = std::env::var("OMQ_SQPOLL_IDLE_MS") {
         if let Ok(ms) = raw.parse::<u64>() {
-            let mut proactor = compio::driver::ProactorBuilder::new();
             proactor.sqpoll_idle(std::time::Duration::from_millis(ms));
-            runtime_builder.with_proactor(proactor);
         }
     }
+    runtime_builder.with_proactor(proactor);
     runtime_builder.build()
 }
 

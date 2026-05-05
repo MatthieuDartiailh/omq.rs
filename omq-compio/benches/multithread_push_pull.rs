@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_compio::options::ReconnectPolicy;
-use omq_compio::{Message, Options, Socket, SocketType};
+use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
 const SIZES: &[usize] = &[128, 512, 2_048];
 const TOPOLOGIES: &[(usize, usize)] = &[(1, 3), (2, 2)];
@@ -65,7 +65,7 @@ fn run_cell(
             let endpoints = endpoints.clone();
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                compio::runtime::Runtime::new()
+                build_default_runtime()
                     .expect("pull runtime")
                     .block_on(async move {
                         let pull = Socket::new(
@@ -96,7 +96,7 @@ fn run_cell(
             let payload = Bytes::from(vec![b'x'; size]);
 
             std::thread::spawn(move || {
-                compio::runtime::Runtime::new()
+                build_default_runtime()
                     .expect("push runtime")
                     .block_on(async move {
                         let push = Socket::new(SocketType::Push, Options::default());

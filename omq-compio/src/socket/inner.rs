@@ -16,7 +16,6 @@ use std::sync::{
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
-use compio::runtime::fd::PollFd;
 use event_listener::Event;
 
 use omq_proto::endpoint::Endpoint;
@@ -31,7 +30,47 @@ use omq_proto::type_state::TypeState;
 use crate::monitor::{MonitorEvent, MonitorPublisher, PeerInfo};
 use crate::transport::driver::DriverCommand;
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
-use crate::transport::peer_io::{SharedPeerIo, WireWriter};
+use crate::transport::peer_io::{RecvStream, SharedPeerIo, WireWriter};
+
+/// `Send + Sync`-asserting wrapper around a multi-shot recv stream.
+///
+/// compio's multi-shot recv stream contains [`compio::driver::SharedFd`]
+/// which is `Rc`-based for single-thread efficiency, hence `!Send`. We
+/// store such a stream behind an [`async_lock::Mutex`] inside the
+/// `Arc<DirectIoState>` so the driver task and the user's
+/// `try_direct_recv` task can share it.
+///
+/// # Safety
+///
+/// `compio::runtime::Runtime` is thread-pinned: every `compio::runtime::spawn`
+/// places the future on the local runtime's thread, and `Socket` is documented
+/// as pinned to its creating runtime. Cross-runtime sends in omq-compio go
+/// through `flume` mpsc, never moving the `Arc<DirectIoState>` itself.
+/// Therefore the inner `Rc` refcount is only ever touched on a single thread,
+/// and asserting `Send + Sync` on this wrapper does not introduce a data race
+/// in any usage pattern omq-compio supports.
+pub(crate) struct LocalStream(pub(crate) async_lock::Mutex<Option<RecvStream>>);
+
+// SAFETY: see `LocalStream` doc comment.
+unsafe impl Send for LocalStream {}
+// SAFETY: see `LocalStream` doc comment.
+unsafe impl Sync for LocalStream {}
+
+impl LocalStream {
+    /// Replace the stream with a freshly-built one. Used to re-arm
+    /// after the kernel terminates a multi-shot recv SQE - typically
+    /// `ENOBUFS` under sustained delivery on a small `BUF_RING` pool.
+    /// The previous stream's lingering op is cancelled when its slot
+    /// drops.
+    pub(crate) async fn rearm(&self, peer_io: &SharedPeerIo) -> std::io::Result<()> {
+        let new_stream = {
+            let io = peer_io.lock().expect("peer_io");
+            io.reader.build_recv_stream()?
+        };
+        *self.0.lock().await = Some(new_stream);
+        Ok(())
+    }
+}
 
 pub(super) struct SocketInner {
     pub(super) socket_type: SocketType,
@@ -467,16 +506,29 @@ pub(crate) struct DirectIoState {
     /// directly into the codec buffer while the driver is parked in
     /// its `select_biased!`. Wakes the driver to flush the new data.
     pub(crate) transmit_ready: Event,
-    /// Cancel-safe FD readiness probe. Shared with the driver task,
-    /// which uses it identically to `PollFd::read_ready`.
-    pub(crate) poll_fd: Arc<PollFd<socket2::Socket>>,
-    /// 0 = idle (driver reads); 1 = `recv()` owns reads. Drained
-    /// events under the [`PeerIo`] lock are fine on either side; the
-    /// claim arbitrates only the read SQE.
+    /// Multi-shot recv stream. Persists across consumer drops, so
+    /// cancelling a `recv()` future does NOT cancel the kernel SQE -
+    /// bytes accumulate in the `BUF_RING` and are picked up by the
+    /// next consumer poll. Both the driver task and `try_direct_recv`
+    /// pull from this stream; serialized by the inner [`async_lock::Mutex`].
+    pub(crate) recv_stream: LocalStream,
+    /// 0 = idle (driver reads); 1 = `recv()` owns reads. The claim
+    /// stops the driver from buffering new messages into `in_rx`
+    /// while `try_direct_recv` pulls and returns them inline,
+    /// preserving FIFO ordering between the two consumer paths.
     pub(crate) recv_claim: AtomicU8,
     /// Driver listens on this to wake when `recv_claim` flips back
     /// to 0 (the direct-recv caller has released the claim).
     pub(crate) recv_state_changed: Event,
+    /// Notified by the driver when it parses bytes into the codec
+    /// while the recv-direct path holds the claim. The race: the
+    /// driver may have started a stream pull with claim=0 and won the
+    /// pull just as the user set claim=1. After feeding `handle_input`,
+    /// the codec has events the user expects to drain inline, but the
+    /// user is parked on its own `pull_and_feed` waiting for new bytes
+    /// the kernel won't deliver. This signal wakes the user's recv
+    /// future so it returns to its outer loop and drains the codec.
+    pub(crate) recv_codec_ready: Event,
     /// `recv()` notifies on this on EOF / fatal read error so the
     /// driver task terminates instead of busy-looping after recv has
     /// bailed.
@@ -525,17 +577,6 @@ pub(crate) struct DirectIoState {
     /// notification when `false` — the driver is actively processing and
     /// will drain `encoded_queue` on its own next step-3b pass.
     pub(crate) driver_in_select: AtomicBool,
-    /// Incremented by `try_direct_recv` after each successful TCP read
-    /// (under the `peer_io` lock, before releasing it). The driver
-    /// snapshots this before entering `select_biased!` and bails from
-    /// the `read_ready` arm without reading when the value has changed —
-    /// meaning `try_direct_recv` drained the kernel buffer between the
-    /// PollOnce SQE firing and the driver acquiring `peer_io`. Without
-    /// this, the driver would enter `reader.read(buf).await` on an empty
-    /// buffer and block until the peer sends again (deadlock for
-    /// sequential REQ/REP under the `priority` feature).
-    #[cfg(feature = "priority")]
-    pub(crate) drain_generation: AtomicU64,
 }
 
 impl std::fmt::Debug for DirectIoState {
@@ -550,7 +591,7 @@ impl DirectIoState {
     pub(crate) fn new(
         peer_io: SharedPeerIo,
         writer: WireWriter,
-        poll_fd: Arc<PollFd<socket2::Socket>>,
+        recv_stream: RecvStream,
         has_transform: bool,
         transform_passthrough: Option<(Bytes, usize)>,
         encoder: Option<MessageEncoder>,
@@ -560,9 +601,10 @@ impl DirectIoState {
             peer_io,
             writer: async_lock::Mutex::new(writer),
             transmit_ready: Event::new(),
-            poll_fd,
+            recv_stream: LocalStream(async_lock::Mutex::new(Some(recv_stream))),
             recv_claim: AtomicU8::new(0),
             recv_state_changed: Event::new(),
+            recv_codec_ready: Event::new(),
             eof_signal: Event::new(),
             last_input_nanos: AtomicU64::new(0),
             hb_epoch: Instant::now(),
@@ -573,8 +615,6 @@ impl DirectIoState {
             encoder: async_lock::Mutex::new(encoder),
             encoded_queue: Mutex::new(EncodedQueue::new()),
             driver_in_select: AtomicBool::new(false),
-            #[cfg(feature = "priority")]
-            drain_generation: AtomicU64::new(0),
         })
     }
 }
