@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Options::large_message_threshold(n)` /
+  `Options::disable_large_message_path()` are accepted on tokio for
+  API parity with omq-compio. They have no effect: tokio's recv path
+  does not use buf-rings, so the multi-shot vs one-shot switch the
+  knob controls only matters on omq-compio. Code that compiles
+  against the compio backend stays compiling against tokio.
+
+### Changed
+
+- The codec inbound buffer (from `omq-proto`) is now a chunked queue. For
+  tokio, the read path still copies from the stack buffer into `Bytes` once
+  per read (same as before), but the codec no longer reallocates as
+  messages grow: each received slice is appended as a fixed chunk rather
+  than into a growing `BytesMut`. Large messages see one copy per read
+  instead of O(n log n) copies from repeated doubling.
+
 ## [0.2.3](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.2...omq-tokio-v0.2.3) - 2026-05-05
 
 ### Fixed

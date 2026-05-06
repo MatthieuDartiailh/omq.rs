@@ -7,11 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Recv path now switches to a sized one-shot read for inbound frames
+  whose wire payload exceeds `Options::large_message_threshold`
+  (default 128 KiB). After the codec parses a large-frame header, the
+  per-stream `compio` `CancelToken` cancels the multi-shot recv SQE,
+  any in-flight CQEs are drained into the destination buffer, and the
+  remaining bytes are read directly into one contiguous `BytesMut`.
+  Result: zero userspace memcpy on the long tail of the payload (the
+  drained prefix is bounded by the io_uring pool slot size). The
+  multi-shot stream is rebuilt before normal recv resumes, so the
+  small-message path is unchanged. Pass `0` or
+  `Options::disable_large_message_path()` to keep every recv on the
+  multi-shot path.
+
 ### Changed
 
+- Recv path copies each buf-ring slot into a `Bytes` and drops the
+  `BufferRef` immediately so the slot returns to the pool, then calls
+  `handle_input(Bytes)` directly. This replaces the previous
+  `BytesMut::extend_from_slice` path which triggered O(n log n)
+  reallocation copies as large messages accumulated bytes; now each
+  received slot is exactly one copy regardless of message size.
 - `runtime.rs` module doc and `doc/compio.md` now include a pool sizing
   recipe: a table mapping peak message size to recommended slot size and
-  pool RAM, with guidance on slot count trade-offs.
+  pool RAM, with guidance on slot count trade-offs. The very-large
+  message trade-off in that recipe is rewritten to point at
+  `large_message_threshold` instead of describing the old
+  `extend_from_slice` regrowth behaviour. The `RecvStream` section
+  documents the per-stream `CancelToken` and the `.with_cancel`
+  registration discipline. `doc/performance.md` adds a "Zero-copy
+  recv for large frames" chapter walking through both halves of the
+  change (chunked input buf + cancel-and-drain one-shot recv).
 
 ## [0.2.8](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.7...omq-compio-v0.2.8) - 2026-05-05
 

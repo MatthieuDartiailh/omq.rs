@@ -22,14 +22,14 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use compio::BufResult;
 use compio::driver::op::{RecvFlags, RecvMulti};
 use compio::driver::{BufferRef, ToSharedFd};
-use compio::io::AsyncWrite;
+use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::{OwnedWriteHalf, TcpStream, UnixStream};
 use compio::runtime::fd::AsyncFd;
-use compio::runtime::{Runtime, submit_multi};
+use compio::runtime::{CancelToken, Runtime, submit_multi};
 use futures::Stream;
 
 use omq_proto::proto::connection::Connection;
@@ -41,6 +41,31 @@ use omq_proto::proto::transform::MessageDecoder;
 /// future does NOT cancel the SQE - bytes accumulate in the ring and
 /// are picked up by the next poll.
 pub(crate) type RecvStream = Pin<Box<dyn Stream<Item = io::Result<BufferRef>> + 'static>>;
+
+/// Multi-shot recv stream paired with a [`CancelToken`] that targets
+/// the same underlying io_uring op key.
+///
+/// Every `stream.next().await` poll site MUST wrap with
+/// `.with_cancel(cancel.clone())` so the `SubmitMulti`'s first poll
+/// registers its op key with the token. After registration,
+/// `cancel.clone().cancel()` submits an `IORING_OP_ASYNC_CANCEL`
+/// targeting that op. Subsequent polls of the stream then drain any
+/// CQEs that were already in flight before the cancel landed; the
+/// stream terminates with an `ECANCELED` error or a final `None`.
+/// This is the basis of the large-frame "cancel-and-drain → one-shot"
+/// path: drained bytes are accounted as part of the supplied payload,
+/// so no kernel-consumed bytes are lost in the cancel race window.
+pub(crate) struct CancellableRecvStream {
+    pub(crate) stream: RecvStream,
+    pub(crate) cancel: CancelToken,
+}
+
+impl std::fmt::Debug for CancellableRecvStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellableRecvStream")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Wire reader half. One variant per concrete transport. Static
 /// dispatch via `match` inside `read` - no `Box<dyn ...>`, no
@@ -72,18 +97,97 @@ impl WireReader {
     /// `ProactorBuilder`).
     ///
     /// [`SharedFd`]: compio::driver::SharedFd
-    pub(crate) fn build_recv_stream(&self) -> io::Result<RecvStream> {
+    pub(crate) fn build_recv_stream(&self) -> io::Result<CancellableRecvStream> {
         let pool = Runtime::current().buffer_pool()?;
-        match self {
+        let cancel = CancelToken::new();
+        let stream: RecvStream = match self {
             Self::Tcp(fd) => {
                 let op = RecvMulti::new(fd.to_shared_fd(), &pool, 0, RecvFlags::empty())?;
-                Ok(Box::pin(submit_multi(op).into_managed(pool)))
+                Box::pin(submit_multi(op).into_managed(pool))
             }
             Self::Ipc(fd) => {
                 let op = RecvMulti::new(fd.to_shared_fd(), &pool, 0, RecvFlags::empty())?;
-                Ok(Box::pin(submit_multi(op).into_managed(pool)))
+                Box::pin(submit_multi(op).into_managed(pool))
             }
+        };
+        Ok(CancellableRecvStream { stream, cancel })
+    }
+
+    /// Clone the underlying fd into an owned [`WireRecvFd`]. The clone
+    /// shares the kernel fd via `SharedFd` reference counts, so it can
+    /// be used for one-shot reads without holding the [`PeerIo`] mutex
+    /// across the await — the caller drops the lock before issuing the
+    /// recv.
+    pub(crate) fn fd_clone(&self) -> WireRecvFd {
+        match self {
+            Self::Tcp(fd) => WireRecvFd::Tcp(fd.clone()),
+            Self::Ipc(fd) => WireRecvFd::Ipc(fd.clone()),
         }
+    }
+}
+
+/// Owned recv-only view over a wire fd, produced by
+/// [`WireReader::fd_clone`]. Used by the large-frame one-shot path:
+/// the recv stream lock has been swapped to `None`, the caller clones
+/// the fd, drops the codec lock, and reads exactly `payload_len`
+/// bytes into a sized destination buffer.
+pub(crate) enum WireRecvFd {
+    Tcp(AsyncFd<TcpStream>),
+    Ipc(AsyncFd<UnixStream>),
+}
+
+impl std::fmt::Debug for WireRecvFd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireRecvFd").finish_non_exhaustive()
+    }
+}
+
+impl WireRecvFd {
+    /// Append reads to `dst` until `dst.len() >= target_total`. Loops
+    /// over short reads via `split_off` / `unsplit` so the destination
+    /// stays one contiguous allocation (single-chunk `Bytes` after
+    /// `freeze`).
+    ///
+    /// `dst` must have `capacity() >= target_total`. The split/unsplit
+    /// pattern relies on both parts sharing one allocation, so an
+    /// under-sized buffer would force a reallocation copy.
+    ///
+    /// Returns [`io::ErrorKind::UnexpectedEof`] if the peer closes
+    /// before the target is reached.
+    pub(crate) async fn read_until(
+        &self,
+        dst: &mut BytesMut,
+        target_total: usize,
+    ) -> io::Result<()> {
+        debug_assert!(dst.capacity() >= target_total);
+        while dst.len() < target_total {
+            let tail = dst.split_off(dst.len());
+            let BufResult(res, returned) = match self {
+                Self::Tcp(fd) => {
+                    let mut r: &AsyncFd<TcpStream> = fd;
+                    AsyncRead::read(&mut r, tail).await
+                }
+                Self::Ipc(fd) => {
+                    let mut r: &AsyncFd<UnixStream> = fd;
+                    AsyncRead::read(&mut r, tail).await
+                }
+            };
+            let n = res?;
+            if n == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
+            dst.unsplit(returned);
+        }
+        Ok(())
+    }
+
+    /// Convenience: allocate a sized [`BytesMut`] and call
+    /// [`read_until`] up to `len` bytes.
+    #[allow(dead_code)]
+    pub(crate) async fn recv_exact(&self, len: usize) -> io::Result<BytesMut> {
+        let mut buf = BytesMut::with_capacity(len);
+        self.read_until(&mut buf, len).await?;
+        Ok(buf)
     }
 }
 

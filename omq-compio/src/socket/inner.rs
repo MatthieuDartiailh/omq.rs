@@ -30,7 +30,7 @@ use omq_proto::type_state::TypeState;
 use crate::monitor::{MonitorEvent, MonitorPublisher, PeerInfo};
 use crate::transport::driver::DriverCommand;
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
-use crate::transport::peer_io::{RecvStream, SharedPeerIo, WireWriter};
+use crate::transport::peer_io::{CancellableRecvStream, SharedPeerIo, WireWriter};
 
 /// `Send + Sync`-asserting wrapper around a multi-shot recv stream.
 ///
@@ -49,9 +49,12 @@ use crate::transport::peer_io::{RecvStream, SharedPeerIo, WireWriter};
 /// Therefore the inner `Rc` refcount is only ever touched on a single thread,
 /// and asserting `Send + Sync` on this wrapper does not introduce a data race
 /// in any usage pattern omq-compio supports.
-pub(crate) struct LocalStream(pub(crate) async_lock::Mutex<Option<RecvStream>>);
+pub(crate) struct LocalStream(pub(crate) async_lock::Mutex<Option<CancellableRecvStream>>);
 
-// SAFETY: see `LocalStream` doc comment.
+// SAFETY: see `LocalStream` doc comment. `CancelToken` is `Rc`-based
+// (single-threaded) for the same reason as `SharedFd`, and is only
+// touched from the runtime thread. The unsafe `Send + Sync` cover
+// both fields of the inner `CancellableRecvStream`.
 unsafe impl Send for LocalStream {}
 // SAFETY: see `LocalStream` doc comment.
 unsafe impl Sync for LocalStream {}
@@ -577,6 +580,32 @@ pub(crate) struct DirectIoState {
     /// notification when `false` — the driver is actively processing and
     /// will drain `encoded_queue` on its own next step-3b pass.
     pub(crate) driver_in_select: AtomicBool,
+    /// Pending one-shot recv size when non-zero: after parsing a frame
+    /// header whose wire payload exceeds
+    /// [`Options::large_message_threshold`](omq_proto::options::Options::large_message_threshold),
+    /// the codec is left in
+    /// [`AwaitingSuppliedPayload`](omq_proto::proto::connection)
+    /// state and this field carries the payload byte count the recv
+    /// loop must read directly into a sized buffer. `0` means no
+    /// pending one-shot. Cleared by the recv path immediately after
+    /// `Connection::supply_payload`.
+    ///
+    /// Stage 2 wires this field into the struct so Stage 3's recv-loop
+    /// branch can read and clear it. Until Stage 3 lands the field is
+    /// always 0, hence the dead-code allow.
+    #[allow(dead_code)]
+    pub(crate) large_recv_pending: AtomicUsize,
+    /// Notified by the codec-feeder side when `large_recv_pending`
+    /// transitions from 0 to a non-zero value, so the parked recv
+    /// loop wakes promptly. Re-armable.
+    #[allow(dead_code)]
+    pub(crate) large_recv_signal: Event,
+    /// Threshold mirrored from `Options::large_message_threshold` at
+    /// construction. `0` means "never switch" (translated from `None`).
+    /// Held here so the hot path doesn't reach back through the
+    /// `SocketInner` to read it.
+    #[allow(dead_code)]
+    pub(crate) large_message_threshold: usize,
 }
 
 impl std::fmt::Debug for DirectIoState {
@@ -587,15 +616,236 @@ impl std::fmt::Debug for DirectIoState {
     }
 }
 
+/// Outcome of [`try_one_shot_large_recv`]. Distinct from the surrounding
+/// [`StreamArmOutcome`] / [`PullOutcome`] enums so call sites can map
+/// it to whichever local outcome they use.
+#[derive(Debug)]
+pub(crate) enum OneShotLargeRecvOutcome {
+    /// Codec head was not a large frame (or threshold disabled).
+    /// Caller proceeds with the existing event-drain flow.
+    Skipped,
+    /// Frame payload was recvd directly into a sized buffer and supplied
+    /// to the codec; multi-shot has been re-armed. Caller proceeds with
+    /// the normal "fed" path.
+    Took,
+    /// I/O error during cancel-drain or one-shot recv. Connection is
+    /// dead.
+    IoErr(std::io::Error),
+    /// Codec rejected the supplied payload (e.g. mechanism decrypt
+    /// failure). Connection is dead.
+    ProtoErr(omq_proto::error::Error),
+}
+
+/// Cancel the multi-shot recv stream, drain any in-flight CQEs into a
+/// sized [`BytesMut`], then read the remaining payload bytes via a
+/// one-shot recv. Supply the assembled payload to the codec and
+/// re-arm a fresh multi-shot stream.
+///
+/// The caller has already verified — under the [`PeerIo`] mutex — that
+/// the codec head is a large data frame with no payload prefix
+/// buffered, and holds the [`LocalStream`] async mutex (so no other
+/// recv consumer can race the fd). This function:
+///
+/// 1. Inside the codec lock: confirms `peek_next_frame_payload_size`
+///    still reports a large-no-prefix frame, then calls
+///    [`Connection::begin_supplied_payload`]. Releases the lock.
+/// 2. Cancels the multi-shot via the per-stream [`CancelToken`] and
+///    drains any pending CQEs by polling the same stream until it
+///    yields `None` or an `ECANCELED` error. Drained bytes go into
+///    `acc`; bytes spilling past `payload_len` are saved as the
+///    `extra` to push into the codec after supply.
+/// 3. Drops the cancelled stream from the slot, clones the wire fd,
+///    and reads the remaining payload bytes one-shot into the same
+///    contiguous `acc` allocation.
+/// 4. Inside the codec lock: calls
+///    [`Connection::supply_payload`] (mechanism decrypt + decode), then
+///    feeds any saved overflow bytes via `handle_input`.
+/// 5. Builds a fresh `CancellableRecvStream` and stores it in the
+///    held slot.
+///
+/// Returns [`OneShotLargeRecvOutcome::Took`] on success,
+/// `Skipped` if the head was no longer a switchable large frame
+/// (race with `handle_input` ordering — defensive), or one of the
+/// error variants on I/O / codec failure.
+// Five clearly-delimited phases (peek → cancel-drain → one-shot →
+// supply → re-arm). Splitting them into helpers would scatter the
+// sguard / peer_io lock discipline that's the point of the function.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn try_one_shot_large_recv(
+    state: &Arc<DirectIoState>,
+    sguard: &mut async_lock::MutexGuard<
+        '_,
+        Option<crate::transport::peer_io::CancellableRecvStream>,
+    >,
+) -> OneShotLargeRecvOutcome {
+    use bytes::BytesMut;
+    use compio::runtime::FutureExt;
+
+    // Linux raw error numbers. We don't take a `libc` dep; the values
+    // are stable ABI surface.
+    const ECANCELED: i32 = 125;
+    const ENOBUFS: i32 = 105;
+
+    if state.large_message_threshold == 0 {
+        return OneShotLargeRecvOutcome::Skipped;
+    }
+
+    // 1) Peek + transition codec under peer_io.
+    let payload_len = {
+        let Ok(mut io) = state.peer_io.lock() else {
+            return OneShotLargeRecvOutcome::Skipped;
+        };
+        let info = match io.codec.peek_next_frame_payload_size() {
+            Ok(Some(info)) => info,
+            Ok(None) => return OneShotLargeRecvOutcome::Skipped,
+            Err(e) => return OneShotLargeRecvOutcome::ProtoErr(e),
+        };
+        if info.payload_len < state.large_message_threshold || info.buffered_payload_prefix != 0 {
+            return OneShotLargeRecvOutcome::Skipped;
+        }
+        // begin_supplied_payload returns Some(payload_len) iff
+        // ready + header buffered + no prefix. We just verified all
+        // three; treat None as a programming error mid-flight.
+        match io.codec.begin_supplied_payload() {
+            Some(plen) => plen,
+            None => return OneShotLargeRecvOutcome::Skipped,
+        }
+    };
+
+    let mut acc = BytesMut::with_capacity(payload_len);
+    let mut extra: Option<bytes::Bytes> = None;
+
+    // 2) Cancel + drain. Fire the CancelToken on a clone (cancel()
+    // consumes by value); subsequent `stream.next().with_cancel(...)`
+    // polls drain pending CQEs and eventually surface `ECANCELED` /
+    // `None`, terminating the loop.
+    if let Some(cs) = sguard.as_mut() {
+        cs.cancel.clone().cancel();
+        loop {
+            let item =
+                FutureExt::with_cancel(futures::StreamExt::next(&mut cs.stream), cs.cancel.clone())
+                    .await;
+            match item {
+                Some(Ok(buf_ref)) => {
+                    if buf_ref.is_empty() {
+                        // Empty CQE = peer EOF. Without all the bytes
+                        // we cannot satisfy supply_payload; surface
+                        // EOF as an io error.
+                        return OneShotLargeRecvOutcome::IoErr(std::io::Error::from(
+                            std::io::ErrorKind::UnexpectedEof,
+                        ));
+                    }
+                    let want = payload_len - acc.len();
+                    let take = want.min(buf_ref.len());
+                    acc.extend_from_slice(&buf_ref[..take]);
+                    if take < buf_ref.len() {
+                        // Spill into next frame. Coalesce with any
+                        // earlier overflow (rare; usually one CQE
+                        // carries the spill).
+                        let spill = bytes::Bytes::copy_from_slice(&buf_ref[take..]);
+                        match extra.as_mut() {
+                            Some(_existing) => {
+                                let mut combined = BytesMut::with_capacity(
+                                    extra.as_ref().map_or(0, bytes::Bytes::len) + spill.len(),
+                                );
+                                combined.extend_from_slice(extra.as_ref().expect("set"));
+                                combined.extend_from_slice(&spill);
+                                extra = Some(combined.freeze());
+                            }
+                            None => extra = Some(spill),
+                        }
+                    }
+                    if acc.len() == payload_len && extra.is_some() {
+                        // Already have everything plus overflow; keep
+                        // draining only if more overflow lands. The
+                        // cancel will terminate naturally below.
+                    }
+                }
+                Some(Err(e)) => {
+                    // ECANCELED (Linux: 125) means the cancel landed.
+                    // Any other io error is fatal.
+                    if e.raw_os_error() == Some(ECANCELED) {
+                        break;
+                    }
+                    if e.raw_os_error() == Some(ENOBUFS) {
+                        // Pool exhausted. Terminate the stream and
+                        // proceed to one-shot — the remaining payload
+                        // bytes still need to come down.
+                        break;
+                    }
+                    return OneShotLargeRecvOutcome::IoErr(e);
+                }
+                None => break,
+            }
+        }
+    }
+
+    // The drained-stream is terminal: drop it so the kernel ASYNC_CANCEL
+    // is acknowledged before our one-shot Recv submits on the same fd.
+    **sguard = None;
+
+    // 3) One-shot the remainder.
+    if acc.len() < payload_len {
+        let fd = {
+            let Ok(io) = state.peer_io.lock() else {
+                return OneShotLargeRecvOutcome::Skipped;
+            };
+            io.reader.fd_clone()
+        };
+        if let Err(e) = fd.read_until(&mut acc, payload_len).await {
+            return OneShotLargeRecvOutcome::IoErr(e);
+        }
+    }
+    state.last_input_nanos.store(
+        state.hb_epoch.elapsed().as_nanos() as u64,
+        Ordering::Relaxed,
+    );
+
+    // 4) Supply payload + replay overflow.
+    let payload_bytes = acc.freeze();
+    {
+        let Ok(mut io) = state.peer_io.lock() else {
+            return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
+        };
+        if let Err(e) = io.codec.supply_payload(payload_bytes) {
+            return OneShotLargeRecvOutcome::ProtoErr(e);
+        }
+        if let Some(spill) = extra
+            && let Err(e) = io.codec.handle_input(spill)
+        {
+            return OneShotLargeRecvOutcome::ProtoErr(e);
+        }
+        // The spill may itself have been a large-frame header. The
+        // caller's outer loop re-enters this helper on the next
+        // iteration; nothing to do here.
+    }
+
+    // 5) Re-arm multi-shot.
+    let new_stream = {
+        let Ok(io) = state.peer_io.lock() else {
+            return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
+        };
+        match io.reader.build_recv_stream() {
+            Ok(s) => s,
+            Err(e) => return OneShotLargeRecvOutcome::IoErr(e),
+        }
+    };
+    **sguard = Some(new_stream);
+
+    OneShotLargeRecvOutcome::Took
+}
+
 impl DirectIoState {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         peer_io: SharedPeerIo,
         writer: WireWriter,
-        recv_stream: RecvStream,
+        recv_stream: CancellableRecvStream,
         has_transform: bool,
         transform_passthrough: Option<(Bytes, usize)>,
         encoder: Option<MessageEncoder>,
         uses_crypto: bool,
+        large_message_threshold: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             peer_io,
@@ -615,6 +865,9 @@ impl DirectIoState {
             encoder: async_lock::Mutex::new(encoder),
             encoded_queue: Mutex::new(EncodedQueue::new()),
             driver_in_select: AtomicBool::new(false),
+            large_recv_pending: AtomicUsize::new(0),
+            large_recv_signal: Event::new(),
+            large_message_threshold,
         })
     }
 }

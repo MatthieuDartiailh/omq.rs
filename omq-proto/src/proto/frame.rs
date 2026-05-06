@@ -7,10 +7,12 @@
 
 use std::collections::VecDeque;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::message::{Frame, FrameFlags, Payload};
+use crate::message::{Frame, FrameFlags};
+
+use super::chunked_buf::ChunkedInputBuf;
 
 pub(crate) const FLAG_MORE: u8 = 0x01;
 pub(crate) const FLAG_LONG: u8 = 0x02;
@@ -87,17 +89,27 @@ pub fn encode_frame_into(frame: &Frame, out: &mut VecDeque<Bytes>, scratch: &mut
     }
 }
 
-/// Try to decode one frame from `buf`, consuming its bytes on success.
+/// A frame header parsed without consuming any bytes from the buffer.
+/// Returned by [`peek_frame_header`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PeekedFrameHeader {
+    pub flags: FrameFlags,
+    pub header_len: usize,
+    pub payload_len: usize,
+}
+
+/// Inspect `buf` for a complete frame header without consuming any bytes.
 ///
 /// Returns:
-/// - `Ok(Some(frame))` if a complete frame was available and was consumed.
-/// - `Ok(None)` if more bytes are needed. `buf` is left untouched.
+/// - `Ok(Some(hdr))` if the header is fully buffered. `buf` is unchanged.
+///   The payload may or may not be fully buffered; the caller checks that
+///   separately via `buf.len() >= hdr.header_len + hdr.payload_len`.
+/// - `Ok(None)` if the header is not yet fully buffered.
 /// - `Err(_)` on protocol violation (reserved flag bits set, COMMAND+MORE).
-pub fn try_decode_frame(buf: &mut BytesMut) -> Result<Option<Frame>> {
-    if buf.is_empty() {
+pub(crate) fn peek_frame_header(buf: &ChunkedInputBuf) -> Result<Option<PeekedFrameHeader>> {
+    let Some([flags]) = buf.peek_array::<1>() else {
         return Ok(None);
-    }
-    let flags = buf[0];
+    };
     if flags & FLAG_RESERVED_MASK != 0 {
         return Err(Error::Protocol(format!(
             "reserved ZMTP flag bits set: 0x{flags:02x}"
@@ -110,37 +122,62 @@ pub fn try_decode_frame(buf: &mut BytesMut) -> Result<Option<Frame>> {
         return Err(Error::Protocol("COMMAND frame must not have MORE".into()));
     }
     let (header_len, payload_len) = if long {
-        if buf.len() < MAX_FRAME_HEADER_LEN {
+        let Some(hdr) = buf.peek_array::<MAX_FRAME_HEADER_LEN>() else {
             return Ok(None);
-        }
-        let size = u64::from_be_bytes(buf[1..9].try_into().expect("9 bytes present"));
+        };
+        let size = u64::from_be_bytes(hdr[1..].try_into().expect("8 bytes"));
         (MAX_FRAME_HEADER_LEN, size as usize)
     } else {
-        if buf.len() < 2 {
+        let Some(hdr) = buf.peek_array::<2>() else {
             return Ok(None);
-        }
-        (2, buf[1] as usize)
+        };
+        (2, hdr[1] as usize)
     };
-    if buf.len() < header_len + payload_len {
+    Ok(Some(PeekedFrameHeader {
+        flags: FrameFlags { more, command },
+        header_len,
+        payload_len,
+    }))
+}
+
+/// Try to decode one frame from `buf`, consuming its bytes on success.
+///
+/// Returns:
+/// - `Ok(Some(frame))` if a complete frame was available and was consumed.
+/// - `Ok(None)` if more bytes are needed. `buf` is left untouched.
+/// - `Err(_)` on protocol violation (reserved flag bits set, COMMAND+MORE).
+pub(crate) fn try_decode_frame(buf: &mut ChunkedInputBuf) -> Result<Option<Frame>> {
+    let Some(hdr) = peek_frame_header(buf)? else {
+        return Ok(None);
+    };
+    if buf.len() < hdr.header_len + hdr.payload_len {
         return Ok(None);
     }
-    buf.advance(header_len);
-    let payload = buf.split_to(payload_len).freeze();
+    buf.advance(hdr.header_len);
+    let payload = buf.split_to(hdr.payload_len);
     Ok(Some(Frame {
-        flags: FrameFlags { more, command },
-        payload: Payload::from_bytes(payload),
+        flags: hdr.flags,
+        payload,
     }))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::chunked_buf::ChunkedInputBuf;
     use super::*;
+    use crate::message::Payload;
     use bytes::Bytes;
 
     fn encode(frame: &Frame) -> BytesMut {
         let mut out = BytesMut::new();
         encode_frame(frame, &mut out);
         out
+    }
+
+    fn make_buf(data: &[u8]) -> ChunkedInputBuf {
+        let mut buf = ChunkedInputBuf::new();
+        buf.push(Bytes::copy_from_slice(data));
+        buf
     }
 
     #[test]
@@ -188,34 +225,34 @@ mod tests {
 
     #[test]
     fn decode_returns_none_on_empty() {
-        let mut buf = BytesMut::new();
+        let mut buf = ChunkedInputBuf::new();
         assert!(try_decode_frame(&mut buf).unwrap().is_none());
     }
 
     #[test]
     fn decode_partial_header() {
-        let mut buf = BytesMut::from(&[0x00][..]);
+        let mut buf = make_buf(&[0x00]);
         assert!(try_decode_frame(&mut buf).unwrap().is_none());
         assert_eq!(buf.len(), 1, "buf preserved on short read");
     }
 
     #[test]
     fn decode_partial_long_header() {
-        let mut buf = BytesMut::from(&[FLAG_LONG, 0, 0, 0, 0][..]);
+        let mut buf = make_buf(&[FLAG_LONG, 0, 0, 0, 0]);
         assert!(try_decode_frame(&mut buf).unwrap().is_none());
         assert_eq!(buf.len(), 5);
     }
 
     #[test]
     fn decode_partial_payload() {
-        let mut buf = BytesMut::from(&[0x00, 0x05, b'h', b'e'][..]);
+        let mut buf = make_buf(&[0x00, 0x05, b'h', b'e']);
         assert!(try_decode_frame(&mut buf).unwrap().is_none());
         assert_eq!(buf.len(), 4);
     }
 
     #[test]
     fn decode_short_frame() {
-        let mut buf = BytesMut::from(&[0x00, 0x03, b'a', b'b', b'c'][..]);
+        let mut buf = make_buf(&[0x00, 0x03, b'a', b'b', b'c']);
         let f = try_decode_frame(&mut buf).unwrap().unwrap();
         assert_eq!(f.flags, FrameFlags::LAST);
         assert_eq!(f.payload.as_bytes(), &b"abc"[..]);
@@ -224,21 +261,21 @@ mod tests {
 
     #[test]
     fn decode_more_bit() {
-        let mut buf = BytesMut::from(&[FLAG_MORE, 0x01, b'x'][..]);
+        let mut buf = make_buf(&[FLAG_MORE, 0x01, b'x']);
         let f = try_decode_frame(&mut buf).unwrap().unwrap();
         assert_eq!(f.flags, FrameFlags::MORE);
     }
 
     #[test]
     fn decode_command_frame() {
-        let mut buf = BytesMut::from(&[FLAG_COMMAND, 0x01, b'x'][..]);
+        let mut buf = make_buf(&[FLAG_COMMAND, 0x01, b'x']);
         let f = try_decode_frame(&mut buf).unwrap().unwrap();
         assert_eq!(f.flags, FrameFlags::COMMAND);
     }
 
     #[test]
     fn decode_rejects_reserved_bits() {
-        let mut buf = BytesMut::from(&[0x08, 0x01, b'x'][..]);
+        let mut buf = make_buf(&[0x08, 0x01, b'x']);
         assert!(matches!(
             try_decode_frame(&mut buf),
             Err(Error::Protocol(_))
@@ -247,7 +284,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_command_with_more() {
-        let mut buf = BytesMut::from(&[FLAG_COMMAND | FLAG_MORE, 0x01, b'x'][..]);
+        let mut buf = make_buf(&[FLAG_COMMAND | FLAG_MORE, 0x01, b'x']);
         assert!(matches!(
             try_decode_frame(&mut buf),
             Err(Error::Protocol(_))
@@ -257,9 +294,10 @@ mod tests {
     #[test]
     fn decode_long_frame() {
         let payload = vec![0x77u8; 1024];
-        let mut buf = BytesMut::new();
+        let mut wire = BytesMut::new();
         let f = Frame::data(Bytes::from(payload.clone()), false);
-        encode_frame(&f, &mut buf);
+        encode_frame(&f, &mut wire);
+        let mut buf = make_buf(&wire);
         let decoded = try_decode_frame(&mut buf).unwrap().unwrap();
         assert_eq!(decoded.payload.len(), 1024);
         assert_eq!(decoded.payload.as_bytes(), payload.as_slice());
@@ -272,10 +310,11 @@ mod tests {
             Frame::data(Bytes::from_static(b"a"), true),
             Frame::data(Bytes::from(vec![0u8; 500]), false),
         ];
-        let mut buf = BytesMut::new();
+        let mut wire = BytesMut::new();
         for f in &frames {
-            encode_frame(f, &mut buf);
+            encode_frame(f, &mut wire);
         }
+        let mut buf = make_buf(&wire);
         let d0 = try_decode_frame(&mut buf).unwrap().unwrap();
         let d1 = try_decode_frame(&mut buf).unwrap().unwrap();
         assert!(buf.is_empty());
@@ -290,12 +329,11 @@ mod tests {
         let f = Frame::data(Bytes::from(vec![0xAAu8; 400]), false);
         let mut wire = BytesMut::new();
         encode_frame(&f, &mut wire);
-        let bytes: Vec<u8> = wire.to_vec();
 
-        let mut buf = BytesMut::new();
+        let mut buf = ChunkedInputBuf::new();
         let mut decoded = None;
-        for b in bytes {
-            buf.put_u8(b);
+        for b in wire {
+            buf.push(Bytes::copy_from_slice(&[b]));
             if let Some(d) = try_decode_frame(&mut buf).unwrap() {
                 decoded = Some(d);
                 break;

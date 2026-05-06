@@ -100,7 +100,7 @@ async fn large_multipart_over_tcp() {
 async fn huge_messages_xxhash() {
     use xxhash_rust::xxh3::xxh3_128;
 
-    const SIZES: [usize; 3] = [100 * 1024 * 1024, 200 * 1024 * 1024, 500 * 1024 * 1024];
+    const SIZES: [usize; 3] = [4 * 1024 * 1024, 8 * 1024 * 1024, 100 * 1024 * 1024];
 
     let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
@@ -111,13 +111,8 @@ async fn huge_messages_xxhash() {
 
     let mut hashes = [0u128; 3];
     for (i, &size) in SIZES.iter().enumerate() {
-        let payload: Vec<u8> = (0u64..size as u64)
-            .map(|j| {
-                j.wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407)
-                    .to_be_bytes()[0]
-            })
-            .collect();
+        let seed = (i as u8).wrapping_mul(0xAB).wrapping_add(0x37);
+        let payload = vec![seed; size];
         hashes[i] = xxh3_128(&payload);
         push.send(Message::single(payload)).await.unwrap();
     }

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Options::large_message_threshold(n)` and
+  `Options::disable_large_message_path()`: tune the wire-payload size at
+  which compatible recv backends switch from a buffer-pool multi-shot
+  read to a single sized one-shot read. Default: `Some(128 * 1024)`.
+  Honoured by `omq-compio`; accepted but ignored on `omq-tokio` for API
+  parity.
+- New `Connection` API for direct-recv I/O backends:
+  `peek_next_frame_payload_size`, `begin_supplied_payload`, and
+  `supply_payload`. A backend that has decided to recv a large frame's
+  payload directly into a sized buffer (instead of via the codec's
+  inbound chunk queue) consumes the wire-frame header from the codec
+  with `begin_supplied_payload`, recvs the payload bytes itself, and
+  hands them back as one `Bytes` via `supply_payload`. The codec runs
+  the same mechanism decrypt and demux path as it would on an
+  in-buffer-assembled frame. Existing callers that never invoke the
+  new methods are unaffected.
+
+### Changed
+
+- Codec inbound buffer replaced with a chunked queue (`ChunkedInputBuf`):
+  received bytes are appended as owned `Bytes` chunks without copying,
+  and the frame decoder slices into them directly. This eliminates the
+  `BytesMut` reallocation chain that previously scaled as O(n log n) for
+  large messages, cutting total copies to one per received chunk.
+- `Connection::handle_input` now takes `Bytes` instead of `&[u8]`. Callers
+  with a slice use `Bytes::copy_from_slice`; callers with an already-owned
+  `Bytes` (e.g. from a buf-ring slot) pass it directly with no copy.
+- `frame::try_decode_frame` and `greeting::try_decode` are now
+  `pub(crate)` (they were never part of the stable public API).
+
 ## [0.2.3](https://github.com/paddor/omq.rs/compare/omq-proto-v0.2.2...omq-proto-v0.2.3) - 2026-05-05
 
 ### Fixed

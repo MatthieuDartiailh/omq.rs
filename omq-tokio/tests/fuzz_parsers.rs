@@ -98,7 +98,7 @@ fn fuzz_handle_input_full_stream() {
             ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(MechanismSetup::Null);
         let mut conn = Connection::new(cfg);
         let raw = random_bytes(&mut rng, 4096);
-        let _ = conn.handle_input(&raw);
+        let _ = conn.handle_input(Bytes::copy_from_slice(&raw));
         // Drain whatever events the codec emitted.
         while conn.poll_event().is_some() {}
         if i % 10_000 == 0 {
@@ -121,7 +121,10 @@ fn fuzz_handle_input_chunked() {
         let mut pos = 0;
         while pos < raw.len() {
             let chunk_len = rng.gen_range(1..=raw.len() - pos).min(64);
-            if conn.handle_input(&raw[pos..pos + chunk_len]).is_err() {
+            if conn
+                .handle_input(Bytes::copy_from_slice(&raw[pos..pos + chunk_len]))
+                .is_err()
+            {
                 break; // codec rejected; further input would panic? no, but stop anyway
             }
             while conn.poll_event().is_some() {}
@@ -154,7 +157,7 @@ fn fuzz_handle_input_both_roles() {
         let cfg = ConnectionConfig::new(role, st).mechanism(MechanismSetup::Null);
         let mut conn = Connection::new(cfg);
         let raw = random_bytes(&mut rng, 2048);
-        let _ = conn.handle_input(&raw);
+        let _ = conn.handle_input(Bytes::copy_from_slice(&raw));
         while conn.poll_event().is_some() {}
         if i % 10_000 == 0 {
             eprintln!("both_roles iter {i}");
@@ -244,7 +247,7 @@ fn fuzz_handle_input_perturbed_greeting() {
         let cfg =
             ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(MechanismSetup::Null);
         let mut conn = Connection::new(cfg);
-        let _ = conn.handle_input(&buf);
+        let _ = conn.handle_input(Bytes::copy_from_slice(&buf));
         while conn.poll_event().is_some() {}
         if i % 10_000 == 0 {
             eprintln!("perturbed iter {i}");
@@ -377,7 +380,7 @@ mod mech_fuzz {
             );
             let mut conn = Connection::new(cfg);
             let raw = random_bytes(&mut rng, 1024);
-            let _ = conn.handle_input(&raw);
+            let _ = conn.handle_input(Bytes::copy_from_slice(&raw));
             while conn.poll_event().is_some() {}
             if i % 5_000 == 0 {
                 eprintln!("curve iter {i}");
@@ -403,7 +406,7 @@ mod mech_fuzz {
                 },
             );
             let mut conn = Connection::new(cfg);
-            let _ = conn.handle_input(&greeting);
+            let _ = conn.handle_input(Bytes::copy_from_slice(&greeting));
             // HELLO is 194-byte body for the well-formed case;
             // mutate length 0..256 to also hit the early-reject paths.
             let body_len = rng.gen_range(0..=256);
@@ -416,7 +419,7 @@ mod mech_fuzz {
             rng.fill_bytes(&mut tail);
             body.extend_from_slice(&tail);
             let frame = long_command_frame(&body);
-            let _ = conn.handle_input(&frame);
+            let _ = conn.handle_input(Bytes::copy_from_slice(&frame));
             while conn.poll_event().is_some() {}
             if i % 5_000 == 0 {
                 eprintln!("curve hello iter {i}");
@@ -443,7 +446,7 @@ mod mech_fuzz {
             );
             let mut conn = Connection::new(cfg);
             let raw = random_bytes(&mut rng, 1024);
-            let _ = conn.handle_input(&raw);
+            let _ = conn.handle_input(Bytes::copy_from_slice(&raw));
             while conn.poll_event().is_some() {}
             if i % 5_000 == 0 {
                 eprintln!("blake3zmq iter {i}");
@@ -474,7 +477,7 @@ mod mech_fuzz {
                 },
             );
             let mut conn = Connection::new(cfg);
-            let _ = conn.handle_input(&greeting);
+            let _ = conn.handle_input(Bytes::copy_from_slice(&greeting));
             let body_len = rng.gen_range(0..=256);
             let mut body = Vec::with_capacity(1 + 5 + body_len);
             body.push(5);
@@ -483,7 +486,7 @@ mod mech_fuzz {
             rng.fill_bytes(&mut tail);
             body.extend_from_slice(&tail);
             let frame = long_command_frame(&body);
-            let _ = conn.handle_input(&frame);
+            let _ = conn.handle_input(Bytes::copy_from_slice(&frame));
             while conn.poll_event().is_some() {}
             if i % 5_000 == 0 {
                 eprintln!("blake3zmq hello iter {i}");

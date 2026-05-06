@@ -19,6 +19,8 @@ use bytes::{BufMut, BytesMut};
 
 use crate::error::{Error, Result};
 
+use super::chunked_buf::ChunkedInputBuf;
+
 /// Total wire length of a ZMTP greeting.
 pub const GREETING_LEN: usize = 64;
 
@@ -164,21 +166,26 @@ pub fn peek_major(buf: &[u8]) -> Result<Option<u8>> {
 /// [`GREETING_LEN`] bytes and returns the parsed greeting alongside
 /// the raw 64 wire bytes - the latter is needed by transcript-binding
 /// mechanisms (e.g. BLAKE3ZMQ) that hash the exact bytes the peer sent.
-pub fn try_decode(buf: &mut BytesMut) -> Result<Option<(Greeting, bytes::Bytes)>> {
-    if peek_major(buf)?.is_none() {
+pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<(Greeting, bytes::Bytes)>> {
+    let Some(sniff) = buf.peek_array::<VERSION_SNIFF_LEN>() else {
+        return Ok(None);
+    };
+    if peek_major(&sniff)?.is_none() {
         return Ok(None);
     }
     if buf.len() < GREETING_LEN {
         return Ok(None);
     }
-    let bytes = buf.split_to(GREETING_LEN).freeze();
-    let major = bytes[10];
-    let minor = bytes[11];
+    let raw: [u8; GREETING_LEN] = buf.peek_array::<GREETING_LEN>().expect("len checked");
+    let raw_payload = buf.split_to(GREETING_LEN);
+    let raw_bytes = raw_payload.as_bytes();
+    let major = raw[10];
+    let minor = raw[11];
     if major != ZMTP_MAJOR {
         return Err(Error::UnsupportedZmtpVersion { major, minor });
     }
     let mut mech_raw = [0u8; MECHANISM_BYTES];
-    mech_raw.copy_from_slice(&bytes[12..12 + MECHANISM_BYTES]);
+    mech_raw.copy_from_slice(&raw[12..12 + MECHANISM_BYTES]);
     // Reject names with stray non-zero bytes after a NUL -- RFC compliance.
     let mut saw_zero = false;
     for &b in &mech_raw {
@@ -189,7 +196,7 @@ pub fn try_decode(buf: &mut BytesMut) -> Result<Option<(Greeting, bytes::Bytes)>
         }
     }
     let mechanism = MechanismName::from_padded(&mech_raw);
-    let as_server = bytes[32] != 0;
+    let as_server = raw[32] != 0;
     Ok(Some((
         Greeting {
             major,
@@ -197,7 +204,7 @@ pub fn try_decode(buf: &mut BytesMut) -> Result<Option<(Greeting, bytes::Bytes)>
             mechanism,
             as_server,
         },
-        bytes,
+        raw_bytes,
     )))
 }
 
@@ -209,13 +216,24 @@ pub fn effective_minor(peer_minor: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+
+    fn make_buf(data: &[u8]) -> ChunkedInputBuf {
+        let mut buf = ChunkedInputBuf::new();
+        buf.push(Bytes::copy_from_slice(data));
+        buf
+    }
+
+    fn encode_to_buf(g: &Greeting) -> ChunkedInputBuf {
+        let mut wire = BytesMut::new();
+        g.encode(&mut wire);
+        make_buf(&wire)
+    }
 
     #[test]
     fn encode_decode_roundtrip() {
         let g = Greeting::current(MechanismName::NULL, true);
-        let mut buf = BytesMut::new();
-        g.encode(&mut buf);
-        assert_eq!(buf.len(), GREETING_LEN);
+        let mut buf = encode_to_buf(&g);
         let (decoded, raw) = try_decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded, g);
         assert_eq!(raw.len(), GREETING_LEN);
@@ -224,7 +242,7 @@ mod tests {
 
     #[test]
     fn partial_read_returns_none() {
-        let mut buf = BytesMut::from(&SIGNATURE[..]);
+        let mut buf = make_buf(&SIGNATURE);
         assert!(try_decode(&mut buf).unwrap().is_none());
         assert_eq!(buf.len(), 10);
     }
@@ -268,8 +286,7 @@ mod tests {
             mechanism: MechanismName::NULL,
             as_server: false,
         };
-        let mut buf = BytesMut::new();
-        g.encode(&mut buf);
+        let mut buf = encode_to_buf(&g);
         let (decoded, _) = try_decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded.minor, 0);
     }
@@ -292,18 +309,18 @@ mod tests {
     #[test]
     fn reject_mechanism_bytes_after_nul() {
         let g = Greeting::current(MechanismName::NULL, false);
-        let mut buf = BytesMut::new();
-        g.encode(&mut buf);
+        let mut wire = BytesMut::new();
+        g.encode(&mut wire);
         // Sabotage: set byte 17 (within mechanism region after NUL padding)
-        buf[17] = b'X';
+        wire[17] = b'X';
+        let mut buf = make_buf(&wire);
         assert!(matches!(try_decode(&mut buf), Err(Error::Protocol(_))));
     }
 
     #[test]
     fn server_flag() {
         let s = Greeting::current(MechanismName::NULL, true);
-        let mut buf = BytesMut::new();
-        s.encode(&mut buf);
+        let mut buf = encode_to_buf(&s);
         let (d, _) = try_decode(&mut buf).unwrap().unwrap();
         assert!(d.as_server);
     }

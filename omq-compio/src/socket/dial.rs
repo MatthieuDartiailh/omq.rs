@@ -178,6 +178,7 @@ async fn dial_supervisor_tcp(
             transform_passthrough,
             encoder,
             uses_crypto,
+            inner.options.large_message_threshold.unwrap_or(0),
         );
         *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
 
@@ -349,6 +350,7 @@ async fn dial_supervisor_ipc(
             None,
             None,
             uses_crypto,
+            inner.options.large_message_threshold.unwrap_or(0),
         );
         *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
 

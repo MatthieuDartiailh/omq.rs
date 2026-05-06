@@ -335,7 +335,7 @@ where
                     if n == 0 {
                         return Ok(()); // peer EOF
                     }
-                    codec.handle_input(&read_buf[..n])?;
+                    codec.handle_input(Bytes::copy_from_slice(&read_buf[..n]))?;
                 }
 
                 res = flush_once(&mut writer, &mut codec), if want_write => {

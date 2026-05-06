@@ -14,6 +14,7 @@
 //! Both ZMTP 3.0 and ZMTP 3.1 are supported. Peers speaking < 3.0 are rejected
 //! after reading 11 bytes (signature + major version).
 
+pub(crate) mod chunked_buf;
 pub mod command;
 pub mod connection;
 pub mod frame;

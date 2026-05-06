@@ -150,6 +150,7 @@ pub(super) fn install_accepted_wire_peer(
         transform_passthrough,
         encoder,
         uses_crypto,
+        inner.options.large_message_threshold.unwrap_or(0),
     );
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);

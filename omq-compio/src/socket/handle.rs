@@ -1151,10 +1151,20 @@ impl Socket {
             //    invariant elsewhere keeps the sync lock from blocking.
             let pull_and_feed = async {
                 let mut sguard = state.recv_stream.0.lock().await;
-                let stream = sguard
-                    .as_mut()
-                    .expect("recv_stream initialized at bring-up");
-                let buf = futures::StreamExt::next(stream).await;
+                // See driver.rs: a previous iteration's one-shot
+                // recv path may have dropped the stream and been
+                // interrupted before rebuilding. Treat as EOF.
+                let Some(cs) = sguard.as_mut() else {
+                    return PullOutcome::Eof;
+                };
+                // See driver.rs `stream_arm`: `.with_cancel` registers
+                // the SubmitMulti op key with the per-stream token so
+                // the large-frame switch can drain pending CQEs.
+                let buf = compio::runtime::FutureExt::with_cancel(
+                    futures::StreamExt::next(&mut cs.stream),
+                    cs.cancel.clone(),
+                )
+                .await;
                 match buf {
                     None => PullOutcome::Eof,
                     Some(Err(e)) => PullOutcome::Err(e),
@@ -1162,16 +1172,30 @@ impl Socket {
                         if buf.is_empty() {
                             return PullOutcome::Eof;
                         }
-                        let mut io = state.peer_io.lock().expect("peer_io");
-                        match io.codec.handle_input(&buf[..]) {
-                            Ok(()) => {
-                                state.last_input_nanos.store(
-                                    state.hb_epoch.elapsed().as_nanos() as u64,
-                                    Ordering::Relaxed,
-                                );
-                                PullOutcome::Fed
+                        let handle_result = {
+                            let mut io = state.peer_io.lock().expect("peer_io");
+                            let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
+                            drop(buf);
+                            io.codec.handle_input(bytes)
+                        };
+                        if handle_result.is_err() {
+                            PullOutcome::ProtoErr
+                        } else {
+                            state.last_input_nanos.store(
+                                state.hb_epoch.elapsed().as_nanos() as u64,
+                                Ordering::Relaxed,
+                            );
+                            match crate::socket::try_one_shot_large_recv(&state, &mut sguard).await
+                            {
+                                crate::socket::OneShotLargeRecvOutcome::Skipped
+                                | crate::socket::OneShotLargeRecvOutcome::Took => PullOutcome::Fed,
+                                crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
+                                    PullOutcome::Err(e)
+                                }
+                                crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => {
+                                    PullOutcome::ProtoErr
+                                }
                             }
-                            Err(_) => PullOutcome::ProtoErr,
                         }
                     }
                 }

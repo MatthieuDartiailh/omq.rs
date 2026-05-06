@@ -255,19 +255,30 @@ write API is needed.
 ```rust
 type RecvStream =
     Pin<Box<dyn Stream<Item = io::Result<BufferRef>> + 'static>>;
+
+struct CancellableRecvStream {
+    stream: RecvStream,
+    cancel: compio::runtime::CancelToken,
+}
 ```
 
 Built once per connection via
 `WireReader::build_recv_stream()` -> `RecvMulti` -> `submit_multi(op)
-.into_managed(pool)`. One persistent SQE per connection: the kernel
-selects a buffer from the runtime's `BUF_RING` only when bytes are
-ready, posts a CQE carrying a `BufferRef`, and the stream yields it.
-Dropping the consumer future does NOT cancel the SQE -- bytes
-accumulate in the ring and are picked up by the next poll.
+.into_managed(pool)`, paired with a fresh `CancelToken`. One
+persistent SQE per connection: the kernel selects a buffer from the
+runtime's `BUF_RING` only when bytes are ready, posts a CQE carrying
+a `BufferRef`, and the stream yields it. Dropping the consumer
+future of `.next()` does NOT cancel the SQE -- bytes accumulate in
+the ring and are picked up by the next poll. Every `.next().await`
+poll site wraps with `.with_cancel(cancel.clone())` so the
+`SubmitMulti`'s first poll registers its op key with the token; the
+large-frame switch can later call `cancel.clone().cancel()` to
+submit an `IORING_OP_ASYNC_CANCEL` and drain pending CQEs
+deterministically.
 
 Stored in `DirectIoState::recv_stream: LocalStream`. `LocalStream::rearm`
 rebuilds it after `ENOBUFS` (the kernel terminates the multi-shot SQE
-when the pool is exhausted).
+when the pool is exhausted) -- a fresh stream gets a fresh token.
 
 ### `MessageEncoder` / `MessageDecoder`
 
@@ -656,13 +667,17 @@ Trade-offs:
   forces a rearm. More slots = better burst absorption but more pinned
   RAM. A single high-rate connection rarely needs more than `2 × peak
   inflight CQEs` worth of slots.
-- For very-large messages (≥ 100 MiB), a single-slot fit is impractical
-  (RAM cost). Until the codec switches to multi-chunk payload assembly,
-  one large message is split across slots and the codec extends its
-  internal buffer with `extend_from_slice`, which memcpys each chunk
-  and reallocates as the buffer grows. Plan accordingly:
-  `max_message_size` should bound the worst case, and the pool slot
-  size should fit the typical hot-path message.
+- For frames whose wire payload exceeds
+  `Options::large_message_threshold` (default 128 KiB), the recv path
+  switches to a cancel-and-drain + sized one-shot Recv, allocating one
+  contiguous `BytesMut` for the whole payload. The pool slots are not
+  used for that frame's tail, so very-large messages do not require a
+  proportionally-large pool. The cancel-drain prefix is bounded by one
+  or two pool slots; see "Zero-copy recv for large frames" in
+  `performance.md`. Set `Options::disable_large_message_path()` (or
+  `large_message_threshold(0)`) to keep every frame on the multi-shot
+  path -- useful for low-latency profiles where the per-cancel SQE-
+  rebuild cost (~tens of µs) is worse than the memcpy.
 
 If you don't know your workload, start with the default; reads
 exceeding the slot size still work (each chunk produces its own CQE),

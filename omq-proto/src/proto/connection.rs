@@ -28,8 +28,9 @@ use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
-use crate::message::{MESSAGE_INLINE_PARTS, Message, Payload};
+use crate::message::{FrameFlags, MESSAGE_INLINE_PARTS, Message, Payload};
 
+use super::chunked_buf::ChunkedInputBuf;
 use super::command::{self, Command, PeerProperties};
 
 /// Parse a command-frame payload as raw `Command::Unknown { name, body }`
@@ -124,11 +125,39 @@ pub enum Event {
     Command(Command),
 }
 
+/// Information about the next frame whose header is fully buffered but whose
+/// payload may not yet be. Returned by
+/// [`Connection::peek_next_frame_payload_size`].
+///
+/// Used by I/O backends to decide whether to recv the payload directly into
+/// a sized destination buffer (large frames) instead of accumulating it via
+/// the multi-shot pool path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NextFrameInfo {
+    /// Wire flags of the next frame.
+    pub flags: FrameFlags,
+    /// Wire-frame header byte count (2 for short, 9 for long).
+    pub header_len: usize,
+    /// Wire-frame payload byte count (post-decryption may differ).
+    pub payload_len: usize,
+    /// Bytes of this frame's payload that are already buffered behind the
+    /// header. Always `<= payload_len`.
+    pub buffered_payload_prefix: usize,
+}
+
 #[derive(Debug)]
 enum State {
     AwaitingGreeting,
     MechanismHandshake,
     Ready,
+    /// Caller has taken over recv for one frame: header has been consumed
+    /// from the inbound buffer, the payload will arrive via
+    /// [`Connection::supply_payload`]. While in this state, the codec
+    /// rejects further `handle_input` and `drive` is a no-op.
+    AwaitingSuppliedPayload {
+        flags: FrameFlags,
+        payload_len: usize,
+    },
     Closed,
 }
 
@@ -151,7 +180,7 @@ pub struct Connection {
     our_greeting: Bytes,
     peer_greeting: Bytes,
     peer_minor: u8,
-    in_buf: BytesMut,
+    in_buf: ChunkedInputBuf,
     /// Outbound bytes pending transmit, kept as a queue of `Bytes` so the
     /// engine can gather-write via `writev` / `sendmsg` instead of
     /// memcpy'ing every frame into a contiguous buffer.
@@ -189,7 +218,7 @@ impl Connection {
             transform: None,
             our_greeting: Bytes::new(),
             peer_greeting: Bytes::new(),
-            in_buf: BytesMut::new(),
+            in_buf: ChunkedInputBuf::new(),
             out_chunks: VecDeque::new(),
             header_scratch: BytesMut::with_capacity(64 * 1024),
             front_consumed: 0,
@@ -216,15 +245,29 @@ impl Connection {
         self.out_chunks.push_back(bytes);
     }
 
-    /// Feed received bytes. Drives the state machine as far as possible.
-    pub fn handle_input(&mut self, src: &[u8]) -> Result<()> {
-        if matches!(self.state, State::Closed) {
-            return Err(Error::Closed);
+    /// Feed received bytes into the codec. Drives the state machine as far as
+    /// possible. Pass [`Bytes::copy_from_slice`] for stack/borrowed data;
+    /// pass an owned [`Bytes`] directly when the caller already has one.
+    ///
+    /// Errors with [`Error::Protocol`] if the codec is in the
+    /// `AwaitingSuppliedPayload` state — the caller must deliver the frame
+    /// payload via [`supply_payload`](Self::supply_payload) instead, since
+    /// further bytes on the wire belong to that frame's payload and have
+    /// been claimed by direct-recv.
+    pub fn handle_input(&mut self, src: Bytes) -> Result<()> {
+        match self.state {
+            State::Closed => return Err(Error::Closed),
+            State::AwaitingSuppliedPayload { .. } => {
+                return Err(Error::Protocol(
+                    "handle_input while awaiting supplied payload".into(),
+                ));
+            }
+            _ => {}
         }
         if src.is_empty() {
             return Ok(());
         }
-        self.in_buf.extend_from_slice(src);
+        self.in_buf.push(src);
         self.drive()
     }
 
@@ -234,7 +277,7 @@ impl Connection {
                 State::AwaitingGreeting => self.try_advance_greeting()?,
                 State::MechanismHandshake => self.try_advance_mechanism()?,
                 State::Ready => self.try_advance_ready()?,
-                State::Closed => return Ok(()),
+                State::AwaitingSuppliedPayload { .. } | State::Closed => return Ok(()),
             };
             if !progress {
                 return Ok(());
@@ -322,12 +365,24 @@ impl Connection {
     }
 
     fn try_advance_ready(&mut self) -> Result<bool> {
-        #[cfg(feature = "curve")]
-        const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
-        // is itself a command-encoded body; we handle those by re-decoding
         let Some(frame) = frame::try_decode_frame(&mut self.in_buf)? else {
             return Ok(false);
         };
+        self.decode_assembled_frame(frame.flags, frame.payload)?;
+        Ok(true)
+    }
+
+    /// Run the post-handshake dispatch on an already-assembled wire frame:
+    /// decrypt (CURVE / BLAKE3ZMQ if active), demux command-vs-data, and
+    /// either auto-answer / surface a command or accumulate a data frame
+    /// into the pending message.
+    ///
+    /// Shared between [`try_advance_ready`] (frame parsed from `in_buf`)
+    /// and [`supply_payload`] (frame body delivered out-of-band by a
+    /// direct-recv backend).
+    fn decode_assembled_frame(&mut self, flags: FrameFlags, payload: Payload) -> Result<()> {
+        #[cfg(feature = "curve")]
+        const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
 
         // BLAKE3ZMQ: every post-handshake frame is AEAD-encrypted -
         // data and commands alike (RFC §10.3). Decrypt first; the
@@ -336,16 +391,17 @@ impl Connection {
         // data.
         #[cfg(feature = "blake3zmq")]
         if let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut() {
-            let ciphertext = frame.payload.as_bytes();
-            let aad = blake3zmq_aad(frame.flags, ciphertext.len());
+            let ciphertext = payload.as_bytes();
+            let aad = blake3zmq_aad(flags, ciphertext.len());
             let plaintext = tx.decrypt(&aad, &ciphertext)?;
             let plaintext = Bytes::from(plaintext);
-            if frame.flags.command {
+            if flags.command {
                 let cmd = command::decode(plaintext)?;
                 self.handle_post_handshake_command(cmd);
-                return Ok(true);
+                return Ok(());
             }
-            return self.absorb_data_frame(frame.flags.more, Payload::from_bytes(plaintext));
+            self.absorb_data_frame(flags.more, Payload::from_bytes(plaintext))?;
+            return Ok(());
         }
 
         // CURVE: every post-handshake application frame on the wire is a
@@ -356,30 +412,32 @@ impl Connection {
         // the plaintext if its inner shape begins with a command name.
         #[cfg(feature = "curve")]
         if let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() {
-            let body = frame.payload.as_bytes();
+            let body = payload.as_bytes();
             if body.len() >= CURVE_MESSAGE_PREFIX.len()
                 && &body[..CURVE_MESSAGE_PREFIX.len()] == CURVE_MESSAGE_PREFIX
             {
                 let (more, plaintext) = tx.decrypt_message(&body[CURVE_MESSAGE_PREFIX.len()..])?;
-                if frame.flags.command {
+                if flags.command {
                     let cmd = command::decode(plaintext)?;
                     self.handle_post_handshake_command(cmd);
-                    return Ok(true);
+                    return Ok(());
                 }
-                return self.absorb_data_frame(more, Payload::from_bytes(plaintext));
+                self.absorb_data_frame(more, Payload::from_bytes(plaintext))?;
+                return Ok(());
             }
             return Err(Error::Protocol(
                 "expected CURVE-wrapped MESSAGE on data-phase connection".into(),
             ));
         }
 
-        if frame.flags.command {
-            let cmd = command::decode(frame.payload.as_bytes())?;
+        if flags.command {
+            let cmd = command::decode(payload.as_bytes())?;
             self.handle_post_handshake_command(cmd);
-            return Ok(true);
+            return Ok(());
         }
 
-        self.absorb_data_frame(frame.flags.more, frame.payload)
+        self.absorb_data_frame(flags.more, payload)?;
+        Ok(())
     }
 
     fn absorb_data_frame(&mut self, more: bool, payload: Payload) -> Result<bool> {
@@ -761,6 +819,106 @@ impl Connection {
         }
     }
 
+    /// Inspect the next inbound frame without consuming any bytes.
+    ///
+    /// Returns `Some(NextFrameInfo)` when the connection is in the data
+    /// phase and a complete wire-frame header is buffered; `None`
+    /// otherwise (handshake not done, header not yet buffered, or
+    /// codec already in [`AwaitingSuppliedPayload`](State) /
+    /// [`Closed`](State)).
+    ///
+    /// Used by I/O backends to decide, before any payload bytes have
+    /// arrived in the codec buffer, whether to recv this frame's payload
+    /// directly into a sized destination buffer (large frames) instead of
+    /// going through the multi-shot pool. Inspect
+    /// `info.buffered_payload_prefix` — when zero, the codec has only
+    /// the header and the entire payload is still on the wire.
+    ///
+    /// Errors propagate the same protocol violations
+    /// [`frame::try_decode_frame`] would surface (reserved bits set,
+    /// COMMAND+MORE).
+    pub fn peek_next_frame_payload_size(&self) -> Result<Option<NextFrameInfo>> {
+        if !matches!(self.state, State::Ready) {
+            return Ok(None);
+        }
+        let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
+            return Ok(None);
+        };
+        let buffered_total = self.in_buf.len();
+        let prefix_after_header = buffered_total.saturating_sub(hdr.header_len);
+        let buffered_payload_prefix = prefix_after_header.min(hdr.payload_len);
+        Ok(Some(NextFrameInfo {
+            flags: hdr.flags,
+            header_len: hdr.header_len,
+            payload_len: hdr.payload_len,
+            buffered_payload_prefix,
+        }))
+    }
+
+    /// Consume the buffered header of the next frame and transition the
+    /// codec to [`AwaitingSuppliedPayload`](State). The caller is then
+    /// responsible for delivering exactly `payload_len` payload bytes via
+    /// [`supply_payload`](Self::supply_payload).
+    ///
+    /// Returns `Some(payload_len)` on success. Returns `None` and leaves
+    /// the codec untouched when:
+    /// - The connection is not in [`Ready`](State).
+    /// - No complete frame header is buffered.
+    /// - The inbound buffer already contains payload bytes past the header
+    ///   (caller would lose those bytes; fall back to the in-buf path).
+    ///
+    /// While in `AwaitingSuppliedPayload`, [`handle_input`](Self::handle_input)
+    /// will reject further bytes — direct-recv has claimed the wire.
+    pub fn begin_supplied_payload(&mut self) -> Option<usize> {
+        if !matches!(self.state, State::Ready) {
+            return None;
+        }
+        let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
+        if self.in_buf.len() != hdr.header_len {
+            return None;
+        }
+        self.in_buf.advance(hdr.header_len);
+        self.state = State::AwaitingSuppliedPayload {
+            flags: hdr.flags,
+            payload_len: hdr.payload_len,
+        };
+        Some(hdr.payload_len)
+    }
+
+    /// Deliver the payload of a frame whose header was consumed by a prior
+    /// [`begin_supplied_payload`](Self::begin_supplied_payload). The bytes
+    /// are wrapped as a single-chunk `Payload` and dispatched through the
+    /// same decrypt-and-demux path as in-buf-assembled frames.
+    ///
+    /// On success the codec returns to [`Ready`](State) and resumes
+    /// normal input handling. Errors with [`Error::Protocol`] if called
+    /// in a state other than `AwaitingSuppliedPayload`, or if the supplied
+    /// length does not match what `begin_supplied_payload` returned.
+    /// Mechanism / decode errors propagate as-is.
+    pub fn supply_payload(&mut self, payload: Bytes) -> Result<()> {
+        let (flags, expected_len) = match self.state {
+            State::AwaitingSuppliedPayload { flags, payload_len } => (flags, payload_len),
+            State::Closed => return Err(Error::Closed),
+            _ => {
+                return Err(Error::Protocol(
+                    "supply_payload outside AwaitingSuppliedPayload".into(),
+                ));
+            }
+        };
+        if payload.len() != expected_len {
+            return Err(Error::Protocol(format!(
+                "supplied payload length {} != expected {}",
+                payload.len(),
+                expected_len,
+            )));
+        }
+        self.state = State::Ready;
+        self.decode_assembled_frame(flags, Payload::from_bytes(payload))?;
+        // Drive in case in_buf still holds further frames the caller
+        // pushed before deciding to switch back to direct-recv.
+        self.drive()
+    }
+
     /// Permanently close the connection; further input is rejected.
     pub fn close(&mut self) {
         self.state = State::Closed;
@@ -840,7 +998,7 @@ mod tests {
         };
         frame::encode_frame(&ready_frame, &mut wire);
 
-        c.handle_input(&wire).unwrap();
+        c.handle_input(wire.freeze()).unwrap();
         assert!(c.is_ready());
         assert_eq!(c.peer_minor(), 0);
     }

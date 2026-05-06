@@ -84,8 +84,7 @@ fn run_cell_threaded(
                     let mut dealers: Vec<Socket> = Vec::with_capacity(peers);
                     for i in 0..peers {
                         let id: Bytes = format!("d{i}").into();
-                        let d =
-                            Socket::new(SocketType::Dealer, Options::default().identity(id));
+                        let d = Socket::new(SocketType::Dealer, Options::default().identity(id));
                         d.connect(ep.clone()).await.expect("connect DEALER");
                         dealers.push(d);
                     }
@@ -101,17 +100,14 @@ fn run_cell_threaded(
                         let recv_count = recv_count.clone();
                         async move {
                             let per = (k / dealers.len()).max(1);
-                            let target =
-                                recv_count.load(Ordering::Relaxed) + per * dealers.len();
+                            let target = recv_count.load(Ordering::Relaxed) + per * dealers.len();
                             let mut handles = Vec::with_capacity(dealers.len());
                             for i in 0..dealers.len() {
                                 let d = dealers.clone();
                                 let payload = payload.clone();
                                 handles.push(compio::runtime::spawn(async move {
                                     for _ in 0..per {
-                                        d[i].send(Message::single(payload.clone()))
-                                            .await
-                                            .unwrap();
+                                        d[i].send(Message::single(payload.clone())).await.unwrap();
                                     }
                                 }));
                             }
@@ -124,8 +120,7 @@ fn run_cell_threaded(
                         }
                     };
 
-                    let cell =
-                        common::measure_min_of(size, dealers.len(), burst).await;
+                    let cell = common::measure_min_of(size, dealers.len(), burst).await;
                     stop.store(true, Ordering::Relaxed);
                     cell
                 })

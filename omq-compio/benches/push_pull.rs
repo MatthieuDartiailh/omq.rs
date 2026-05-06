@@ -107,17 +107,14 @@ fn run_cell_threaded(
                         let pull_count = pull_count.clone();
                         async move {
                             let per = (k / pushes.len()).max(1);
-                            let target =
-                                pull_count.load(Ordering::Relaxed) + per * pushes.len();
+                            let target = pull_count.load(Ordering::Relaxed) + per * pushes.len();
                             let mut handles = Vec::with_capacity(pushes.len());
                             for i in 0..pushes.len() {
                                 let p = pushes.clone();
                                 let payload = payload.clone();
                                 handles.push(compio::runtime::spawn(async move {
                                     for _ in 0..per {
-                                        p[i].send(Message::single(payload.clone()))
-                                            .await
-                                            .unwrap();
+                                        p[i].send(Message::single(payload.clone())).await.unwrap();
                                     }
                                 }));
                             }

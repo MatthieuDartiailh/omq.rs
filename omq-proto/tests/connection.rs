@@ -23,18 +23,18 @@ fn push_pull_pair() -> (Connection, Connection) {
 /// Pump bytes both directions until no new events arrive.
 fn pump(a: &mut Connection, b: &mut Connection) {
     loop {
-        let a_out = a.poll_transmit().to_vec();
-        let b_out = b.poll_transmit().to_vec();
+        let a_out = a.poll_transmit();
+        let b_out = b.poll_transmit();
         if a_out.is_empty() && b_out.is_empty() {
             break;
         }
         if !a_out.is_empty() {
             a.advance_transmit(a_out.len());
-            b.handle_input(&a_out).expect("b accepts");
+            b.handle_input(a_out).expect("b accepts");
         }
         if !b_out.is_empty() {
             b.advance_transmit(b_out.len());
-            a.handle_input(&b_out).expect("a accepts");
+            a.handle_input(b_out).expect("a accepts");
         }
     }
 }
@@ -72,21 +72,21 @@ fn handshake_rejects_incompatible() {
     let mut pub_ = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pub));
     let mut err = None;
     for _ in 0..10 {
-        let a_out = push.poll_transmit().to_vec();
-        let b_out = pub_.poll_transmit().to_vec();
+        let a_out = push.poll_transmit();
+        let b_out = pub_.poll_transmit();
         if a_out.is_empty() && b_out.is_empty() {
             break;
         }
         if !a_out.is_empty() {
             push.advance_transmit(a_out.len());
-            if let Err(e) = pub_.handle_input(&a_out) {
+            if let Err(e) = pub_.handle_input(a_out) {
                 err = Some(e);
                 break;
             }
         }
         if !b_out.is_empty() {
             pub_.advance_transmit(b_out.len());
-            if let Err(e) = push.handle_input(&b_out) {
+            if let Err(e) = push.handle_input(b_out) {
                 err = Some(e);
                 break;
             }
@@ -181,9 +181,9 @@ fn oversized_message_rejected() {
     while b.poll_event().is_some() {}
 
     b.send_message(&Message::single("too-big-payload")).unwrap();
-    let bytes = b.poll_transmit().to_vec();
+    let bytes = b.poll_transmit();
     b.advance_transmit(bytes.len());
-    let err = a.handle_input(&bytes).unwrap_err();
+    let err = a.handle_input(bytes).unwrap_err();
     assert!(matches!(err, Error::MessageTooLarge { .. }));
 }
 
@@ -205,11 +205,11 @@ fn streaming_one_byte_at_a_time_handshake() {
 
         if !push_to_pull.is_empty() {
             let byte = push_to_pull.remove(0);
-            pull.handle_input(&[byte]).unwrap();
+            pull.handle_input(Bytes::copy_from_slice(&[byte])).unwrap();
         }
         if !pull_to_push.is_empty() {
             let byte = pull_to_push.remove(0);
-            push.handle_input(&[byte]).unwrap();
+            push.handle_input(Bytes::copy_from_slice(&[byte])).unwrap();
         }
         if push.is_ready() && pull.is_ready() {
             break;
@@ -244,8 +244,8 @@ fn curve_handshake_and_message_roundtrip() {
     );
 
     for i in 0..10 {
-        let s_out = server.poll_transmit().to_vec();
-        let c_out = client.poll_transmit().to_vec();
+        let s_out = server.poll_transmit();
+        let c_out = client.poll_transmit();
         if s_out.is_empty() && c_out.is_empty() && (server.is_ready() || i > 0) {
             break;
         }
@@ -253,12 +253,12 @@ fn curve_handshake_and_message_roundtrip() {
         client.advance_transmit(c_out.len());
         if !s_out.is_empty() {
             client
-                .handle_input(&s_out)
+                .handle_input(s_out)
                 .expect("client accepts server bytes");
         }
         if !c_out.is_empty() {
             server
-                .handle_input(&c_out)
+                .handle_input(c_out)
                 .expect("server accepts client bytes");
         }
     }
@@ -271,9 +271,9 @@ fn curve_handshake_and_message_roundtrip() {
     client
         .send_message(&Message::single("encrypted hello"))
         .unwrap();
-    let c_out = client.poll_transmit().to_vec();
+    let c_out = client.poll_transmit();
     client.advance_transmit(c_out.len());
-    server.handle_input(&c_out).expect("server receives msg");
+    server.handle_input(c_out).expect("server receives msg");
 
     let ev = server.poll_event().expect("message event");
     match ev {
@@ -284,9 +284,298 @@ fn curve_handshake_and_message_roundtrip() {
     }
 }
 
+// --- Direct-recv codec API: peek / begin / supply -----------------
+
+fn ready_pair() -> (Connection, Connection) {
+    let (mut push, mut pull) = push_pull_pair();
+    pump(&mut push, &mut pull);
+    while push.poll_event().is_some() {}
+    while pull.poll_event().is_some() {}
+    (push, pull)
+}
+
+#[test]
+fn peek_next_frame_payload_size_short_frame() {
+    let (mut push, mut pull) = ready_pair();
+    push.send_message(&Message::single("hi")).unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    pull.handle_input(wire.slice(..2)).unwrap();
+    let info = pull.peek_next_frame_payload_size().unwrap().unwrap();
+    assert_eq!(info.header_len, 2);
+    assert_eq!(info.payload_len, 2);
+    assert_eq!(info.buffered_payload_prefix, 0);
+    assert!(!info.flags.command);
+    assert!(!info.flags.more);
+}
+
+#[test]
+fn peek_next_frame_payload_size_long_frame() {
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![0u8; 1024];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    pull.handle_input(wire.slice(..9)).unwrap();
+    let info = pull.peek_next_frame_payload_size().unwrap().unwrap();
+    assert_eq!(info.header_len, 9);
+    assert_eq!(info.payload_len, 1024);
+    assert_eq!(info.buffered_payload_prefix, 0);
+}
+
+#[test]
+fn peek_reports_buffered_payload_prefix() {
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![0u8; 1024];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    // 9-byte header + 7 bytes of payload prefix.
+    pull.handle_input(wire.slice(..16)).unwrap();
+    let info = pull.peek_next_frame_payload_size().unwrap().unwrap();
+    assert_eq!(info.buffered_payload_prefix, 7);
+}
+
+#[test]
+fn peek_returns_none_on_partial_header() {
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![0u8; 1024];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    pull.handle_input(wire.slice(..3)).unwrap();
+    assert!(pull.peek_next_frame_payload_size().unwrap().is_none());
+}
+
+#[test]
+fn peek_returns_none_before_handshake() {
+    let (_, pull) = push_pull_pair();
+    assert!(pull.peek_next_frame_payload_size().unwrap().is_none());
+}
+
+#[test]
+fn begin_returns_none_with_payload_prefix() {
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![7u8; 1024];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    pull.handle_input(wire.slice(..10)).unwrap();
+    assert!(pull.begin_supplied_payload().is_none());
+}
+
+#[test]
+fn begin_returns_none_without_full_header() {
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![0u8; 1024];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    pull.handle_input(wire.slice(..3)).unwrap();
+    assert!(pull.begin_supplied_payload().is_none());
+}
+
+#[test]
+fn supply_payload_emits_message() {
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![0xABu8; 4096];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    pull.handle_input(wire.slice(..9)).unwrap();
+    let payload_len = pull.begin_supplied_payload().expect("can switch");
+    assert_eq!(payload_len, 4096);
+    let payload = wire.slice(9..9 + payload_len);
+    pull.supply_payload(payload).unwrap();
+    match pull.poll_event().expect("message event") {
+        Event::Message(m) => {
+            assert_eq!(m.len(), 1);
+            assert_eq!(m.parts()[0].as_bytes(), big.as_slice());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn handle_input_rejected_during_supply() {
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![0u8; 1024];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    pull.handle_input(wire.slice(..9)).unwrap();
+    pull.begin_supplied_payload().unwrap();
+    let err = pull.handle_input(Bytes::from_static(b"x")).unwrap_err();
+    assert!(matches!(err, Error::Protocol(_)));
+}
+
+#[test]
+fn supply_payload_rejects_size_mismatch() {
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![0u8; 1024];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    pull.handle_input(wire.slice(..9)).unwrap();
+    pull.begin_supplied_payload().unwrap();
+    let err = pull
+        .supply_payload(Bytes::from_static(b"too short"))
+        .unwrap_err();
+    assert!(matches!(err, Error::Protocol(_)));
+}
+
+#[test]
+fn supply_payload_outside_state_errors() {
+    let (_, mut pull) = ready_pair();
+    let err = pull.supply_payload(Bytes::from_static(b"x")).unwrap_err();
+    assert!(matches!(err, Error::Protocol(_)));
+}
+
+#[test]
+fn ready_resumes_after_supply_payload() {
+    // After a one-shot frame is supplied, the codec returns to Ready and
+    // a subsequent in-buf-fed frame parses normally.
+    let (mut push, mut pull) = ready_pair();
+    let big = vec![1u8; 1024];
+    push.send_message(&Message::single(Bytes::copy_from_slice(&big)))
+        .unwrap();
+    push.send_message(&Message::single("after")).unwrap();
+    let wire = push.poll_transmit();
+    push.advance_transmit(wire.len());
+    // Frame 1: 9-byte header + 1024 = 1033 wire bytes.
+    let frame1_total = 9 + 1024;
+    pull.handle_input(wire.slice(..9)).unwrap();
+    pull.begin_supplied_payload().unwrap();
+    pull.supply_payload(wire.slice(9..frame1_total)).unwrap();
+    pull.handle_input(wire.slice(frame1_total..)).unwrap();
+    let mut events = Vec::new();
+    while let Some(e) = pull.poll_event() {
+        events.push(e);
+    }
+    assert_eq!(events.len(), 2);
+    match (&events[0], &events[1]) {
+        (Event::Message(m1), Event::Message(m2)) => {
+            assert_eq!(m1.parts()[0].as_bytes(), big.as_slice());
+            assert_eq!(m2.parts()[0].as_bytes(), &b"after"[..]);
+        }
+        _ => panic!("expected two Message events"),
+    }
+}
+
+#[cfg(feature = "curve")]
+#[test]
+fn supply_payload_through_curve() {
+    use omq_proto::proto::mechanism::{CurveKeypair, MechanismSetup};
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let mut server = Connection::new(
+        ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+            MechanismSetup::CurveServer {
+                keypair: server_kp,
+                authenticator: None,
+            },
+        ),
+    );
+    let mut client = Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
+            MechanismSetup::CurveClient {
+                keypair: client_kp,
+                server_public: server_pub,
+            },
+        ),
+    );
+    pump(&mut server, &mut client);
+    while server.poll_event().is_some() {}
+    while client.poll_event().is_some() {}
+
+    let plaintext = vec![0xCDu8; 4096];
+    client
+        .send_message(&Message::single(Bytes::copy_from_slice(&plaintext)))
+        .unwrap();
+    let wire = client.poll_transmit();
+    client.advance_transmit(wire.len());
+
+    // The wire frame is a long-header data frame with curve-wrapped
+    // ciphertext. Feed only the header and supply the ciphertext body.
+    let info = {
+        server.handle_input(wire.slice(..9)).unwrap();
+        server.peek_next_frame_payload_size().unwrap().unwrap()
+    };
+    assert_eq!(info.header_len, 9);
+    let payload_len = server.begin_supplied_payload().expect("can switch");
+    assert_eq!(payload_len, info.payload_len);
+    server
+        .supply_payload(wire.slice(9..9 + payload_len))
+        .unwrap();
+    match server.poll_event().expect("message after supply") {
+        Event::Message(m) => assert_eq!(m.parts()[0].as_bytes(), plaintext.as_slice()),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[cfg(feature = "blake3zmq")]
+#[test]
+fn supply_payload_through_blake3zmq() {
+    use omq_proto::proto::mechanism::{Blake3ZmqKeypair, MechanismSetup};
+    let server_kp = Blake3ZmqKeypair::generate();
+    let client_kp = Blake3ZmqKeypair::generate();
+    let server_pub = server_kp.public;
+    let mut server = Connection::new(
+        ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+            MechanismSetup::Blake3ZmqServer {
+                keypair: server_kp,
+                cookie_keyring: std::sync::Arc::new(
+                    omq_proto::proto::mechanism::blake3zmq::CookieKeyring::new(),
+                ),
+                authenticator: None,
+            },
+        ),
+    );
+    let mut client = Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
+            MechanismSetup::Blake3ZmqClient {
+                keypair: client_kp,
+                server_public: server_pub,
+            },
+        ),
+    );
+    pump(&mut server, &mut client);
+    while server.poll_event().is_some() {}
+    while client.poll_event().is_some() {}
+
+    let plaintext = vec![0x55u8; 4096];
+    client
+        .send_message(&Message::single(Bytes::copy_from_slice(&plaintext)))
+        .unwrap();
+    let wire = client.poll_transmit();
+    client.advance_transmit(wire.len());
+
+    server.handle_input(wire.slice(..9)).unwrap();
+    let payload_len = server.begin_supplied_payload().expect("can switch");
+    server
+        .supply_payload(wire.slice(9..9 + payload_len))
+        .unwrap();
+    match server.poll_event().expect("message after supply") {
+        Event::Message(m) => assert_eq!(m.parts()[0].as_bytes(), plaintext.as_slice()),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 #[test]
 fn bad_signature_rejected() {
     let mut c = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
     let wire = [0u8; 11];
-    assert!(matches!(c.handle_input(&wire), Err(Error::Protocol(_))));
+    assert!(matches!(
+        c.handle_input(Bytes::copy_from_slice(&wire)),
+        Err(Error::Protocol(_))
+    ));
 }

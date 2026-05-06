@@ -155,7 +155,7 @@ prefix (sentinels, identities, ZMTP frame headers) by pushing one more
 `Bytes` onto a `Payload`, never by copying the payload itself.
 
 ```rust
-type Payload = SmallVec<[Bytes; 2]>;    // 2 chunks inline
+type Payload = SmallVec<[Bytes; 1]>;    // 1 chunk inline
 type Message = SmallVec<[Payload; 3]>;  // 3 frames inline
 ```
 
@@ -492,6 +492,70 @@ the channel slot small on the hot path. inproc throughput on compio
 sits at ~3M msg/s for any size below 32 KiB and rises past 100 GB/s
 nominal at 32 KiB+ because no bytes ever cross the kernel.
 
+## Zero-copy recv for large frames
+
+Up through the work above, the recv side did one userspace memcpy per
+buf-ring slot. Each multi-shot CQE delivered a `BufferRef` borrowing a
+pooled slot; the driver did `Bytes::copy_from_slice(&buf[..])`, dropped
+the slot back to the pool, and fed the owned `Bytes` to the codec.
+That copy is needed when slots are held by the codec across CQEs (the
+pool deadlocks on any frame bigger than the pool capacity), so we paid
+it on every slot. For a 1 MiB payload over 32 KiB slots that is 1 MiB
+of memcpy on the recv side, on top of the kernel's NIC -> pool copy.
+
+Two related changes removed both ends of that.
+
+The first was the codec's input buffer. It used to be a single
+`BytesMut` extended via `extend_from_slice` on every `handle_input`,
+which meant repeated reallocation as a large frame accumulated. The
+buffer is now a `ChunkedInputBuf`: a `VecDeque<Bytes>` that takes
+owned chunks zero-copy. `peek_array::<N>` reads the first N bytes
+across chunk boundaries without consuming. `try_decode_frame` calls
+`split_to(payload_len)` which returns a multi-chunk `Payload` by
+slicing each contributing chunk -- still no memcpy, the result is a
+chunk list of `Bytes::split_to` views into the same allocations.
+That removed the O(n log n) reallocation chain on the input side.
+
+The second change targeted the per-slot copy itself. The codec
+exposes three new methods -- `peek_next_frame_payload_size`,
+`begin_supplied_payload`, `supply_payload` -- that let an I/O backend
+take over recv for one frame. After parsing a header whose wire
+payload is at least `Options::large_message_threshold` (default 128
+KiB) and that has no payload prefix already buffered, the compio
+backend cancels the multi-shot recv via a per-stream
+`compio::runtime::CancelToken`, drains any in-flight CQEs through the
+same stream until `ECANCELED` lands (those drained bytes go straight
+into the destination `BytesMut`, bounded by one or two pool slots),
+then issues a one-shot Recv on the same fd to pull the remaining
+bytes directly into the same contiguous allocation. The codec gets
+one `Bytes` covering the whole payload via `supply_payload`, runs the
+mechanism decrypt and demux the same way it would for an in-buf
+frame, and the multi-shot stream rebuilds for the next iteration.
+
+The drained-prefix step is the reason this needs `CancelToken` rather
+than just dropping the stream. Bytes the kernel has already filled
+into pool slots between the header CQE and the cancel SQE landing
+would otherwise be lost, desyncing ZMTP framing on the next frame.
+Draining through the existing stream keeps the bytes accounted for;
+only after the drain terminates does the one-shot Recv submit on the
+same fd.
+
+The cost of the drained prefix is bounded by the pool slot size, not
+the payload size. For a 1 MiB payload that is at most ~32 KiB of
+slot-to-`BytesMut` memcpy in the worst case, vs. 1 MiB before. Larger
+payloads improve the ratio further: a 100 MiB transfer pays the same
+~32 KiB drain prefix and gets the rest at NIC bandwidth into one
+contiguous buffer. Small messages stay on the multi-shot path
+unchanged; the threshold knob exists so that workloads with no large
+messages do not pay the per-cancel SQE-rebuild cost (~tens of µs).
+
+A side effect worth calling out: the assembled payload is one
+contiguous `Bytes` rather than a multi-chunk `Payload`. Consumers
+that previously triggered a `Payload::as_bytes` concat (hashing,
+forwarding into another `sendmsg` as a single iovec) silently get a
+faster path. Single-chunk inline storage on `Payload`
+(`SmallVec<[Bytes; 1]>`) is sized for exactly this case.
+
 ## Things tried and dropped
 
 The optimisations above are the ones that survived. Several plausible
@@ -623,15 +687,6 @@ A few directions that look promising but have not been measured yet:
   similar 20-40 % once converted. REQ/REP and latency are roundtrip
   patterns where multi-runtime adds inter-thread overhead with no
   throughput win, so they stay single-runtime.
-- **Zero-copy recv for very large messages.** At message sizes that
-  exceed the buf-ring slot, the codec extends its internal `BytesMut`
-  with `extend_from_slice` per chunk. Beyond ~1 MiB this dominates.
-  The fix is three coordinated changes: wrap each `BufferRef` as a
-  `Bytes` with a custom drop, switch the codec's input buffer to a
-  chunked `VecDeque<Bytes>`, and have `try_decode_frame` return a
-  multi-chunk `Payload` instead of a contiguous `Bytes`. Today the
-  workaround for known-large workloads is a bigger pool slot via
-  `with_omq_buffer_pool_sized` (see `compio.md`).
 - **Single-wire-peer bypass on tokio.** The compio fast path
   (sender encodes directly into a per-peer queue, skipping the
   per-peer command channel) has no equivalent on tokio yet. The

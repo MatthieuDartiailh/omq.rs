@@ -93,6 +93,27 @@ pub struct Options {
     ///   Set to `false` to suppress training (e.g. tests that need a
     ///   deterministic wire shape).
     pub compression_auto_train: bool,
+
+    /// Switch the recv path to a sized one-shot read for any inbound
+    /// frame whose wire payload is at least this many bytes.
+    ///
+    /// On `omq-compio` the default recv path uses an io_uring multi-shot
+    /// SQE with a `BUF_RING` pool; each CQE delivers a borrowed pool
+    /// slot that the driver memcpys into an owned `Bytes` so the slot
+    /// can be returned to the pool immediately. For frames much larger
+    /// than the slot size that memcpy dominates the recv cost. With
+    /// `Some(n)` set, the driver detects a large frame from its header
+    /// and recvs the payload directly into one sized `BytesMut` of
+    /// exactly `payload_len` bytes — no pool, no userspace copy.
+    ///
+    /// `None` disables the optimization (multi-shot path always).
+    /// Default: `Some(128 * 1024)` — small enough to skip the memcpy on
+    /// any frame past four 32 KiB pool slots, large enough that the
+    /// per-frame SQE-rebuild cost is amortised.
+    ///
+    /// Ignored on `omq-tokio` (tokio's recv path doesn't use a buf-ring;
+    /// the field is accepted for API parity).
+    pub large_message_threshold: Option<usize>,
 }
 
 /// Security-mechanism configuration. NULL is the default; CURVE is
@@ -243,6 +264,7 @@ impl Default for Options {
             mechanism: MechanismConfig::Null,
             compression_dict: None,
             compression_auto_train: true,
+            large_message_threshold: Some(128 * 1024),
         }
     }
 }
@@ -351,6 +373,26 @@ impl Options {
     #[must_use]
     pub fn tcp_keepalive(mut self, k: KeepAlive) -> Self {
         self.tcp_keepalive = k;
+        self
+    }
+
+    /// Set the wire-payload size at which the recv path switches to a
+    /// sized one-shot read. See the field-level docs on
+    /// [`large_message_threshold`](Self::large_message_threshold) for
+    /// the trade-offs. Pass `0` to fall back to the multi-shot path
+    /// for every frame; the threshold is treated as `usize::MAX` in
+    /// that case.
+    #[must_use]
+    pub fn large_message_threshold(mut self, n: usize) -> Self {
+        self.large_message_threshold = if n == 0 { None } else { Some(n) };
+        self
+    }
+
+    /// Disable the one-shot recv switch entirely; the multi-shot path
+    /// is used for every inbound frame regardless of size.
+    #[must_use]
+    pub fn disable_large_message_path(mut self) -> Self {
+        self.large_message_threshold = None;
         self
     }
 
@@ -572,6 +614,29 @@ mod tests {
         assert!(!o.conflate);
         assert!(!o.router_mandatory);
         assert_eq!(o.on_mute, OnMute::Block);
+        assert_eq!(o.large_message_threshold, Some(128 * 1024));
+    }
+
+    #[test]
+    fn large_message_threshold_setters() {
+        assert_eq!(
+            Options::new()
+                .large_message_threshold(64 * 1024)
+                .large_message_threshold,
+            Some(64 * 1024),
+        );
+        assert_eq!(
+            Options::new()
+                .large_message_threshold(0)
+                .large_message_threshold,
+            None,
+        );
+        assert_eq!(
+            Options::new()
+                .disable_large_message_path()
+                .large_message_threshold,
+            None,
+        );
     }
 
     #[test]
