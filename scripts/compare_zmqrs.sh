@@ -64,8 +64,9 @@ run_cell() {
 # fmt_msgs <msgs_per_sec>
 fmt_msgs() {
     awk -v v="$1" 'BEGIN {
-        if (v >= 1e6) printf "%.2fM", v/1e6
-        else          printf "%.0fk", v/1e3
+        if (v >= 1e6)      printf "%.2fM", v/1e6
+        else if (v >= 1e3) printf "%.0fk", v/1e3
+        else               printf "%.0f", v
     }'
 }
 
@@ -74,6 +75,15 @@ fmt_bw() {
     awk -v v="$1" 'BEGIN {
         if (v >= 1000) printf "%.1f GB/s", v/1000
         else           printf "%.0f MB/s", v
+    }'
+}
+
+# fmt_size <bytes>
+fmt_size() {
+    awk -v v="$1" 'BEGIN {
+        if (v >= 1048576) printf "%g MiB", v/1048576
+        else if (v >= 1024) printf "%g KiB", v/1024
+        else printf "%d B", v
     }'
 }
 
@@ -101,12 +111,12 @@ OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
 
 # ---------- run ----------
 
-SIZES=(128 512 2048 8192 32768 131072)
+SIZES=(32 128 512 2048 8192 32768 131072 524288 2097152 8388608 16777216 67108864)
 
 echo ""
 echo "zmq.rs (zeromq $ZMQRS_VERSION) vs omq $OMQ_VERSION — TCP loopback, 2 processes, ${DURATION}s window + 500ms warmup"
 echo ""
-printf "%-10s  %20s  %22s  %22s\n" "" "zmq.rs" "omq-tokio" "omq-compio"
+printf "%-10s  %20s  %22s  %22s\n" "" "zmq.rs" "omq-compio" "omq-tokio"
 printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | ×)" "(msg/s  |  MB/s  | ×)"
 echo "-----------------------------------------------------------------------------------------------------------"
 
@@ -130,11 +140,11 @@ for size in "${SIZES[@]}"; do
     tokio_x=$(speedup_str  "$tokio_msgs"  "$zmqrs_msgs")
     compio_x=$(speedup_str "$compio_msgs" "$zmqrs_msgs")
 
-    printf "  %6dB    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
-        "$size" \
+    printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
+        "$(fmt_size "$size")" \
         "$zmqrs_msgs"  "$zmqrs_mb" \
-        "$tokio_msgs"  "$tokio_mb"  "$tokio_x" \
-        "$compio_msgs" "$compio_mb" "$compio_x"
+        "$compio_msgs" "$compio_mb" "$compio_x" \
+        "$tokio_msgs"  "$tokio_mb"  "$tokio_x"
 
     RES_SIZES[$idx]=$size
     RES_ZMQRS_MSGS[$idx]=$zmqrs_msgs;  RES_ZMQRS_MB[$idx]=$zmqrs_mb
@@ -153,8 +163,8 @@ if [ "$UPDATE_BENCHMARKS" = true ]; then
 
     MD=""
     MD+=$'\n'
-    MD+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × | omq-compio msg/s | omq-compio MB/s | compio × |"$'\n'
-    MD+="|-------|-------------|------------|----------------|---------------|---------|-----------------|----------------|---------|"$'\n'
+    MD+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
+    MD+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
 
     for i in "${!RES_SIZES[@]}"; do
         sz=${RES_SIZES[$i]}
@@ -162,13 +172,7 @@ if [ "$UPDATE_BENCHMARKS" = true ]; then
         tmsg=${RES_TOKIO_MSGS[$i]};  tmb=${RES_TOKIO_MB[$i]}
         cmsg=${RES_COMPIO_MSGS[$i]}; cmb=${RES_COMPIO_MB[$i]}
 
-        if   [ "$sz" -ge 131072 ]; then label="128 KiB"
-        elif [ "$sz" -ge 32768  ]; then label="32 KiB"
-        elif [ "$sz" -ge 8192   ]; then label="8 KiB"
-        elif [ "$sz" -ge 2048   ]; then label="2 KiB"
-        elif [ "$sz" -ge 512    ]; then label="512 B"
-        else                            label="128 B"
-        fi
+        label=$(fmt_size "$sz")
 
         zmqrs_fmt=$(fmt_msgs "$zmsg");  zmqrs_bw=$(fmt_bw "$zmb")
         tokio_fmt=$(fmt_msgs "$tmsg");  tokio_bw=$(fmt_bw "$tmb")
@@ -176,7 +180,7 @@ if [ "$UPDATE_BENCHMARKS" = true ]; then
         tokio_ratio=$(speedup_str  "$tmsg" "$zmsg")
         compio_ratio=$(speedup_str "$cmsg" "$zmsg")
 
-        MD+="| $label | $zmqrs_fmt | $zmqrs_bw | $tokio_fmt | $tokio_bw | $tokio_ratio | $compio_fmt | $compio_bw | $compio_ratio |"$'\n'
+        MD+="| $label | $zmqrs_fmt | $zmqrs_bw | $compio_fmt | $compio_bw | $compio_ratio | $tokio_fmt | $tokio_bw | $tokio_ratio |"$'\n'
     done
     MD+=$'\n'
 

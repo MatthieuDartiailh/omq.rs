@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Compare omq-compio vs libzmq: single PUSH process → single PULL process,
-# TCP loopback, small messages. Each cell: 3 s timed window after 500 ms warmup.
+# Compare omq-compio + omq-tokio vs libzmq: single PUSH process → single PULL
+# process, TCP loopback. Each cell: 3 s timed window after 500 ms warmup.
 #
 # Usage:
 #   ./scripts/compare_libzmq.sh                   # print table to stdout
@@ -27,6 +27,10 @@ done
 echo "==> building omq-compio bench_peer..."
 cargo build --release -p omq-compio --bin bench_peer 2>/dev/null
 OMQ_PEER="$REPO/target/release/bench_peer"
+
+echo "==> building omq-tokio bench_peer..."
+cargo build --release -p omq-tokio --bin bench_peer_tokio 2>/dev/null
+TOKIO_PEER="$REPO/target/release/bench_peer_tokio"
 
 echo "==> building libzmq bench_peer..."
 gcc -O2 -o "$SCRIPT_DIR/libzmq_bench_peer" \
@@ -56,8 +60,9 @@ run_cell() {
 # fmt_msgs <msgs_per_sec>  → e.g. "2,568k" or "540k"
 fmt_msgs() {
     awk -v v="$1" 'BEGIN {
-        if (v >= 1e6) printf "%.2fM", v/1e6
-        else          printf "%.0fk", v/1e3
+        if (v >= 1e6)      printf "%.2fM", v/1e6
+        else if (v >= 1e3) printf "%.0fk", v/1e3
+        else               printf "%.0f", v
     }'
 }
 
@@ -66,6 +71,15 @@ fmt_bw() {
     awk -v v="$1" 'BEGIN {
         if (v >= 1000) printf "%.1f GB/s", v/1000
         else           printf "%.0f MB/s", v
+    }'
+}
+
+# fmt_size <bytes>
+fmt_size() {
+    awk -v v="$1" 'BEGIN {
+        if (v >= 1048576) printf "%g MiB", v/1048576
+        else if (v >= 1024) printf "%g KiB", v/1024
+        else printf "%d B", v
     }'
 }
 
@@ -80,7 +94,7 @@ ratio_str() {
 
 # ---------- run ----------
 
-SIZES=(128 512 2048 8192 32768 131072)
+SIZES=(32 128 512 2048 8192 32768 131072 524288 2097152 8388608 16777216 67108864)
 OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
     | python3 -c 'import sys,json; pkgs=json.load(sys.stdin)["packages"]; \
       print(next(p["version"] for p in pkgs if p["name"]=="omq-compio"))' \
@@ -88,34 +102,44 @@ OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
 ZMQ_VERSION=$(pkg-config --modversion libzmq 2>/dev/null || echo '?')
 
 echo ""
-echo "omq-compio $OMQ_VERSION vs libzmq $ZMQ_VERSION"
+echo "omq $OMQ_VERSION vs libzmq $ZMQ_VERSION"
 echo "TCP loopback, 2 processes, ${DURATION}s window + 500ms warmup"
 echo ""
-printf "%-10s  %20s  %20s\n" "" "omq-compio" "libzmq"
-printf "%-10s  %20s  %20s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s)"
-echo "--------------------------------------------------------------------"
+printf "%-10s  %20s  %22s  %22s\n" "" "libzmq" "omq-compio" "omq-tokio"
+printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | ×)" "(msg/s  |  MB/s  | ×)"
+echo "-----------------------------------------------------------------------------------------------------------"
 
-declare -a RESULTS_SIZES RESULTS_OMQ_MSGS RESULTS_OMQ_MB RESULTS_ZMQ_MSGS RESULTS_ZMQ_MB
+declare -a RESULTS_SIZES RESULTS_OMQ_MSGS RESULTS_OMQ_MB RESULTS_TOKIO_MSGS RESULTS_TOKIO_MB RESULTS_ZMQ_MSGS RESULTS_ZMQ_MB
 
 idx=0
 for size in "${SIZES[@]}"; do
     # Use sequential ports to avoid overflow for large sizes.
     PORT=$((BASE_PORT + idx))
 
-    omq_raw=$(run_cell "$OMQ_PEER"    "$PORT"             "$size")
-    lzq_raw=$(run_cell "$LIBZMQ_PEER" "$((PORT + 100))"   "$size")
+    omq_raw=$(run_cell   "$OMQ_PEER"    "$PORT"            "$size")
+    tokio_raw=$(run_cell "$TOKIO_PEER"  "$((PORT + 100))"  "$size")
+    lzq_raw=$(run_cell   "$LIBZMQ_PEER" "$((PORT + 200))"  "$size")
 
-    omq_msgs=$(echo "$omq_raw" | awk '{printf "%.0f", $1/$2}')
-    omq_mb=$(echo   "$omq_raw" | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
-    lzq_msgs=$(echo "$lzq_raw" | awk '{printf "%.0f", $1/$2}')
-    lzq_mb=$(echo   "$lzq_raw" | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
+    omq_msgs=$(echo   "$omq_raw"   | awk '{printf "%.0f", $1/$2}')
+    omq_mb=$(echo     "$omq_raw"   | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
+    tokio_msgs=$(echo "$tokio_raw" | awk '{printf "%.0f", $1/$2}')
+    tokio_mb=$(echo   "$tokio_raw" | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
+    lzq_msgs=$(echo   "$lzq_raw"   | awk '{printf "%.0f", $1/$2}')
+    lzq_mb=$(echo     "$lzq_raw"   | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
 
-    printf "  %6dB    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s\n" \
-        "$size" "$omq_msgs" "$omq_mb" "$lzq_msgs" "$lzq_mb"
+    omq_ratio=$(ratio_str   "$omq_msgs"   "$lzq_msgs")
+    tokio_ratio=$(ratio_str "$tokio_msgs" "$lzq_msgs")
+    printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
+        "$(fmt_size "$size")" \
+        "$lzq_msgs"   "$lzq_mb" \
+        "$omq_msgs"   "$omq_mb"   "$omq_ratio" \
+        "$tokio_msgs" "$tokio_mb" "$tokio_ratio"
 
     RESULTS_SIZES[$idx]=$size
     RESULTS_OMQ_MSGS[$idx]=$omq_msgs
     RESULTS_OMQ_MB[$idx]=$omq_mb
+    RESULTS_TOKIO_MSGS[$idx]=$tokio_msgs
+    RESULTS_TOKIO_MB[$idx]=$tokio_mb
     RESULTS_ZMQ_MSGS[$idx]=$lzq_msgs
     RESULTS_ZMQ_MB[$idx]=$lzq_mb
     idx=$((idx + 1))
@@ -132,32 +156,26 @@ if [ "$UPDATE_BENCHMARKS" = true ]; then
     # Build markdown table
     MD=""
     MD+=$'\n'
-    MD+="| Size | omq msg/s | omq MB/s | zmq msg/s | zmq MB/s | ratio |"$'\n'
-    MD+="|-------|-----------|----------|-----------|----------|-------|"$'\n'
+    MD+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
+    MD+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
 
     for i in "${!RESULTS_SIZES[@]}"; do
         sz=${RESULTS_SIZES[$i]}
         omsg=${RESULTS_OMQ_MSGS[$i]}
         omb=${RESULTS_OMQ_MB[$i]}
+        tmsg=${RESULTS_TOKIO_MSGS[$i]}
+        tmb=${RESULTS_TOKIO_MB[$i]}
         zmsg=${RESULTS_ZMQ_MSGS[$i]}
         zmb=${RESULTS_ZMQ_MB[$i]}
 
-        # human size label
-        if   [ "$sz" -ge 131072 ]; then label="128 KiB"
-        elif [ "$sz" -ge 32768  ]; then label="32 KiB"
-        elif [ "$sz" -ge 8192   ]; then label="8 KiB"
-        elif [ "$sz" -ge 2048   ]; then label="2 KiB"
-        elif [ "$sz" -ge 512    ]; then label="512 B"
-        else                            label="128 B"
-        fi
+        label=$(fmt_size "$sz")
+        zmq_fmt=$(fmt_msgs "$zmsg");   zmq_bw=$(fmt_bw "$zmb")
+        omq_fmt=$(fmt_msgs "$omsg");   omq_bw=$(fmt_bw "$omb")
+        tokio_fmt=$(fmt_msgs "$tmsg"); tokio_bw=$(fmt_bw "$tmb")
+        omq_ratio=$(ratio_str   "$omsg" "$zmsg")
+        tokio_ratio=$(ratio_str "$tmsg" "$zmsg")
 
-        omq_fmt=$(fmt_msgs "$omsg")
-        omq_bw=$(fmt_bw "$omb")
-        zmq_fmt=$(fmt_msgs "$zmsg")
-        zmq_bw=$(fmt_bw "$zmb")
-        ratio=$(ratio_str "$omsg" "$zmsg")
-
-        MD+="| $label | $omq_fmt | $omq_bw | $zmq_fmt | $zmq_bw | $ratio |"$'\n'
+        MD+="| $label | $zmq_fmt | $zmq_bw | $omq_fmt | $omq_bw | $omq_ratio | $tokio_fmt | $tokio_bw | $tokio_ratio |"$'\n'
     done
     MD+=$'\n'
 
