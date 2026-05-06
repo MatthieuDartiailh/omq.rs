@@ -143,25 +143,64 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
     }
 }
 
+/// Run `fut` on `runtime` and then drain pending tasks before dropping the
+/// runtime. Without this, every cell leaks the io_uring fd plus every TCP /
+/// unix-socket fd owned by tasks that were still parked at end-of-cell.
+///
+/// Why: compio 0.12.0-rc.1's `Runtime::drop` early-returns when
+/// `Rc::strong_count(&self.0) > 1`, and `compio::time::sleep` / `timeout`
+/// install a `CancelToken` that holds a `Runtime` clone for as long as the
+/// future is parked. `JoinHandle::drop` (called via `Socket::drop` ->
+/// `dialers.clear()`) only marks the task cancelled; the future is dropped
+/// the next time the executor ticks the task. `block_on` ticks once after
+/// the user future returns, which is not enough when cancellations cascade
+/// (dial supervisor -> driver -> pump). Spinning `runtime.run()` until
+/// `has_hot()` goes false flushes the cascade so every CancelToken's
+/// `Runtime` clone is released, `Runtime::drop` reaches strong_count == 1,
+/// and `executor.clear()` finally runs.
+pub(crate) fn block_on_and_drain<F>(runtime: compio::runtime::Runtime, fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    let out = runtime.block_on(fut);
+    while runtime.run() {}
+    drop(runtime);
+    out
+}
+
 pub(crate) async fn wait_connected(socks: &[&omq_compio::Socket]) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let mut all_ok = true;
+        let mut pending = 0usize;
         for s in socks {
             let conns = s.connections().await.unwrap_or_default();
-            let ready = conns.iter().any(|c| c.peer_info.is_some());
-            if !ready {
-                all_ok = false;
-                break;
+            if !conns.iter().any(|c| c.peer_info.is_some()) {
+                pending += 1;
             }
         }
-        if all_ok {
+        if pending == 0 {
             return;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "bench: timed out waiting for peers to connect"
-        );
+        if Instant::now() > deadline {
+            // Distinguish "TCP connect never landed" (peer slot missing
+            // entirely) from "connected but greeting stuck" (peer slot
+            // present, peer_info still None). Helps localise hangs.
+            let mut detail = Vec::with_capacity(socks.len());
+            for (i, s) in socks.iter().enumerate() {
+                let conns = s.connections().await.unwrap_or_default();
+                detail.push(format!(
+                    "#{i}: slots={} info_some={}",
+                    conns.len(),
+                    conns.iter().filter(|c| c.peer_info.is_some()).count()
+                ));
+            }
+            panic!(
+                "bench: {pending}/{} peer(s) never reached peer_info=Some \
+                 within 15s. per-socket: [{}]",
+                socks.len(),
+                detail.join(", ")
+            );
+        }
         compio::time::sleep(Duration::from_millis(5)).await;
     }
 }

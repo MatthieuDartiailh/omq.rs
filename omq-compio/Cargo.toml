@@ -33,7 +33,7 @@ omq-proto = { path = "../omq-proto", version = "0.2.3", default-features = false
 bytes = "1"
 flume = { version = "0.11", default-features = false, features = ["async"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-compio = { version = "=0.19.0-rc.1", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync", "async-fd"] }
+compio = { git = "https://github.com/paddor/compio.git", rev = "060427c", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync", "async-fd"] }
 event-listener = "5"
 async-lock = "3"
 socket2 = "0.6"

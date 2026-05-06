@@ -168,24 +168,27 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
 /// because the connect handshake is async-driven; ZMTP READY arrives
 /// some millis after the TCP/IPC accept.
 pub(crate) async fn wait_connected(socks: &[&omq_tokio::Socket]) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Long enough to absorb cumulative pressure from earlier cells in a
+    // multi-cell run (TIME_WAIT sockets, kernel scheduling jitter). On a
+    // healthy first cell the loop returns within ~10 ms.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let mut all_ok = true;
+        let mut pending = 0usize;
         for s in socks {
             let conns = s.connections().await.unwrap_or_default();
             // Connection is ZMTP-Ready once `peer_info` is populated.
-            let ready = conns.iter().any(|c| c.peer_info.is_some());
-            if !ready {
-                all_ok = false;
-                break;
+            if !conns.iter().any(|c| c.peer_info.is_some()) {
+                pending += 1;
             }
         }
-        if all_ok {
+        if pending == 0 {
             return;
         }
         assert!(
             Instant::now() <= deadline,
-            "bench: timed out waiting for peers to connect"
+            "bench: {pending}/{} peer(s) never reached peer_info=Some \
+             within 30s",
+            socks.len()
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

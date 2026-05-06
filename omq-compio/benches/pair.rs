@@ -1,7 +1,9 @@
 //! PAIR exclusive 1-to-1 throughput.
 //!
-//! Multi-runtime bench: receiver runs on its own thread/runtime,
-//! sender runs on another. Mirrors `push_pull.rs`.
+//! Two topologies:
+//! - **Inproc**: single-runtime cooperative scheduling.
+//! - **Wire**: multi-runtime — receiver on its own thread/runtime,
+//!   sender on another.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -28,8 +30,12 @@ fn main() {
             for &size in &common::sizes() {
                 seq += 1;
                 let label = format!("{transport}/{peers}peer/{size}B");
-                let cell = run_cell_threaded(&transport, size, seq)
-                    .unwrap_or_else(|e| panic!("{label} panicked: {e:?}"));
+                let cell = if transport == "inproc" {
+                    run_cell_single(&transport, size, seq)
+                } else {
+                    run_cell_threaded(&transport, size, seq)
+                        .unwrap_or_else(|e| panic!("{label} panicked: {e:?}"))
+                };
                 common::print_cell(size, cell);
                 common::append_jsonl(PATTERN, &transport, peers, size, cell);
             }
@@ -37,6 +43,50 @@ fn main() {
         }
     }
 }
+
+// ── single-runtime (inproc) ──────────────────────────────────────────
+
+fn run_cell_single(transport: &str, size: usize, seq: usize) -> common::Cell {
+    let rt = build_default_runtime().expect("single runtime");
+    common::block_on_and_drain(rt, async {
+        let ep = common::endpoint(transport, seq);
+        let receiver = Socket::new(SocketType::Pair, Options::default());
+        receiver.bind(ep.clone()).await.expect("bind PAIR");
+
+        let sender = Socket::new(SocketType::Pair, Options::default());
+        sender.connect(ep).await.expect("connect PAIR");
+        common::wait_connected(&[&sender]).await;
+
+        let payload = Bytes::from(vec![b'x'; size]);
+        let receiver = Arc::new(receiver);
+        let sender = Arc::new(sender);
+
+        let burst = |k: usize| {
+            let receiver = receiver.clone();
+            let sender = sender.clone();
+            let payload = payload.clone();
+            async move {
+                let send_handle = {
+                    let sender = sender.clone();
+                    let payload = payload.clone();
+                    compio::runtime::spawn(async move {
+                        for _ in 0..k {
+                            sender.send(Message::single(payload.clone())).await.unwrap();
+                        }
+                    })
+                };
+                for _ in 0..k {
+                    receiver.recv().await.unwrap();
+                }
+                let _ = send_handle.await;
+            }
+        };
+
+        common::measure_min_of(size, 1, burst).await
+    })
+}
+
+// ── multi-runtime (wire transports) ──────────────────────────────────
 
 fn run_cell_threaded(
     transport: &str,
@@ -54,20 +104,19 @@ fn run_cell_threaded(
         let stop = stop.clone();
         let ready = ready.clone();
         std::thread::spawn(move || {
-            build_default_runtime()
-                .expect("recv runtime")
-                .block_on(async move {
-                    let receiver = Socket::new(SocketType::Pair, Options::default());
-                    receiver.bind(ep).await.expect("bind PAIR");
-                    ready.wait();
-                    while !stop.load(Ordering::Relaxed) {
-                        if let Ok(Ok(_)) =
-                            compio::time::timeout(Duration::from_millis(20), receiver.recv()).await
-                        {
-                            recv_count.fetch_add(1, Ordering::Relaxed);
-                        }
+            let rt = build_default_runtime().expect("recv runtime");
+            common::block_on_and_drain(rt, async move {
+                let receiver = Socket::new(SocketType::Pair, Options::default());
+                receiver.bind(ep).await.expect("bind PAIR");
+                ready.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(Ok(_)) =
+                        compio::time::timeout(Duration::from_millis(20), receiver.recv()).await
+                    {
+                        recv_count.fetch_add(1, Ordering::Relaxed);
                     }
-                });
+                }
+            });
         })
     };
 
@@ -76,36 +125,35 @@ fn run_cell_threaded(
         let stop = stop.clone();
         let ready = ready.clone();
         std::thread::spawn(move || {
-            build_default_runtime()
-                .expect("send runtime")
-                .block_on(async move {
-                    ready.wait();
-                    let sender = Socket::new(SocketType::Pair, Options::default());
-                    sender.connect(ep).await.expect("connect PAIR");
-                    common::wait_connected(&[&sender]).await;
+            let rt = build_default_runtime().expect("send runtime");
+            common::block_on_and_drain(rt, async move {
+                ready.wait();
+                let sender = Socket::new(SocketType::Pair, Options::default());
+                sender.connect(ep).await.expect("connect PAIR");
+                common::wait_connected(&[&sender]).await;
 
-                    let payload = Bytes::from(vec![b'x'; size]);
-                    let sender = Arc::new(sender);
+                let payload = Bytes::from(vec![b'x'; size]);
+                let sender = Arc::new(sender);
 
-                    let burst = |k: usize| {
-                        let sender = sender.clone();
-                        let payload = payload.clone();
-                        let recv_count = recv_count.clone();
-                        async move {
-                            let target = recv_count.load(Ordering::Relaxed) + k;
-                            for _ in 0..k {
-                                sender.send(Message::single(payload.clone())).await.unwrap();
-                            }
-                            while recv_count.load(Ordering::Relaxed) < target {
-                                compio::time::sleep(Duration::from_micros(50)).await;
-                            }
+                let burst = |k: usize| {
+                    let sender = sender.clone();
+                    let payload = payload.clone();
+                    let recv_count = recv_count.clone();
+                    async move {
+                        let target = recv_count.load(Ordering::Relaxed) + k;
+                        for _ in 0..k {
+                            sender.send(Message::single(payload.clone())).await.unwrap();
                         }
-                    };
+                        while recv_count.load(Ordering::Relaxed) < target {
+                            compio::time::sleep(Duration::from_micros(50)).await;
+                        }
+                    }
+                };
 
-                    let cell = common::measure_min_of(size, 1, burst).await;
-                    stop.store(true, Ordering::Relaxed);
-                    cell
-                })
+                let cell = common::measure_min_of(size, 1, burst).await;
+                stop.store(true, Ordering::Relaxed);
+                cell
+            })
         })
     };
 

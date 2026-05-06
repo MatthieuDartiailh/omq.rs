@@ -65,24 +65,22 @@ fn run_cell(
             let endpoints = endpoints.clone();
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                build_default_runtime()
-                    .expect("pull runtime")
-                    .block_on(async move {
-                        let pull = Socket::new(
-                            SocketType::Pull,
-                            Options {
-                                reconnect: ReconnectPolicy::Fixed(Duration::from_millis(5)),
-                                ..Default::default()
-                            },
-                        );
-                        for ep in &endpoints {
-                            pull.connect(ep.clone()).await.expect("pull connect");
-                        }
-                        while !stop.load(Ordering::Relaxed) {
-                            let _ =
-                                compio::time::timeout(Duration::from_millis(10), pull.recv()).await;
-                        }
-                    });
+                let rt = build_default_runtime().expect("pull runtime");
+                common::block_on_and_drain(rt, async move {
+                    let pull = Socket::new(
+                        SocketType::Pull,
+                        Options {
+                            reconnect: ReconnectPolicy::Fixed(Duration::from_millis(5)),
+                            ..Default::default()
+                        },
+                    );
+                    for ep in &endpoints {
+                        pull.connect(ep.clone()).await.expect("pull connect");
+                    }
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = compio::time::timeout(Duration::from_millis(10), pull.recv()).await;
+                    }
+                });
             })
         })
         .collect();
@@ -96,44 +94,43 @@ fn run_cell(
             let payload = Bytes::from(vec![b'x'; size]);
 
             std::thread::spawn(move || {
-                build_default_runtime()
-                    .expect("push runtime")
-                    .block_on(async move {
-                        let push = Socket::new(SocketType::Push, Options::default());
-                        push.bind(ep).await.expect("push bind");
+                let rt = build_default_runtime().expect("push runtime");
+                common::block_on_and_drain(rt, async move {
+                    let push = Socket::new(SocketType::Push, Options::default());
+                    push.bind(ep).await.expect("push bind");
 
-                        let deadline = Instant::now() + Duration::from_secs(5);
-                        loop {
-                            let conns = push.connections().await.unwrap_or_default();
-                            if conns.iter().filter(|c| c.peer_info.is_some()).count() >= pull_n {
-                                break;
-                            }
-                            assert!(Instant::now() < deadline, "pulls did not connect in 5s");
-                            compio::time::sleep(Duration::from_millis(5)).await;
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        let conns = push.connections().await.unwrap_or_default();
+                        if conns.iter().filter(|c| c.peer_info.is_some()).count() >= pull_n {
+                            break;
                         }
+                        assert!(Instant::now() < deadline, "pulls did not connect in 5s");
+                        compio::time::sleep(Duration::from_millis(5)).await;
+                    }
 
-                        let warmup_end = Instant::now() + common::WARMUP_DURATION;
-                        while Instant::now() < warmup_end {
-                            push.send(Message::single(payload.clone())).await.unwrap();
-                        }
-                        // Yield so the runtime drains in-flight ops before the
-                        // synchronous Barrier::wait() blocks the OS thread.
-                        compio::time::sleep(Duration::from_millis(1)).await;
+                    let warmup_end = Instant::now() + common::WARMUP_DURATION;
+                    while Instant::now() < warmup_end {
+                        push.send(Message::single(payload.clone())).await.unwrap();
+                    }
+                    // Yield so the runtime drains in-flight ops before the
+                    // synchronous Barrier::wait() blocks the OS thread.
+                    compio::time::sleep(Duration::from_millis(1)).await;
 
-                        start.wait();
+                    start.wait();
 
-                        let t0 = Instant::now();
-                        let end = t0 + common::round_duration();
-                        let mut n = 0usize;
-                        while Instant::now() < end {
-                            push.send(Message::single(payload.clone())).await.unwrap();
-                            n += 1;
-                        }
-                        let elapsed = t0.elapsed();
+                    let t0 = Instant::now();
+                    let end = t0 + common::round_duration();
+                    let mut n = 0usize;
+                    while Instant::now() < end {
+                        push.send(Message::single(payload.clone())).await.unwrap();
+                        n += 1;
+                    }
+                    let elapsed = t0.elapsed();
 
-                        count_out.store(n, Ordering::Relaxed);
-                        nanos_out.store(elapsed.as_nanos() as u64, Ordering::Relaxed);
-                    });
+                    count_out.store(n, Ordering::Relaxed);
+                    nanos_out.store(elapsed.as_nanos() as u64, Ordering::Relaxed);
+                });
             })
         })
         .collect();

@@ -11,6 +11,7 @@
 #   ruby scripts/bench_report.rb --threshold 10       # 10% noise band
 #   ruby scripts/bench_report.rb --all                # show all measurements
 #   ruby scripts/bench_report.rb --pattern push_pull  # filter to one pattern
+#   ruby scripts/bench_report.rb --exclude-run ID     # drop a noisy run (repeatable)
 #   ruby scripts/bench_report.rb --update-benchmarks  # regenerate BENCHMARKS.md tables
 
 require 'json'
@@ -108,6 +109,7 @@ options = {
   threshold:          10.0,
   all:                false,
   pattern:            nil,
+  exclude_runs:       [],
   update_benchmarks:  false,
 }
 
@@ -118,6 +120,7 @@ OptionParser.new do |o|
   o.on('--threshold PCT', Float, 'Noise band % (default 5)')            { |v| options[:threshold]         = v }
   o.on('--all',                  'Show all measurements')               { options[:all]                   = true }
   o.on('--pattern NAME',         'Filter to one pattern')               { |v| options[:pattern]           = v }
+  o.on('--exclude-run RUN_ID',   'Exclude a run_id (repeatable)')       { |v| options[:exclude_runs]      << v }
   o.on('--update-benchmarks',    'Regenerate tables in BENCHMARKS.md')  { options[:update_benchmarks]     = true }
 end.parse!
 
@@ -134,6 +137,9 @@ JSONL_PATH.each do |backend, path|
     next if line.strip.empty?
     JSON.parse(line, symbolize_names: true) rescue nil
   end
+  unless options[:exclude_runs].empty?
+    rows_by_backend[backend].reject! { |r| options[:exclude_runs].include?(r[:run_id]) }
+  end
 end
 
 priority_rows_by_backend = {}
@@ -146,6 +152,9 @@ JSONL_PRIORITY_PATH.each do |backend, path|
   priority_rows_by_backend[backend] = File.readlines(path, chomp: true).filter_map do |line|
     next if line.strip.empty?
     JSON.parse(line, symbolize_names: true) rescue nil
+  end
+  unless options[:exclude_runs].empty?
+    priority_rows_by_backend[backend].reject! { |r| options[:exclude_runs].include?(r[:run_id]) }
   end
 end
 
@@ -347,10 +356,11 @@ options[:backends].each do |backend|
   rows = rows_by_backend[backend] || []
   rows = rows.select { |r| r[:pattern] == options[:pattern] } if options[:pattern]
 
-  run_ids = rows.map { |r| r[:run_id] }.uniq.last(options[:runs])
+  all_run_ids = rows.map { |r| r[:run_id] }.uniq
+  run_ids = all_run_ids.last(options[:runs])
 
   if run_ids.size < 2
-    warn "#{backend}: need at least 2 runs to compare, found #{run_ids.size}"
+    warn "#{backend}: need at least 2 runs to compare, found #{run_ids.size} (#{all_run_ids.size} total)"
     next
   end
 
@@ -412,6 +422,7 @@ options[:backends].each do |backend|
   total      = regressions.size + improvements.size + trends.size + stable_count
   span_label = run_ids.size == 2 ? "#{latest_run} vs #{base_run}" :
                "#{latest_run} vs #{base_run} (#{run_ids.size} runs)"
+  span_label += " [#{all_run_ids.size} total]" if all_run_ids.size > run_ids.size
 
   puts "#{BOLD}=== #{backend} (#{span_label}) ===#{RESET}"
   puts

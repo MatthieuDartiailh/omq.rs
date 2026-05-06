@@ -1,15 +1,15 @@
 //! PUB/SUB fan-out throughput. PUB sends N, each SUB receives all N.
 //!
-//! Multi-runtime bench: each SUB runs on its own thread/runtime, PUB runs on
-//! another. The bind barrier ensures PUB is bound before SUBs connect; the
-//! probe loop then serves as subscription confirmation (equivalent to
-//! `wait_subscribed` but cross-runtime).
+//! Two topologies:
+//! - **Inproc**: single-runtime cooperative scheduling.
+//! - **Wire**: multi-runtime — each SUB on its own thread/runtime,
+//!   PUB on another.
 
 #[path = "common/mod.rs"]
 mod common;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -30,13 +30,98 @@ fn main() {
             for &size in &common::sizes() {
                 seq += 1;
                 let label = format!("{transport}/{peers}peer/{size}B");
-                let cell = run_cell_threaded(&transport, peers, size, seq)
-                    .unwrap_or_else(|e| panic!("{label} panicked: {e:?}"));
+                let cell = if transport == "inproc" {
+                    run_cell_single(&transport, peers, size, seq)
+                } else {
+                    run_cell_with_watchdog(&transport, peers, size, seq, &label)
+                };
                 common::print_cell(size, cell);
                 common::append_jsonl(PATTERN, &transport, peers, size, cell);
             }
             println!();
         }
+    }
+}
+
+// ── single-runtime (inproc) ──────────────────────────────────────────
+
+fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
+    let rt = build_default_runtime().expect("single runtime");
+    common::block_on_and_drain(rt, async {
+        let ep = common::endpoint(transport, seq);
+        let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
+        pub_.bind(ep.clone()).await.expect("bind PUB");
+
+        let mut subs: Vec<Socket> = Vec::with_capacity(peers);
+        for _ in 0..peers {
+            let s = Socket::new(SocketType::Sub, Options::default());
+            s.connect(ep.clone()).await.expect("connect SUB");
+            s.subscribe(Bytes::new()).await.expect("subscribe");
+            subs.push(s);
+        }
+        {
+            let refs: Vec<&Socket> = subs.iter().collect();
+            common::wait_subscribed(&pub_, &refs).await;
+        }
+
+        let payload = Bytes::from(vec![b'x'; size]);
+        let pub_ = Arc::new(pub_);
+        let subs = Arc::new(subs);
+
+        let burst = |k: usize| {
+            let pub_ = pub_.clone();
+            let subs = subs.clone();
+            let payload = payload.clone();
+            async move {
+                let send_handle = {
+                    let pub_ = pub_.clone();
+                    let payload = payload.clone();
+                    compio::runtime::spawn(async move {
+                        for _ in 0..k {
+                            pub_.send(Message::single(payload.clone())).await.unwrap();
+                        }
+                    })
+                };
+                let mut recv_handles = Vec::with_capacity(subs.len());
+                for i in 0..subs.len() {
+                    let s = subs.clone();
+                    recv_handles.push(compio::runtime::spawn(async move {
+                        for _ in 0..k {
+                            s[i].recv().await.unwrap();
+                        }
+                    }));
+                }
+                for h in recv_handles {
+                    let _ = h.await;
+                }
+                let _ = send_handle.await;
+            }
+        };
+
+        common::measure_min_of(size, 1, burst).await
+    })
+}
+
+// ── multi-runtime (wire transports) ──────────────────────────────────
+
+fn run_cell_with_watchdog(
+    transport: &str,
+    peers: usize,
+    size: usize,
+    seq: usize,
+    label: &str,
+) -> common::Cell {
+    let (tx, rx) = mpsc::channel();
+    let transport = transport.to_string();
+    std::thread::spawn(move || {
+        let res = run_cell_threaded(&transport, peers, size, seq);
+        let _ = tx.send(res);
+    });
+    let budget = common::run_timeout() + Duration::from_secs(15);
+    match rx.recv_timeout(budget) {
+        Ok(Ok(cell)) => cell,
+        Ok(Err(e)) => panic!("{label} panicked: {e:?}"),
+        Err(_) => panic!("BENCH TIMEOUT: {label} exceeded {budget:?}"),
     }
 }
 
@@ -48,83 +133,80 @@ fn run_cell_threaded(
 ) -> Result<common::Cell, Box<dyn std::any::Any + Send>> {
     let ep = common::endpoint(transport, seq);
     let recv_count = Arc::new(AtomicUsize::new(0));
+    let subs_ready: Arc<Vec<AtomicBool>> =
+        Arc::new((0..peers).map(|_| AtomicBool::new(false)).collect());
     let stop = Arc::new(AtomicBool::new(false));
-    // Barrier: PUB binds first, then SUBs connect. Prevents inproc races.
     let bind_barrier = Arc::new(Barrier::new(peers + 1));
 
     let sub_threads: Vec<_> = (0..peers)
-        .map(|_| {
+        .map(|i| {
             let ep = ep.clone();
             let recv_count = recv_count.clone();
+            let subs_ready = subs_ready.clone();
             let stop = stop.clone();
             let bind_barrier = bind_barrier.clone();
             std::thread::spawn(move || {
-                build_default_runtime()
-                    .expect("sub runtime")
-                    .block_on(async move {
-                        bind_barrier.wait();
-                        let s = Socket::new(SocketType::Sub, Options::default());
-                        s.connect(ep).await.expect("connect SUB");
-                        s.subscribe(Bytes::new()).await.expect("subscribe");
-                        while !stop.load(Ordering::Relaxed) {
-                            if let Ok(Ok(_)) =
-                                compio::time::timeout(Duration::from_millis(20), s.recv()).await
-                            {
-                                recv_count.fetch_add(1, Ordering::Relaxed);
-                            }
+                let rt = build_default_runtime().expect("sub runtime");
+                common::block_on_and_drain(rt, async move {
+                    bind_barrier.wait();
+                    let s = Socket::new(SocketType::Sub, Options::default());
+                    s.connect(ep).await.expect("connect SUB");
+                    s.subscribe(Bytes::new()).await.expect("subscribe");
+                    while !stop.load(Ordering::Relaxed) {
+                        if let Ok(Ok(_)) =
+                            compio::time::timeout(Duration::from_millis(20), s.recv()).await
+                        {
+                            subs_ready[i].store(true, Ordering::Relaxed);
+                            recv_count.fetch_add(1, Ordering::Relaxed);
                         }
-                    });
+                    }
+                });
             })
         })
         .collect();
 
     let pub_thread = {
         let recv_count = recv_count.clone();
+        let subs_ready = subs_ready.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
-            build_default_runtime()
-                .expect("pub runtime")
-                .block_on(async move {
-                    let pub_ =
-                        Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
-                    pub_.bind(ep).await.expect("bind PUB");
-                    bind_barrier.wait();
+            let rt = build_default_runtime().expect("pub runtime");
+            common::block_on_and_drain(rt, async move {
+                let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
+                pub_.bind(ep).await.expect("bind PUB");
+                bind_barrier.wait();
 
-                    let payload = Bytes::from(vec![b'x'; size]);
+                let payload = Bytes::from(vec![b'x'; size]);
 
-                    // Probe until subscriptions are active. PUB sends probes; SUBs
-                    // receive them once their subscription message has propagated.
-                    // Each published message reaches all N SUBs, so recv_count grows
-                    // by `peers` per delivered message. One full delivery suffices.
-                    loop {
-                        let _ = pub_.send(Message::single(payload.clone())).await;
-                        if recv_count.load(Ordering::Relaxed) >= peers {
-                            break;
-                        }
-                        compio::time::sleep(Duration::from_micros(50)).await;
+                loop {
+                    let _ = pub_.send(Message::single(payload.clone())).await;
+                    if subs_ready.iter().all(|r| r.load(Ordering::Relaxed)) {
+                        break;
                     }
+                    compio::time::sleep(Duration::from_micros(50)).await;
+                }
 
-                    let pub_ = Arc::new(pub_);
+                let pub_ = Arc::new(pub_);
 
-                    let burst = |k: usize| {
-                        let pub_ = pub_.clone();
-                        let payload = payload.clone();
-                        let recv_count = recv_count.clone();
-                        async move {
-                            let target = recv_count.load(Ordering::Relaxed) + k * peers;
-                            for _ in 0..k {
-                                pub_.send(Message::single(payload.clone())).await.unwrap();
-                            }
-                            while recv_count.load(Ordering::Relaxed) < target {
-                                compio::time::sleep(Duration::from_micros(50)).await;
-                            }
+                let burst = |k: usize| {
+                    let pub_ = pub_.clone();
+                    let payload = payload.clone();
+                    let recv_count = recv_count.clone();
+                    async move {
+                        let target = recv_count.load(Ordering::Relaxed) + k * peers;
+                        for _ in 0..k {
+                            pub_.send(Message::single(payload.clone())).await.unwrap();
                         }
-                    };
+                        while recv_count.load(Ordering::Relaxed) < target {
+                            compio::time::sleep(Duration::from_micros(50)).await;
+                        }
+                    }
+                };
 
-                    let cell = common::measure_min_of(size, 1, burst).await;
-                    stop.store(true, Ordering::Relaxed);
-                    cell
-                })
+                let cell = common::measure_min_of(size, 1, burst).await;
+                stop.store(true, Ordering::Relaxed);
+                cell
+            })
         })
     };
 
