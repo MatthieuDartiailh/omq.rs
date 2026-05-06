@@ -49,7 +49,17 @@ use crate::transport::peer_io::{CancellableRecvStream, SharedPeerIo, WireWriter}
 /// Therefore the inner `Rc` refcount is only ever touched on a single thread,
 /// and asserting `Send + Sync` on this wrapper does not introduce a data race
 /// in any usage pattern omq-compio supports.
-pub(crate) struct LocalStream(pub(crate) async_lock::Mutex<Option<CancellableRecvStream>>);
+/// Two-state recv mode for a wire peer.
+///
+/// After a large-frame one-shot, stay in `OneShot` so consecutive large
+/// messages pay **zero** cancel+rearm cost. Transition back to `MultiShot`
+/// when a small frame arrives.
+pub(crate) enum RecvStreamState {
+    MultiShot(CancellableRecvStream),
+    OneShot,
+}
+
+pub(crate) struct LocalStream(pub(crate) async_lock::Mutex<Option<RecvStreamState>>);
 
 // SAFETY: see `LocalStream` doc comment. `CancelToken` is `Rc`-based
 // (single-threaded) for the same reason as `SharedFd`, and is only
@@ -70,9 +80,17 @@ impl LocalStream {
             let io = peer_io.lock().expect("peer_io");
             io.reader.build_recv_stream()?
         };
-        *self.0.lock().await = Some(new_stream);
+        *self.0.lock().await = Some(RecvStreamState::MultiShot(new_stream));
         Ok(())
     }
+}
+
+/// Cached single-peer route. Saves `out_peers.read()` + `direct_io.read()`
+/// on every send/recv when the peer set hasn't changed.
+pub(super) struct CachedPeerRoute {
+    pub(super) generation: u64,
+    pub(super) out: PeerOut,
+    pub(super) direct: Option<Arc<DirectIoState>>,
 }
 
 pub(super) struct SocketInner {
@@ -84,6 +102,12 @@ pub(super) struct SocketInner {
     /// identify peers that have no explicit identity.
     pub(super) inproc_identity: Bytes,
     pub(super) out_peers: RwLock<Vec<PeerSlot>>,
+    /// Bumped on every `out_peers` write. Lets send/recv skip lock
+    /// acquisitions when the peer set is stable.
+    pub(super) peers_gen: AtomicU64,
+    /// Cached route for the common single-peer case. Invalidated
+    /// when `peers_gen` advances past the stored generation.
+    pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
     pub(super) in_tx: flume::Sender<InprocFrame>,
     pub(super) in_rx: flume::Receiver<InprocFrame>,
     pub(super) on_peer_ready: Event,
@@ -625,8 +649,8 @@ pub(crate) enum OneShotLargeRecvOutcome {
     /// Caller proceeds with the existing event-drain flow.
     Skipped,
     /// Frame payload was recvd directly into a sized buffer and supplied
-    /// to the codec; multi-shot has been re-armed. Caller proceeds with
-    /// the normal "fed" path.
+    /// to the codec. The recv slot remains `OneShot`; the caller stays
+    /// in that mode until the next small frame triggers a re-arm.
     Took,
     /// I/O error during cancel-drain or one-shot recv. Connection is
     /// dead.
@@ -673,10 +697,7 @@ pub(crate) enum OneShotLargeRecvOutcome {
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn try_one_shot_large_recv(
     state: &Arc<DirectIoState>,
-    sguard: &mut async_lock::MutexGuard<
-        '_,
-        Option<crate::transport::peer_io::CancellableRecvStream>,
-    >,
+    sguard: &mut async_lock::MutexGuard<'_, Option<RecvStreamState>>,
 ) -> OneShotLargeRecvOutcome {
     use bytes::BytesMut;
     use compio::runtime::FutureExt;
@@ -719,7 +740,8 @@ pub(crate) async fn try_one_shot_large_recv(
     // consumes by value); subsequent `stream.next().with_cancel(...)`
     // polls drain pending CQEs and eventually surface `ECANCELED` /
     // `None`, terminating the loop.
-    if let Some(cs) = sguard.as_mut() {
+    // When already OneShot there is no stream to cancel; skip entirely.
+    if let Some(RecvStreamState::MultiShot(cs)) = sguard.as_mut() {
         cs.cancel.clone().cancel();
         loop {
             let item =
@@ -780,9 +802,10 @@ pub(crate) async fn try_one_shot_large_recv(
         }
     }
 
-    // The drained-stream is terminal: drop it so the kernel ASYNC_CANCEL
-    // is acknowledged before our one-shot Recv submits on the same fd.
-    **sguard = None;
+    // Mark slot OneShot. The drained multi-shot stream (if any) is dropped
+    // here so the kernel ASYNC_CANCEL is acknowledged before our one-shot
+    // Recv submits on the same fd. If already OneShot this is a no-op.
+    **sguard = Some(RecvStreamState::OneShot);
 
     // 3) One-shot the remainder.
     if acc.len() < payload_len {
@@ -820,19 +843,69 @@ pub(crate) async fn try_one_shot_large_recv(
         // iteration; nothing to do here.
     }
 
-    // 5) Re-arm multi-shot.
-    let new_stream = {
+    // Slot stays OneShot. Caller (one_shot_recv_and_feed) re-arms when
+    // the next frame turns out to be small.
+    OneShotLargeRecvOutcome::Took
+}
+
+/// Read one kernel delivery into the codec, then decide on state.
+///
+/// Called when the recv slot is `OneShot`. Does a single non-exact read
+/// (up to 64 KiB), feeds the bytes to the codec, then calls
+/// [`try_one_shot_large_recv`]:
+///
+/// - If the new bytes contained a large-frame header → stays `OneShot`.
+/// - If not (small frame) → re-arms multi-shot, transitions to `MultiShot`.
+///
+/// Returns `Took` on success (either transition), or `IoErr`/`ProtoErr`
+/// on failure. Never returns `Skipped`.
+pub(crate) async fn one_shot_recv_and_feed(
+    state: &Arc<DirectIoState>,
+    sguard: &mut async_lock::MutexGuard<'_, Option<RecvStreamState>>,
+) -> OneShotLargeRecvOutcome {
+    use bytes::BytesMut;
+
+    let fd = {
         let Ok(io) = state.peer_io.lock() else {
             return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
         };
-        match io.reader.build_recv_stream() {
-            Ok(s) => s,
-            Err(e) => return OneShotLargeRecvOutcome::IoErr(e),
-        }
+        io.reader.fd_clone()
     };
-    **sguard = Some(new_stream);
 
-    OneShotLargeRecvOutcome::Took
+    let bytes = match fd.read_some(BytesMut::with_capacity(65536)).await {
+        Ok(b) => b,
+        Err(e) => return OneShotLargeRecvOutcome::IoErr(e),
+    };
+    state.last_input_nanos.store(
+        state.hb_epoch.elapsed().as_nanos() as u64,
+        Ordering::Relaxed,
+    );
+    {
+        let Ok(mut io) = state.peer_io.lock() else {
+            return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
+        };
+        if let Err(e) = io.codec.handle_input(bytes) {
+            return OneShotLargeRecvOutcome::ProtoErr(e);
+        }
+    }
+
+    match try_one_shot_large_recv(state, sguard).await {
+        OneShotLargeRecvOutcome::Skipped => {
+            // Small frame: re-arm and transition back to MultiShot.
+            let new_stream = {
+                let Ok(io) = state.peer_io.lock() else {
+                    return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
+                };
+                match io.reader.build_recv_stream() {
+                    Ok(s) => s,
+                    Err(e) => return OneShotLargeRecvOutcome::IoErr(e),
+                }
+            };
+            **sguard = Some(RecvStreamState::MultiShot(new_stream));
+            OneShotLargeRecvOutcome::Took
+        }
+        other => other,
+    }
 }
 
 impl DirectIoState {
@@ -851,7 +924,7 @@ impl DirectIoState {
             peer_io,
             writer: async_lock::Mutex::new(writer),
             transmit_ready: Event::new(),
-            recv_stream: LocalStream(async_lock::Mutex::new(Some(recv_stream))),
+            recv_stream: LocalStream(async_lock::Mutex::new(Some(RecvStreamState::MultiShot(recv_stream)))),
             recv_claim: AtomicU8::new(0),
             recv_state_changed: Event::new(),
             recv_codec_ready: Event::new(),
@@ -1068,6 +1141,8 @@ impl SocketInner {
             inproc_identity,
             options,
             out_peers: RwLock::new(Vec::new()),
+            peers_gen: AtomicU64::new(0),
+            cached_route: Mutex::new(None),
             in_tx,
             in_rx,
             on_peer_ready: Event::new(),

@@ -556,6 +556,54 @@ forwarding into another `sendmsg` as a single iovec) silently get a
 faster path. Single-chunk inline storage on `Payload`
 (`SmallVec<[Bytes; 1]>`) is sized for exactly this case.
 
+## Amortizing cancel+rearm across consecutive large frames
+
+The zero-copy path above paid its cancel+rearm cost on every large
+frame, even when large frames arrived back to back. Each frame
+triggered:
+
+1. Fire `CancelToken` on the multi-shot stream.
+2. Drain remaining CQEs until `ECANCELED` arrives.
+3. Submit one-shot `Recv` to collect the payload.
+4. Rebuild the multi-shot stream (`build_recv_stream` + new SQE).
+
+Steps 1-2 and 4 together are two io_uring submissions plus a drain
+loop. For a benchmark sending 1000 × 32 MiB messages that is 2000
+extra submissions and 1000 drain loops that carry no useful bytes.
+
+The fix is a two-state machine on the recv slot:
+
+```
+MultiShot ──[large frame]──> OneShot
+    ^                           │
+    └───[small frame]───────────┘
+```
+
+`RecvStreamState` replaces the plain `Option<CancellableRecvStream>` in
+`LocalStream`. On the first large frame, the usual cancel+drain runs and
+the slot transitions to `OneShot` instead of immediately rebuilding the
+stream. Subsequent large frames skip steps 1-2 and 4 entirely -- there
+is no multi-shot stream to cancel and nothing to rebuild. Each frame
+costs one one-shot `Recv` and nothing else. When a small frame arrives
+in `OneShot` mode, `one_shot_recv_and_feed` re-arms the multi-shot
+stream once and transitions back to `MultiShot`.
+
+The threshold is unchanged at 128 KiB. The state machine removes the
+concern that the threshold placement matters for sequential large-message
+workloads: cancel+rearm fires at most once per run of consecutive large
+frames (the transition into `OneShot`), not once per frame.
+
+Cancel-safety is structural in both states:
+
+- **MultiShot → OneShot**: cancel+drain runs to completion before the
+  one-shot `Recv` submits. If the future is dropped during the one-shot
+  read, the slot is already `OneShot` -- the next poll starts a fresh
+  one-shot read with no stream to account for.
+- **OneShot → MultiShot**: `build_recv_stream` + store to slot is a
+  single synchronous step. If dropped before the store the slot stays
+  `OneShot`; the next iteration retries. If dropped after, the new
+  stream is live and the driver picks it up on the next wakeup.
+
 ## Things tried and dropped
 
 The optimisations above are the ones that survived. Several plausible
@@ -675,6 +723,70 @@ on the bench machine, with the largest wins at 2-32 KiB (where the
 multi-chunk + writev advantage compounds with the hop reductions) and
 parity-to-1.4x at 128 B (where the I/O-thread advantage gets close to
 neutralised, but not quite).
+
+## Send-path route caching
+
+After the direct-encode fast path landed, perf profiling revealed that
+the send path's routing overhead was the next bottleneck. At 128 B
+over TCP, the profile showed `Socket::send` consuming ~15% of CPU
+time. The actual encoding (`try_direct_encode`) was only 3%. The
+other 12% was synchronization: lock acquisitions to look up the target
+peer and verify it was alive.
+
+For a single-peer PUSH socket sending 128 B messages over TCP, each
+`send()` call performed:
+
+1. `out_peers.read()` -- RwLock to access the peer list.
+2. `peer_alive()` -- RwLock read on `direct_io` handle to check the
+   driver was still running.
+3. `peer_alive()` again -- a second check for the round-robin chosen
+   peer (the first check was `any_alive`, the second was per-candidate).
+4. `direct_io.read().clone()` -- a third RwLock read plus an Arc clone
+   to extract the `DirectIoState` that `try_direct_encode` needs.
+
+Four lock acquisitions and two `Arc<DirectIoState>` refcount bumps per
+message, for a peer set that changes maybe once during the entire
+benchmark.
+
+**Fused peer selection.** The first fix collapsed these three
+`direct_io` reads into one: read the handle once, derive liveness from
+the same guard, and extract the Arc in the same pass. This removed the
+`peer_alive` helper entirely. The measured impact was within noise on
+TCP (the kernel syscalls dominate) but the code became a single-pass
+loop instead of scan-then-recheck.
+
+**Generation-gated route cache.** The second fix added a generation
+counter (`peers_gen: AtomicU64`) that increments on any peer mutation
+(connect, accept, reconnect, driver exit, close). The send path
+checks the generation against a cached `CachedPeerRoute` stored in
+`SocketInner`. On cache hit (generation matches), the entire
+`out_peers.read()` + `direct_io.read()` sequence is skipped -- the
+send path goes straight to `slow_round_robin` with the cached
+`PeerOut` and `Arc<DirectIoState>`.
+
+The cache hit path costs one atomic load (`peers_gen`) and one
+uncontended mutex lock (to read the cached struct). The miss path
+populates the cache after the full peer lookup, so the next send is a
+hit.
+
+This mattered most for inproc, where there are no kernel syscalls to
+dominate the profile: inproc 1-peer 128 B jumped from 3.07M to 3.42M
+msg/s (+11%). TCP and IPC gains were in the noise band (~3-5%), which
+is expected -- the eliminated overhead is ~10 ns per message, and the
+per-message budget at 2.7M msg/s over TCP is ~370 ns with most of it
+in the kernel.
+
+**What didn't work: caching on the recv side.** The recv path has an
+analogous `snapshot_direct_io_single_peer()` that reads `out_peers` +
+`direct_io` on every `recv()` call. Adding the same cache check there
+caused a regression: the `Mutex<CachedPeerRoute>` became contended
+between the send thread and recv thread (they run on separate compio
+runtimes). The Mutex lock/unlock overhead under cross-thread contention
+was worse than the two uncontended RwLock reads it replaced. The recv-
+side cache was removed. A future approach might use an `AtomicPtr`
+swap or per-thread caching, but the uncontended RwLock reads are cheap
+enough (~3-5 ns each) that this isn't a bottleneck worth the
+complexity.
 
 ## What remains
 

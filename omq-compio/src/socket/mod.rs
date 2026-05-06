@@ -27,7 +27,8 @@ mod send;
 pub use handle::Socket;
 
 pub(crate) use inner::{
-    DirectIoState, FLAT_THRESHOLD, OneShotLargeRecvOutcome, try_one_shot_large_recv,
+    DirectIoState, FLAT_THRESHOLD, OneShotLargeRecvOutcome, RecvStreamState,
+    one_shot_recv_and_feed, try_one_shot_large_recv,
 };
 
 /// Per-peer cmd channel capacity, sized off `Options::send_hwm`.

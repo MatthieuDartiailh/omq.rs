@@ -969,10 +969,6 @@ impl Socket {
         }
     }
 
-    /// Snapshot the [`DirectIoState`] iff this socket has exactly one
-    /// connected wire peer. Returns `None` for inproc-only sockets,
-    /// no-peer sockets, or multi-peer sockets - any of which forces
-    /// the caller to fall back to the slow `in_rx` path.
     fn snapshot_direct_io_single_peer(&self) -> Option<Arc<DirectIoState>> {
         let peers = self.inner.out_peers.read().expect("peers lock");
         if peers.len() != 1 {
@@ -1151,49 +1147,66 @@ impl Socket {
             //    invariant elsewhere keeps the sync lock from blocking.
             let pull_and_feed = async {
                 let mut sguard = state.recv_stream.0.lock().await;
-                // See driver.rs: a previous iteration's one-shot
-                // recv path may have dropped the stream and been
-                // interrupted before rebuilding. Treat as EOF.
-                let Some(cs) = sguard.as_mut() else {
-                    return PullOutcome::Eof;
-                };
-                // See driver.rs `stream_arm`: `.with_cancel` registers
-                // the SubmitMulti op key with the per-stream token so
-                // the large-frame switch can drain pending CQEs.
-                let buf = compio::runtime::FutureExt::with_cancel(
-                    futures::StreamExt::next(&mut cs.stream),
-                    cs.cancel.clone(),
-                )
-                .await;
-                match buf {
+                match sguard.as_mut() {
                     None => PullOutcome::Eof,
-                    Some(Err(e)) => PullOutcome::Err(e),
-                    Some(Ok(buf)) => {
-                        if buf.is_empty() {
-                            return PullOutcome::Eof;
+                    Some(crate::socket::RecvStreamState::OneShot) => {
+                        match crate::socket::one_shot_recv_and_feed(&state, &mut sguard).await {
+                            crate::socket::OneShotLargeRecvOutcome::Skipped
+                            | crate::socket::OneShotLargeRecvOutcome::Took => PullOutcome::Fed,
+                            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
+                                PullOutcome::Err(e)
+                            }
+                            crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => {
+                                PullOutcome::ProtoErr
+                            }
                         }
-                        let handle_result = {
-                            let mut io = state.peer_io.lock().expect("peer_io");
-                            let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
-                            drop(buf);
-                            io.codec.handle_input(bytes)
-                        };
-                        if handle_result.is_err() {
-                            PullOutcome::ProtoErr
-                        } else {
-                            state.last_input_nanos.store(
-                                state.hb_epoch.elapsed().as_nanos() as u64,
-                                Ordering::Relaxed,
-                            );
-                            match crate::socket::try_one_shot_large_recv(&state, &mut sguard).await
-                            {
-                                crate::socket::OneShotLargeRecvOutcome::Skipped
-                                | crate::socket::OneShotLargeRecvOutcome::Took => PullOutcome::Fed,
-                                crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
-                                    PullOutcome::Err(e)
+                    }
+                    Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
+                        // See driver.rs `stream_arm`: `.with_cancel` registers
+                        // the SubmitMulti op key with the per-stream token so
+                        // the large-frame switch can drain pending CQEs.
+                        let buf = compio::runtime::FutureExt::with_cancel(
+                            futures::StreamExt::next(&mut cs.stream),
+                            cs.cancel.clone(),
+                        )
+                        .await;
+                        match buf {
+                            None => PullOutcome::Eof,
+                            Some(Err(e)) => PullOutcome::Err(e),
+                            Some(Ok(buf)) => {
+                                if buf.is_empty() {
+                                    return PullOutcome::Eof;
                                 }
-                                crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => {
+                                let handle_result = {
+                                    let mut io = state.peer_io.lock().expect("peer_io");
+                                    let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
+                                    drop(buf);
+                                    io.codec.handle_input(bytes)
+                                };
+                                if handle_result.is_err() {
                                     PullOutcome::ProtoErr
+                                } else {
+                                    state.last_input_nanos.store(
+                                        state.hb_epoch.elapsed().as_nanos() as u64,
+                                        Ordering::Relaxed,
+                                    );
+                                    match crate::socket::try_one_shot_large_recv(
+                                        &state,
+                                        &mut sguard,
+                                    )
+                                    .await
+                                    {
+                                        crate::socket::OneShotLargeRecvOutcome::Skipped
+                                        | crate::socket::OneShotLargeRecvOutcome::Took => {
+                                            PullOutcome::Fed
+                                        }
+                                        crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
+                                            PullOutcome::Err(e)
+                                        }
+                                        crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => {
+                                            PullOutcome::ProtoErr
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1410,6 +1423,7 @@ impl Socket {
         {
             let mut peers = self.inner.out_peers.write().expect("peers lock");
             peers.clear();
+            self.inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
         self.inner.monitor.publish(MonitorEvent::Closed);
         Ok(())

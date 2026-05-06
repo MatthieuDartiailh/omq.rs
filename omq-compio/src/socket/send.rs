@@ -20,29 +20,12 @@ use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
 #[cfg(not(feature = "priority"))]
-use crate::socket::inner::{DirectIoState, FLAT_THRESHOLD, PeerSlot};
+use crate::socket::inner::{CachedPeerRoute, DirectIoState, FLAT_THRESHOLD};
 #[cfg(not(feature = "priority"))]
 use crate::transport::driver::DriverCommand;
 
 use super::handle::Socket;
 use super::inner::PeerOut;
-
-/// Liveness check for round-robin / priority pickers. A wire peer's
-/// driver clears its `direct_io` handle on exit (see
-/// `socket/install.rs`); routing to a dead wire slot would silently
-/// drop the message into `shared_send_tx` with no consumer. An inproc
-/// peer has no driver — its sender is always live until the receiver
-/// disconnects.
-#[cfg(not(feature = "priority"))]
-fn peer_alive(p: &PeerSlot) -> bool {
-    match &p.out {
-        PeerOut::Inproc { sender, .. } => !sender.is_disconnected(),
-        PeerOut::Wire(_) => p
-            .direct_io
-            .as_ref()
-            .is_some_and(|h| h.read().expect("direct_io handle lock").is_some()),
-    }
-}
 
 /// Encode `msg` for this peer without going through the driver's cmd channel.
 /// Returns `true` if encoded and the driver was (conditionally) notified,
@@ -253,48 +236,94 @@ impl Socket {
     #[cfg(not(feature = "priority"))]
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
         let inner = self.inner();
+
+        // Fast path: reuse cached route when the peer set hasn't changed.
+        let cur_gen = inner.peers_gen.load(Ordering::Acquire);
+        {
+            let cache = inner.cached_route.lock().expect("cached_route");
+            if let Some(ref cr) = *cache {
+                if cr.generation == cur_gen {
+                    return self
+                        .slow_round_robin(cr.out.clone(), msg, 1, cr.direct.clone())
+                        .await;
+                }
+            }
+        }
+
         loop {
             let chosen = {
                 let peers = inner.out_peers.read().expect("peers lock");
                 if peers.is_empty() {
                     if inner.options.conflate {
-                        // No peer yet: buffer into the cap-1 shared queue
-                        // without blocking. Each send evicts the previous
-                        // message, leaving only the latest in the queue.
                         return self.conflate_shared_queue_send(msg);
                     }
                     None
                 } else {
-                    // Skip dead wire peers (driver exited → direct_io
-                    // cleared) when at least one alive peer exists.
-                    // Otherwise routing would keep landing on a dead
-                    // slot whose only fallback is shared_send_tx — fine
-                    // when *all* peers are dead (the shared-queue
-                    // back-pressure path that handshake_timeout tests
-                    // depend on) but lossy in the mixed-transport case
-                    // where shared_send_tx has no consumer at all.
                     let n = peers.len();
-                    let any_alive = peers.iter().any(peer_alive);
-                    let mut chosen_slot = None;
+                    let mut any_alive = false;
+                    let mut first_alive_idx = None;
+                    let mut first_alive_direct = None;
+                    let mut first_dead_idx = None;
                     for _ in 0..n {
                         let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed) % n;
                         let p = &peers[idx];
-                        if any_alive && !peer_alive(p) {
-                            continue;
+                        let alive = match &p.out {
+                            PeerOut::Inproc { sender, .. } => !sender.is_disconnected(),
+                            PeerOut::Wire(_) => {
+                                if let Some(h) = p.direct_io.as_ref() {
+                                    let guard = h.read().expect("direct_io handle lock");
+                                    if guard.is_some() {
+                                        if first_alive_idx.is_none() {
+                                            first_alive_direct = guard.clone();
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                        };
+                        if alive {
+                            any_alive = true;
+                            if first_alive_idx.is_none() {
+                                first_alive_idx = Some(idx);
+                            }
+                            break;
+                        } else if first_dead_idx.is_none() {
+                            first_dead_idx = Some(idx);
                         }
-                        chosen_slot = Some(p);
-                        break;
                     }
-                    chosen_slot.map(|p| {
-                        let direct = p
-                            .direct_io
-                            .as_ref()
-                            .and_then(|h| h.read().expect("direct_io handle lock").clone());
+                    let pick = if any_alive {
+                        first_alive_idx
+                    } else {
+                        first_dead_idx
+                    };
+                    pick.map(|idx| {
+                        let p = &peers[idx];
+                        let direct = if any_alive && first_alive_idx == Some(idx) {
+                            first_alive_direct
+                        } else {
+                            p.direct_io
+                                .as_ref()
+                                .and_then(|h| h.read().expect("direct_io handle lock").clone())
+                        };
                         (p.out.clone(), n, direct)
                     })
                 }
             };
             if let Some((chosen, peer_count, direct)) = chosen {
+                // Populate cache for single-peer sockets.
+                if peer_count == 1 {
+                    let cur_gen = inner.peers_gen.load(Ordering::Acquire);
+                    *inner.cached_route.lock().expect("cached_route") =
+                        Some(CachedPeerRoute {
+                            generation: cur_gen,
+                            out: chosen.clone(),
+                            direct: direct.clone(),
+                        });
+                }
                 return self.slow_round_robin(chosen, msg, peer_count, direct).await;
             }
             let listener = inner.on_peer_ready.listen();

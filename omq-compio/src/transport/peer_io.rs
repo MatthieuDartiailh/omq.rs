@@ -181,6 +181,26 @@ impl WireRecvFd {
         Ok(())
     }
 
+    /// Single non-exact read into `buf`. Returns however many bytes the
+    /// kernel delivered. Returns `UnexpectedEof` if the peer closed.
+    pub(crate) async fn read_some(&self, buf: BytesMut) -> io::Result<bytes::Bytes> {
+        let BufResult(res, buf) = match self {
+            Self::Tcp(fd) => {
+                let mut r: &AsyncFd<TcpStream> = fd;
+                AsyncRead::read(&mut r, buf).await
+            }
+            Self::Ipc(fd) => {
+                let mut r: &AsyncFd<UnixStream> = fd;
+                AsyncRead::read(&mut r, buf).await
+            }
+        };
+        let n = res?;
+        if n == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        Ok(buf.freeze())
+    }
+
     /// Convenience: allocate a sized [`BytesMut`] and call
     /// [`read_until`] up to `len` bytes.
     #[allow(dead_code)]

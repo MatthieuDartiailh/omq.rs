@@ -181,6 +181,7 @@ async fn dial_supervisor_tcp(
             inner.options.large_message_threshold.unwrap_or(0),
         );
         *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
+        inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
 
         let idx = if let Some(idx) = slot_idx {
             idx
@@ -353,6 +354,7 @@ async fn dial_supervisor_ipc(
             inner.options.large_message_threshold.unwrap_or(0),
         );
         *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
+        inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
 
         let idx = if let Some(idx) = slot_idx {
             idx

@@ -723,62 +723,75 @@ pub(crate) async fn run_connection(
                     state.recv_state_changed.listen().await;
                     return StreamArmOutcome::ClaimFlipped;
                 }
-                // A previous iteration's one-shot path may have
-                // dropped the stream and been interrupted before
-                // re-arming. Treat that as connection dead.
-                let Some(cs) = sguard.as_mut() else {
-                    return StreamArmOutcome::Eof;
-                };
-                // `.with_cancel(cs.cancel.clone())` registers the
-                // SubmitMulti's op key with the token on its first
-                // poll (a no-op on subsequent polls of the same key).
-                // The token can later be cancelled by the large-frame
-                // path to drain pending CQEs cleanly before swapping
-                // to a one-shot recv.
-                let buf = compio::runtime::FutureExt::with_cancel(
-                    futures::StreamExt::next(&mut cs.stream),
-                    cs.cancel.clone(),
-                )
-                .await;
-                match buf {
+                match sguard.as_mut() {
                     None => StreamArmOutcome::Eof,
-                    Some(Err(e)) => StreamArmOutcome::Err(e),
-                    Some(Ok(buf)) => {
-                        if buf.is_empty() {
-                            StreamArmOutcome::Eof
-                        } else {
-                            state.last_input_nanos.store(
-                                state.hb_epoch.elapsed().as_nanos() as u64,
-                                Ordering::Relaxed,
-                            );
-                            let handle_result = {
-                                let mut io = peer_io.lock().expect("peer_io");
-                                // Copy then drop: returns the slot to
-                                // the pool before entering the codec,
-                                // so the pool never depletes for large
-                                // messages.
-                                let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
-                                drop(buf);
-                                io.codec.handle_input(bytes)
-                            };
-                            match handle_result {
-                                Err(e) => StreamArmOutcome::ProtoErr(e),
-                                Ok(()) => {
-                                    match crate::socket::try_one_shot_large_recv(
-                                        &state,
-                                        &mut sguard,
-                                    )
-                                    .await
-                                    {
-                                        crate::socket::OneShotLargeRecvOutcome::Skipped
-                                        | crate::socket::OneShotLargeRecvOutcome::Took => {
-                                            StreamArmOutcome::Fed
-                                        }
-                                        crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
-                                            StreamArmOutcome::Err(e)
-                                        }
-                                        crate::socket::OneShotLargeRecvOutcome::ProtoErr(e) => {
-                                            StreamArmOutcome::ProtoErr(e)
+                    Some(crate::socket::RecvStreamState::OneShot) => {
+                        match crate::socket::one_shot_recv_and_feed(&state, &mut sguard).await {
+                            crate::socket::OneShotLargeRecvOutcome::Skipped
+                            | crate::socket::OneShotLargeRecvOutcome::Took => {
+                                StreamArmOutcome::Fed
+                            }
+                            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
+                                StreamArmOutcome::Err(e)
+                            }
+                            crate::socket::OneShotLargeRecvOutcome::ProtoErr(e) => {
+                                StreamArmOutcome::ProtoErr(e)
+                            }
+                        }
+                    }
+                    Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
+                        // `.with_cancel(cs.cancel.clone())` registers the
+                        // SubmitMulti's op key with the token on its first
+                        // poll (a no-op on subsequent polls of the same key).
+                        // The token can later be cancelled by the large-frame
+                        // path to drain pending CQEs cleanly before swapping
+                        // to a one-shot recv.
+                        let buf = compio::runtime::FutureExt::with_cancel(
+                            futures::StreamExt::next(&mut cs.stream),
+                            cs.cancel.clone(),
+                        )
+                        .await;
+                        match buf {
+                            None => StreamArmOutcome::Eof,
+                            Some(Err(e)) => StreamArmOutcome::Err(e),
+                            Some(Ok(buf)) => {
+                                if buf.is_empty() {
+                                    StreamArmOutcome::Eof
+                                } else {
+                                    state.last_input_nanos.store(
+                                        state.hb_epoch.elapsed().as_nanos() as u64,
+                                        Ordering::Relaxed,
+                                    );
+                                    let handle_result = {
+                                        let mut io = peer_io.lock().expect("peer_io");
+                                        // Copy then drop: returns the slot to
+                                        // the pool before entering the codec,
+                                        // so the pool never depletes for large
+                                        // messages.
+                                        let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
+                                        drop(buf);
+                                        io.codec.handle_input(bytes)
+                                    };
+                                    match handle_result {
+                                        Err(e) => StreamArmOutcome::ProtoErr(e),
+                                        Ok(()) => {
+                                            match crate::socket::try_one_shot_large_recv(
+                                                &state,
+                                                &mut sguard,
+                                            )
+                                            .await
+                                            {
+                                                crate::socket::OneShotLargeRecvOutcome::Skipped
+                                                | crate::socket::OneShotLargeRecvOutcome::Took => {
+                                                    StreamArmOutcome::Fed
+                                                }
+                                                crate::socket::OneShotLargeRecvOutcome::IoErr(
+                                                    e,
+                                                ) => StreamArmOutcome::Err(e),
+                                                crate::socket::OneShotLargeRecvOutcome::ProtoErr(
+                                                    e,
+                                                ) => StreamArmOutcome::ProtoErr(e),
+                                            }
                                         }
                                     }
                                 }

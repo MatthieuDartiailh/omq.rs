@@ -85,6 +85,7 @@ pub(super) fn install_inproc_peer(
             #[cfg(feature = "priority")]
             priority,
         });
+        inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
         idx
     };
     #[cfg(feature = "priority")]
@@ -171,6 +172,7 @@ pub(super) fn install_accepted_wire_peer(
             #[cfg(feature = "priority")]
             priority: omq_proto::DEFAULT_PRIORITY,
         });
+        inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
         idx
     };
     #[cfg(feature = "priority")]
@@ -308,6 +310,7 @@ pub(super) fn spawn_wire_driver(
         // a fresh PeerIo; while this is `None`, Socket::send falls
         // back to cmd_tx and waits.
         *direct_io_for_exit.write().expect("direct_io handle lock") = None;
+        inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
         // Publish Disconnected so monitor consumers see the peer
         // tear down. Reason: PeerClosed for clean EOF, Error(...)
         // for any other failure. Skip if the handshake never
