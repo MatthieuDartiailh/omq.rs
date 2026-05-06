@@ -181,7 +181,7 @@ if options[:update_benchmarks]
 
   # push_pull_compio_1peer — compio, push_pull, peers=1, by transport
   build_push_pull_compio = lambda do
-    transports = %w[inproc ipc tcp lz4+tcp zstd+tcp].select do |t|
+    transports = %w[inproc inproc-mt ipc tcp lz4+tcp zstd+tcp].select do |t|
       SIZE_LABELS.keys.any? { |s| latest.call('compio', 'push_pull', t, 1, s) }
     end
     sizes = SIZE_LABELS.keys.select do |s|

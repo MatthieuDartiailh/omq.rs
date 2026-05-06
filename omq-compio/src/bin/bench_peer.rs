@@ -50,7 +50,7 @@ fn main() {
 }
 
 async fn run_push(port: u16, size: usize) {
-    let push = Socket::new(SocketType::Push, Options::default());
+    let push = Socket::new(SocketType::Push, bench_options());
     push.bind(tcp_ep(port)).await.expect("push bind");
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
@@ -58,8 +58,16 @@ async fn run_push(port: u16, size: usize) {
     }
 }
 
+fn bench_options() -> Options {
+    let mut o = Options::default();
+    if std::env::var_os("OMQ_NO_LARGE_MSG").is_some() {
+        o = o.disable_large_message_path();
+    }
+    o
+}
+
 async fn run_pull(port: u16, size: usize, duration: Duration) {
-    let pull = Socket::new(SocketType::Pull, Options::default());
+    let pull = Socket::new(SocketType::Pull, bench_options());
     pull.connect(tcp_ep(port)).await.expect("pull connect");
 
     // Warmup: wait 500 ms for the push side to fill kernel buffers.

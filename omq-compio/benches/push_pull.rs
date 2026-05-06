@@ -1,12 +1,13 @@
 //! PUSH/PULL sustained pipeline throughput. Mirrors
 //! `omq-tokio/benches/push_pull.rs`.
 //!
-//! Two topologies:
-//! - **Inproc**: single-runtime cooperative scheduling (no wire I/O,
-//!   cross-thread hop would only add overhead).
-//! - **Wire** (TCP, IPC, lz4+tcp, zstd+tcp): multi-runtime — PULL on
-//!   its own thread/runtime, PUSHes on another. Exercises a typical
-//!   2-core deployment.
+//! Three topologies:
+//! - **inproc**: single-runtime cooperative scheduling (IO-bound
+//!   workloads where both ends share a thread).
+//! - **inproc-mt**: multi-runtime inproc — PULL on its own
+//!   thread/runtime, PUSHes on another (CPU-bound workloads).
+//! - **Wire** (TCP, IPC, lz4+tcp, zstd+tcp): multi-runtime, same
+//!   shape as inproc-mt but over kernel sockets.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -49,7 +50,11 @@ fn main() {
     let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
 
     let mut seq = 0usize;
-    for transport in common::transports() {
+    let mut transports = common::transports();
+    if let Some(pos) = transports.iter().position(|t| t == "inproc") {
+        transports.insert(pos + 1, "inproc-mt".to_string());
+    }
+    for transport in transports {
         for &peers in peer_counts {
             common::print_subheader(&transport, peers);
             for &size in &common::sizes() {
@@ -57,6 +62,9 @@ fn main() {
                 let label = format!("{transport}/{peers}peer/{size}B");
                 let cell = if transport == "inproc" {
                     run_cell_single(&transport, peers, size, seq)
+                } else if transport == "inproc-mt" {
+                    run_cell_threaded("inproc", peers, size, seq)
+                        .unwrap_or_else(|e| panic!("{label} panicked: {e:?}"))
                 } else {
                     run_cell_threaded(&transport, peers, size, seq)
                         .unwrap_or_else(|e| panic!("{label} panicked: {e:?}"))
