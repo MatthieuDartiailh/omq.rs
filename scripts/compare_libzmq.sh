@@ -94,7 +94,7 @@ ratio_str() {
 
 # ---------- run ----------
 
-SIZES=(32 128 512 2048 8192 32768 131072 524288 2097152 8388608 16777216 67108864)
+SIZES=(32 128 512 2048 8192 32768 131072 524288 2097152 8388608 33554432)
 OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
     | python3 -c 'import sys,json; pkgs=json.load(sys.stdin)["packages"]; \
       print(next(p["version"] for p in pkgs if p["name"]=="omq-compio"))' \
