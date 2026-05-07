@@ -30,10 +30,11 @@ fuzz = []
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.2.3", default-features = false }
+blume = { path = "../blume" }
 bytes = "1"
 flume = { version = "0.11", default-features = false, features = ["async"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-compio = { git = "https://github.com/paddor/compio.git", rev = "060427c", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync", "async-fd"] }
+compio = { git = "https://github.com/compio-rs/compio.git", rev = "453ed63", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync", "async-fd"] }
 event-listener = "5"
 async-lock = "3"
 socket2 = "0.6"

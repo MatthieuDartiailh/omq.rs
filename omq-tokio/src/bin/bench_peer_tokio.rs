@@ -54,8 +54,17 @@ async fn main() {
     }
 }
 
+fn bench_options(msg_size: usize) -> Options {
+    let mut o = Options::default();
+    if msg_size >= 2 * 1024 * 1024 {
+        let buf = msg_size * 2;
+        o = o.tcp_recv_buffer_size(buf).tcp_send_buffer_size(buf);
+    }
+    o
+}
+
 async fn run_push(port: u16, size: usize) {
-    let push = Socket::new(SocketType::Push, Options::default());
+    let push = Socket::new(SocketType::Push, bench_options(size));
     push.bind(tcp_ep(port)).await.expect("push bind");
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
@@ -64,7 +73,7 @@ async fn run_push(port: u16, size: usize) {
 }
 
 async fn run_pull(port: u16, size: usize, duration: Duration) {
-    let pull = Socket::new(SocketType::Pull, Options::default());
+    let pull = Socket::new(SocketType::Pull, bench_options(size));
     pull.connect(tcp_ep(port)).await.expect("pull connect");
 
     tokio::time::sleep(Duration::from_millis(500)).await;

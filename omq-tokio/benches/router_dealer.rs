@@ -81,5 +81,14 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         }
     };
 
-    common::measure_min_of(size, dealers.len(), burst).await
+    let cell = common::measure_min_of(size, dealers.len(), burst).await;
+    if let Ok(dealers) = std::sync::Arc::try_unwrap(dealers) {
+        for d in dealers {
+            let _ = d.close().await;
+        }
+    }
+    if let Ok(router) = std::sync::Arc::try_unwrap(router) {
+        let _ = router.close().await;
+    }
+    cell
 }

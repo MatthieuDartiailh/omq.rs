@@ -1,0 +1,23 @@
+[package]
+name = "blume"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Batching MPSC channel for cross-core message passing"
+
+[lints]
+workspace = true
+
+[dependencies]
+event-listener = "5"
+
+[dev-dependencies]
+flume = { version = "0.11", default-features = false, features = ["async"] }
+futures-lite = "2"
+
+[[bench]]
+name = "throughput"
+harness = false

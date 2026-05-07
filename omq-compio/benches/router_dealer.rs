@@ -46,6 +46,7 @@ fn main() {
 
 // ── single-runtime (inproc) ──────────────────────────────────────────
 
+#[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
 fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
     let rt = build_default_runtime().expect("single runtime");
     common::block_on_and_drain(rt, async {
@@ -96,6 +97,7 @@ fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> co
 
 // ── multi-runtime (wire transports) ──────────────────────────────────
 
+#[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
 fn run_cell_threaded(
     transport: &str,
     peers: usize,

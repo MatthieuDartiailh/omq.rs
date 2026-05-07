@@ -63,7 +63,7 @@ fn main() {
 }
 
 async fn run_push(ep: Endpoint, size: usize) {
-    let push = Socket::new(SocketType::Push, bench_options());
+    let push = Socket::new(SocketType::Push, bench_options(size));
     push.bind(ep).await.expect("push bind");
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
@@ -71,16 +71,20 @@ async fn run_push(ep: Endpoint, size: usize) {
     }
 }
 
-fn bench_options() -> Options {
+fn bench_options(msg_size: usize) -> Options {
     let mut o = Options::default();
     if std::env::var_os("OMQ_NO_LARGE_MSG").is_some() {
         o = o.disable_large_message_path();
+    }
+    if msg_size >= 2 * 1024 * 1024 {
+        let buf = msg_size * 2;
+        o = o.tcp_recv_buffer_size(buf).tcp_send_buffer_size(buf);
     }
     o
 }
 
 async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
-    let pull = Socket::new(SocketType::Pull, bench_options());
+    let pull = Socket::new(SocketType::Pull, bench_options(size));
     pull.connect(ep).await.expect("pull connect");
 
     compio::time::sleep(Duration::from_millis(500)).await;

@@ -352,7 +352,9 @@ pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
 /// hard ceiling. Panics on timeout with a recognisable message.
 pub(crate) async fn with_timeout<T>(label: &str, fut: impl std::future::Future<Output = T>) -> T {
     let to = run_timeout();
-    tokio::time::timeout(to, fut)
+    let result = tokio::time::timeout(to, fut)
         .await
-        .unwrap_or_else(|_| panic!("BENCH TIMEOUT: {label} exceeded {to:?}"))
+        .unwrap_or_else(|_| panic!("BENCH TIMEOUT: {label} exceeded {to:?}"));
+    tokio::task::yield_now().await;
+    result
 }

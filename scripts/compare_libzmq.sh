@@ -9,6 +9,15 @@
 
 set -euo pipefail
 
+cleanup() {
+    # Kill remaining child processes (push peers left behind).
+    local pids
+    pids=$(jobs -p 2>/dev/null) || true
+    [ -n "$pids" ] && kill $pids 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$SCRIPT_DIR/.."
 DURATION=3
@@ -94,7 +103,7 @@ ratio_str() {
 
 # ---------- run ----------
 
-SIZES=(32 128 512 2048 8192 32768 131072 524288 2097152 8388608 33554432)
+SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152 8388608 33554432)
 OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
     | python3 -c 'import sys,json; pkgs=json.load(sys.stdin)["packages"]; \
       print(next(p["version"] for p in pkgs if p["name"]=="omq-compio"))' \

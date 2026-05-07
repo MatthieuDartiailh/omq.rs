@@ -37,8 +37,12 @@ impl AnyStream {
     /// lifetime.
     pub(crate) fn apply_tcp_options(&self, options: &omq_proto::Options) -> std::io::Result<()> {
         match self {
-            Self::Tcp(s) => options.tcp_keepalive.apply(s),
-            Self::Ipc(_) => Ok(()),
+            Self::Tcp(s) => {
+                options.tcp_keepalive.apply(s)?;
+                options.apply_socket_buffers(s)?;
+                Ok(())
+            }
+            Self::Ipc(s) => options.apply_socket_buffers(s),
         }
     }
 }

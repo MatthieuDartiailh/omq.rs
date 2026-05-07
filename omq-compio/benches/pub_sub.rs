@@ -45,6 +45,7 @@ fn main() {
 
 // ── single-runtime (inproc) ──────────────────────────────────────────
 
+#[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
 fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
     let rt = build_default_runtime().expect("single runtime");
     common::block_on_and_drain(rt, async {
@@ -121,10 +122,11 @@ fn run_cell_with_watchdog(
     match rx.recv_timeout(budget) {
         Ok(Ok(cell)) => cell,
         Ok(Err(e)) => panic!("{label} panicked: {e:?}"),
-        Err(_) => panic!("BENCH TIMEOUT: {label} exceeded {budget:?}"),
+        Err(e) => panic!("BENCH TIMEOUT: {label} exceeded {budget:?}: {e}"),
     }
 }
 
+#[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
 fn run_cell_threaded(
     transport: &str,
     peers: usize,

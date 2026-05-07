@@ -368,7 +368,6 @@ impl Connection {
     }
 
     #[inline]
-    #[inline]
     fn try_advance_ready(&mut self) -> Result<bool> {
         // Fast path: single non-more, non-command data frame with
         // inline-sized payload, no crypto transform, no pending
@@ -413,7 +412,12 @@ impl Connection {
             let msg = Message {
                 inner: crate::message::MessageInner::Inline {
                     len: hdr.payload_len as u8,
-                    data: unsafe { std::mem::transmute(data) },
+                    data: unsafe {
+                        std::mem::transmute::<
+                            [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE],
+                            [u8; crate::message::MAX_INLINE_MESSAGE],
+                        >(data)
+                    },
                 },
             };
             self.messages.push_back(msg);
@@ -969,6 +973,39 @@ impl Connection {
             payload_len: hdr.payload_len,
         };
         Some(hdr.payload_len)
+    }
+
+    /// Like [`begin_supplied_payload`](Self::begin_supplied_payload) but
+    /// also drains any buffered payload prefix from the codec's input
+    /// buffer. Returns `(payload_len, prefix)` where `prefix` contains
+    /// the bytes already buffered past the header. The caller must
+    /// prepend `prefix` to the externally-read remainder before calling
+    /// [`supply_payload`](Self::supply_payload) with the full payload.
+    ///
+    /// Returns `None` when `begin_supplied_payload`'s preconditions fail
+    /// (not Ready, no complete header).
+    pub fn begin_supplied_payload_with_prefix(
+        &mut self,
+    ) -> Option<(usize, Payload)> {
+        if !matches!(self.state, State::Ready) {
+            return None;
+        }
+        let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
+        if self.in_buf.len() < hdr.header_len {
+            return None;
+        }
+        self.in_buf.advance(hdr.header_len);
+        let prefix_len = self.in_buf.len().min(hdr.payload_len);
+        let prefix = if prefix_len > 0 {
+            self.in_buf.split_to(prefix_len)
+        } else {
+            Payload::new()
+        };
+        self.state = State::AwaitingSuppliedPayload {
+            flags: hdr.flags,
+            payload_len: hdr.payload_len,
+        };
+        Some((hdr.payload_len, prefix))
     }
 
     /// Deliver the payload of a frame whose header was consumed by a prior

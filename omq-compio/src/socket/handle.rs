@@ -252,6 +252,7 @@ impl Socket {
                 let _ = stream.set_nodelay(true);
                 if let Ok(poll_fd) = stream.to_poll_fd() {
                     let _ = inner.options.tcp_keepalive.apply(&poll_fd);
+                    let _ = inner.options.apply_socket_buffers(&poll_fd);
                 }
                 let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
                 inner.monitor.publish(MonitorEvent::Accepted {
@@ -1004,8 +1005,8 @@ impl Socket {
         }
         loop {
             let frame = self.inner.in_rx.try_recv().map_err(|e| match e {
-                flume::TryRecvError::Empty => Error::WouldBlock,
-                flume::TryRecvError::Disconnected => Error::Closed,
+                blume::TryRecvError::Empty => Error::WouldBlock,
+                blume::TryRecvError::Disconnected => Error::Closed,
             })?;
             if let Some(msg) = self.process_inbound_frame(frame)? {
                 return Ok(msg);
@@ -1237,7 +1238,7 @@ impl Socket {
             //    its persistent SQE survives consumer-future drops, so
             //    losing this select arm to in_rx does not lose any
             //    bytes - they remain queued in the BUF_RING for the
-            //    next consumer to pick up. `recv_async` on flume is
+            //    next consumer to pick up. `recv_async` on blume is
             //    cancel-safe by construction.
             //    Cancel-safety invariant: NO `.await` between extracting
             //    the BufferRef from the stream and feeding it to

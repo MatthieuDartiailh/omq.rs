@@ -1,21 +1,20 @@
 //! In-process transport for omq-compio.
 //!
 //! Channel topology: each `Socket` owns ONE shared inbound
-//! `flume::Sender` (its `in_tx`) and a matching `Receiver` it
+//! `blume::Sender` (its `in_tx`) and a matching `Receiver` it
 //! reads from. At connect / accept time the two peers exchange
 //! their `in_tx` clones. To send: write into the peer's `in_tx`.
 //! To receive: drain your own `in_rx`.
 //!
 //! This is the "fan-into-one" shape: many peers push into one
 //! receiver. No per-peer forwarder task, no extra channel hop on
-//! recv. Costs one shared `flume::Sender` clone per peer (cheap;
-//! flume Senders are atomic-refcounted handles).
+//! recv. Costs one shared `blume::Sender` clone per peer (cheap;
+//! blume Senders are atomic-refcounted handles).
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use bytes::Bytes;
-use flume::{Receiver, Sender};
 
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -91,7 +90,7 @@ pub struct InprocPeerSnapshot {
 /// snapshot.
 #[derive(Debug)]
 pub struct InprocConn {
-    pub out: Sender<InprocFrame>,
+    pub out: blume::Sender<InprocFrame>,
     pub peer: InprocPeerSnapshot,
 }
 
@@ -101,16 +100,12 @@ pub struct InprocConn {
 /// its own snapshot + `in_tx`.
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
-    /// Listener will send INTO this to deliver frames to the
-    /// connector.
-    connector_in_tx: Sender<InprocFrame>,
-    /// Cross-thread one-shot ack carrying listener's snapshot +
-    /// `in_tx`.
-    accept_ack: Sender<(InprocPeerSnapshot, Sender<InprocFrame>)>,
+    connector_in_tx: blume::Sender<InprocFrame>,
+    accept_ack: flume::Sender<(InprocPeerSnapshot, blume::Sender<InprocFrame>)>,
 }
 
 /// Global registry of bound inproc names → request channel.
-static REGISTRY: LazyLock<Mutex<HashMap<String, Sender<InprocConnectRequest>>>> =
+static REGISTRY: LazyLock<Mutex<HashMap<String, flume::Sender<InprocConnectRequest>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Default per-socket inbound capacity (whole messages).
@@ -123,7 +118,7 @@ pub const DEFAULT_INPROC_HWM: usize = 1024;
 pub fn bind(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    in_tx: Sender<InprocFrame>,
+    in_tx: blume::Sender<InprocFrame>,
 ) -> Result<InprocListener> {
     let (req_tx, req_rx) = flume::bounded(32);
     {
@@ -149,7 +144,7 @@ pub fn bind(
 pub async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    in_tx: Sender<InprocFrame>,
+    in_tx: blume::Sender<InprocFrame>,
 ) -> Result<InprocConn> {
     let req_tx = {
         let reg = REGISTRY.lock().expect("inproc registry poisoned");
@@ -184,8 +179,8 @@ pub async fn connect(
 pub struct InprocListener {
     name: String,
     snapshot: InprocPeerSnapshot,
-    in_tx: Sender<InprocFrame>,
-    incoming: Receiver<InprocConnectRequest>,
+    in_tx: blume::Sender<InprocFrame>,
+    incoming: flume::Receiver<InprocConnectRequest>,
 }
 
 impl InprocListener {

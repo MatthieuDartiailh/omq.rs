@@ -238,15 +238,18 @@ impl Socket {
 
         // Fast path: reuse cached route when the peer set hasn't changed.
         let cur_gen = inner.peers_gen.load(Ordering::Acquire);
-        {
+        let cached = {
             let cache = inner.cached_route.lock().expect("cached_route");
             if let Some(ref cr) = *cache
                 && cr.generation == cur_gen
             {
-                return self
-                    .slow_round_robin(cr.out.clone(), msg, 1, cr.direct.clone())
-                    .await;
+                Some((cr.out.clone(), cr.direct.clone()))
+            } else {
+                None
             }
+        };
+        if let Some((out, direct)) = cached {
+            return self.slow_round_robin(out, msg, 1, direct).await;
         }
 
         loop {
@@ -273,7 +276,7 @@ impl Socket {
                                     let guard = h.read().expect("direct_io handle lock");
                                     if guard.is_some() {
                                         if first_alive_idx.is_none() {
-                                            first_alive_direct = guard.clone();
+                                            first_alive_direct.clone_from(&guard);
                                         }
                                         true
                                     } else {
@@ -497,12 +500,12 @@ impl Socket {
                 let peer = &peers[peer_idx];
                 match peer.out.try_send(msg) {
                     Ok(()) => return PriorityOutcome::Sent,
-                    Err(flume::TrySendError::Full(())) => {
+                    Err(blume::TrySendError::Full(())) => {
                         if highest_alive.is_none() {
                             highest_alive = Some(peer.out.clone());
                         }
                     }
-                    Err(flume::TrySendError::Disconnected(())) => {}
+                    Err(blume::TrySendError::Disconnected(())) => {}
                 }
             }
             i = j;

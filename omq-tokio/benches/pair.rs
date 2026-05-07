@@ -69,5 +69,12 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
         }
     };
 
-    common::measure_min_of(size, 1, burst).await
+    let cell = common::measure_min_of(size, 1, burst).await;
+    if let Ok(sender) = std::sync::Arc::try_unwrap(sender) {
+        let _ = sender.close().await;
+    }
+    if let Ok(receiver) = std::sync::Arc::try_unwrap(receiver) {
+        let _ = receiver.close().await;
+    }
+    cell
 }

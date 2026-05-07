@@ -1207,3 +1207,143 @@ Closing it requires one of:
 - **Profile-guided optimization.** Not yet attempted. Likely worth
   a few percent at the small-message end where the hot path is
   short enough to be PGO-shaped.
+
+## Inproc cross-core: blume batching channel
+
+After the wire-transport work above, the inproc-mt numbers exposed a
+different bottleneck. At 32 B, inproc between two compio runtimes on
+two cores ran at 2.13M msg/s -- 25% slower than TCP (2.86M) on the
+same machine. TCP, which encodes ZMTP frames, crosses the kernel, and
+decodes on the other side, was beating a direct in-process channel.
+
+### Why TCP wins at small messages
+
+TCP's advantage is batching. The send-side driver accumulates many
+small messages into one `flat_buf`, writes them with one io_uring SQE.
+The receiver reads them all with one CQE. Two cross-core cache-line
+transfers for the whole batch: one for the data pages, one for the
+completion notification.
+
+Inproc used `flume::bounded` channels. Each `send_async` + `recv_async`
+involves per-message atomic operations and a wakeup notification. At
+32 B, the per-message cost is dominated by cache coherency: each send
+dirties a cache line on core A, each recv triggers a MESIF forwarding
+request from core B. Two cache-line round-trips per message, ~40-80 ns
+each on the i7-8700B's ring interconnect. That fixed cost per message
+is what TCP amortizes and flume does not.
+
+### blume: batching MPSC channel
+
+The fix is a new channel crate, `blume`, that sits in the workspace.
+The core idea: produce one-at-a-time, consume in batches. The API
+matches flume's MPSC surface (`send_async`, `try_send`, `recv_async`,
+`try_recv`, `is_empty`, `is_disconnected`) so the swap is mechanical.
+
+Internals: `Mutex<VecDeque<T>>` shared queue, `event_listener::Event`
+for async waking, local `VecDeque<T>` cache on the receiver. No unsafe.
+The key optimizations:
+
+**Coalesced wake.** The sender notifies the receiver only on
+empty-to-non-empty transitions. N rapid sends produce one wake.
+With flume, each send wakes the receiver independently.
+
+**Swap-drain.** When the receiver wakes, it locks the shared queue
+and `std::mem::swap`s the entire VecDeque into its local cache --
+O(1), one pointer swap. Subsequent `try_recv` calls pop from the
+local cache with zero shared-state access: no lock, no atomic, no
+cache-line transfer. The shared queue is touched once per batch,
+not once per message.
+
+**Cache-first recv.** Both `recv_async` and `try_recv` check the
+local cache before touching the shared queue. After a swap-drain
+of N messages, the next N-1 receives are local VecDeque pops.
+
+### Microbenchmark: blume vs flume
+
+Cross-thread, 1 sender + 1 receiver, `bounded(1024)`, min of
+3 x 500 ms rounds:
+
+| mode | 0 B | 32 B | 128 B | 512 B | 2 KiB |
+|------|-----|------|-------|-------|-------|
+| blume try | 17.0M | 14.3M | 15.9M | 17.4M | 17.6M |
+| flume try | 9.2M | 8.3M | 8.0M | 8.0M | 7.9M |
+| **ratio** | **1.85x** | **1.72x** | **1.99x** | **2.18x** | **2.22x** |
+| blume async | 16.5M | 16.1M | 16.2M | 16.3M | 16.0M |
+| flume async | 4.6M | 4.7M | 5.1M | 4.7M | 4.5M |
+| **ratio** | **3.60x** | **3.45x** | **3.19x** | **3.51x** | **3.58x** |
+
+The async path shows the biggest gain (3.5x) because flume's
+`recv_async` involves an `event_listener` registration per call,
+while blume's local cache path avoids it entirely after the first
+wake.
+
+### Integration into omq-compio
+
+The swap targets the `in_tx`/`in_rx` channel pair on `SocketInner` --
+the per-socket inbound channel that all inproc peers and wire drivers
+push into. This is the hot path for inproc transport. Wire peer command
+channels (`DriverCommand`) and the MPMC shared send queue stay on
+flume.
+
+Files changed: `socket/inner.rs` (channel construction, `PeerOut::Inproc`
+sender type, error types), `socket/handle.rs` (recv error types),
+`transport/inproc.rs` (channel types in bind/connect/accept),
+`transport/driver.rs` (wire driver's `peer_in_tx` type).
+
+### Result
+
+Compio inproc-mt PUSH/PULL, 1 peer:
+
+| size | before (flume) | after (blume) | TCP | blume vs TCP |
+|------|---------------|---------------|-----|-------------|
+| 32 B | 2.13M | 2.90M (+36%) | 2.86M | **1.01x** |
+| 128 B | 2.36M | 2.51M (+6%) | 2.63M | 0.95x |
+| 512 B | 2.45M | 2.55M (+4%) | 2.19M | **1.16x** |
+| 2 KiB | 2.30M | 2.71M (+18%) | 1.31M | **2.07x** |
+
+At 32 B, inproc-mt went from 25% behind TCP to parity. The 128 B gap
+narrowed from 10% to 5%. 512 B and above, inproc wins comfortably.
+Single-thread inproc (~3.5M) was unaffected.
+
+The remaining 5% gap at 128 B is the Mutex cost on the sender side.
+Blume uses `Mutex<VecDeque>` for the shared queue; flume uses a
+lock-free queue internally. Swapping blume's internals to a lock-free
+MPSC queue (~100 lines of unsafe, Vyukov pattern) would close this,
+but the current Mutex approach is correct-by-construction with zero
+unsafe. Profiling under real workloads will decide whether the
+lock-free path is worth the complexity.
+
+## Tokio inproc recv_direct
+
+Independently of the channel optimization, tokio's inproc path had a
+structural disadvantage. Wire transport connections (TCP, IPC) got
+`recv_direct` -- messages flow straight from the connection driver to
+the user's recv channel, bypassing the socket actor entirely. Inproc
+connections did not: every message went through the actor's event loop,
+adding a channel hop and a task wake per message.
+
+The fix: `spawn_inproc_peer` checks `can_bypass_actor_recv` (the same
+predicate used for wire connections) and passes the `recv_tx` channel
+to `inproc_peer_driver`. The driver sends messages directly to the
+user's recv channel instead of through `peer_out` -> actor.
+
+This is a necessary but not sufficient fix for tokio inproc
+throughput. The send path still routes through a per-peer pump task
+(the wire path bypasses this via `shared_rx`). Adding `shared_rx`
+support to the inproc driver is the next step.
+
+## Bug: zero-payload frame panic
+
+The PUB/SUB IPC benchmark panicked on startup in
+`ChunkedInputBuf::read_into_uninit` -- `chunks.front()` returned
+`None` on an empty buffer. Root cause: the bench's `wait_subscribed`
+helper sends empty probe messages (`Message::single("")`) to detect
+when subscriptions have propagated. That produces `[0x00, 0x00]` on
+the wire -- a valid zero-length ZMTP data frame. The inline fast path
+in `try_advance_ready` consumed the 2-byte header via `advance(2)`,
+draining the buffer, then called `read_into_uninit(0, ...)` which
+unconditionally dereferenced `chunks.front()`.
+
+Fix: early return in `read_into_uninit` when `n == 0`, matching
+`advance` and `split_to` which already handled the zero case. Empty
+messages are valid in ZMTP and must not panic.

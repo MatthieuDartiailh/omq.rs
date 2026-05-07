@@ -1054,6 +1054,12 @@ impl SocketDriver {
             },
         );
 
+        let recv_direct = if can_bypass_actor_recv(self.socket_type) {
+            Some(self.recv_tx.clone())
+        } else {
+            None
+        };
+
         let InprocConn {
             out,
             in_rx,
@@ -1074,6 +1080,7 @@ impl SocketDriver {
             child_cancel,
             peer_props,
             self.options.max_message_size,
+            recv_direct,
         ));
     }
 
@@ -1373,6 +1380,7 @@ async fn inproc_peer_driver(
     cancel: tokio_util::sync::CancellationToken,
     peer_props: omq_proto::proto::command::PeerProperties,
     max_message_size: Option<usize>,
+    recv_direct: Option<async_channel::Sender<omq_proto::message::Message>>,
 ) {
     use crate::engine::{DriverCommand, PeerOut};
     use omq_proto::proto::greeting::ZMTP_MINOR;
@@ -1431,11 +1439,20 @@ async fn inproc_peer_driver(
                         {
                             return;
                         }
-                        if emit_event(&peer_out, peer_id, ZmtpEvent::Message(m))
-                            .await
-                            .is_err()
-                        {
-                            return;
+                        match recv_direct.as_ref() {
+                            Some(tx) => {
+                                if tx.send(m).await.is_err() {
+                                    return;
+                                }
+                            }
+                            None => {
+                                if emit_event(&peer_out, peer_id, ZmtpEvent::Message(m))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
                         }
                     }
                     Some(InprocFrame::Command(c)) => {

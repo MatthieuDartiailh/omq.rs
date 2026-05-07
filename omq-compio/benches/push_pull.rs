@@ -79,6 +79,7 @@ fn main() {
 
 // ── single-runtime (inproc) ──────────────────────────────────────────
 
+#[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
 fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
     let rt = build_runtime().expect("single runtime");
     common::block_on_and_drain(rt, async {
@@ -130,6 +131,7 @@ fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> co
 
 // ── multi-runtime (wire transports) ──────────────────────────────────
 
+#[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
 fn run_cell_threaded(
     transport: &str,
     peers: usize,
@@ -164,6 +166,7 @@ fn run_cell_threaded(
                         pull_count.fetch_add(drained as usize, Ordering::Relaxed);
                     }
                 }
+                drop(pull);
             });
         })
     };
@@ -219,6 +222,9 @@ fn run_cell_threaded(
 
                 let cell = common::measure_min_of(size, pushes.len(), burst).await;
                 stop.store(true, Ordering::Relaxed);
+                if let Ok(pushes) = Arc::try_unwrap(pushes) {
+                    drop(pushes);
+                }
                 cell
             })
         })
@@ -257,7 +263,7 @@ async fn wait_connected_with_monitors(socks: &[&Socket], monitors: &mut [Monitor
                         MonitorEvent::HandshakeSucceeded { .. } => "handshake_ok",
                         MonitorEvent::Disconnected { .. } => "disconnected",
                         MonitorEvent::Closed => "closed",
-                        _ => "other",
+                        MonitorEvent::PeerCommand { .. } => "peer_command",
                     };
                     *counts.entry(k).or_default() += 1;
                 }

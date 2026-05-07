@@ -134,8 +134,8 @@ pub(super) struct SocketInner {
     /// Cached route for the common single-peer case. Invalidated
     /// when `peers_gen` advances past the stored generation.
     pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
-    pub(super) in_tx: flume::Sender<InprocFrame>,
-    pub(super) in_rx: flume::Receiver<InprocFrame>,
+    pub(super) in_tx: blume::Sender<InprocFrame>,
+    pub(super) in_rx: blume::Receiver<InprocFrame>,
     /// Batch-drain cache for the direct-recv path. `try_direct_recv` drains
     /// all codec events from one TCP delivery into here; `recv`/`try_recv`
     /// pop raw messages and apply `post_recv_apply`. Uncontended on a
@@ -250,7 +250,7 @@ pub(super) enum PeerOut {
     /// Inproc: shared sender + our identity (so the receiving peer
     /// knows where the frame came from for identity routing).
     Inproc {
-        sender: flume::Sender<InprocFrame>,
+        sender: blume::Sender<InprocFrame>,
         our_identity: Bytes,
     },
     Wire(WirePeerHandle),
@@ -649,7 +649,7 @@ pub(crate) async fn try_one_shot_large_recv(
     }
 
     // 1) Peek + transition codec under peer_io.
-    let payload_len = {
+    let (payload_len, prefilled) = {
         let Ok(mut io) = state.peer_io.lock() else {
             return OneShotLargeRecvOutcome::Skipped;
         };
@@ -658,17 +658,35 @@ pub(crate) async fn try_one_shot_large_recv(
             Ok(None) => return OneShotLargeRecvOutcome::Skipped,
             Err(e) => return OneShotLargeRecvOutcome::ProtoErr(e),
         };
-        if info.payload_len < state.large_message_threshold || info.buffered_payload_prefix != 0 {
+        if info.payload_len < state.large_message_threshold {
             return OneShotLargeRecvOutcome::Skipped;
         }
-        // begin_supplied_payload returns Some(payload_len) iff
-        // ready + header buffered + no prefix. We just verified all
-        // three; treat None as a programming error mid-flight.
-        match io.codec.begin_supplied_payload() {
-            Some(plen) => plen,
-            None => return OneShotLargeRecvOutcome::Skipped,
+        let already_one_shot =
+            matches!(sguard.as_ref(), Some(RecvStreamState::OneShot));
+        if info.buffered_payload_prefix == 0 {
+            match io.codec.begin_supplied_payload() {
+                Some(plen) => (plen, None),
+                None => return OneShotLargeRecvOutcome::Skipped,
+            }
+        } else if already_one_shot {
+            match io.codec.begin_supplied_payload_with_prefix() {
+                Some((plen, prefix)) => {
+                    let mut acc = BytesMut::with_capacity(plen);
+                    for chunk in prefix.chunks() {
+                        acc.extend_from_slice(chunk);
+                    }
+                    (plen, Some(acc))
+                }
+                None => return OneShotLargeRecvOutcome::Skipped,
+            }
+        } else {
+            return OneShotLargeRecvOutcome::Skipped;
         }
     };
+
+    if let Some(acc) = prefilled {
+        return one_shot_with_prefix(state, sguard, payload_len, acc).await;
+    }
 
     let mut acc = BytesMut::with_capacity(payload_len);
     let mut extra: Option<bytes::Bytes> = None;
@@ -796,6 +814,42 @@ pub(crate) async fn try_one_shot_large_recv(
 ///
 /// Returns `Took` on success (either transition), or `IoErr`/`ProtoErr`
 /// on failure. Never returns `Skipped`.
+async fn one_shot_with_prefix(
+    state: &Arc<DirectIoState>,
+    sguard: &mut async_lock::MutexGuard<'_, Option<RecvStreamState>>,
+    payload_len: usize,
+    mut acc: BytesMut,
+) -> OneShotLargeRecvOutcome {
+    **sguard = Some(RecvStreamState::OneShot);
+
+    if acc.len() < payload_len {
+        let fd = {
+            let Ok(io) = state.peer_io.lock() else {
+                return OneShotLargeRecvOutcome::Skipped;
+            };
+            io.reader.fd_clone()
+        };
+        if let Err(e) = fd.read_until(&mut acc, payload_len).await {
+            return OneShotLargeRecvOutcome::IoErr(e);
+        }
+    }
+    state.last_input_nanos.store(
+        state.hb_epoch.elapsed().as_nanos() as u64,
+        Ordering::Relaxed,
+    );
+
+    let payload_bytes = acc.freeze();
+    {
+        let Ok(mut io) = state.peer_io.lock() else {
+            return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
+        };
+        if let Err(e) = io.codec.supply_payload(payload_bytes) {
+            return OneShotLargeRecvOutcome::ProtoErr(e);
+        }
+    }
+    OneShotLargeRecvOutcome::Took
+}
+
 pub(crate) async fn one_shot_recv_and_feed(
     state: &Arc<DirectIoState>,
     sguard: &mut async_lock::MutexGuard<'_, Option<RecvStreamState>>,
@@ -960,8 +1014,8 @@ impl PeerOut {
             } => {
                 let frame = InprocFrame::message_from(our_identity.clone(), msg);
                 sender.try_send(frame).map_err(|e| match e {
-                    flume::TrySendError::Full(_) => Error::WouldBlock,
-                    flume::TrySendError::Disconnected(_) => Error::Closed,
+                    blume::TrySendError::Full(_) => Error::WouldBlock,
+                    blume::TrySendError::Disconnected(_) => Error::Closed,
                 })
             }
             Self::Wire(handle) => {
@@ -986,7 +1040,7 @@ impl PeerOut {
     pub(super) fn try_send(
         &self,
         msg: &Message,
-    ) -> std::result::Result<(), flume::TrySendError<()>> {
+    ) -> std::result::Result<(), blume::TrySendError<()>> {
         match self {
             Self::Inproc {
                 sender,
@@ -994,17 +1048,17 @@ impl PeerOut {
             } => {
                 let frame = InprocFrame::message_from(our_identity.clone(), msg.clone());
                 sender.try_send(frame).map_err(|e| match e {
-                    flume::TrySendError::Full(_) => flume::TrySendError::Full(()),
-                    flume::TrySendError::Disconnected(_) => flume::TrySendError::Disconnected(()),
+                    blume::TrySendError::Full(_) => blume::TrySendError::Full(()),
+                    blume::TrySendError::Disconnected(_) => blume::TrySendError::Disconnected(()),
                 })
             }
             Self::Wire(handle) => {
                 let tx = handle.read().expect("wire peer handle lock").clone();
                 tx.try_send(DriverCommand::SendMessage(msg.clone()))
                     .map_err(|e| match e {
-                        flume::TrySendError::Full(_) => flume::TrySendError::Full(()),
+                        flume::TrySendError::Full(_) => blume::TrySendError::Full(()),
                         flume::TrySendError::Disconnected(_) => {
-                            flume::TrySendError::Disconnected(())
+                            blume::TrySendError::Disconnected(())
                         }
                     })
             }
@@ -1031,8 +1085,8 @@ impl PeerOut {
 impl SocketInner {
     pub(super) fn new(socket_type: SocketType, options: Options) -> Arc<Self> {
         let (in_tx, in_rx) = match options.recv_hwm {
-            None => flume::unbounded::<InprocFrame>(),
-            Some(hwm) => flume::bounded::<InprocFrame>((hwm as usize).max(16)),
+            None => blume::unbounded::<InprocFrame>(),
+            Some(hwm) => blume::bounded::<InprocFrame>((hwm as usize).max(16)),
         };
         // Conflate forces cap-1 with drain-before-send semantics so that only
         // the latest message survives in the queue at any point in time.
@@ -1073,6 +1127,7 @@ impl SocketInner {
         } else {
             options.identity.clone()
         };
+        #[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded by design
         Arc::new(Self {
             socket_type,
             inproc_identity,

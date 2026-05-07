@@ -90,45 +90,7 @@ impl ChunkedInputBuf {
         }
     }
 
-    /// Copy `n` bytes into `dest[..n]` and advance. Single-chunk fast path
-    /// is a memcpy; multi-chunk iterates. Used by the inline message fast
-    /// path to skip the Payload intermediary.
-    #[inline]
-    pub(crate) fn read_into(&mut self, n: usize, dest: &mut [u8]) {
-        debug_assert!(n <= self.total_len);
-        debug_assert!(n <= dest.len());
-        self.total_len -= n;
-        let front = self.chunks.front().expect("total_len accounting");
-        let avail = front.len() - self.front_offset;
-        if n <= avail {
-            dest[..n].copy_from_slice(&front[self.front_offset..self.front_offset + n]);
-            self.front_offset += n;
-            if self.front_offset >= front.len() {
-                self.chunks.pop_front();
-                self.front_offset = 0;
-            }
-            return;
-        }
-        let mut remaining = n;
-        let mut pos = 0;
-        while remaining > 0 {
-            let front = self.chunks.front().expect("total_len accounting");
-            let start = self.front_offset;
-            let avail = front.len() - start;
-            let take = remaining.min(avail);
-            dest[pos..pos + take].copy_from_slice(&front[start..start + take]);
-            pos += take;
-            remaining -= take;
-            if take >= avail {
-                self.chunks.pop_front();
-                self.front_offset = 0;
-            } else {
-                self.front_offset += take;
-            }
-        }
-    }
-
-    /// Like [`read_into`](Self::read_into) but writes into a
+    /// Copy `n` bytes into uninitialized `dest[..n]` and advance. Writes into a
     /// `MaybeUninit<u8>` slice, allowing the caller to skip zeroing the
     /// destination. After this call, `dest[..n]` is initialized.
     #[inline]
@@ -139,6 +101,9 @@ impl ChunkedInputBuf {
     ) {
         debug_assert!(n <= self.total_len);
         debug_assert!(n <= dest.len());
+        if n == 0 {
+            return;
+        }
         self.total_len -= n;
         let front = self.chunks.front().expect("total_len accounting");
         let avail = front.len() - self.front_offset;
@@ -397,5 +362,24 @@ mod tests {
         assert_eq!(p.as_bytes(), &b"cdefg"[..]);
         assert_eq!(buf.len(), 1);
         assert_eq!(buf.peek_array::<1>(), Some(*b"h"));
+    }
+
+    #[test]
+    fn read_into_uninit_zero_on_empty() {
+        let mut buf = ChunkedInputBuf::new();
+        let mut dest = [std::mem::MaybeUninit::uninit(); 4];
+        buf.read_into_uninit(0, &mut dest);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn read_into_uninit_zero_after_drain() {
+        let mut buf = ChunkedInputBuf::new();
+        push_bytes(&mut buf, b"\x00\x00");
+        buf.advance(2);
+        assert!(buf.is_empty());
+        let mut dest = [std::mem::MaybeUninit::uninit(); 4];
+        buf.read_into_uninit(0, &mut dest);
+        assert!(buf.is_empty());
     }
 }

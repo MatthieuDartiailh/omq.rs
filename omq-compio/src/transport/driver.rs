@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use flume::{Receiver, Sender};
+use flume::Receiver;
 use smallvec::SmallVec;
 
 use omq_proto::endpoint::Endpoint;
@@ -124,7 +124,7 @@ pub(crate) struct MonitorCtx {
 
 /// Events drained from the codec under the [`PeerIo`] lock that need
 /// post-processing OUTSIDE the lock (because the post-processing
-/// awaits on the per-socket `peer_in_tx` flume channel, which we
+/// awaits on the per-socket `peer_in_tx` blume channel, which we
 /// must not hold across).
 enum Drained {
     Handshake {
@@ -154,7 +154,7 @@ fn make_codec(role: Role, socket_type: SocketType, options: &Options) -> Connect
 async fn handle_sub_cmd(
     socket_type: SocketType,
     monitor_ctx: Option<&MonitorCtx>,
-    peer_in_tx: &flume::Sender<InprocFrame>,
+    peer_in_tx: &blume::Sender<InprocFrame>,
     cmd: Command,
 ) -> std::io::Result<()> {
     let prefix = match &cmd {
@@ -231,8 +231,8 @@ pub(crate) async fn run_connection(
     options: Options,
     inbox: Receiver<DriverCommand>,
     shared_msg_rx: Option<Receiver<Message>>,
-    peer_in_tx: Sender<InprocFrame>,
-    peer_snapshot_tx: Sender<InprocPeerSnapshot>,
+    peer_in_tx: blume::Sender<InprocFrame>,
+    peer_snapshot_tx: flume::Sender<InprocPeerSnapshot>,
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {
     let peer_io: SharedPeerIo = state.peer_io.clone();

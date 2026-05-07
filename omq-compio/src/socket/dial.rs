@@ -124,6 +124,7 @@ async fn dial_supervisor_tcp(
             continue;
         };
         let _ = inner.options.tcp_keepalive.apply(&poll_fd);
+        let _ = inner.options.apply_socket_buffers(&poll_fd);
         let peer_addr = stream.peer_addr().ok();
         let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
         inner.monitor.publish(MonitorEvent::Connected {

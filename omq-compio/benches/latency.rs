@@ -102,6 +102,7 @@ fn append_jsonl(transport: &str, msg_size: usize, c: LatencyCell) {
     }
 }
 
+#[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
 async fn run_cell(transport: &str, size: usize, seq: usize) -> LatencyCell {
     let ep = common::endpoint(transport, seq);
     let rep = Socket::new(SocketType::Rep, Options::default());

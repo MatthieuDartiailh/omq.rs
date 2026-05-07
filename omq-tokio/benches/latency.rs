@@ -142,6 +142,13 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> LatencyCell {
     }
 
     responder.abort();
+    let _ = responder.await;
+    if let Ok(req) = std::sync::Arc::try_unwrap(req) {
+        let _ = req.close().await;
+    }
+    if let Ok(rep) = std::sync::Arc::try_unwrap(rep) {
+        let _ = rep.close().await;
+    }
 
     rtts.sort_unstable();
     LatencyCell {

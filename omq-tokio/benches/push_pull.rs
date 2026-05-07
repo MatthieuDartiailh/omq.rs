@@ -3,6 +3,8 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use omq_tokio::{Message, Options, Socket, SocketType};
 
@@ -77,5 +79,14 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         }
     };
 
-    common::measure_min_of(size, pushes.len(), burst).await
+    let cell = common::measure_min_of(size, pushes.len(), burst).await;
+    if let Ok(pushes) = Arc::try_unwrap(pushes) {
+        for p in pushes {
+            let _ = p.close().await;
+        }
+    }
+    if let Ok(pull) = Arc::try_unwrap(pull) {
+        let _ = pull.close().await;
+    }
+    cell
 }

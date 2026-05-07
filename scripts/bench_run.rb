@@ -50,14 +50,32 @@ ENV['OMQ_BENCH_SIZES'] = '32,128,512,2048,8192,32768,131072' if options[:all_siz
 
 puts "=== bench run #{run_id} ==="
 
+# Split by transport: one process per transport avoids accumulating
+# hundreds of TCP TIME_WAIT sockets in a single bench binary, which
+# can stall connection handshakes late in a full sweep.
+transport_groups = if ENV['OMQ_BENCH_TRANSPORTS']
+                     [nil] # user already picked; pass through as-is
+                   else
+                     base = %w[inproc ipc tcp]
+                     feats = options[:features] || ''
+                     base << 'lz4+tcp'  if feats.include?('lz4')
+                     base << 'zstd+tcp' if feats.include?('zstd')
+                     base
+                   end
+
 options[:backends].each do |backend|
   crate = "omq-#{backend}"
-  cmd   = %w[cargo bench -p] + [crate]
-  cmd  += ['--features', options[:features]] if options[:features]
-  cmd  += ['--bench',    options[:bench]]    if options[:bench]
+  transport_groups.each do |transport|
+    cmd = %w[cargo bench -p] + [crate]
+    cmd += ['--features', options[:features]] if options[:features]
+    cmd += ['--bench',    options[:bench]]    if options[:bench]
 
-  puts "\n--- #{crate} ---"
-  system(*cmd, chdir: ROOT) || abort("#{crate} bench failed")
+    env = {}
+    env['OMQ_BENCH_TRANSPORTS'] = transport if transport
+    label = transport ? "#{crate} [#{transport}]" : crate
+    puts "\n--- #{label} ---"
+    system(env, *cmd, chdir: ROOT) || abort("#{label} bench failed")
+  end
 end
 
 if options[:with_priority]
