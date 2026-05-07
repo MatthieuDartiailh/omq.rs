@@ -348,6 +348,7 @@ pub(crate) async fn run_connection(
             codec_has_input = false; // consumed; re-set by stream arm
             let mut io = peer_io.lock().expect("peer_io");
             let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
+            // Control-plane events first (handshake must precede messages).
             while let Some(ev) = io.codec.poll_event() {
                 match ev {
                     Event::HandshakeSucceeded {
@@ -384,12 +385,7 @@ pub(crate) async fn run_connection(
                                             let mut eq =
                                                 state.encoded_queue.lock().expect("encoded_queue");
                                             for wire in &wires {
-                                                let total: usize = wire
-                                                    .parts()
-                                                    .iter()
-                                                    .map(omq_proto::Payload::len)
-                                                    .sum();
-                                                if total < crate::socket::FLAT_THRESHOLD {
+                                                if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
                                                     eq.encode_and_push_flat(wire);
                                                 } else {
                                                     eq.encode_and_push(wire);
@@ -412,24 +408,21 @@ pub(crate) async fn run_connection(
                             });
                         }
                     }
-                    Event::Message(m) => {
-                        // Compression transport: decode the wire
-                        // payload back to plaintext before delivery.
-                        // `None` means the wire message was a dict
-                        // shipment consumed at the transport layer -
-                        // don't surface it.
-                        let m = if let Some(dec) = io.decoder.as_mut() {
-                            match dec.decode(m)? {
-                                Some(plain) => plain,
-                                None => continue,
-                            }
-                        } else {
-                            m
-                        };
-                        out.push(Drained::Msg(m));
-                    }
+                    Event::Message(_) => unreachable!("messages use poll_message"),
                     Event::Command(c) => out.push(Drained::Cmd(c)),
                 }
+            }
+            // Data-plane messages (separate queue since message-queue split).
+            while let Some(m) = io.codec.poll_message() {
+                let m = if let Some(dec) = io.decoder.as_mut() {
+                    match dec.decode(m)? {
+                        Some(plain) => plain,
+                        None => continue,
+                    }
+                } else {
+                    m
+                };
+                out.push(Drained::Msg(m));
             }
             out
         } else {
@@ -470,9 +463,9 @@ pub(crate) async fn run_connection(
                     // (cancel). pyzmq XSUB and libzmq's older paths
                     // emit these instead of the 3.1 wire commands.
                     if matches!(socket_type, SocketType::Pub | SocketType::XPub)
-                        && m.parts().len() == 1
+                        && m.len() == 1
                     {
-                        let body = m.parts()[0].as_bytes();
+                        let body = m.part_bytes(0).unwrap();
                         if let Some((tag, prefix)) = body.split_first() {
                             let cmd = match tag {
                                 0x01 => {
@@ -924,9 +917,7 @@ pub(crate) async fn run_connection(
                                     let mut eq = state.encoded_queue.lock().expect("encoded_queue");
                                     let cr = eq.total_bytes() >= cap;
                                     for wire in &wires {
-                                        let total: usize = wire.parts().iter()
-                                            .map(omq_proto::Payload::len).sum();
-                                        if total < crate::socket::FLAT_THRESHOLD {
+                                        if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
                                             eq.encode_and_push_flat(wire);
                                         } else {
                                             eq.encode_and_push(wire);
@@ -956,9 +947,7 @@ pub(crate) async fn run_connection(
                                     // still sits in eq.
                                     let mut eq = state.encoded_queue.lock().expect("encoded_queue");
                                     let cr = eq.total_bytes() >= cap;
-                                    let total: usize = m.parts().iter()
-                                        .map(omq_proto::Payload::len).sum();
-                                    if total < crate::socket::FLAT_THRESHOLD {
+                                    if m.byte_len() < crate::socket::FLAT_THRESHOLD {
                                         eq.encode_and_push_flat(&m);
                                     } else {
                                         eq.encode_and_push(&m);
@@ -1013,9 +1002,7 @@ pub(crate) async fn run_connection(
                             let mut eq = state.encoded_queue.lock().expect("encoded_queue");
                             let cr = eq.total_bytes() >= cap;
                             for wire in &wires {
-                                let total: usize = wire.parts().iter()
-                                    .map(omq_proto::Payload::len).sum();
-                                if total < crate::socket::FLAT_THRESHOLD {
+                                if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
                                     eq.encode_and_push_flat(wire);
                                 } else {
                                     eq.encode_and_push(wire);
@@ -1037,9 +1024,7 @@ pub(crate) async fn run_connection(
                             // fast-path sender's.
                             let mut eq = state.encoded_queue.lock().expect("encoded_queue");
                             let cr = eq.total_bytes() >= cap;
-                            let total: usize = m.parts().iter()
-                                .map(omq_proto::Payload::len).sum();
-                            if total < crate::socket::FLAT_THRESHOLD {
+                            if m.byte_len() < crate::socket::FLAT_THRESHOLD {
                                 eq.encode_and_push_flat(&m);
                             } else {
                                 eq.encode_and_push(&m);

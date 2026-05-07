@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use omq_compio::endpoint::Host;
-use omq_compio::message::Payload;
 use omq_compio::{Endpoint, Error, Message, Options, Socket, SocketType};
 
 fn loopback_port() -> u16 {
@@ -50,21 +49,22 @@ async fn router_addresses_dealer_by_identity() {
         .await
         .expect("router recv timeout")
         .unwrap();
-    assert_eq!(r.parts().len(), 2);
-    assert_eq!(r.parts()[0].as_bytes(), &b"dealer-1"[..]);
-    assert_eq!(r.parts()[1].as_bytes(), &b"hello"[..]);
+    assert_eq!(r.len(), 2);
+    assert_eq!(r.part_bytes(0).unwrap(), &b"dealer-1"[..]);
+    assert_eq!(r.part_bytes(1).unwrap(), &b"hello"[..]);
 
     // ROUTER replies by prefixing the dealer identity.
-    let mut reply = Message::new();
-    reply.push_part(Payload::from_bytes(Bytes::from_static(b"dealer-1")));
-    reply.push_part(Payload::from_bytes(Bytes::from_static(b"world")));
+    let reply = Message::multipart([
+        Bytes::from_static(b"dealer-1"),
+        Bytes::from_static(b"world"),
+    ]);
     router.send(reply).await.unwrap();
 
     let d = compio::time::timeout(Duration::from_secs(2), dealer.recv())
         .await
         .expect("dealer recv timeout")
         .unwrap();
-    assert_eq!(d.parts()[0].as_bytes(), &b"world"[..]);
+    assert_eq!(d.part_bytes(0).unwrap(), &b"world"[..]);
 }
 
 #[compio::test]
@@ -89,9 +89,10 @@ async fn router_mandatory_errors_on_unknown_identity() {
         .unwrap();
 
     // Send to an identity nobody owns.
-    let mut bad = Message::new();
-    bad.push_part(Payload::from_bytes(Bytes::from_static(b"ghost")));
-    bad.push_part(Payload::from_bytes(Bytes::from_static(b"oops")));
+    let bad = Message::multipart([
+        Bytes::from_static(b"ghost"),
+        Bytes::from_static(b"oops"),
+    ]);
     let err = router.send(bad).await.err().unwrap();
     assert!(matches!(err, Error::Unroutable), "got {err:?}");
 }
@@ -111,9 +112,10 @@ async fn router_drops_unknown_identity_by_default() {
         .expect("router recv timeout")
         .unwrap();
 
-    let mut bad = Message::new();
-    bad.push_part(Payload::from_bytes(Bytes::from_static(b"nope")));
-    bad.push_part(Payload::from_bytes(Bytes::from_static(b"oops")));
+    let bad = Message::multipart([
+        Bytes::from_static(b"nope"),
+        Bytes::from_static(b"oops"),
+    ]);
     // Default is silent drop (libzmq matches).
     router.send(bad).await.unwrap();
 }

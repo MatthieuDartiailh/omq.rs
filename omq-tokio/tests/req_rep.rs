@@ -50,7 +50,7 @@ async fn req_rep_basic_roundtrip() {
 
     let request = rep.recv().await.unwrap();
     assert_eq!(request.len(), 1);
-    assert_eq!(request.parts()[0].as_bytes(), &b"hello"[..]);
+    assert_eq!(request.part_bytes(0).unwrap(), &b"hello"[..]);
 
     rep.send(Message::single("world")).await.unwrap();
 
@@ -59,7 +59,7 @@ async fn req_rep_basic_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(reply.len(), 1);
-    assert_eq!(reply.parts()[0].as_bytes(), &b"world"[..]);
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"world"[..]);
 }
 
 #[tokio::test]
@@ -98,10 +98,10 @@ async fn req_rep_multiple_rounds() {
     for i in 0..5 {
         req.send(Message::single(format!("q-{i}"))).await.unwrap();
         let got = rep.recv().await.unwrap();
-        assert_eq!(got.parts()[0].as_bytes(), format!("q-{i}").as_bytes());
+        assert_eq!(got.part_bytes(0).unwrap(), format!("q-{i}").as_bytes());
         rep.send(Message::single(format!("a-{i}"))).await.unwrap();
         let reply = req.recv().await.unwrap();
-        assert_eq!(reply.parts()[0].as_bytes(), format!("a-{i}").as_bytes());
+        assert_eq!(reply.part_bytes(0).unwrap(), format!("a-{i}").as_bytes());
     }
 }
 
@@ -129,7 +129,7 @@ async fn dealer_to_rep_envelope() {
 
     let got = rep.recv().await.unwrap();
     assert_eq!(got.len(), 1);
-    assert_eq!(got.parts()[0].as_bytes(), &b"hello"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"hello"[..]);
 
     rep.send(Message::single("world")).await.unwrap();
 
@@ -139,8 +139,8 @@ async fn dealer_to_rep_envelope() {
         .unwrap()
         .unwrap();
     assert_eq!(reply.len(), 2);
-    assert!(reply.parts()[0].is_empty());
-    assert_eq!(reply.parts()[1].as_bytes(), &b"world"[..]);
+    assert!(reply.part_bytes(0).unwrap().is_empty());
+    assert_eq!(reply.part_bytes(1).unwrap(), &b"world"[..]);
 }
 
 #[tokio::test]
@@ -178,14 +178,14 @@ async fn rep_survives_client_disconnect_mid_cycle() {
         .await
         .expect("REP did not receive second client's request")
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes().as_ref(), b"real");
+    assert_eq!(got.part_bytes(0).unwrap().as_ref(), b"real");
 
     rep.send(Message::single("reply")).await.unwrap();
     let reply = tokio::time::timeout(Duration::from_millis(500), req2.recv())
         .await
         .expect("REQ2 did not receive reply")
         .unwrap();
-    assert_eq!(reply.parts()[0].as_bytes().as_ref(), b"reply");
+    assert_eq!(reply.part_bytes(0).unwrap().as_ref(), b"reply");
 }
 
 #[tokio::test]
@@ -217,7 +217,7 @@ async fn req_rep_1000_cycles_tcp() {
             .unwrap_or_else(|_| panic!("cycle {i} timed out"))
             .unwrap();
         let expected = format!("{i}");
-        assert_eq!(r.parts()[0].as_bytes(), expected.as_bytes(), "cycle {i}");
+        assert_eq!(r.part_bytes(0).unwrap(), expected.as_bytes(), "cycle {i}");
     }
 
     rep_task.await.unwrap();

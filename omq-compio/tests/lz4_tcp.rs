@@ -47,7 +47,7 @@ async fn lz4_small_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"hello over lz4"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over lz4"[..]);
 }
 
 #[compio::test]
@@ -64,8 +64,8 @@ async fn lz4_large_compressible_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes().len(), payload.len());
-    assert_eq!(&m.parts()[0].as_bytes()[..], &payload[..]);
+    assert_eq!(m.part_bytes(0).unwrap().len(), payload.len());
+    assert_eq!(&m.part_bytes(0).unwrap()[..], &payload[..]);
 }
 
 #[compio::test]
@@ -82,7 +82,7 @@ async fn lz4_multipart_message_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(m.len(), 3);
-    assert_eq!(m.parts()[0].as_bytes(), &b"a"[..]);
-    assert_eq!(m.parts()[1].as_bytes(), &b"bb"[..]);
-    assert_eq!(m.parts()[2].as_bytes(), &b"ccc"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
+    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
 }

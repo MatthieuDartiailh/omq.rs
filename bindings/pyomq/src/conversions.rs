@@ -1,7 +1,7 @@
 //! Bytes <-> Message conversion. Hot path; avoid copies.
 
 use bytes::Bytes;
-use omq_proto::message::{Message, Payload};
+use omq_proto::message::Message;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
@@ -59,19 +59,16 @@ pub fn bytes_from_pyany(b: &Bound<'_, PyAny>) -> PyResult<Bytes> {
 
 /// Build a multipart `Message` from a Python list/tuple of bytes-like.
 pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
-    let mut msg = Message::new();
     let it = parts.iter()?;
-    for part in it {
-        let part: Bound<'_, PyAny> = part?;
-        msg.push_part(Payload::from_bytes(bytes_from_pyany(&part)?));
-    }
-    Ok(msg)
+    let collected: Vec<Bytes> = it
+        .map(|part| bytes_from_pyany(&part?))
+        .collect::<PyResult<_>>()?;
+    Ok(Message::multipart(collected))
 }
 
 /// Return a Python list of bytes - one per message frame.
 pub fn parts_to_pylist<'py>(py: Python<'py>, msg: Message) -> Bound<'py, PyList> {
-    let parts = msg.into_parts();
     let items: Vec<Bound<'py, PyBytes>> =
-        parts.into_iter().map(|p| PyBytes::new_bound(py, &p.as_bytes())).collect();
+        msg.iter().map(|b| PyBytes::new_bound(py, &b)).collect();
     PyList::new_bound(py, items)
 }

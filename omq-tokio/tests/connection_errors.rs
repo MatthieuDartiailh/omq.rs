@@ -52,7 +52,7 @@ async fn server_survives_pre_handshake_drop() {
         .await
         .expect("recv timed out after rude clients")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes().as_ref(), b"alive");
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"alive");
 }
 
 #[tokio::test]
@@ -85,7 +85,7 @@ async fn server_survives_mid_session_abrupt_drop() {
         .await
         .expect("recv timed out after abrupt drop")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes().as_ref(), b"second");
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"second");
 }
 
 #[tokio::test]
@@ -116,7 +116,7 @@ async fn reconnect_after_ipc_peer_restarts() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes().as_ref(), b"before");
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"before");
 
     // Listener restarts: close pull1 (removes the socket file) then rebind.
     pull1.close().await.unwrap();
@@ -137,5 +137,5 @@ async fn reconnect_after_ipc_peer_restarts() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(m2.parts()[0].as_bytes().as_ref(), b"after");
+    assert_eq!(m2.part_bytes(0).unwrap().as_ref(), b"after");
 }

@@ -55,7 +55,7 @@ async fn small_plaintext_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
 }
 
 #[tokio::test]
@@ -71,7 +71,7 @@ async fn large_compressible_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes().to_vec(), plain);
+    assert_eq!(m.part_bytes(0).unwrap().to_vec(), plain);
 }
 
 #[tokio::test]
@@ -93,9 +93,9 @@ async fn multipart_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(m.len(), 3);
-    assert_eq!(m.parts()[0].as_bytes(), &b"hdr"[..]);
-    assert_eq!(m.parts()[1].as_bytes().to_vec(), big);
-    assert_eq!(m.parts()[2].as_bytes(), &b"tail"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hdr"[..]);
+    assert_eq!(m.part_bytes(1).unwrap().to_vec(), big);
+    assert_eq!(m.part_bytes(2).unwrap(), &b"tail"[..]);
 }
 
 #[tokio::test]
@@ -137,7 +137,7 @@ async fn dict_roundtrip_small_payload() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(m.parts()[0].as_bytes().to_vec(), plain);
+        assert_eq!(m.part_bytes(0).unwrap().to_vec(), plain);
     }
 }
 
@@ -156,7 +156,7 @@ async fn many_messages_in_a_row() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(m.parts()[0].as_bytes(), format!("m-{i}").as_bytes());
+        assert_eq!(m.part_bytes(0).unwrap(), format!("m-{i}").as_bytes());
     }
 }
 
@@ -188,7 +188,7 @@ async fn static_dict_survives_reconnect() {
             .await
             .expect("timed out waiting for message")
             .expect("recv error");
-        assert_eq!(m.parts()[0].as_bytes().to_vec(), payload);
+        assert_eq!(m.part_bytes(0).unwrap().to_vec(), payload);
     }
 }
 

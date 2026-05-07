@@ -52,7 +52,7 @@ async fn connect_retries_until_listener_appears() {
         .await
         .expect("recv timeout")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"eventually"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"eventually"[..]);
 }
 
 #[compio::test]
@@ -79,7 +79,7 @@ async fn reconnect_after_peer_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(&*m.parts()[0].as_bytes(), b"before");
+    assert_eq!(&*m.part_bytes(0).unwrap(), b"before");
 
     // Peer restarts: close cleanly. close() cancels listener tasks
     // immediately so the OS port is freed as the runtime processes
@@ -104,7 +104,7 @@ async fn reconnect_after_peer_restart() {
         .await
         .expect("recv after peer restart timed out")
         .unwrap();
-    assert_eq!(&*m.parts()[0].as_bytes(), b"after");
+    assert_eq!(&*m.part_bytes(0).unwrap(), b"after");
 }
 
 #[compio::test]

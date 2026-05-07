@@ -22,7 +22,7 @@ pub use omq_proto::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, IpcPath, KeepAlive,
-    MechanismConfig, Message, OnMute, Options, Payload, ReconnectPolicy, Result, SocketType,
+    MechanismConfig, Message, MessageIter, OnMute, Options, ReconnectPolicy, Result, SocketType,
     is_compatible,
 };
 

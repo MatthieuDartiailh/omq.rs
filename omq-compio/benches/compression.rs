@@ -63,10 +63,7 @@ mod inner {
             let m = omq_compio::Message::single(plain.clone());
             let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
                 out.last().map_or(plain.len(), |m| {
-                    m.parts()
-                        .iter()
-                        .map(omq_compio::Payload::len)
-                        .sum::<usize>()
+                    m.byte_len()
                 })
             };
             let lz4_n = encoded_len(Lz4Encoder::new().encode(&m).unwrap());
@@ -146,10 +143,7 @@ mod inner {
                 // shipment to the peer (one-shot per connection); the
                 // payload is in the second message.
                 out.last().map_or(plain.len(), |m| {
-                    m.parts()
-                        .iter()
-                        .map(omq_compio::Payload::len)
-                        .sum::<usize>()
+                    m.byte_len()
                 })
             };
             let lz4_n = encoded_len(
@@ -223,10 +217,7 @@ mod inner {
         let m = omq_compio::Message::single(plain.clone());
         let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
             out.last().map_or(plain.len(), |m| {
-                m.parts()
-                    .iter()
-                    .map(omq_compio::Payload::len)
-                    .sum::<usize>()
+                m.byte_len()
             })
         };
         match transport {

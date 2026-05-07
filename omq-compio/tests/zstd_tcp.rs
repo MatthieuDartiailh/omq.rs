@@ -57,7 +57,7 @@ async fn zstd_small_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"hello over zstd"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over zstd"[..]);
 }
 
 #[compio::test]
@@ -72,7 +72,7 @@ async fn zstd_large_compressible_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(&m.parts()[0].as_bytes()[..], &payload[..]);
+    assert_eq!(&m.part_bytes(0).unwrap()[..], &payload[..]);
 }
 
 #[compio::test]
@@ -89,9 +89,9 @@ async fn zstd_multipart_message_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(m.len(), 3);
-    assert_eq!(m.parts()[0].as_bytes(), &b"a"[..]);
-    assert_eq!(m.parts()[1].as_bytes(), &b"bb"[..]);
-    assert_eq!(m.parts()[2].as_bytes(), &b"ccc"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
+    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
 }
 
 /// Regression: `close()` used to cancel the dialer supervisor task (and
@@ -147,7 +147,7 @@ async fn static_dict_survives_reconnect() {
             .await
             .expect("timed out")
             .expect("recv error");
-        assert_eq!(m.parts()[0].as_bytes().to_vec(), payload);
+        assert_eq!(m.part_bytes(0).unwrap().to_vec(), payload);
     }
 }
 
@@ -229,7 +229,7 @@ async fn zstd_auto_train_end_to_end() {
 
     let mut got = 0usize;
     while let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), pull.recv()).await {
-        assert_eq!(m.parts()[0].as_bytes(), &sample[..]);
+        assert_eq!(m.part_bytes(0).unwrap(), &sample[..]);
         got += 1;
     }
     assert!(

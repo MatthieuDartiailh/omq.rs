@@ -52,13 +52,12 @@ impl Submitter {
                 // frames; this matches libzmq. RFC 48's `len(group) + group
                 // + body` single-frame format is UDP-only and applied at
                 // the UDP transport layer (not implemented here yet).
-                let parts = msg.parts();
-                if parts.len() != 2 {
+                if msg.len() != 2 {
                     return Err(Error::Protocol(
                         "RADIO send requires [group, body] (2 parts)".into(),
                     ));
                 }
-                let group_bytes = parts[0].as_bytes();
+                let group_bytes = msg.part_bytes(0).unwrap_or_default();
                 if group_bytes.len() > u8::MAX as usize {
                     return Err(Error::Protocol(
                         "RADIO group name too long (max 255 bytes)".into(),
@@ -234,8 +233,5 @@ impl FanOutSend {
 }
 
 fn first_frame_bytes(msg: &Message) -> Bytes {
-    msg.parts()
-        .first()
-        .map(omq_proto::Payload::as_bytes)
-        .unwrap_or_default()
+    msg.part_bytes(0).unwrap_or_default()
 }

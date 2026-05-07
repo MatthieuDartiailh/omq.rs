@@ -117,7 +117,7 @@ async fn ruby_push_zstd_tcp_sustained() {
         let recv = tokio::time::timeout(Duration::from_secs(1), pull.recv()).await;
         match recv {
             Ok(Ok(msg)) => {
-                let body = msg.parts()[0].as_bytes();
+                let body = msg.part_bytes(0).unwrap();
                 assert_eq!(
                     body.as_ref(),
                     expected.as_bytes(),

@@ -23,8 +23,16 @@ fn tcp_ep(port: u16) -> Endpoint {
     }
 }
 
+extern "C" fn exit_on_signal(_sig: libc::c_int) {
+    unsafe { libc::_exit(0) };
+}
+
 #[tokio::main]
 async fn main() {
+    unsafe {
+        libc::signal(libc::SIGTERM, exit_on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, exit_on_signal as *const () as libc::sighandler_t);
+    }
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("push") => {
@@ -64,18 +72,16 @@ async fn run_pull(port: u16, size: usize, duration: Duration) {
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
-
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        pull.recv().await.unwrap();
+        count += 1;
+        while pull.try_recv().is_ok() {
+            count += 1;
+        }
+        if Instant::now() >= deadline {
             break;
         }
-        match tokio::time::timeout(remaining, pull.recv()).await {
-            Ok(Ok(_)) => count += 1,
-            _ => break,
-        }
     }
-
     let elapsed = t0.elapsed().as_secs_f64();
     println!("{count} {elapsed:.6} {size}");
 }

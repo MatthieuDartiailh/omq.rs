@@ -75,9 +75,9 @@ impl TypeState {
                     ));
                 }
                 let mut new_msg = Message::new();
-                new_msg.push_part(Payload::from_bytes(Bytes::new()));
-                for p in msg.parts() {
-                    new_msg.push_part(p.clone());
+                new_msg.push_part_payload(Payload::from_bytes(Bytes::new()));
+                for p in &msg.parts_payload() {
+                    new_msg.push_part_payload(p.clone());
                 }
                 self.req_awaiting_reply = true;
                 Ok(new_msg)
@@ -90,11 +90,11 @@ impl TypeState {
                 };
                 let mut new_msg = Message::new();
                 for frame in envelope {
-                    new_msg.push_part(Payload::from_bytes(frame));
+                    new_msg.push_part_payload(Payload::from_bytes(frame));
                 }
-                new_msg.push_part(Payload::from_bytes(Bytes::new()));
-                for p in msg.parts() {
-                    new_msg.push_part(p.clone());
+                new_msg.push_part_payload(Payload::from_bytes(Bytes::new()));
+                for p in &msg.parts_payload() {
+                    new_msg.push_part_payload(p.clone());
                 }
                 Ok(new_msg)
             }
@@ -108,52 +108,35 @@ impl TypeState {
     pub fn post_recv(&mut self, t: SocketType, msg: Message) -> Result<Option<Message>> {
         match t {
             SocketType::Req => {
-                // Expecting a reply? Drop unexpected recv.
                 if !self.req_awaiting_reply {
                     return Ok(None);
                 }
-                // Reply must begin with an empty delimiter. Anything else
-                // is a protocol violation from the peer; drop it.
-                let parts = msg.parts();
+                let mut parts = msg.into_parts_payload();
                 if parts.is_empty() || !parts[0].is_empty() {
                     return Ok(None);
                 }
-                let mut body = Message::new();
-                for p in parts.iter().skip(1) {
-                    body.push_part(p.clone());
-                }
+                parts.remove(0);
                 self.req_awaiting_reply = false;
-                Ok(Some(body))
+                Ok(Some(Message::from_payloads_vec(parts)))
             }
             SocketType::Dish => {
-                // Wire format on ZMTP transports is two frames
-                // `[group, body]` (matches libzmq). UDP would
-                // length-prefix the group into a single frame body, but
-                // that lives at the UDP transport layer.
-                let parts = msg.parts();
-                if parts.len() != 2 {
+                if msg.len() != 2 {
                     return Ok(None);
                 }
                 Ok(Some(msg))
             }
             SocketType::Rep => {
-                // Split at first empty delimiter. Frames before it are
-                // envelope; frames after are the request body.
-                let parts = msg.parts();
-                let Some(delim_idx) = parts.iter().position(super::message::Payload::is_empty)
-                else {
-                    return Ok(None); // malformed
+                let parts = msg.into_parts_payload();
+                let Some(delim_idx) = parts.iter().position(Payload::is_empty) else {
+                    return Ok(None);
                 };
                 let mut envelope = Vec::with_capacity(delim_idx);
                 for p in parts.iter().take(delim_idx) {
                     envelope.push(p.as_bytes());
                 }
-                let mut body = Message::new();
-                for p in parts.iter().skip(delim_idx + 1) {
-                    body.push_part(p.clone());
-                }
+                let body_parts: Vec<Payload> = parts.into_iter().skip(delim_idx + 1).collect();
                 self.rep_envelope = Some(envelope);
-                Ok(Some(body))
+                Ok(Some(Message::from_payloads_vec(body_parts)))
             }
             _ => Ok(Some(msg)),
         }
@@ -171,8 +154,8 @@ mod tests {
             .pre_send(SocketType::Req, Message::single("body"))
             .unwrap();
         assert_eq!(out.len(), 2);
-        assert!(out.parts()[0].is_empty());
-        assert_eq!(out.parts()[1].as_bytes(), &b"body"[..]);
+        assert!(out.part_bytes(0).unwrap().is_empty());
+        assert_eq!(out.part_bytes(1).unwrap(), &b"body"[..]);
     }
 
     #[test]
@@ -190,7 +173,7 @@ mod tests {
         let reply = Message::multipart(["", "reply"]);
         let got = s.post_recv(SocketType::Req, reply).unwrap().unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got.parts()[0].as_bytes(), &b"reply"[..]);
+        assert_eq!(got.part_bytes(0).unwrap(), &b"reply"[..]);
         s.pre_send(SocketType::Req, Message::single("b")).unwrap();
     }
 
@@ -218,13 +201,13 @@ mod tests {
         let mut s = TypeState::new();
         let req = Message::multipart(["id-a", "", "body"]);
         let got = s.post_recv(SocketType::Rep, req).unwrap().unwrap();
-        assert_eq!(got.parts()[0].as_bytes(), &b"body"[..]);
+        assert_eq!(got.part_bytes(0).unwrap(), &b"body"[..]);
 
         let reply = s.pre_send(SocketType::Rep, Message::single("ok")).unwrap();
         assert_eq!(reply.len(), 3);
-        assert_eq!(reply.parts()[0].as_bytes(), &b"id-a"[..]);
-        assert!(reply.parts()[1].is_empty());
-        assert_eq!(reply.parts()[2].as_bytes(), &b"ok"[..]);
+        assert_eq!(reply.part_bytes(0).unwrap(), &b"id-a"[..]);
+        assert!(reply.part_bytes(1).unwrap().is_empty());
+        assert_eq!(reply.part_bytes(2).unwrap(), &b"ok"[..]);
     }
 
     #[test]
@@ -240,15 +223,15 @@ mod tests {
         let req = Message::multipart(["id1", "id2", "", "b1", "b2"]);
         let got = s.post_recv(SocketType::Rep, req).unwrap().unwrap();
         assert_eq!(got.len(), 2);
-        assert_eq!(got.parts()[0].as_bytes(), &b"b1"[..]);
-        assert_eq!(got.parts()[1].as_bytes(), &b"b2"[..]);
+        assert_eq!(got.part_bytes(0).unwrap(), &b"b1"[..]);
+        assert_eq!(got.part_bytes(1).unwrap(), &b"b2"[..]);
 
         let reply = s.pre_send(SocketType::Rep, Message::single("r")).unwrap();
         assert_eq!(reply.len(), 4);
-        assert_eq!(reply.parts()[0].as_bytes(), &b"id1"[..]);
-        assert_eq!(reply.parts()[1].as_bytes(), &b"id2"[..]);
-        assert!(reply.parts()[2].is_empty());
-        assert_eq!(reply.parts()[3].as_bytes(), &b"r"[..]);
+        assert_eq!(reply.part_bytes(0).unwrap(), &b"id1"[..]);
+        assert_eq!(reply.part_bytes(1).unwrap(), &b"id2"[..]);
+        assert!(reply.part_bytes(2).unwrap().is_empty());
+        assert_eq!(reply.part_bytes(3).unwrap(), &b"r"[..]);
     }
 
     #[test]
@@ -256,8 +239,8 @@ mod tests {
         let mut s = TypeState::new();
         let m = Message::single("x");
         let out = s.pre_send(SocketType::Push, m.clone()).unwrap();
-        assert_eq!(out.parts()[0].as_bytes(), m.parts()[0].as_bytes());
+        assert_eq!(out.part_bytes(0).unwrap(), m.part_bytes(0).unwrap());
         let got = s.post_recv(SocketType::Pull, m.clone()).unwrap().unwrap();
-        assert_eq!(got.parts()[0].as_bytes(), m.parts()[0].as_bytes());
+        assert_eq!(got.part_bytes(0).unwrap(), m.part_bytes(0).unwrap());
     }
 }

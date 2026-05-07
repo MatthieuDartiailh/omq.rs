@@ -25,7 +25,7 @@ async fn ipc_push_pull_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"hello over ipc"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over ipc"[..]);
 }
 
 #[tokio::test]
@@ -40,13 +40,13 @@ async fn ipc_req_rep_roundtrip() {
 
     req.send(Message::single("ping")).await.unwrap();
     let got = rep.recv().await.unwrap();
-    assert_eq!(got.parts()[0].as_bytes(), &b"ping"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"ping"[..]);
     rep.send(Message::single("pong")).await.unwrap();
     let reply = tokio::time::timeout(Duration::from_millis(500), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.parts()[0].as_bytes(), &b"pong"[..]);
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"pong"[..]);
 }
 
 #[cfg(target_os = "linux")]
@@ -72,7 +72,7 @@ async fn ipc_abstract_push_pull_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"hello over abstract ipc"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over abstract ipc"[..]);
 }
 
 #[tokio::test]
@@ -101,7 +101,7 @@ async fn ipc_connect_before_bind() {
         .await
         .expect("recv timed out after late bind")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"late-bind"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"late-bind"[..]);
 }
 
 #[tokio::test]

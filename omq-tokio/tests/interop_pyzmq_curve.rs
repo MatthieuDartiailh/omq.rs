@@ -135,7 +135,7 @@ ctx.term()
                 String::from_utf8_lossy(&out.stderr)
             );
         };
-        assert_eq!(m.parts()[0].as_bytes(), format!("hello-{i}").as_bytes());
+        assert_eq!(m.part_bytes(0).unwrap(), format!("hello-{i}").as_bytes());
     }
 
     let out = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())

@@ -58,7 +58,7 @@ async fn curve_push_pull_roundtrip_over_ipc() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"hello over curve"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over curve"[..]);
 }
 
 #[tokio::test]
@@ -88,9 +88,9 @@ async fn curve_multipart_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(m.len(), 3);
-    assert_eq!(m.parts()[0].as_bytes(), &b"a"[..]);
-    assert_eq!(m.parts()[1].as_bytes(), &b"bb"[..]);
-    assert_eq!(m.parts()[2].as_bytes(), &b"ccc"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
+    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
 }
 
 #[tokio::test]
@@ -192,7 +192,7 @@ async fn curve_authenticator_admits_known_client() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"authed"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"authed"[..]);
     assert!(
         saw_callback.load(Ordering::SeqCst),
         "authenticator must run"
@@ -260,13 +260,13 @@ async fn curve_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.parts()[0].as_bytes(), &b"q"[..]);
+    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
     let a = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.parts()[0].as_bytes(), &b"a"[..]);
+    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
 }
 
 #[tokio::test]
@@ -295,8 +295,8 @@ async fn curve_dealer_router() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"d1"[..]);
-    assert_eq!(m.parts()[1].as_bytes(), &b"hi"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
 }
 
 #[tokio::test]
@@ -318,7 +318,7 @@ async fn curve_pub_sub() {
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
+            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
             return;
         }
     }
@@ -359,7 +359,7 @@ async fn curve_reconnects_after_server_restart() {
         .await
         .expect("first recv timed out")
         .unwrap();
-    assert_eq!(&*m.parts()[0].as_bytes(), b"before");
+    assert_eq!(&*m.part_bytes(0).unwrap(), b"before");
 
     // Server restarts with same keypair.
     server1.close().await.unwrap();
@@ -380,5 +380,5 @@ async fn curve_reconnects_after_server_restart() {
         .await
         .expect("second recv timed out — CURVE reconnect failed")
         .unwrap();
-    assert_eq!(&*m.parts()[0].as_bytes(), b"after");
+    assert_eq!(&*m.part_bytes(0).unwrap(), b"after");
 }

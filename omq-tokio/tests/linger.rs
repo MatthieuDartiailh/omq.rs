@@ -57,7 +57,7 @@ async fn linger_nonzero_drains_queued_messages_inproc() {
             .await
             .expect("recv timed out")
             .unwrap();
-        let bytes: [u8; 4] = m.parts()[0].as_bytes().as_ref().try_into().unwrap();
+        let bytes: [u8; 4] = m.part_bytes(0).unwrap().as_ref().try_into().unwrap();
         assert_eq!(
             u32::from_be_bytes(bytes),
             i,
@@ -96,7 +96,7 @@ async fn linger_nonzero_drains_queued_messages_tcp() {
             .await
             .expect("recv timed out")
             .unwrap();
-        let bytes: [u8; 4] = m.parts()[0].as_bytes().as_ref().try_into().unwrap();
+        let bytes: [u8; 4] = m.part_bytes(0).unwrap().as_ref().try_into().unwrap();
         assert_eq!(
             u32::from_be_bytes(bytes),
             i,
@@ -133,7 +133,7 @@ async fn linger_forever_waits_until_drained() {
                 .await
                 .expect("recv timed out in linger_forever task")
                 .unwrap();
-            let bytes: [u8; 4] = m.parts()[0].as_bytes().as_ref().try_into().unwrap();
+            let bytes: [u8; 4] = m.part_bytes(0).unwrap().as_ref().try_into().unwrap();
             received.push(u32::from_be_bytes(bytes));
         }
         received

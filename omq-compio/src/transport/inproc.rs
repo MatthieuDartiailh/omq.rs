@@ -58,24 +58,20 @@ pub struct InprocFullMessage {
 
 impl InprocFrame {
     /// Construct a Message frame tagged with the sender's identity.
-    /// Empty identity collapses to `None`. Single-part / single-chunk
-    /// messages take the inline `SinglePart` path; everything else
-    /// boxes the full `Message`.
+    /// Empty identity collapses to `None`. Single-part messages take
+    /// the inline `SinglePart` path; everything else boxes the full
+    /// `Message`.
     pub fn message_from(identity: Bytes, msg: Message) -> Self {
         let peer_identity = if identity.is_empty() {
             None
         } else {
             Some(identity)
         };
-        let parts = msg.parts();
-        if parts.len() == 1 {
-            let chunks = parts[0].chunks();
-            if chunks.len() == 1 {
-                return Self::SinglePart {
-                    peer_identity,
-                    body: chunks[0].clone(),
-                };
-            }
+        if msg.len() == 1 {
+            return Self::SinglePart {
+                peer_identity,
+                body: Bytes::from(msg),
+            };
         }
         Self::Message(Box::new(InprocFullMessage { peer_identity, msg }))
     }

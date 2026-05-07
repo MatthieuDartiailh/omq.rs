@@ -29,8 +29,8 @@ async fn client_server_basic_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(got.len(), 2);
-    assert_eq!(got.parts()[0].as_bytes(), &b"cli1"[..]);
-    assert_eq!(got.parts()[1].as_bytes(), &b"ping"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"cli1"[..]);
+    assert_eq!(got.part_bytes(1).unwrap(), &b"ping"[..]);
 
     server
         .send(Message::multipart(["cli1", "pong"]))
@@ -42,7 +42,7 @@ async fn client_server_basic_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(reply.len(), 1);
-    assert_eq!(reply.parts()[0].as_bytes(), &b"pong"[..]);
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"pong"[..]);
 }
 
 #[compio::test]
@@ -84,7 +84,7 @@ async fn scatter_gather_single_frame_roundtrip() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(m.parts()[0].as_bytes(), format!("m{i}").as_bytes());
+        assert_eq!(m.part_bytes(0).unwrap(), format!("m{i}").as_bytes());
     }
 }
 
@@ -111,14 +111,14 @@ async fn channel_pair_one_to_one() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes(), &b"hi"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"hi"[..]);
 
     b.send(Message::single("there")).await.unwrap();
     let got = compio::time::timeout(Duration::from_millis(500), a.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes(), &b"there"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"there"[..]);
 }
 
 #[compio::test]
@@ -152,8 +152,8 @@ async fn peer_bidirectional_identity_routing() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes(), &b"peer-b"[..]);
-    assert_eq!(got.parts()[1].as_bytes(), &b"hello a"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"peer-b"[..]);
+    assert_eq!(got.part_bytes(1).unwrap(), &b"hello a"[..]);
 
     a.send(Message::multipart(["peer-b", "hello b"]))
         .await
@@ -162,6 +162,6 @@ async fn peer_bidirectional_identity_routing() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes(), &b"peer-a"[..]);
-    assert_eq!(got.parts()[1].as_bytes(), &b"hello b"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"peer-a"[..]);
+    assert_eq!(got.part_bytes(1).unwrap(), &b"hello b"[..]);
 }

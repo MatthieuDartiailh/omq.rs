@@ -117,7 +117,7 @@ fn roundtrip_single_frame_message() {
     match ev {
         Event::Message(m) => {
             assert_eq!(m.len(), 1);
-            assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
+            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
         }
         _ => panic!("expected Message"),
     }
@@ -136,9 +136,9 @@ fn roundtrip_multipart_message() {
     match pull.poll_event().unwrap() {
         Event::Message(m) => {
             assert_eq!(m.len(), 3);
-            assert_eq!(m.parts()[0].as_bytes(), &b"a"[..]);
-            assert_eq!(m.parts()[1].as_bytes(), &b"bb"[..]);
-            assert_eq!(m.parts()[2].as_bytes(), &b"ccc"[..]);
+            assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
+            assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
+            assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
         }
         _ => panic!(),
     }
@@ -278,7 +278,7 @@ fn curve_handshake_and_message_roundtrip() {
     let ev = server.poll_event().expect("message event");
     match ev {
         Event::Message(m) => {
-            assert_eq!(m.parts()[0].as_bytes(), &b"encrypted hello"[..]);
+            assert_eq!(m.part_bytes(0).unwrap(), &b"encrypted hello"[..]);
         }
         other => panic!("unexpected event: {other:?}"),
     }
@@ -396,7 +396,7 @@ fn supply_payload_emits_message() {
     match pull.poll_event().expect("message event") {
         Event::Message(m) => {
             assert_eq!(m.len(), 1);
-            assert_eq!(m.parts()[0].as_bytes(), big.as_slice());
+            assert_eq!(m.part_bytes(0).unwrap(), big.as_slice());
         }
         other => panic!("unexpected: {other:?}"),
     }
@@ -463,8 +463,8 @@ fn ready_resumes_after_supply_payload() {
     assert_eq!(events.len(), 2);
     match (&events[0], &events[1]) {
         (Event::Message(m1), Event::Message(m2)) => {
-            assert_eq!(m1.parts()[0].as_bytes(), big.as_slice());
-            assert_eq!(m2.parts()[0].as_bytes(), &b"after"[..]);
+            assert_eq!(m1.part_bytes(0).unwrap(), big.as_slice());
+            assert_eq!(m2.part_bytes(0).unwrap(), &b"after"[..]);
         }
         _ => panic!("expected two Message events"),
     }
@@ -517,7 +517,7 @@ fn supply_payload_through_curve() {
         .supply_payload(wire.slice(9..9 + payload_len))
         .unwrap();
     match server.poll_event().expect("message after supply") {
-        Event::Message(m) => assert_eq!(m.parts()[0].as_bytes(), plaintext.as_slice()),
+        Event::Message(m) => assert_eq!(m.part_bytes(0).unwrap(), plaintext.as_slice()),
         other => panic!("unexpected: {other:?}"),
     }
 }
@@ -565,7 +565,7 @@ fn supply_payload_through_blake3zmq() {
         .supply_payload(wire.slice(9..9 + payload_len))
         .unwrap();
     match server.poll_event().expect("message after supply") {
-        Event::Message(m) => assert_eq!(m.parts()[0].as_bytes(), plaintext.as_slice()),
+        Event::Message(m) => assert_eq!(m.part_bytes(0).unwrap(), plaintext.as_slice()),
         other => panic!("unexpected: {other:?}"),
     }
 }

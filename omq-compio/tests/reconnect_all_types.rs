@@ -56,7 +56,7 @@ async fn req_rep_reconnect_after_server_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes().as_ref(), b"ping1");
+    assert_eq!(got.part_bytes(0).unwrap().as_ref(), b"ping1");
     rep1.send(Message::single("pong1")).await.unwrap();
     compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
@@ -71,13 +71,13 @@ async fn req_rep_reconnect_after_server_restart() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(got2.parts()[0].as_bytes().as_ref(), b"ping2");
+    assert_eq!(got2.part_bytes(0).unwrap().as_ref(), b"ping2");
     rep2.send(Message::single("pong2")).await.unwrap();
     let reply2 = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .expect("post-restart reply timed out")
         .unwrap();
-    assert_eq!(reply2.parts()[0].as_bytes().as_ref(), b"pong2");
+    assert_eq!(reply2.part_bytes(0).unwrap().as_ref(), b"pong2");
 }
 
 #[compio::test]
@@ -112,13 +112,13 @@ async fn req_state_machine_survives_drop_mid_cycle() {
         .await
         .expect("post-drop recv timed out")
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes().as_ref(), b"c");
+    assert_eq!(got.part_bytes(0).unwrap().as_ref(), b"c");
     rep2.send(Message::single("c-reply")).await.unwrap();
     let reply = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .expect("post-drop reply timed out")
         .unwrap();
-    assert_eq!(reply.parts()[0].as_bytes().as_ref(), b"c-reply");
+    assert_eq!(reply.part_bytes(0).unwrap().as_ref(), b"c-reply");
 }
 
 // ── PUB / SUB ────────────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ async fn pub_sub_reconnect_replays_subscriptions() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(m1.parts()[0].as_bytes().as_ref(), b"x.hello");
+    assert_eq!(m1.part_bytes(0).unwrap().as_ref(), b"x.hello");
 
     pub1.close().await.unwrap();
     let pub2 = rebind(port, || Socket::new(SocketType::Pub, Options::default())).await;
@@ -155,12 +155,12 @@ async fn pub_sub_reconnect_replays_subscriptions() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(m2.parts()[0].as_bytes().as_ref(), b"x.world");
+    assert_eq!(m2.part_bytes(0).unwrap().as_ref(), b"x.world");
     let m3 = compio::time::timeout(Duration::from_millis(500), sub.recv())
         .await
         .expect("second post-restart recv timed out")
         .unwrap();
-    assert_eq!(m3.parts()[0].as_bytes().as_ref(), b"x.again");
+    assert_eq!(m3.part_bytes(0).unwrap().as_ref(), b"x.again");
 }
 
 // ── DEALER / ROUTER ──────────────────────────────────────────────────────────
@@ -187,8 +187,8 @@ async fn dealer_router_reconnect_after_router_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got1.parts()[0].as_bytes().as_ref(), b"d1");
-    assert_eq!(got1.parts()[1].as_bytes().as_ref(), b"hello");
+    assert_eq!(got1.part_bytes(0).unwrap().as_ref(), b"d1");
+    assert_eq!(got1.part_bytes(1).unwrap().as_ref(), b"hello");
 
     router1.close().await.unwrap();
     let router2 = rebind(port, || Socket::new(SocketType::Router, Options::default())).await;
@@ -198,6 +198,6 @@ async fn dealer_router_reconnect_after_router_restart() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(got2.parts()[0].as_bytes().as_ref(), b"d1");
-    assert_eq!(got2.parts()[1].as_bytes().as_ref(), b"after");
+    assert_eq!(got2.part_bytes(0).unwrap().as_ref(), b"d1");
+    assert_eq!(got2.part_bytes(1).unwrap().as_ref(), b"after");
 }

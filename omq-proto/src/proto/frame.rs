@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::message::{Frame, FrameFlags};
+use crate::message::{Frame, FrameFlags, Message, Payload};
 
 use super::chunked_buf::ChunkedInputBuf;
 
@@ -82,9 +82,147 @@ pub fn encode_frame_into(frame: &Frame, out: &mut VecDeque<Bytes>, scratch: &mut
         scratch.put_u8(size as u8);
     }
     out.push_back(scratch.split().freeze());
-    for chunk in frame.payload.chunks() {
-        if !chunk.is_empty() {
-            out.push_back(chunk.clone());
+    if frame.payload.is_contiguous() {
+        let b = frame.payload.as_bytes();
+        if !b.is_empty() {
+            out.push_back(b);
+        }
+    } else {
+        for chunk in frame.payload.chunks() {
+            if !chunk.is_empty() {
+                out.push_back(chunk.clone());
+            }
+        }
+    }
+}
+
+// ---- Message-level frame encoding (NULL mechanism, no transform) ----
+
+#[inline]
+fn write_frame_header(buf: &mut BytesMut, more: bool, payload_len: usize) {
+    let flags = u8::from(more);
+    if payload_len > MAX_SHORT_FRAME_SIZE {
+        buf.extend_from_slice(&[
+            flags | FLAG_LONG,
+            (payload_len >> 56) as u8,
+            (payload_len >> 48) as u8,
+            (payload_len >> 40) as u8,
+            (payload_len >> 32) as u8,
+            (payload_len >> 24) as u8,
+            (payload_len >> 16) as u8,
+            (payload_len >> 8) as u8,
+            payload_len as u8,
+        ]);
+    } else {
+        buf.extend_from_slice(&[flags, payload_len as u8]);
+    }
+}
+
+fn write_payload_flat(buf: &mut BytesMut, part: &Payload) {
+    if let Some(s) = part.as_slice() {
+        buf.extend_from_slice(s);
+    } else {
+        for chunk in part.chunks() {
+            buf.extend_from_slice(chunk);
+        }
+    }
+}
+
+/// Encode all frames of `msg` into a flat contiguous buffer (header + payload
+/// concatenated). Used by the compio fast send path for small messages.
+pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {
+    let parts = msg.parts_payload();
+    let n = parts.len();
+    for (i, part) in parts.iter().enumerate() {
+        write_frame_header(buf, i + 1 < n, part.len());
+        write_payload_flat(buf, part);
+    }
+}
+
+/// Like [`encode_message_flat`] but prepends `prefix` to each part payload.
+pub fn encode_message_prefixed_flat(prefix: &[u8], msg: &Message, buf: &mut BytesMut) {
+    let parts = msg.parts_payload();
+    let n = parts.len();
+    for (i, part) in parts.iter().enumerate() {
+        write_frame_header(buf, i + 1 < n, prefix.len() + part.len());
+        buf.extend_from_slice(prefix);
+        write_payload_flat(buf, part);
+    }
+}
+
+/// Encode all frames of `msg` as separate header + payload `Bytes` chunks
+/// for gather-write (`writev`). Large payloads avoid copying; only the
+/// frame header is serialized into `scratch`.
+pub fn encode_message_gather(
+    msg: &Message,
+    chunks: &mut VecDeque<Bytes>,
+    scratch: &mut BytesMut,
+) {
+    let parts = msg.parts_payload();
+    let n = parts.len();
+    for (i, part) in parts.iter().enumerate() {
+        if scratch.capacity() < MAX_FRAME_HEADER_LEN {
+            *scratch = BytesMut::with_capacity(64 * 1024);
+        }
+        let more = i + 1 < n;
+        let payload_len = part.len();
+        let flags = u8::from(more);
+        if payload_len > MAX_SHORT_FRAME_SIZE {
+            scratch.put_u8(flags | FLAG_LONG);
+            scratch.put_u64(payload_len as u64);
+        } else {
+            scratch.put_u8(flags);
+            scratch.put_u8(payload_len as u8);
+        }
+        chunks.push_back(scratch.split().freeze());
+        if part.is_contiguous() {
+            let b = part.as_bytes();
+            if !b.is_empty() {
+                chunks.push_back(b);
+            }
+        } else {
+            for chunk in part.chunks() {
+                chunks.push_back(chunk.clone());
+            }
+        }
+    }
+}
+
+/// Like [`encode_message_gather`] but prepends `prefix` to each part payload.
+pub fn encode_message_prefixed_gather(
+    prefix: &[u8],
+    msg: &Message,
+    chunks: &mut VecDeque<Bytes>,
+    scratch: &mut BytesMut,
+) {
+    let parts = msg.parts_payload();
+    let n = parts.len();
+    let prefix_bytes = Bytes::copy_from_slice(prefix);
+    for (i, part) in parts.iter().enumerate() {
+        if scratch.capacity() < MAX_FRAME_HEADER_LEN {
+            *scratch = BytesMut::with_capacity(64 * 1024);
+        }
+        let more = i + 1 < n;
+        let payload_len = prefix.len() + part.len();
+        let flags = u8::from(more);
+        if payload_len > MAX_SHORT_FRAME_SIZE {
+            scratch.put_u8(flags | FLAG_LONG);
+            scratch.put_u64(payload_len as u64);
+        } else {
+            scratch.put_u8(flags);
+            scratch.put_u8(payload_len as u8);
+        }
+        chunks.push_back(scratch.split().freeze());
+        chunks.push_back(prefix_bytes.clone());
+        if part.is_contiguous() {
+            let b = part.as_bytes();
+            if !b.is_empty() {
+                chunks.push_back(b);
+            }
+        } else {
+            for chunk in part.chunks() {
+                chunks.push_back(chunk.clone());
+            }
         }
     }
 }
@@ -106,6 +244,7 @@ pub(crate) struct PeekedFrameHeader {
 ///   separately via `buf.len() >= hdr.header_len + hdr.payload_len`.
 /// - `Ok(None)` if the header is not yet fully buffered.
 /// - `Err(_)` on protocol violation (reserved flag bits set, COMMAND+MORE).
+#[inline]
 pub(crate) fn peek_frame_header(buf: &ChunkedInputBuf) -> Result<Option<PeekedFrameHeader>> {
     let Some([flags]) = buf.peek_array::<1>() else {
         return Ok(None);
@@ -146,6 +285,7 @@ pub(crate) fn peek_frame_header(buf: &ChunkedInputBuf) -> Result<Option<PeekedFr
 /// - `Ok(Some(frame))` if a complete frame was available and was consumed.
 /// - `Ok(None)` if more bytes are needed. `buf` is left untouched.
 /// - `Err(_)` on protocol violation (reserved flag bits set, COMMAND+MORE).
+#[inline]
 pub(crate) fn try_decode_frame(buf: &mut ChunkedInputBuf) -> Result<Option<Frame>> {
     let Some(hdr) = peek_frame_header(buf)? else {
         return Ok(None);

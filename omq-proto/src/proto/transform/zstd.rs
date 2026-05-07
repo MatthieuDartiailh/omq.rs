@@ -217,7 +217,7 @@ impl ZstdEncoder {
     }
 
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
-        for part in msg.parts() {
+        for part in &msg.parts_payload() {
             self.maybe_train(&part.as_bytes());
         }
 
@@ -231,8 +231,8 @@ impl ZstdEncoder {
             self.send_dict_shipped = true;
         }
         let mut wire = Message::new();
-        for part in msg.parts() {
-            wire.push_part(self.encode_part(part)?);
+        for part in &msg.parts_payload() {
+            wire.push_part_payload(self.encode_part(part)?);
         }
         out.push(wire);
         Ok(out)
@@ -363,7 +363,7 @@ impl ZstdDecoder {
 
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
         let mut out = Message::new();
-        let parts = msg.into_parts();
+        let parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
         let mut budget_left = self.max_message_size;
         for (idx, part) in parts.into_iter().enumerate() {
@@ -377,10 +377,10 @@ impl ZstdDecoder {
             if sentinel == SENTINEL_PLAIN {
                 let body_len = bytes.len() - 4;
                 take_budget(&mut budget_left, body_len)?;
-                out.push_part(Payload::from_bytes(bytes.slice(4..)));
+                out.push_part_payload(Payload::from_bytes(bytes.slice(4..)));
             } else if sentinel == ZSTD_MAGIC {
                 let part = self.decode_zstd(&bytes, &mut budget_left)?;
-                out.push_part(part);
+                out.push_part_payload(part);
             } else if sentinel == SENTINEL_DICT {
                 if multipart || idx != 0 {
                     return Err(Error::Protocol(
@@ -471,7 +471,7 @@ mod tests {
     fn small_part_uses_plaintext_sentinel() {
         let mut enc = ZstdEncoder::new();
         let wire = enc.encode(&Message::single("hello")).unwrap();
-        let bytes = wire[0].parts()[0].as_bytes();
+        let bytes = wire[0].part_bytes(0).unwrap();
         assert_eq!(&bytes[..4], &SENTINEL_PLAIN);
         assert_eq!(&bytes[4..], &b"hello"[..]);
     }
@@ -481,7 +481,7 @@ mod tests {
         let plain = vec![b'A'; 4096];
         let mut enc = ZstdEncoder::new();
         let wire = enc.encode(&Message::single(plain.clone())).unwrap();
-        let bytes = wire[0].parts()[0].as_bytes();
+        let bytes = wire[0].part_bytes(0).unwrap();
         assert_eq!(&bytes[..4], &ZSTD_MAGIC);
 
         let mut dec = ZstdDecoder::new();
@@ -489,7 +489,7 @@ mod tests {
             .decode(wire.into_iter().next().unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(out.parts()[0].as_bytes().to_vec(), plain);
+        assert_eq!(out.part_bytes(0).unwrap().to_vec(), plain);
     }
 
     #[test]
@@ -497,7 +497,7 @@ mod tests {
         let plain = vec![b'A'; 4096];
         let mut enc = ZstdEncoder::new();
         let wire = enc.encode(&Message::single(plain.clone())).unwrap();
-        let bytes = wire[0].parts()[0].as_bytes();
+        let bytes = wire[0].part_bytes(0).unwrap();
         let declared = zstd_safe::get_frame_content_size(&bytes).unwrap();
         assert_eq!(declared, Some(plain.len() as u64));
     }
@@ -538,7 +538,7 @@ mod tests {
         let mut enc = ZstdEncoder::with_send_dict(dict.clone()).unwrap();
         let wire = enc.encode(&Message::single("hi")).unwrap();
         assert_eq!(wire.len(), 2);
-        let ship = wire[0].parts()[0].as_bytes();
+        let ship = wire[0].part_bytes(0).unwrap();
         // The wire payload IS the dict in full — first 4 bytes are the
         // dict's own ZDICT_MAGIC, doubling as the wire discriminator.
         assert_eq!(ship.as_ref(), &dict[..]);
@@ -554,13 +554,13 @@ mod tests {
         let mut dec = ZstdDecoder::new();
         let wire = enc.encode(&msg).unwrap();
         assert_eq!(wire.len(), 2);
-        assert_eq!(wire[0].parts()[0].as_bytes().as_ref(), &dict[..]);
+        assert_eq!(wire[0].part_bytes(0).unwrap().as_ref(), &dict[..]);
 
         let consumed = dec.decode(wire[0].clone()).unwrap();
         assert!(consumed.is_none());
 
         let recovered = dec.decode(wire[1].clone()).unwrap().unwrap();
-        assert_eq!(recovered.parts()[0].as_bytes().to_vec(), plain);
+        assert_eq!(recovered.part_bytes(0).unwrap().to_vec(), plain);
     }
 
     #[test]
@@ -632,7 +632,7 @@ mod tests {
         let consumed = dec.decode(wire[0].clone()).unwrap();
         assert!(consumed.is_none());
         let m = dec.decode(wire[1].clone()).unwrap().unwrap();
-        assert_eq!(m.parts()[0].as_bytes(), &b"ok"[..]);
+        assert_eq!(m.part_bytes(0).unwrap(), &b"ok"[..]);
     }
 
     #[test]
@@ -645,7 +645,7 @@ mod tests {
             let wire = enc.encode(&Message::single(sample.as_slice())).unwrap();
             for part in wire {
                 if let Some(out) = dec.decode(part).unwrap() {
-                    assert_eq!(out.parts()[0].as_bytes(), &sample[..]);
+                    assert_eq!(out.part_bytes(0).unwrap(), &sample[..]);
                     roundtripped += 1;
                 }
             }
@@ -668,7 +668,7 @@ mod tests {
         let mut got_payload = false;
         for part in wire {
             if let Some(out) = dec.decode(part).unwrap() {
-                assert_eq!(out.parts()[0].as_bytes(), &sample[..]);
+                assert_eq!(out.part_bytes(0).unwrap(), &sample[..]);
                 got_payload = true;
             }
         }

@@ -29,6 +29,7 @@ use super::reject_encrypted_inproc;
 /// Mirror of [`super::send::pre_send_needs_type_state`] for the recv path:
 /// REQ / REP touch state, DISH validates two-frame `[group, body]`
 /// shape. Everything else just returns the message unchanged.
+#[inline]
 fn post_recv_needs_type_state(t: SocketType) -> bool {
     matches!(t, SocketType::Req | SocketType::Rep | SocketType::Dish)
 }
@@ -48,6 +49,7 @@ fn is_identity_recv(t: SocketType) -> bool {
 /// data only" — no ROUTER identity prefix, no XPUB/XSUB subscribe
 /// command surfacing, no UDP-only DISH. Other shapes go through the
 /// driver's inproc-frame hop.
+#[inline]
 fn direct_recv_eligible(t: SocketType) -> bool {
     matches!(
         t,
@@ -368,9 +370,7 @@ impl Socket {
                 if !joined_now {
                     continue;
                 }
-                let mut msg = Message::new();
-                msg.push_part(omq_proto::message::Payload::from_bytes(group));
-                msg.push_part(omq_proto::message::Payload::from_bytes(body));
+                let msg = Message::multipart([group, body]);
                 let frame =
                     InprocFrame::Message(Box::new(crate::transport::inproc::InprocFullMessage {
                         peer_identity: None,
@@ -738,10 +738,40 @@ impl Socket {
     #[allow(clippy::too_many_lines)]
     pub async fn recv(&self) -> Result<Message> {
         let st = self.inner.socket_type;
-        if direct_recv_eligible(st)
-            && let Some(msg) = self.try_direct_recv().await?
-        {
-            return Ok(msg);
+        if direct_recv_eligible(st) {
+            if post_recv_needs_type_state(st) {
+                loop {
+                    let raw = self.inner.recv_cache.get().pop_front();
+                    let Some(raw) = raw else { break };
+                    if let Some(out) = self.post_recv_apply(raw)? {
+                        return Ok(out);
+                    }
+                }
+            } else if self.needs_subscription_filter() {
+                let cache = self.inner.recv_cache.get();
+                while let Some(raw) = cache.pop_front() {
+                    if self.matches_subscription(&raw) {
+                        return Ok(raw);
+                    }
+                }
+
+            } else {
+                // PULL/PAIR: check recv_cache first (filled by swap_messages).
+                let cache = self.inner.recv_cache.get();
+                if let Some(msg) = cache.pop_front() {
+                    return Ok(msg);
+                }
+                let dio = unsafe { &*self.inner.direct_recv_io.get() };
+                if let Some(ref state) = *dio
+                    && let Ok(mut io) = state.peer_io.try_lock()
+                    && let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache)
+                {
+                    return Ok(msg);
+                }
+            }
+            if let Some(msg) = self.try_direct_recv().await? {
+                return Ok(msg);
+            }
         }
         loop {
             let frame = self
@@ -766,10 +796,7 @@ impl Socket {
                     // ~624 B Message struct.
                     let msg = if is_identity_recv(st) {
                         let id = peer_identity.unwrap_or_default();
-                        let mut wrapped = Message::new();
-                        wrapped.push_part(omq_proto::message::Payload::from_bytes(id));
-                        wrapped.push_part(omq_proto::message::Payload::from_bytes(body));
-                        wrapped
+                        Message::with_prefix(id, Message::single(body))
                     } else {
                         Message::single(body)
                     };
@@ -802,12 +829,7 @@ impl Socket {
                     }
                     let msg = if is_identity_recv(st) {
                         let id = peer_identity.unwrap_or_default();
-                        let mut wrapped = Message::new();
-                        wrapped.push_part(omq_proto::message::Payload::from_bytes(id));
-                        for p in msg.parts() {
-                            wrapped.push_part(p.clone());
-                        }
-                        wrapped
+                        Message::with_prefix(id, msg)
                     } else {
                         msg
                     };
@@ -846,9 +868,7 @@ impl Socket {
                             _ => None,
                         };
                         if let Some(b) = body {
-                            let mut m = Message::new();
-                            m.push_part(omq_proto::message::Payload::from_bytes(b));
-                            return Ok(m);
+                            return Ok(Message::single(b));
                         }
                     }
                 }
@@ -874,10 +894,7 @@ impl Socket {
                 }
                 let msg = if is_identity_recv(st) {
                     let id = peer_identity.unwrap_or_default();
-                    let mut wrapped = Message::new();
-                    wrapped.push_part(omq_proto::message::Payload::from_bytes(id));
-                    wrapped.push_part(omq_proto::message::Payload::from_bytes(body));
-                    wrapped
+                    Message::with_prefix(id, Message::single(body))
                 } else {
                     Message::single(body)
                 };
@@ -906,12 +923,7 @@ impl Socket {
                 }
                 let msg = if is_identity_recv(st) {
                     let id = peer_identity.unwrap_or_default();
-                    let mut wrapped = Message::new();
-                    wrapped.push_part(omq_proto::message::Payload::from_bytes(id));
-                    for p in msg.parts() {
-                        wrapped.push_part(p.clone());
-                    }
-                    wrapped
+                    Message::with_prefix(id, msg)
                 } else {
                     msg
                 };
@@ -944,9 +956,7 @@ impl Socket {
                         _ => None,
                     };
                     if let Some(b) = body {
-                        let mut m = Message::new();
-                        m.push_part(omq_proto::message::Payload::from_bytes(b));
-                        return Ok(Some(m));
+                        return Ok(Some(Message::single(b)));
                     }
                 }
                 Ok(None)
@@ -957,7 +967,41 @@ impl Socket {
     /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
     /// currently queued. Does not perform I/O; only messages already buffered
     /// by the background driver are visible.
+    #[inline]
     pub fn try_recv(&self) -> Result<Message> {
+        let st = self.inner.socket_type;
+        if direct_recv_eligible(st) {
+            if post_recv_needs_type_state(st) {
+                loop {
+                    let raw = self.inner.recv_cache.get().pop_front();
+                    let Some(raw) = raw else { break };
+                    if let Some(out) = self.post_recv_apply(raw)? {
+                        return Ok(out);
+                    }
+                }
+            } else if self.needs_subscription_filter() {
+                let cache = self.inner.recv_cache.get();
+                while let Some(raw) = cache.pop_front() {
+                    if self.matches_subscription(&raw) {
+                        return Ok(raw);
+                    }
+                }
+
+            } else {
+                // PULL/PAIR: check recv_cache first (filled by swap_messages).
+                let cache = self.inner.recv_cache.get();
+                if let Some(msg) = cache.pop_front() {
+                    return Ok(msg);
+                }
+                let dio = unsafe { &*self.inner.direct_recv_io.get() };
+                if let Some(ref state) = *dio {
+                    let mut io = state.peer_io.lock().expect("peer_io");
+                    if let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache) {
+                        return Ok(msg);
+                    }
+                }
+            }
+        }
         loop {
             let frame = self.inner.in_rx.try_recv().map_err(|e| match e {
                 flume::TryRecvError::Empty => Error::WouldBlock,
@@ -968,6 +1012,7 @@ impl Socket {
             }
         }
     }
+
 
     fn snapshot_direct_io_single_peer(&self) -> Option<Arc<DirectIoState>> {
         let peers = self.inner.out_peers.read().expect("peers lock");
@@ -993,28 +1038,44 @@ impl Socket {
     /// the direct-read loop on `handshake_done == true` while
     /// holding the lock, so this branch shouldn't normally fire.
     /// Flip the flag and continue if it does.
+    /// Drain events then swap the codec's message queue into the
+    /// `recv_cache` in O(1). Returns the first message (popped from
+    /// `recv_cache`). Remaining messages stay in `recv_cache` for
+    /// `try_recv()` to pop without re-acquiring `peer_io`.
     #[allow(clippy::unused_self)]
-    fn drain_one_user_event(&self, io: &mut PeerIo) -> Result<Option<Message>> {
+    fn drain_and_swap(
+        &self,
+        io: &mut PeerIo,
+        cache: &mut std::collections::VecDeque<Message>,
+    ) -> Result<Option<Message>> {
         while let Some(ev) = io.codec.poll_event() {
             match ev {
-                Event::Message(m) => {
-                    let m = if let Some(dec) = io.decoder.as_mut() {
-                        match dec.decode(m)? {
-                            Some(plain) => plain,
-                            None => continue,
-                        }
-                    } else {
-                        m
-                    };
-                    return Ok(Some(m));
-                }
+                Event::Message(_) => unreachable!("messages use poll_message"),
                 Event::Command(_) => {}
                 Event::HandshakeSucceeded { .. } => {
                     io.handshake_done = true;
                 }
             }
         }
-        Ok(None)
+        if !cache.is_empty() {
+            return Ok(cache.pop_front());
+        }
+        if io.decoder.is_some() {
+            while let Some(m) = io.codec.poll_message() {
+                let m = if let Some(dec) = io.decoder.as_mut() {
+                    match dec.decode(m)? {
+                        Some(plain) => plain,
+                        None => continue,
+                    }
+                } else {
+                    m
+                };
+                cache.push_back(m);
+            }
+        } else {
+            io.codec.swap_messages(cache);
+        }
+        Ok(cache.pop_front())
     }
 
     /// Apply post-receive socket-type processing: SUB / XSUB
@@ -1083,9 +1144,24 @@ impl Socket {
         if !self.inner.in_rx.is_empty() {
             return Ok(None);
         }
-        let Some(state) = self.snapshot_direct_io_single_peer() else {
+        let state = {
+            let cur_gen = self.inner.peers_gen.load(Ordering::Acquire);
+            let cr = self.inner.cached_route.lock().expect("cached_route");
+            if let Some(ref r) = *cr
+                && r.generation == cur_gen
+            {
+                r.direct.clone()
+            } else {
+                None
+            }
+        }
+        .or_else(|| self.snapshot_direct_io_single_peer());
+        let Some(state) = state else {
             return Ok(None);
         };
+        // Cache for try_recv's direct codec access.
+        // SAFETY: single-threaded compio runtime.
+        unsafe { *self.inner.direct_recv_io.get() = Some(state.clone()) };
         if state
             .recv_claim
             .compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
@@ -1105,16 +1181,44 @@ impl Socket {
             // 1) Drain any user-facing events the driver left in the
             //    codec. Bail out (Ok(None)) if the handshake hasn't
             //    completed - we hold the lock so this is race-free.
+            //    After the first message, drain remaining codec events
+            //    into recv_cache so try_recv() can pop them without
+            //    re-acquiring peer_io. Lock order: peer_io → recv_cache.
             let drained = {
                 let mut io = state.peer_io.lock().expect("peer_io");
                 if !io.handshake_done {
                     return Ok(None);
                 }
-                self.drain_one_user_event(&mut io)?
+                let cache = self.inner.recv_cache.get();
+                self.drain_and_swap(&mut io, cache)?
             };
             if let Some(msg) = drained {
                 if let Some(out) = self.post_recv_apply(msg)? {
                     return Ok(Some(out));
+                }
+                // First message filtered (SUB/REQ/REP). Drain cache for
+                // a match before returning to the wire.
+                if post_recv_needs_type_state(self.inner.socket_type) {
+                    loop {
+                        let raw =
+                            self.inner.recv_cache.get().pop_front();
+                        let Some(raw) = raw else { break };
+                        if let Some(out) = self.post_recv_apply(raw)? {
+                            return Ok(Some(out));
+                        }
+                    }
+                } else if self.needs_subscription_filter() {
+                    let cache = self.inner.recv_cache.get();
+                    while let Some(raw) = cache.pop_front() {
+                        if self.matches_subscription(&raw) {
+                            return Ok(Some(raw));
+                        }
+                    }
+                } else {
+                    let cache = self.inner.recv_cache.get();
+                    if let Some(raw) = cache.pop_front() {
+                        return Ok(Some(raw));
+                    }
                 }
                 continue;
             }
@@ -1429,6 +1533,14 @@ impl Socket {
         Ok(())
     }
 
+    #[inline]
+    fn needs_subscription_filter(&self) -> bool {
+        matches!(
+            self.inner.socket_type,
+            SocketType::Sub | SocketType::XSub | SocketType::Dish
+        )
+    }
+
     fn matches_subscription(&self, msg: &Message) -> bool {
         // Fast path: types that accept all messages skip the lock entirely.
         if !matches!(
@@ -1439,11 +1551,7 @@ impl Socket {
         }
         match self.inner.socket_type {
             SocketType::Sub | SocketType::XSub => {
-                let topic = msg
-                    .parts()
-                    .first()
-                    .map(omq_proto::Payload::as_bytes)
-                    .unwrap_or_default();
+                let topic = msg.part_bytes(0).unwrap_or_default();
                 self.inner
                     .subscriptions
                     .read()
@@ -1455,11 +1563,7 @@ impl Socket {
                 // whose group is not in `joined_groups`. Inproc and
                 // wire RADIO peers fan out to every connection without
                 // a per-peer filter; the DISH side does the filtering.
-                let group = msg
-                    .parts()
-                    .first()
-                    .map(omq_proto::Payload::as_bytes)
-                    .unwrap_or_default();
+                let group = msg.part_bytes(0).unwrap_or_default();
                 self.inner
                     .joined_groups
                     .read()

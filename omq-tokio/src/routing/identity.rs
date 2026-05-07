@@ -17,13 +17,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use smallvec::SmallVec;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::DriverHandle;
 use omq_proto::error::{Error, Result};
-use omq_proto::message::{MESSAGE_INLINE_PARTS, Message, Payload};
+use omq_proto::message::Message;
 use omq_proto::options::Options;
 
 use super::drop_queue::DropQueue;
@@ -36,12 +35,11 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
-    pub(crate) async fn send(&self, msg: Message) -> Result<()> {
-        let parts = msg.parts();
-        if parts.is_empty() {
+    pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
+        if msg.is_empty() {
             return Err(Error::Unroutable);
         }
-        let identity = parts[0].as_bytes();
+        let identity = msg.pop_front().unwrap();
 
         // Snapshot the destination queue under a short lock.
         let queue: Option<DropQueue> = {
@@ -59,21 +57,8 @@ impl Submitter {
             return Ok(());
         };
 
-        // Strip the routing frame; rest becomes the wire message.
-        let mut rest_parts: SmallVec<[Payload; MESSAGE_INLINE_PARTS]> = SmallVec::new();
-        for p in &parts[1..] {
-            rest_parts.push(p.clone());
-        }
-        let rest_msg = if rest_parts.is_empty() {
-            Message::new()
-        } else {
-            let mut m = Message::new();
-            for p in rest_parts {
-                m.push_part(p);
-            }
-            m
-        };
-        q.send(rest_msg).await
+        // `msg` now holds the remaining parts (routing frame already popped).
+        q.send(msg).await
     }
 }
 
@@ -214,11 +199,6 @@ impl IdentityRecv {
             let g = self.peers.lock().expect("identity recv poisoned");
             g.get(&peer_id).cloned().unwrap_or_default()
         };
-        let mut wrapped = Message::new();
-        wrapped.push_part(Payload::from_bytes(identity));
-        for p in msg.parts() {
-            wrapped.push_part(p.clone());
-        }
-        wrapped
+        Message::with_prefix(identity, msg)
     }
 }

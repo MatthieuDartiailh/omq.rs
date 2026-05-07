@@ -86,7 +86,7 @@ async fn pull_fair_queues_three_pushes() {
     let mut received = std::collections::HashSet::new();
     for _ in 0..15 {
         let m = pull.recv().await.unwrap();
-        received.insert(String::from_utf8_lossy(&m.parts()[0].as_bytes()).into_owned());
+        received.insert(String::from_utf8_lossy(&m.part_bytes(0).unwrap()).into_owned());
     }
     assert_eq!(received.len(), 15);
     for i in 0..3u32 {
@@ -131,7 +131,7 @@ async fn pub_sub_fan_out_with_prefix_filter() {
             .await
             .expect("recv timeout")
             .unwrap();
-        let body = m.parts()[0].as_bytes();
+        let body = m.part_bytes(0).unwrap();
         assert!(
             body.starts_with(topics[i].as_bytes()),
             "sub {i} expected {} got {:?}",

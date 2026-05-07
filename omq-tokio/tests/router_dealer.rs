@@ -35,8 +35,8 @@ async fn router_prefixes_identity_on_recv() {
         .unwrap()
         .unwrap();
     assert_eq!(got.len(), 2, "router message is [identity, body]");
-    assert_eq!(got.parts()[0].as_bytes(), &b"alice"[..]);
-    assert_eq!(got.parts()[1].as_bytes(), &b"hello"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"alice"[..]);
+    assert_eq!(got.part_bytes(1).unwrap(), &b"hello"[..]);
 }
 
 #[tokio::test]
@@ -56,8 +56,8 @@ async fn router_routes_back_by_identity() {
     dealer.send(Message::single("ping")).await.unwrap();
 
     let incoming = router.recv().await.unwrap();
-    assert_eq!(incoming.parts()[0].as_bytes(), &b"bob"[..]);
-    assert_eq!(incoming.parts()[1].as_bytes(), &b"ping"[..]);
+    assert_eq!(incoming.part_bytes(0).unwrap(), &b"bob"[..]);
+    assert_eq!(incoming.part_bytes(1).unwrap(), &b"ping"[..]);
 
     // Reply: [identity, body]. Router strips identity, routes to the peer.
     router
@@ -69,7 +69,7 @@ async fn router_routes_back_by_identity() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.parts()[0].as_bytes(), &b"pong"[..]);
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"pong"[..]);
 }
 
 #[tokio::test]
@@ -137,7 +137,7 @@ async fn router_handles_identity_churn_without_growth() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.parts()[1].as_bytes(), &b"final"[..]);
+    assert_eq!(got.part_bytes(1).unwrap(), &b"final"[..]);
 }
 
 #[tokio::test]
@@ -159,7 +159,7 @@ async fn router_assigns_identity_for_peers_without_one() {
     assert_eq!(got.len(), 2);
     // The identity is opaque; we just care it's non-empty and we can
     // route a reply back through it.
-    let identity = got.parts()[0].as_bytes();
+    let identity = got.part_bytes(0).unwrap();
     assert!(!identity.is_empty());
 
     router
@@ -174,5 +174,5 @@ async fn router_assigns_identity_for_peers_without_one() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.parts()[0].as_bytes(), &b"reply"[..]);
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"reply"[..]);
 }

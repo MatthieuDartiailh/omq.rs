@@ -50,7 +50,7 @@ async fn ipv6_push_pull() {
         .await
         .expect("ipv6 push/pull timed out")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"hello v6"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello v6"[..]);
 }
 
 #[compio::test]
@@ -69,14 +69,14 @@ async fn ipv6_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"ping"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"ping"[..]);
 
     rep.send(Message::single("pong")).await.unwrap();
     let r = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.parts()[0].as_bytes(), &b"pong"[..]);
+    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
 }
 
 #[compio::test]
@@ -94,7 +94,7 @@ async fn ipv6_pub_sub() {
     loop {
         let _ = pub_.send(Message::single("v6msg")).await;
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(20), sub.recv()).await {
-            assert_eq!(m.parts()[0].as_bytes(), &b"v6msg"[..]);
+            assert_eq!(m.part_bytes(0).unwrap(), &b"v6msg"[..]);
             return;
         }
         assert!(
@@ -123,6 +123,6 @@ async fn ipv6_dealer_router() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"v6-cli"[..]);
-    assert_eq!(m.parts()[1].as_bytes(), &b"v6-msg"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"v6-cli"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"v6-msg"[..]);
 }

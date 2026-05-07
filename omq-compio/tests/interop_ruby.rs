@@ -178,7 +178,7 @@ async fn ruby_push_to_rust_pull(t: Transport) {
             .expect("recv timed out")
             .unwrap();
         assert_eq!(
-            msg.parts()[0].as_bytes(),
+            msg.part_bytes(0).unwrap(),
             format!("from-ruby-{i}").as_bytes()
         );
     }
@@ -225,7 +225,7 @@ async fn rust_req_to_ruby_rep(t: Transport) {
             .await
             .expect("reply timed out")
             .unwrap();
-        assert_eq!(reply.parts()[0].as_bytes(), payload.as_bytes());
+        assert_eq!(reply.part_bytes(0).unwrap(), payload.as_bytes());
     }
 
     let status = wait_status(child).await;
@@ -333,8 +333,8 @@ async fn rust_router_sees_ruby_dealer_identity(t: Transport) {
         .expect("router recv timed out")
         .unwrap();
     assert_eq!(got.len(), 2, "router message is [identity, body]");
-    assert_eq!(got.parts()[0].as_bytes(), &b"worker-7"[..]);
-    assert_eq!(got.parts()[1].as_bytes(), &b"from-dealer"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"worker-7"[..]);
+    assert_eq!(got.part_bytes(1).unwrap(), &b"from-dealer"[..]);
 
     let _ = wait_with_output(child).await;
 }

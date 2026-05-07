@@ -5,7 +5,7 @@
 //! - **inproc**: single-runtime cooperative scheduling (IO-bound
 //!   workloads where both ends share a thread).
 //! - **inproc-mt**: multi-runtime inproc — PULL on its own
-//!   thread/runtime, PUSHes on another (CPU-bound workloads).
+//!   thread/runtime, `PUSH`es on another (CPU-bound workloads).
 //! - **Wire** (TCP, IPC, lz4+tcp, zstd+tcp): multi-runtime, same
 //!   shape as inproc-mt but over kernel sockets.
 
@@ -21,7 +21,7 @@ use omq_compio::{
     Message, MonitorEvent, MonitorStream, Options, ProactorBuilderExt, Socket, SocketType,
 };
 
-/// Build a per-cell runtime with a configurable BUF_RING pool.
+/// Build a per-cell runtime with a configurable `BUF_RING` pool.
 /// `OMQ_BENCH_POOL=count,len_bytes` overrides the default 128 × 32 KiB.
 fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
     use compio::driver::ProactorBuilder;
@@ -157,6 +157,11 @@ fn run_cell_threaded(
                         compio::time::timeout(Duration::from_millis(20), pull.recv()).await
                     {
                         pull_count.fetch_add(1, Ordering::Relaxed);
+                        let mut drained = 0u64;
+                        while pull.try_recv().is_ok() {
+                            drained += 1;
+                        }
+                        pull_count.fetch_add(drained as usize, Ordering::Relaxed);
                     }
                 }
             });

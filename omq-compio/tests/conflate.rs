@@ -66,7 +66,7 @@ async fn push_conflate_keeps_only_latest() {
 
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = compio::time::timeout(Duration::from_millis(500), pull.recv()).await {
-        received.push(String::from_utf8_lossy(&msg.parts()[0].as_bytes()).into_owned());
+        received.push(String::from_utf8_lossy(&msg.part_bytes(0).unwrap()).into_owned());
         if received.len() >= 5 {
             break;
         }

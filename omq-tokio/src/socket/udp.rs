@@ -79,9 +79,7 @@ pub(crate) fn spawn_dish_listener(
                         if !joined_now {
                             continue;
                         }
-                        let mut msg = Message::new();
-                        msg.push_part(group);
-                        msg.push_part(body);
+                        let msg = Message::multipart([group, body]);
                         if recv_tx.send(msg).await.is_err() {
                             break;
                         }
@@ -108,12 +106,11 @@ pub(crate) fn spawn_radio_sender(
                 () = cancel.cancelled() => break,
                 cmd = inbox_rx.recv() => match cmd {
                     Some(DriverCommand::SendMessage(m)) => {
-                        let parts = m.parts();
-                        if parts.len() != 2 {
+                        if m.len() != 2 {
                             continue;
                         }
-                        let group = parts[0].as_bytes();
-                        let body = parts[1].as_bytes();
+                        let group = m.part_bytes(0).unwrap_or_default();
+                        let body = m.part_bytes(1).unwrap_or_default();
                         if let Ok(dgram) = udp::encode_datagram(&group, &body) {
                             // Best-effort fire-and-forget; UDP errors
                             // (ECONNREFUSED, ENETUNREACH) are silently

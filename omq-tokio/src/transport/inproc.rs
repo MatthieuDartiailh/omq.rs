@@ -227,7 +227,7 @@ mod tests {
         .unwrap();
         match f {
             InprocFrame::Message(m) => {
-                assert_eq!(m.parts()[0].as_bytes(), &b"hi"[..]);
+                assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
             }
             InprocFrame::Command(_) => panic!("expected Message"),
         }

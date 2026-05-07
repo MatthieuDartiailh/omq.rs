@@ -25,10 +25,9 @@ use std::sync::Arc;
 #[cfg(feature = "curve")]
 use bytes::BufMut;
 use bytes::{Bytes, BytesMut};
-use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
-use crate::message::{FrameFlags, MESSAGE_INLINE_PARTS, Message, Payload};
+use crate::message::{FrameFlags, Message, Payload};
 
 use super::chunked_buf::ChunkedInputBuf;
 use super::command::{self, Command, PeerProperties};
@@ -201,7 +200,8 @@ pub struct Connection {
     /// of iterating the whole queue on every drain-loop call.
     out_bytes_total: usize,
     events: VecDeque<Event>,
-    pending_parts: SmallVec<[Payload; MESSAGE_INLINE_PARTS]>,
+    messages: VecDeque<Message>,
+    pending_parts: Vec<Payload>,
     pending_size: usize,
 }
 
@@ -224,7 +224,8 @@ impl Connection {
             front_consumed: 0,
             out_bytes_total: 0,
             events: VecDeque::new(),
-            pending_parts: SmallVec::new(),
+            messages: VecDeque::new(),
+            pending_parts: Vec::new(),
             pending_size: 0,
             config,
         };
@@ -254,6 +255,7 @@ impl Connection {
     /// payload via [`supply_payload`](Self::supply_payload) instead, since
     /// further bytes on the wire belong to that frame's payload and have
     /// been claimed by direct-recv.
+    #[inline]
     pub fn handle_input(&mut self, src: Bytes) -> Result<()> {
         match self.state {
             State::Closed => return Err(Error::Closed),
@@ -271,6 +273,7 @@ impl Connection {
         self.drive()
     }
 
+    #[inline]
     fn drive(&mut self) -> Result<()> {
         loop {
             let progress = match self.state {
@@ -364,7 +367,58 @@ impl Connection {
         Ok(true)
     }
 
+    #[inline]
+    #[inline]
     fn try_advance_ready(&mut self) -> Result<bool> {
+        // Fast path: single non-more, non-command data frame with
+        // inline-sized payload, no crypto transform, no pending
+        // multi-part accumulation. Reads frame bytes directly into
+        // Message::Inline, skipping the Payload intermediary.
+        if !self.has_frame_transform()
+            && self.pending_parts.is_empty()
+            && let Some(hdr) = frame::peek_frame_header(&self.in_buf)?
+            && !hdr.flags.command
+            && !hdr.flags.more
+            && hdr.payload_len <= crate::message::MAX_INLINE_MESSAGE
+            && self.in_buf.len() >= hdr.header_len + hdr.payload_len
+        {
+            if let Some(max) = self.config.max_message_size
+                && hdr.payload_len > max
+            {
+                return Err(Error::MessageTooLarge {
+                    size: hdr.payload_len,
+                    max,
+                });
+            }
+            self.in_buf.advance(hdr.header_len);
+            // SAFETY: `[MaybeUninit<u8>; N]` has no validity invariant —
+            // every bit pattern is valid, including uninitialized memory.
+            // `MaybeUninit::uninit().assume_init()` on an array of
+            // `MaybeUninit` is the standard pattern (see std docs).
+            let mut data: [std::mem::MaybeUninit<u8>;
+                crate::message::MAX_INLINE_MESSAGE] =
+                unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+            self.in_buf.read_into_uninit(hdr.payload_len, &mut data);
+            // SAFETY: `transmute` from `[MaybeUninit<u8>; 39]` to
+            // `[u8; 39]` is sound because:
+            //  1. Both types have identical size and alignment.
+            //  2. `data[..payload_len]` was initialized by `read_into_uninit`.
+            //  3. `data[payload_len..39]` is uninit, but `MessageInner::Inline`
+            //     only reads `data[..len]` (where `len == payload_len`).
+            //  4. `Clone` copies all 39 bytes — copying uninit `u8` values
+            //     is defined behavior (u8 has no invalid bit patterns).
+            //
+            // Without this, `[0u8; 39]` zeroes the full array on every
+            // message. At 8 B payloads that zeroing costs 13% throughput.
+            let msg = Message {
+                inner: crate::message::MessageInner::Inline {
+                    len: hdr.payload_len as u8,
+                    data: unsafe { std::mem::transmute(data) },
+                },
+            };
+            self.messages.push_back(msg);
+            return Ok(true);
+        }
         let Some(frame) = frame::try_decode_frame(&mut self.in_buf)? else {
             return Ok(false);
         };
@@ -380,6 +434,7 @@ impl Connection {
     /// Shared between [`try_advance_ready`] (frame parsed from `in_buf`)
     /// and [`supply_payload`] (frame body delivered out-of-band by a
     /// direct-recv backend).
+    #[inline]
     fn decode_assembled_frame(&mut self, flags: FrameFlags, payload: Payload) -> Result<()> {
         #[cfg(feature = "curve")]
         const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
@@ -440,6 +495,7 @@ impl Connection {
         Ok(())
     }
 
+    #[inline]
     fn absorb_data_frame(&mut self, more: bool, payload: Payload) -> Result<bool> {
         let size = payload.len();
         self.pending_size = self.pending_size.saturating_add(size);
@@ -451,15 +507,24 @@ impl Connection {
                 max,
             });
         }
-        self.pending_parts.push(payload);
-        if !more {
+        if more {
+            self.pending_parts.push(payload);
+        } else if self.pending_parts.is_empty() {
+            self.pending_size = 0;
+            let msg = if let Some(s) = payload.as_slice()
+                && s.len() <= crate::message::MAX_INLINE_MESSAGE
+            {
+                Message::from_inline(s)
+            } else {
+                Message::from_payload(payload)
+            };
+            self.messages.push_back(msg);
+        } else {
+            self.pending_parts.push(payload);
             let parts = std::mem::take(&mut self.pending_parts);
             self.pending_size = 0;
-            let mut msg = Message::new();
-            for p in parts {
-                msg.push_part(p);
-            }
-            self.events.push_back(Event::Message(msg));
+            let msg = Message::from_payloads_vec(parts);
+            self.messages.push_back(msg);
         }
         Ok(true)
     }
@@ -560,23 +625,23 @@ impl Connection {
                 "send_message before handshake complete".into(),
             ));
         }
-        let parts = msg.parts();
-        if parts.is_empty() {
+        let parts = msg.parts_payload();
+        let n = parts.len();
+        if n == 0 {
             return Ok(());
         }
-        let last = parts.len() - 1;
-        for (i, p) in parts.iter().enumerate() {
-            let more = i != last;
+        for (i, part) in parts.iter().enumerate() {
+            let more = i + 1 < n;
             #[cfg(any(feature = "curve", feature = "blake3zmq"))]
             match self.transform.as_mut() {
                 #[cfg(feature = "curve")]
                 Some(FrameTransform::Curve(_)) => {
-                    self.send_part_curve(more, p)?;
+                    self.send_part_curve(more, part)?;
                     continue;
                 }
                 #[cfg(feature = "blake3zmq")]
                 Some(FrameTransform::Blake3Zmq(_)) => {
-                    self.send_part_blake3zmq(more, p)?;
+                    self.send_part_blake3zmq(more, part)?;
                     continue;
                 }
                 None => {}
@@ -589,7 +654,7 @@ impl Connection {
                 };
                 let f = crate::message::Frame {
                     flags,
-                    payload: p.clone(),
+                    payload: part.clone(),
                 };
                 let plen = f.payload.len();
                 self.out_bytes_total += frame::header_len_for(plen) + plen;
@@ -673,9 +738,26 @@ impl Connection {
         Ok(())
     }
 
-    /// Drain the next parsed event.
+    /// Drain the next parsed control-plane event (commands, handshake).
+    /// Application messages are on a separate queue — use
+    /// [`poll_message`](Self::poll_message).
+    #[inline]
     pub fn poll_event(&mut self) -> Option<Event> {
         self.events.pop_front()
+    }
+
+    /// Pop one decoded application message.
+    #[inline]
+    pub fn poll_message(&mut self) -> Option<Message> {
+        self.messages.pop_front()
+    }
+
+    /// Swap the internal message queue with `dest`. O(1) — exchanges
+    /// three machine words regardless of queue length. Use this to
+    /// batch-drain all pending messages in one operation.
+    #[inline]
+    pub fn swap_messages(&mut self, dest: &mut VecDeque<Message>) {
+        std::mem::swap(&mut self.messages, dest);
     }
 
     /// Total bytes pending transmit across all queued chunks. O(1).
@@ -793,11 +875,11 @@ impl Connection {
             !self.has_frame_transform(),
             "send_message_flat called with frame transform active"
         );
-        let parts = msg.parts();
+        let parts = msg.parts_payload();
         let n = parts.len();
-        for (i, part) in parts.iter().enumerate() {
+        for (i, p) in parts.iter().enumerate() {
             let more = i + 1 < n;
-            let payload_len = part.len();
+            let payload_len = p.len();
             if payload_len > frame::MAX_SHORT_FRAME_SIZE {
                 flat_buf.extend_from_slice(&[
                     frame::FLAG_LONG | u8::from(more),
@@ -813,8 +895,12 @@ impl Connection {
             } else {
                 flat_buf.extend_from_slice(&[u8::from(more), payload_len as u8]);
             }
-            for chunk in part.chunks() {
-                flat_buf.extend_from_slice(chunk);
+            if let Some(s) = p.as_slice() {
+                flat_buf.extend_from_slice(s);
+            } else {
+                for chunk in p.chunks() {
+                    flat_buf.extend_from_slice(chunk);
+                }
             }
         }
     }

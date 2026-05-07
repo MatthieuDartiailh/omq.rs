@@ -120,12 +120,8 @@ impl SocketInner {
             return None;
         }
         let mut buf = self.sndbuf.lock().unwrap();
-        let mut m = omq_compio::Message::new();
-        for p in buf.parts.drain(..) {
-            m.push_part(omq_proto::message::Payload::from_bytes(p));
-        }
-        m.push_part(omq_proto::message::Payload::from_bytes(bytes));
-        Some(m)
+        let parts: Vec<Bytes> = buf.parts.drain(..).chain(std::iter::once(bytes)).collect();
+        Some(omq_compio::Message::multipart(parts))
     }
 
     /// Pop the head of any leftover RCVMORE frames; `Some` when one
@@ -343,11 +339,7 @@ impl Socket {
             return Ok(PyBytes::new_bound(py, &head));
         }
         let msg = self.recv_message(py)?;
-        let mut parts: Vec<Bytes> = msg
-            .into_parts()
-            .into_iter()
-            .map(|p| p.as_bytes())
-            .collect();
+        let mut parts: Vec<Bytes> = msg.iter().collect();
         let head = if parts.is_empty() {
             Bytes::new()
         } else {

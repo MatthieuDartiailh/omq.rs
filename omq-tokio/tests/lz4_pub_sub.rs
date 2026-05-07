@@ -62,15 +62,15 @@ async fn pub_sub_prefix_filter() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m1.parts()[0].as_bytes(), &b"news.sports"[..]);
-    assert_eq!(m1.parts()[1].as_bytes(), &b"ball scores"[..]);
+    assert_eq!(m1.part_bytes(0).unwrap(), &b"news.sports"[..]);
+    assert_eq!(m1.part_bytes(1).unwrap(), &b"ball scores"[..]);
 
     let m2 = tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m2.parts()[0].as_bytes(), &b"news.tech"[..]);
-    assert_eq!(m2.parts()[1].as_bytes(), &b"rust 2.0"[..]);
+    assert_eq!(m2.part_bytes(0).unwrap(), &b"news.tech"[..]);
+    assert_eq!(m2.part_bytes(1).unwrap(), &b"rust 2.0"[..]);
 
     // "weather" must never arrive.
     let nothing = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;

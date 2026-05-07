@@ -49,9 +49,9 @@ async fn pub_sub_simple_prefix_match() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got1.parts()[0].as_bytes(), &b"news.sports"[..]);
-    assert_eq!(got1.parts()[1].as_bytes(), &b"ball scores"[..]);
-    assert_eq!(got2.parts()[0].as_bytes(), &b"news.tech"[..]);
+    assert_eq!(got1.part_bytes(0).unwrap(), &b"news.sports"[..]);
+    assert_eq!(got1.part_bytes(1).unwrap(), &b"ball scores"[..]);
+    assert_eq!(got2.part_bytes(0).unwrap(), &b"news.tech"[..]);
 
     // No third message -- 'weather' was filtered.
     let third = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
@@ -86,7 +86,7 @@ async fn pub_sub_late_subscriber_misses_earlier() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"post-subscribe"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"post-subscribe"[..]);
 
     // The pre-subscribe message must NOT arrive.
     let other = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
@@ -115,7 +115,7 @@ async fn pub_sub_subscribe_all_with_empty_prefix() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(m.parts()[0].as_bytes(), expected.as_bytes());
+        assert_eq!(m.part_bytes(0).unwrap(), expected.as_bytes());
     }
 }
 
@@ -142,7 +142,7 @@ async fn pub_sub_unsubscribe() {
         .await
         .unwrap()
         .unwrap();
-    let got = [m1.parts()[0].as_bytes(), m2.parts()[0].as_bytes()];
+    let got = [m1.part_bytes(0).unwrap(), m2.part_bytes(0).unwrap()];
     assert!(got.contains(&bytes::Bytes::from_static(b"apple")));
     assert!(got.contains(&bytes::Bytes::from_static(b"banana")));
 
@@ -155,7 +155,7 @@ async fn pub_sub_unsubscribe() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"apricot"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"apricot"[..]);
 
     // blueberry filtered out.
     let other = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
@@ -183,7 +183,7 @@ async fn sub_replays_subscriptions_on_new_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"x.hello"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"x.hello"[..]);
     let other = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
 }

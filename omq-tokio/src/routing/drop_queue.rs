@@ -91,7 +91,7 @@ mod tests {
         q.send(Message::single("c")).await.unwrap();
         // Only the first made it.
         let got = rx.recv_async().await.unwrap();
-        assert_eq!(got.parts()[0].as_bytes(), &b"a"[..]);
+        assert_eq!(got.part_bytes(0).unwrap(), &b"a"[..]);
         assert!(rx.is_empty());
     }
 
@@ -104,8 +104,8 @@ mod tests {
         q.send(Message::single("d")).await.unwrap(); // drops "b"
         let got_c = rx.recv_async().await.unwrap();
         let got_d = rx.recv_async().await.unwrap();
-        assert_eq!(got_c.parts()[0].as_bytes(), &b"c"[..]);
-        assert_eq!(got_d.parts()[0].as_bytes(), &b"d"[..]);
+        assert_eq!(got_c.part_bytes(0).unwrap(), &b"c"[..]);
+        assert_eq!(got_d.part_bytes(0).unwrap(), &b"d"[..]);
     }
 
     #[tokio::test]

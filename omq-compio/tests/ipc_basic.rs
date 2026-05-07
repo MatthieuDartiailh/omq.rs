@@ -30,7 +30,7 @@ async fn ipc_push_pull_single_message() {
         .await
         .expect("recv timeout")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"over-ipc"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"over-ipc"[..]);
 }
 
 #[compio::test]
@@ -56,7 +56,7 @@ async fn ipc_connect_before_bind() {
         .await
         .expect("recv timed out after late bind")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"late-bind"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"late-bind"[..]);
 }
 
 #[compio::test]
@@ -80,6 +80,6 @@ async fn ipc_push_pull_burst() {
             .expect("recv timeout")
             .unwrap();
         let want = format!("m-{i:04}");
-        assert_eq!(m.parts()[0].as_bytes(), want.as_bytes());
+        assert_eq!(m.part_bytes(0).unwrap(), want.as_bytes());
     }
 }

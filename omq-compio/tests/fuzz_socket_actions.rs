@@ -203,13 +203,15 @@ async fn fuzz_push_pull_action_sequences() {
                     // Multi-frame send: surfaces frame-boundary /
                     // partial-flush bugs.
                     if connected[i] {
-                        let mut msg = Message::new();
-                        for _ in 0..rng.gen_range(1..=3) {
-                            let len = rng.gen_range(0..=128);
-                            let mut payload = vec![0u8; len];
-                            rng.fill_bytes(&mut payload);
-                            msg.push_part(omq_compio::Payload::from_bytes(Bytes::from(payload)));
-                        }
+                        let parts: Vec<Bytes> = (0..rng.gen_range(1..=3))
+                            .map(|_| {
+                                let len = rng.gen_range(0..=128);
+                                let mut payload = vec![0u8; len];
+                                rng.fill_bytes(&mut payload);
+                                Bytes::from(payload)
+                            })
+                            .collect();
+                        let msg = Message::multipart(parts);
                         let _ =
                             compio::time::timeout(Duration::from_millis(50), pushes[i].send(msg))
                                 .await;

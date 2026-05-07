@@ -1174,9 +1174,9 @@ impl SocketDriver {
                 // XSUB and older libzmq paths emit these instead of
                 // the 3.1 wire commands. PUB/XPUB must honor both.
                 if matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
-                    && msg.parts().len() == 1
+                    && msg.len() == 1
                 {
-                    let body = msg.parts()[0].as_bytes();
+                    let body = msg.part_bytes(0).unwrap_or_default();
                     if let Some((tag, prefix)) = body.split_first() {
                         match tag {
                             0x01 => {
@@ -1231,9 +1231,7 @@ impl SocketDriver {
                             let mut b = bytes::BytesMut::with_capacity(1 + prefix.len());
                             b.extend_from_slice(&[0x01]);
                             b.extend_from_slice(&prefix);
-                            let mut m = Message::new();
-                            m.push_part(omq_proto::message::Payload::from_bytes(b.freeze()));
-                            let _ = self.recv_tx.send(m).await;
+                            let _ = self.recv_tx.send(Message::single(b.freeze())).await;
                         }
                     }
                     Command::Cancel(prefix) => {
@@ -1242,9 +1240,7 @@ impl SocketDriver {
                             let mut b = bytes::BytesMut::with_capacity(1 + prefix.len());
                             b.extend_from_slice(&[0x00]);
                             b.extend_from_slice(&prefix);
-                            let mut m = Message::new();
-                            m.push_part(omq_proto::message::Payload::from_bytes(b.freeze()));
-                            let _ = self.recv_tx.send(m).await;
+                            let _ = self.recv_tx.send(Message::single(b.freeze())).await;
                         }
                     }
                     Command::Join(group) => {
@@ -1488,11 +1484,11 @@ mod tests {
 
         client.send(Message::single("hello")).await.unwrap();
         let msg = server.recv().await.unwrap();
-        assert_eq!(msg.parts()[0].as_bytes(), &b"hello"[..]);
+        assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
 
         server.send(Message::single("world")).await.unwrap();
         let msg = client.recv().await.unwrap();
-        assert_eq!(msg.parts()[0].as_bytes(), &b"world"[..]);
+        assert_eq!(msg.part_bytes(0).unwrap(), &b"world"[..]);
 
         client.close().await.unwrap();
         server.close().await.unwrap();
@@ -1516,7 +1512,7 @@ mod tests {
 
         send_task.await.unwrap().unwrap();
         let msg = server.recv().await.unwrap();
-        assert_eq!(msg.parts()[0].as_bytes(), &b"early"[..]);
+        assert_eq!(msg.part_bytes(0).unwrap(), &b"early"[..]);
     }
 
     #[tokio::test]

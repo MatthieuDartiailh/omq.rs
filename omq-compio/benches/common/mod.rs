@@ -155,8 +155,8 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
 /// the next time the executor ticks the task. `block_on` ticks once after
 /// the user future returns, which is not enough when cancellations cascade
 /// (dial supervisor -> driver -> pump). Spinning `runtime.run()` until
-/// `has_hot()` goes false flushes the cascade so every CancelToken's
-/// `Runtime` clone is released, `Runtime::drop` reaches strong_count == 1,
+/// `has_hot()` goes false flushes the cascade so every `CancelToken`'s
+/// `Runtime` clone is released, `Runtime::drop` reaches `strong_count` == 1,
 /// and `executor.clear()` finally runs.
 pub(crate) fn block_on_and_drain<F>(runtime: compio::runtime::Runtime, fut: F) -> F::Output
 where

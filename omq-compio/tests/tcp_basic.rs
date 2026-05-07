@@ -36,7 +36,7 @@ async fn tcp_push_pull_single_message() {
         .await
         .expect("recv timeout")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"over-tcp"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"over-tcp"[..]);
 }
 
 #[compio::test]
@@ -60,7 +60,7 @@ async fn tcp_push_pull_burst() {
             .expect("recv timeout")
             .unwrap();
         let want = format!("m-{i:04}");
-        assert_eq!(m.parts()[0].as_bytes(), want.as_bytes());
+        assert_eq!(m.part_bytes(0).unwrap(), want.as_bytes());
     }
 }
 
@@ -80,5 +80,5 @@ async fn inproc_push_pull_roundtrip() {
         .await
         .expect("recv timeout")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"inproc-hi"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"inproc-hi"[..]);
 }

@@ -46,10 +46,10 @@ async fn radio_to_dish_with_matching_group() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m1.parts()[0].as_bytes(), &b"weather"[..]);
-    assert_eq!(m1.parts()[1].as_bytes(), &b"sunny"[..]);
-    assert_eq!(m2.parts()[0].as_bytes(), &b"weather"[..]);
-    assert_eq!(m2.parts()[1].as_bytes(), &b"rain"[..]);
+    assert_eq!(m1.part_bytes(0).unwrap(), &b"weather"[..]);
+    assert_eq!(m1.part_bytes(1).unwrap(), &b"sunny"[..]);
+    assert_eq!(m2.part_bytes(0).unwrap(), &b"weather"[..]);
+    assert_eq!(m2.part_bytes(1).unwrap(), &b"rain"[..]);
 
     let third = compio::time::timeout(Duration::from_millis(100), dish.recv()).await;
     assert!(third.is_err(), "non-joined group must not be delivered");
@@ -83,7 +83,7 @@ async fn dish_join_replays_to_new_radios() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[1].as_bytes(), &b"joined"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"joined"[..]);
 }
 
 #[compio::test]
@@ -105,7 +105,7 @@ async fn dish_leave_stops_delivery() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[1].as_bytes(), &b"first"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"first"[..]);
 
     dish.leave("g").await.unwrap();
     wait().await;

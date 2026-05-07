@@ -40,7 +40,7 @@ async fn push_pull_large(size_bytes: usize) {
         .await
         .expect("large message recv timed out")
         .unwrap();
-    let got = m.parts()[0].as_bytes();
+    let got = m.part_bytes(0).unwrap();
     assert_eq!(
         got.len(),
         size_bytes,
@@ -90,10 +90,10 @@ async fn large_multipart_over_tcp() {
         .unwrap()
         .unwrap();
     assert_eq!(m.len(), 2, "expected 2-part message");
-    assert_eq!(m.parts()[0].as_bytes().len(), part_size);
-    assert_eq!(*m.parts()[0].as_bytes().first().unwrap(), 0xAA);
-    assert_eq!(m.parts()[1].as_bytes().len(), part_size);
-    assert_eq!(*m.parts()[1].as_bytes().first().unwrap(), 0xBB);
+    assert_eq!(m.part_bytes(0).unwrap().len(), part_size);
+    assert_eq!(*m.part_bytes(0).unwrap().first().unwrap(), 0xAA);
+    assert_eq!(m.part_bytes(1).unwrap().len(), part_size);
+    assert_eq!(*m.part_bytes(1).unwrap().first().unwrap(), 0xBB);
 }
 
 #[tokio::test]
@@ -122,7 +122,7 @@ async fn huge_messages_xxhash() {
             .await
             .unwrap_or_else(|_| panic!("recv timed out for message {i}"))
             .unwrap();
-        let got = m.parts()[0].as_bytes();
+        let got = m.part_bytes(0).unwrap();
         assert_eq!(got.len(), SIZES[i], "length mismatch on message {i}");
         assert_eq!(
             xxh3_128(&got),
@@ -157,6 +157,6 @@ async fn large_message_back_to_back() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(&*m1.parts()[0].as_bytes(), &p1[..]);
-    assert_eq!(&*m2.parts()[0].as_bytes(), &p2[..]);
+    assert_eq!(&*m1.part_bytes(0).unwrap(), &p1[..]);
+    assert_eq!(&*m2.part_bytes(0).unwrap(), &p2[..]);
 }

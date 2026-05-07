@@ -8,11 +8,37 @@
 //!
 //! [`Socket`]: super::Socket
 
+use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
+
+/// A `VecDeque` wrapper that provides `&mut` access without a `Mutex`.
+///
+/// Sound only when all access is confined to a single thread -- true for
+/// compio's cooperative single-threaded runtime. The `Sync` impl is the
+/// unsafe contract: callers must never access from multiple threads.
+pub(super) struct RecvCache(UnsafeCell<VecDeque<Message>>);
+
+// SAFETY: compio is single-threaded. All recv_cache access happens on
+// the runtime thread that created the socket. No concurrent access.
+unsafe impl Sync for RecvCache {}
+
+impl RecvCache {
+    fn new() -> Self {
+        Self(UnsafeCell::new(VecDeque::new()))
+    }
+
+    /// Borrow the inner deque mutably. Caller must be on the owning
+    /// runtime thread (always true in compio's cooperative model).
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub(super) fn get(&self) -> &mut VecDeque<Message> {
+        unsafe { &mut *self.0.get() }
+    }
+}
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
@@ -110,6 +136,15 @@ pub(super) struct SocketInner {
     pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
     pub(super) in_tx: flume::Sender<InprocFrame>,
     pub(super) in_rx: flume::Receiver<InprocFrame>,
+    /// Batch-drain cache for the direct-recv path. `try_direct_recv` drains
+    /// all codec events from one TCP delivery into here; `recv`/`try_recv`
+    /// pop raw messages and apply `post_recv_apply`. Uncontended on a
+    /// single-threaded compio runtime.
+    pub(super) recv_cache: RecvCache,
+    /// Direct codec access for `try_recv`. Set once during the first
+    /// successful `try_direct_recv`; cleared on peer disconnect.
+    /// `UnsafeCell` because compio is single-threaded.
+    pub(super) direct_recv_io: UnsafeCell<Option<Arc<DirectIoState>>>,
     pub(super) on_peer_ready: Event,
     pub(super) subscriptions: RwLock<SubscriptionSet>,
     /// Active subscription prefixes (SUB / XSUB only). Replayed to
@@ -302,32 +337,8 @@ impl EncodedQueue {
     /// `flat_buf` by copying all header and payload bytes contiguously.
     /// Amortises many small messages into one `write_vectored` iovec entry.
     pub(crate) fn encode_and_push_flat(&mut self, msg: &omq_proto::message::Message) {
-        let parts = msg.parts();
-        let n = parts.len();
         let before = self.flat_buf.len();
-        for (i, part) in parts.iter().enumerate() {
-            let more = i + 1 < n;
-            let flags = u8::from(more);
-            let payload_len = part.len();
-            if payload_len > 255 {
-                self.flat_buf.extend_from_slice(&[
-                    flags | 0x02,
-                    (payload_len >> 56) as u8,
-                    (payload_len >> 48) as u8,
-                    (payload_len >> 40) as u8,
-                    (payload_len >> 32) as u8,
-                    (payload_len >> 24) as u8,
-                    (payload_len >> 16) as u8,
-                    (payload_len >> 8) as u8,
-                    payload_len as u8,
-                ]);
-            } else {
-                self.flat_buf.extend_from_slice(&[flags, payload_len as u8]);
-            }
-            for b in part.chunks() {
-                self.flat_buf.extend_from_slice(b);
-            }
-        }
+        omq_proto::proto::frame::encode_message_flat(msg, &mut self.flat_buf);
         self.total_bytes += self.flat_buf.len() - before;
     }
 
@@ -342,35 +353,10 @@ impl EncodedQueue {
     /// when small and large messages are interleaved.
     pub(crate) fn encode_and_push(&mut self, msg: &omq_proto::message::Message) {
         self.flush_flat_to_chunks();
-        let parts = msg.parts();
-        let n = parts.len();
-        for (i, part) in parts.iter().enumerate() {
-            let more = i + 1 < n;
-            let flags = u8::from(more); // FLAG_MORE = 0x01
-            let payload_len = part.len(); // total bytes across all Payload chunks
-            self.scratch.clear();
-            if payload_len > 255 {
-                self.scratch.extend_from_slice(&[
-                    flags | 0x02, // FLAG_LONG
-                    (payload_len >> 56) as u8,
-                    (payload_len >> 48) as u8,
-                    (payload_len >> 40) as u8,
-                    (payload_len >> 32) as u8,
-                    (payload_len >> 24) as u8,
-                    (payload_len >> 16) as u8,
-                    (payload_len >> 8) as u8,
-                    payload_len as u8,
-                ]);
-            } else {
-                self.scratch.extend_from_slice(&[flags, payload_len as u8]);
-            }
-            let header = self.scratch.split().freeze();
-            self.total_bytes += header.len();
-            self.chunks.push_back(header);
-            for b in part.chunks() {
-                self.total_bytes += b.len();
-                self.chunks.push_back(b.clone());
-            }
+        let chunk_count_before = self.chunks.len();
+        omq_proto::proto::frame::encode_message_gather(msg, &mut self.chunks, &mut self.scratch);
+        for chunk in self.chunks.iter().skip(chunk_count_before) {
+            self.total_bytes += chunk.len();
         }
     }
 
@@ -381,34 +367,8 @@ impl EncodedQueue {
         prefix: &Bytes,
         msg: &omq_proto::message::Message,
     ) {
-        let parts = msg.parts();
-        let n = parts.len();
-        let prefix_len = prefix.len();
         let before = self.flat_buf.len();
-        for (i, part) in parts.iter().enumerate() {
-            let more = i + 1 < n;
-            let flags = u8::from(more);
-            let payload_len = part.len() + prefix_len;
-            if payload_len > 255 {
-                self.flat_buf.extend_from_slice(&[
-                    flags | 0x02,
-                    (payload_len >> 56) as u8,
-                    (payload_len >> 48) as u8,
-                    (payload_len >> 40) as u8,
-                    (payload_len >> 32) as u8,
-                    (payload_len >> 24) as u8,
-                    (payload_len >> 16) as u8,
-                    (payload_len >> 8) as u8,
-                    payload_len as u8,
-                ]);
-            } else {
-                self.flat_buf.extend_from_slice(&[flags, payload_len as u8]);
-            }
-            self.flat_buf.extend_from_slice(prefix);
-            for b in part.chunks() {
-                self.flat_buf.extend_from_slice(b);
-            }
-        }
+        omq_proto::proto::frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);
         self.total_bytes += self.flat_buf.len() - before;
     }
 
@@ -428,38 +388,15 @@ impl EncodedQueue {
         msg: &omq_proto::message::Message,
     ) {
         self.flush_flat_to_chunks();
-        let parts = msg.parts();
-        let n = parts.len();
-        let prefix_len = prefix.len();
-        for (i, part) in parts.iter().enumerate() {
-            let more = i + 1 < n;
-            let flags = u8::from(more);
-            let payload_len = part.len() + prefix_len;
-            self.scratch.clear();
-            if payload_len > 255 {
-                self.scratch.extend_from_slice(&[
-                    flags | 0x02,
-                    (payload_len >> 56) as u8,
-                    (payload_len >> 48) as u8,
-                    (payload_len >> 40) as u8,
-                    (payload_len >> 32) as u8,
-                    (payload_len >> 24) as u8,
-                    (payload_len >> 16) as u8,
-                    (payload_len >> 8) as u8,
-                    payload_len as u8,
-                ]);
-            } else {
-                self.scratch.extend_from_slice(&[flags, payload_len as u8]);
-            }
-            let header = self.scratch.split().freeze();
-            self.total_bytes += header.len();
-            self.chunks.push_back(header);
-            self.total_bytes += prefix_len;
-            self.chunks.push_back(prefix.clone());
-            for b in part.chunks() {
-                self.total_bytes += b.len();
-                self.chunks.push_back(b.clone());
-            }
+        let chunk_count_before = self.chunks.len();
+        omq_proto::proto::frame::encode_message_prefixed_gather(
+            prefix,
+            msg,
+            &mut self.chunks,
+            &mut self.scratch,
+        );
+        for chunk in self.chunks.iter().skip(chunk_count_before) {
+            self.total_bytes += chunk.len();
         }
     }
 
@@ -1145,6 +1082,8 @@ impl SocketInner {
             cached_route: Mutex::new(None),
             in_tx,
             in_rx,
+            recv_cache: RecvCache::new(),
+            direct_recv_io: UnsafeCell::new(None),
             on_peer_ready: Event::new(),
             subscriptions: RwLock::new(SubscriptionSet::new()),
             our_subs: RwLock::new(Vec::new()),

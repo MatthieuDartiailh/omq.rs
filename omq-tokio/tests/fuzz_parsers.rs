@@ -297,11 +297,12 @@ fn fuzz_lz4_decode() {
         let mut tx = Lz4Decoder::new();
         // Build a random message with 1..=4 random parts.
         let n_parts = rng.gen_range(1..=4);
-        let mut msg = Message::new();
+        let mut parts_vec: Vec<Bytes> = Vec::new();
         for _ in 0..n_parts {
             let part = random_bytes(&mut rng, 256);
-            msg.push_part(omq_tokio::message::Payload::from_bytes(Bytes::from(part)));
+            parts_vec.push(Bytes::from(part));
         }
+        let msg = Message::multipart(parts_vec);
         let _ = tx.decode(msg);
         if i % 10_000 == 0 {
             eprintln!("lz4 iter {i}");
@@ -318,11 +319,12 @@ fn fuzz_zstd_decode() {
     for i in 0..iters() / 4 {
         let mut tx = ZstdDecoder::new();
         let n_parts = rng.gen_range(1..=4);
-        let mut msg = Message::new();
+        let mut parts_vec: Vec<Bytes> = Vec::new();
         for _ in 0..n_parts {
             let part = random_bytes(&mut rng, 256);
-            msg.push_part(omq_tokio::message::Payload::from_bytes(Bytes::from(part)));
+            parts_vec.push(Bytes::from(part));
         }
+        let msg = Message::multipart(parts_vec);
         let _ = tx.decode(msg);
         if i % 10_000 == 0 {
             eprintln!("zstd iter {i}");

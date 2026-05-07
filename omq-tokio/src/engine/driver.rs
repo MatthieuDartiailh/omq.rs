@@ -248,24 +248,36 @@ where
                 handshake_deadline = None;
             }
 
-            // 1. Drain parsed events. Backpressure via the shared
-            //    peer-out channel (or, for bypass types, the direct recv channel).
+            // 1a. Drain control-plane events (handshake, commands) first
+            // so HandshakeSucceeded reaches the actor before any data
+            // messages — the actor needs the peer identity map populated
+            // before it can apply post_recv transforms (REP envelope).
             while let Some(ev) = codec.poll_event() {
-                let ev = match (decoder.as_mut(), ev) {
-                    (Some(dec), Event::Message(m)) => match dec.decode(m)? {
-                        Some(plain) => Event::Message(plain),
-                        None => continue, // dict shipment consumed at transport
+                if peer_out.send((peer_id, PeerOut::Event(ev))).await.is_err() {
+                    return Ok(());
+                }
+            }
+            // 1b. Drain decoded application messages (data plane).
+            while let Some(m) = codec.poll_message() {
+                let m = match decoder.as_mut() {
+                    Some(dec) => match dec.decode(m)? {
+                        Some(plain) => plain,
+                        None => continue,
                     },
-                    (_, ev) => ev,
+                    None => m,
                 };
-                match (recv_direct.as_ref(), ev) {
-                    (Some(tx), Event::Message(m)) => {
+                match recv_direct.as_ref() {
+                    Some(tx) => {
                         if tx.send(m).await.is_err() {
                             return Ok(());
                         }
                     }
-                    (_, ev) => {
-                        if peer_out.send((peer_id, PeerOut::Event(ev))).await.is_err() {
+                    None => {
+                        if peer_out
+                            .send((peer_id, PeerOut::Event(Event::Message(m))))
+                            .await
+                            .is_err()
+                        {
                             return Ok(());
                         }
                     }
@@ -692,7 +704,7 @@ mod tests {
         let ev = server_events.recv().await.unwrap();
         match ev {
             Event::Message(m) => {
-                assert_eq!(m.parts()[0].as_bytes(), &b"hello"[..]);
+                assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
             }
             _ => panic!("unexpected {ev:?}"),
         }

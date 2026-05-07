@@ -98,7 +98,7 @@ async fn heartbeat_keeps_idle_connection_alive() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes(), &b"still alive"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"still alive"[..]);
 }
 
 #[tokio::test]
@@ -118,7 +118,7 @@ async fn heartbeat_disabled_by_default() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.parts()[0].as_bytes(), &b"x"[..]);
+    assert_eq!(got.part_bytes(0).unwrap(), &b"x"[..]);
 }
 
 #[tokio::test]

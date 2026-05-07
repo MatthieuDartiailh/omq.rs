@@ -62,7 +62,7 @@ async fn tokio_push_to_compio_pull_tcp() {
                     .await
                     .expect("compio pull timed out")
                     .unwrap();
-                got.push(m.parts()[0].as_bytes().to_vec());
+                got.push(m.part_bytes(0).unwrap().to_vec());
             }
             got
         })
@@ -115,7 +115,7 @@ async fn compio_push_to_tokio_pull_tcp() {
             .await
             .expect("tokio pull timed out")
             .unwrap();
-        got.push(m.parts()[0].as_bytes().to_vec());
+        got.push(m.part_bytes(0).unwrap().to_vec());
     }
     push_thread.join().expect("compio thread panic");
     assert_eq!(got, vec![b"m0".to_vec(), b"m1".to_vec(), b"m2".to_vec()]);
@@ -136,8 +136,8 @@ async fn tokio_dealer_to_compio_router_tcp() {
                 .expect("compio router timed out")
                 .unwrap();
             (
-                m.parts()[0].as_bytes().to_vec(),
-                m.parts()[1].as_bytes().to_vec(),
+                m.part_bytes(0).unwrap().to_vec(),
+                m.part_bytes(1).unwrap().to_vec(),
             )
         })
     });
@@ -188,7 +188,7 @@ async fn compio_pub_to_tokio_sub_tcp() {
         .await
         .expect("sub timed out")
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"topic.hello"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"topic.hello"[..]);
     drop(sub);
     pub_thread.join().expect("compio thread panic");
 }

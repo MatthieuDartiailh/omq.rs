@@ -26,9 +26,9 @@ async fn push_pull_single_peer() {
     let m1 = pull.recv().await.unwrap();
     let m2 = pull.recv().await.unwrap();
     let m3 = pull.recv().await.unwrap();
-    assert_eq!(m1.parts()[0].as_bytes(), &b"a"[..]);
-    assert_eq!(m2.parts()[0].as_bytes(), &b"b"[..]);
-    assert_eq!(m3.parts()[0].as_bytes(), &b"c"[..]);
+    assert_eq!(m1.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(m2.part_bytes(0).unwrap(), &b"b"[..]);
+    assert_eq!(m3.part_bytes(0).unwrap(), &b"c"[..]);
 }
 
 #[tokio::test]
@@ -245,6 +245,6 @@ async fn push_send_before_peer_connects_queues() {
             .unwrap()
             .unwrap();
         let expected = format!("early-{i}");
-        assert_eq!(m.parts()[0].as_bytes(), expected.as_bytes());
+        assert_eq!(m.part_bytes(0).unwrap(), expected.as_bytes());
     }
 }

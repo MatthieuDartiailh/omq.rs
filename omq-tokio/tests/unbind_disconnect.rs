@@ -61,7 +61,7 @@ async fn disconnect_after_connect_succeeds() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.parts()[0].as_bytes(), &b"hi"[..]);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
 
     push.disconnect(tcp_loopback(port)).await.unwrap();
     let r = push.disconnect(tcp_loopback(port)).await;

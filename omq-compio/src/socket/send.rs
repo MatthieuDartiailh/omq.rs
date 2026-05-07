@@ -65,7 +65,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         if eq.total_bytes() >= DIRECT_CAP {
             return Ok(false);
         }
-        let msg_total: usize = msg.parts().iter().map(omq_proto::Payload::len).sum();
+        let msg_total = msg.byte_len();
         if msg_total < FLAT_THRESHOLD {
             eq.encode_and_push_flat(msg);
         } else {
@@ -86,7 +86,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
     // 4-byte plaintext sentinel to each part payload.
     if let Some((ref sentinel, threshold)) = state.transform_passthrough
         && state.handshake_done.load(Ordering::Relaxed)
-        && msg.parts().iter().all(|p| p.len() < threshold)
+        && msg.iter().all(|b| b.len() < threshold)
     {
         let Ok(mut eq) = state.encoded_queue.try_lock() else {
             return Ok(false);
@@ -95,7 +95,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             return Ok(false);
         }
         let prefix_len = sentinel.len();
-        let msg_total: usize = msg.parts().iter().map(|p| p.len() + prefix_len).sum();
+        let msg_total: usize = msg.byte_len() + prefix_len * msg.len();
         if msg_total < FLAT_THRESHOLD {
             eq.encode_and_push_prefixed_flat(sentinel, msg);
         } else {
@@ -130,8 +130,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         return Ok(false);
     }
     for wire in &wires {
-        let total: usize = wire.parts().iter().map(omq_proto::Payload::len).sum();
-        if total < FLAT_THRESHOLD {
+        if wire.byte_len() < FLAT_THRESHOLD {
             eq.encode_and_push_flat(wire);
         } else {
             eq.encode_and_push(wire);
@@ -241,12 +240,12 @@ impl Socket {
         let cur_gen = inner.peers_gen.load(Ordering::Acquire);
         {
             let cache = inner.cached_route.lock().expect("cached_route");
-            if let Some(ref cr) = *cache {
-                if cr.generation == cur_gen {
-                    return self
-                        .slow_round_robin(cr.out.clone(), msg, 1, cr.direct.clone())
-                        .await;
-                }
+            if let Some(ref cr) = *cache
+                && cr.generation == cur_gen
+            {
+                return self
+                    .slow_round_robin(cr.out.clone(), msg, 1, cr.direct.clone())
+                    .await;
             }
         }
 
@@ -522,12 +521,11 @@ impl Socket {
     /// `[routing_id, body...]`; the first frame names the target peer
     /// in `identity_to_slot`. Unknown identity is dropped silently
     /// unless `router_mandatory` is set, which surfaces `Unroutable`.
-    async fn send_identity_routed(&self, msg: Message) -> Result<()> {
-        let parts = msg.parts();
-        if parts.is_empty() {
+    async fn send_identity_routed(&self, mut msg: Message) -> Result<()> {
+        if msg.is_empty() {
             return Err(Error::Unroutable);
         }
-        let identity = parts[0].as_bytes();
+        let identity = msg.part_bytes(0).unwrap_or_default();
         let target = {
             let table = self
                 .inner()
@@ -547,11 +545,8 @@ impl Socket {
             }
             return Ok(());
         };
-        let mut body = Message::new();
-        for p in parts.iter().skip(1) {
-            body.push_part(p.clone());
-        }
-        out.send(body).await
+        msg.pop_front();
+        out.send(msg).await
     }
 
     /// RADIO: each message must be `[group, body]`. Fan out to every
@@ -559,14 +554,13 @@ impl Socket {
     /// joined the message's group. Inproc peers have no per-peer
     /// group filter; the DISH side filters on receive.
     async fn send_radio(&self, msg: Message) -> Result<()> {
-        let parts = msg.parts();
-        if parts.len() != 2 {
+        if msg.len() != 2 {
             return Err(Error::Protocol(
                 "RADIO socket requires [group, body] (2 parts)".into(),
             ));
         }
-        let group = parts[0].as_bytes();
-        let body = parts[1].as_bytes();
+        let group = msg.part_bytes(0).unwrap();
+        let body = msg.part_bytes(1).unwrap();
         let udp_socks: Vec<Arc<compio::net::UdpSocket>> = self
             .inner()
             .udp_dialers
@@ -607,11 +601,7 @@ impl Socket {
     /// is treated as match-nothing (the wire peer hasn't said it
     /// wants anything yet).
     async fn send_pub_filtered(&self, msg: Message) -> Result<()> {
-        let topic = msg
-            .parts()
-            .first()
-            .map(omq_proto::Payload::as_bytes)
-            .unwrap_or_default();
+        let topic = msg.part_bytes(0).unwrap_or_default();
         let targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers
@@ -764,11 +754,10 @@ impl Socket {
     }
 
     fn try_send_identity_routed(&self, msg: &Message) -> Result<()> {
-        let parts = msg.parts();
-        if parts.is_empty() {
+        if msg.is_empty() {
             return Err(Error::Unroutable);
         }
-        let identity = parts[0].as_bytes();
+        let identity = msg.part_bytes(0).unwrap_or_default();
         let target = {
             let table = self
                 .inner()
@@ -788,19 +777,13 @@ impl Socket {
             }
             return Ok(());
         };
-        let mut body = Message::new();
-        for p in parts.iter().skip(1) {
-            body.push_part(p.clone());
-        }
+        let mut body = msg.clone();
+        body.pop_front();
         out.try_send_immediate(body)
     }
 
     fn try_send_pub_filtered(&self, msg: &Message) {
-        let topic = msg
-            .parts()
-            .first()
-            .map(omq_proto::Payload::as_bytes)
-            .unwrap_or_default();
+        let topic = msg.part_bytes(0).unwrap_or_default();
         let targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers
@@ -820,13 +803,12 @@ impl Socket {
     }
 
     fn try_send_radio(&self, msg: &Message) -> Result<()> {
-        let parts = msg.parts();
-        if parts.len() != 2 {
+        if msg.len() != 2 {
             return Err(Error::Protocol(
                 "RADIO socket requires [group, body] (2 parts)".into(),
             ));
         }
-        let group = parts[0].as_bytes();
+        let group = msg.part_bytes(0).unwrap();
         let stream_targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers

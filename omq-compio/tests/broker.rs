@@ -53,14 +53,14 @@ async fn router_dealer_rep_single_cycle() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(work.parts()[0].as_bytes(), &b"work"[..]);
+    assert_eq!(work.part_bytes(0).unwrap(), &b"work"[..]);
     rep.send(Message::single("done")).await.unwrap();
 
     let reply = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.parts()[0].as_bytes(), &b"done"[..]);
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"done"[..]);
 
     broker.await.unwrap();
 }
@@ -92,7 +92,7 @@ async fn router_dealer_rep_multiple_rounds() {
                 .await
                 .unwrap()
                 .unwrap();
-            let body = m.parts()[0].as_bytes().to_vec();
+            let body = m.part_bytes(0).unwrap().to_vec();
             let mut reply = b"ack:".to_vec();
             reply.extend_from_slice(&body);
             rep.send(Message::single(reply)).await.unwrap();
@@ -122,7 +122,7 @@ async fn router_dealer_rep_multiple_rounds() {
             .await
             .unwrap()
             .unwrap();
-        let got = r.parts()[0].as_bytes();
+        let got = r.part_bytes(0).unwrap();
         let expected = format!("ack:job-{i}");
         assert_eq!(&*got, expected.as_bytes(), "round {i} mismatch");
     }
@@ -169,7 +169,7 @@ async fn router_dealer_rep_two_concurrent_clients() {
             .expect("rep recv timed out")
             .unwrap();
         let mut ok = b"ok-".to_vec();
-        ok.extend_from_slice(&m.parts()[0].as_bytes());
+        ok.extend_from_slice(&m.part_bytes(0).unwrap());
         rep.send(Message::single(ok)).await.unwrap();
 
         let reply = compio::time::timeout(Duration::from_secs(3), dealer.recv())
@@ -184,15 +184,15 @@ async fn router_dealer_rep_two_concurrent_clients() {
         .await
         .expect("req1 recv timed out")
         .unwrap()
-        .parts()[0]
-        .as_bytes()
+        .part_bytes(0)
+        .unwrap()
         .to_vec();
     let r2 = compio::time::timeout(Duration::from_secs(3), req2.recv())
         .await
         .expect("req2 recv timed out")
         .unwrap()
-        .parts()[0]
-        .as_bytes()
+        .part_bytes(0)
+        .unwrap()
         .to_vec();
 
     assert!(r1.starts_with(b"ok-"), "req1 got bad reply: {r1:?}");

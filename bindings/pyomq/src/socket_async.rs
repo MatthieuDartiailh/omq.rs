@@ -120,11 +120,7 @@ impl AsyncSocket {
         runtime::compio_future_into_py(py, move || async move {
             match recv_rx.recv_async().await {
                 Ok(msg) => {
-                    let mut parts: Vec<Bytes> = msg
-                        .into_parts()
-                        .into_iter()
-                        .map(|p| p.as_bytes())
-                        .collect();
+                    let mut parts: Vec<Bytes> = msg.iter().collect();
                     let head = if parts.is_empty() {
                         Bytes::new()
                     } else {
