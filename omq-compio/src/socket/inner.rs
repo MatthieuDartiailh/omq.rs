@@ -690,7 +690,7 @@ pub(crate) async fn try_one_shot_large_recv(
     }
 
     let mut acc = BytesMut::with_capacity(payload_len);
-    let mut extra: Option<bytes::Bytes> = None;
+    let mut extra = BytesMut::new();
 
     // 2) Cancel + drain. Fire the CancelToken on a clone (cancel()
     // consumes by value); subsequent `stream.next().with_cancel(...)`
@@ -717,26 +717,7 @@ pub(crate) async fn try_one_shot_large_recv(
                     let take = want.min(buf_ref.len());
                     acc.extend_from_slice(&buf_ref[..take]);
                     if take < buf_ref.len() {
-                        // Spill into next frame. Coalesce with any
-                        // earlier overflow (rare; usually one CQE
-                        // carries the spill).
-                        let spill = bytes::Bytes::copy_from_slice(&buf_ref[take..]);
-                        match extra.as_mut() {
-                            Some(_existing) => {
-                                let mut combined = BytesMut::with_capacity(
-                                    extra.as_ref().map_or(0, bytes::Bytes::len) + spill.len(),
-                                );
-                                combined.extend_from_slice(extra.as_ref().expect("set"));
-                                combined.extend_from_slice(&spill);
-                                extra = Some(combined.freeze());
-                            }
-                            None => extra = Some(spill),
-                        }
-                    }
-                    if acc.len() == payload_len && extra.is_some() {
-                        // Already have everything plus overflow; keep
-                        // draining only if more overflow lands. The
-                        // cancel will terminate naturally below.
+                        extra.extend_from_slice(&buf_ref[take..]);
                     }
                 }
                 Some(Err(e)) => {
@@ -789,8 +770,8 @@ pub(crate) async fn try_one_shot_large_recv(
         if let Err(e) = io.codec.supply_payload(payload_bytes) {
             return OneShotLargeRecvOutcome::ProtoErr(e);
         }
-        if let Some(spill) = extra
-            && let Err(e) = io.codec.handle_input(spill)
+        if !extra.is_empty()
+            && let Err(e) = io.codec.handle_input(extra.freeze())
         {
             return OneShotLargeRecvOutcome::ProtoErr(e);
         }

@@ -1095,7 +1095,7 @@ impl SocketDriver {
                     .identity
                     .clone()
                     .unwrap_or_else(|| generated_identity(peer_id));
-                let (handle, subs_replay, endpoint, peer_ident) = {
+                let (handle, subs_replay, peer_ident) = {
                     let Some(p) = self.peers.get_mut(&peer_id) else {
                         return;
                     };
@@ -1115,11 +1115,9 @@ impl SocketDriver {
                     (
                         p.handle.clone(),
                         self.subscriptions.clone(),
-                        p.endpoint.clone(),
                         p.ident.clone(),
                     )
                 };
-                let _ = endpoint;
                 #[cfg(feature = "priority")]
                 {
                     let _ = peer_ident;
@@ -1142,35 +1140,7 @@ impl SocketDriver {
                     matches!(peer_ident, PeerIdent::Inproc(_)),
                 );
                 self.recv_strategy.connection_added(peer_id, identity);
-                // SUB / XSUB: replay our current subscriptions to the new peer.
-                if supports_subscribe(self.socket_type) {
-                    for prefix in subs_replay {
-                        let _ = handle
-                            .inbox
-                            .send(crate::engine::DriverCommand::SendCommand(
-                                omq_proto::proto::Command::Subscribe(prefix),
-                            ))
-                            .await;
-                    }
-                }
-                // DISH: replay our current group joins to ZMTP RADIO peers.
-                if supports_groups(self.socket_type) {
-                    let groups: Vec<bytes::Bytes> = self
-                        .joined_groups
-                        .lock()
-                        .expect("joined_groups poisoned")
-                        .iter()
-                        .cloned()
-                        .collect();
-                    for group in groups {
-                        let _ = handle
-                            .inbox
-                            .send(crate::engine::DriverCommand::SendCommand(
-                                omq_proto::proto::Command::Join(group),
-                            ))
-                            .await;
-                    }
-                }
+                self.replay_state_to_peer(&handle, subs_replay).await;
             }
             ZmtpEvent::Message(msg) => {
                 if self.closing {
@@ -1264,6 +1234,40 @@ impl SocketDriver {
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+
+    async fn replay_state_to_peer(
+        &self,
+        handle: &crate::engine::DriverHandle,
+        subs_replay: Vec<bytes::Bytes>,
+    ) {
+        if supports_subscribe(self.socket_type) {
+            for prefix in subs_replay {
+                let _ = handle
+                    .inbox
+                    .send(crate::engine::DriverCommand::SendCommand(
+                        omq_proto::proto::Command::Subscribe(prefix),
+                    ))
+                    .await;
+            }
+        }
+        if supports_groups(self.socket_type) {
+            let groups: Vec<bytes::Bytes> = self
+                .joined_groups
+                .lock()
+                .expect("joined_groups poisoned")
+                .iter()
+                .cloned()
+                .collect();
+            for group in groups {
+                let _ = handle
+                    .inbox
+                    .send(crate::engine::DriverCommand::SendCommand(
+                        omq_proto::proto::Command::Join(group),
+                    ))
+                    .await;
             }
         }
     }

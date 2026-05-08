@@ -78,18 +78,22 @@ async fn maybe_sleep_until(deadline: Option<Instant>) {
 /// preserving the cancellation-safety invariant: dropping the driver
 /// future at any earlier `.await` does not lose any kernel bytes.
 enum StreamArmOutcome {
-    /// `recv_active` was true and `recv_state_changed` fired (the
-    /// `recv()` direct path released the claim or transitioned).
     ClaimFlipped,
-    /// `handle_input` consumed a non-empty buffer.
     Fed,
-    /// Stream terminated cleanly (peer closed) or yielded an empty buffer.
     Eof,
-    /// Codec rejected input as a protocol error.
     ProtoErr(Error),
-    /// Stream errored. ENOBUFS is recoverable via re-arm; other errors
-    /// terminate the driver.
     Err(std::io::Error),
+}
+
+impl From<crate::socket::OneShotLargeRecvOutcome> for StreamArmOutcome {
+    fn from(o: crate::socket::OneShotLargeRecvOutcome) -> Self {
+        match o {
+            crate::socket::OneShotLargeRecvOutcome::Skipped
+            | crate::socket::OneShotLargeRecvOutcome::Took => Self::Fed,
+            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => Self::Err(e),
+            crate::socket::OneShotLargeRecvOutcome::ProtoErr(e) => Self::ProtoErr(e),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -353,38 +357,12 @@ pub(crate) async fn run_connection(
             }
         }
 
-        // 1) Drain parsed events. Skipped post-handshake when no new bytes
-        //    arrived this iteration — `poll_event` would return None
-        //    immediately, and acquiring the async mutex is not free.
-        //
-        //    Post-handshake also skipped when the recv direct path
-        //    holds the claim: `try_direct_recv` is concurrently pulling
-        //    bytes via the multi-shot stream, feeding the codec, and
-        //    consuming user-visible events directly. Pushing those same
-        //    events to `in_rx` from here would deliver them to the user
-        //    twice (once via the channel path on the next `recv()`,
-        //    once via the direct path) and out-of-order with respect to
-        //    bytes that arrived after the claim was set. With drain
-        //    skipped under the claim, events stay in the codec for
-        //    `try_direct_recv` to consume in arrival order; when the
-        //    claim drops, the driver wakes via `recv_state_changed` and
-        //    drains anything left.
-        // Skip draining post-handshake when the recv direct path holds
-        // the claim. The user's `try_direct_recv` is concurrently
-        // pulling bytes via the multi-shot stream and consuming events
-        // directly from the codec; pushing to in_rx from here would
-        // race the inline drain and surface events out of arrival order
-        // (driver-pushed events trail user-consumed events even though
-        // they were parsed first). With drain skipped under the claim,
-        // events stay in the codec until either the user drains them
-        // inline or the claim drops.
-        // Skip draining post-handshake when the recv direct path holds
-        // the claim. The user's `try_direct_recv` is concurrently
-        // consuming events directly from the codec; if the driver also
-        // drained, the two paths would each pull their own subset of
-        // events and surface them out of FIFO order (driver-pushed
-        // events trail user-consumed events even though they were
-        // parsed first).
+        // 1) Drain parsed events. Skipped post-handshake when no new
+        //    bytes arrived (codec_has_input is false) or when the recv
+        //    direct path holds the claim (recv_claimed). Under the
+        //    claim, try_direct_recv is consuming events from the codec
+        //    inline; draining here would surface events out of FIFO
+        //    order.
         let post_handshake = state.handshake_done.load(Ordering::Relaxed);
         let recv_claimed = state.recv_claim.load(Ordering::Acquire) == 1;
         let drained: SmallVec<[Drained; 8]> = if !post_handshake
@@ -764,18 +742,9 @@ pub(crate) async fn run_connection(
                 match sguard.as_mut() {
                     None => StreamArmOutcome::Eof,
                     Some(crate::socket::RecvStreamState::OneShot) => {
-                        match crate::socket::one_shot_recv_and_feed(&state, &mut sguard).await {
-                            crate::socket::OneShotLargeRecvOutcome::Skipped
-                            | crate::socket::OneShotLargeRecvOutcome::Took => {
-                                StreamArmOutcome::Fed
-                            }
-                            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
-                                StreamArmOutcome::Err(e)
-                            }
-                            crate::socket::OneShotLargeRecvOutcome::ProtoErr(e) => {
-                                StreamArmOutcome::ProtoErr(e)
-                            }
-                        }
+                        crate::socket::one_shot_recv_and_feed(&state, &mut sguard)
+                            .await
+                            .into()
                     }
                     Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
                         // `.with_cancel(cs.cancel.clone())` registers the
@@ -813,23 +782,12 @@ pub(crate) async fn run_connection(
                                     match handle_result {
                                         Err(e) => StreamArmOutcome::ProtoErr(e),
                                         Ok(()) => {
-                                            match crate::socket::try_one_shot_large_recv(
+                                            crate::socket::try_one_shot_large_recv(
                                                 &state,
                                                 &mut sguard,
                                             )
                                             .await
-                                            {
-                                                crate::socket::OneShotLargeRecvOutcome::Skipped
-                                                | crate::socket::OneShotLargeRecvOutcome::Took => {
-                                                    StreamArmOutcome::Fed
-                                                }
-                                                crate::socket::OneShotLargeRecvOutcome::IoErr(
-                                                    e,
-                                                ) => StreamArmOutcome::Err(e),
-                                                crate::socket::OneShotLargeRecvOutcome::ProtoErr(
-                                                    e,
-                                                ) => StreamArmOutcome::ProtoErr(e),
-                                            }
+                                            .into()
                                         }
                                     }
                                 }
