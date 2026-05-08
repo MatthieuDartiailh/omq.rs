@@ -272,6 +272,6 @@ fn main() {
         let fa = run_cell("flume async", size, flume_async);
         let ratio_batch = bb.msg_per_sec() / fa.msg_per_sec();
         let ratio_async = ba.msg_per_sec() / fa.msg_per_sec();
-        println!("  {ratio_batch:>42.2}× batch/flume  {ratio_async:.2}× async/flume\n",);
+        println!("  {ratio_batch:>42.2}× batch/flume  {ratio_async:.2}× async/flume\n");
     }
 }
