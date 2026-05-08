@@ -1163,8 +1163,7 @@ impl SocketDriver {
                 // message whose body starts with 0x01 / 0x00. pyzmq
                 // XSUB and older libzmq paths emit these instead of
                 // the 3.1 wire commands. PUB/XPUB must honor both.
-                if matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
-                    && msg.len() == 1
+                if matches!(self.socket_type, SocketType::Pub | SocketType::XPub) && msg.len() == 1
                 {
                     let body = msg.part_bytes(0).unwrap_or_default();
                     if let Some((tag, prefix)) = body.split_first() {
@@ -1218,19 +1217,13 @@ impl SocketDriver {
                     Command::Subscribe(prefix) => {
                         self.send_strategy.peer_subscribe(peer_id, prefix.clone());
                         if self.socket_type == SocketType::XPub {
-                            let _ = self
-                                .recv_tx
-                                .send(xpub_notification(0x01, &prefix))
-                                .await;
+                            let _ = self.recv_tx.send(xpub_notification(0x01, &prefix)).await;
                         }
                     }
                     Command::Cancel(prefix) => {
                         self.send_strategy.peer_cancel(peer_id, &prefix);
                         if self.socket_type == SocketType::XPub {
-                            let _ = self
-                                .recv_tx
-                                .send(xpub_notification(0x00, &prefix))
-                                .await;
+                            let _ = self.recv_tx.send(xpub_notification(0x00, &prefix)).await;
                         }
                     }
                     Command::Join(group) => {

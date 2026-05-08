@@ -739,7 +739,6 @@ impl Socket {
                         return Ok(raw);
                     }
                 }
-
             } else {
                 // PULL/PAIR: check recv_cache first (filled by swap_messages).
                 let cache = self.inner.recv_cache.get();
@@ -881,7 +880,6 @@ impl Socket {
                         return Ok(raw);
                     }
                 }
-
             } else {
                 // PULL/PAIR: check recv_cache first (filled by swap_messages).
                 let cache = self.inner.recv_cache.get();
@@ -907,7 +905,6 @@ impl Socket {
             }
         }
     }
-
 
     fn snapshot_direct_io_single_peer(&self) -> Option<Arc<DirectIoState>> {
         let peers = self.inner.out_peers.read().expect("peers lock");
@@ -1095,8 +1092,7 @@ impl Socket {
                 // a match before returning to the wire.
                 if post_recv_needs_type_state(self.inner.socket_type) {
                     loop {
-                        let raw =
-                            self.inner.recv_cache.get().pop_front();
+                        let raw = self.inner.recv_cache.get().pop_front();
                         let Some(raw) = raw else { break };
                         if let Some(out) = self.post_recv_apply(raw)? {
                             return Ok(Some(out));
@@ -1152,9 +1148,7 @@ impl Socket {
                         match crate::socket::one_shot_recv_and_feed(&state, &mut sguard).await {
                             crate::socket::OneShotLargeRecvOutcome::Skipped
                             | crate::socket::OneShotLargeRecvOutcome::Took => PullOutcome::Fed,
-                            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
-                                PullOutcome::Err(e)
-                            }
+                            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => PullOutcome::Err(e),
                             crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => {
                                 PullOutcome::ProtoErr
                             }
@@ -1422,7 +1416,9 @@ impl Socket {
         {
             let mut peers = self.inner.out_peers.write().expect("peers lock");
             peers.clear();
-            self.inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
+            self.inner
+                .peers_gen
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
         }
         self.inner.monitor.publish(MonitorEvent::Closed);
         Ok(())

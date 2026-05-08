@@ -30,8 +30,14 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
 #[tokio::main]
 async fn main() {
     unsafe {
-        libc::signal(libc::SIGTERM, exit_on_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, exit_on_signal as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            exit_on_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            exit_on_signal as *const () as libc::sighandler_t,
+        );
     }
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {

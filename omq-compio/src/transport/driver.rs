@@ -485,9 +485,7 @@ pub(crate) async fn run_connection(
                     // body starts with 0x01 (subscribe) or 0x00
                     // (cancel). pyzmq XSUB and libzmq's older paths
                     // emit these instead of the 3.1 wire commands.
-                    if matches!(socket_type, SocketType::Pub | SocketType::XPub)
-                        && m.len() == 1
-                    {
+                    if matches!(socket_type, SocketType::Pub | SocketType::XPub) && m.len() == 1 {
                         let body = m.part_bytes(0).unwrap();
                         if let Some((tag, prefix)) = body.split_first() {
                             let cmd = match tag {
@@ -781,14 +779,12 @@ pub(crate) async fn run_connection(
                                     };
                                     match handle_result {
                                         Err(e) => StreamArmOutcome::ProtoErr(e),
-                                        Ok(()) => {
-                                            crate::socket::try_one_shot_large_recv(
-                                                &state,
-                                                &mut sguard,
-                                            )
-                                            .await
-                                            .into()
-                                        }
+                                        Ok(()) => crate::socket::try_one_shot_large_recv(
+                                            &state,
+                                            &mut sguard,
+                                        )
+                                        .await
+                                        .into(),
                                     }
                                 }
                             }

@@ -153,11 +153,7 @@ pub fn encode_message_prefixed_flat(prefix: &[u8], msg: &Message, buf: &mut Byte
 /// Encode all frames of `msg` as separate header + payload `Bytes` chunks
 /// for gather-write (`writev`). Large payloads avoid copying; only the
 /// frame header is serialized into `scratch`.
-pub fn encode_message_gather(
-    msg: &Message,
-    chunks: &mut VecDeque<Bytes>,
-    scratch: &mut BytesMut,
-) {
+pub fn encode_message_gather(msg: &Message, chunks: &mut VecDeque<Bytes>, scratch: &mut BytesMut) {
     let parts = msg.parts_payload();
     let n = parts.len();
     for (i, part) in parts.iter().enumerate() {

@@ -319,12 +319,11 @@ impl Socket {
                 // Populate cache for single-peer sockets.
                 if peer_count == 1 {
                     let cur_gen = inner.peers_gen.load(Ordering::Acquire);
-                    *inner.cached_route.lock().expect("cached_route") =
-                        Some(CachedPeerRoute {
-                            generation: cur_gen,
-                            out: chosen.clone(),
-                            direct: direct.clone(),
-                        });
+                    *inner.cached_route.lock().expect("cached_route") = Some(CachedPeerRoute {
+                        generation: cur_gen,
+                        out: chosen.clone(),
+                        direct: direct.clone(),
+                    });
                 }
                 return self.slow_round_robin(chosen, msg, peer_count, direct).await;
             }

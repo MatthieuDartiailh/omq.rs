@@ -89,10 +89,7 @@ async fn router_mandatory_errors_on_unknown_identity() {
         .unwrap();
 
     // Send to an identity nobody owns.
-    let bad = Message::multipart([
-        Bytes::from_static(b"ghost"),
-        Bytes::from_static(b"oops"),
-    ]);
+    let bad = Message::multipart([Bytes::from_static(b"ghost"), Bytes::from_static(b"oops")]);
     let err = router.send(bad).await.err().unwrap();
     assert!(matches!(err, Error::Unroutable), "got {err:?}");
 }
@@ -112,10 +109,7 @@ async fn router_drops_unknown_identity_by_default() {
         .expect("router recv timeout")
         .unwrap();
 
-    let bad = Message::multipart([
-        Bytes::from_static(b"nope"),
-        Bytes::from_static(b"oops"),
-    ]);
+    let bad = Message::multipart([Bytes::from_static(b"nope"), Bytes::from_static(b"oops")]);
     // Default is silent drop (libzmq matches).
     router.send(bad).await.unwrap();
 }

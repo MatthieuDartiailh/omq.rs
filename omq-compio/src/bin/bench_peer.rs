@@ -25,7 +25,8 @@ fn parse_ep(s: &str) -> Endpoint {
             port,
         }
     } else {
-        s.parse().expect("valid endpoint (port number or ipc:// path)")
+        s.parse()
+            .expect("valid endpoint (port number or ipc:// path)")
     }
 }
 
@@ -35,8 +36,14 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
 
 fn main() {
     unsafe {
-        libc::signal(libc::SIGTERM, exit_on_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, exit_on_signal as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            exit_on_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            exit_on_signal as *const () as libc::sighandler_t,
+        );
     }
     let rt = build_default_runtime().expect("compio runtime");
     rt.block_on(async {

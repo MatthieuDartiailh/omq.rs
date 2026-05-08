@@ -34,7 +34,10 @@ pub struct Payload {
 #[derive(Clone)]
 enum PayloadInner {
     Empty,
-    Inline { len: u8, data: [u8; MAX_INLINE_PAYLOAD] },
+    Inline {
+        len: u8,
+        data: [u8; MAX_INLINE_PAYLOAD],
+    },
     Single(Bytes),
     Multi(Vec<Bytes>),
 }
@@ -173,9 +176,7 @@ impl Payload {
     pub fn as_bytes(&self) -> Bytes {
         match &self.inner {
             PayloadInner::Empty => Bytes::new(),
-            PayloadInner::Inline { data, len } => {
-                Bytes::copy_from_slice(&data[..*len as usize])
-            }
+            PayloadInner::Inline { data, len } => Bytes::copy_from_slice(&data[..*len as usize]),
             PayloadInner::Single(b) => b.clone(),
             PayloadInner::Multi(v) => {
                 let mut out = BytesMut::with_capacity(self.len());
@@ -206,7 +207,9 @@ impl Payload {
 
 impl Clone for Payload {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -220,9 +223,10 @@ impl std::fmt::Debug for Payload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
             PayloadInner::Empty => f.write_str("Payload(empty)"),
-            PayloadInner::Inline { data, len } => {
-                f.debug_tuple("Payload").field(&&data[..*len as usize]).finish()
-            }
+            PayloadInner::Inline { data, len } => f
+                .debug_tuple("Payload")
+                .field(&&data[..*len as usize])
+                .finish(),
             PayloadInner::Single(b) => f.debug_tuple("Payload").field(b).finish(),
             PayloadInner::Multi(v) => f.debug_tuple("Payload").field(v).finish(),
         }
@@ -330,7 +334,10 @@ const _: () = assert!(std::mem::size_of::<Message>() == 48);
 
 pub(crate) enum MessageInner {
     Empty,
-    Inline { len: u8, data: [u8; MAX_INLINE_MESSAGE] },
+    Inline {
+        len: u8,
+        data: [u8; MAX_INLINE_MESSAGE],
+    },
     Single(Payload),
     Multi(Vec<Payload>),
 }
@@ -343,7 +350,9 @@ pub struct Message {
 impl Message {
     #[inline]
     pub fn new() -> Self {
-        Self { inner: MessageInner::Empty }
+        Self {
+            inner: MessageInner::Empty,
+        }
     }
 
     #[inline]
@@ -352,7 +361,9 @@ impl Message {
         if b.len() <= MAX_INLINE_MESSAGE {
             return Self::from_inline(&b);
         }
-        Self { inner: MessageInner::Single(Payload::from_bytes(b)) }
+        Self {
+            inner: MessageInner::Single(Payload::from_bytes(b)),
+        }
     }
 
     pub fn multipart<I, P>(parts: I) -> Self
@@ -368,9 +379,13 @@ impl Message {
             0 => Self::new(),
             1 => {
                 let p = payloads.into_iter().next().unwrap();
-                Self { inner: MessageInner::Single(p) }
+                Self {
+                    inner: MessageInner::Single(p),
+                }
             }
-            _ => Self { inner: MessageInner::Multi(payloads) },
+            _ => Self {
+                inner: MessageInner::Multi(payloads),
+            },
         }
     }
 
@@ -416,7 +431,11 @@ impl Message {
                 }
             }
             MessageInner::Single(p) => {
-                if index == 0 { Some(p.as_bytes()) } else { None }
+                if index == 0 {
+                    Some(p.as_bytes())
+                } else {
+                    None
+                }
             }
             MessageInner::Multi(v) => v.get(index).map(Payload::as_bytes),
         }
@@ -464,7 +483,9 @@ impl Message {
             MessageInner::Single(p) => parts.push(p),
             MessageInner::Multi(v) => parts.extend(v),
         }
-        Self { inner: MessageInner::Multi(parts) }
+        Self {
+            inner: MessageInner::Multi(parts),
+        }
     }
 
     // ---- pub(crate) API for codec / type_state / transforms ----
@@ -509,7 +530,9 @@ impl Message {
 
     #[inline]
     pub(crate) fn from_payload(p: Payload) -> Self {
-        Self { inner: MessageInner::Single(p) }
+        Self {
+            inner: MessageInner::Single(p),
+        }
     }
 
     #[inline]
@@ -517,18 +540,26 @@ impl Message {
         debug_assert!(data.len() <= MAX_INLINE_MESSAGE);
         let mut buf = [0u8; MAX_INLINE_MESSAGE];
         buf[..data.len()].copy_from_slice(data);
-        Self { inner: MessageInner::Inline { len: data.len() as u8, data: buf } }
+        Self {
+            inner: MessageInner::Inline {
+                len: data.len() as u8,
+                data: buf,
+            },
+        }
     }
 
     #[inline]
     pub(crate) fn from_payloads_vec(parts: Vec<Payload>) -> Self {
         match parts.len() {
             0 => Self::new(),
-            1 => Self { inner: MessageInner::Single(parts.into_iter().next().unwrap()) },
-            _ => Self { inner: MessageInner::Multi(parts) },
+            1 => Self {
+                inner: MessageInner::Single(parts.into_iter().next().unwrap()),
+            },
+            _ => Self {
+                inner: MessageInner::Multi(parts),
+            },
         }
     }
-
 }
 
 /// Public iterator yielding `Bytes` per message part.
@@ -567,7 +598,9 @@ impl<'a> IntoIterator for &'a Message {
 
 impl Default for Message {
     fn default() -> Self {
-        Self { inner: MessageInner::Empty }
+        Self {
+            inner: MessageInner::Empty,
+        }
     }
 }
 
@@ -576,9 +609,10 @@ impl Clone for Message {
         Self {
             inner: match &self.inner {
                 MessageInner::Empty => MessageInner::Empty,
-                MessageInner::Inline { len, data } => {
-                    MessageInner::Inline { len: *len, data: *data }
-                }
+                MessageInner::Inline { len, data } => MessageInner::Inline {
+                    len: *len,
+                    data: *data,
+                },
                 MessageInner::Single(p) => MessageInner::Single(p.clone()),
                 MessageInner::Multi(v) => MessageInner::Multi(v.clone()),
             },
@@ -646,9 +680,7 @@ impl From<Message> for Bytes {
     fn from(msg: Message) -> Bytes {
         match msg.inner {
             MessageInner::Empty => Bytes::new(),
-            MessageInner::Inline { len, data } => {
-                Bytes::copy_from_slice(&data[..len as usize])
-            }
+            MessageInner::Inline { len, data } => Bytes::copy_from_slice(&data[..len as usize]),
             MessageInner::Single(p) => p.as_bytes(),
             MessageInner::Multi(_) => {
                 panic!("From<Message> for Bytes on multi-part Message; use msg.iter() instead")

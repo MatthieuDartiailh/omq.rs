@@ -1,6 +1,6 @@
 use std::fmt;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::error::{SendError, TrySendError};
 use crate::shared::Shared;

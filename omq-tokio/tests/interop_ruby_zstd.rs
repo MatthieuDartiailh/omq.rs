@@ -104,8 +104,7 @@ async fn ruby_push_zstd_tcp_sustained() {
     // shipment frame followed by compressed messages.
     //
     // `yes` produces a 114-char line; `* 3` → 342-byte payloads.
-    const PAYLOAD_UNIT: &str =
-        "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+    const PAYLOAD_UNIT: &str = "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
          The quick brown fox jumps over the lazy dog.";
     let expected = PAYLOAD_UNIT.repeat(3);
 

@@ -48,7 +48,6 @@ fn random_bytes(rng: &mut StdRng, max_len: usize) -> Vec<u8> {
     v
 }
 
-
 #[test]
 fn fuzz_command_decode() {
     let mut rng = rng();

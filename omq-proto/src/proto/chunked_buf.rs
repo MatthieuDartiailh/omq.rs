@@ -94,11 +94,7 @@ impl ChunkedInputBuf {
     /// `MaybeUninit<u8>` slice, allowing the caller to skip zeroing the
     /// destination. After this call, `dest[..n]` is initialized.
     #[inline]
-    pub(crate) fn read_into_uninit(
-        &mut self,
-        n: usize,
-        dest: &mut [std::mem::MaybeUninit<u8>],
-    ) {
+    pub(crate) fn read_into_uninit(&mut self, n: usize, dest: &mut [std::mem::MaybeUninit<u8>]) {
         debug_assert!(n <= self.total_len);
         debug_assert!(n <= dest.len());
         if n == 0 {

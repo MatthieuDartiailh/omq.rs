@@ -131,8 +131,7 @@ async fn ruby_push_lz4_tcp_sustained() {
     // 114-char unit × 5 = 570-byte payloads. lz4's MIN_COMPRESS_NO_DICT
     // is 512 B, so each part takes the LZ4B envelope path (compressed
     // body with `Frame_Content_Size` declared up-front).
-    const PAYLOAD_UNIT: &str =
-        "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+    const PAYLOAD_UNIT: &str = "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
          The quick brown fox jumps over the lazy dog.";
     let expected = PAYLOAD_UNIT.repeat(5);
 

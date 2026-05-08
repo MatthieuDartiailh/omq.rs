@@ -394,8 +394,7 @@ impl Connection {
             // every bit pattern is valid, including uninitialized memory.
             // `MaybeUninit::uninit().assume_init()` on an array of
             // `MaybeUninit` is the standard pattern (see std docs).
-            let mut data: [std::mem::MaybeUninit<u8>;
-                crate::message::MAX_INLINE_MESSAGE] =
+            let mut data: [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE] =
                 unsafe { std::mem::MaybeUninit::uninit().assume_init() };
             self.in_buf.read_into_uninit(hdr.payload_len, &mut data);
             // SAFETY: `transmute` from `[MaybeUninit<u8>; 39]` to
@@ -482,12 +481,7 @@ impl Connection {
     }
 
     #[cfg(any(feature = "blake3zmq", feature = "curve"))]
-    fn dispatch_decrypted(
-        &mut self,
-        command: bool,
-        more: bool,
-        plaintext: Bytes,
-    ) -> Result<()> {
+    fn dispatch_decrypted(&mut self, command: bool, more: bool, plaintext: Bytes) -> Result<()> {
         if command {
             let cmd = command::decode(plaintext)?;
             self.handle_post_handshake_command(cmd);
@@ -969,9 +963,7 @@ impl Connection {
     ///
     /// Returns `None` when `begin_supplied_payload`'s preconditions fail
     /// (not Ready, no complete header).
-    pub fn begin_supplied_payload_with_prefix(
-        &mut self,
-    ) -> Option<(usize, Payload)> {
+    pub fn begin_supplied_payload_with_prefix(&mut self) -> Option<(usize, Payload)> {
         if !matches!(self.state, State::Ready) {
             return None;
         }

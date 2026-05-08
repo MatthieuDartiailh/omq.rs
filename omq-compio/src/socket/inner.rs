@@ -662,8 +662,7 @@ pub(crate) async fn try_one_shot_large_recv(
         if info.payload_len < state.large_message_threshold {
             return OneShotLargeRecvOutcome::Skipped;
         }
-        let already_one_shot =
-            matches!(sguard.as_ref(), Some(RecvStreamState::OneShot));
+        let already_one_shot = matches!(sguard.as_ref(), Some(RecvStreamState::OneShot));
         if info.buffered_payload_prefix == 0 {
             match io.codec.begin_supplied_payload() {
                 Some(plen) => (plen, None),
@@ -897,7 +896,9 @@ impl DirectIoState {
             peer_io,
             writer: async_lock::Mutex::new(writer),
             transmit_ready: Event::new(),
-            recv_stream: LocalStream(async_lock::Mutex::new(Some(RecvStreamState::MultiShot(recv_stream)))),
+            recv_stream: LocalStream(async_lock::Mutex::new(Some(RecvStreamState::MultiShot(
+                recv_stream,
+            )))),
             recv_claim: AtomicU8::new(0),
             recv_state_changed: Event::new(),
             recv_codec_ready: Event::new(),
