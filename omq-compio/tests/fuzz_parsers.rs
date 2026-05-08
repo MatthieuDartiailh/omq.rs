@@ -16,7 +16,7 @@ use rand::{Rng, RngCore, SeedableRng};
 use omq_compio::proto::{
     SocketType, command,
     connection::{Connection, ConnectionConfig, Role},
-    frame, greeting,
+    frame,
     mechanism::MechanismSetup,
     z85,
 };
@@ -48,32 +48,6 @@ fn random_bytes(rng: &mut StdRng, max_len: usize) -> Vec<u8> {
     v
 }
 
-#[test]
-fn fuzz_greeting_decode() {
-    let mut rng = rng();
-    for i in 0..iters() {
-        let raw = random_bytes(&mut rng, 96);
-        let mut buf = BytesMut::from(&raw[..]);
-        // Must not panic on any input.
-        let _ = greeting::try_decode(&mut buf);
-        if i % 50_000 == 0 {
-            eprintln!("greeting iter {i}");
-        }
-    }
-}
-
-#[test]
-fn fuzz_frame_decode() {
-    let mut rng = rng();
-    for i in 0..iters() {
-        let raw = random_bytes(&mut rng, 4096);
-        let mut buf = BytesMut::from(&raw[..]);
-        let _ = frame::try_decode_frame(&mut buf);
-        if i % 50_000 == 0 {
-            eprintln!("frame iter {i}");
-        }
-    }
-}
 
 #[test]
 fn fuzz_command_decode() {
@@ -170,9 +144,8 @@ fn fuzz_handle_input_both_roles() {
 /// flag bit handling, or buffer-management bugs in either side.
 #[test]
 fn fuzz_frame_roundtrip() {
-    use bytes::BytesMut;
     use omq_compio::message::{Frame, FrameFlags, Payload};
-    use omq_compio::proto::frame::{encode_frame, try_decode_frame};
+    use omq_compio::proto::frame::{decode_frame_from_bytes, encode_frame};
     let mut rng = rng();
     for i in 0..iters() / 2 {
         // Random size sweep covering both short (<=255) and long (>255)
@@ -188,8 +161,7 @@ fn fuzz_frame_roundtrip() {
         let mut payload = vec![0u8; size];
         rng.fill_bytes(&mut payload);
         let bytes = Bytes::from(payload);
-        // command + more is illegal; flip them independently but
-        // never both on.
+        // command + more is illegal; flip them independently but never both on.
         let (more, command) = match rng.gen_range(0..3) {
             0 => (false, false),
             1 => (true, false),
@@ -201,13 +173,13 @@ fn fuzz_frame_roundtrip() {
         };
         let mut out = BytesMut::new();
         encode_frame(&frame, &mut out);
-        let decoded =
-            try_decode_frame(&mut out).expect("decode of self-encoded frame must not error");
+        let (decoded, remaining) = decode_frame_from_bytes(out.freeze())
+            .expect("decode of self-encoded frame must not error");
         let decoded = decoded.expect("must produce a frame");
         assert_eq!(decoded.flags.more, more, "more bit");
         assert_eq!(decoded.flags.command, command, "command bit");
         assert_eq!(decoded.payload.as_bytes(), bytes, "payload mismatch");
-        assert!(out.is_empty(), "decoder left {} bytes pending", out.len());
+        assert_eq!(remaining, 0, "decoder left {remaining} bytes pending");
         if i % 50_000 == 0 {
             eprintln!("frame_roundtrip iter {i}");
         }

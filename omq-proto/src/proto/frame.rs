@@ -301,6 +301,17 @@ pub(crate) fn try_decode_frame(buf: &mut ChunkedInputBuf) -> Result<Option<Frame
     }))
 }
 
+/// Decode one frame from an owned byte buffer. Returns `(frame, remaining_len)`
+/// where `remaining_len` is the number of bytes left unconsumed after decoding.
+/// For a complete, single-frame buffer `remaining_len` should be zero.
+/// Intended for tests and fuzz suites that have flat `Bytes` data.
+pub fn decode_frame_from_bytes(data: Bytes) -> Result<(Option<Frame>, usize)> {
+    let mut buf = ChunkedInputBuf::new();
+    buf.push(data);
+    let frame = try_decode_frame(&mut buf)?;
+    Ok((frame, buf.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::chunked_buf::ChunkedInputBuf;
