@@ -92,6 +92,18 @@ impl Drop for ClaimGuard<'_> {
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
 /// driver tasks. Close happens via the explicit [`Socket::close`] method
 /// (the last handle drop cancels the background tasks without draining).
+///
+/// # Single-caller contract
+///
+/// `Socket` is pinned to the compio runtime that created it and all
+/// I/O runs on that single thread. `send` and `recv` take `&self`
+/// for ergonomic use behind `Arc`, but **at most one `send` and one
+/// `recv` may be in flight at a time on the same socket.** Concurrent
+/// `recv` calls race on internal queues (the inbound channel, the
+/// recv-cache, and the direct-recv claim) that assume a single
+/// consumer; concurrent `send` calls race on the outbound codec.
+/// Neither combination is detected at runtime — the result is
+/// silently lost or duplicated messages.
 #[derive(Clone)]
 pub struct Socket {
     inner: Arc<SocketInner>,

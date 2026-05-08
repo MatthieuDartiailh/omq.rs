@@ -19,6 +19,16 @@ use crate::routing::{SendStrategy, SendSubmitter};
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
 /// driver task. Close happens via the explicit [`Socket::close`] method
 /// (the last handle drop cancels the driver without waiting for drain).
+///
+/// # Concurrency
+///
+/// The tokio backend is multi-threaded. `recv` reads from an
+/// `async_channel` (MPMC), so concurrent `recv` calls from
+/// different tasks are safe — each message is delivered to exactly
+/// one caller. `send` goes through a per-socket `SendSubmitter`
+/// that serializes internally, so concurrent `send` calls are also
+/// safe. This is unlike the compio backend, where both `send` and
+/// `recv` assume a single caller at a time.
 #[derive(Clone, Debug)]
 pub struct Socket {
     inner: Arc<Inner>,

@@ -61,59 +61,6 @@ async fn cancel_recv_mid_wait_then_recv_succeeds() {
     assert_eq!(m.part_bytes(0).unwrap(), &b"after-cancel"[..]);
 }
 
-/// Two concurrent `recv()` callers on the same Socket. Only one
-/// can hold the direct claim at a time; the loser falls back to the
-/// `in_rx` slow path. Both must collectively receive every message
-/// without loss or duplication.
-#[compio::test]
-async fn two_concurrent_recv_callers_share_messages() {
-    const N: u32 = 100;
-    let port = loopback_port();
-    let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
-
-    let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
-
-    let producer = {
-        let push = push.clone();
-        compio::runtime::spawn(async move {
-            for i in 0..N {
-                push.send(Message::single(format!("msg-{i}")))
-                    .await
-                    .unwrap();
-            }
-        })
-    };
-
-    let pull_a = pull.clone();
-    let recv_a = compio::runtime::spawn(async move {
-        let mut got = Vec::new();
-        for _ in 0..(N / 2) {
-            let m = pull_a.recv().await.unwrap();
-            got.push(m.part_bytes(0).unwrap().to_vec());
-        }
-        got
-    });
-    let pull_b = pull.clone();
-    let recv_b = compio::runtime::spawn(async move {
-        let mut got = Vec::new();
-        for _ in 0..(N / 2) {
-            let m = pull_b.recv().await.unwrap();
-            got.push(m.part_bytes(0).unwrap().to_vec());
-        }
-        got
-    });
-
-    let _ = producer.await;
-    let mut got: Vec<Vec<u8>> = recv_a.await.unwrap_or_default();
-    got.extend(recv_b.await.unwrap_or_default());
-    got.sort();
-    let mut expected: Vec<Vec<u8>> = (0..N).map(|i| format!("msg-{i}").into_bytes()).collect();
-    expected.sort();
-    assert_eq!(got, expected);
-}
-
 /// While a `recv()` direct claim is held with no traffic, both
 /// sides' driver heartbeat ticks must continue to fire and update
 /// the shared `last_input_nanos` so the connection stays up. After
