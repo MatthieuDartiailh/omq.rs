@@ -1235,19 +1235,19 @@ impl SocketDriver {
                     Command::Subscribe(prefix) => {
                         self.send_strategy.peer_subscribe(peer_id, prefix.clone());
                         if self.socket_type == SocketType::XPub {
-                            let mut b = bytes::BytesMut::with_capacity(1 + prefix.len());
-                            b.extend_from_slice(&[0x01]);
-                            b.extend_from_slice(&prefix);
-                            let _ = self.recv_tx.send(Message::single(b.freeze())).await;
+                            let _ = self
+                                .recv_tx
+                                .send(xpub_notification(0x01, &prefix))
+                                .await;
                         }
                     }
                     Command::Cancel(prefix) => {
                         self.send_strategy.peer_cancel(peer_id, &prefix);
                         if self.socket_type == SocketType::XPub {
-                            let mut b = bytes::BytesMut::with_capacity(1 + prefix.len());
-                            b.extend_from_slice(&[0x00]);
-                            b.extend_from_slice(&prefix);
-                            let _ = self.recv_tx.send(Message::single(b.freeze())).await;
+                            let _ = self
+                                .recv_tx
+                                .send(xpub_notification(0x00, &prefix))
+                                .await;
                         }
                     }
                     Command::Join(group) => {
@@ -1471,6 +1471,13 @@ async fn inproc_peer_driver(
     .await;
     let () = result;
     let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
+}
+
+fn xpub_notification(tag: u8, prefix: &bytes::Bytes) -> Message {
+    let mut b = bytes::BytesMut::with_capacity(1 + prefix.len());
+    b.extend_from_slice(&[tag]);
+    b.extend_from_slice(prefix);
+    Message::single(b.freeze())
 }
 
 /// Spawn a socket driver on the current tokio runtime.

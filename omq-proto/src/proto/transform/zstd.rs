@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(declared, Some(plain.len() as u64));
     }
 
-    /// Build bytes that pass the ZDICT_MAGIC sanity check but never reach
+    /// Build bytes that pass the `ZDICT_MAGIC` sanity check but never reach
     /// `load_dictionary` (i.e. only `with_send_dict` validation runs).
     /// Use this for tests that exercise the wire/sentinel path, not real
     /// compression.
@@ -515,7 +515,7 @@ mod tests {
 
     /// Train a real ZDICT-format dictionary from a small synthetic corpus.
     /// Used by tests that actually compress with the dict (`load_dictionary`
-    /// rejects malformed bytes even when ZDICT_MAGIC is present).
+    /// rejects malformed bytes even when `ZDICT_MAGIC` is present).
     fn trained_dict() -> Bytes {
         let samples: Vec<&[u8]> = (0..200)
             .map(|_| &b"the-quick-brown-fox-jumps-over-the-lazy-dog\n"[..])

@@ -115,6 +115,7 @@ impl LocalStream {
 /// on every send/recv when the peer set hasn't changed.
 pub(super) struct CachedPeerRoute {
     pub(super) generation: u64,
+    #[cfg(not(feature = "priority"))]
     pub(super) out: PeerOut,
     pub(super) direct: Option<Arc<DirectIoState>>,
 }

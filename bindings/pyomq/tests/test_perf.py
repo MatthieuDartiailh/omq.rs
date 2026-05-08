@@ -1,6 +1,7 @@
 """Performance gate: pyomq PUSH/PULL throughput vs pyzmq.
 
-inproc small (≤2048B): ≥2x. tcp small: ≥1.5x. large (>2048B): ≥1.5x.
+inproc small (≤2048B): ≥2x. tcp small (≤2048B): ≥1.5x.
+large (>2048B, ≤32KiB): ≥1.5x. xlarge (>32KiB): ≥1.2x.
 Skipped when pyzmq isn't importable.
 """
 
@@ -13,14 +14,16 @@ zmq_pyzmq = pytest.importorskip("zmq")  # pyzmq
 
 import pyomq
 
-SIZES = [128, 512, 2048, 8192, 32768]
+SIZES = [8, 32, 128, 512, 2048, 8192, 32768, 131072]
 TARGET_RUNTIME_S = 0.4
 
 SMALL_SIZES = [s for s in SIZES if s <= 2048]
-LARGE_SIZES = [s for s in SIZES if s > 2048]
+LARGE_SIZES = [s for s in SIZES if 2048 < s <= 32768]
+XLARGE_SIZES = [s for s in SIZES if s > 32768]
 INPROC_SMALL_GATE = 2.0
 TCP_SMALL_GATE = 1.5
 LARGE_GATE = 1.5
+XLARGE_GATE = 1.2
 
 
 def _measure_pyomq(endpoint: str, size: int, n_target_per_s: int = 200_000) -> float:
@@ -86,6 +89,8 @@ def _free_inproc(label: str) -> str:
 
 
 def _gate_for(size: int, *, tcp: bool = False) -> float:
+    if size in XLARGE_SIZES:
+        return XLARGE_GATE
     if size in LARGE_SIZES:
         return LARGE_GATE
     return TCP_SMALL_GATE if tcp else INPROC_SMALL_GATE

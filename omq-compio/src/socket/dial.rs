@@ -27,6 +27,83 @@ use super::inner::{
 };
 use super::{cmd_channel_capacity, pub_side_peer_sub, radio_side_peer_groups};
 
+fn reset_peer_channel(
+    inner: &SocketInner,
+    handle: &WirePeerHandle,
+    info_holder: &Arc<RwLock<Option<PeerInfo>>>,
+    peer_sub: Option<&Arc<RwLock<SubscriptionSet>>>,
+) -> (flume::Sender<DriverCommand>, flume::Receiver<DriverCommand>) {
+    let cap = cmd_channel_capacity(&inner.options);
+    let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
+    *handle.write().expect("wire peer handle lock") = cmd_tx.clone();
+    *info_holder.write().expect("peer_info lock") = None;
+    if let Some(set) = peer_sub {
+        *set.write().expect("peer_sub lock") = SubscriptionSet::new();
+    }
+    (cmd_tx, cmd_rx)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn install_and_run(
+    inner: &Arc<SocketInner>,
+    state: std::sync::Arc<DirectIoState>,
+    direct_io_handle: &DirectIoHandle,
+    handle: &WirePeerHandle,
+    cmd_rx: flume::Receiver<DriverCommand>,
+    slot_idx: &mut Option<usize>,
+    endpoint: &Endpoint,
+    conn_id: u64,
+    info_holder: &Arc<RwLock<Option<PeerInfo>>>,
+    peer_addr: Option<std::net::SocketAddr>,
+    peer_sub: Option<&Arc<RwLock<SubscriptionSet>>>,
+    peer_groups: Option<&Arc<RwLock<std::collections::HashSet<Bytes>>>>,
+    #[cfg(feature = "priority")] priority: u8,
+) {
+    *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
+    inner
+        .peers_gen
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+
+    let idx = if let Some(idx) = *slot_idx {
+        idx
+    } else {
+        let mut peers = inner.out_peers.write().expect("peers lock");
+        let idx = peers.len();
+        peers.push(PeerSlot {
+            out: PeerOut::Wire(handle.clone()),
+            direct_io: Some(direct_io_handle.clone()),
+            peer: Arc::new(RwLock::new(None)),
+            connection_id: conn_id,
+            endpoint: endpoint.clone(),
+            info: info_holder.clone(),
+            peer_sub: peer_sub.cloned(),
+            peer_groups: peer_groups.cloned(),
+            #[cfg(feature = "priority")]
+            priority,
+        });
+        *slot_idx = Some(idx);
+        idx
+    };
+    #[cfg(feature = "priority")]
+    inner.rebuild_priority_view();
+    inner.on_peer_ready.notify(usize::MAX);
+
+    let driver_join = super::install::spawn_wire_driver(
+        inner.clone(),
+        state,
+        direct_io_handle.clone(),
+        cmd_rx,
+        idx,
+        endpoint.clone(),
+        conn_id,
+        info_holder.clone(),
+        peer_addr,
+        peer_sub.cloned(),
+        peer_groups.cloned(),
+    );
+    let _ = driver_join.await;
+}
+
 /// Spawn the TCP dial supervisor and register the dialer entry.
 /// Returns immediately. See [`super::Socket::connect`] for the
 /// public-facing semantics.
@@ -134,13 +211,8 @@ async fn dial_supervisor_tcp(
             connection_id: conn_id,
         });
 
-        let cap = cmd_channel_capacity(&inner.options);
-        let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
-        *handle.write().expect("wire peer handle lock") = cmd_tx;
-        *info_holder.write().expect("peer_info lock") = None;
-        if let Some(set) = &peer_sub {
-            *set.write().expect("peer_sub lock") = SubscriptionSet::new();
-        }
+        let (_cmd_tx, cmd_rx) =
+            reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
 
         let (encoder, decoder, has_transform, transform_passthrough) =
             match omq_proto::proto::transform::MessageEncoder::for_endpoint(
@@ -181,48 +253,23 @@ async fn dial_supervisor_tcp(
             uses_crypto,
             inner.options.large_message_threshold.unwrap_or(0),
         );
-        *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
-        inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
-
-        let idx = if let Some(idx) = slot_idx {
-            idx
-        } else {
-            let mut peers = inner.out_peers.write().expect("peers lock");
-            let idx = peers.len();
-            peers.push(PeerSlot {
-                out: PeerOut::Wire(handle.clone()),
-                direct_io: Some(direct_io_handle.clone()),
-                peer: Arc::new(RwLock::new(None)),
-                connection_id: conn_id,
-                endpoint: wrapper.clone(),
-                info: info_holder.clone(),
-                peer_sub: peer_sub.clone(),
-                peer_groups: peer_groups.clone(),
-                #[cfg(feature = "priority")]
-                priority,
-            });
-            slot_idx = Some(idx);
-            idx
-        };
-        #[cfg(feature = "priority")]
-        inner.rebuild_priority_view();
-        inner.on_peer_ready.notify(usize::MAX);
-
-        let driver_join = super::install::spawn_wire_driver(
-            inner.clone(),
+        install_and_run(
+            &inner,
             state,
-            direct_io_handle.clone(),
+            &direct_io_handle,
+            &handle,
             cmd_rx,
-            idx,
-            wrapper.clone(),
+            &mut slot_idx,
+            &wrapper,
             conn_id,
-            info_holder.clone(),
+            &info_holder,
             peer_addr,
-            peer_sub.clone(),
-            peer_groups.clone(),
-        );
-
-        let _ = driver_join.await;
+            peer_sub.as_ref(),
+            peer_groups.as_ref(),
+            #[cfg(feature = "priority")]
+            priority,
+        )
+        .await;
 
         if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
             return;
@@ -318,13 +365,8 @@ async fn dial_supervisor_ipc(
             connection_id: conn_id,
         });
 
-        let cap = cmd_channel_capacity(&inner.options);
-        let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
-        *handle.write().expect("wire peer handle lock") = cmd_tx;
-        *info_holder.write().expect("peer_info lock") = None;
-        if let Some(set) = &peer_sub {
-            *set.write().expect("peer_sub lock") = SubscriptionSet::new();
-        }
+        let (_cmd_tx, cmd_rx) =
+            reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
 
         let uses_crypto = !matches!(
             inner.options.mechanism,
@@ -354,48 +396,24 @@ async fn dial_supervisor_ipc(
             uses_crypto,
             inner.options.large_message_threshold.unwrap_or(0),
         );
-        *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
-        inner.peers_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
 
-        let idx = if let Some(idx) = slot_idx {
-            idx
-        } else {
-            let mut peers = inner.out_peers.write().expect("peers lock");
-            let idx = peers.len();
-            peers.push(PeerSlot {
-                out: PeerOut::Wire(handle.clone()),
-                direct_io: Some(direct_io_handle.clone()),
-                peer: Arc::new(RwLock::new(None)),
-                connection_id: conn_id,
-                endpoint: endpoint.clone(),
-                info: info_holder.clone(),
-                peer_sub: peer_sub.clone(),
-                peer_groups: peer_groups.clone(),
-                #[cfg(feature = "priority")]
-                priority,
-            });
-            slot_idx = Some(idx);
-            idx
-        };
-        #[cfg(feature = "priority")]
-        inner.rebuild_priority_view();
-        inner.on_peer_ready.notify(usize::MAX);
-
-        let driver_join = super::install::spawn_wire_driver(
-            inner.clone(),
+        install_and_run(
+            &inner,
             state,
-            direct_io_handle.clone(),
+            &direct_io_handle,
+            &handle,
             cmd_rx,
-            idx,
-            endpoint.clone(),
+            &mut slot_idx,
+            &endpoint,
             conn_id,
-            info_holder.clone(),
+            &info_holder,
             None,
-            peer_sub.clone(),
-            peer_groups.clone(),
-        );
-
-        let _ = driver_join.await;
+            peer_sub.as_ref(),
+            peer_groups.as_ref(),
+            #[cfg(feature = "priority")]
+            priority,
+        )
+        .await;
 
         if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
             return;

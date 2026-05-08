@@ -211,6 +211,51 @@ pub(crate) fn build_peer_io(
     Ok((peer_io, recv_stream))
 }
 
+/// Encode a user message through the appropriate path (transform /
+/// crypto / plain) and return whether the batch cap was reached.
+async fn encode_outbound_message(
+    state: &DirectIoState,
+    peer_io: &SharedPeerIo,
+    m: &Message,
+    cap: usize,
+    codec_maybe_dirty: &mut bool,
+) -> Result<bool> {
+    if state.has_transform {
+        let mut enc = state.encoder.lock().await;
+        let wires = enc
+            .as_mut()
+            .expect("has_transform but no encoder")
+            .encode(m)?;
+        drop(enc);
+        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+        let cr = eq.total_bytes() >= cap;
+        for wire in &wires {
+            if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
+                eq.encode_and_push_flat(wire);
+            } else {
+                eq.encode_and_push(wire);
+            }
+        }
+        Ok(cr)
+    } else if state.uses_crypto {
+        let mut io = peer_io.lock().expect("peer_io");
+        io.codec.send_message(m)?;
+        let cr = io.codec.pending_transmit_size() >= cap;
+        drop(io);
+        *codec_maybe_dirty = true;
+        Ok(cr)
+    } else {
+        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+        let cr = eq.total_bytes() >= cap;
+        if m.byte_len() < crate::socket::FLAT_THRESHOLD {
+            eq.encode_and_push_flat(m);
+        } else {
+            eq.encode_and_push(m);
+        }
+        Ok(cr)
+    }
+}
+
 /// Drive one connection through the ZMTP codec. The reader, writer,
 /// codec, and transform all live inside [`SharedPeerIo`] so
 /// `Socket::send`'s direct-write fast path and `Socket::recv`'s
@@ -907,53 +952,14 @@ pub(crate) async fn run_connection(
                     let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
                         match cmd {
                             DriverCommand::SendMessage(m) => {
-                                if state.has_transform {
-                                    // Encoder path: independent of peer_io.
-                                    let mut enc = state.encoder.lock().await;
-                                    let wires = enc.as_mut()
-                                        .expect("has_transform but no encoder")
-                                        .encode(&m)?;
-                                    drop(enc);
-                                    let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-                                    let cr = eq.total_bytes() >= cap;
-                                    for wire in &wires {
-                                        if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                                            eq.encode_and_push_flat(wire);
-                                        } else {
-                                            eq.encode_and_push(wire);
-                                        }
-                                    }
-                                    cr
-                                } else if state.uses_crypto {
-                                    // Crypto must go through codec.send_message
-                                    // to be encrypted. The fast-path sender bails
-                                    // for crypto (try_direct_encode early-returns),
-                                    // so cmd-channel sends are the only outbound
-                                    // path here; wire ordering is naturally
-                                    // preserved.
-                                    let mut io = peer_io.lock().expect("peer_io");
-                                    io.codec.send_message(&m)?;
-                                    let cr = io.codec.pending_transmit_size() >= cap;
-                                    drop(io);
-                                    codec_maybe_dirty = true;
-                                    cr
-                                } else {
-                                    // Plain non-transform: encode into
-                                    // encoded_queue, not the codec, so wire
-                                    // ordering is preserved against the fast-path
-                                    // sender. Mixing the two queues for user data
-                                    // lets step 3a (codec) race ahead of step 3b
-                                    // (eq) when a fast-path send queued earlier
-                                    // still sits in eq.
-                                    let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-                                    let cr = eq.total_bytes() >= cap;
-                                    if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-                                        eq.encode_and_push_flat(&m);
-                                    } else {
-                                        eq.encode_and_push(&m);
-                                    }
-                                    cr
-                                }
+                                encode_outbound_message(
+                                    &state,
+                                    &peer_io,
+                                    &m,
+                                    cap,
+                                    &mut codec_maybe_dirty,
+                                )
+                                .await?
                             }
                             DriverCommand::SendCommand(c) => {
                                 let mut io = peer_io.lock().expect("peer_io");
@@ -992,45 +998,14 @@ pub(crate) async fn run_connection(
                     .expect("shared_fut only ready when rx is Some");
                 while let Some(m) = next.take() {
                     let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
-                        if state.has_transform {
-                            // Encoder path: independent of peer_io.
-                            let mut enc = state.encoder.lock().await;
-                            let wires = enc.as_mut()
-                                .expect("has_transform but no encoder")
-                                .encode(&m)?;
-                            drop(enc);
-                            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-                            let cr = eq.total_bytes() >= cap;
-                            for wire in &wires {
-                                if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                                    eq.encode_and_push_flat(wire);
-                                } else {
-                                    eq.encode_and_push(wire);
-                                }
-                            }
-                            cr
-                        } else if state.uses_crypto {
-                            // See cmd_fut arm: crypto requires codec.send_message
-                            // for encryption.
-                            let mut io = peer_io.lock().expect("peer_io");
-                            io.codec.send_message(&m)?;
-                            let cr = io.codec.pending_transmit_size() >= cap;
-                            drop(io);
-                            codec_maybe_dirty = true;
-                            cr
-                        } else {
-                            // Same rationale as the cmd_fut arm above: encode
-                            // into encoded_queue so wire ordering matches the
-                            // fast-path sender's.
-                            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-                            let cr = eq.total_bytes() >= cap;
-                            if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-                                eq.encode_and_push_flat(&m);
-                            } else {
-                                eq.encode_and_push(&m);
-                            }
-                            cr
-                        }
+                        encode_outbound_message(
+                            &state,
+                            &peer_io,
+                            &m,
+                            cap,
+                            &mut codec_maybe_dirty,
+                        )
+                        .await?
                     } else {
                         pending_cmds.push_back(DriverCommand::SendMessage(m));
                         false

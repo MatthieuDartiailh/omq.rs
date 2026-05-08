@@ -107,24 +107,44 @@ for strict per-pipe priority tiers (nanomsg-style 1..=255, lower =
 higher priority). Higher tiers ship first; lower tiers run only when
 higher are blocked or disconnected.
 
-## Multi-chunk frame payloads
+## Message and Payload types
+
+Both are custom enums (not SmallVecs) tuned for the common decode
+path:
 
 ```rust
-type Payload = SmallVec<[Bytes; 2]>;    // 2 chunks inline
-type Message = SmallVec<[Payload; 3]>;  // 3 frames inline
+// Payload: 40 bytes. One decoded ZMTP frame.
+enum PayloadInner {
+    Empty,
+    Inline { len: u8, data: [u8; 38] },  // no heap, no Arc
+    Single(Bytes),                         // one owned chunk
+    Multi(Vec<Bytes>),                     // rare: prepended headers
+}
+
+// Message: 48 bytes. One or more frames (parts).
+enum MessageInner {
+    Empty,
+    Inline { len: u8, data: [MaybeUninit<u8>; 39] },  // single-frame <= 39 B
+    Single(Payload),
+    Multi(Vec<Payload>),
+}
 ```
 
-`Bytes::clone` is one atomic increment, never a memcpy. Layers prepend
-their static prefixes (sentinels, identities, ZMTP frame headers) by
-pushing extra `Bytes` onto a `Payload`, never by copying the payload.
-At write time the codec emits a `Vec<IoSlice>` and the kernel stitches
-the chunks via `writev` / `sendmsg`. Inline storage covers the common
-shapes -- single-frame payloads, REQ/REP three-part envelopes --
-without heap allocation.
+Inline variants cover payloads up to 38 bytes and single-frame
+messages up to 39 bytes with zero refcounting overhead. The codec's
+fast path (`try_advance_ready`) constructs `MessageInner::Inline`
+directly from the input buffer, skipping the intermediate `Payload`.
 
-The codec exposes accessors (`Payload::as_bytes`, `as_slice`,
-`is_contiguous`) so callers inspect single-chunk payloads without
-coalescing.
+Layers prepend static prefixes (sentinels, identities, ZMTP frame
+headers) by pushing extra `Bytes` chunks onto a `Payload`, never by
+copying the payload itself. At write time the codec flattens chunks
+into a `Vec<IoSlice>` and the kernel stitches them via `writev` /
+`sendmsg`.
+
+`Payload` is `pub` in `omq-proto` but not re-exported from the
+backends. Users see only `Message`. Public API: `Deref<[u8]>`
+(single-part only), `From<Message> for Bytes`, `msg.iter()`,
+`msg.pop_front()`, `msg.part_bytes(idx)`, `Message::with_prefix()`.
 
 ## Backends compared
 
@@ -187,6 +207,55 @@ a socket. Each event carries an owned `PeerInfo` snapshot
 Multiple subscribers per socket; each gets an independent stream with
 its own lag counter (returned as `Err(Lagged(n))` if the receiver fell
 behind).
+
+## Source file map
+
+### omq-proto
+
+| file | what |
+|------|------|
+| `src/message.rs` | `Payload` + `Message` enums, inline/single/multi variants |
+| `src/proto/connection.rs` | `Connection` -- the sans-I/O ZMTP codec + state machine |
+| `src/proto/frame.rs` | ZMTP frame encoding/decoding, `send_message_flat` |
+| `src/proto/greeting.rs` | ZMTP greeting state machine |
+| `src/proto/command.rs` | ZMTP commands (SUBSCRIBE, PING, etc.) |
+| `src/proto/chunked_buf.rs` | `ChunkedInputBuf` -- zero-copy multi-chunk input buffer |
+| `src/proto/mechanism/` | Mechanism dispatch + handshakes (NULL / CURVE / BLAKE3ZMQ) |
+| `src/proto/transform/` | LZ4 and Zstd per-part encoder/decoder |
+| `src/endpoint.rs` | URI parsing (`tcp://`, `ipc://`, `lz4+tcp://`, etc.) |
+| `src/options.rs` | `Options` builder (HWM, identity, keepalive, mechanism) |
+| `src/subscription.rs` | Patricia-trie prefix matcher for SUB/XSUB |
+
+### omq-compio
+
+| file | what |
+|------|------|
+| `src/socket/handle.rs` | Public `Socket` handle -- send/recv/connect/bind/close |
+| `src/socket/inner.rs` | `SocketInner`, `EncodedQueue`, `DirectIoState` |
+| `src/socket/send.rs` | Send strategies (round-robin, fan-out, identity, priority) |
+| `src/socket/dial.rs` | TCP/IPC dial supervisors with reconnect |
+| `src/socket/install.rs` | Peer slot installation, wire driver spawning |
+| `src/transport/driver.rs` | Per-connection driver loop (`run_connection`) |
+| `src/transport/peer_io.rs` | `PeerIo`, `WireReader`/`WireWriter`, `RecvStream` |
+| `src/transport/tcp.rs` | TCP bind/connect/accept |
+| `src/transport/ipc.rs` | IPC bind/connect |
+| `src/transport/inproc.rs` | In-process transport (no ZMTP, blume channels) |
+| `src/monitor.rs` | `MonitorPublisher` + `MonitorStream` |
+
+### omq-tokio
+
+| file | what |
+|------|------|
+| `src/socket/actor.rs` | `SocketDriver` actor -- peer table, type state, routing |
+| `src/socket/handle.rs` | Public `Socket` handle |
+| `src/socket/dispatch.rs` | Send-side dispatch (actor bypass for non-REQ/REP) |
+| `src/engine/driver.rs` | Per-connection `ConnectionDriver` |
+| `src/routing/mod.rs` | `SendStrategy`/`RecvStrategy` dispatch |
+| `src/routing/round_robin.rs` | Round-robin + priority submitter |
+| `src/routing/fan_out.rs` | PUB/XPUB/RADIO fan-out with subscription filter |
+| `src/routing/identity.rs` | ROUTER/REP/SERVER identity routing |
+| `src/routing/fair_queue.rs` | PULL/SUB fair-queue recv |
+| `src/transport/tcp.rs` | TCP bind/connect with reconnect |
 
 ## Adding a new socket type / transport / mechanism
 

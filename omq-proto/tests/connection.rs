@@ -113,14 +113,9 @@ fn roundtrip_single_frame_message() {
 
     push.send_message(&Message::single("hello")).unwrap();
     pump(&mut push, &mut pull);
-    let ev = pull.poll_event().expect("message event");
-    match ev {
-        Event::Message(m) => {
-            assert_eq!(m.len(), 1);
-            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
-        }
-        _ => panic!("expected Message"),
-    }
+    let m = pull.poll_message().expect("message");
+    assert_eq!(m.len(), 1);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
 }
 
 #[test]
@@ -133,15 +128,11 @@ fn roundtrip_multipart_message() {
     push.send_message(&Message::multipart(["a", "bb", "ccc"]))
         .unwrap();
     pump(&mut push, &mut pull);
-    match pull.poll_event().unwrap() {
-        Event::Message(m) => {
-            assert_eq!(m.len(), 3);
-            assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
-            assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
-            assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
-        }
-        _ => panic!(),
-    }
+    let m = pull.poll_message().expect("message");
+    assert_eq!(m.len(), 3);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
+    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
 }
 
 #[test]
@@ -275,13 +266,8 @@ fn curve_handshake_and_message_roundtrip() {
     client.advance_transmit(c_out.len());
     server.handle_input(c_out).expect("server receives msg");
 
-    let ev = server.poll_event().expect("message event");
-    match ev {
-        Event::Message(m) => {
-            assert_eq!(m.part_bytes(0).unwrap(), &b"encrypted hello"[..]);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
+    let m = server.poll_message().expect("message");
+    assert_eq!(m.part_bytes(0).unwrap(), &b"encrypted hello"[..]);
 }
 
 // --- Direct-recv codec API: peek / begin / supply -----------------
@@ -393,13 +379,9 @@ fn supply_payload_emits_message() {
     assert_eq!(payload_len, 4096);
     let payload = wire.slice(9..9 + payload_len);
     pull.supply_payload(payload).unwrap();
-    match pull.poll_event().expect("message event") {
-        Event::Message(m) => {
-            assert_eq!(m.len(), 1);
-            assert_eq!(m.part_bytes(0).unwrap(), big.as_slice());
-        }
-        other => panic!("unexpected: {other:?}"),
-    }
+    let m = pull.poll_message().expect("message");
+    assert_eq!(m.len(), 1);
+    assert_eq!(m.part_bytes(0).unwrap(), big.as_slice());
 }
 
 #[test]
@@ -456,18 +438,10 @@ fn ready_resumes_after_supply_payload() {
     pull.begin_supplied_payload().unwrap();
     pull.supply_payload(wire.slice(9..frame1_total)).unwrap();
     pull.handle_input(wire.slice(frame1_total..)).unwrap();
-    let mut events = Vec::new();
-    while let Some(e) = pull.poll_event() {
-        events.push(e);
-    }
-    assert_eq!(events.len(), 2);
-    match (&events[0], &events[1]) {
-        (Event::Message(m1), Event::Message(m2)) => {
-            assert_eq!(m1.part_bytes(0).unwrap(), big.as_slice());
-            assert_eq!(m2.part_bytes(0).unwrap(), &b"after"[..]);
-        }
-        _ => panic!("expected two Message events"),
-    }
+    let m1 = pull.poll_message().expect("first message");
+    let m2 = pull.poll_message().expect("second message");
+    assert_eq!(m1.part_bytes(0).unwrap(), big.as_slice());
+    assert_eq!(m2.part_bytes(0).unwrap(), &b"after"[..]);
 }
 
 #[cfg(feature = "curve")]
@@ -516,10 +490,8 @@ fn supply_payload_through_curve() {
     server
         .supply_payload(wire.slice(9..9 + payload_len))
         .unwrap();
-    match server.poll_event().expect("message after supply") {
-        Event::Message(m) => assert_eq!(m.part_bytes(0).unwrap(), plaintext.as_slice()),
-        other => panic!("unexpected: {other:?}"),
-    }
+    let m = server.poll_message().expect("message after supply");
+    assert_eq!(m.part_bytes(0).unwrap(), plaintext.as_slice());
 }
 
 #[cfg(feature = "blake3zmq")]
@@ -564,10 +536,8 @@ fn supply_payload_through_blake3zmq() {
     server
         .supply_payload(wire.slice(9..9 + payload_len))
         .unwrap();
-    match server.poll_event().expect("message after supply") {
-        Event::Message(m) => assert_eq!(m.part_bytes(0).unwrap(), plaintext.as_slice()),
-        other => panic!("unexpected: {other:?}"),
-    }
+    let m = server.poll_message().expect("message after supply");
+    assert_eq!(m.part_bytes(0).unwrap(), plaintext.as_slice());
 }
 
 #[test]

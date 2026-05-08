@@ -45,7 +45,7 @@ SocketInner {
   identity_to_slot: RwLock<HashMap<Bytes,usize>>, // ROUTER lookup
 
   // Inbound
-  in_tx/in_rx: flume::channel<InprocFrame>,  // socket-wide receive queue
+  in_tx/in_rx: blume::channel<InprocFrame>,   // socket-wide receive queue (batching MPSC)
   on_peer_ready: Event,                      // notified on peer add/handshake
 
   // Subscription / group state (SUB / XSUB / DISH)
@@ -86,7 +86,7 @@ fast path reads the inner `Option`; `None` means reconnect is in flight
 
 ```rust
 enum PeerOut {
-  Inproc { sender: flume::Sender<InprocFrame>, our_identity: Bytes },
+  Inproc { sender: blume::Sender<InprocFrame>, our_identity: Bytes },
   Wire(WirePeerHandle),  // Arc<RwLock<flume::Sender<DriverCommand>>>
 }
 ```
@@ -523,8 +523,10 @@ No driver, no codec, no handshake. A global `REGISTRY`
 sends a request.
 
 Peers exchange an `InprocPeerSnapshot` (socket type + identity)
-synchronously. Messages flow as `InprocFrame` through flume channels.
-The `InprocListener` drops from the registry on `Drop`.
+synchronously. Messages flow as `InprocFrame` through blume channels
+(batching MPSC -- swap-drain consumer amortizes cross-core cache
+coherency cost). The `InprocListener` drops from the registry on
+`Drop`.
 
 ### UDP (RADIO / DISH)
 
@@ -593,8 +595,9 @@ after each handshake via `our_subs` and `joined_groups`.
 ### `InprocFrame::SinglePart`
 
 The single-part variant carries `Option<Bytes>` (identity) and `Bytes`
-(body) inline (~72 B). The `Message` struct is ~624 B; wrapping it in
-a box for the multipart variant keeps the flume channel slot small on
+(body) inline (~72 B). The `Message` struct is 48 B (custom enum with
+inline storage for single-frame messages up to 39 B); wrapping it in
+a box for the multipart variant keeps the blume channel slot small on
 the hot path.
 
 ### Header scratch buffers
