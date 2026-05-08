@@ -69,9 +69,10 @@ async fn ruby_push_zstd_tcp_sustained() {
     // 64-byte with-dict threshold; the transport layer will emit a dict
     // shipment frame followed by compressed messages.
     //
-    // `yes` produces a 134-char line; `* 3` → 402-byte payloads.
-    const PAYLOAD_UNIT: &str = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\
-         yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
+    // `yes` produces a 114-char line; `* 3` → 342-byte payloads.
+    const PAYLOAD_UNIT: &str =
+        "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+         The quick brown fox jumps over the lazy dog.";
     let expected = PAYLOAD_UNIT.repeat(3);
 
     let mut child = Command::new("sh")
