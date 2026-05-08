@@ -184,19 +184,15 @@ impl Socket {
     /// DISH, once the socket is bound and the recv loop is spawned).
     pub async fn bind(&self, endpoint: Endpoint) -> Result<()> {
         reject_encrypted_inproc(&endpoint, &self.inner.options.mechanism)?;
-        // The Lz4Tcp / ZstdTcp arms are gated on this crate's own
-        // feature; Cargo feature unification can still surface those
-        // variants (e.g. when a workspace neighbor enables `omq-proto/lz4`
-        // for its own tests but pulls us in as a dev-dep without our lz4),
-        // so we add a wildcard runtime fallback.
-        #[allow(unreachable_patterns)]
+        if endpoint.is_tcp_family() {
+            return self.bind_tcp(endpoint).await;
+        }
+        // The Lz4Tcp / ZstdTcp arms are gated on this crate's own feature;
+        // Cargo feature unification can still surface those variants, so we
+        // add a wildcard runtime fallback.
+        #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
         match endpoint {
             Endpoint::Inproc { name } => self.bind_inproc(name).await,
-            Endpoint::Tcp { .. } => self.bind_tcp(endpoint).await,
-            #[cfg(feature = "lz4")]
-            Endpoint::Lz4Tcp { .. } => self.bind_tcp(endpoint).await,
-            #[cfg(feature = "zstd")]
-            Endpoint::ZstdTcp { .. } => self.bind_tcp(endpoint).await,
             Endpoint::Ipc(_) => self.bind_ipc(endpoint).await,
             Endpoint::Udp { .. } => self.bind_udp(endpoint).await,
             _ => Err(Error::Protocol(
@@ -436,6 +432,18 @@ impl Socket {
         #[cfg(feature = "priority")] priority: u8,
     ) -> Result<()> {
         reject_encrypted_inproc(&endpoint, &self.inner.options.mechanism)?;
+        if endpoint.is_tcp_family() {
+            use omq_proto::proto::connection::Role;
+            connect_tcp_with_reconnect(
+                &self.inner,
+                endpoint,
+                Role::Client,
+                #[cfg(feature = "priority")]
+                priority,
+            );
+            return Ok(());
+        }
+        #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
         match endpoint {
             Endpoint::Inproc { name } => {
                 let snapshot = self.inner.snapshot();
@@ -460,41 +468,6 @@ impl Socket {
                 );
                 Ok(())
             }
-            Endpoint::Tcp { .. } => {
-                use omq_proto::proto::connection::Role;
-                connect_tcp_with_reconnect(
-                    &self.inner,
-                    endpoint,
-                    Role::Client,
-                    #[cfg(feature = "priority")]
-                    priority,
-                );
-                Ok(())
-            }
-            #[cfg(feature = "lz4")]
-            Endpoint::Lz4Tcp { .. } => {
-                use omq_proto::proto::connection::Role;
-                connect_tcp_with_reconnect(
-                    &self.inner,
-                    endpoint,
-                    Role::Client,
-                    #[cfg(feature = "priority")]
-                    priority,
-                );
-                Ok(())
-            }
-            #[cfg(feature = "zstd")]
-            Endpoint::ZstdTcp { .. } => {
-                use omq_proto::proto::connection::Role;
-                connect_tcp_with_reconnect(
-                    &self.inner,
-                    endpoint,
-                    Role::Client,
-                    #[cfg(feature = "priority")]
-                    priority,
-                );
-                Ok(())
-            }
             Endpoint::Ipc(_) => {
                 use omq_proto::proto::connection::Role;
                 connect_ipc_with_reconnect(
@@ -507,7 +480,6 @@ impl Socket {
                 Ok(())
             }
             Endpoint::Udp { .. } => self.connect_udp(endpoint).await,
-            #[allow(unreachable_patterns)]
             _ => Err(Error::Protocol(
                 "transport variant not enabled in this omq-compio build".into(),
             )),

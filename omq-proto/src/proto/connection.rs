@@ -443,32 +443,20 @@ impl Connection {
         #[cfg(feature = "curve")]
         const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
 
-        // BLAKE3ZMQ: every post-handshake frame is AEAD-encrypted -
-        // data and commands alike (RFC §10.3). Decrypt first; the
-        // wire COMMAND bit (which is in the AAD) decides whether the
-        // resulting plaintext is a ZMTP command body or application
-        // data.
+        // BLAKE3ZMQ: every post-handshake frame is AEAD-encrypted
+        // (RFC §10.3). Decrypt first; the wire COMMAND bit decides
+        // whether the plaintext is a command body or application data.
         #[cfg(feature = "blake3zmq")]
         if let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut() {
             let ciphertext = payload.as_bytes();
             let aad = blake3zmq_aad(flags, ciphertext.len());
-            let plaintext = tx.decrypt(&aad, &ciphertext)?;
-            let plaintext = Bytes::from(plaintext);
-            if flags.command {
-                let cmd = command::decode(plaintext)?;
-                self.handle_post_handshake_command(cmd);
-                return Ok(());
-            }
-            self.absorb_data_frame(flags.more, Payload::from_bytes(plaintext))?;
-            return Ok(());
+            let plaintext = Bytes::from(tx.decrypt(&aad, &ciphertext)?);
+            return self.dispatch_decrypted(flags.command, flags.more, plaintext);
         }
 
-        // CURVE: every post-handshake application frame on the wire is a
-        // ZMTP DATA frame whose body is `\x07 "MESSAGE" flags(1) nonce(8)
-        // box(...)` - libzmq does NOT set the COMMAND bit for these.
-        // ZMTP commands (PING, SUBSCRIBE, ...) under CURVE are sent as
-        // separate `MESSAGE`-wrapped data frames whose decrypted plaintext
-        // the plaintext if its inner shape begins with a command name.
+        // CURVE: wire body is `\x07 "MESSAGE" flags(1) nonce(8) box(...)`.
+        // libzmq does NOT set the COMMAND bit; the wire flag is forwarded
+        // after decrypt so the receiver demuxes command-vs-data.
         #[cfg(feature = "curve")]
         if let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() {
             let body = payload.as_bytes();
@@ -476,13 +464,7 @@ impl Connection {
                 && &body[..CURVE_MESSAGE_PREFIX.len()] == CURVE_MESSAGE_PREFIX
             {
                 let (more, plaintext) = tx.decrypt_message(&body[CURVE_MESSAGE_PREFIX.len()..])?;
-                if flags.command {
-                    let cmd = command::decode(plaintext)?;
-                    self.handle_post_handshake_command(cmd);
-                    return Ok(());
-                }
-                self.absorb_data_frame(more, Payload::from_bytes(plaintext))?;
-                return Ok(());
+                return self.dispatch_decrypted(flags.command, more, plaintext);
             }
             return Err(Error::Protocol(
                 "expected CURVE-wrapped MESSAGE on data-phase connection".into(),
@@ -496,6 +478,22 @@ impl Connection {
         }
 
         self.absorb_data_frame(flags.more, payload)?;
+        Ok(())
+    }
+
+    #[cfg(any(feature = "blake3zmq", feature = "curve"))]
+    fn dispatch_decrypted(
+        &mut self,
+        command: bool,
+        more: bool,
+        plaintext: Bytes,
+    ) -> Result<()> {
+        if command {
+            let cmd = command::decode(plaintext)?;
+            self.handle_post_handshake_command(cmd);
+        } else {
+            self.absorb_data_frame(more, Payload::from_bytes(plaintext))?;
+        }
         Ok(())
     }
 
@@ -555,10 +553,7 @@ impl Connection {
             command::encode(c, &mut body);
 
             // BLAKE3ZMQ post-handshake: every frame is AEAD-encrypted
-            // (RFC §10.3), commands included. The COMMAND bit stays
-            // set on the wire flags byte (so the receiver demuxes
-            // command-vs-data after AEAD verify) and is bound by the
-            // AAD.
+            // (RFC §10.3), commands included.
             #[cfg(feature = "blake3zmq")]
             if matches!(self.state, State::Ready)
                 && let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut()
@@ -572,20 +567,12 @@ impl Connection {
                 let Ok(ciphertext) = tx.encrypt(&aad, &plaintext) else {
                     continue;
                 };
-                let f = crate::message::Frame {
-                    flags: crate::message::FrameFlags::COMMAND,
-                    payload: Payload::from_bytes(Bytes::from(ciphertext)),
-                };
-                let plen = f.payload.len();
-                self.out_bytes_total += frame::header_len_for(plen) + plen;
-                frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
+                self.emit_command_frame(Bytes::from(ciphertext));
                 continue;
             }
 
-            // CURVE post-handshake: commands (SUBSCRIBE / CANCEL / PING /
-            // JOIN / LEAVE / ...) traverse the same MESSAGE encryption as
-            // application data; the wire COMMAND bit stays set so the
-            // receiver knows the decrypted plaintext is a command body.
+            // CURVE post-handshake: commands traverse MESSAGE encryption;
+            // the wire COMMAND bit stays set so the receiver demuxes.
             #[cfg(feature = "curve")]
             if matches!(self.state, State::Ready)
                 && let Some(FrameTransform::Curve(tx)) = self.transform.as_mut()
@@ -598,24 +585,22 @@ impl Connection {
                 wire.put_u8(b"MESSAGE".len() as u8);
                 wire.put_slice(b"MESSAGE");
                 wire.put_slice(&enc);
-                let f = crate::message::Frame {
-                    flags: crate::message::FrameFlags::COMMAND,
-                    payload: Payload::from_bytes(wire.freeze()),
-                };
-                let plen = f.payload.len();
-                self.out_bytes_total += frame::header_len_for(plen) + plen;
-                frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
+                self.emit_command_frame(wire.freeze());
                 continue;
             }
 
-            let f = crate::message::Frame {
-                flags: crate::message::FrameFlags::COMMAND,
-                payload: Payload::from_bytes(body.freeze()),
-            };
-            let plen = f.payload.len();
-            self.out_bytes_total += frame::header_len_for(plen) + plen;
-            frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
+            self.emit_command_frame(body.freeze());
         }
+    }
+
+    fn emit_command_frame(&mut self, payload: Bytes) {
+        let f = crate::message::Frame {
+            flags: crate::message::FrameFlags::COMMAND,
+            payload: Payload::from_bytes(payload),
+        };
+        let plen = f.payload.len();
+        self.out_bytes_total += frame::header_len_for(plen) + plen;
+        frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
     }
 
     /// Queue an application message. Parts serialize in order; the last part

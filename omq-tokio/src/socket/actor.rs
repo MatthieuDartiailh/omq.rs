@@ -721,25 +721,13 @@ impl SocketDriver {
     async fn handle_internal_event(&mut self, evt: InternalEvent) {
         match evt {
             InternalEvent::Accepted { conn, endpoint } => {
-                // During linger, a listener task may have already queued an
-                // Accepted event before its cancel token fired. Spawn the peer
-                // so the outbound queue can drain; teardown will cancel it once
-                // the queue empties or the linger deadline passes.
-                if !self.closing || !self.send_strategy.is_drained() {
-                    let conn_id = self.next_peer_id;
-                    self.monitor.publish(MonitorEvent::Accepted {
-                        endpoint: endpoint.clone(),
-                        peer_ident: conn.peer_ident().clone(),
-                        connection_id: conn_id,
-                    });
-                    self.spawn_any_conn(
-                        conn,
-                        endpoint,
-                        true,
-                        #[cfg(feature = "priority")]
-                        omq_proto::DEFAULT_PRIORITY,
-                    );
-                }
+                self.spawn_on_handshake(
+                    conn,
+                    endpoint,
+                    true,
+                    #[cfg(feature = "priority")]
+                    omq_proto::DEFAULT_PRIORITY,
+                );
             }
             InternalEvent::Connected {
                 conn,
@@ -747,25 +735,13 @@ impl SocketDriver {
                 #[cfg(feature = "priority")]
                 priority,
             } => {
-                // During linger, the TCP handshake may complete after
-                // begin_close() set self.closing. Spawn the peer so messages
-                // already in the outbound queue reach the wire; teardown will
-                // cancel the driver once the queue empties or linger expires.
-                if !self.closing || !self.send_strategy.is_drained() {
-                    let conn_id = self.next_peer_id;
-                    self.monitor.publish(MonitorEvent::Connected {
-                        endpoint: endpoint.clone(),
-                        peer_ident: conn.peer_ident().clone(),
-                        connection_id: conn_id,
-                    });
-                    self.spawn_any_conn(
-                        conn,
-                        endpoint,
-                        false,
-                        #[cfg(feature = "priority")]
-                        priority,
-                    );
-                }
+                self.spawn_on_handshake(
+                    conn,
+                    endpoint,
+                    false,
+                    #[cfg(feature = "priority")]
+                    priority,
+                );
             }
             InternalEvent::ConnectGaveUp => {
                 // Dial task exited. Leave the entry alone; the Socket remains
@@ -838,6 +814,43 @@ impl SocketDriver {
             socket_type: self.socket_type,
             identity: self.options.identity.clone(),
         }
+    }
+
+    fn spawn_on_handshake(
+        &mut self,
+        conn: AnyConn,
+        endpoint: Endpoint,
+        accepted: bool,
+        #[cfg(feature = "priority")] priority: u8,
+    ) {
+        // During linger, the handshake may complete after begin_close().
+        // Spawn anyway so queued messages can drain; teardown cancels once
+        // the queue empties or linger expires.
+        if self.closing && self.send_strategy.is_drained() {
+            return;
+        }
+        let conn_id = self.next_peer_id;
+        let event = if accepted {
+            MonitorEvent::Accepted {
+                endpoint: endpoint.clone(),
+                peer_ident: conn.peer_ident().clone(),
+                connection_id: conn_id,
+            }
+        } else {
+            MonitorEvent::Connected {
+                endpoint: endpoint.clone(),
+                peer_ident: conn.peer_ident().clone(),
+                connection_id: conn_id,
+            }
+        };
+        self.monitor.publish(event);
+        self.spawn_any_conn(
+            conn,
+            endpoint,
+            accepted,
+            #[cfg(feature = "priority")]
+            priority,
+        );
     }
 
     /// Dispatch on transport type: byte-stream conns get the full
