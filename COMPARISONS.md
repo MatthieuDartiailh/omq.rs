@@ -4,7 +4,7 @@ Two-process TCP benchmarks against libzmq and zmq.rs. Each cell: 3 s timed
 window after 500 ms warmup. Hardware: Linux 6.12 (Debian 13) VM on an Intel
 Mac Mini 2018 (i7-8700B, 3.2 GHz, 6 vCPU), Rust 1.95.0.
 
-## libzmq vs omq-compio (two-process TCP, one core each)
+## libzmq vs omq-compio vs omq-tokio (two-process TCP, one core each)
 
 Two separate processes on the same machine, each pinned to one core.
 `bench_peer push` binds a TCP port and sends forever; `bench_peer pull`
@@ -20,14 +20,20 @@ multi-chunk frames in a single `writev` call, while libzmq issues
 separate `send()` calls for the frame header and each payload segment.
 
 <!-- BEGIN libzmq_comparison -->
-| Size | omq msg/s | omq MB/s | zmq msg/s | zmq MB/s | ratio |
-|-------|-----------|----------|-----------|----------|-------|
-| 128 B | 3.27M | 418 MB/s | 3.10M | 397 MB/s | 1.05× |
-| 512 B | 2.36M | 1.2 GB/s | 2.06M | 1.1 GB/s | **1.1×** |
-| 2 KiB | 1.48M | 3.0 GB/s | 677k | 1.4 GB/s | **2.2×** |
-| 8 KiB | 567k | 4.6 GB/s | 181k | 1.5 GB/s | **3.1×** |
-| 32 KiB | 171k | 5.6 GB/s | 74k | 2.4 GB/s | **2.3×** |
-| 128 KiB | 45k | 5.9 GB/s | 34k | 4.4 GB/s | **1.3×** |
+| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |
+|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|
+| 8 B | 8.46M | 68 MB/s | 7.47M | 60 MB/s | 0.88× | 7.04M | 56 MB/s | 0.83× |
+| 32 B | 8.69M | 278 MB/s | 6.34M | 203 MB/s | 0.73× | 6.24M | 200 MB/s | 0.72× |
+| 128 B | 2.95M | 377 MB/s | 4.81M | 616 MB/s | **1.6×** | 5.01M | 641 MB/s | **1.7×** |
+| 512 B | 1.93M | 988 MB/s | 3.39M | 1.7 GB/s | **1.8×** | 3.74M | 1.9 GB/s | **1.9×** |
+| 2 KiB | 679k | 1.4 GB/s | 1.70M | 3.5 GB/s | **2.5×** | 1.37M | 2.8 GB/s | **2.0×** |
+| 8 KiB | 190k | 1.6 GB/s | 604k | 4.9 GB/s | **3.2×** | 496k | 4.1 GB/s | **2.6×** |
+| 32 KiB | 75k | 2.4 GB/s | 172k | 5.6 GB/s | **2.3×** | 149k | 4.9 GB/s | **2.0×** |
+| 128 KiB | 31k | 4.0 GB/s | 63k | 8.3 GB/s | **2.1×** | 42k | 5.5 GB/s | **1.4×** |
+| 512 KiB | 10k | 5.4 GB/s | 11k | 5.8 GB/s | 1.07× | 14k | 7.3 GB/s | **1.4×** |
+| 2 MiB | 3k | 5.6 GB/s | 3k | 6.3 GB/s | **1.1×** | 3k | 6.8 GB/s | **1.2×** |
+| 8 MiB | 598 | 5.0 GB/s | 656 | 5.5 GB/s | 1.10× | 762 | 6.4 GB/s | **1.3×** |
+| 32 MiB | 140 | 4.7 GB/s | 136 | 4.6 GB/s | 0.97× | 163 | 5.5 GB/s | **1.2×** |
 
 <!-- END libzmq_comparison -->
 
@@ -38,7 +44,7 @@ roughly where `write_vectored` batching of multi-chunk frames pays off
 vs. libzmq's separate `send()` per frame segment. Run
 `./scripts/compare_libzmq.sh --update-benchmarks` to refresh this table.
 
-## zmq.rs vs omq-tokio vs omq-compio (two-process TCP)
+## zmq.rs vs omq-compio vs omq-tokio (two-process TCP)
 
 Two separate processes on the same machine, TCP loopback. `bench_peer
 push` binds and sends forever; `bench_peer pull` connects, warms up for
@@ -64,14 +70,20 @@ thread), zmq.rs drives I/O on the same tokio executor as the send/recv
 loop — structurally closer to omq-tokio than to libzmq.
 
 <!-- BEGIN zmqrs_comparison -->
-| Size | zmq.rs msg/s | zmq.rs MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × | omq-compio msg/s | omq-compio MB/s | compio × |
-|-------|-------------|------------|----------------|---------------|---------|-----------------|----------------|---------|
-| 128 B | 347k | 44 MB/s | 5.15M | 659 MB/s | **14.8×** | 3.09M | 395 MB/s | **8.9×** |
-| 512 B | 332k | 170 MB/s | 3.51M | 1.8 GB/s | **10.6×** | 2.32M | 1.2 GB/s | **7.0×** |
-| 2 KiB | 291k | 597 MB/s | 2.02M | 4.1 GB/s | **6.9×** | 1.52M | 3.1 GB/s | **5.2×** |
-| 8 KiB | 229k | 1.9 GB/s | 507k | 4.2 GB/s | **2.2×** | 579k | 4.7 GB/s | **2.5×** |
-| 32 KiB | 133k | 4.4 GB/s | 155k | 5.1 GB/s | **1.2×** | 176k | 5.8 GB/s | **1.3×** |
-| 128 KiB | 32k | 4.2 GB/s | 42k | 5.5 GB/s | **1.3×** | 46k | 6.0 GB/s | **1.4×** |
+| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |
+|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|
+| 8 B | 428k | 3 MB/s | 7.84M | 63 MB/s | **18.3×** | 6.63M | 53 MB/s | **15.5×** |
+| 32 B | 393k | 13 MB/s | 6.62M | 212 MB/s | **16.8×** | 6.52M | 209 MB/s | **16.6×** |
+| 128 B | 351k | 45 MB/s | 4.81M | 616 MB/s | **13.7×** | 4.75M | 608 MB/s | **13.5×** |
+| 512 B | 316k | 162 MB/s | 3.51M | 1.8 GB/s | **11.1×** | 2.74M | 1.4 GB/s | **8.7×** |
+| 2 KiB | 289k | 591 MB/s | 1.60M | 3.3 GB/s | **5.6×** | 1.28M | 2.6 GB/s | **4.4×** |
+| 8 KiB | 228k | 1.9 GB/s | 586k | 4.8 GB/s | **2.6×** | 548k | 4.5 GB/s | **2.4×** |
+| 32 KiB | 133k | 4.4 GB/s | 169k | 5.6 GB/s | **1.3×** | 152k | 5.0 GB/s | **1.1×** |
+| 128 KiB | 33k | 4.4 GB/s | 61k | 8.0 GB/s | **1.8×** | 43k | 5.6 GB/s | **1.3×** |
+| 512 KiB | 8k | 4.2 GB/s | 15k | 7.7 GB/s | **1.8×** | 14k | 7.2 GB/s | **1.7×** |
+| 2 MiB | 2k | 3.2 GB/s | 3k | 6.4 GB/s | **2.0×** | 3k | 6.8 GB/s | **2.1×** |
+| 8 MiB | 311 | 2.6 GB/s | 591 | 5.0 GB/s | **1.9×** | 715 | 6.0 GB/s | **2.3×** |
+| 32 MiB | 110 | 3.7 GB/s | 134 | 4.5 GB/s | **1.2×** | 166 | 5.6 GB/s | **1.5×** |
 
 <!-- END zmqrs_comparison -->
 

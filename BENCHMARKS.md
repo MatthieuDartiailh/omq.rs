@@ -7,24 +7,26 @@ timed rounds after a prime + 100 ms warmup — peak throughput, closest
 to the hardware ceiling and least perturbed by scheduler/IRQ jitter.
 Sources: `omq-tokio/benches/` and `omq-compio/benches/`.
 
-> **Compio numbers are one core.** All omq-compio benches run PUSH and
-> PULL inside a single `#[compio::main]` runtime (single-threaded by
-> design). The omq-tokio numbers use a multi-thread runtime across
-> `num_cpus::get()` workers — "what one core can do" vs "what the box
-> can do".
+> **Compio bench topology.** `inproc`: single runtime, single thread
+> (sender + receiver cooperatively scheduled — IO-bound workloads).
+> `inproc-mt`: multi-runtime inproc — PULL on its own thread/runtime,
+> PUSHes on another (CPU-bound workloads). Wire transports
+> (TCP/IPC/lz4+tcp/zstd+tcp): same multi-runtime shape as inproc-mt.
+> omq-tokio uses a multi-thread runtime across all available cores
+> throughout.
 
-## PUSH/PULL throughput by transport, single peer (omq-compio, one core)
+## PUSH/PULL throughput by transport, single peer (omq-compio, two cores)
 
 <!-- BEGIN push_pull_compio_1peer -->
-| Size | inproc | ipc | tcp | lz4+tcp | zstd+tcp |
-|---|---|---|---|---|---|
-| 32 B | 3.08M / 98.7 MB/s | 2.25M / 72.0 MB/s | 969k / 31.0 MB/s | 1.85M / 59.1 MB/s | 1.52M / 48.7 MB/s |
-| 128 B | 3.05M / 391 MB/s | 1.89M / 242 MB/s | 1.84M / 236 MB/s | 1.64M / 210 MB/s | 107k / 13.7 MB/s |
-| 512 B | 3.05M / 1.56 GB/s | 1.40M / 718 MB/s | 1.34M / 686 MB/s | 1.07M / 550 MB/s | 109k / 56.0 MB/s |
-| 2 KiB | 3.07M / 6.29 GB/s | 823k / 1.69 GB/s | 833k / 1.71 GB/s | 778k / 1.59 GB/s | 105k / 216 MB/s |
-| 8 KiB | 3.08M / 25.3 GB/s | 372k / 3.05 GB/s | 187k / 1.53 GB/s | 369k / 3.02 GB/s | 267k / 2.18 GB/s |
-| 32 KiB | 3.08M / 100.8 GB/s | 120k / 3.93 GB/s | 117k / 3.83 GB/s | 114k / 3.74 GB/s | 103k / 3.39 GB/s |
-| 128 KiB | 3.07M / 402.6 GB/s | 30.8k / 4.03 GB/s | 29.8k / 3.91 GB/s | 30.0k / 3.93 GB/s | 29.3k / 3.84 GB/s |
+| Size | inproc | inproc-mt | ipc | tcp | lz4+tcp | zstd+tcp |
+|---|---|---|---|---|---|---|
+| 32 B | 3.50M / 112 MB/s | 3.03M / 97.1 MB/s | 6.13M / 196 MB/s | 6.58M / 210 MB/s | 4.55M / 146 MB/s | 2.67M / 85.4 MB/s |
+| 128 B | 3.48M / 446 MB/s | 2.62M / 336 MB/s | 4.59M / 588 MB/s | 5.01M / 641 MB/s | 3.84M / 491 MB/s | 107k / 13.7 MB/s |
+| 512 B | 3.64M / 1.86 GB/s | 2.57M / 1.32 GB/s | 3.41M / 1.75 GB/s | 3.46M / 1.77 GB/s | 1.61M / 826 MB/s | 111k / 56.8 MB/s |
+| 2 KiB | 3.43M / 7.02 GB/s | 2.55M / 5.22 GB/s | 1.94M / 3.98 GB/s | 1.58M / 3.24 GB/s | 1.55M / 3.17 GB/s | 568k / 1.16 GB/s |
+| 8 KiB | 3.48M / 28.5 GB/s | 2.75M / 22.6 GB/s | 675k / 5.53 GB/s | 589k / 4.83 GB/s | 581k / 4.76 GB/s | 381k / 3.12 GB/s |
+| 32 KiB | 3.79M / 124.2 GB/s | 2.59M / 84.8 GB/s | 176k / 5.77 GB/s | 177k / 5.81 GB/s | 144k / 4.73 GB/s | 91.0k / 2.98 GB/s |
+| 128 KiB | 3.78M / 494.9 GB/s | 2.78M / 364.2 GB/s | 48.9k / 6.41 GB/s | 64.1k / 8.40 GB/s | 11.7k / 1.53 GB/s | 22.5k / 2.95 GB/s |
 
 <!-- END push_pull_compio_1peer -->
 
@@ -40,13 +42,13 @@ Without a dict, the threshold is 512 B (smaller frames pass as plaintext with a
 <!-- BEGIN backend_comparison -->
 | Size | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
 |---|---|---|---|---|---|---|
-| 32 B | 3.08M | 953k | 2.25M | 3.64M | 969k | 4.78M |
-| 128 B | 3.05M | 948k | 1.89M | 4.12M | 1.84M | 4.62M |
-| 512 B | 3.05M | 505k | 1.40M | 2.67M | 1.34M | 3.60M |
-| 2 KiB | 3.07M | 1.15M | 823k | 1.38M | 833k | 1.79M |
-| 8 KiB | 3.08M | 1.09M | 372k | 466k | 187k | 570k |
-| 32 KiB | 3.08M | 832k | 120k | 125k | 117k | 149k |
-| 128 KiB | 3.07M | 804k | 30.8k | 45.5k | 29.8k | 40.9k |
+| 32 B | 3.50M | 1.23M | 6.13M | 4.87M | 6.58M | 4.65M |
+| 128 B | 3.48M | 1.62M | 4.59M | 2.32M | 5.01M | 4.21M |
+| 512 B | 3.64M | 1.31M | 3.41M | 3.21M | 3.46M | 3.82M |
+| 2 KiB | 3.43M | 1.57M | 1.94M | 1.12M | 1.58M | 1.78M |
+| 8 KiB | 3.48M | 1.79M | 675k | 428k | 589k | 579k |
+| 32 KiB | 3.79M | 445k | 176k | 123k | 177k | 155k |
+| 128 KiB | 3.78M | 909k | 48.9k | 44.6k | 64.1k | 32.3k |
 
 <!-- END backend_comparison -->
 
@@ -136,41 +138,41 @@ All values are µs wall time. Compression transports add per-frame codec overhea
 <!-- BEGIN latency_percentiles -->
 | transport | size | compio p50 | compio p99 | compio p999 | tokio p50 | tokio p99 | tokio p999 |
 |---|---|---|---|---|---|---|---|
-| inproc | 32 B | 5.33 µs | 11.2 µs | 30.2 µs | 29.6 µs | 45.6 µs | 60.5 µs |
-| inproc | 128 B | 5.53 µs | 5.63 µs | 19.1 µs | 26.8 µs | 44.3 µs | 70.0 µs |
-| inproc | 512 B | 5.41 µs | 5.71 µs | 29.8 µs | 26.5 µs | 37.2 µs | 47.6 µs |
-| inproc | 2 KiB | 5.41 µs | 5.50 µs | 11.3 µs | 27.0 µs | 47.3 µs | 79.5 µs |
-| inproc | 8 KiB | 5.32 µs | 5.76 µs | 26.0 µs | 26.8 µs | 268 µs | 320 µs |
-| inproc | 32 KiB | 5.30 µs | 5.69 µs | 26.7 µs | 146 µs | 300 µs | 354 µs |
-| inproc | 128 KiB | 5.28 µs | 5.92 µs | 36.5 µs | 27.4 µs | 36.0 µs | 50.4 µs |
-| ipc | 32 B | 19.5 µs | 33.3 µs | 60.7 µs | 51.0 µs | 70.1 µs | 103 µs |
-| ipc | 128 B | 19.1 µs | 35.5 µs | 57.0 µs | 50.4 µs | 66.2 µs | 97.0 µs |
-| ipc | 512 B | 19.8 µs | 33.8 µs | 59.9 µs | 49.9 µs | 803 µs | 870 µs |
-| ipc | 2 KiB | 20.6 µs | 35.4 µs | 59.0 µs | 50.4 µs | 66.5 µs | 99.7 µs |
-| ipc | 8 KiB | 24.2 µs | 40.6 µs | 65.4 µs | 62.1 µs | 879 µs | 1.0 ms |
-| ipc | 32 KiB | 30.0 µs | 56.0 µs | 75.7 µs | 76.8 µs | 903 µs | 1.0 ms |
-| ipc | 128 KiB | 73.6 µs | 119 µs | 145 µs | 100 µs | 124 µs | 175 µs |
-| tcp | 32 B | 27.2 µs | 46.4 µs | 69.7 µs | 61.6 µs | 112 µs | 166 µs |
-| tcp | 128 B | 27.1 µs | 41.4 µs | 65.1 µs | 62.8 µs | 892 µs | 975 µs |
-| tcp | 512 B | 27.4 µs | 46.4 µs | 65.0 µs | 63.5 µs | 118 µs | 187 µs |
-| tcp | 2 KiB | 28.3 µs | 50.1 µs | 69.6 µs | 65.2 µs | 954 µs | 1.0 ms |
-| tcp | 8 KiB | 31.0 µs | 50.2 µs | 71.7 µs | 66.4 µs | 106 µs | 184 µs |
-| tcp | 32 KiB | 38.3 µs | 63.2 µs | 81.0 µs | 79.5 µs | 965 µs | 1.1 ms |
-| tcp | 128 KiB | 86.4 µs | 139 µs | 156 µs | 127 µs | 1.3 ms | 1.4 ms |
-| lz4+tcp | 32 B | 27.7 µs | 41.6 µs | 64.9 µs | 79.3 µs | 104 µs | 132 µs |
-| lz4+tcp | 128 B | 27.4 µs | 40.8 µs | 63.8 µs | 77.7 µs | 1.0 ms | 1.1 ms |
-| lz4+tcp | 512 B | 30.3 µs | 45.0 µs | 70.3 µs | 82.5 µs | 103 µs | 124 µs |
-| lz4+tcp | 2 KiB | 31.2 µs | 45.1 µs | 69.2 µs | 85.2 µs | 1.0 ms | 1.1 ms |
-| lz4+tcp | 8 KiB | 34.3 µs | 60.6 µs | 80.7 µs | 86.2 µs | 115 µs | 140 µs |
-| lz4+tcp | 32 KiB | 44.6 µs | 81.5 µs | 97.9 µs | 100 µs | 1.2 ms | 1.3 ms |
-| lz4+tcp | 128 KiB | 87.4 µs | 138 µs | 156 µs | 151 µs | 1.4 ms | 1.6 ms |
-| zstd+tcp | 32 B | 28.3 µs | 41.5 µs | 61.1 µs | 819 µs | 1.1 ms | 1.2 ms |
-| zstd+tcp | 128 B | 52.7 µs | 106 µs | 1.1 ms | 142 µs | 1.3 ms | 1.4 ms |
-| zstd+tcp | 512 B | 52.7 µs | 964 µs | 1.2 ms | 108 µs | 149 µs | 186 µs |
-| zstd+tcp | 2 KiB | 36.9 µs | 63.6 µs | 90.7 µs | 88.0 µs | 108 µs | 128 µs |
-| zstd+tcp | 8 KiB | 39.9 µs | 65.3 µs | 94.7 µs | 91.1 µs | 139 µs | 170 µs |
-| zstd+tcp | 32 KiB | 52.4 µs | 90.1 µs | 118 µs | 107 µs | 1.2 ms | 1.3 ms |
-| zstd+tcp | 128 KiB | 101 µs | 155 µs | 187 µs | 158 µs | 195 µs | 1.5 ms |
+| inproc | 32 B | 5.57 µs | 5.95 µs | 28.3 µs | 27.4 µs | 63.8 µs | 83.3 µs |
+| inproc | 128 B | 5.45 µs | 18.3 µs | 29.6 µs | 28.0 µs | 41.4 µs | 81.9 µs |
+| inproc | 512 B | 5.52 µs | 5.69 µs | 13.1 µs | 29.1 µs | 40.2 µs | 57.3 µs |
+| inproc | 2 KiB | 5.59 µs | 5.77 µs | 28.4 µs | 30.0 µs | 40.0 µs | 72.6 µs |
+| inproc | 8 KiB | 5.53 µs | 5.63 µs | 24.1 µs | 30.7 µs | 41.1 µs | 67.3 µs |
+| inproc | 32 KiB | 5.55 µs | 5.95 µs | 36.2 µs | 26.4 µs | 41.1 µs | 78.7 µs |
+| inproc | 128 KiB | 5.60 µs | 6.02 µs | 25.3 µs | 23.8 µs | 34.4 µs | 41.0 µs |
+| ipc | 32 B | 17.4 µs | 23.8 µs | 45.1 µs | 48.6 µs | 66.6 µs | 89.0 µs |
+| ipc | 128 B | 17.1 µs | 26.2 µs | 44.2 µs | 51.1 µs | 72.9 µs | 103 µs |
+| ipc | 512 B | 18.0 µs | 36.7 µs | 46.4 µs | 53.5 µs | 823 µs | 919 µs |
+| ipc | 2 KiB | 18.2 µs | 24.0 µs | 43.6 µs | 57.0 µs | 105 µs | 236 µs |
+| ipc | 8 KiB | 22.2 µs | 31.5 µs | 51.4 µs | 61.8 µs | 133 µs | 465 µs |
+| ipc | 32 KiB | 30.7 µs | 42.7 µs | 63.3 µs | 77.0 µs | 1.0 ms | 1.1 ms |
+| ipc | 128 KiB | 67.0 µs | 86.9 µs | 116 µs | 97.1 µs | 137 µs | 185 µs |
+| tcp | 32 B | 24.4 µs | 37.9 µs | 50.3 µs | 59.3 µs | 114 µs | 179 µs |
+| tcp | 128 B | 23.6 µs | 37.1 µs | 61.3 µs | 61.2 µs | 79.6 µs | 165 µs |
+| tcp | 512 B | 25.1 µs | 39.2 µs | 64.3 µs | 60.3 µs | 109 µs | 185 µs |
+| tcp | 2 KiB | 26.0 µs | 47.9 µs | 78.5 µs | 64.2 µs | 95.2 µs | 120 µs |
+| tcp | 8 KiB | 28.2 µs | 46.6 µs | 94.6 µs | 68.5 µs | 86.7 µs | 117 µs |
+| tcp | 32 KiB | 38.1 µs | 46.7 µs | 74.2 µs | 79.3 µs | 1.0 ms | 1.1 ms |
+| tcp | 128 KiB | 80.4 µs | 110 µs | 162 µs | 118 µs | 166 µs | 196 µs |
+| lz4+tcp | 32 B | 25.9 µs | 39.3 µs | 59.9 µs | 77.8 µs | 100 µs | 129 µs |
+| lz4+tcp | 128 B | 25.1 µs | 39.1 µs | 68.6 µs | 82.2 µs | 1.0 ms | 1.1 ms |
+| lz4+tcp | 512 B | 28.3 µs | 42.1 µs | 67.3 µs | 82.3 µs | 1.0 ms | 1.1 ms |
+| lz4+tcp | 2 KiB | 27.8 µs | 42.2 µs | 69.7 µs | 85.8 µs | 119 µs | 178 µs |
+| lz4+tcp | 8 KiB | 30.9 µs | 43.7 µs | 61.0 µs | 88.7 µs | 122 µs | 154 µs |
+| lz4+tcp | 32 KiB | 43.7 µs | 57.9 µs | 96.5 µs | 100 µs | 1.1 ms | 1.2 ms |
+| lz4+tcp | 128 KiB | 87.5 µs | 118 µs | 157 µs | 151 µs | 1.4 ms | 1.5 ms |
+| zstd+tcp | 32 B | 26.0 µs | 39.4 µs | 60.3 µs | 82.9 µs | 118 µs | 143 µs |
+| zstd+tcp | 128 B | 50.0 µs | 64.3 µs | 109 µs | 108 µs | 146 µs | 288 µs |
+| zstd+tcp | 512 B | 50.3 µs | 69.7 µs | 97.1 µs | 112 µs | 971 µs | 1.2 ms |
+| zstd+tcp | 2 KiB | 34.2 µs | 63.2 µs | 90.4 µs | 91.6 µs | 117 µs | 138 µs |
+| zstd+tcp | 8 KiB | 37.2 µs | 59.6 µs | 90.5 µs | 96.8 µs | 154 µs | 1.1 ms |
+| zstd+tcp | 32 KiB | 49.7 µs | 69.2 µs | 93.7 µs | 112 µs | 148 µs | 222 µs |
+| zstd+tcp | 128 KiB | 96.5 µs | 117 µs | 152 µs | 164 µs | 1.5 ms | 1.7 ms |
 
 <!-- END latency_percentiles -->
 
@@ -181,13 +183,13 @@ All values are µs wall time. Compression transports add per-frame codec overhea
 <!-- BEGIN push_pull_8peer -->
 | Size | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
 |---|---|---|---|---|---|---|
-| 32 B | 3.22M | 905k | 2.10M | 5.21M | 1.70M | 3.35M |
-| 128 B | 3.21M | 1.04M | 1.48M | 4.31M | 1.85M | 3.17M |
-| 512 B | 3.23M | 981k | 808k | 4.67M | 1.32M | 4.16M |
-| 2 KiB | 3.23M | 1.02M | 830k | 1.66M | 784k | 2.02M |
-| 8 KiB | 3.18M | 1.00M | 384k | 633k | 310k | 797k |
-| 32 KiB | 3.17M | 868k | 128k | 215k | 105k | 220k |
-| 128 KiB | 3.20M | 1.05M | 34.4k | 78.9k | 24.9k | 55.8k |
+| 32 B | 3.62M | 2.73M | 3.76M | 4.60M | 3.62M | 6.22M |
+| 128 B | 3.48M | 2.83M | 4.21M | 3.89M | 4.28M | 4.38M |
+| 512 B | 3.76M | 2.66M | 3.08M | 2.97M | 2.33M | 4.19M |
+| 2 KiB | 3.46M | 3.05M | 1.38M | 2.15M | 1.29M | 2.09M |
+| 8 KiB | 3.44M | 2.53M | 441k | 611k | 395k | 651k |
+| 32 KiB | 3.78M | 2.81M | 155k | 178k | 113k | 175k |
+| 128 KiB | 3.78M | 2.27M | 40.4k | 72.5k | 29.0k | 53.7k |
 
 <!-- END push_pull_8peer -->
 

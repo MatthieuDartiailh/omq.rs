@@ -65,20 +65,24 @@ around compio's single-thread invariant.
 Loopback PUSH/PULL throughput vs pyzmq, on a Linux 6.12 (Debian 13) VM on an
 Intel Mac Mini 2018 (i7-8700B, 3.2 GHz), Rust 1.95.0, default features:
 
-| Size   | inproc pyomq | inproc pyzmq | ratio     | tcp pyomq | tcp pyzmq | ratio     |
-|--------|-------------:|-------------:|----------:|----------:|----------:|----------:|
-| 128 B  | 1.64 M/s     | 544 k/s      | **3.02×** | 1.14 M/s  | 483 k/s   | **2.37×** |
-| 512 B  | 1.63 M/s     | 513 k/s      | **3.18×** | 914 k/s   | 462 k/s   | **1.98×** |
-| 2 KiB  | 1.61 M/s     | 456 k/s      | **3.53×** | 623 k/s   | 361 k/s   | **1.73×** |
-| 8 KiB  | 1.44 M/s     | 378 k/s      | **3.81×** | 267 k/s   | 106 k/s   | **2.52×** |
-| 32 KiB | 773 k/s      | 192 k/s      | **4.04×** | 86 k/s    | 47 k/s    | **1.85×** |
+| Size    | inproc pyomq | inproc pyzmq | ratio     | tcp pyomq | tcp pyzmq | ratio     |
+|---------|-------------:|-------------:|----------:|----------:|----------:|----------:|
+| 8 B     | 1.49 M/s     | 603 k/s      | **2.47×** | 1.34 M/s  | 519 k/s   | **2.59×** |
+| 32 B    | 1.41 M/s     | 603 k/s      | **2.34×** | 1.37 M/s  | 567 k/s   | **2.41×** |
+| 128 B   | 1.71 M/s     | 530 k/s      | **3.22×** | 1.37 M/s  | 509 k/s   | **2.70×** |
+| 512 B   | 1.57 M/s     | 492 k/s      | **3.19×** | 1.30 M/s  | 463 k/s   | **2.81×** |
+| 2 KiB   | 1.44 M/s     | 422 k/s      | **3.41×** | 875 k/s   | 363 k/s   | **2.41×** |
+| 8 KiB   | 1.23 M/s     | 370 k/s      | **3.33×** | 324 k/s   | 104 k/s   | **3.12×** |
+| 32 KiB  | 645 k/s      | 183 k/s      | **3.52×** | 111 k/s   | 45 k/s    | **2.46×** |
+| 128 KiB | 218 k/s      | 68 k/s       | **3.20×** | 31 k/s    | 26 k/s    | **1.23×** |
 
 Run `pytest tests/test_perf.py -v -s` (after `maturin develop --release`) to reproduce on your hardware.
 
 At small sizes, the per-call PyO3 + flume hop is shorter than pyzmq's libzmq
-round-trip, so pyomq pulls ahead by a wide margin. At 32 KiB the two
-implementations both hit memory-bandwidth and converge (small lead from
-compio's writev + io_uring batching).
+round-trip, so pyomq pulls ahead by a wide margin. The lead holds through
+32 KiB (3.5× inproc, 2.5× TCP). At 128 KiB TCP both implementations saturate
+memory bandwidth and the gap narrows to ~1.2×; inproc still shows 3.2× because
+there is no kernel copy.
 
 ## Develop
 
