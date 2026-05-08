@@ -28,7 +28,7 @@
 //! push.send(Message::single("hi")).await?;
 //!
 //! let m = pull.recv().await?;
-//! assert_eq!(m.parts()[0].as_bytes(), &b"hi"[..]);
+//! assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
 //! # Ok(()) }
 //! ```
 //!
