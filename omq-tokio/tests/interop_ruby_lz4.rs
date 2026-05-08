@@ -13,7 +13,7 @@
 //! plaintext-passthrough sentinel against a non-Rust encoder.
 
 use std::net::TcpListener as StdTcpListener;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use omq_proto::endpoint::Host;
@@ -54,6 +54,40 @@ fn omq_lz4_supported() -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn take(&mut self) -> Child {
+        self.0.take().expect("ChildGuard already consumed")
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("ChildGuard already consumed")
+    }
+}
+
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("ChildGuard already consumed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
 }
 
 fn skip_if_no_omq_lz4() -> bool {
@@ -102,15 +136,17 @@ async fn ruby_push_lz4_tcp_sustained() {
          The quick brown fox jumps over the lazy dog.";
     let expected = PAYLOAD_UNIT.repeat(5);
 
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "yes '{PAYLOAD_UNIT}' | omq push -c {cli_ep} -i0.005 -E 'it.first * 5'"
-        ))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn ruby omq push");
+    let mut guard = ChildGuard::new(
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "yes '{PAYLOAD_UNIT}' | omq push -c {cli_ep} -i0.005 -E 'it.first * 5'"
+            ))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ruby omq push"),
+    );
 
     let monitor_task = tokio::spawn(async move {
         let mut first_drop: Option<String> = None;
@@ -153,8 +189,8 @@ async fn ruby_push_lz4_tcp_sustained() {
         }
     }
 
-    let _ = child.kill();
-    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+    let _ = guard.kill();
+    let _ = tokio::task::spawn_blocking(move || guard.take().wait()).await;
     drop(pull);
     let (dropped, first_drop) = monitor_task.await.unwrap();
 

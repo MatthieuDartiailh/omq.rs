@@ -14,6 +14,42 @@ use std::time::Duration;
 use omq_compio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 use omq_proto::endpoint::{Host, IpcPath};
 
+/// Kills and waits for a child process on drop so orphaned Ruby processes
+/// cannot outlive a panicking test.
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn take(&mut self) -> Child {
+        self.0.take().expect("ChildGuard already consumed")
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.0.as_ref().expect("ChildGuard already consumed")
+    }
+}
+
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("ChildGuard already consumed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 fn omq_available() -> bool {
     Command::new("omq")
         .arg("--version")
@@ -113,12 +149,14 @@ async fn rust_push_to_ruby_pull(t: Transport) {
     let push = Socket::new(SocketType::Push, Options::default());
     push.bind(t.rust.clone()).await.unwrap();
 
-    let child = Command::new("omq")
-        .args(["pull", "-c", &t.cli, "-A", "-n", "5"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn omq pull");
+    let mut guard = ChildGuard::new(
+        Command::new("omq")
+            .args(["pull", "-c", &t.cli, "-A", "-n", "5"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn omq pull"),
+    );
 
     wait_for_handshake(&push).await;
 
@@ -128,7 +166,7 @@ async fn rust_push_to_ruby_pull(t: Transport) {
             .unwrap();
     }
 
-    let out = wait_with_output(child).await;
+    let out = wait_with_output(guard.take()).await;
     assert!(out.status.success(), "omq pull failed: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
@@ -157,16 +195,18 @@ async fn ruby_push_to_rust_pull(t: Transport) {
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(t.rust.clone()).await.unwrap();
 
-    let mut child = Command::new("omq")
-        .args(["push", "-c", &t.cli, "-A"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn omq push");
+    let mut guard = ChildGuard::new(
+        Command::new("omq")
+            .args(["push", "-c", &t.cli, "-A"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn omq push"),
+    );
 
     {
-        let mut stdin = child.stdin.take().unwrap();
+        let mut stdin = guard.stdin.take().unwrap();
         for i in 0..4 {
             writeln!(stdin, "from-ruby-{i}").unwrap();
         }
@@ -183,7 +223,7 @@ async fn ruby_push_to_rust_pull(t: Transport) {
         );
     }
 
-    let _ = wait_status(child).await;
+    let _ = wait_status(guard.take()).await;
 }
 
 #[compio::test]
@@ -207,12 +247,14 @@ async fn ruby_push_to_rust_pull_ipc() {
 // =====================================================================
 
 async fn rust_req_to_ruby_rep(t: Transport) {
-    let child = Command::new("omq")
-        .args(["rep", "-b", &t.cli, "--echo", "-n", "3"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn omq rep");
+    let mut guard = ChildGuard::new(
+        Command::new("omq")
+            .args(["rep", "-b", &t.cli, "--echo", "-n", "3"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn omq rep"),
+    );
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(t.rust.clone()).await.unwrap();
@@ -228,7 +270,7 @@ async fn rust_req_to_ruby_rep(t: Transport) {
         assert_eq!(reply.part_bytes(0).unwrap(), payload.as_bytes());
     }
 
-    let status = wait_status(child).await;
+    let status = wait_status(guard.take()).await;
     assert!(status.success(), "omq rep exited with {status:?}");
 }
 
@@ -256,12 +298,14 @@ async fn rust_pub_to_ruby_sub(t: Transport) {
     let pubs = Socket::new(SocketType::Pub, Options::default());
     pubs.bind(t.rust.clone()).await.unwrap();
 
-    let child = Command::new("omq")
-        .args(["sub", "-c", &t.cli, "-s", "weather.", "-A", "-n", "2"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn omq sub");
+    let mut guard = ChildGuard::new(
+        Command::new("omq")
+            .args(["sub", "-c", &t.cli, "-s", "weather.", "-A", "-n", "2"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn omq sub"),
+    );
 
     wait_for_handshake(&pubs).await;
     compio::time::sleep(Duration::from_millis(100)).await;
@@ -276,7 +320,7 @@ async fn rust_pub_to_ruby_sub(t: Transport) {
         .await
         .unwrap();
 
-    let out = wait_with_output(child).await;
+    let out = wait_with_output(guard.take()).await;
     assert!(out.status.success(), "omq sub failed: {out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout)
@@ -310,23 +354,25 @@ async fn rust_router_sees_ruby_dealer_identity(t: Transport) {
     let router = Socket::new(SocketType::Router, Options::default());
     router.bind(t.rust.clone()).await.unwrap();
 
-    let child = Command::new("omq")
-        .args([
-            "dealer",
-            "-c",
-            &t.cli,
-            "--identity",
-            "worker-7",
-            "-A",
-            "-D",
-            "from-dealer",
-            "-n",
-            "1",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn omq dealer");
+    let mut guard = ChildGuard::new(
+        Command::new("omq")
+            .args([
+                "dealer",
+                "-c",
+                &t.cli,
+                "--identity",
+                "worker-7",
+                "-A",
+                "-D",
+                "from-dealer",
+                "-n",
+                "1",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn omq dealer"),
+    );
 
     let got = compio::time::timeout(Duration::from_secs(5), router.recv())
         .await
@@ -336,7 +382,7 @@ async fn rust_router_sees_ruby_dealer_identity(t: Transport) {
     assert_eq!(got.part_bytes(0).unwrap(), &b"worker-7"[..]);
     assert_eq!(got.part_bytes(1).unwrap(), &b"from-dealer"[..]);
 
-    let _ = wait_with_output(child).await;
+    let _ = wait_with_output(guard.take()).await;
 }
 
 #[compio::test]
@@ -363,12 +409,14 @@ async fn rust_radio_to_ruby_dish(t: Transport) {
     let radio = Socket::new(SocketType::Radio, Options::default());
     radio.bind(t.rust.clone()).await.unwrap();
 
-    let child = Command::new("omq")
-        .args(["dish", "-c", &t.cli, "-j", "weather", "-A", "-n", "2"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn omq dish");
+    let mut guard = ChildGuard::new(
+        Command::new("omq")
+            .args(["dish", "-c", &t.cli, "-j", "weather", "-A", "-n", "2"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn omq dish"),
+    );
 
     wait_for_handshake(&radio).await;
     compio::time::sleep(Duration::from_millis(100)).await;
@@ -386,7 +434,7 @@ async fn rust_radio_to_ruby_dish(t: Transport) {
         .await
         .unwrap();
 
-    let out = wait_with_output(child).await;
+    let out = wait_with_output(guard.take()).await;
     assert!(out.status.success(), "omq dish failed: {out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout)
