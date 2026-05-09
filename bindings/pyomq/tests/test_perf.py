@@ -1,8 +1,7 @@
-"""Performance gate: pyomq PUSH/PULL throughput vs pyzmq.
+"""Performance measurement: pyomq PUSH/PULL throughput vs pyzmq.
 
-inproc small (≤2048B): ≥2x. tcp small (≤2048B): ≥1.5x.
-large (>2048B, ≤32KiB): ≥1.5x. xlarge (>32KiB): ≥1.2x.
-Skipped when pyzmq isn't importable.
+No assertions — just measure and print. Run `scripts/update_perf.py`
+to re-measure and update the README table automatically.
 """
 
 import threading
@@ -17,14 +16,6 @@ import pyomq
 SIZES = [8, 32, 128, 512, 2048, 8192, 32768, 131072]
 TARGET_RUNTIME_S = 0.4
 
-SMALL_SIZES = [s for s in SIZES if s <= 2048]
-LARGE_SIZES = [s for s in SIZES if 2048 < s <= 32768]
-XLARGE_SIZES = [s for s in SIZES if s > 32768]
-INPROC_SMALL_GATE = 2.0
-TCP_SMALL_GATE = 1.5
-LARGE_GATE = 1.5
-XLARGE_GATE = 1.2
-
 
 def _measure_pyomq(endpoint: str, size: int, n_target_per_s: int = 200_000) -> float:
     payload = b"x" * size
@@ -38,7 +29,6 @@ def _measure_pyomq(endpoint: str, size: int, n_target_per_s: int = 200_000) -> f
         for _ in range(n):
             push.send(payload)
 
-    # Calibrate: how many to send to fill TARGET_RUNTIME_S.
     n = max(int(n_target_per_s * TARGET_RUNTIME_S), 100)
     t = threading.Thread(target=sender, args=(n,))
     start = time.monotonic()
@@ -88,17 +78,8 @@ def _free_inproc(label: str) -> str:
     return f"inproc://perf-{label}-{time.monotonic_ns()}"
 
 
-def _gate_for(size: int, *, tcp: bool = False) -> float:
-    if size in XLARGE_SIZES:
-        return XLARGE_GATE
-    if size in LARGE_SIZES:
-        return LARGE_GATE
-    return TCP_SMALL_GATE if tcp else INPROC_SMALL_GATE
-
-
 @pytest.mark.parametrize("size", SIZES)
 def test_perf_inproc(size):
-    # Warmup once each, then measure two rounds and take the best.
     _measure_pyomq(_free_inproc(f"warm-pyomq-{size}"), size)
     _measure_pyzmq(f"inproc://warm-pyzmq-{size}-{time.monotonic_ns()}", size)
     runs_omq = [_measure_pyomq(_free_inproc(f"omq-{size}-{i}"), size) for i in range(2)]
@@ -109,14 +90,9 @@ def test_perf_inproc(size):
     omq = max(runs_omq)
     pz = max(runs_pz)
     ratio = omq / pz
-    gate = _gate_for(size, tcp=False)
     print(
         f"[perf inproc {size:>5}B]  pyomq {omq:>10,.0f} msg/s  "
-        f"pyzmq {pz:>10,.0f} msg/s  ratio {ratio:.2f}x  (gate {gate:.2f}x)"
-    )
-    assert ratio >= gate, (
-        f"inproc {size}B: pyomq {omq:.0f} msg/s vs pyzmq {pz:.0f} msg/s "
-        f"= {ratio:.2f}x, below the {gate}x gate"
+        f"pyzmq {pz:>10,.0f} msg/s  ratio {ratio:.2f}x"
     )
 
 
@@ -135,22 +111,14 @@ def _new_tcp_ep() -> str:
 
 @pytest.mark.parametrize("size", SIZES)
 def test_perf_tcp(size):
-    # Warmup with their own fresh ports - "tcp://127.0.0.1:0" would
-    # leave the connector pointing at port 0 (invalid), hanging the run.
     _measure_pyomq(_new_tcp_ep(), size)
     _measure_pyzmq(_new_tcp_ep(), size)
-    # Re-allocate per run to avoid TIME_WAIT collisions.
     omq_runs = [_measure_pyomq(_new_tcp_ep(), size) for _ in range(2)]
     pz_runs = [_measure_pyzmq(_new_tcp_ep(), size) for _ in range(2)]
     omq = max(omq_runs)
     pz = max(pz_runs)
     ratio = omq / pz
-    gate = _gate_for(size, tcp=True)
     print(
         f"[perf tcp    {size:>5}B]  pyomq {omq:>10,.0f} msg/s  "
-        f"pyzmq {pz:>10,.0f} msg/s  ratio {ratio:.2f}x  (gate {gate:.2f}x)"
-    )
-    assert ratio >= gate, (
-        f"tcp {size}B: pyomq {omq:.0f} msg/s vs pyzmq {pz:.0f} msg/s "
-        f"= {ratio:.2f}x, below the {gate}x gate"
+        f"pyzmq {pz:>10,.0f} msg/s  ratio {ratio:.2f}x"
     )

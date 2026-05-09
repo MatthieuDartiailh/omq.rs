@@ -65,24 +65,34 @@ around compio's single-thread invariant.
 Loopback PUSH/PULL throughput vs pyzmq, on a Linux 6.12 (Debian 13) VM on an
 Intel Mac Mini 2018 (i7-8700B, 3.2 GHz), Rust 1.95.0, default features:
 
+<!-- PERF:START -->
 | Size    | inproc pyomq | inproc pyzmq | ratio     | tcp pyomq | tcp pyzmq | ratio     |
 |---------|-------------:|-------------:|----------:|----------:|----------:|----------:|
-| 8 B     | 1.49 M/s     | 603 k/s      | **2.47×** | 1.34 M/s  | 519 k/s   | **2.59×** |
-| 32 B    | 1.41 M/s     | 603 k/s      | **2.34×** | 1.37 M/s  | 567 k/s   | **2.41×** |
-| 128 B   | 1.71 M/s     | 530 k/s      | **3.22×** | 1.37 M/s  | 509 k/s   | **2.70×** |
-| 512 B   | 1.57 M/s     | 492 k/s      | **3.19×** | 1.30 M/s  | 463 k/s   | **2.81×** |
-| 2 KiB   | 1.44 M/s     | 422 k/s      | **3.41×** | 875 k/s   | 363 k/s   | **2.41×** |
-| 8 KiB   | 1.23 M/s     | 370 k/s      | **3.33×** | 324 k/s   | 104 k/s   | **3.12×** |
-| 32 KiB  | 645 k/s      | 183 k/s      | **3.52×** | 111 k/s   | 45 k/s    | **2.46×** |
-| 128 KiB | 218 k/s      | 68 k/s       | **3.20×** | 31 k/s    | 26 k/s    | **1.23×** |
+| 8 B     |     1.30 M/s |      627 k/s | **2.08×** |  1.36 M/s |   565 k/s | **2.41×** |
+| 32 B    |     1.29 M/s |      620 k/s | **2.08×** |  1.36 M/s |   576 k/s | **2.37×** |
+| 128 B   |     1.31 M/s |      516 k/s | **2.54×** |  1.29 M/s |   496 k/s | **2.61×** |
+| 512 B   |     1.29 M/s |      480 k/s | **2.69×** |  1.21 M/s |   461 k/s | **2.62×** |
+| 2 KiB   |     1.17 M/s |      461 k/s | **2.54×** |   908 k/s |   342 k/s | **2.65×** |
+| 8 KiB   |     1.04 M/s |      368 k/s | **2.83×** |   349 k/s |   102 k/s | **3.41×** |
+| 32 KiB  |      622 k/s |      196 k/s | **3.17×** |   116 k/s |    46 k/s | **2.50×** |
+| 128 KiB |      203 k/s |       70 k/s | **2.91×** |    32 k/s |    24 k/s | **1.32×** |
+<!-- PERF:END -->
 
-Run `pytest tests/test_perf.py -v -s` (after `maturin develop --release`) to reproduce on your hardware.
+### `zmq.proxy()` forwarding (128 B, TCP)
 
-At small sizes, the per-call PyO3 + flume hop is shorter than pyzmq's libzmq
-round-trip, so pyomq pulls ahead by a wide margin. The lead holds through
-32 KiB (3.5× inproc, 2.5× TCP). At 128 KiB TCP both implementations saturate
-memory bandwidth and the gap narrows to ~1.2×; inproc still shows 3.2× because
-there is no kernel copy.
+<!-- PROXY_PERF:START -->
+|                    | pyomq     | pyzmq     | ratio     |
+|--------------------|----------:|----------:|----------:|
+| PUSH/PULL msg/s    |   963 k/s |   520 k/s | **1.85×** |
+| REQ/REP rt/s       |     8,764/s |     6,521/s | **1.34×** |
+<!-- PROXY_PERF:END -->
+
+pyomq's `proxy()` runs as a native Rust async loop on the compio thread — no
+Python per-message overhead. pyzmq's `zmq.proxy()` calls libzmq's C-level
+`zmq_proxy`. PUSH/PULL forwarding is throughput-bound and pyomq is ~1.9× faster.
+REQ/REP is latency-bound (4 TCP hops per round-trip) so both are similar.
+
+Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure and update the tables above.
 
 ## Develop
 

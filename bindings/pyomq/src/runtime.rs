@@ -212,6 +212,148 @@ where
 }
 
 
+/// Run a forwarding proxy between two sockets on the compio thread.
+///
+/// Two async tasks loop: one forwards frontend->backend, the other
+/// backend->frontend. Runs entirely on the compio thread using flume
+/// async — no Python hops per message. Blocks the calling thread
+/// until one direction errors (socket closed).
+pub fn proxy(
+    fe_recv: flume::Receiver<omq_compio::Message>,
+    be_send: flume::Sender<omq_compio::Message>,
+    be_recv: flume::Receiver<omq_compio::Message>,
+    fe_send: flume::Sender<omq_compio::Message>,
+    cap_send: Option<flume::Sender<omq_compio::Message>>,
+) {
+    let (done_tx, done_rx) = flume::bounded::<()>(1);
+    let done_tx2 = done_tx.clone();
+    let cap2 = cap_send.clone();
+
+    let job: Job = Box::new(move || {
+        // frontend -> backend
+        compio::runtime::spawn(async move {
+            while let Ok(msg) = fe_recv.recv_async().await {
+                if let Some(cap) = &cap_send {
+                    let copy = omq_compio::Message::multipart(msg.iter());
+                    let _ = cap.send_async(copy).await;
+                }
+                if be_send.send_async(msg).await.is_err() {
+                    break;
+                }
+            }
+            let _ = done_tx2.send(());
+        })
+        .detach();
+
+        // backend -> frontend
+        compio::runtime::spawn(async move {
+            while let Ok(msg) = be_recv.recv_async().await {
+                if let Some(cap) = &cap2 {
+                    let copy = omq_compio::Message::multipart(msg.iter());
+                    let _ = cap.send_async(copy).await;
+                }
+                if fe_send.send_async(msg).await.is_err() {
+                    break;
+                }
+            }
+            let _ = done_tx.send(());
+        })
+        .detach();
+    });
+
+    submit_chan()
+        .send(job)
+        .expect("pyomq: compio runtime gone");
+    let _ = done_rx.recv();
+}
+
+/// Block the calling thread until at least one of the given sockets has
+/// an inbound message ready (or until `timeout_ms` elapses). Returns
+/// the list of socket IDs that are ready.
+///
+/// The winning `recv_async()` future consumes one message from the flume
+/// channel; we stash it back into the socket's `rxbuf` so the next
+/// Python `recv()` picks it up without loss.
+pub fn wait_any(
+    receivers: Vec<(u64, flume::Receiver<omq_compio::Message>, std::sync::Arc<crate::socket::SocketInner>)>,
+    timeout_ms: Option<u64>,
+) -> Vec<u64> {
+    if receivers.is_empty() {
+        return vec![];
+    }
+    let (otx, orx) = flume::bounded::<Vec<u64>>(1);
+    let job: Job = Box::new(move || {
+        compio::runtime::spawn(async move {
+            let ids: Vec<u64> = receivers.iter().map(|(id, _, _)| *id).collect();
+            let futs: Vec<_> = receivers
+                .iter()
+                .map(|(id, rx, _)| {
+                    let id = *id;
+                    let rx = rx.clone();
+                    Box::pin(async move {
+                        (rx.recv_async().await, id)
+                    })
+                })
+                .collect();
+            let (recv_result, first_id) = match timeout_ms {
+                None => {
+                    let ((result, id), _, _) =
+                        futures::future::select_all(futs).await;
+                    (result, id)
+                }
+                Some(ms) => {
+                    use futures::FutureExt;
+                    let deadline = compio::time::sleep(
+                        std::time::Duration::from_millis(ms),
+                    );
+                    futures::select! {
+                        ((result, id), ..) = futures::future::select_all(futs).fuse() => {
+                            (result, id)
+                        }
+                        _ = deadline.fuse() => {
+                            let _ = otx.send(vec![]);
+                            return;
+                        }
+                    }
+                }
+            };
+            // Stash the consumed message into the socket's rxbuf.
+            if let Ok(msg) = recv_result {
+                let frames: Vec<bytes::Bytes> = msg.iter().collect();
+                if let Some((_, _, inner)) =
+                    receivers.iter().find(|(id, _, _)| *id == first_id)
+                {
+                    let mut buf = inner.rxbuf.lock().unwrap();
+                    // Prepend: rxbuf may have leftover RCVMORE frames.
+                    buf.splice(0..0, frames);
+                }
+            }
+            // Scan all sockets for readiness (non-destructive).
+            let mut ready: Vec<u64> = ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    receivers
+                        .iter()
+                        .find(|(rid, _, _)| rid == id)
+                        .is_some_and(|(_, rx, inner)| {
+                            !rx.is_empty() || !inner.rxbuf.lock().unwrap().is_empty()
+                        })
+                })
+                .collect();
+            if !ready.contains(&first_id) {
+                ready.push(first_id);
+            }
+            let _ = otx.send(ready);
+        })
+        .detach();
+    });
+    submit_chan()
+        .send(job)
+        .expect("pyomq: compio runtime gone");
+    orx.recv().unwrap_or_default()
+}
+
 #[derive(Debug)]
 pub struct MissingSocket;
 

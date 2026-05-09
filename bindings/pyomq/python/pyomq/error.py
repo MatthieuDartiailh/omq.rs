@@ -1,14 +1,13 @@
 """Error hierarchy mirroring pyzmq's ``zmq.error``.
 
-`ZMQError` is the native exception class itself (a subclass of
-``OSError``). `Again` / `ContextTerminated` / `NotImplementedError` are
-plain Python subclasses; the binding raises the base class with an
-errno attribute set, and helper code (or user code) can promote to the
-specific subclass when desired.
+``ZMQBaseError`` is the root exception (above ``ZMQError``), matching
+pyzmq's hierarchy. ``ZMQBindError`` is a sibling of ``ZMQError`` under
+``ZMQBaseError``, not a subclass of ``ZMQError``.
 """
 
 import errno as _errno
 
+from ._native import ZMQBaseError as ZMQBaseError  # type: ignore[attr-defined]
 from ._native import ZMQError as ZMQError  # type: ignore[attr-defined]
 
 
@@ -21,7 +20,15 @@ class ContextTerminated(ZMQError):
 
 
 class NotImplementedError(ZMQError):  # noqa: A001  shadow OK; matches pyzmq
-    """The requested option / feature is not implemented in pyomq v0.1."""
+    """The requested option / feature is not implemented in pyomq."""
+
+
+class ZMQBindError(ZMQBaseError):
+    """Binding failed (e.g. ``bind_to_random_port`` exhausted all tries)."""
+
+
+class InterruptedSystemCall(ZMQError):
+    """Interrupted system call (``EINTR``). Never raised by pyomq (io_uring handles EINTR internally)."""
 
 
 _BY_ERRNO = {

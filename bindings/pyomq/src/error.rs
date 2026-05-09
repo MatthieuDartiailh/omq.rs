@@ -2,10 +2,11 @@
 
 use omq_proto::error::Error;
 use pyo3::create_exception;
-use pyo3::exceptions::PyOSError;
+use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
-create_exception!(_native, ZMQError, PyOSError, "Base class for pyomq errors.");
+create_exception!(_native, ZMQBaseError, PyException, "Root of all ZMQ errors.");
+create_exception!(_native, ZMQError, ZMQBaseError, "ZMQ error with errno.");
 
 // libzmq's ETERM constant. POSIX errno 156 isn't standard so libzmq
 // picks a value in the range that doesn't collide on supported OSes.
@@ -62,6 +63,7 @@ pub fn not_implemented(name: &str) -> PyErr {
 }
 
 pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("ZMQBaseError", py.get_type_bound::<ZMQBaseError>())?;
     m.add("ZMQError", py.get_type_bound::<ZMQError>())?;
     Ok(())
 }

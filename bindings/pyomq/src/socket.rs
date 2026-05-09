@@ -17,7 +17,7 @@
 //! because it can block for milliseconds.
 
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -57,6 +57,7 @@ pub(crate) struct SocketInner {
     pub sndbuf: Mutex<SendBuffer>,
     pub rxbuf: Mutex<Vec<Bytes>>,
     pub materialized: Mutex<Option<Materialized>>,
+    closed: AtomicBool,
 }
 
 impl SocketInner {
@@ -69,6 +70,7 @@ impl SocketInner {
             sndbuf: Mutex::new(SendBuffer::default()),
             rxbuf: Mutex::new(Vec::new()),
             materialized: Mutex::new(None),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -78,6 +80,9 @@ impl SocketInner {
 
     /// Build the underlying omq Socket + queues + pumps on first I/O.
     pub fn materialize(&self) -> PyResult<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(map_err(omq_proto::error::Error::Closed));
+        }
         let mut slot = self.materialized.lock().unwrap();
         if slot.is_some() {
             return Ok(());
@@ -149,6 +154,7 @@ impl SocketInner {
     /// Drop the materialized state on close. Pumps see Disconnected on
     /// the next op and exit; the registry entry is removed separately.
     pub fn take_materialized(&self) -> Option<Materialized> {
+        self.closed.store(true, Ordering::Relaxed);
         self.materialized.lock().unwrap().take()
     }
 }
@@ -291,6 +297,10 @@ impl Socket {
 
 #[pymethods]
 impl Socket {
+    fn socket_id(&self) -> PyResult<u64> {
+        self.inner.ensure_id()
+    }
+
     fn bind(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
         dispatch::sync_unit(&self.inner, py, |s| async move { s.bind(ep).await })
