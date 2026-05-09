@@ -6,6 +6,12 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-05-09
+
+### omq-compio 0.2.10
+
+- Pin `blume = { version = "0.1.0" }` for crates.io publish. No code change.
+
 ## [0.2.4] - 2026-05-09
 
 ### omq-proto 0.3.0

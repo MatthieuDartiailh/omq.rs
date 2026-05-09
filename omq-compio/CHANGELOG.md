@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.9...omq-compio-v0.2.10) - 2026-05-09
+
+### Changed
+
+- *(deps)* pin `blume = { version = "0.1.0" }` in Cargo.toml so `cargo publish`
+  resolves it from crates.io. No code or behavior change.
+
 ## [0.2.9](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.8...omq-compio-v0.2.9) - 2026-05-09
 
 ### Added

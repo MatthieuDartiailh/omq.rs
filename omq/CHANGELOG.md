@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/paddor/omq.rs/compare/omq-v0.2.4...omq-v0.2.5) - 2026-05-09
+
+### Changed
+
+- *(deps)* track `omq-compio = 0.2.10` (blume dep fix; no behavior change).
+
 ## [0.2.4](https://github.com/paddor/omq.rs/compare/omq-v0.2.3...omq-v0.2.4) - 2026-05-09
 
 ### Changed
