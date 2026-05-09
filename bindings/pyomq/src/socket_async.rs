@@ -34,7 +34,9 @@ pub struct AsyncSocket {
 
 impl AsyncSocket {
     pub fn new(socket_type: omq_compio::SocketType) -> Self {
-        Self { inner: SocketInner::new(socket_type) }
+        Self {
+            inner: SocketInner::new(socket_type),
+        }
     }
 
     pub fn socket_type(&self) -> omq_compio::SocketType {
@@ -110,9 +112,7 @@ impl AsyncSocket {
         let _ = flags;
         if let Some(head) = self.inner.pop_rxbuf_head() {
             return runtime::compio_future_into_py(py, move || async move {
-                Python::with_gil(|py| {
-                    Ok(PyBytes::new_bound(py, &head).into_any().unbind())
-                })
+                Python::with_gil(|py| Ok(PyBytes::new_bound(py, &head).into_any().unbind()))
             });
         }
         let recv_rx = self.inner.recv_rx_clone()?;
@@ -129,9 +129,7 @@ impl AsyncSocket {
                     if !parts.is_empty() {
                         inner.store_rxbuf(parts);
                     }
-                    Python::with_gil(|py| {
-                        Ok(PyBytes::new_bound(py, &head).into_any().unbind())
-                    })
+                    Python::with_gil(|py| Ok(PyBytes::new_bound(py, &head).into_any().unbind()))
                 }
                 Err(_) => Err(map_err(PError::Closed)),
             }
@@ -139,11 +137,7 @@ impl AsyncSocket {
     }
 
     #[pyo3(signature = (flags = 0))]
-    fn recv_multipart<'py>(
-        &self,
-        py: Python<'py>,
-        flags: i32,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn recv_multipart<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, PyAny>> {
         let _ = flags;
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
@@ -168,14 +162,26 @@ impl AsyncSocket {
         })
     }
 
-    fn subscribe<'py>(&self, py: Python<'py>, prefix: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn subscribe<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
         dispatch::async_unit(&self.inner, py, |s| async move { s.subscribe(bytes).await })
     }
 
-    fn unsubscribe<'py>(&self, py: Python<'py>, prefix: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn unsubscribe<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
-        dispatch::async_unit(&self.inner, py, |s| async move { s.unsubscribe(bytes).await })
+        dispatch::async_unit(
+            &self.inner,
+            py,
+            |s| async move { s.unsubscribe(bytes).await },
+        )
     }
 
     fn join<'py>(&self, py: Python<'py>, group: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
@@ -183,7 +189,11 @@ impl AsyncSocket {
         dispatch::async_unit(&self.inner, py, |s| async move { s.join(bytes).await })
     }
 
-    fn leave<'py>(&self, py: Python<'py>, group: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn leave<'py>(
+        &self,
+        py: Python<'py>,
+        group: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
         dispatch::async_unit(&self.inner, py, |s| async move { s.leave(bytes).await })
     }
@@ -193,37 +203,39 @@ impl AsyncSocket {
     fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let id = self.inner.ensure_id()?;
         runtime::compio_future_into_py(py, move || async move {
-            let statuses = match runtime::with_socket_async(id, |s| async move {
-                s.connections().await.unwrap_or_default()
-            })
-            .await
-            {
-                Ok(v) => v,
-                Err(_) => vec![],
-            };
+            let statuses: Vec<omq_proto::ConnectionStatus> =
+                runtime::with_socket_async(id, |s| async move {
+                    s.connections().await.unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
             Python::with_gil(|py| {
                 let dicts: Vec<PyObject> = statuses
                     .iter()
                     .map(|cs| crate::socket::connection_status_to_dict(py, cs))
                     .collect::<PyResult<_>>()?;
-                Ok(pyo3::types::PyList::new_bound(py, dicts).into_any().unbind())
+                Ok(pyo3::types::PyList::new_bound(py, dicts)
+                    .into_any()
+                    .unbind())
             })
         })
     }
 
     /// Return an `asyncio.Future` that resolves to a connection-status
     /// dict for `connection_id`, or `None` if no such peer is connected.
-    fn connection_info<'py>(&self, py: Python<'py>, connection_id: u64) -> PyResult<Bound<'py, PyAny>> {
+    fn connection_info<'py>(
+        &self,
+        py: Python<'py>,
+        connection_id: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let id = self.inner.ensure_id()?;
         runtime::compio_future_into_py(py, move || async move {
-            let status = match runtime::with_socket_async(id, move |s| async move {
-                s.connection_info(connection_id).await.ok().flatten()
-            })
-            .await
-            {
-                Ok(v) => v,
-                Err(_) => None,
-            };
+            let status: Option<omq_proto::ConnectionStatus> =
+                runtime::with_socket_async(id, move |s| async move {
+                    s.connection_info(connection_id).await.ok().flatten()
+                })
+                .await
+                .unwrap_or_default();
             Python::with_gil(|py| match status {
                 Some(cs) => crate::socket::connection_status_to_dict(py, &cs),
                 None => Ok(py.None()),
@@ -245,20 +257,11 @@ impl AsyncSocket {
 
     /// Sync setsockopt (returning None directly) - matches pyzmq's
     /// async API which keeps setsockopt synchronous since it's not I/O.
-    fn setsockopt(
-        &self,
-        py: Python<'_>,
-        option: i32,
-        value: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn setsockopt(&self, py: Python<'_>, option: i32, value: &Bound<'_, PyAny>) -> PyResult<()> {
         crate::options::setsockopt(self.inner.as_ref(), py, option, value)
     }
 
-    fn getsockopt<'py>(
-        &self,
-        py: Python<'py>,
-        option: i32,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn getsockopt<'py>(&self, py: Python<'py>, option: i32) -> PyResult<Bound<'py, PyAny>> {
         crate::options::getsockopt(self.inner.as_ref(), py, option)
     }
 

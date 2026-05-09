@@ -18,11 +18,7 @@ use crate::socket::SocketInner;
 
 /// Sync version: drive a `Result<()>`-returning op on the compio
 /// thread, blocking the caller. Releases the GIL across the trip.
-pub(crate) fn sync_unit<F, Fut>(
-    inner: &Arc<SocketInner>,
-    py: Python<'_>,
-    op: F,
-) -> PyResult<()>
+pub(crate) fn sync_unit<F, Fut>(inner: &Arc<SocketInner>, py: Python<'_>, op: F) -> PyResult<()>
 where
     F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), PError>> + 'static,

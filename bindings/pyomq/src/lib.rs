@@ -10,6 +10,10 @@
 // abi3 feature path checks for that cfg key, which Rust 1.80+ flags
 // because nothing actually defines it.
 #![allow(unexpected_cfgs)]
+// PyO3 0.22's `#[pymethods]` macro wraps every `-> PyResult<T>` return
+// in `.into()`, which clippy flags as `useless_conversion` when T is
+// already the right type. 45 instances, all macro-generated.
+#![allow(clippy::useless_conversion)]
 
 mod constants;
 mod context;

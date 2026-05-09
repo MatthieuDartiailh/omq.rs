@@ -68,7 +68,6 @@ pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
 
 /// Return a Python list of bytes - one per message frame.
 pub fn parts_to_pylist<'py>(py: Python<'py>, msg: Message) -> Bound<'py, PyList> {
-    let items: Vec<Bound<'py, PyBytes>> =
-        msg.iter().map(|b| PyBytes::new_bound(py, &b)).collect();
+    let items: Vec<Bound<'py, PyBytes>> = msg.iter().map(|b| PyBytes::new_bound(py, &b)).collect();
     PyList::new_bound(py, items)
 }

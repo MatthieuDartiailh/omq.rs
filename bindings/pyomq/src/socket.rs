@@ -98,7 +98,11 @@ impl SocketInner {
         };
         let st = self.socket_type;
         let id = runtime::materialize(st, opts, send_rx, recv_tx);
-        *slot = Some(Materialized { id, send_tx, recv_rx });
+        *slot = Some(Materialized {
+            id,
+            send_tx,
+            recv_rx,
+        });
         Ok(())
     }
 
@@ -109,12 +113,26 @@ impl SocketInner {
 
     pub fn send_tx_clone(&self) -> PyResult<flume::Sender<omq_compio::Message>> {
         self.materialize()?;
-        Ok(self.materialized.lock().unwrap().as_ref().unwrap().send_tx.clone())
+        Ok(self
+            .materialized
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send_tx
+            .clone())
     }
 
     pub fn recv_rx_clone(&self) -> PyResult<flume::Receiver<omq_compio::Message>> {
         self.materialize()?;
-        Ok(self.materialized.lock().unwrap().as_ref().unwrap().recv_rx.clone())
+        Ok(self
+            .materialized
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .recv_rx
+            .clone())
     }
 
     /// Push `bytes` onto the SNDMORE buffer. Returns `Some(msg)` if the
@@ -176,12 +194,20 @@ fn monitor_event_to_dict(py: Python<'_>, ev: &MonitorEvent) -> PyResult<PyObject
             d.set_item("event", "listening")?;
             d.set_item("endpoint", endpoint.to_string())?;
         }
-        MonitorEvent::Accepted { endpoint, connection_id, .. } => {
+        MonitorEvent::Accepted {
+            endpoint,
+            connection_id,
+            ..
+        } => {
             d.set_item("event", "accepted")?;
             d.set_item("endpoint", endpoint.to_string())?;
             d.set_item("connection_id", connection_id)?;
         }
-        MonitorEvent::Connected { endpoint, connection_id, .. } => {
+        MonitorEvent::Connected {
+            endpoint,
+            connection_id,
+            ..
+        } => {
             d.set_item("event", "connected")?;
             d.set_item("endpoint", endpoint.to_string())?;
             d.set_item("connection_id", connection_id)?;
@@ -194,12 +220,16 @@ fn monitor_event_to_dict(py: Python<'_>, ev: &MonitorEvent) -> PyResult<PyObject
                 d.set_item("peer_identity", PyBytes::new_bound(py, id))?;
             }
         }
-        MonitorEvent::HandshakeFailed { endpoint, reason, .. } => {
+        MonitorEvent::HandshakeFailed {
+            endpoint, reason, ..
+        } => {
             d.set_item("event", "handshake_failed")?;
             d.set_item("endpoint", endpoint.to_string())?;
             d.set_item("reason", reason.as_str())?;
         }
-        MonitorEvent::ConnectDelayed { endpoint, attempt, .. } => {
+        MonitorEvent::ConnectDelayed {
+            endpoint, attempt, ..
+        } => {
             d.set_item("event", "connect_delayed")?;
             d.set_item("endpoint", endpoint.to_string())?;
             d.set_item("attempt", attempt)?;
@@ -287,7 +317,9 @@ pub struct Socket {
 
 impl Socket {
     pub fn new(socket_type: omq_compio::SocketType) -> Self {
-        Self { inner: SocketInner::new(socket_type) }
+        Self {
+            inner: SocketInner::new(socket_type),
+        }
     }
 
     pub fn socket_type(&self) -> omq_compio::SocketType {
@@ -331,12 +363,7 @@ impl Socket {
     }
 
     #[pyo3(signature = (parts, flags = 0))]
-    fn send_multipart(
-        &self,
-        py: Python<'_>,
-        parts: &Bound<'_, PyAny>,
-        flags: i32,
-    ) -> PyResult<()> {
+    fn send_multipart(&self, py: Python<'_>, parts: &Bound<'_, PyAny>, flags: i32) -> PyResult<()> {
         let _ = flags;
         let msg = conversions::message_from_pylist(parts)?;
         self.send_message(py, msg)
@@ -362,11 +389,7 @@ impl Socket {
     }
 
     #[pyo3(signature = (flags = 0))]
-    fn recv_multipart<'py>(
-        &self,
-        py: Python<'py>,
-        flags: i32,
-    ) -> PyResult<Bound<'py, PyList>> {
+    fn recv_multipart<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, PyList>> {
         let _ = flags;
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
@@ -387,7 +410,11 @@ impl Socket {
 
     fn unsubscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.unsubscribe(bytes).await })
+        dispatch::sync_unit(
+            &self.inner,
+            py,
+            |s| async move { s.unsubscribe(bytes).await },
+        )
     }
 
     fn join(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -404,8 +431,11 @@ impl Socket {
     fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let id = self.inner.ensure_id()?;
         let statuses: Vec<omq_compio::ConnectionStatus> = py.allow_threads(|| {
-            runtime::with_socket(id, |s| async move { s.connections().await.unwrap_or_default() })
-                .unwrap_or_default()
+            runtime::with_socket(
+                id,
+                |s| async move { s.connections().await.unwrap_or_default() },
+            )
+            .unwrap_or_default()
         });
         let dicts: Vec<PyObject> = statuses
             .iter()
@@ -416,11 +446,7 @@ impl Socket {
 
     /// Return a dict for the peer with the given `connection_id`, or
     /// `None` if no such peer is currently connected.
-    fn connection_info<'py>(
-        &self,
-        py: Python<'py>,
-        connection_id: u64,
-    ) -> PyResult<PyObject> {
+    fn connection_info<'py>(&self, py: Python<'py>, connection_id: u64) -> PyResult<PyObject> {
         let id = self.inner.ensure_id()?;
         let status: Option<omq_compio::ConnectionStatus> = py.allow_threads(|| {
             runtime::with_socket(id, move |s| async move {
@@ -447,27 +473,20 @@ impl Socket {
         Ok(Monitor { rx, lagged })
     }
 
-    fn setsockopt(
-        &self,
-        py: Python<'_>,
-        option: i32,
-        value: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn setsockopt(&self, py: Python<'_>, option: i32, value: &Bound<'_, PyAny>) -> PyResult<()> {
         options::setsockopt(self.inner.as_ref(), py, option, value)
     }
 
-    fn getsockopt<'py>(
-        &self,
-        py: Python<'py>,
-        option: i32,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn getsockopt<'py>(&self, py: Python<'py>, option: i32) -> PyResult<Bound<'py, PyAny>> {
         options::getsockopt(self.inner.as_ref(), py, option)
     }
 
     #[pyo3(signature = (_linger=None))]
     fn close(&self, py: Python<'_>, _linger: Option<i64>) -> PyResult<()> {
         let m = self.inner.take_materialized();
-        let Some(m) = m else { return Ok(()); };
+        let Some(m) = m else {
+            return Ok(());
+        };
         py.allow_threads(|| runtime::destroy_socket(m.id));
         Ok(())
     }
@@ -491,11 +510,7 @@ impl Socket {
 }
 
 impl Socket {
-    fn send_message(
-        &self,
-        py: Python<'_>,
-        msg: omq_compio::Message,
-    ) -> PyResult<()> {
+    fn send_message(&self, py: Python<'_>, msg: omq_compio::Message) -> PyResult<()> {
         let send_tx = self.inner.send_tx_clone()?;
         match send_tx.try_send(msg) {
             Ok(()) => Ok(()),
@@ -506,9 +521,7 @@ impl Socket {
                     Some(t) => match send_tx.send_timeout(msg, t) {
                         Ok(()) => Ok(()),
                         Err(SendTimeoutError::Timeout(_)) => Err(timeout_err()),
-                        Err(SendTimeoutError::Disconnected(_)) => {
-                            Err(map_err(PError::Closed))
-                        }
+                        Err(SendTimeoutError::Disconnected(_)) => Err(map_err(PError::Closed)),
                     },
                     None => match send_tx.send(msg) {
                         Ok(()) => Ok(()),
@@ -530,9 +543,7 @@ impl Socket {
                     Some(t) => match recv_rx.recv_timeout(t) {
                         Ok(m) => Ok(m),
                         Err(RecvTimeoutError::Timeout) => Err(timeout_err()),
-                        Err(RecvTimeoutError::Disconnected) => {
-                            Err(map_err(PError::Closed))
-                        }
+                        Err(RecvTimeoutError::Disconnected) => Err(map_err(PError::Closed)),
                     },
                     None => match recv_rx.recv() {
                         Ok(m) => Ok(m),
@@ -543,4 +554,3 @@ impl Socket {
         }
     }
 }
-

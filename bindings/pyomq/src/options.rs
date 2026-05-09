@@ -18,9 +18,9 @@ fn int_to_bound<T: pyo3::IntoPy<PyObject>>(py: Python<'_>, v: T) -> Bound<'_, Py
     v.into_py(py).into_bound(py)
 }
 
-use omq_compio as backend;
 use crate::constants;
 use crate::error::{map_err, not_implemented};
+use omq_compio as backend;
 // SocketInner accessed via fully-qualified path; no top-level import.
 
 /// Wrapper-only state that doesn't live on `Options`.
@@ -51,25 +51,26 @@ impl Overlay {
     /// Materialise an `omq_compio::Options` from the overlay. Used
     /// when the underlying Socket is first built.
     pub fn to_options(&self) -> backend::Options {
-        let mut o = backend::Options::default();
-        o.send_hwm = self.send_hwm;
-        o.recv_hwm = self.recv_hwm;
-        o.linger = self.linger;
-        o.identity = self.identity.clone();
-        o.max_message_size = self.max_message_size;
-        o.router_mandatory = self.router_mandatory;
-        o.heartbeat_interval = self.heartbeat_ivl;
-        o.heartbeat_ttl = self.heartbeat_ttl;
-        o.heartbeat_timeout = self.heartbeat_timeout;
-        o.handshake_timeout = self.handshake_ivl;
-        o.conflate = self.conflate;
-        o.tcp_keepalive = self.keepalive;
-        o.reconnect = match (self.reconnect_ivl, self.reconnect_ivl_max) {
-            (None, _) => ReconnectPolicy::Disabled,
-            (Some(min), None) => ReconnectPolicy::Fixed(min),
-            (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
-        };
-        o
+        backend::Options {
+            send_hwm: self.send_hwm,
+            recv_hwm: self.recv_hwm,
+            linger: self.linger,
+            identity: self.identity.clone(),
+            max_message_size: self.max_message_size,
+            router_mandatory: self.router_mandatory,
+            heartbeat_interval: self.heartbeat_ivl,
+            heartbeat_ttl: self.heartbeat_ttl,
+            heartbeat_timeout: self.heartbeat_timeout,
+            handshake_timeout: self.handshake_ivl,
+            conflate: self.conflate,
+            tcp_keepalive: self.keepalive,
+            reconnect: match (self.reconnect_ivl, self.reconnect_ivl_max) {
+                (None, _) => ReconnectPolicy::Disabled,
+                (Some(min), None) => ReconnectPolicy::Fixed(min),
+                (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
+            },
+            ..Default::default()
+        }
     }
 
     pub fn from_options(o: &backend::Options) -> Self {
@@ -249,9 +250,7 @@ pub fn setsockopt(
         // Group C "not implemented in v0.1".
         constants::AFFINITY => return Err(not_implemented("AFFINITY")),
         constants::BACKLOG => return Err(not_implemented("BACKLOG")),
-        constants::TYPE | constants::RCVMORE => {
-            return Err(not_implemented("read-only option"))
-        }
+        constants::TYPE | constants::RCVMORE => return Err(not_implemented("read-only option")),
         other => {
             return Err(not_implemented(&format!("option id {other}")));
         }
@@ -367,6 +366,8 @@ pub fn getsockopt<'py>(
             };
             Ok(int_to_bound(py, v))
         }
-        other => Err(not_implemented(&format!("getsockopt for option id {other}"))),
+        other => Err(not_implemented(&format!(
+            "getsockopt for option id {other}"
+        ))),
     }
 }

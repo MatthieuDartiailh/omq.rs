@@ -43,8 +43,7 @@ fn submit_chan() -> &'static flume::Sender<Job> {
         thread::Builder::new()
             .name("pyomq-compio".into())
             .spawn(move || {
-                let rt = build_compio_runtime()
-                    .expect("pyomq: compio runtime build");
+                let rt = build_compio_runtime().expect("pyomq: compio runtime build");
                 rt.block_on(async move {
                     while let Ok(job) = rx.recv_async().await {
                         // Job runs synchronously here. Each job either
@@ -71,10 +70,10 @@ fn build_compio_runtime() -> std::io::Result<compio::runtime::Runtime> {
     let mut runtime_builder = compio::runtime::RuntimeBuilder::new();
     let mut proactor = compio::driver::ProactorBuilder::new();
     proactor.with_omq_buffer_pool();
-    if let Ok(raw) = std::env::var("OMQ_SQPOLL_IDLE_MS") {
-        if let Ok(ms) = raw.parse::<u64>() {
-            proactor.sqpoll_idle(std::time::Duration::from_millis(ms));
-        }
+    if let Ok(raw) = std::env::var("OMQ_SQPOLL_IDLE_MS")
+        && let Ok(ms) = raw.parse::<u64>()
+    {
+        proactor.sqpoll_idle(std::time::Duration::from_millis(ms));
     }
     runtime_builder.with_proactor(proactor);
     runtime_builder.build()
@@ -96,9 +95,7 @@ where
     let job: Job = Box::new(move || {
         let _ = otx.send(f());
     });
-    submit_chan()
-        .send(job)
-        .expect("pyomq: compio runtime gone");
+    submit_chan().send(job).expect("pyomq: compio runtime gone");
     orx.recv().expect("pyomq: runtime dropped result")
 }
 
@@ -188,9 +185,7 @@ where
             }
         }
     });
-    submit_chan()
-        .send(job)
-        .expect("pyomq: compio runtime gone");
+    submit_chan().send(job).expect("pyomq: compio runtime gone");
     orx.recv().expect("pyomq: runtime dropped result")
 }
 
@@ -210,7 +205,6 @@ where
         None => Err(MissingSocket),
     }
 }
-
 
 /// Run a forwarding proxy between two sockets on the compio thread.
 ///
@@ -261,9 +255,7 @@ pub fn proxy(
         .detach();
     });
 
-    submit_chan()
-        .send(job)
-        .expect("pyomq: compio runtime gone");
+    submit_chan().send(job).expect("pyomq: compio runtime gone");
     let _ = done_rx.recv();
 }
 
@@ -275,7 +267,11 @@ pub fn proxy(
 /// channel; we stash it back into the socket's `rxbuf` so the next
 /// Python `recv()` picks it up without loss.
 pub fn wait_any(
-    receivers: Vec<(u64, flume::Receiver<omq_compio::Message>, std::sync::Arc<crate::socket::SocketInner>)>,
+    receivers: Vec<(
+        u64,
+        flume::Receiver<omq_compio::Message>,
+        std::sync::Arc<crate::socket::SocketInner>,
+    )>,
     timeout_ms: Option<u64>,
 ) -> Vec<u64> {
     if receivers.is_empty() {
@@ -290,22 +286,17 @@ pub fn wait_any(
                 .map(|(id, rx, _)| {
                     let id = *id;
                     let rx = rx.clone();
-                    Box::pin(async move {
-                        (rx.recv_async().await, id)
-                    })
+                    Box::pin(async move { (rx.recv_async().await, id) })
                 })
                 .collect();
             let (recv_result, first_id) = match timeout_ms {
                 None => {
-                    let ((result, id), _, _) =
-                        futures::future::select_all(futs).await;
+                    let ((result, id), _, _) = futures::future::select_all(futs).await;
                     (result, id)
                 }
                 Some(ms) => {
                     use futures::FutureExt;
-                    let deadline = compio::time::sleep(
-                        std::time::Duration::from_millis(ms),
-                    );
+                    let deadline = compio::time::sleep(std::time::Duration::from_millis(ms));
                     futures::select! {
                         ((result, id), ..) = futures::future::select_all(futs).fuse() => {
                             (result, id)
@@ -320,27 +311,24 @@ pub fn wait_any(
             // Stash the consumed message into the socket's rxbuf.
             if let Ok(msg) = recv_result {
                 let frames: Vec<bytes::Bytes> = msg.iter().collect();
-                if let Some((_, _, inner)) =
-                    receivers.iter().find(|(id, _, _)| *id == first_id)
-                {
+                if let Some((_, _, inner)) = receivers.iter().find(|(id, _, _)| *id == first_id) {
                     let mut buf = inner.rxbuf.lock().unwrap();
                     // Prepend: rxbuf may have leftover RCVMORE frames.
                     buf.splice(0..0, frames);
                 }
             }
             // Scan all sockets for readiness (non-destructive).
-            let mut ready: Vec<u64> = ids
-                .iter()
-                .copied()
-                .filter(|id| {
-                    receivers
-                        .iter()
-                        .find(|(rid, _, _)| rid == id)
-                        .is_some_and(|(_, rx, inner)| {
-                            !rx.is_empty() || !inner.rxbuf.lock().unwrap().is_empty()
-                        })
-                })
-                .collect();
+            let mut ready: Vec<u64> =
+                ids.iter()
+                    .copied()
+                    .filter(|id| {
+                        receivers.iter().find(|(rid, _, _)| rid == id).is_some_and(
+                            |(_, rx, inner)| {
+                                !rx.is_empty() || !inner.rxbuf.lock().unwrap().is_empty()
+                            },
+                        )
+                    })
+                    .collect();
             if !ready.contains(&first_id) {
                 ready.push(first_id);
             }
@@ -348,9 +336,7 @@ pub fn wait_any(
         })
         .detach();
     });
-    submit_chan()
-        .send(job)
-        .expect("pyomq: compio runtime gone");
+    submit_chan().send(job).expect("pyomq: compio runtime gone");
     orx.recv().unwrap_or_default()
 }
 
@@ -396,17 +382,12 @@ where
                     let _ = match result {
                         Ok(value) => {
                             let setter = fut_obj.getattr("set_result")?;
-                            loop_obj.call_method1(
-                                "call_soon_threadsafe",
-                                (setter, value),
-                            )
+                            loop_obj.call_method1("call_soon_threadsafe", (setter, value))
                         }
                         Err(e) => {
                             let setter = fut_obj.getattr("set_exception")?;
-                            loop_obj.call_method1(
-                                "call_soon_threadsafe",
-                                (setter, e.into_value(gil)),
-                            )
+                            loop_obj
+                                .call_method1("call_soon_threadsafe", (setter, e.into_value(gil)))
                         }
                     };
                     PyResult::<()>::Ok(())

@@ -5,7 +5,12 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
-create_exception!(_native, ZMQBaseError, PyException, "Root of all ZMQ errors.");
+create_exception!(
+    _native,
+    ZMQBaseError,
+    PyException,
+    "Root of all ZMQ errors."
+);
 create_exception!(_native, ZMQError, ZMQBaseError, "ZMQ error with errno.");
 
 // libzmq's ETERM constant. POSIX errno 156 isn't standard so libzmq
@@ -25,15 +30,10 @@ pub fn map_err(e: Error) -> PyErr {
             libc::EPROTO,
             format!("unsupported ZMTP version {major}.{minor}"),
         ),
-        Error::MessageTooLarge { size, max } => {
-            (libc::EMSGSIZE, format!("message {size} > {max}"))
-        }
+        Error::MessageTooLarge { size, max } => (libc::EMSGSIZE, format!("message {size} > {max}")),
         Error::InvalidEndpoint(m) => (libc::EINVAL, m),
         Error::IdentityCollision(_) => (libc::EADDRINUSE, "identity collision".into()),
-        Error::Io(io) => (
-            io.raw_os_error().unwrap_or(libc::EIO),
-            io.to_string(),
-        ),
+        Error::Io(io) => (io.raw_os_error().unwrap_or(libc::EIO), io.to_string()),
         _ => (libc::EIO, "internal error".into()),
     };
     let py_err = ZMQError::new_err(msg);
