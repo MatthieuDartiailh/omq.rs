@@ -38,7 +38,7 @@ bytes = "1"
 # `-C target-feature=+avx2`). Without it the scalar path runs ~55 MiB/s on
 # AVX2 hardware. Set RUSTFLAGS="-C target-cpu=native" for production builds.
 # Switch to upstream skerkour/chacha20-blake3 once PR #12 is merged + published.
-chacha20-blake3 = { version = "0.9.11", optional = true }
+chacha20-blake3 = { version = "0.9.12", optional = true }
 crypto_box = { version = "0.9", features = ["std"], optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
