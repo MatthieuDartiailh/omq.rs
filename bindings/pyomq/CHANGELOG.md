@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/paddor/omq.rs/compare/pyomq-v0.2.1...pyomq-v0.2.2) - 2026-05-09
+
+### Changed
+
+- *(deps)* bump `pyproject.toml` version to match `Cargo.toml`. The two were
+  out of sync; maturin reads `pyproject.toml` as the authoritative version.
+
 ## [0.2.1](https://github.com/paddor/omq.rs/compare/pyomq-v0.2.0...pyomq-v0.2.1) - 2026-05-09
 
 ### Changed
