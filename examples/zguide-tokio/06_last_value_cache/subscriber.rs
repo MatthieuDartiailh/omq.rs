@@ -1,4 +1,4 @@
-//! ZGuide 06 — Last Value Cache (late-joining subscriber).
+//! `ZGuide` 06 — Last Value Cache (late-joining subscriber).
 //!
 //! Connects to the cache's REP socket to fetch a snapshot, then
 //! optionally subscribes for live updates.
@@ -11,9 +11,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {

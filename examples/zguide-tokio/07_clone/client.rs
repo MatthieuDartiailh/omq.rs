@@ -1,4 +1,4 @@
-//! ZGuide 07 — Clone (client).
+//! `ZGuide` 07 — Clone (client).
 //!
 //! Subscribes for live updates first, then requests a snapshot. Merges
 //! buffered updates (seq > snapshot seq) into the local store.
@@ -13,9 +13,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {
@@ -81,7 +79,10 @@ async fn main() {
             println!("client (snapshot): {key}={val} seq={s}");
         }
     }
-    println!("client: snapshot has {} entries (up to seq={snapshot_seq})", store.len());
+    println!(
+        "client: snapshot has {} entries (up to seq={snapshot_seq})",
+        store.len()
+    );
 
     // Wait for buffered updates to finish arriving.
     buffer_task.await.unwrap();

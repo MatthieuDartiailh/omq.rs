@@ -1,4 +1,4 @@
-//! ZGuide 04 — Lazy Pirate client (REQ).
+//! `ZGuide` 04 — Lazy Pirate client (REQ).
 //!
 //! Sends 5 requests over a single REQ socket. If a reply does not
 //! arrive within 400ms, the socket is dropped and recreated before
@@ -12,9 +12,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {

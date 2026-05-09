@@ -1,4 +1,4 @@
-//! ZGuide 02 — PUB publisher.
+//! `ZGuide` 02 — PUB publisher.
 //!
 //! Binds a PUB socket and publishes weather and sports data in a loop.
 //!
@@ -12,9 +12,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 #[tokio::main]
@@ -37,20 +35,16 @@ async fn main() {
         let sfo_temp = 60 + (i % 20);
         let chi_temp = 40 + (i % 35);
 
-        pub_
-            .send(Message::single(format!("weather.nyc {nyc_temp}F")))
+        pub_.send(Message::single(format!("weather.nyc {nyc_temp}F")))
             .await
             .unwrap();
-        pub_
-            .send(Message::single(format!("weather.sfo {sfo_temp}F")))
+        pub_.send(Message::single(format!("weather.sfo {sfo_temp}F")))
             .await
             .unwrap();
-        pub_
-            .send(Message::single(format!("weather.chi {chi_temp}F")))
+        pub_.send(Message::single(format!("weather.chi {chi_temp}F")))
             .await
             .unwrap();
-        pub_
-            .send(Message::single(format!("sports.nba score-{i}")))
+        pub_.send(Message::single(format!("sports.nba score-{i}")))
             .await
             .unwrap();
 

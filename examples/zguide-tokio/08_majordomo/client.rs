@@ -1,4 +1,4 @@
-//! ZGuide 08 — Majordomo client.
+//! `ZGuide` 08 — Majordomo client.
 //!
 //! REQ socket connects to the broker frontend. Sends requests for
 //! different services and prints replies.
@@ -8,9 +8,7 @@
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {

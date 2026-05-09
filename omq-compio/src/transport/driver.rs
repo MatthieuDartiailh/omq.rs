@@ -392,11 +392,11 @@ pub(crate) async fn run_connection(
                             if let Some(iv) = hb_interval {
                                 hb_next = Some(Instant::now() + iv);
                             }
-                            peer_identity = peer_properties.identity.clone().unwrap_or_else(
-                                || monitor_ctx.as_ref().map_or_else(Bytes::new, |ctx| {
+                            peer_identity = peer_properties.identity.clone().unwrap_or_else(|| {
+                                monitor_ctx.as_ref().map_or_else(Bytes::new, |ctx| {
                                     generated_identity(ctx.connection_id)
-                                }),
-                            );
+                                })
+                            });
                             // Drain pre-handshake commands now that we're
                             // allowed to send. Non-transform cmds go into
                             // the codec; transform msgs use the encoder

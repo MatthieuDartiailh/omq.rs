@@ -1,4 +1,4 @@
-//! ZGuide 03 — Ventilator (task producer).
+//! `ZGuide` 03 — Ventilator (task producer).
 //!
 //! PUSH socket binds and sends N tasks followed by sentinel messages
 //! so each worker knows when to stop.
@@ -10,9 +10,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 #[tokio::main]

@@ -1,4 +1,4 @@
-//! ZGuide 11 — Freelance: server.
+//! `ZGuide` 11 — Freelance: server.
 //!
 //! REP server that replies with "{name}:{body}". Optional delay before
 //! each reply to simulate a slow server.
@@ -10,9 +10,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {
@@ -24,10 +22,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ep = endpoint_or(&args, 1, "ipc://@omq-zguide-11-server1");
     let name = args.get(2).cloned().unwrap_or_else(|| "server".to_string());
-    let delay_secs: f64 = args
-        .get(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
+    let delay_secs: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.bind(ep).await.unwrap();

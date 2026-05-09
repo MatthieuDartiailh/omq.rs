@@ -1,4 +1,4 @@
-//! ZGuide 01 — REP worker.
+//! `ZGuide` 01 — REP worker.
 //!
 //! Connects to the broker's DEALER backend. Receives requests and
 //! replies with an echo prefixed by the worker ID.
@@ -8,9 +8,7 @@
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {

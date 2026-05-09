@@ -34,9 +34,7 @@ async fn main() {
     println!("dispatcher: {dispatch_ep} store={store_dir}");
 
     loop {
-        let Ok(Ok(msg)) =
-            compio::time::timeout(Duration::from_secs(3), pull.recv()).await
-        else {
+        let Ok(Ok(msg)) = compio::time::timeout(Duration::from_secs(3), pull.recv()).await else {
             break;
         };
         let ticket = msg_str(&msg, 0);

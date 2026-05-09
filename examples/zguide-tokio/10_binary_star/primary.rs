@@ -1,4 +1,4 @@
-//! ZGuide 10 — Binary Star: primary server.
+//! `ZGuide` 10 — Binary Star: primary server.
 //!
 //! REP binds a service endpoint, PUB binds a heartbeat endpoint.
 //! Two tasks: one sends "HB" heartbeats every 50ms, the other
@@ -11,9 +11,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {

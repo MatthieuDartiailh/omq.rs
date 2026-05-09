@@ -1,4 +1,4 @@
-//! ZGuide 05 — Heartbeat publisher (PUB).
+//! `ZGuide` 05 — Heartbeat publisher (PUB).
 //!
 //! Sends periodic heartbeats with a simulated failure gap in the middle.
 //!
@@ -13,9 +13,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 #[tokio::main]
@@ -31,10 +29,7 @@ async fn main() {
 
     // Phase 1: alive
     for i in 0..8 {
-        pub_socket
-            .send(Message::single("HEARTBEAT"))
-            .await
-            .unwrap();
+        pub_socket.send(Message::single("HEARTBEAT")).await.unwrap();
         println!("publisher: heartbeat {i}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -45,10 +40,7 @@ async fn main() {
 
     // Phase 3: recover
     for i in 8..16 {
-        pub_socket
-            .send(Message::single("HEARTBEAT"))
-            .await
-            .unwrap();
+        pub_socket.send(Message::single("HEARTBEAT")).await.unwrap();
         println!("publisher: heartbeat {i}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

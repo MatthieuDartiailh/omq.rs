@@ -37,10 +37,7 @@ async fn main() {
     // Phase 1: monitor heartbeats.
     let timeout = Duration::from_millis(300);
     loop {
-        if !matches!(
-            compio::time::timeout(timeout, sub.recv()).await,
-            Ok(Ok(_))
-        ) {
+        if !matches!(compio::time::timeout(timeout, sub.recv()).await, Ok(Ok(_))) {
             // Timeout or connection closed: primary is gone.
             println!("backup: primary heartbeat lost -- taking over!");
             break;

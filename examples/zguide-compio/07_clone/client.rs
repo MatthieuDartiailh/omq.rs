@@ -86,7 +86,10 @@ async fn main() {
             println!("client (snapshot): {key}={val} seq={s}");
         }
     }
-    println!("client: snapshot has {} entries (up to seq={snapshot_seq})", store.len());
+    println!(
+        "client: snapshot has {} entries (up to seq={snapshot_seq})",
+        store.len()
+    );
 
     // Wait for buffered updates to finish arriving.
     buffer_task.await.unwrap();

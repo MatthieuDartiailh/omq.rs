@@ -1,4 +1,4 @@
-//! ZGuide 11 — Freelance Model 1: sequential failover.
+//! `ZGuide` 11 — Freelance Model 1: sequential failover.
 //!
 //! For each request, try endpoints in order. Create a fresh REQ per
 //! attempt, send, recv with 150ms timeout. On timeout: drop socket,

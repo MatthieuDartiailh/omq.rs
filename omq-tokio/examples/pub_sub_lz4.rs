@@ -1,12 +1,11 @@
 //! Pub/sub with lz4+tcp:// compression.
 //!
 //! Run with:
-//!   cargo run -p omq --example pub_sub_lz4 --no-default-features \
-//!     --features tokio-backend,lz4
+//!   cargo run -p omq-tokio --example pub_sub_lz4 --features lz4
 
 use std::time::Duration;
 
-use omq::{Message, Options, Socket, SocketType};
+use omq_tokio::{Message, Options, Socket, SocketType};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

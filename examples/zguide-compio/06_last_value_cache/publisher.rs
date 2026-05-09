@@ -20,10 +20,7 @@ fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let pub_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-06-publisher");
-    let count: usize = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5);
+    let count: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(pub_ep.clone()).await.unwrap();

@@ -43,9 +43,7 @@ async fn main() {
     println!("frontend: {frontend_ep} dispatch={dispatch_ep} store={store_dir}");
 
     loop {
-        let Ok(Ok(msg)) =
-            compio::time::timeout(Duration::from_secs(3), rep.recv()).await
-        else {
+        let Ok(Ok(msg)) = compio::time::timeout(Duration::from_secs(3), rep.recv()).await else {
             break;
         };
         let body = msg_str(&msg, 0);

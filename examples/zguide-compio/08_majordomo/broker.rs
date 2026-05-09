@@ -68,10 +68,13 @@ async fn main() {
         let service = msg_str(&msg, 2);
         let body = msg.part_bytes(3).unwrap();
 
-        let Some(worker_id) = services
-            .get_mut(&service)
-            .and_then(|pool| if pool.is_empty() { None } else { Some(pool.remove(0)) })
-        else {
+        let Some(worker_id) = services.get_mut(&service).and_then(|pool| {
+            if pool.is_empty() {
+                None
+            } else {
+                Some(pool.remove(0))
+            }
+        }) else {
             println!("broker: no worker for service '{service}'");
             continue;
         };

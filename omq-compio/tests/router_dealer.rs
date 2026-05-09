@@ -133,13 +133,13 @@ async fn router_assigns_identity_for_peers_without_one() {
         .unwrap();
     assert_eq!(got.len(), 2);
     let identity = got.part_bytes(0).unwrap();
-    assert!(!identity.is_empty(), "auto-generated identity must be non-empty");
+    assert!(
+        !identity.is_empty(),
+        "auto-generated identity must be non-empty"
+    );
 
     router
-        .send(Message::multipart([
-            identity,
-            Bytes::from_static(b"reply"),
-        ]))
+        .send(Message::multipart([identity, Bytes::from_static(b"reply")]))
         .await
         .unwrap();
 

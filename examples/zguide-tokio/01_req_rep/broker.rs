@@ -1,4 +1,4 @@
-//! ZGuide 01 — ROUTER/DEALER broker.
+//! `ZGuide` 01 — ROUTER/DEALER broker.
 //!
 //! Forwards messages between a ROUTER frontend (for clients) and a
 //! DEALER backend (for workers). Load-balances requests across workers.
@@ -8,9 +8,7 @@
 use omq::{Endpoint, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 #[tokio::main]

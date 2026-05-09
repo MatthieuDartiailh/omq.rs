@@ -32,10 +32,7 @@ async fn main() {
 
     // Phase 1: alive
     for i in 0..8 {
-        pub_socket
-            .send(Message::single("HEARTBEAT"))
-            .await
-            .unwrap();
+        pub_socket.send(Message::single("HEARTBEAT")).await.unwrap();
         println!("publisher: heartbeat {i}");
         compio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -46,10 +43,7 @@ async fn main() {
 
     // Phase 3: recover
     for i in 8..16 {
-        pub_socket
-            .send(Message::single("HEARTBEAT"))
-            .await
-            .unwrap();
+        pub_socket.send(Message::single("HEARTBEAT")).await.unwrap();
         println!("publisher: heartbeat {i}");
         compio::time::sleep(Duration::from_millis(50)).await;
     }

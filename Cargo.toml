@@ -5,8 +5,6 @@ members = [
     "omq-compio",
     "omq-proto",
     "omq-tokio",
-    "examples/zguide-tokio/*",
-    "examples/zguide-compio/*",
 ]
 default-members = ["blume", "omq", "omq-compio", "omq-proto", "omq-tokio"]
 # Bindings live in their own subtree. Each is its own build root - Python's

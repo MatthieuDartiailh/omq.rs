@@ -26,10 +26,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let primary_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-10-primary");
     let backup_ep = endpoint_or(&args, 2, "ipc://@omq-zguide-10-backup");
-    let n: usize = args
-        .get(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4);
+    let n: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
 
     for i in 0..n {
         let body = format!("req-{i}");

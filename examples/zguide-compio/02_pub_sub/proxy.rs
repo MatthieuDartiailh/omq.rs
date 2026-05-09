@@ -1,4 +1,4 @@
-//! ZGuide 02 — SUB/PUB forwarding proxy.
+//! `ZGuide` 02 — SUB/PUB forwarding proxy.
 //!
 //! Connects a SUB socket to an upstream PUB (subscribes to all topics)
 //! and binds a PUB socket downstream. Receives messages from upstream
@@ -9,14 +9,12 @@
 //! Runs indefinitely (Ctrl-C to stop).
 //!
 //! NOTE: This uses SUB/PUB relay instead of the canonical XSUB/XPUB
-//! proxy because XSUB.send() is not yet supported.
+//! proxy because `XSUB.send()` is not yet supported.
 
 use omq::{Endpoint, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 #[compio::main]

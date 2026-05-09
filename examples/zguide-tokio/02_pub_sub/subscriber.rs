@@ -1,4 +1,4 @@
-//! ZGuide 02 — SUB subscriber.
+//! `ZGuide` 02 — SUB subscriber.
 //!
 //! Connects a SUB socket, subscribes to a topic prefix, and prints
 //! matching messages.
@@ -11,9 +11,7 @@
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {

@@ -1,7 +1,7 @@
-//! ZGuide 11 — Freelance Model 3: tracked failover.
+//! `ZGuide` 11 — Freelance Model 3: tracked failover.
 //!
 //! Maintains a `known_good` endpoint index. For each request, try
-//! known_good first (if set), then remaining endpoints. On success,
+//! `known_good` first (if set), then remaining endpoints. On success,
 //! remember the endpoint. On timeout, clear it.
 //!
 //! The `--kill-after N` flag tells run.sh which request to kill a

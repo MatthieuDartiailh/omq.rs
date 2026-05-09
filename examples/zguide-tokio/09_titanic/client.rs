@@ -28,11 +28,7 @@ async fn main() {
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(frontend_ep).await.unwrap();
 
-    let requests = [
-        ("echo", "hello"),
-        ("upper", "world"),
-        ("echo", "foo"),
-    ];
+    let requests = [("echo", "hello"), ("upper", "world"), ("echo", "foo")];
 
     // Submit requests, collect tickets.
     let mut tickets = Vec::new();
@@ -63,5 +59,8 @@ async fn main() {
         println!("client: result for {ticket} -> {result}");
     }
 
-    println!("done: {} requests persisted, dispatched, and retrieved", tickets.len());
+    println!(
+        "done: {} requests persisted, dispatched, and retrieved",
+        tickets.len()
+    );
 }

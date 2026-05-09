@@ -1,4 +1,4 @@
-//! ZGuide 11 — Freelance Model 2: shotgun.
+//! `ZGuide` 11 — Freelance Model 2: shotgun.
 //!
 //! DEALER connects to all endpoints. Sends a request to each (empty
 //! delimiter + body for REP compatibility). Takes the first reply.

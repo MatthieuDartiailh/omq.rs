@@ -1,4 +1,4 @@
-//! ZGuide 10 — Binary Star: client.
+//! `ZGuide` 10 — Binary Star: client.
 //!
 //! Sends N requests. For each: create REQ, connect to primary, send,
 //! recv with 200ms timeout. On timeout: drop socket, create new REQ,
@@ -11,9 +11,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {
@@ -25,10 +23,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let primary_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-10-primary");
     let backup_ep = endpoint_or(&args, 2, "ipc://@omq-zguide-10-backup");
-    let n: usize = args
-        .get(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4);
+    let n: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
 
     for i in 0..n {
         let body = format!("req-{i}");

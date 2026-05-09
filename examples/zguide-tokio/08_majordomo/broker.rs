@@ -1,4 +1,4 @@
-//! ZGuide 08 — Majordomo broker.
+//! `ZGuide` 08 — Majordomo broker.
 //!
 //! Two ROUTER sockets: frontend (clients) and backend (workers).
 //! Workers register with `["READY", service_name]`. Client requests
@@ -13,9 +13,7 @@ use bytes::Bytes;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {
@@ -46,7 +44,10 @@ async fn main() {
         let command = msg_str(&msg, 1);
         let service = msg_str(&msg, 2);
         if command == "READY" {
-            println!("broker: worker '{}' registered for '{service}'", String::from_utf8_lossy(&worker_id));
+            println!(
+                "broker: worker '{}' registered for '{service}'",
+                String::from_utf8_lossy(&worker_id)
+            );
             services.entry(service).or_default().push(worker_id);
         }
     }
@@ -60,15 +61,21 @@ async fn main() {
         let service = msg_str(&msg, 2);
         let body = msg.part_bytes(3).unwrap();
 
-        let Some(worker_id) = services
-            .get_mut(&service)
-            .and_then(|pool| if pool.is_empty() { None } else { Some(pool.remove(0)) })
-        else {
+        let Some(worker_id) = services.get_mut(&service).and_then(|pool| {
+            if pool.is_empty() {
+                None
+            } else {
+                Some(pool.remove(0))
+            }
+        }) else {
             println!("broker: no worker for service '{service}'");
             continue;
         };
 
-        println!("broker: routing '{service}' request to {}", String::from_utf8_lossy(&worker_id));
+        println!(
+            "broker: routing '{service}' request to {}",
+            String::from_utf8_lossy(&worker_id)
+        );
 
         // Send to backend ROUTER: [worker_id, client_id, "", body]
         backend
@@ -93,7 +100,11 @@ async fn main() {
 
         // Forward to frontend ROUTER: [client_id, "", reply]
         frontend
-            .send(Message::multipart([reply_client_id, Bytes::from_static(b""), reply_body]))
+            .send(Message::multipart([
+                reply_client_id,
+                Bytes::from_static(b""),
+                reply_body,
+            ]))
             .await
             .unwrap();
     }

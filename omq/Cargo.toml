@@ -42,13 +42,6 @@ priority = [
   "omq-tokio?/priority",
 ]
 
-[dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-
-[[example]]
-name = "pub_sub_lz4"
-required-features = ["tokio-backend", "lz4"]
-
 [dependencies]
 omq-compio = { path = "../omq-compio", version = "0.2.8", default-features = false, optional = true }
 omq-tokio  = { path = "../omq-tokio",  version = "0.2.3", default-features = false, optional = true }

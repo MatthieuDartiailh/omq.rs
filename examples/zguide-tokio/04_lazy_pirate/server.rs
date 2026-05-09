@@ -1,4 +1,4 @@
-//! ZGuide 04 — Lazy Pirate server (REP).
+//! `ZGuide` 04 — Lazy Pirate server (REP).
 //!
 //! Binds a REP socket, receives requests and replies. On request #3,
 //! sleeps 500ms before replying to simulate a crash/slowdown. Exits
@@ -11,9 +11,7 @@ use std::time::Duration;
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {

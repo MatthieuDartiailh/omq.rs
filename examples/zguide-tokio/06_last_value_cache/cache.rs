@@ -1,4 +1,4 @@
-//! ZGuide 06 — Last Value Cache (caching proxy).
+//! `ZGuide` 06 — Last Value Cache (caching proxy).
 //!
 //! Sits between publishers and subscribers. Caches the latest value per
 //! topic and serves snapshots to late joiners via REQ/REP.
@@ -12,9 +12,7 @@ use std::sync::{Arc, Mutex};
 use omq::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index)
-        .map(|s| s.parse().expect("invalid endpoint"))
-        .unwrap_or_else(|| default.parse().unwrap())
+    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {
