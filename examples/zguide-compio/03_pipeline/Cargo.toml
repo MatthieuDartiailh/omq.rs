@@ -1,0 +1,27 @@
+[package]
+name = "zguide-compio-03-pipeline"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+omq = { path = "../../../omq" }
+compio = { git = "https://github.com/compio-rs/compio.git", rev = "453ed63", features = ["macros", "runtime", "time"] }
+bytes = "1"
+
+[[bin]]
+name = "zg03_ventilator"
+path = "ventilator.rs"
+
+[[bin]]
+name = "zg03_worker"
+path = "worker.rs"
+
+[[bin]]
+name = "zg03_sink"
+path = "sink.rs"
+
+
+
+[lints]
+workspace = true

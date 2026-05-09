@@ -1,0 +1,77 @@
+//! `ZGuide` 06 — Last Value Cache (late-joining subscriber).
+//!
+//! Connects to the cache's REP socket to fetch a snapshot, then
+//! optionally subscribes for live updates.
+//!
+//!     cargo run -p zguide-compio-06-last-value-cache --bin subscriber \
+//!         [snapshot_ep] [sub_ep]
+
+use std::time::Duration;
+
+use omq::{Endpoint, Message, Options, Socket, SocketType};
+
+fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
+    args.get(index).map_or_else(
+        || default.parse().unwrap(),
+        |s| s.parse().expect("invalid endpoint"),
+    )
+}
+
+fn msg_str(msg: &Message, idx: usize) -> String {
+    String::from_utf8_lossy(&msg.part_bytes(idx).unwrap()).to_string()
+}
+
+#[compio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let snapshot_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-06-snapshot");
+    let sub_ep = endpoint_or(&args, 2, "ipc://@omq-zguide-06-subscriber");
+
+    // Request snapshot from cache.
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(snapshot_ep.clone()).await.unwrap();
+
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    req.send(Message::single("SNAPSHOT")).await.unwrap();
+    let reply = req.recv().await.unwrap();
+    let body = msg_str(&reply, 0);
+
+    println!("subscriber: snapshot from cache:");
+    if body.is_empty() {
+        println!("  (empty)");
+    } else {
+        for line in body.lines() {
+            println!("  {line}");
+        }
+    }
+
+    // Subscribe for live updates.
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.connect(sub_ep.clone()).await.unwrap();
+    sub.subscribe("").await.unwrap();
+
+    println!("subscriber: listening for live updates (2s) ...");
+
+    // Use timeout-based recv loop instead of select!.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match compio::time::timeout(remaining, sub.recv()).await {
+            Ok(Ok(msg)) => {
+                let body = msg_str(&msg, 0);
+                println!("  live: {body}");
+            }
+            Ok(Err(e)) => {
+                eprintln!("subscriber: recv error: {e}");
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+
+    println!("subscriber: done");
+}

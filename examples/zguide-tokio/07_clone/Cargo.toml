@@ -1,0 +1,23 @@
+[package]
+name = "zguide-tokio-07-clone"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+omq = { path = "../../../omq", default-features = false, features = ["tokio-backend"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+bytes = "1"
+
+[[bin]]
+name = "zg07_server"
+path = "server.rs"
+
+[[bin]]
+name = "zg07_client"
+path = "client.rs"
+
+
+
+[lints]
+workspace = true

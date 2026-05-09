@@ -113,3 +113,39 @@ async fn router_drops_unknown_identity_by_default() {
     // Default is silent drop (libzmq matches).
     router.send(bad).await.unwrap();
 }
+
+#[compio::test]
+async fn router_assigns_identity_for_peers_without_one() {
+    let port = loopback_port();
+    let router = Socket::new(SocketType::Router, Options::default());
+    router.bind(tcp_ep(port)).await.unwrap();
+
+    let dealer = Socket::new(SocketType::Dealer, Options::default());
+    dealer.connect(tcp_ep(port)).await.unwrap();
+
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    dealer.send(Message::single("anon")).await.unwrap();
+
+    let got = compio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .expect("router recv timeout")
+        .unwrap();
+    assert_eq!(got.len(), 2);
+    let identity = got.part_bytes(0).unwrap();
+    assert!(!identity.is_empty(), "auto-generated identity must be non-empty");
+
+    router
+        .send(Message::multipart([
+            identity,
+            Bytes::from_static(b"reply"),
+        ]))
+        .await
+        .unwrap();
+
+    let reply = compio::time::timeout(Duration::from_millis(500), dealer.recv())
+        .await
+        .expect("dealer recv timeout")
+        .unwrap();
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"reply"[..]);
+}

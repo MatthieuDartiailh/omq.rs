@@ -103,6 +103,13 @@ pub enum DriverCommand {
     Close,
 }
 
+fn generated_identity(connection_id: u64) -> bytes::Bytes {
+    let mut buf = Vec::with_capacity(9);
+    buf.push(0); // libzmq-style leading null marks "auto-generated"
+    buf.extend_from_slice(&connection_id.to_be_bytes());
+    bytes::Bytes::from(buf)
+}
+
 /// Per-connection context: monitor publisher + per-peer subscription
 /// set. Carried by the driver so it can publish `HandshakeSucceeded` /
 /// `PeerCommand` events with the correct `peer/endpoint/connection_id`,
@@ -385,7 +392,11 @@ pub(crate) async fn run_connection(
                             if let Some(iv) = hb_interval {
                                 hb_next = Some(Instant::now() + iv);
                             }
-                            peer_identity = peer_properties.identity.clone().unwrap_or_default();
+                            peer_identity = peer_properties.identity.clone().unwrap_or_else(
+                                || monitor_ctx.as_ref().map_or_else(Bytes::new, |ctx| {
+                                    generated_identity(ctx.connection_id)
+                                }),
+                            );
                             // Drain pre-handshake commands now that we're
                             // allowed to send. Non-transform cmds go into
                             // the codec; transform msgs use the encoder

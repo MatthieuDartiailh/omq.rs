@@ -35,10 +35,14 @@ run() {
 # ---------------------------------------------------------------- #
 # 1) Default workspace: NULL mechanism + tcp/ipc/inproc/udp,
 #    no compression, no priority. Smallest deploy shape.
+#    No --workspace: uses default-members, which excludes the example
+#    crates. zguide-compio and zguide-tokio depend on mutually
+#    exclusive omq features and cannot be built in one invocation.
 # ---------------------------------------------------------------- #
-run cargo build --workspace --all-targets
-run cargo clippy --workspace --all-targets --no-deps -- -D warnings
-run cargo test  --workspace
+run cargo build --all-targets
+run cargo clippy --all-targets --no-deps -- -D warnings
+run cargo test
+
 
 # ---------------------------------------------------------------- #
 # 2) Each per-backend feature, full test suite for that backend.
