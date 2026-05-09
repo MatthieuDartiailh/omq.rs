@@ -29,13 +29,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?; // filtered out
 
     let m = subscriber.recv().await?; // only "news.sports" arrives
-    assert_eq!(&*m.parts()[0].as_bytes(), b"news.sports");
-    assert_eq!(&*m.parts()[1].as_bytes(), b"ball scores");
+    let topic = m.part_bytes(0).unwrap();
+    let body = m.part_bytes(1).unwrap();
+    assert_eq!(&*topic, b"news.sports");
+    assert_eq!(&*body, b"ball scores");
 
     println!(
         "{}: {}",
-        String::from_utf8_lossy(&m.parts()[0].as_bytes()),
-        String::from_utf8_lossy(&m.parts()[1].as_bytes()),
+        String::from_utf8_lossy(&topic),
+        String::from_utf8_lossy(&body),
     );
 
     Ok(())
