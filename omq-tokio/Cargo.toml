@@ -1,6 +1,6 @@
 [package]
 name = "omq-tokio"
-version = "0.2.3"
+version = "0.2.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -27,7 +27,7 @@ priority = ["omq-proto/priority"]
 fuzz = []
 
 [dependencies]
-omq-proto = { path = "../omq-proto", version = "0.2.3", default-features = false }
+omq-proto = { path = "../omq-proto", version = "0.3.0", default-features = false }
 async-channel = "2"
 bytes = "1"
 flume = { version = "0.11", default-features = false, features = ["async"] }

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.3...omq-tokio-v0.2.4) - 2026-05-09
+
 ### Added
 
 - `Options::large_message_threshold(n)` /

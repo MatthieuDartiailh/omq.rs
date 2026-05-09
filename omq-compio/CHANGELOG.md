@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.8...omq-compio-v0.2.9) - 2026-05-09
+
 ### Added
 
 - Recv path now switches to a sized one-shot read for inbound frames

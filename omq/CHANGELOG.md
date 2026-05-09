@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/paddor/omq.rs/compare/omq-v0.2.3...omq-v0.2.4) - 2026-05-09
+
+### Changed
+
+- *(deps)* track `omq-compio = 0.2.9` and `omq-tokio = 0.2.4`. Surface the
+  large-frame zero-copy recv path (compio) and chunked codec inbound buffer
+  (both) to consumers who depend on `omq` directly. See per-backend
+  CHANGELOGs for details.
+
 ## [0.2.3](https://github.com/paddor/omq.rs/compare/omq-v0.2.2...omq-v0.2.3) - 2026-05-05
 
 ### Added

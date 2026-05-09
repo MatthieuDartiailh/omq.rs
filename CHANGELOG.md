@@ -4,6 +4,48 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.4] - 2026-05-09
+
+### omq-proto 0.3.0
+
+- **Breaking:** `Connection::handle_input` now takes `Bytes` instead of
+  `&[u8]`. Callers with a slice use `Bytes::copy_from_slice`; callers with
+  an already-owned `Bytes` pass it directly with no copy.
+- Codec inbound buffer replaced with `ChunkedInputBuf`: received bytes are
+  appended as owned `Bytes` chunks without copying; the frame decoder slices
+  into them directly. Eliminates O(n log n) `BytesMut` reallocation for
+  large messages.
+- New `Options::large_message_threshold(n)` /
+  `Options::disable_large_message_path()`: tune the frame size at which
+  io_uring backends switch from multi-shot to a sized one-shot read
+  (default 128 KiB).
+- New `Connection` API for direct-recv backends:
+  `peek_next_frame_payload_size`, `begin_supplied_payload`, `supply_payload`.
+
+### omq-compio 0.2.9
+
+- Large-frame one-shot recv: for frames whose wire payload exceeds
+  `large_message_threshold`, the multi-shot SQE is cancelled, any in-flight
+  CQEs are drained, and the remainder is read directly into one contiguous
+  `BytesMut`. Zero userspace memcpy on the long tail of the payload.
+- Buf-ring: each slot is now copied into a `Bytes` and the `BufferRef`
+  dropped immediately so the slot returns to the pool; `handle_input(Bytes)`
+  is called directly. Replaces the old `BytesMut::extend_from_slice` path.
+
+### omq-tokio 0.2.4
+
+- `Options::large_message_threshold` / `disable_large_message_path` accepted
+  for API parity with omq-compio; no effect on tokio (no buf-rings).
+- Codec inbound buffer is now a chunked queue (same change as omq-proto 0.3.0
+  delivers); large messages see one copy per read instead of O(n log n).
+
+### pyomq 0.2.0
+
+- First PyPI release. Python binding for omq-compio (compio/io_uring backend).
+  Linux x86_64 and aarch64 wheels; stable ABI covers Python 3.9+.
+
 ## [0.2.0] - 2026-05-04
 
 First public release. Three-crate Rust ZeroMQ implementation, wire-compatible
