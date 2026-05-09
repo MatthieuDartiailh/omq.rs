@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.5...omq-tokio-v0.2.6) - 2026-05-09
+
+### Changed
+
+- *(deps)* replace `compio` git dev-dep with `version = "0.19.0-rc.1"` to
+  match omq-compio's registry dep; avoids duplicate compio-runtime instances
+  that caused TLS mismatch panics in interop_compio tests. No library change.
+
 ## [0.2.5](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.4...omq-tokio-v0.2.5) - 2026-05-09
 
 ### Fixed
