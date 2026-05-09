@@ -11,12 +11,13 @@ env:
 
 jobs:
   test:
-    name: cargo test (${{ matrix.toolchain }})
-    runs-on: ubuntu-latest
+    name: cargo test (${{ matrix.toolchain }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         toolchain: [stable, "1.93"]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -27,12 +28,13 @@ jobs:
         run: cargo test --workspace
 
   feature-matrix:
-    name: feature ${{ matrix.feature }}
-    runs-on: ubuntu-latest
+    name: feature ${{ matrix.feature }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         feature: [curve, blake3zmq, lz4, zstd, priority]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,8 +43,12 @@ jobs:
       - run: cargo test -p omq-compio --features ${{ matrix.feature }}
 
   facade:
-    name: omq facade (both backends)
-    runs-on: ubuntu-latest
+    name: omq facade (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,8 +91,12 @@ jobs:
         run: cargo clippy --workspace --all-targets
 
   pyomq:
-    name: pyomq + pyzmq interop
-    runs-on: ubuntu-latest
+    name: pyomq + pyzmq interop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
