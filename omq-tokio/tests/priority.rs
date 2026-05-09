@@ -96,6 +96,7 @@ async fn inproc_equal_priorities_round_robin() {
     pull_c.bind(inproc("prio-eq-c")).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
+    let mut mon = push.monitor();
     push.connect_with(inproc("prio-eq-a"), opts(8))
         .await
         .unwrap();
@@ -105,6 +106,8 @@ async fn inproc_equal_priorities_round_robin() {
     push.connect_with(inproc("prio-eq-c"), opts(8))
         .await
         .unwrap();
+
+    wait_for_handshakes(&mut mon, 3).await;
 
     for _ in 0..N {
         push.send(Message::single("x")).await.unwrap();

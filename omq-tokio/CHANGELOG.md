@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.4...omq-tokio-v0.2.5) - 2026-05-09
+
+### Fixed
+
+- *(test)* `inproc_equal_priorities_round_robin`: wait for all 3 handshakes
+  before sending. Without the barrier, messages sent before a peer registered
+  in the routing table skewed the distribution, causing a spurious
+  "tier round-robin starved" failure. No library behavior change.
+
 ## [0.2.4](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.3...omq-tokio-v0.2.4) - 2026-05-09
 
 ### Added
