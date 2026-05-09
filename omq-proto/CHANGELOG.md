@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/paddor/omq.rs/compare/omq-proto-v0.3.0...omq-proto-v0.3.1) - 2026-05-09
+
+### Fixed
+
+- *(blake3zmq)* raise `chacha20-blake3` floor to 0.9.12 (paddor/chacha20-blake3);
+  fixes ARM CI (aarch64 build failure introduced in 0.9.11).
+
 ## [0.3.0](https://github.com/paddor/omq.rs/compare/omq-proto-v0.2.3...omq-proto-v0.3.0) - 2026-05-09
 
 ### Added
