@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.10...omq-compio-v0.2.11) - 2026-05-09
+
+### Changed
+
+- *(deps)* replace `compio` git dep with `version = "0.19.0-rc.1"` for
+  crates.io publish. Rev `453ed63` is identical to that release. No code change.
+
 ## [0.2.10](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.9...omq-compio-v0.2.10) - 2026-05-09
 
 ### Changed
