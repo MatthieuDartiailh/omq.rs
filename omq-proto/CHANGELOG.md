@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/paddor/omq.rs/compare/omq-proto-v0.3.1...omq-proto-v0.3.2) - 2026-05-10
+
 ### Added
 
 - *(lz4)* LZ4M multi-block encoding for parts larger than 1 GiB.
@@ -18,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the block size continue to use the existing `LZ4B` single-block
   encoding. `Lz4Encoder` and `Lz4Decoder` gain `with_block_size()`
   to override the default for testing.
+
+### Fixed
+
+- *(curve)* Enforce monotonic nonce counter on incoming CURVE MESSAGE
+  commands per RFC 26. Previously, any counter value was accepted,
+  allowing replay of captured encrypted frames.
+
+### Changed
+
+- `Message::parts_payload()` returns `SmallVec<[Payload; 1]>` instead
+  of `Vec<Payload>`, eliminating a per-send heap allocation for
+  single-part messages (+8% on 8 B IPC throughput).
 
 ## [0.3.1](https://github.com/paddor/omq.rs/compare/omq-proto-v0.3.0...omq-proto-v0.3.1) - 2026-05-09
 
