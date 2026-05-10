@@ -15,6 +15,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use omq_proto::endpoint::{Host, IpcPath};
+#[cfg(feature = "curve")]
+use omq_proto::proto::mechanism::CurveKeypair;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
 /// Kills and waits for a child process on drop so orphaned Ruby processes
@@ -468,4 +470,142 @@ async fn rust_radio_to_ruby_dish_ipc() {
         return;
     }
     rust_radio_to_ruby_dish(ipc_transport("radio-dish")).await;
+}
+
+// ---------------------------------------------------------------------
+// CURVE -- Rust PUSH (server) to Ruby PULL (client) over TCP with CURVE.
+// Validates the ZMTP CURVE handshake + encrypted MESSAGE framing
+// (including monotonic nonce counters) against Ruby's implementation.
+// ---------------------------------------------------------------------
+
+#[cfg(feature = "curve")]
+fn curve_available() -> bool {
+    Command::new("omq")
+        .args(["push", "--help"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .is_ok_and(|o| {
+            let help = String::from_utf8_lossy(&o.stderr);
+            help.contains("curve") || o.status.success()
+        })
+}
+
+#[cfg(feature = "curve")]
+#[tokio::test]
+async fn rust_curve_push_to_ruby_pull_tcp() {
+    if skip_if_no_omq() {
+        return;
+    }
+    if !curve_available() {
+        eprintln!("skip: omq CLI does not support --curve-server-key");
+        return;
+    }
+
+    let t = tcp_transport();
+    let server_kp = CurveKeypair::generate();
+    let server_pub_z85 = server_kp.public.to_z85();
+
+    let opts = Options::default().curve_server(server_kp);
+    let push = Socket::new(SocketType::Push, opts);
+    push.bind(t.rust).await.unwrap();
+
+    let mut guard = ChildGuard::new(
+        Command::new("omq")
+            .args([
+                "pull",
+                "-c",
+                &t.cli,
+                "--curve-server-key",
+                &server_pub_z85,
+                "-A",
+                "-n",
+                "3",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn omq pull --curve-server-key"),
+    );
+
+    wait_for_handshake(&push).await;
+
+    for i in 0..3 {
+        push.send(Message::single(format!("encrypted-{i}")))
+            .await
+            .unwrap();
+    }
+
+    let out = tokio::task::spawn_blocking(move || guard.take().wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "omq pull --curve failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["encrypted-0", "encrypted-1", "encrypted-2"]
+    );
+}
+
+#[cfg(feature = "curve")]
+#[tokio::test]
+async fn ruby_curve_push_to_rust_pull_tcp() {
+    if skip_if_no_omq() {
+        return;
+    }
+    if !curve_available() {
+        eprintln!("skip: omq CLI does not support --curve-server");
+        return;
+    }
+
+    let t = tcp_transport();
+    let server_kp = CurveKeypair::generate();
+    let server_pub_z85 = server_kp.public.to_z85();
+
+    let opts = Options::default().curve_server(server_kp);
+    let pull = Socket::new(SocketType::Pull, opts);
+    pull.bind(t.rust).await.unwrap();
+
+    let mut guard = ChildGuard::new(
+        Command::new("omq")
+            .args([
+                "push",
+                "-c",
+                &t.cli,
+                "--curve-server-key",
+                &server_pub_z85,
+                "-A",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn omq push --curve-server-key"),
+    );
+
+    {
+        let mut stdin = guard.stdin.take().unwrap();
+        for i in 0..3 {
+            writeln!(stdin, "from-ruby-{i}").unwrap();
+        }
+    }
+
+    for i in 0..3 {
+        let msg = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+            .await
+            .expect("recv timed out")
+            .unwrap();
+        assert_eq!(
+            msg.part_bytes(0).unwrap(),
+            format!("from-ruby-{i}").as_bytes()
+        );
+    }
+
+    let _ = tokio::task::spawn_blocking(move || guard.take().wait().unwrap())
+        .await
+        .unwrap();
 }

@@ -64,7 +64,7 @@ pub(crate) struct CurveTransform {
     salsa: SalsaBox,
     /// Outgoing MESSAGE nonce counter.
     out_counter: u64,
-    /// Incoming MESSAGE nonce counter (advisory; we accept any).
+    /// Incoming MESSAGE nonce counter. Must increase monotonically (RFC 26).
     in_counter: u64,
     /// 16-byte prefix for outgoing MESSAGE nonces.
     out_prefix: [u8; 16],
@@ -112,6 +112,11 @@ impl CurveTransform {
             return Err(Error::Protocol("MESSAGE command too short".into()));
         }
         let counter = u64::from_be_bytes(body[..8].try_into().unwrap());
+        if counter <= self.in_counter {
+            return Err(Error::Protocol(
+                "CURVE MESSAGE nonce counter not monotonically increasing".into(),
+            ));
+        }
         let ct = &body[8..];
         let nonce = nonce_short(&self.in_prefix, counter);
         let pt = self
