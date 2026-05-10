@@ -10,13 +10,11 @@
 set -euo pipefail
 
 cleanup() {
-    # Kill remaining child processes (push peers left behind).
-    local pids
-    pids=$(jobs -p 2>/dev/null) || true
-    [ -n "$pids" ] && kill $pids 2>/dev/null || true
+    trap - INT TERM EXIT
+    kill 0 2>/dev/null || true
     wait 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup INT TERM EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$SCRIPT_DIR/.."
