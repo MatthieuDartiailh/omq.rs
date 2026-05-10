@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::message::{MAX_INLINE_PAYLOAD, Payload};
 
@@ -174,15 +174,14 @@ impl ChunkedInputBuf {
             return payload;
         }
 
-        // Slow path: spans multiple chunks.
+        // Slow path: spans multiple chunks — coalesce into one contiguous buffer.
         let mut remaining = n;
-        let mut payload = Payload::new();
+        let mut buf = BytesMut::with_capacity(n);
 
-        // First chunk: take the remainder past front_offset.
         let first = self.chunks.pop_front().expect("total_len accounting");
-        let tail = first.slice(self.front_offset..);
+        let tail = &first[self.front_offset..];
         remaining -= tail.len();
-        payload.push(tail);
+        buf.extend_from_slice(tail);
         self.front_offset = 0;
 
         while remaining > 0 {
@@ -190,15 +189,19 @@ impl ChunkedInputBuf {
             if remaining >= front.len() {
                 let chunk = self.chunks.pop_front().expect("total_len accounting");
                 remaining -= chunk.len();
-                payload.push(chunk);
+                buf.extend_from_slice(&chunk);
             } else {
-                let chunk = front.slice(..remaining);
+                buf.extend_from_slice(&front[..remaining]);
                 self.front_offset = remaining;
                 remaining = 0;
-                payload.push(chunk);
             }
         }
-        payload
+
+        if n <= MAX_INLINE_PAYLOAD {
+            Payload::inline(&buf)
+        } else {
+            Payload::from_bytes(buf.freeze())
+        }
     }
 }
 

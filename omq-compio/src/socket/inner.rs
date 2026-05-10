@@ -672,9 +672,7 @@ pub(crate) async fn try_one_shot_large_recv(
             match io.codec.begin_supplied_payload_with_prefix() {
                 Some((plen, prefix)) => {
                     let mut acc = BytesMut::with_capacity(plen);
-                    for chunk in prefix.chunks() {
-                        acc.extend_from_slice(chunk);
-                    }
+                    acc.extend_from_slice(prefix.as_slice());
                     (plen, Some(acc))
                 }
                 None => return OneShotLargeRecvOutcome::Skipped,

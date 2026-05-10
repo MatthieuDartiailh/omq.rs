@@ -69,7 +69,7 @@ impl InprocFrame {
         if msg.len() == 1 {
             return Self::SinglePart {
                 peer_identity,
-                body: Bytes::from(msg),
+                body: msg.part_bytes(0).unwrap_or_default(),
             };
         }
         Self::Message(Box::new(InprocFullMessage { peer_identity, msg }))

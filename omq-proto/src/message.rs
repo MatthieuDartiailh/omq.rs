@@ -14,7 +14,7 @@
 //! A `Frame` is one ZMTP wire unit: flags plus a `Payload`. A `Message` is a
 //! logical sequence of parts where each part maps to one data Frame on the wire.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use smallvec::SmallVec;
 
 /// Maximum payload bytes stored inline (no `Bytes` / Arc).
@@ -40,7 +40,6 @@ enum PayloadInner {
         data: [u8; MAX_INLINE_PAYLOAD],
     },
     Single(Bytes),
-    Multi(Vec<Bytes>),
 }
 
 impl Payload {
@@ -86,60 +85,6 @@ impl Payload {
         Self::from_bytes(Bytes::from_static(b))
     }
 
-    /// Creates a payload by collecting chunks. Empty entries are filtered.
-    pub fn from_chunks<I: IntoIterator<Item = Bytes>>(iter: I) -> Self {
-        let chunks: Vec<Bytes> = iter.into_iter().filter(|b| !b.is_empty()).collect();
-        match chunks.len() {
-            0 => Self::new(),
-            1 => Self {
-                inner: PayloadInner::Single(chunks.into_iter().next().unwrap()),
-            },
-            _ => Self {
-                inner: PayloadInner::Multi(chunks),
-            },
-        }
-    }
-
-    /// Appends a chunk. Empty chunks are dropped silently.
-    pub fn push(&mut self, b: Bytes) {
-        if b.is_empty() {
-            return;
-        }
-        self.inner = match std::mem::replace(&mut self.inner, PayloadInner::Empty) {
-            PayloadInner::Empty => PayloadInner::Single(b),
-            PayloadInner::Inline { data, len } => {
-                let existing = Bytes::copy_from_slice(&data[..len as usize]);
-                PayloadInner::Multi(vec![existing, b])
-            }
-            PayloadInner::Single(existing) => PayloadInner::Multi(vec![existing, b]),
-            PayloadInner::Multi(mut v) => {
-                v.push(b);
-                PayloadInner::Multi(v)
-            }
-        };
-    }
-
-    /// Number of chunks.
-    pub fn chunk_count(&self) -> usize {
-        match &self.inner {
-            PayloadInner::Empty => 0,
-            PayloadInner::Inline { .. } | PayloadInner::Single(_) => 1,
-            PayloadInner::Multi(v) => v.len(),
-        }
-    }
-
-    /// Slice of `Bytes` chunks for `writev` / `write_vectored`.
-    ///
-    /// Returns `&[]` for `Empty` and `Inline` variants (which have no
-    /// backing `Bytes`). Callers that need the raw bytes should use
-    /// [`as_slice`](Self::as_slice) first — it covers `Inline` too.
-    pub fn chunks(&self) -> &[Bytes] {
-        match &self.inner {
-            PayloadInner::Empty | PayloadInner::Inline { .. } => &[],
-            PayloadInner::Single(b) => std::slice::from_ref(b),
-            PayloadInner::Multi(v) => v,
-        }
-    }
 
     /// Total payload length in bytes.
     #[inline]
@@ -148,7 +93,6 @@ impl Payload {
             PayloadInner::Empty => 0,
             PayloadInner::Inline { len, .. } => *len as usize,
             PayloadInner::Single(b) => b.len(),
-            PayloadInner::Multi(v) => v.iter().map(Bytes::len).sum(),
         }
     }
 
@@ -159,8 +103,7 @@ impl Payload {
     }
 
     /// Zero-copy single-chunk borrow: `Some(&Bytes)` iff the payload holds
-    /// exactly one `Bytes` chunk.  Returns `None` for empty, inline, and
-    /// multi-chunk payloads.
+    /// exactly one `Bytes` chunk. Returns `None` for empty and inline.
     pub fn as_chunk(&self) -> Option<&Bytes> {
         match &self.inner {
             PayloadInner::Single(b) => Some(b),
@@ -171,38 +114,24 @@ impl Payload {
     /// Returns the payload as a single contiguous `Bytes`.
     ///
     /// - Empty → `Bytes::new()`.
-    /// - Inline → `Bytes::copy_from_slice` (≤ 31 B copy).
+    /// - Inline → `Bytes::copy_from_slice` (≤ 38 B copy).
     /// - Single → `Bytes::clone` (Arc bump only).
-    /// - Multi → allocates and copies.
     pub fn as_bytes(&self) -> Bytes {
         match &self.inner {
             PayloadInner::Empty => Bytes::new(),
             PayloadInner::Inline { data, len } => Bytes::copy_from_slice(&data[..*len as usize]),
             PayloadInner::Single(b) => b.clone(),
-            PayloadInner::Multi(v) => {
-                let mut out = BytesMut::with_capacity(self.len());
-                for c in v {
-                    out.extend_from_slice(c);
-                }
-                out.freeze()
-            }
         }
     }
 
-    /// Borrow as a contiguous byte slice when possible. Returns `Some(&[u8])`
-    /// for empty, inline, and single-chunk payloads; `None` for multi-chunk.
-    pub fn as_slice(&self) -> Option<&[u8]> {
+    /// Borrow as a contiguous byte slice.
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
         match &self.inner {
-            PayloadInner::Empty => Some(&[]),
-            PayloadInner::Inline { data, len } => Some(&data[..*len as usize]),
-            PayloadInner::Single(b) => Some(b),
-            PayloadInner::Multi(_) => None,
+            PayloadInner::Empty => &[],
+            PayloadInner::Inline { data, len } => &data[..*len as usize],
+            PayloadInner::Single(b) => b,
         }
-    }
-
-    /// `true` iff the payload is contiguous (empty, inline, or single-chunk).
-    pub fn is_contiguous(&self) -> bool {
-        !matches!(self.inner, PayloadInner::Multi(_))
     }
 }
 
@@ -222,15 +151,7 @@ impl Default for Payload {
 
 impl std::fmt::Debug for Payload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.inner {
-            PayloadInner::Empty => f.write_str("Payload(empty)"),
-            PayloadInner::Inline { data, len } => f
-                .debug_tuple("Payload")
-                .field(&&data[..*len as usize])
-                .finish(),
-            PayloadInner::Single(b) => f.debug_tuple("Payload").field(b).finish(),
-            PayloadInner::Multi(v) => f.debug_tuple("Payload").field(v).finish(),
-        }
+        f.debug_tuple("Payload").field(&self.as_slice()).finish()
     }
 }
 
@@ -631,19 +552,36 @@ impl std::fmt::Debug for Message {
     }
 }
 
-impl std::ops::Deref for Message {
-    type Target = [u8];
+impl Message {
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        match &self.inner {
+            MessageInner::Empty => None,
+            MessageInner::Inline { len, data } => {
+                if index == 0 {
+                    Some(&data[..*len as usize])
+                } else {
+                    None
+                }
+            }
+            MessageInner::Single(p) => {
+                if index == 0 {
+                    Some(p.as_slice())
+                } else {
+                    None
+                }
+            }
+            MessageInner::Multi(v) => v.get(index).map(Payload::as_slice),
+        }
+    }
+}
+
+impl std::ops::Index<usize> for Message {
+    type Output = [u8];
 
     #[inline]
-    fn deref(&self) -> &[u8] {
-        match &self.inner {
-            MessageInner::Empty => &[],
-            MessageInner::Inline { len, data } => &data[..*len as usize],
-            MessageInner::Single(p) => p.as_slice().expect("non-contiguous payload in Deref<[u8]>"),
-            MessageInner::Multi(_) => {
-                panic!("Deref<[u8]> on multi-part Message; use msg.iter() instead")
-            }
-        }
+    fn index(&self, index: usize) -> &[u8] {
+        self.get(index).expect("Message frame index out of bounds or non-contiguous")
     }
 }
 
@@ -677,18 +615,6 @@ impl From<Payload> for Message {
     }
 }
 
-impl From<Message> for Bytes {
-    fn from(msg: Message) -> Bytes {
-        match msg.inner {
-            MessageInner::Empty => Bytes::new(),
-            MessageInner::Inline { len, data } => Bytes::copy_from_slice(&data[..len as usize]),
-            MessageInner::Single(p) => p.as_bytes(),
-            MessageInner::Multi(_) => {
-                panic!("From<Message> for Bytes on multi-part Message; use msg.iter() instead")
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -699,8 +625,8 @@ mod tests {
         let p = Payload::new();
         assert_eq!(p.len(), 0);
         assert!(p.is_empty());
-        assert_eq!(p.chunk_count(), 0);
         assert_eq!(p.as_bytes(), Bytes::new());
+        assert_eq!(p.as_slice(), &[][..]);
     }
 
     #[test]
@@ -708,43 +634,9 @@ mod tests {
         let b = Bytes::from_static(b"hello");
         let p = Payload::from_bytes(b.clone());
         assert_eq!(p.len(), 5);
-        assert_eq!(p.chunk_count(), 1);
         let got = p.as_bytes();
         assert_eq!(got, b);
-        // Same ptr proves refcount-only, no copy.
         assert!(std::ptr::addr_eq(got.as_ptr(), b.as_ptr()));
-    }
-
-    #[test]
-    fn payload_multi_chunk_as_bytes_concats() {
-        let p = Payload::from_chunks([
-            Bytes::from_static(b"foo"),
-            Bytes::from_static(b"bar"),
-            Bytes::from_static(b"baz"),
-        ]);
-        assert_eq!(p.chunk_count(), 3);
-        assert_eq!(p.len(), 9);
-        assert_eq!(p.as_bytes(), &b"foobarbaz"[..]);
-    }
-
-    #[test]
-    fn payload_empty_chunks_filtered() {
-        let p = Payload::from_chunks([
-            Bytes::from_static(b""),
-            Bytes::from_static(b"x"),
-            Bytes::from_static(b""),
-        ]);
-        assert_eq!(p.chunk_count(), 1);
-        assert_eq!(p.len(), 1);
-    }
-
-    #[test]
-    fn payload_push_drops_empty() {
-        let mut p = Payload::new();
-        p.push(Bytes::new());
-        p.push(Bytes::from_static(b"x"));
-        p.push(Bytes::new());
-        assert_eq!(p.chunk_count(), 1);
     }
 
     #[test]
@@ -769,12 +661,6 @@ mod tests {
     }
 
     #[test]
-    fn payload_as_chunk_multi_chunk_returns_none() {
-        let p = Payload::from_chunks([Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
-        assert!(p.as_chunk().is_none());
-    }
-
-    #[test]
     fn payload_as_bytes_empty_returns_empty() {
         let p = Payload::new();
         assert_eq!(p.as_bytes(), Bytes::new());
@@ -790,28 +676,16 @@ mod tests {
     }
 
     #[test]
-    fn payload_as_bytes_multi_chunk_coalesces() {
-        let p = Payload::from_chunks([Bytes::from_static(b"foo"), Bytes::from_static(b"bar")]);
-        assert_eq!(p.as_bytes(), &b"foobar"[..]);
-    }
-
-    #[test]
     fn payload_as_slice_empty_returns_empty_slice() {
         let p = Payload::new();
-        assert_eq!(p.as_slice(), Some(&[][..]));
+        assert_eq!(p.as_slice(), &[][..]);
     }
 
     #[test]
     fn payload_as_slice_single_chunk_borrows() {
         let b = Bytes::from_static(b"world");
         let p = Payload::from_bytes(b.clone());
-        assert_eq!(p.as_slice(), Some(&b"world"[..]));
-    }
-
-    #[test]
-    fn payload_as_slice_multi_chunk_returns_none() {
-        let p = Payload::from_chunks([Bytes::from_static(b"x"), Bytes::from_static(b"y")]);
-        assert!(p.as_slice().is_none());
+        assert_eq!(p.as_slice(), &b"world"[..]);
     }
 
     #[test]
@@ -820,15 +694,6 @@ mod tests {
         let p = Payload::from_bytes(b.clone());
         let got: Bytes = p.into();
         assert_eq!(got, b);
-    }
-
-    #[test]
-    fn payload_is_contiguous() {
-        assert!(Payload::new().is_contiguous());
-        assert!(Payload::from_bytes(Bytes::from_static(b"x")).is_contiguous());
-        assert!(Payload::inline(b"hello").is_contiguous());
-        let multi = Payload::from_chunks([Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
-        assert!(!multi.is_contiguous());
     }
 
     #[test]
@@ -841,12 +706,9 @@ mod tests {
         let p = Payload::inline(b"hello");
         assert_eq!(p.len(), 5);
         assert!(!p.is_empty());
-        assert_eq!(p.chunk_count(), 1);
-        assert!(p.is_contiguous());
-        assert_eq!(p.as_slice(), Some(&b"hello"[..]));
+        assert_eq!(p.as_slice(), b"hello");
         assert_eq!(p.as_bytes(), &b"hello"[..]);
         assert!(p.as_chunk().is_none());
-        assert!(p.chunks().is_empty());
     }
 
     #[test]
@@ -864,20 +726,11 @@ mod tests {
     }
 
     #[test]
-    fn payload_inline_push_transitions_to_multi() {
-        let mut p = Payload::inline(b"ab");
-        p.push(Bytes::from_static(b"cd"));
-        assert_eq!(p.chunk_count(), 2);
-        assert_eq!(p.as_bytes(), &b"abcd"[..]);
-        assert!(!p.is_contiguous());
-    }
-
-    #[test]
     fn payload_inline_max_size() {
         let data = [0xAA; MAX_INLINE_PAYLOAD];
         let p = Payload::inline(&data);
         assert_eq!(p.len(), MAX_INLINE_PAYLOAD);
-        assert_eq!(p.as_slice().unwrap(), &data[..]);
+        assert_eq!(p.as_slice(), &data[..]);
     }
 
     #[test]
@@ -944,45 +797,38 @@ mod tests {
     }
 
     #[test]
-    fn message_deref_single_part() {
+    fn message_get_single_part() {
         let m = Message::single("hello");
-        let data: &[u8] = &m;
-        assert_eq!(data, b"hello");
+        assert_eq!(m.get(0), Some(b"hello".as_slice()));
+        assert_eq!(m.get(1), None);
     }
 
     #[test]
-    fn message_deref_empty() {
+    fn message_get_empty() {
         let m = Message::new();
-        let data: &[u8] = &m;
-        assert!(data.is_empty());
+        assert_eq!(m.get(0), None);
     }
 
     #[test]
-    #[should_panic(expected = "multi-part")]
-    fn message_deref_panics_on_multipart() {
-        let m = Message::multipart(["a", "b"]);
-        let _ = &*m;
+    fn message_get_multipart() {
+        let m = Message::multipart(["a", "bb", "ccc"]);
+        assert_eq!(m.get(0), Some(b"a".as_slice()));
+        assert_eq!(m.get(1), Some(b"bb".as_slice()));
+        assert_eq!(m.get(2), Some(b"ccc".as_slice()));
+        assert_eq!(m.get(3), None);
     }
 
     #[test]
-    fn message_into_bytes() {
+    fn message_index() {
         let m = Message::single("hello");
-        let b: Bytes = m.into();
-        assert_eq!(b, &b"hello"[..]);
+        assert_eq!(&m[0], b"hello");
     }
 
     #[test]
-    fn message_into_bytes_empty() {
-        let m = Message::new();
-        let b: Bytes = m.into();
-        assert!(b.is_empty());
-    }
-
-    #[test]
-    #[should_panic(expected = "multi-part")]
-    fn message_into_bytes_panics_on_multipart() {
-        let m = Message::multipart(["a", "b"]);
-        let _: Bytes = m.into();
+    #[should_panic(expected = "out of bounds")]
+    fn message_index_oob_panics() {
+        let m = Message::single("x");
+        let _ = &m[1];
     }
 
     #[test]
@@ -1001,7 +847,7 @@ mod tests {
         let first = m.pop_front().unwrap();
         assert_eq!(first, &b"id"[..]);
         assert_eq!(m.len(), 1);
-        assert_eq!(&*m, b"body");
+        assert_eq!(m.get(0).unwrap(), b"body");
     }
 
     #[test]

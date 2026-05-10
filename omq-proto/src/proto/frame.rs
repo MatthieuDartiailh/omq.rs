@@ -82,17 +82,9 @@ pub fn encode_frame_into(frame: &Frame, out: &mut VecDeque<Bytes>, scratch: &mut
         scratch.put_u8(size as u8);
     }
     out.push_back(scratch.split().freeze());
-    if frame.payload.is_contiguous() {
-        let b = frame.payload.as_bytes();
-        if !b.is_empty() {
-            out.push_back(b);
-        }
-    } else {
-        for chunk in frame.payload.chunks() {
-            if !chunk.is_empty() {
-                out.push_back(chunk.clone());
-            }
-        }
+    let b = frame.payload.as_bytes();
+    if !b.is_empty() {
+        out.push_back(b);
     }
 }
 
@@ -119,13 +111,7 @@ fn write_frame_header(buf: &mut BytesMut, more: bool, payload_len: usize) {
 }
 
 fn write_payload_flat(buf: &mut BytesMut, part: &Payload) {
-    if let Some(s) = part.as_slice() {
-        buf.extend_from_slice(s);
-    } else {
-        for chunk in part.chunks() {
-            buf.extend_from_slice(chunk);
-        }
-    }
+    buf.extend_from_slice(part.as_slice());
 }
 
 /// Encode all frames of `msg` into a flat contiguous buffer (header + payload
@@ -171,15 +157,9 @@ pub fn encode_message_gather(msg: &Message, chunks: &mut VecDeque<Bytes>, scratc
             scratch.put_u8(payload_len as u8);
         }
         chunks.push_back(scratch.split().freeze());
-        if part.is_contiguous() {
-            let b = part.as_bytes();
-            if !b.is_empty() {
-                chunks.push_back(b);
-            }
-        } else {
-            for chunk in part.chunks() {
-                chunks.push_back(chunk.clone());
-            }
+        let b = part.as_bytes();
+        if !b.is_empty() {
+            chunks.push_back(b);
         }
     }
 }
@@ -210,15 +190,9 @@ pub fn encode_message_prefixed_gather(
         }
         chunks.push_back(scratch.split().freeze());
         chunks.push_back(prefix_bytes.clone());
-        if part.is_contiguous() {
-            let b = part.as_bytes();
-            if !b.is_empty() {
-                chunks.push_back(b);
-            }
-        } else {
-            for chunk in part.chunks() {
-                chunks.push_back(chunk.clone());
-            }
+        let b = part.as_bytes();
+        if !b.is_empty() {
+            chunks.push_back(b);
         }
     }
 }
@@ -491,8 +465,8 @@ mod tests {
     }
 
     #[test]
-    fn encode_multi_chunk_payload_concats() {
-        let p = Payload::from_chunks([Bytes::from_static(b"ab"), Bytes::from_static(b"cd")]);
+    fn encode_single_payload() {
+        let p = Payload::from_bytes(Bytes::from_static(b"abcd"));
         let f = Frame {
             flags: FrameFlags::LAST,
             payload: p,

@@ -516,9 +516,8 @@ impl Connection {
             self.pending_parts.push(payload);
         } else if self.pending_parts.is_empty() {
             self.pending_size = 0;
-            let msg = if let Some(s) = payload.as_slice()
-                && s.len() <= crate::message::MAX_INLINE_MESSAGE
-            {
+            let s = payload.as_slice();
+            let msg = if s.len() <= crate::message::MAX_INLINE_MESSAGE {
                 Message::from_inline(s)
             } else {
                 Message::from_payload(payload)
@@ -887,13 +886,7 @@ impl Connection {
             } else {
                 flat_buf.extend_from_slice(&[u8::from(more), payload_len as u8]);
             }
-            if let Some(s) = p.as_slice() {
-                flat_buf.extend_from_slice(s);
-            } else {
-                for chunk in p.chunks() {
-                    flat_buf.extend_from_slice(chunk);
-                }
-            }
+            flat_buf.extend_from_slice(p.as_slice());
         }
     }
 

@@ -24,11 +24,50 @@ cargo add omq --no-default-features --features tokio-backend
 ```
 
 ```rust
-use omq::{Endpoint, Message, Options, Socket, SocketType};
+use omq::{Message, Options, Socket, SocketType};
 
 let push = Socket::new(SocketType::Push, Options::default());
 push.connect("tcp://127.0.0.1:5555".parse()?).await?;
-push.send(Message::single("hi")).await?;
+push.send(Message::single("hello")).await?;
+
+let pull = Socket::new(SocketType::Pull, Options::default());
+pull.bind("tcp://127.0.0.1:5555".parse()?).await?;
+let msg = pull.recv().await?;
+assert_eq!(&msg[0], b"hello");
+```
+
+### Accessing message frames
+
+A ZMQ message is one or more frames delivered atomically. Frame payloads
+are always contiguous — zero-copy `&[u8]` access with no fallback needed:
+
+```rust
+let msg = pull.recv().await?;
+
+// Borrow frame bytes (zero-copy)
+let first: &[u8] = &msg[0];           // panics on OOB
+let maybe: Option<&[u8]> = msg.get(1); // None on OOB
+
+// Owned Bytes (refcount bump, no copy)
+let frame: Bytes = msg.part_bytes(0).unwrap();
+
+// Iterate all frames
+for frame in msg.iter() {
+    println!("{} bytes", frame.len());
+}
+
+// Part count and total byte length
+msg.len();       // number of frames
+msg.byte_len();  // total bytes across all frames
+```
+
+### Multi-part send
+
+```rust
+use omq::Message;
+
+let msg = Message::single("hello");
+let msg = Message::multipart(["identity", "payload"]);
 ```
 
 Pub/sub with `lz4+tcp://` compression: [`omq/examples/pub_sub_lz4.rs`](omq/examples/pub_sub_lz4.rs)
@@ -68,8 +107,8 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 - **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)): byte-in / events-out, no async.
 - **Per-socket HWM** with work-stealing send pumps on round-robin patterns;
   per-connection queues on fan-out and identity-routed patterns.
-- **Multi-chunk frame payloads**: layers prepend headers without copying;
-  kernel stitches chunks via `writev`.
+- **Always-contiguous frame payloads**: `&msg[0]` gives `&[u8]` directly,
+  no fallible borrow or coalesce step. Kernel stitches outbound frames via `writev`.
 - **Inproc bypasses ZMTP codec**: exchanges `InprocPeerSnapshot` at connect, no serialization.
 - **Identity collision detection**: duplicate identity on ROUTER/SERVER/PEER =>
   `Error::IdentityCollision`.
