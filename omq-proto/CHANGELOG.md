@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(lz4)* LZ4M multi-block encoding for parts larger than 1 GiB.
+  The LZ4 block API caps a single call at ~2 GiB (`i32` parameters);
+  LZ4M chunks the payload into 1 GiB blocks, each independently
+  compressed and decompressed. Wire format: `LZ4M` sentinel
+  (`4C 5A 34 4D`) + `u64 LE` total decompressed size + per-block
+  `(u32 LE compressed_len | LZ4 block)` pairs. Parts at or below
+  the block size continue to use the existing `LZ4B` single-block
+  encoding. `Lz4Encoder` and `Lz4Decoder` gain `with_block_size()`
+  to override the default for testing.
+
 ## [0.3.1](https://github.com/paddor/omq.rs/compare/omq-proto-v0.3.0...omq-proto-v0.3.1) - 2026-05-09
 
 ### Fixed

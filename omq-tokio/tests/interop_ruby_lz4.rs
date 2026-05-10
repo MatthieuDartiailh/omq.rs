@@ -16,7 +16,10 @@ use std::net::TcpListener as StdTcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use bytes::Bytes;
 use omq_proto::endpoint::Host;
+use omq_proto::message::Message;
+use omq_proto::proto::transform::lz4::{Lz4Decoder, Lz4Encoder};
 use omq_tokio::{Endpoint, MonitorEvent, Options, Socket, SocketType};
 
 /// Bare-minimum CLI version that wires `lz4+tcp://` endpoints through to
@@ -201,4 +204,104 @@ async fn ruby_push_lz4_tcp_sustained() {
         dropped, 0,
         "PULL connection was dropped mid-stream {dropped}× (first reason: {first_drop:?})",
     );
+}
+
+fn skip_if_no_ruby_omq_lz4() -> bool {
+    Command::new("ruby")
+        .args(["-r", "omq/lz4", "-e", ""])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+        .then_some(false)
+        .unwrap_or_else(|| {
+            eprintln!("skip: needs ruby with omq-lz4 gem");
+            true
+        })
+}
+
+/// Ruby encodes a >4096-byte payload with block_size=4096 (LZ4M path),
+/// Rust decodes the raw wire bytes and verifies the plaintext.
+#[test]
+fn ruby_lz4m_encode_rust_decode() {
+    if skip_if_no_ruby_omq_lz4() {
+        return;
+    }
+
+    const BLOCK_SIZE: usize = 4096;
+    const PAYLOAD_LEN: usize = BLOCK_SIZE + 2000;
+
+    let ruby = format!(
+        r#"require "omq/lz4"; require "rlz4"
+codec = RLZ4::BlockCodec.new
+plain = "B" * {PAYLOAD_LEN}
+wire = OMQ::LZ4::Codec.encode_part(plain, block_codec: codec, block_size: {BLOCK_SIZE})
+$stdout.binmode
+$stdout.write(wire)"#
+    );
+
+    let out = Command::new("ruby")
+        .args(["-e", &ruby])
+        .output()
+        .expect("spawn ruby encoder");
+    assert!(out.status.success(), "ruby encoder failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let wire_bytes = Bytes::from(out.stdout);
+    assert_eq!(&wire_bytes[..4], b"LZ4M", "expected LZ4M sentinel");
+
+    let msg = Message::single(wire_bytes);
+    let mut dec = Lz4Decoder::new().with_block_size(BLOCK_SIZE);
+    let decoded = dec.decode(msg).unwrap().unwrap();
+    let body = decoded.part_bytes(0).unwrap();
+    assert_eq!(body.len(), PAYLOAD_LEN);
+    assert!(body.iter().all(|&b| b == b'B'));
+}
+
+/// Rust encodes a >4096-byte payload with block_size=4096 (LZ4M path),
+/// Ruby decodes the raw wire bytes and verifies the plaintext.
+#[test]
+fn rust_lz4m_encode_ruby_decode() {
+    if skip_if_no_ruby_omq_lz4() {
+        return;
+    }
+
+    const BLOCK_SIZE: usize = 4096;
+    const PAYLOAD_LEN: usize = BLOCK_SIZE + 2000;
+
+    let plain = vec![b'C'; PAYLOAD_LEN];
+    let msg = Message::single(plain);
+    let mut enc = Lz4Encoder::new().with_block_size(BLOCK_SIZE);
+    let wire = enc.encode(&msg).unwrap();
+    let wire_bytes = wire[0].part_bytes(0).unwrap();
+    assert_eq!(&wire_bytes[..4], b"LZ4M");
+
+    let ruby = format!(
+        r#"require "omq/lz4"; require "rlz4"
+codec = RLZ4::BlockCodec.new
+$stdin.binmode
+wire = $stdin.read
+plain = OMQ::LZ4::Codec.decode_part(wire, block_codec: codec, block_size: {BLOCK_SIZE})
+unless plain.bytesize == {PAYLOAD_LEN} && plain.bytes.all? {{ |b| b == 67 }}
+  abort "mismatch: got #{{plain.bytesize}} bytes"
+end
+print "ok""#
+    );
+
+    let mut child = Command::new("ruby")
+        .args(["-e", &ruby])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ruby decoder");
+
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(&wire_bytes).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "ruby decoder failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
 }
