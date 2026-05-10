@@ -244,7 +244,11 @@ $stdout.write(wire)"#
         .args(["-e", &ruby])
         .output()
         .expect("spawn ruby encoder");
-    assert!(out.status.success(), "ruby encoder failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "ruby encoder failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let wire_bytes = Bytes::from(out.stdout);
     assert_eq!(&wire_bytes[..4], b"LZ4M", "expected LZ4M sentinel");

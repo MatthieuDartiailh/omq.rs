@@ -246,8 +246,7 @@ impl Lz4Encoder {
         let total = plain.len();
         let block_size = self.block_size;
         let num_blocks = total.div_ceil(block_size);
-        let block_bound =
-            unsafe { lz4_sys::LZ4_compressBound(block_size as i32) } as usize;
+        let block_bound = unsafe { lz4_sys::LZ4_compressBound(block_size as i32) } as usize;
         let max_out = ENVELOPE_LZ4B + num_blocks * (4 + block_bound);
         if self.out_buf.len() < max_out {
             self.out_buf.resize(max_out, 0);
@@ -269,7 +268,9 @@ impl Lz4Encoder {
             pos += 4 + n;
         }
 
-        Ok(Payload::from_bytes(Bytes::copy_from_slice(&self.out_buf[..pos])))
+        Ok(Payload::from_bytes(Bytes::copy_from_slice(
+            &self.out_buf[..pos],
+        )))
     }
 }
 
@@ -398,14 +399,7 @@ fn compress_block(
         Some(d) => unsafe {
             LZ4_resetStream(stream);
             LZ4_loadDict(stream, d.as_ptr(), d.len() as i32);
-            LZ4_compress_fast_continue(
-                stream,
-                src.as_ptr(),
-                dst.as_mut_ptr(),
-                src_i32,
-                dst_i32,
-                1,
-            )
+            LZ4_compress_fast_continue(stream, src.as_ptr(), dst.as_mut_ptr(), src_i32, dst_i32, 1)
         },
         None => unsafe {
             lz4_sys::LZ4_compress_default(
@@ -502,9 +496,7 @@ fn decode_lz4m(
 
     while dst_pos < decompressed_size {
         if src_pos + 4 > body.len() {
-            return Err(Error::Protocol(
-                "LZ4M truncated block length".into(),
-            ));
+            return Err(Error::Protocol("LZ4M truncated block length".into()));
         }
         let compressed_len =
             u32::from_le_bytes(body[src_pos..src_pos + 4].try_into().unwrap()) as usize;
@@ -873,8 +865,9 @@ mod tests {
         let plain = vec![0x42u8; TEST_BLOCK + 100];
         let msg = Message::single(plain.clone());
 
-        let mut enc =
-            Lz4Encoder::with_send_dict(dict).unwrap().with_block_size(TEST_BLOCK);
+        let mut enc = Lz4Encoder::with_send_dict(dict)
+            .unwrap()
+            .with_block_size(TEST_BLOCK);
         let mut dec = test_dec();
         let wire = enc.encode(&msg).unwrap();
         assert_eq!(wire.len(), 2);
