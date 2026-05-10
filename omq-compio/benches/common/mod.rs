@@ -158,6 +158,9 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
 /// `has_hot()` goes false flushes the cascade so every `CancelToken`'s
 /// `Runtime` clone is released, `Runtime::drop` reaches `strong_count` == 1,
 /// and `executor.clear()` finally runs.
+///
+/// Upstream fix: compio-rs/compio#911 (replaces `Runtime` clones with
+/// `Rc<RefCell<Proactor>>`). Remove this workaround once that merges.
 pub(crate) fn block_on_and_drain<F>(runtime: compio::runtime::Runtime, fut: F) -> F::Output
 where
     F: std::future::Future,
