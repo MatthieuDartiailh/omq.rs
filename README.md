@@ -82,26 +82,6 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 - **Monitor**: socket-like `Stream` with owned `PeerInfo` on every event.
 - **Python binding** ([`bindings/pyomq`](bindings/pyomq/)): PyO3 over `omq-compio`, sync + asyncio.
 
-## Hot path
-
-- Single-peer wire send encodes directly into a per-peer outbound queue under a `try_lock`, skipping the codec's async mutex.
-- Small frames (<32 KiB) pack contiguously into one `Bytes` chunk per drain: one iovec entry for N messages instead of 2N.
-- Direct-recv on supported socket types reads the FD inline, skipping the driver's read-side task wake.
-- Frame headers from a per-connection scratch `BytesMut`; payload chunks are `Bytes::clone` (Arc bump) all the way to `writev`.
-- Under `lz4+tcp` / `zstd+tcp`, sub-threshold frames use the plain TCP path with a 4-byte sentinel prepended.
-
-## Tests
-
-81 integration test files, ~700 tests. `cargo test --workspace` runs the default subset in a few seconds.
-
-- **Coverage matrix** (`tests/coverage_matrix.rs`): every socket type × every transport on each backend.
-- **Cross-runtime interop** (`omq-tokio/tests/interop_compio.rs`): compio and tokio, cross-backend.
-- **External interop**: pyzmq (CURVE) and [OMQ Ruby](https://github.com/paddor/omq) over TCP, lz4, zstd.
-- **Fuzz** (`tests/fuzz_*.rs`): ~1M iterations of randomized socket actions and parser inputs. Gated behind `fuzz`; run by `scripts/test-all.sh` unless `OMQ_SKIP_FUZZ=1`.
-- **pyomq**: maturin build + pytest, sync + asyncio + pyzmq drop-in.
-
-`scripts/test-all.sh` runs every feature combination on both backends.
-
 ## Benchmarks
 
 - [BENCHMARKS.md](BENCHMARKS.md): throughput / latency / compression tables
