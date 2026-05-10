@@ -1158,14 +1158,37 @@ This is the opposite of the conventional wisdom that "zero-copy is
 always faster." For payloads that fit in a cache line, the atomic
 operation in an Arc bump is more expensive than the copy.
 
+### Round 9: SmallVec for parts_payload()
+
+`Connection::send_message` and the four `encode_message_*` functions
+in `frame.rs` call `msg.parts_payload()`, which returned `Vec<Payload>`.
+For single-part messages (the dominant case), this allocated a `Vec`
+on every send -- one malloc+free per message just to iterate one
+element.
+
+Fix: return `SmallVec<[Payload; 1]>` instead. The single-element case
+stores the `Payload` inline on the stack. No heap allocation, no
+free. Multi-part messages spill to the heap as before.
+
+This was initially benchmarked on `inproc-mt` where it showed no
+effect -- because inproc bypasses the codec entirely (`send_message`
+is never called). Re-benchmarked on IPC at 8 B (where the codec
+dominates and per-message overhead is maximal):
+
+| | Vec (msg/s) | SmallVec (msg/s) | delta |
+|---|---|---|---|
+| 8 B IPC | 7.26M | 7.83M | **+8%** |
+
+Consistent across runs (Vec: 7.03–7.43M, SmallVec: 7.70–7.93M).
+
 ### Net result (current)
 
-8 B TCP: 3.8M -> 8.5M msg/s (0.45x -> **1.07x** of libzmq).
-32 B TCP: 3.7M -> 7.3M msg/s (0.45x -> 0.87x of libzmq).
+8 B TCP: 3.8M -> 8.2M msg/s (0.45x -> **0.99x** of libzmq).
+32 B TCP: 3.7M -> 6.6M msg/s (0.45x -> 0.74x of libzmq).
 
 ## What remains
 
-### 32 B gap (0.87x)
+### 32 B gap (0.74x)
 
 The profile at 32 B is dominated by the same codec parse (55%) +
 `VecDeque::push_back` (12%) + memmove (8%) as at 8 B, but the

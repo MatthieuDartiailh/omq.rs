@@ -15,6 +15,7 @@
 //! logical sequence of parts where each part maps to one data Frame on the wire.
 
 use bytes::{Bytes, BytesMut};
+use smallvec::SmallVec;
 
 /// Maximum payload bytes stored inline (no `Bytes` / Arc).
 /// 38 is the largest value that keeps `Payload` at 40 bytes.
@@ -506,14 +507,14 @@ impl Message {
         };
     }
 
-    pub(crate) fn parts_payload(&self) -> Vec<Payload> {
+    pub(crate) fn parts_payload(&self) -> SmallVec<[Payload; 1]> {
         match &self.inner {
-            MessageInner::Empty => Vec::new(),
+            MessageInner::Empty => SmallVec::new(),
             MessageInner::Inline { len, data } => {
-                vec![Payload::inline(&data[..*len as usize])]
+                SmallVec::from_buf([Payload::inline(&data[..*len as usize])])
             }
-            MessageInner::Single(p) => vec![p.clone()],
-            MessageInner::Multi(v) => v.clone(),
+            MessageInner::Single(p) => SmallVec::from_buf([p.clone()]),
+            MessageInner::Multi(v) => v.iter().cloned().collect(),
         }
     }
 
