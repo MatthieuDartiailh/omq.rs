@@ -422,6 +422,15 @@ impl Connection {
             self.messages.push_back(msg);
             return Ok(true);
         }
+        if let Some(max) = self.config.max_message_size
+            && let Some(hdr) = frame::peek_frame_header(&self.in_buf)?
+            && hdr.payload_len + size_of::<Payload>() > max
+        {
+            return Err(Error::MessageTooLarge {
+                size: hdr.payload_len,
+                max,
+            });
+        }
         let Some(frame) = frame::try_decode_frame(&mut self.in_buf)? else {
             return Ok(false);
         };
@@ -913,6 +922,14 @@ impl Connection {
         let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
             return Ok(None);
         };
+        if let Some(max) = self.config.max_message_size
+            && hdr.payload_len + size_of::<Payload>() > max
+        {
+            return Err(Error::MessageTooLarge {
+                size: hdr.payload_len,
+                max,
+            });
+        }
         let buffered_total = self.in_buf.len();
         let prefix_after_header = buffered_total.saturating_sub(hdr.header_len);
         let buffered_payload_prefix = prefix_after_header.min(hdr.payload_len);
@@ -1072,7 +1089,7 @@ fn blake3zmq_aad(flags: crate::message::FrameFlags, ciphertext_len: usize) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
+    use bytes::{BufMut, BytesMut};
 
     fn ready_connection(max_message_size: Option<usize>) -> Connection {
         let mut cfg = ConnectionConfig::new(Role::Server, SocketType::Pull);
@@ -1147,6 +1164,20 @@ mod tests {
             "3 × (40 + 100) = {}, should exceed max={max}",
             3 * (overhead + 100),
         );
+    }
+
+    #[test]
+    fn oversized_single_frame_rejected_before_payload_buffered() {
+        let max = 500;
+        let mut c = ready_connection(Some(max));
+        // Send only the frame header declaring a huge payload, no actual data.
+        let mut wire = BytesMut::new();
+        wire.put_u8(frame::FLAG_LONG);
+        wire.put_u64(1_000_000);
+        // Feed just the header — codec should reject immediately without
+        // waiting for the 1 MB payload to arrive.
+        let r = c.handle_input(wire.freeze());
+        assert!(matches!(r, Err(Error::MessageTooLarge { .. })), "got: {r:?}");
     }
 
     #[test]
