@@ -33,10 +33,6 @@ Sources: `omq-tokio/benches/` and `omq-compio/benches/`.
 Inproc "GB/s" at large payloads reflects zero-copy Arc-clone — no kernel
 traversal.
 
-lz4+tcp and zstd+tcp use `Options::default()` — **no compression dictionary**.
-Without a dict, the threshold is 512 B (smaller frames pass as plaintext with a
-4-byte `SENTINEL_PLAIN` header).
-
 ## Backend comparison: PUSH/PULL throughput, single peer
 
 <!-- BEGIN backend_comparison -->
@@ -90,11 +86,6 @@ Loopback throughput (msgs/s · wire MB/s · virtual MB/s):
 | 4 KiB | 558k / 2.29 GB/s           | 267k / 222 MB/s / 1.09 GB/s       | 115k / 63.4 MB/s / 469 MB/s       |
 | 16 KiB| 206k / 3.38 GB/s           | 103k / 262 MB/s / 1.69 GB/s       | 42.2k / 53.7 MB/s / 691 MB/s      |
 
-Loopback: plain TCP wins msg/s (no bandwidth scarcity). **Wire MB/s column**
-predicts WAN behavior: at 16 KiB, lz4+tcp ships ~262 MB/s wire / ~1.69 GB/s
-virtual. On a 1 Gbps WAN (~125 MB/s ceiling): plain tcp ~125 MB/s, lz4+tcp ~808
-MB/s, zstd+tcp ~1.61 GB/s virtual throughput.
-
 ### With a pre-trained dict (small messages)
 
 Dict primes the codec with message-family byte sequences so even 128 B records
@@ -110,11 +101,6 @@ Ratios on same JSON template (zstd: 1.6 KiB dict from 200 samples; lz4: 4 KiB bu
 | 1 KiB | 2.60×         | **11.25×**      | 2.84×          | **35.31×**       |
 | 2 KiB | 3.76×         | **8.50×**       | 4.47×          | **16.93×**       |
 
-"(skip)" marks sizes below the 512-byte attempt threshold - the
-transform doesn't even try to compress, so the no-dict ratio is just
-the framing tax. With a dict, the threshold drops to 32 B (lz4) /
-64 B (zstd) and small messages compress meaningfully.
-
 Loopback throughput with the same dict (msgs/s · wire MB/s · virt MB/s):
 
 | size  | lz4+tcp                          | zstd+tcp                       |
@@ -123,10 +109,6 @@ Loopback throughput with the same dict (msgs/s · wire MB/s · virt MB/s):
 | 512 B | 261k / 6.00 MB/s / 134 MB/s     | 136k / 3.50 MB/s / 69.9 MB/s  |
 | 1 KiB | 331k / 30.1 MB/s / 339 MB/s     | 134k / 3.90 MB/s / 138 MB/s   |
 | 2 KiB | 298k / 71.9 MB/s / 611 MB/s     | 118k / 14.2 MB/s / 241 MB/s   |
-
-Loopback: same caveat as above. Wire MB/s = link load; virt MB/s = application
-throughput. `zstd+tcp` auto-trains by default, reaching similar ratios after
-~1000 messages or 100 KiB.
 
 ## REQ/REP round-trip latency (single peer)
 
@@ -216,16 +198,7 @@ throughput (MB/s or GB/s, decimal); higher is better.
 |16 KiB   |   54.2 GB/s     |              541 MB/s    |             **1.25 GB/s**   |
 |64 KiB   |   47.1 GB/s     |              557 MB/s    |             **1.43 GB/s**   |
 
-> **Security note on BLAKE3ZMQ.** This mechanism is omq-native and has
-> **not been independently security audited.** It's modeled on Noise
-> XX with BLAKE3 transcript hashing, X25519 key exchange, and
-> ChaCha20-BLAKE3 AEAD, but novel cryptographic constructions need
-> third-party review before they should be trusted for anything that
-> matters. If you have security or compliance requirements, use
-> **CURVE** (RFC 26 / NaCl XSalsa20Poly1305 - well-reviewed and what
-> libzmq ships). Independent audits of BLAKE3ZMQ are very welcome - if
-> you or your organization can fund or conduct one, please open an
-> issue on the repo.
+> **BLAKE3ZMQ is not independently audited.** Use **CURVE** (RFC 26) for production.
 
 Stock `cargo bench` (no `-C target-cpu=native`). omq-proto pins a
 `chacha20-blake3` fork with `#[target_feature(enable = "avx2")]` annotations;

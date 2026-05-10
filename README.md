@@ -33,7 +33,7 @@ push.send(Message::single("hi")).await?;
 
 Pub/sub with `lz4+tcp://` compression: [`omq/examples/pub_sub_lz4.rs`](omq/examples/pub_sub_lz4.rs)
 
-`omq` is a thin facade — pick one backend at build time:
+`omq` is a thin facade; pick one backend at build time:
 
 - `compio-backend` (default): single-thread io_uring/IOCP ([`omq-compio`](omq-compio/))
 - `tokio-backend`: multi-thread tokio + mio ([`omq-tokio`](omq-tokio/))
@@ -65,78 +65,40 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 ## Design highlights
 
-- **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)): byte-in / events-
-  out state machine, no async, no traits on the hot path.
-- **Per-socket HWM with work-stealing send pumps** on round-robin patterns
-  (PUSH / DEALER / REQ / PAIR / CLIENT / CHANNEL / SCATTER); per-connection
-  queues on fan-out (PUB / XPUB / RADIO) and identity-routed patterns
-  (ROUTER / REP / SERVER / PEER).
-- **Optional strict per-pipe priority** (experimental `priority` Cargo feature) on
-  `Socket::connect_with(endpoint, ConnectOpts { priority })` - nanomsg-
-  style 1..=255 (lower = higher priority). Round-robin send always
-  prefers the highest-priority alive peer; lower tiers only run when
-  higher are blocked or disconnected.
-- **Multi-chunk frame payloads** (`Payload = SmallVec<[Bytes; 2]>`,
-  `Message = SmallVec<[Payload; 3]>`): layers prepend static prefixes
-  without copying, kernel stitches chunks via `writev` / `sendmsg`.
-- **Patricia-trie subscription matcher** (`omq-proto/src/subscription.rs`):
-  PUB-side filter is O(M) on topic length, not O(N×M) on subscription count —
-  scales to millions of subscriptions without degrading per-message match cost.
-- **zstd dictionary auto-training** (`zstd+tcp://`): trains an 8 KiB
-  compression dictionary from the first 1 000 messages or 100 KiB of
-  plaintext, ships it to the peer once, then drops the compression
-  threshold from 512 B to 64 B — making tiny messages compress
-  profitably for the rest of the connection.
-- **Inproc bypasses ZMTP codec**: peers exchange a pre-computed
-  `InprocPeerSnapshot` (socket type + identity) at connect, skipping
-  READY command marshalling entirely — no serialization overhead on
-  same-process message passing.
-- **Identity collision detection**: duplicate identities on
-  identity-routed sockets (ROUTER / SERVER / PEER) are rejected with
-  `Error::IdentityCollision` rather than silently clobbering routing.
-- **Encrypted inproc rejected at parse time**: `inproc://` combined
-  with CURVE or BLAKE3ZMQ is a parse-time error, not a silent
-  misconfiguration.
-- **Monitor** as a socket-like `Stream` with owned `PeerInfo` context on
-  every event.
-- **Python binding** ([`bindings/pyomq`](bindings/pyomq/)): PyO3 wrapper
-  over `omq-compio` with a sync API and an `asyncio`-compatible bridge.
+- **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)): byte-in / events-out, no async.
+- **Per-socket HWM** with work-stealing send pumps on round-robin patterns;
+  per-connection queues on fan-out and identity-routed patterns.
+- **Multi-chunk frame payloads**: layers prepend headers without copying;
+  kernel stitches chunks via `writev`.
+- **Inproc bypasses ZMTP codec**: exchanges `InprocPeerSnapshot` at connect, no serialization.
+- **Identity collision detection**: duplicate identity on ROUTER/SERVER/PEER =>
+  `Error::IdentityCollision`.
+- **Strict per-pipe priority** (`priority` feature): nanomsg-style 1..=255 on
+  `Socket::connect_with`.
+- **Patricia-trie subscription matcher**: O(M) on topic length, not O(N×M).
+- **zstd dictionary auto-training** (`zstd+tcp://`): trains from first 1k
+  messages, ships to peer once, drops threshold from 512 B to 64 B.
+- **Encrypted inproc rejected at parse time**: `inproc://` + CURVE/BLAKE3ZMQ is a parse error.
+- **Monitor**: socket-like `Stream` with owned `PeerInfo` on every event.
+- **Python binding** ([`bindings/pyomq`](bindings/pyomq/)): PyO3 over `omq-compio`, sync + asyncio.
 
 ## Hot path
 
-- Single-peer wire send encodes directly into a per-peer outbound
-  queue under a `try_lock`, skipping the codec's async mutex.
-- Small frames (<32 KiB) pack contiguously into one `Bytes` chunk per
-  drain — one iovec entry for a batch of N small messages instead of
-  2N.
-- Direct-recv on supported socket types reads the FD inline, skipping
-  the driver's read-side task wake.
-- Frame headers come from a per-connection scratch `BytesMut`,
-  amortized to ~one allocation per 7 000 frames; payload chunks are
-  `Bytes::clone` (Arc bump) all the way to `writev` / `sendmsg`.
-- Under `lz4+tcp` / `zstd+tcp`, parts below the compression threshold
-  use the same direct-encode path as plain TCP, with the 4-byte
-  plaintext sentinel prepended.
+- Single-peer wire send encodes directly into a per-peer outbound queue under a `try_lock`, skipping the codec's async mutex.
+- Small frames (<32 KiB) pack contiguously into one `Bytes` chunk per drain: one iovec entry for N messages instead of 2N.
+- Direct-recv on supported socket types reads the FD inline, skipping the driver's read-side task wake.
+- Frame headers from a per-connection scratch `BytesMut`; payload chunks are `Bytes::clone` (Arc bump) all the way to `writev`.
+- Under `lz4+tcp` / `zstd+tcp`, sub-threshold frames use the plain TCP path with a 4-byte sentinel prepended.
 
 ## Tests
 
-81 integration test files across `omq-proto`, `omq-compio`, and
-`omq-tokio`; ~700 tests total. `cargo test --workspace` runs the
-default subset in a few seconds.
+81 integration test files, ~700 tests. `cargo test --workspace` runs the default subset in a few seconds.
 
-- **Coverage matrix** (`tests/coverage_matrix.rs`): every socket type
-  × every supported transport on each backend.
-- **Cross-runtime interop** (`omq-tokio/tests/interop_compio.rs`):
-  spawns the other backend and round-trips over the wire.
-- **External interop**: against pyzmq (CURVE) and the author's
-  pure-Ruby ZMTP impl
-  ([OMQ Ruby](https://github.com/paddor/omq)) over plain TCP, lz4, and
-  zstd transports.
-- **Fuzz** (`tests/fuzz_*.rs`): ~1 M iterations of randomized socket
-  actions and parser inputs per suite. Gated behind `fuzz`; run by
-  `scripts/test-all.sh` unless `OMQ_SKIP_FUZZ=1`.
-- **pyomq**: maturin build + pytest, sync + `asyncio` surfaces plus
-  pyzmq drop-in compatibility.
+- **Coverage matrix** (`tests/coverage_matrix.rs`): every socket type × every transport on each backend.
+- **Cross-runtime interop** (`omq-tokio/tests/interop_compio.rs`): compio and tokio, cross-backend.
+- **External interop**: pyzmq (CURVE) and [OMQ Ruby](https://github.com/paddor/omq) over TCP, lz4, zstd.
+- **Fuzz** (`tests/fuzz_*.rs`): ~1M iterations of randomized socket actions and parser inputs. Gated behind `fuzz`; run by `scripts/test-all.sh` unless `OMQ_SKIP_FUZZ=1`.
+- **pyomq**: maturin build + pytest, sync + asyncio + pyzmq drop-in.
 
 `scripts/test-all.sh` runs every feature combination on both backends.
 
