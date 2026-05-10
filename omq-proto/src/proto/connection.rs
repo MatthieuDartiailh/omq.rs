@@ -493,7 +493,7 @@ impl Connection {
 
     #[inline]
     fn absorb_data_frame(&mut self, more: bool, payload: Payload) -> Result<bool> {
-        let size = payload.len();
+        let size = payload.len() + size_of::<Payload>();
         self.pending_size = self.pending_size.saturating_add(size);
         if let Some(max) = self.config.max_message_size
             && self.pending_size > max
@@ -1073,6 +1073,81 @@ fn blake3zmq_aad(flags: crate::message::FrameFlags, ciphertext_len: usize) -> Ve
 mod tests {
     use super::*;
     use bytes::BytesMut;
+
+    fn ready_connection(max_message_size: Option<usize>) -> Connection {
+        let mut cfg = ConnectionConfig::new(Role::Server, SocketType::Pull);
+        if let Some(max) = max_message_size {
+            cfg = cfg.max_message_size(max);
+        }
+        let mut c = Connection::new(cfg);
+        let g = Greeting {
+            major: 3,
+            minor: 1,
+            mechanism: MechanismName::NULL,
+            as_server: false,
+        };
+        let mut wire = BytesMut::new();
+        g.encode(&mut wire);
+        let mut ready_body = BytesMut::new();
+        command::encode(
+            &Command::Ready(PeerProperties::default().with_socket_type(SocketType::Push)),
+            &mut ready_body,
+        );
+        let ready_frame = crate::message::Frame {
+            flags: crate::message::FrameFlags::COMMAND,
+            payload: Payload::from_bytes(ready_body.freeze()),
+        };
+        frame::encode_frame(&ready_frame, &mut wire);
+        c.handle_input(wire.freeze()).unwrap();
+        assert!(c.is_ready());
+        c
+    }
+
+    fn feed_data_frames(c: &mut Connection, frames: &[(bool, &[u8])]) -> Result<()> {
+        let mut wire = BytesMut::new();
+        for &(more, data) in frames {
+            let flags = FrameFlags { more, command: false };
+            let f = crate::message::Frame {
+                flags,
+                payload: Payload::from_bytes(Bytes::copy_from_slice(data)),
+            };
+            frame::encode_frame(&f, &mut wire);
+        }
+        c.handle_input(wire.freeze())
+    }
+
+    #[test]
+    fn max_message_size_rejects_zero_length_more_flood() {
+        let max = 200;
+        let mut c = ready_connection(Some(max));
+        let overhead = size_of::<Payload>();
+        let frame_count = max / overhead + 1;
+        let frames: Vec<(bool, &[u8])> = (0..frame_count).map(|_| (true, &[] as &[u8])).collect();
+        let err = feed_data_frames(&mut c, &frames).unwrap_err();
+        assert!(matches!(err, Error::MessageTooLarge { .. }));
+    }
+
+    #[test]
+    fn max_message_size_accounts_for_overhead_plus_content() {
+        let max = 300;
+        let mut c = ready_connection(Some(max));
+        let overhead = size_of::<Payload>();
+        // 2 frames: each costs overhead + 100 = 140 bytes, total 280 <= 300
+        let r = feed_data_frames(&mut c, &[(true, &[0xAB; 100]), (false, &[0xCD; 100])]);
+        assert!(r.is_ok(), "2 × 140 = 280 <= 300, got: {r:?}");
+
+        // 3 frames: each costs 140, total 420 > 300
+        let mut c = ready_connection(Some(max));
+        let err = feed_data_frames(
+            &mut c,
+            &[(true, &[0; 100]), (true, &[0; 100]), (false, &[0; 100])],
+        );
+        assert!(
+            matches!(err, Err(Error::MessageTooLarge { .. })),
+            "3 × (40 + 100) = {}, should exceed max={max}",
+            3 * (overhead + 100),
+        );
+    }
 
     #[test]
     fn peer_minor_downgrades_to_zero() {
