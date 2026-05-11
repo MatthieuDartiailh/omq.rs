@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Adapt to `omq-proto` Message API changes: use `msg.part_bytes(0)` in
+  inproc single-part path (was `Bytes::from(msg)`).
+- Use `Payload::as_slice()` (now infallible) in large-recv prefix copy.
+
 ## [0.2.11](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.10...omq-compio-v0.2.11) - 2026-05-09
 
 ### Changed

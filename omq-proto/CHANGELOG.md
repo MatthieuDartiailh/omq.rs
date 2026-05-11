@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Remove `Deref<Target=[u8]>` and `From<Message> for Bytes`.
+  Use `msg.get(i)` or `&msg[i]` for zero-copy `&[u8]` frame access;
+  `msg.part_bytes(i)` for owned `Bytes`.
+- **Breaking:** Remove `Payload` from public API. `PayloadInner::Multi`
+  removed — all payloads are now guaranteed contiguous.
+- `Payload::as_slice()` returns `&[u8]` (was `Option<&[u8]>`).
+- `ChunkedInputBuf::split_to()` coalesces when spanning chunk boundaries
+  instead of producing multi-chunk payloads.
+
+### Added
+
+- `Message::get(index) -> Option<&[u8]>` — checked zero-copy frame access.
+- `impl Index<usize> for Message` — `&msg[0]` returns `&[u8]`, panics on OOB.
+
+### Fixed
+
+- Account for per-part overhead (`size_of::<Payload>()`) in `max_message_size`
+  check. Zero-length MORE frames no longer bypass the limit.
+- Reject oversized frames at header parse time instead of waiting for
+  the full payload to arrive.
+
+### Performance
+
+- *(blake3zmq)* Stack-allocate 9-byte AAD buffer instead of `Vec` per frame.
+
 ## [0.3.2](https://github.com/paddor/omq.rs/compare/omq-proto-v0.3.1...omq-proto-v0.3.2) - 2026-05-10
 
 ### Added
