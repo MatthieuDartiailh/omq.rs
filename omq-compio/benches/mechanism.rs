@@ -14,7 +14,9 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_compio::{Message, MonitorEvent, MonitorStream, Options, ProactorBuilderExt, Socket, SocketType};
+use omq_compio::{
+    Message, MonitorEvent, MonitorStream, Options, ProactorBuilderExt, Socket, SocketType,
+};
 
 const DEFAULT_SIZES: &[usize] = &[2_048, 8_192, 32_768];
 
@@ -91,12 +93,7 @@ fn main() {
     }
 }
 
-fn run_cell(
-    pull_opts: Options,
-    push_opts: Options,
-    size: usize,
-    seq: usize,
-) -> common::Cell {
+fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usize) -> common::Cell {
     let ep = common::endpoint("ipc", seq);
     let pull_count = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
