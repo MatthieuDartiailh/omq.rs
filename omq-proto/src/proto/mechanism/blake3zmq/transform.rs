@@ -8,6 +8,7 @@
 //! monotonic counter.
 
 use chacha20_blake3::ChaCha20Blake3;
+use zeroize::ZeroizeOnDrop;
 
 use crate::error::{Error, Result};
 
@@ -18,6 +19,7 @@ const NONCE_PREFIX_LEN: usize = 16;
 /// Per-direction symmetric session: 32-byte key, 16-byte fixed nonce
 /// prefix, 8-byte counter base, monotonic 64-bit counter. Each
 /// `encrypt`/`decrypt` increments the counter by one.
+#[derive(ZeroizeOnDrop)]
 struct Session {
     key: [u8; 32],
     nonce_prefix: [u8; NONCE_PREFIX_LEN],
