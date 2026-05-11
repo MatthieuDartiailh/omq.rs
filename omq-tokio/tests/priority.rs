@@ -87,7 +87,7 @@ async fn inproc_strict_precedence() {
 /// robin should fair-share. Allow generous slop for scheduler jitter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn inproc_equal_priorities_round_robin() {
-    const N: usize = 300;
+    const N: usize = 3000;
     let pull_a = Socket::new(SocketType::Pull, Options::default());
     let pull_b = Socket::new(SocketType::Pull, Options::default());
     let pull_c = Socket::new(SocketType::Pull, Options::default());
