@@ -125,9 +125,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chacha20-blake3"
-version = "0.9.11"
+version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74e24412080fb69a0ac581d23cc0be2a204080302c879fe78bd53aea7da3b9c1"
+checksum = "fd615fc89bad0c5db133906c4706eab1465a19738d8b4edf80751fa6834492eb"
 dependencies = [
  "blake3",
  "constant_time_eq",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "blake3",
  "bytes",
