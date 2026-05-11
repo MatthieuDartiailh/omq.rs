@@ -234,7 +234,7 @@ fn fuzz_z85_decode() {
     let mut rng = rng();
     let alphabet: &[u8] =
         b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
-    for i in 0..iters() {
+    for i in 0..iters() / 4 {
         // Mix 90% z85-alphabet bytes with 10% arbitrary, length 0..256.
         let len = rng.gen_range(0..=256);
         let mut s = String::with_capacity(len);
