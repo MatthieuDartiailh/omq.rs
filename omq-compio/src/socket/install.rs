@@ -338,11 +338,13 @@ pub(super) fn spawn_wire_driver(
                 || PeerIdent::Path(format!("{endpoint_for_exit}")),
                 PeerIdent::Socket,
             );
-            inner_for_exit.monitor.publish(MonitorEvent::HandshakeFailed {
-                endpoint: endpoint_for_exit,
-                peer_ident,
-                reason: format!("{e}"),
-            });
+            inner_for_exit
+                .monitor
+                .publish(MonitorEvent::HandshakeFailed {
+                    endpoint: endpoint_for_exit,
+                    peer_ident,
+                    reason: format!("{e}"),
+                });
         }
         // REQ: reset the send/recv alternation flag so the socket can
         // issue a fresh request once reconnected.
