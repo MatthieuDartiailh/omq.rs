@@ -305,6 +305,9 @@ pub(crate) async fn run_connection(
     // Reused across iterations to avoid per-drain Vec allocation.
     let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
 
+    // Commands (including queued messages) waiting for the handshake to complete.
+    // Drained post-handshake. Dropped on handshake failure — callers observe
+    // loss via MonitorEvent::HandshakeFailed published by spawn_wire_driver.
     let mut pending_cmds: VecDeque<DriverCommand> = VecDeque::new();
     let mut deadline: Option<Instant> = handshake_timeout.map(|t| Instant::now() + t);
     state.last_input_nanos.store(

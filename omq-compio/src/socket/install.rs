@@ -19,7 +19,7 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::proto::SocketType;
 use omq_proto::subscription::SubscriptionSet;
 
-use crate::monitor::{DisconnectReason, MonitorEvent, PeerInfo};
+use crate::monitor::{DisconnectReason, MonitorEvent, PeerIdent, PeerInfo};
 use crate::transport::driver::{self, DriverCommand, MonitorCtx};
 use crate::transport::inproc::{InprocConn, InprocPeerSnapshot};
 use crate::transport::peer_io::{WireReader, WireWriter};
@@ -286,6 +286,7 @@ pub(super) fn spawn_wire_driver(
     } else {
         None
     };
+    let peer_address_for_exit = peer_address; // Copy; used in exit closure for HandshakeFailed
     let monitor_ctx = MonitorCtx {
         monitor: inner.monitor.clone(),
         endpoint: endpoint.clone(),
@@ -317,12 +318,9 @@ pub(super) fn spawn_wire_driver(
         inner
             .peers_gen
             .fetch_add(1, std::sync::atomic::Ordering::Release);
-        // Publish Disconnected so monitor consumers see the peer
-        // tear down. Reason: PeerClosed for clean EOF, Error(...)
-        // for any other failure. Skip if the handshake never
-        // completed (no PeerInfo to attach).
         let info = info_holder.read().expect("peer_info lock").clone();
         if let Some(peer) = info {
+            // Post-handshake teardown: publish Disconnected with reason.
             let reason = match res {
                 Ok(()) => DisconnectReason::PeerClosed,
                 Err(e) => DisconnectReason::Error(format!("{e}")),
@@ -331,6 +329,19 @@ pub(super) fn spawn_wire_driver(
                 endpoint: endpoint_for_exit,
                 peer,
                 reason,
+            });
+        } else if let Err(ref e) = res {
+            // Handshake never completed. Any messages queued in
+            // pending_cmds (send() already returned Ok) are dropped here.
+            // Publish HandshakeFailed so callers can observe the loss.
+            let peer_ident = peer_address_for_exit.map_or_else(
+                || PeerIdent::Path(format!("{endpoint_for_exit}")),
+                PeerIdent::Socket,
+            );
+            inner_for_exit.monitor.publish(MonitorEvent::HandshakeFailed {
+                endpoint: endpoint_for_exit,
+                peer_ident,
+                reason: format!("{e}"),
             });
         }
         // REQ: reset the send/recv alternation flag so the socket can
