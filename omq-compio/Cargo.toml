@@ -80,3 +80,8 @@ harness = false
 name = "latency"
 harness = false
 
+[[bench]]
+name = "mechanism"
+harness = false
+required-features = ["curve", "blake3zmq"]
+
