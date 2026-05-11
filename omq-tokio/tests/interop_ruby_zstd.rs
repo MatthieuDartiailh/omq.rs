@@ -9,6 +9,7 @@
 //! so the rest of the matrix can run without a `--features zstd` gate.
 
 use std::net::TcpListener as StdTcpListener;
+use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -43,16 +44,19 @@ impl std::ops::Deref for ChildGuard {
     }
 }
 
-impl std::ops::DerefMut for ChildGuard {
-    fn deref_mut(&mut self) -> &mut Child {
-        self.0.as_mut().expect("ChildGuard already consumed")
+impl ChildGuard {
+    // Kill the whole process group (sh + yes + omq push pipeline children).
+    fn kill(&mut self) {
+        if let Some(c) = &self.0 {
+            unsafe { libc::kill(-(c.id() as libc::pid_t), libc::SIGKILL) };
+        }
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         if let Some(mut c) = self.0.take() {
-            let _ = c.kill();
+            unsafe { libc::kill(-(c.id() as libc::pid_t), libc::SIGKILL) };
             let _ = c.wait();
         }
     }
@@ -110,6 +114,7 @@ async fn ruby_push_zstd_tcp_sustained() {
 
     let mut guard = ChildGuard::new(
         Command::new("sh")
+            .process_group(0)
             .arg("-c")
             .arg(format!(
                 "yes '{PAYLOAD_UNIT}' | omq push -c {cli_ep} -i0.005 -E 'it.first * 3'"
@@ -165,7 +170,7 @@ async fn ruby_push_zstd_tcp_sustained() {
                 }
             }
             Ok(Err(e)) => panic!("pull.recv error after {got} msgs: {e:?}"),
-            Err(_) => break, // 1s without a message → likely stuck; let asserts diagnose
+            Err(_) => continue, // no message in this 1s window; keep waiting until deadline
         }
     }
 
