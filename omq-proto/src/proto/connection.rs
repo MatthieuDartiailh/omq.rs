@@ -457,8 +457,8 @@ impl Connection {
         #[cfg(feature = "blake3zmq")]
         if let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut() {
             let ciphertext = payload.as_bytes();
-            let aad = blake3zmq_aad(flags, ciphertext.len());
-            let plaintext = Bytes::from(tx.decrypt(&aad, &ciphertext)?);
+            let (aad, aad_len) = blake3zmq_aad(flags, ciphertext.len());
+            let plaintext = Bytes::from(tx.decrypt(&aad[..aad_len], &ciphertext)?);
             return self.dispatch_decrypted(flags.command, flags.more, plaintext);
         }
 
@@ -562,11 +562,11 @@ impl Connection {
             {
                 const TAG_LEN: usize = 32;
                 let plaintext = body.freeze();
-                let aad = blake3zmq_aad(
+                let (aad, aad_len) = blake3zmq_aad(
                     crate::message::FrameFlags::COMMAND,
                     plaintext.len() + TAG_LEN,
                 );
-                let Ok(ciphertext) = tx.encrypt(&aad, &plaintext) else {
+                let Ok(ciphertext) = tx.encrypt(&aad[..aad_len], &plaintext) else {
                     continue;
                 };
                 self.emit_command_frame(Bytes::from(ciphertext));
@@ -714,11 +714,11 @@ impl Connection {
             crate::message::FrameFlags::LAST
         };
         let plaintext = part.as_bytes();
-        let aad = blake3zmq_aad(flags, plaintext.len() + TAG_LEN);
+        let (aad, aad_len) = blake3zmq_aad(flags, plaintext.len() + TAG_LEN);
         let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut() else {
             unreachable!("send_part_blake3zmq called without blake3zmq transform");
         };
-        let ciphertext = tx.encrypt(&aad, &plaintext)?;
+        let ciphertext = tx.encrypt(&aad[..aad_len], &plaintext)?;
         let f = crate::message::Frame {
             flags,
             payload: Payload::from_bytes(Bytes::from(ciphertext)),
@@ -1052,7 +1052,7 @@ impl Connection {
 /// (MORE | LONG | COMMAND), and `length_bytes` is the 1-byte short or
 /// 8-byte big-endian long encoding of `ciphertext_len`.
 #[cfg(feature = "blake3zmq")]
-fn blake3zmq_aad(flags: crate::message::FrameFlags, ciphertext_len: usize) -> Vec<u8> {
+fn blake3zmq_aad(flags: crate::message::FrameFlags, ciphertext_len: usize) -> ([u8; 9], usize) {
     let mut wire_flags = 0u8;
     if flags.more {
         wire_flags |= frame::FLAG_MORE;
@@ -1064,15 +1064,15 @@ fn blake3zmq_aad(flags: crate::message::FrameFlags, ciphertext_len: usize) -> Ve
     if long {
         wire_flags |= frame::FLAG_LONG;
     }
-    let cap = if long { 9 } else { 2 };
-    let mut out = Vec::with_capacity(cap);
-    out.push(wire_flags);
+    let mut buf = [0u8; 9];
+    buf[0] = wire_flags;
     if long {
-        out.extend_from_slice(&(ciphertext_len as u64).to_be_bytes());
+        buf[1..9].copy_from_slice(&(ciphertext_len as u64).to_be_bytes());
+        (buf, 9)
     } else {
-        out.push(ciphertext_len as u8);
+        buf[1] = ciphertext_len as u8;
+        (buf, 2)
     }
-    out
 }
 
 // Public-API roundtrip / handshake / curve / oversized / streaming tests
@@ -1116,7 +1116,10 @@ mod tests {
     fn feed_data_frames(c: &mut Connection, frames: &[(bool, &[u8])]) -> Result<()> {
         let mut wire = BytesMut::new();
         for &(more, data) in frames {
-            let flags = FrameFlags { more, command: false };
+            let flags = FrameFlags {
+                more,
+                command: false,
+            };
             let f = crate::message::Frame {
                 flags,
                 payload: Payload::from_bytes(Bytes::copy_from_slice(data)),
@@ -1170,7 +1173,10 @@ mod tests {
         // Feed just the header — codec should reject immediately without
         // waiting for the 1 MB payload to arrive.
         let r = c.handle_input(wire.freeze());
-        assert!(matches!(r, Err(Error::MessageTooLarge { .. })), "got: {r:?}");
+        assert!(
+            matches!(r, Err(Error::MessageTooLarge { .. })),
+            "got: {r:?}"
+        );
     }
 
     #[test]

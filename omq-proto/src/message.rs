@@ -85,7 +85,6 @@ impl Payload {
         Self::from_bytes(Bytes::from_static(b))
     }
 
-
     /// Total payload length in bytes.
     #[inline]
     pub fn len(&self) -> usize {
@@ -581,7 +580,8 @@ impl std::ops::Index<usize> for Message {
 
     #[inline]
     fn index(&self, index: usize) -> &[u8] {
-        self.get(index).expect("Message frame index out of bounds or non-contiguous")
+        self.get(index)
+            .expect("Message frame index out of bounds or non-contiguous")
     }
 }
 
@@ -614,7 +614,6 @@ impl From<Payload> for Message {
         Self::from_payload(p)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
