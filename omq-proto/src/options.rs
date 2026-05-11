@@ -478,9 +478,11 @@ impl Options {
     ///
     /// Works for both CURVE and BLAKE3ZMQ server configurations.
     /// Panics if the current mechanism is not a server configuration
-    /// of an encrypting mechanism.
+    /// of an encrypting mechanism (i.e., `curve_server` or `blake3zmq_server`
+    /// must be called before this method).
     #[cfg(any(feature = "curve", feature = "blake3zmq"))]
     #[must_use]
+    #[track_caller]
     pub fn authenticator<F>(mut self, f: F) -> Self
     where
         F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
