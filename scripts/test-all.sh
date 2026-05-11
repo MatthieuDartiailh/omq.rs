@@ -15,6 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 retries="${OMQ_TEST_RETRIES:-1}"
+jobs="${OMQ_TEST_JOBS:-2}"
 
 run() {
     echo "::: $*"
@@ -30,6 +31,38 @@ run() {
         fi
         echo "::: retry $attempt/$retries: $*" >&2
     done
+}
+
+# Run a function in the background, keeping at most $jobs parallel workers.
+# Usage: par <func> [args...]
+_par_pids=()
+par() {
+    # Reap any finished workers and check for failures.
+    local new_pids=()
+    for pid in "${_par_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            new_pids+=("$pid")
+        else
+            wait "$pid"  # collect exit status; set -e propagates failure
+        fi
+    done
+    _par_pids=("${new_pids[@]}")
+
+    # Block until a slot is free.
+    while [[ ${#_par_pids[@]} -ge $jobs ]]; do
+        wait "${_par_pids[0]}"
+        _par_pids=("${_par_pids[@]:1}")
+    done
+
+    "$@" &
+    _par_pids+=($!)
+}
+
+par_wait() {
+    for pid in "${_par_pids[@]}"; do
+        wait "$pid"
+    done
+    _par_pids=()
 }
 
 # ---------------------------------------------------------------- #
@@ -52,10 +85,11 @@ run cargo test
 #    not just the priority test file).
 # ---------------------------------------------------------------- #
 for feature in curve blake3zmq lz4 zstd priority; do
-    run cargo test -p omq-proto  --features "$feature"
-    run cargo test -p omq-tokio  --features "$feature"
-    run cargo test -p omq-compio --features "$feature"
+    par run cargo test -p omq-proto  --features "$feature"
+    par run cargo test -p omq-tokio  --features "$feature"
+    par run cargo test -p omq-compio --features "$feature"
 done
+par_wait
 
 # ---------------------------------------------------------------- #
 # 3) All non-fuzz features at once, full backend test suite. Catches
@@ -63,25 +97,27 @@ done
 #    layered on the same connection).
 # ---------------------------------------------------------------- #
 all_features='curve blake3zmq lz4 zstd priority'
-run cargo test -p omq-proto  --features "$all_features"
-run cargo test -p omq-tokio  --features "$all_features"
-run cargo test -p omq-compio --features "$all_features"
+par run cargo test -p omq-proto  --features "$all_features"
+par run cargo test -p omq-tokio  --features "$all_features"
+par run cargo test -p omq-compio --features "$all_features"
 
 # ---------------------------------------------------------------- #
 # 4) Facade crate, both backend choices. Verifies the public API
 #    re-exports compile and the `BACKEND` const reflects the
 #    selected backend.
 # ---------------------------------------------------------------- #
-run cargo test -p omq
-run cargo test -p omq --no-default-features --features tokio-backend
+par run cargo test -p omq
+par run cargo test -p omq --no-default-features --features tokio-backend
+par_wait
 
 # ---------------------------------------------------------------- #
 # 5) Hand-rolled fuzz suites (~1 M iters each; slow). Skip with
 #    `OMQ_SKIP_FUZZ=1` during fast iteration.
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_SKIP_FUZZ:-}" != "1" ]]; then
-    run cargo test -p omq-tokio  --features fuzz
-    run cargo test -p omq-compio --features fuzz
+    par run cargo test -p omq-tokio  --features fuzz --release
+    par run cargo test -p omq-compio --features fuzz --release
+    par_wait
 fi
 
 # ---------------------------------------------------------------- #
