@@ -1199,9 +1199,7 @@ impl SocketDriver {
                 if self.type_state_needs_transform() {
                     let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg).await;
                     let Some(wrapped) = wrapped else { return };
-                    // Ok(None): malformed / out-of-order; drop silently.
-                    // Err(_):   protocol violation; drop but keep the
-                    //           socket open. Surfaces via the monitor.
+                    // None: malformed or out-of-order frame for the current state; drop.
                     if let Ok(Some(m)) = self.type_state.post_recv(self.socket_type, wrapped)
                         && self.recv_tx.send(m).await.is_err()
                     {
