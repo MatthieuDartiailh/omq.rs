@@ -310,6 +310,9 @@ impl Socket {
         let task = compio::runtime::spawn(async move {
             use omq_proto::proto::connection::Role;
             while let Ok((stream, _addr)) = listener.inner.accept().await {
+                if let Ok(poll_fd) = stream.to_poll_fd() {
+                    let _ = inner.options.apply_socket_buffers(&poll_fd);
+                }
                 let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
                 inner.monitor.publish(MonitorEvent::Accepted {
                     endpoint: ep_for_task.clone(),

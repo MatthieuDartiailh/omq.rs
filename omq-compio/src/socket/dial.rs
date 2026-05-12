@@ -358,6 +358,9 @@ async fn dial_supervisor_ipc(
             compio::time::sleep(delay).await;
         };
         let Some(stream) = stream else { return };
+        if let Ok(poll_fd) = stream.to_poll_fd() {
+            let _ = inner.options.apply_socket_buffers(&poll_fd);
+        }
         let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
         inner.monitor.publish(MonitorEvent::Connected {
             endpoint: endpoint.clone(),
