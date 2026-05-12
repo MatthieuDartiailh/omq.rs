@@ -10,7 +10,7 @@
 //!
 //! Apply [`ProactorBuilderExt::with_omq_buffer_pool`] before passing the
 //! `ProactorBuilder` to [`compio::runtime::RuntimeBuilder::with_proactor`]
-//! to use omq-compio's recommended sizing (128 buffers x 32 KiB =
+//! to use omq-compio's recommended sizing (64 buffers x 64 KiB =
 //! 4 MiB per runtime). For larger messages or high-fan-out `PUB` /
 //! 10 `GbE` deployments, call
 //! [`ProactorBuilderExt::with_omq_buffer_pool_sized`] instead.
@@ -26,7 +26,7 @@
 //!
 //! | Peak msg size | Recommended pool | Pool RAM per runtime |
 //! |---|---|---|
-//! | ≤ 32 KiB | [`ProactorBuilderExt::with_omq_buffer_pool`] (default 128 x 32 KiB) | 4 MiB |
+//! | ≤ 64 KiB | [`ProactorBuilderExt::with_omq_buffer_pool`] (default 64 x 64 KiB) | 4 MiB |
 //! | ≤ 256 KiB | `with_omq_buffer_pool_sized(128, 256 * 1024)` | 32 MiB |
 //! | ≤ 1 MiB | `with_omq_buffer_pool_sized(64, 1024 * 1024)` | 64 MiB |
 //! | ≤ 16 MiB | `with_omq_buffer_pool_sized(16, 16 * 1024 * 1024)` | 256 MiB |
@@ -58,10 +58,10 @@ use std::num::NonZero;
 use compio::driver::ProactorBuilder;
 
 /// Number of buffers in the `BUF_RING` pool used by omq-compio's recv path.
-pub const DEFAULT_BUFFER_POOL_COUNT: u16 = 128;
+pub const DEFAULT_BUFFER_POOL_COUNT: u16 = 64;
 
 /// Length in bytes of each buffer in the `BUF_RING` pool.
-pub const DEFAULT_BUFFER_POOL_LEN: usize = 32 * 1024;
+pub const DEFAULT_BUFFER_POOL_LEN: usize = 64 * 1024;
 
 /// Extension methods on [`compio::driver::ProactorBuilder`] for
 /// configuring the `BUF_RING` pool that omq-compio's recv path consumes.

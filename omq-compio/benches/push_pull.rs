@@ -22,7 +22,7 @@ use omq_compio::{
 };
 
 /// Build a per-cell runtime with a configurable `BUF_RING` pool.
-/// `OMQ_BENCH_POOL=count,len_bytes` overrides the default 128 × 32 KiB.
+/// `OMQ_BENCH_POOL=count,len_bytes` overrides the default 64 × 64 KiB.
 fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
     use compio::driver::ProactorBuilder;
     use compio::runtime::RuntimeBuilder;
@@ -34,7 +34,7 @@ fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
             let l: usize = it.next()?.parse().ok()?;
             Some((c, l))
         })
-        .unwrap_or((128, 32 * 1024));
+        .unwrap_or((64, 64 * 1024));
     let mut p = ProactorBuilder::new();
     p.with_omq_buffer_pool_sized(std::num::NonZero::new(count).expect("nonzero"), len);
     RuntimeBuilder::new().with_proactor(p).build()
