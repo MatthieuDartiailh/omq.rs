@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/paddor/omq.rs/compare/omq-proto-v0.3.2...omq-proto-v0.4.0) - 2026-05-12
+
 ### Changed
 
 - **Breaking:** Remove `Deref<Target=[u8]>` and `From<Message> for Bytes`.
@@ -29,10 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check. Zero-length MORE frames no longer bypass the limit.
 - Reject oversized frames at header parse time instead of waiting for
   the full payload to arrive.
+- `Options::authenticator` is now `#[track_caller]`; panics point to the
+  call site instead of inside the library.
 
 ### Performance
 
 - *(blake3zmq)* Stack-allocate 9-byte AAD buffer instead of `Vec` per frame.
+
+### Security
+
+- *(blake3zmq)* `Session` key and nonce are zeroized on drop via
+  `ZeroizeOnDrop`. Key material no longer lingers in freed memory.
 
 ## [0.3.2](https://github.com/paddor/omq.rs/compare/omq-proto-v0.3.1...omq-proto-v0.3.2) - 2026-05-10
 

@@ -6,6 +6,37 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-05-12
+
+### omq-proto 0.4.0
+
+- **Breaking:** Remove `Deref<Target=[u8]>` and `From<Message> for Bytes`.
+  Use `msg.get(i)` or `&msg[i]` for zero-copy `&[u8]` frame access;
+  `msg.part_bytes(i)` for owned `Bytes`.
+- **Breaking:** Remove `Payload` from public API. `PayloadInner::Multi`
+  removed — all payloads are now guaranteed contiguous.
+- `Payload::as_slice()` returns `&[u8]` (was `Option<&[u8]>`).
+- `ChunkedInputBuf::split_to()` coalesces when spanning chunk boundaries
+  instead of producing multi-chunk payloads.
+- New: `Message::get(index) -> Option<&[u8]>` — checked zero-copy frame access.
+- New: `impl Index<usize> for Message` — `&msg[0]` returns `&[u8]`, panics on OOB.
+- Fixed: account for per-part overhead in `max_message_size` check. Zero-length
+  MORE frames no longer bypass the limit.
+- Fixed: reject oversized frames at header parse time.
+- Fixed: `Options::authenticator` is `#[track_caller]`; panics point to the call site.
+- Perf *(blake3zmq)*: stack-allocate 9-byte AAD buffer instead of `Vec` per frame.
+- Security *(blake3zmq)*: `Session` key and nonce zeroized on drop.
+
+### omq-compio 0.2.12
+
+- Fixed: publish `MonitorEvent::HandshakeFailed` when pending messages are dropped
+  after a failed ZMTP handshake. Previously the drop was silent.
+- Adapted to `omq-proto` 0.4.0 Message API changes.
+
+### omq-tokio 0.2.7
+
+- Bump `omq-proto` to 0.4.0.
+
 ## [0.2.5] - 2026-05-09
 
 ### omq-compio 0.2.10

@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.11...omq-compio-v0.2.12) - 2026-05-12
+
 ### Changed
 
+- *(deps)* Bump `omq-proto` to 0.4.0.
 - Adapt to `omq-proto` Message API changes: use `msg.part_bytes(0)` in
   inproc single-part path (was `Bytes::from(msg)`).
 - Use `Payload::as_slice()` (now infallible) in large-recv prefix copy.
+
+### Fixed
+
+- Publish `MonitorEvent::HandshakeFailed` when pending messages are dropped
+  after a failed ZMTP handshake. Previously the drop was silent.
 
 ## [0.2.11](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.10...omq-compio-v0.2.11) - 2026-05-09
 
