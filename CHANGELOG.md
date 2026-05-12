@@ -37,6 +37,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 - Bump `omq-proto` to 0.4.0.
 
+### pyomq 0.2.4
+
+- Bump `omq-compio` to 0.2.12 and `omq-proto` to 0.4.0.
+
 ## [0.2.5] - 2026-05-09
 
 ### omq-compio 0.2.10

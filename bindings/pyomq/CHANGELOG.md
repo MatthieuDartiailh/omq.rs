@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/paddor/omq.rs/compare/pyomq-v0.2.3...pyomq-v0.2.4) - 2026-05-12
+
+### Changed
+
+- *(deps)* Bump `omq-compio` to 0.2.12 and `omq-proto` to 0.4.0. Update `Cargo.lock`.
+
 ## [0.2.3](https://github.com/paddor/omq.rs/compare/pyomq-v0.2.2...pyomq-v0.2.3) - 2026-05-09
 
 ### Changed
