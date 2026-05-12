@@ -1,6 +1,5 @@
 //! Error and Result types.
 
-use bytes::Bytes;
 use thiserror::Error;
 
 /// Convenience alias with `Error` as the default error type.
@@ -33,9 +32,6 @@ pub enum Error {
 
     #[error("message too large: {size} bytes exceeds max {max}")]
     MessageTooLarge { size: usize, max: usize },
-
-    #[error("identity collision: {0:?}")]
-    IdentityCollision(Bytes),
 
     #[error("no route to peer")]
     Unroutable,
