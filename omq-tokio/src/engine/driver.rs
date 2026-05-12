@@ -13,7 +13,7 @@ use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
-const READ_BUF_SIZE: usize = 64 * 1024;
+const READ_BUF_SIZE: usize = 256 * 1024;
 
 /// Max messages one shared-queue batch encodes before flushing.
 const SHARED_MAX_BATCH_MSGS: usize = 256;
