@@ -85,6 +85,24 @@ pub(crate) enum RecvStreamState {
     OneShot,
 }
 
+/// Cancel-safe guard for the accumulation buffer. Takes the `BytesMut`
+/// out of `DirectIoState::pending_acc` for the duration of an async
+/// `read_until`. If the future is dropped (timeout, cancel), the
+/// destructor saves the partial buffer back so the next consumer can
+/// resume.
+pub(crate) struct AccRestore<'a> {
+    pub(crate) state: &'a DirectIoState,
+    pub(crate) buf: Option<BytesMut>,
+}
+
+impl Drop for AccRestore<'_> {
+    fn drop(&mut self) {
+        if let Some(buf) = self.buf.take() {
+            *self.state.pending_acc.lock().expect("pending_acc") = Some(buf);
+        }
+    }
+}
+
 pub(crate) struct LocalStream(pub(crate) async_lock::Mutex<Option<RecvStreamState>>);
 
 // SAFETY: see `LocalStream` doc comment. `CancelToken` is `Rc`-based
@@ -542,21 +560,16 @@ pub(crate) struct DirectIoState {
     /// notification when `false` — the driver is actively processing and
     /// will drain `encoded_queue` on its own next step-3b pass.
     pub(crate) driver_in_select: AtomicBool,
-    /// Pending one-shot recv size when non-zero: after parsing a frame
-    /// header whose wire payload exceeds
-    /// [`Options::large_message_threshold`](omq_proto::options::Options::large_message_threshold),
-    /// the codec is left in
-    /// [`AwaitingSuppliedPayload`](omq_proto::proto::connection)
-    /// state and this field carries the payload byte count the recv
-    /// loop must read directly into a sized buffer. `0` means no
-    /// pending one-shot. Cleared by the recv path immediately after
-    /// `Connection::supply_payload`.
-    ///
-    /// Stage 2 wires this field into the struct so Stage 3's recv-loop
-    /// branch can read and clear it. Until Stage 3 lands the field is
-    /// always 0, hence the dead-code allow.
-    #[allow(dead_code)]
+    /// Total payload byte count for an in-progress accumulation, or `0`
+    /// when idle. Set when `begin_supplied_payload_with_prefix` puts the
+    /// codec into `AwaitingSuppliedPayload`; cleared after
+    /// `supply_payload`. Both the direct-recv path and the driver read
+    /// this to detect and resume an abandoned accumulation.
     pub(crate) large_recv_pending: AtomicUsize,
+    /// Partial accumulation buffer. Survives across `recv()` cancellations
+    /// so the next consumer (direct-recv or driver) can resume without
+    /// losing the bytes already pulled from the multi-shot stream.
+    pub(crate) pending_acc: Mutex<Option<BytesMut>>,
     /// Notified by the codec-feeder side when `large_recv_pending`
     /// transitions from 0 to a non-zero value, so the parked recv
     /// loop wakes promptly. Re-armable.
@@ -590,6 +603,13 @@ pub(crate) enum OneShotLargeRecvOutcome {
     /// to the codec. The recv slot remains `OneShot`; the caller stays
     /// in that mode until the next small frame triggers a re-arm.
     Took,
+    /// Large frame detected while in `MultiShot` with a buffered payload
+    /// prefix. The codec is still in `Ready` — the caller must call
+    /// `begin_supplied_payload_with_prefix` to transition to
+    /// `AwaitingSuppliedPayload` and then accumulate CQE data into a
+    /// sized buffer. The driver maps this to `Fed` (falls back to the
+    /// normal multi-chunk codec assembly).
+    AccumulatePayload,
     /// I/O error during cancel-drain or one-shot recv. Connection is
     /// dead.
     IoErr(std::io::Error),
@@ -598,59 +618,28 @@ pub(crate) enum OneShotLargeRecvOutcome {
     ProtoErr(omq_proto::error::Error),
 }
 
-/// Cancel the multi-shot recv stream, drain any in-flight CQEs into a
-/// sized [`BytesMut`], then read the remaining payload bytes via a
-/// one-shot recv. Supply the assembled payload to the codec and
-/// re-arm a fresh multi-shot stream.
+/// Check whether the codec head is a large data frame. If so:
 ///
-/// The caller has already verified — under the [`PeerIo`] mutex — that
-/// the codec head is a large data frame with no payload prefix
-/// buffered, and holds the [`LocalStream`] async mutex (so no other
-/// recv consumer can race the fd). This function:
+/// - **Already `OneShot`**: extract any buffered prefix, `read_until`
+///   the remainder, `supply_payload`. Returns `Took`.
+/// - **`MultiShot`**: return `AccumulatePayload` so the caller can
+///   accumulate CQEs (and switch to `OneShot` on `ENOBUFS`).
 ///
-/// 1. Inside the codec lock: confirms `peek_next_frame_payload_size`
-///    still reports a large-no-prefix frame, then calls
-///    [`Connection::begin_supplied_payload`]. Releases the lock.
-/// 2. Cancels the multi-shot via the per-stream [`CancelToken`] and
-///    drains any pending CQEs by polling the same stream until it
-///    yields `None` or an `ECANCELED` error. Drained bytes go into
-///    `acc`; bytes spilling past `payload_len` are saved as the
-///    `extra` to push into the codec after supply.
-/// 3. Drops the cancelled stream from the slot, clones the wire fd,
-///    and reads the remaining payload bytes one-shot into the same
-///    contiguous `acc` allocation.
-/// 4. Inside the codec lock: calls
-///    [`Connection::supply_payload`] (mechanism decrypt + decode), then
-///    feeds any saved overflow bytes via `handle_input`.
-/// 5. Builds a fresh `CancellableRecvStream` and stores it in the
-///    held slot.
-///
-/// Returns [`OneShotLargeRecvOutcome::Took`] on success,
-/// `Skipped` if the head was no longer a switchable large frame
-/// (race with `handle_input` ordering — defensive), or one of the
-/// error variants on I/O / codec failure.
-// Five clearly-delimited phases (peek → cancel-drain → one-shot →
-// supply → re-arm). Splitting them into helpers would scatter the
-// sguard / peer_io lock discipline that's the point of the function.
-#[allow(clippy::too_many_lines)]
+/// Returns `Skipped` when the frame is small or the threshold is
+/// disabled.
 pub(crate) async fn try_one_shot_large_recv(
     state: &Arc<DirectIoState>,
     sguard: &mut async_lock::MutexGuard<'_, Option<RecvStreamState>>,
 ) -> OneShotLargeRecvOutcome {
     use bytes::BytesMut;
-    use compio::runtime::FutureExt;
-
-    // Linux raw error numbers. We don't take a `libc` dep; the values
-    // are stable ABI surface.
-    const ECANCELED: i32 = 125;
-    const ENOBUFS: i32 = 105;
 
     if state.large_message_threshold == 0 {
         return OneShotLargeRecvOutcome::Skipped;
     }
 
-    // 1) Peek + transition codec under peer_io.
-    let (payload_len, prefilled) = {
+    let already_one_shot = matches!(sguard.as_ref(), Some(RecvStreamState::OneShot));
+
+    let one_shot_acc = {
         let Ok(mut io) = state.peer_io.lock() else {
             return OneShotLargeRecvOutcome::Skipped;
         };
@@ -662,124 +651,18 @@ pub(crate) async fn try_one_shot_large_recv(
         if info.payload_len < state.large_message_threshold {
             return OneShotLargeRecvOutcome::Skipped;
         }
-        let already_one_shot = matches!(sguard.as_ref(), Some(RecvStreamState::OneShot));
-        if info.buffered_payload_prefix == 0 {
-            match io.codec.begin_supplied_payload() {
-                Some(plen) => (plen, None),
-                None => return OneShotLargeRecvOutcome::Skipped,
-            }
-        } else if already_one_shot {
-            match io.codec.begin_supplied_payload_with_prefix() {
-                Some((plen, prefix)) => {
-                    let mut acc = BytesMut::with_capacity(plen);
-                    acc.extend_from_slice(prefix.as_slice());
-                    (plen, Some(acc))
-                }
-                None => return OneShotLargeRecvOutcome::Skipped,
-            }
-        } else {
-            return OneShotLargeRecvOutcome::Skipped;
+        if !already_one_shot {
+            return OneShotLargeRecvOutcome::AccumulatePayload;
         }
+        let Some((plen, prefix)) = io.codec.begin_supplied_payload_with_prefix() else {
+            return OneShotLargeRecvOutcome::Skipped;
+        };
+        let mut acc = BytesMut::with_capacity(plen);
+        acc.extend_from_slice(prefix.as_slice());
+        (plen, acc)
     };
 
-    if let Some(acc) = prefilled {
-        return one_shot_with_prefix(state, sguard, payload_len, acc).await;
-    }
-
-    let mut acc = BytesMut::with_capacity(payload_len);
-    let mut extra = BytesMut::new();
-
-    // 2) Cancel + drain. Fire the CancelToken on a clone (cancel()
-    // consumes by value); subsequent `stream.next().with_cancel(...)`
-    // polls drain pending CQEs and eventually surface `ECANCELED` /
-    // `None`, terminating the loop.
-    // When already OneShot there is no stream to cancel; skip entirely.
-    if let Some(RecvStreamState::MultiShot(cs)) = sguard.as_mut() {
-        cs.cancel.clone().cancel();
-        loop {
-            let item =
-                FutureExt::with_cancel(futures::StreamExt::next(&mut cs.stream), cs.cancel.clone())
-                    .await;
-            match item {
-                Some(Ok(buf_ref)) => {
-                    if buf_ref.is_empty() {
-                        // Empty CQE = peer EOF. Without all the bytes
-                        // we cannot satisfy supply_payload; surface
-                        // EOF as an io error.
-                        return OneShotLargeRecvOutcome::IoErr(std::io::Error::from(
-                            std::io::ErrorKind::UnexpectedEof,
-                        ));
-                    }
-                    let want = payload_len - acc.len();
-                    let take = want.min(buf_ref.len());
-                    acc.extend_from_slice(&buf_ref[..take]);
-                    if take < buf_ref.len() {
-                        extra.extend_from_slice(&buf_ref[take..]);
-                    }
-                }
-                Some(Err(e)) => {
-                    // ECANCELED (Linux: 125) means the cancel landed.
-                    // Any other io error is fatal.
-                    if e.raw_os_error() == Some(ECANCELED) {
-                        break;
-                    }
-                    if e.raw_os_error() == Some(ENOBUFS) {
-                        // Pool exhausted. Terminate the stream and
-                        // proceed to one-shot — the remaining payload
-                        // bytes still need to come down.
-                        break;
-                    }
-                    return OneShotLargeRecvOutcome::IoErr(e);
-                }
-                None => break,
-            }
-        }
-    }
-
-    // Mark slot OneShot. The drained multi-shot stream (if any) is dropped
-    // here so the kernel ASYNC_CANCEL is acknowledged before our one-shot
-    // Recv submits on the same fd. If already OneShot this is a no-op.
-    **sguard = Some(RecvStreamState::OneShot);
-
-    // 3) One-shot the remainder.
-    if acc.len() < payload_len {
-        let fd = {
-            let Ok(io) = state.peer_io.lock() else {
-                return OneShotLargeRecvOutcome::Skipped;
-            };
-            io.reader.fd_clone()
-        };
-        if let Err(e) = fd.read_until(&mut acc, payload_len).await {
-            return OneShotLargeRecvOutcome::IoErr(e);
-        }
-    }
-    state.last_input_nanos.store(
-        state.hb_epoch.elapsed().as_nanos() as u64,
-        Ordering::Relaxed,
-    );
-
-    // 4) Supply payload + replay overflow.
-    let payload_bytes = acc.freeze();
-    {
-        let Ok(mut io) = state.peer_io.lock() else {
-            return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
-        };
-        if let Err(e) = io.codec.supply_payload(payload_bytes) {
-            return OneShotLargeRecvOutcome::ProtoErr(e);
-        }
-        if !extra.is_empty()
-            && let Err(e) = io.codec.handle_input(extra.freeze())
-        {
-            return OneShotLargeRecvOutcome::ProtoErr(e);
-        }
-        // The spill may itself have been a large-frame header. The
-        // caller's outer loop re-enters this helper on the next
-        // iteration; nothing to do here.
-    }
-
-    // Slot stays OneShot. Caller (one_shot_recv_and_feed) re-arms when
-    // the next frame turns out to be small.
-    OneShotLargeRecvOutcome::Took
+    one_shot_with_prefix(state, sguard, one_shot_acc.0, one_shot_acc.1).await
 }
 
 /// Read one kernel delivery into the codec, then decide on state.
@@ -911,6 +794,7 @@ impl DirectIoState {
             encoded_queue: Mutex::new(EncodedQueue::new()),
             driver_in_select: AtomicBool::new(false),
             large_recv_pending: AtomicUsize::new(0),
+            pending_acc: Mutex::new(None),
             large_recv_signal: Event::new(),
             large_message_threshold,
         })

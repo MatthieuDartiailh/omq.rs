@@ -12,11 +12,11 @@
 set -euo pipefail
 
 cleanup() {
-    trap - INT TERM EXIT
+    trap - INT TERM
     kill 0 2>/dev/null || true
     wait 2>/dev/null || true
 }
-trap cleanup INT TERM EXIT
+trap cleanup INT TERM
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$SCRIPT_DIR/.."
@@ -29,6 +29,12 @@ for arg in "$@"; do
     case "$arg" in
         --update-benchmarks) UPDATE_BENCHMARKS=true ;;
         --ipc) TRANSPORT=ipc ;;
+        -h|--help)
+            echo "Usage: $0 [--ipc] [--update-benchmarks] [port]"
+            echo "  --ipc               use IPC instead of TCP"
+            echo "  --update-benchmarks update COMPARISONS.md"
+            echo "  port                override base TCP port (default $BASE_PORT)"
+            exit 0 ;;
         [0-9]*) BASE_PORT="$arg" ;;
     esac
 done
@@ -104,8 +110,8 @@ fmt_size() {
 ratio_str() {
     awk -v o="$1" -v z="$2" 'BEGIN {
         r = o/z
-        if (r >= 1.1) printf "**%.1fx**", r
-        else          printf "%.2fx", r
+        if (r >= 1.1) printf "**%.1f×**", r
+        else          printf "%.2f×", r
     }'
 }
 
@@ -177,7 +183,7 @@ if [ "$UPDATE_BENCHMARKS" = true ]; then
 
     MD=""
     MD+=$'\n'
-    MD+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio x | omq-tokio msg/s | omq-tokio MB/s | tokio x |"$'\n'
+    MD+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
     MD+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
 
     for i in "${!RESULTS_SIZES[@]}"; do

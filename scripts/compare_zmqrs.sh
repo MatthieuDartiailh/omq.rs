@@ -15,6 +15,14 @@
 
 set -euo pipefail
 
+cleanup() {
+    trap - INT TERM
+    kill 0 2>/dev/null || true
+    wait 2>/dev/null || true
+    rm -f /tmp/omq-bench-zmqrs-*.sock
+}
+trap cleanup INT TERM
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$SCRIPT_DIR/.."
 DURATION=3
@@ -26,6 +34,12 @@ for arg in "$@"; do
     case "$arg" in
         --update-benchmarks) UPDATE_BENCHMARKS=true ;;
         --ipc) TRANSPORT=ipc ;;
+        -h|--help)
+            echo "Usage: $0 [--ipc] [--update-benchmarks] [port]"
+            echo "  --ipc               use IPC instead of TCP"
+            echo "  --update-benchmarks update COMPARISONS.md"
+            echo "  port                override base TCP port (default $BASE_PORT)"
+            exit 0 ;;
         [0-9]*) BASE_PORT="$arg" ;;
     esac
 done
@@ -57,6 +71,11 @@ addr_for() {
 
 run_cell() {
     local peer="$1" addr="$2" size="$3"
+
+    # zmq.rs does not unlink IPC socket files before bind.
+    if [[ "$addr" == ipc://* ]]; then
+        rm -f "${addr#ipc://}"
+    fi
 
     "$peer" push "$addr" "$size" &
     local push_pid=$!
@@ -98,8 +117,8 @@ fmt_size() {
 speedup_str() {
     awk -v o="$1" -v z="$2" 'BEGIN {
         r = o/z
-        if (r >= 1.1) printf "**%.1fx**", r
-        else          printf "%.2fx", r
+        if (r >= 1.1) printf "**%.1f×**", r
+        else          printf "%.2f×", r
     }'
 }
 
@@ -119,6 +138,8 @@ OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
 # ---------- run ----------
 
 SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152 8388608 33554432)
+
+rm -f /tmp/omq-bench-zmqrs-*.sock
 
 echo ""
 echo "zmq.rs (zeromq $ZMQRS_VERSION) vs omq $OMQ_VERSION - ${TRANSPORT^^} loopback, 2 processes, ${DURATION}s window + 500ms warmup"
@@ -176,7 +197,7 @@ if [ "$UPDATE_BENCHMARKS" = true ]; then
 
     MD=""
     MD+=$'\n'
-    MD+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio x | omq-tokio msg/s | omq-tokio MB/s | tokio x |"$'\n'
+    MD+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
     MD+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
 
     for i in "${!RES_SIZES[@]}"; do

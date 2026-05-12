@@ -20,15 +20,16 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at mid-size messages over 
 > (pyzmq), Ruby, Node - on any shared transport. Same ZMTP 3.x framing, same socket types, same
 > CURVE handshake.
 
-### vs. libzmq (TCP loopback, two processes)
+### vs. libzmq (IPC, two processes)
 
-| Size | libzmq | omq-compio | x | omq-tokio | x |
+| Size | libzmq | omq-compio | × | omq-tokio | × |
 |------|--------|------------|---|-----------|---|
-| 512 B | 2.01M msg/s | 3.38M msg/s | **1.7x** | 3.99M msg/s | **2.0x** |
-| 2 KiB | 677k msg/s | 1.64M msg/s | **2.4x** | 1.34M msg/s | **2.0x** |
-| 8 KiB | 178k msg/s | 574k msg/s | **3.2x** | 491k msg/s | **2.8x** |
+| 512 B | 2.42M msg/s | 3.43M msg/s | **1.4×** | 4.04M msg/s | **1.7×** |
+| 8 KiB | 252k msg/s | 746k msg/s | **3.0×** | 459k msg/s | **1.8×** |
+| 512 KiB | 12k msg/s | 21k msg/s | **1.8×** | 11k msg/s | 0.92× |
+| 32 MiB | 86 msg/s | 163 msg/s | **1.9×** | 177 msg/s | **2.1×** |
 
-[Full tables across all sizes and transports (TCP + IPC) ->](COMPARISONS.md)
+[Full tables across all sizes and transports (TCP + IPC) →](COMPARISONS.md)
 
 ## Install
 

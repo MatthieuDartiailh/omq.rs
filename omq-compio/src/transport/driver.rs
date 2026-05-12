@@ -83,13 +83,16 @@ enum StreamArmOutcome {
     Eof,
     ProtoErr(Error),
     Err(std::io::Error),
+    /// Raw CQE data for the shared accumulator in `DirectIoState`.
+    AccData(Bytes),
 }
 
 impl From<crate::socket::OneShotLargeRecvOutcome> for StreamArmOutcome {
     fn from(o: crate::socket::OneShotLargeRecvOutcome) -> Self {
         match o {
             crate::socket::OneShotLargeRecvOutcome::Skipped
-            | crate::socket::OneShotLargeRecvOutcome::Took => Self::Fed,
+            | crate::socket::OneShotLargeRecvOutcome::Took
+            | crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => Self::Fed,
             crate::socket::OneShotLargeRecvOutcome::IoErr(e) => Self::Err(e),
             crate::socket::OneShotLargeRecvOutcome::ProtoErr(e) => Self::ProtoErr(e),
         }
@@ -693,6 +696,7 @@ pub(crate) async fn run_connection(
         // observes EOF or a fatal read error, it notifies
         // `eof_signal` so we exit instead of looping.
         let recv_active = state.recv_claim.load(Ordering::Acquire) == 1;
+        let accumulating = state.large_recv_pending.load(Ordering::Acquire) != 0;
 
         // Signal that we are about to park. The fast-path sender reads this
         // to decide whether to issue a transmit_ready notification. Set before
@@ -730,6 +734,66 @@ pub(crate) async fn run_connection(
             if recv_active {
                 state.recv_state_changed.listen().await;
                 StreamArmOutcome::ClaimFlipped
+            } else if accumulating {
+                // Resume or continue a pending accumulation.
+                let mut sguard = state.recv_stream.0.lock().await;
+                if state.recv_claim.load(Ordering::Acquire) == 1 {
+                    drop(sguard);
+                    state.recv_state_changed.listen().await;
+                    return StreamArmOutcome::ClaimFlipped;
+                }
+                match sguard.as_mut() {
+                    Some(crate::socket::RecvStreamState::OneShot) => {
+                        // read_until the remainder in one syscall.
+                        drop(sguard);
+                        let payload_len = state.large_recv_pending.load(Ordering::Acquire);
+                        let fd = {
+                            let io = peer_io.lock().expect("peer_io");
+                            io.reader.fd_clone()
+                        };
+                        let mut restore = crate::socket::AccRestore {
+                            state: &state,
+                            buf: state.pending_acc.lock().expect("pending_acc").take(),
+                        };
+                        let acc = restore.buf.as_mut().expect("pending_acc");
+                        if let Err(e) = fd.read_until(acc, payload_len).await {
+                            return StreamArmOutcome::Err(e);
+                        }
+                        state.last_input_nanos.store(
+                            state.hb_epoch.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                        let payload = restore.buf.take().unwrap().freeze();
+                        state.large_recv_pending.store(0, Ordering::Release);
+                        let mut io = peer_io.lock().expect("peer_io");
+                        match io.codec.supply_payload(payload) {
+                            Ok(()) => StreamArmOutcome::Fed,
+                            Err(e) => StreamArmOutcome::ProtoErr(e),
+                        }
+                    }
+                    Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
+                        let buf = compio::runtime::FutureExt::with_cancel(
+                            futures::StreamExt::next(&mut cs.stream),
+                            cs.cancel.clone(),
+                        )
+                        .await;
+                        match buf {
+                            None => StreamArmOutcome::Eof,
+                            Some(Err(e)) => StreamArmOutcome::Err(e),
+                            Some(Ok(buf)) if buf.is_empty() => StreamArmOutcome::Eof,
+                            Some(Ok(buf)) => {
+                                state.last_input_nanos.store(
+                                    state.hb_epoch.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                                let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
+                                drop(buf);
+                                StreamArmOutcome::AccData(bytes)
+                            }
+                        }
+                    }
+                    None => StreamArmOutcome::Eof,
+                }
             } else {
                 // Lock the recv_stream alone across the pull. peer_io
                 // is acquired only AFTER stream.next() returns, and is
@@ -885,12 +949,18 @@ pub(crate) async fn run_connection(
                     StreamArmOutcome::Err(e) => {
                         // Linux ENOBUFS = 105. Multi-shot recv is
                         // terminated by the kernel when the BUF_RING is
-                        // exhausted; rearm to keep draining. Other
-                        // errors (ECONNRESET, EPIPE, etc.) are fatal.
+                        // exhausted.
                         if e.raw_os_error() != Some(105) {
                             return Ok(());
                         }
-                        if state.recv_stream.rearm(&peer_io).await.is_err() {
+                        if accumulating {
+                            // Kernel killed the SQE for us. Transition
+                            // to OneShot; next iteration's stream_arm
+                            // does read_until for the remainder.
+                            let mut sguard = state.recv_stream.0.lock().await;
+                            *sguard =
+                                Some(crate::socket::RecvStreamState::OneShot);
+                        } else if state.recv_stream.rearm(&peer_io).await.is_err() {
                             return Ok(());
                         }
                         codec_maybe_dirty = true;
@@ -908,6 +978,33 @@ pub(crate) async fn run_connection(
                         // in response to PING) — mark codec dirty so step 3a
                         // flushes it before try_direct_recv can race it.
                         codec_maybe_dirty = true;
+                    }
+                    StreamArmOutcome::AccData(bytes) => {
+                        let payload_len =
+                            state.large_recv_pending.load(Ordering::Acquire);
+                        let mut acc_guard =
+                            state.pending_acc.lock().expect("pending_acc");
+                        let acc = acc_guard.as_mut().expect("AccData without buffer");
+                        let needed = payload_len - acc.len();
+                        let extra = if bytes.len() <= needed {
+                            acc.extend_from_slice(&bytes);
+                            None
+                        } else {
+                            acc.extend_from_slice(&bytes[..needed]);
+                            Some(bytes.slice(needed..))
+                        };
+                        if acc.len() >= payload_len {
+                            let payload = acc_guard.take().unwrap().freeze();
+                            drop(acc_guard);
+                            state.large_recv_pending.store(0, Ordering::Release);
+                            let mut io = peer_io.lock().expect("peer_io");
+                            io.codec.supply_payload(payload)?;
+                            if let Some(extra) = extra {
+                                io.codec.handle_input(extra)?;
+                            }
+                            codec_has_input = true;
+                            codec_maybe_dirty = true;
+                        }
                     }
                 }
             }

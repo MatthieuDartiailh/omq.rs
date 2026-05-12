@@ -27,7 +27,7 @@ mod send;
 pub use handle::Socket;
 
 pub(crate) use inner::{
-    DirectIoState, FLAT_THRESHOLD, OneShotLargeRecvOutcome, RecvStreamState,
+    AccRestore, DirectIoState, FLAT_THRESHOLD, OneShotLargeRecvOutcome, RecvStreamState,
     one_shot_recv_and_feed, try_one_shot_large_recv,
 };
 

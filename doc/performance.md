@@ -492,117 +492,133 @@ the channel slot small on the hot path. inproc throughput on compio
 sits at ~3M msg/s for any size below 32 KiB and rises past 100 GB/s
 nominal at 32 KiB+ because no bytes ever cross the kernel.
 
-## Zero-copy recv for large frames
+## Large-frame recv: accumulation and one-shot transition
 
 Up through the work above, the recv side did one userspace memcpy per
-buf-ring slot. Each multi-shot CQE delivered a `BufferRef` borrowing a
-pooled slot; the driver did `Bytes::copy_from_slice(&buf[..])`, dropped
-the slot back to the pool, and fed the owned `Bytes` to the codec.
-That copy is needed when slots are held by the codec across CQEs (the
-pool deadlocks on any frame bigger than the pool capacity), so we paid
-it on every slot. For a 1 MiB payload over 32 KiB slots that is 1 MiB
-of memcpy on the recv side, on top of the kernel's NIC -> pool copy.
+BUF_RING buffer. Each multi-shot CQE delivered a `BufferRef` borrowing
+a pooled buffer; the driver did `Bytes::copy_from_slice(&buf[..])`,
+dropped the buffer back to the pool, and fed the owned `Bytes` to the
+codec. For small messages that fit in one buffer, `split_to` takes the
+fast path (zero-copy `Bytes::slice` from a single chunk). One memcpy
+total.
 
-Two related changes removed both ends of that.
+For large messages spanning multiple buffers, the codec's
+`ChunkedInputBuf::split_to` hit its slow path: allocate a `BytesMut`,
+copy every contributing chunk into one contiguous buffer. Combined
+with the per-buffer copy on the way in, the total was 2x memcpy of
+the full payload. At 512 KiB, callgrind showed 96% of recv-side
+instructions in memcpy.
 
-The first was the codec's input buffer. It used to be a single
-`BytesMut` extended via `extend_from_slice` on every `handle_input`,
-which meant repeated reallocation as a large frame accumulated. The
-buffer is now a `ChunkedInputBuf`: a `VecDeque<Bytes>` that takes
-owned chunks zero-copy. `peek_array::<N>` reads the first N bytes
-across chunk boundaries without consuming. `try_decode_frame` calls
-`split_to(payload_len)` which returns a multi-chunk `Payload` by
-slicing each contributing chunk -- still no memcpy, the result is a
-chunk list of `Bytes::split_to` views into the same allocations.
-That removed the O(n log n) reallocation chain on the input side.
+The codec exposes `peek_next_frame_payload_size`,
+`begin_supplied_payload_with_prefix`, and `supply_payload` to let an
+I/O backend take over recv for one frame. When the codec's head frame
+exceeds `Options::large_message_threshold` (default 128 KiB,
+user-configurable), the compio backend bypasses the codec's chunked
+buffer and accumulates the payload into a single pre-allocated
+`BytesMut`.
 
-The second change targeted the per-slot copy itself. The codec
-exposes three new methods -- `peek_next_frame_payload_size`,
-`begin_supplied_payload`, `supply_payload` -- that let an I/O backend
-take over recv for one frame. After parsing a header whose wire
-payload is at least `Options::large_message_threshold` (default 128
-KiB) and that has no payload prefix already buffered, the compio
-backend cancels the multi-shot recv via a per-stream
-`compio::runtime::CancelToken`, drains any in-flight CQEs through the
-same stream until `ECANCELED` lands (those drained bytes go straight
-into the destination `BytesMut`, bounded by one or two pool slots),
-then issues a one-shot Recv on the same fd to pull the remaining
-bytes directly into the same contiguous allocation. The codec gets
-one `Bytes` covering the whole payload via `supply_payload`, runs the
-mechanism decrypt and demux the same way it would for an in-buf
-frame, and the multi-shot stream rebuilds for the next iteration.
-
-The drained-prefix step is the reason this needs `CancelToken` rather
-than just dropping the stream. Bytes the kernel has already filled
-into pool slots between the header CQE and the cancel SQE landing
-would otherwise be lost, desyncing ZMTP framing on the next frame.
-Draining through the existing stream keeps the bytes accounted for;
-only after the drain terminates does the one-shot Recv submit on the
-same fd.
-
-The cost of the drained prefix is bounded by the pool slot size, not
-the payload size. For a 1 MiB payload that is at most ~32 KiB of
-slot-to-`BytesMut` memcpy in the worst case, vs. 1 MiB before. Larger
-payloads improve the ratio further: a 100 MiB transfer pays the same
-~32 KiB drain prefix and gets the rest at NIC bandwidth into one
-contiguous buffer. Small messages stay on the multi-shot path
-unchanged; the threshold knob exists so that workloads with no large
-messages do not pay the per-cancel SQE-rebuild cost (~tens of µs).
-
-A side effect worth calling out: the assembled payload is one
-contiguous `Bytes` rather than a multi-chunk `Payload`. Consumers
-that previously triggered a `Payload::as_bytes` concat (hashing,
-forwarding into another `sendmsg` as a single iovec) silently get a
-faster path. Single-chunk inline storage on `Payload`
-(`SmallVec<[Bytes; 1]>`) is sized for exactly this case.
-
-## Amortizing cancel+rearm across consecutive large frames
-
-The zero-copy path above paid its cancel+rearm cost on every large
-frame, even when large frames arrived back to back. Each frame
-triggered:
-
-1. Fire `CancelToken` on the multi-shot stream.
-2. Drain remaining CQEs until `ECANCELED` arrives.
-3. Submit one-shot `Recv` to collect the payload.
-4. Rebuild the multi-shot stream (`build_recv_stream` + new SQE).
-
-Steps 1-2 and 4 together are two io_uring submissions plus a drain
-loop. For a benchmark sending 1000 × 32 MiB messages that is 2000
-extra submissions and 1000 drain loops that carry no useful bytes.
-
-The fix is a two-state machine on the recv slot:
+### The two recv modes
 
 ```
-MultiShot ──[large frame]──> OneShot
-    ^                           │
-    └───[small frame]───────────┘
+MultiShot ──[ENOBUFS during accumulation]──> OneShot
+    ^                                            │
+    └──────────[small frame]─────────────────────┘
 ```
 
-`RecvStreamState` replaces the plain `Option<CancellableRecvStream>` in
-`LocalStream`. On the first large frame, the usual cancel+drain runs and
-the slot transitions to `OneShot` instead of immediately rebuilding the
-stream. Subsequent large frames skip steps 1-2 and 4 entirely -- there
-is no multi-shot stream to cancel and nothing to rebuild. Each frame
-costs one one-shot `Recv` and nothing else. When a small frame arrives
-in `OneShot` mode, `one_shot_recv_and_feed` re-arms the multi-shot
-stream once and transitions back to `MultiShot`.
+**MultiShot** (default): a persistent multi-shot recv SQE pulls from
+the io_uring BUF_RING pool. Each CQE delivers up to one buffer's
+worth (default 64 KiB). Small messages stay on this path permanently.
 
-The threshold is unchanged at 128 KiB. The state machine removes the
-concern that the threshold placement matters for sequential large-message
-workloads: cancel+rearm fires at most once per run of consecutive large
-frames (the transition into `OneShot`), not once per frame.
+**OneShot**: no multi-shot SQE. A single `read_until` pulls the
+payload directly into a pre-allocated `BytesMut` in one syscall.
+Used for large messages that exceed the BUF_RING pool capacity, and
+for consecutive large messages that follow.
 
-Cancel-safety is structural in both states:
+### How a large message is received
 
-- **MultiShot → OneShot**: cancel+drain runs to completion before the
-  one-shot `Recv` submits. If the future is dropped during the one-shot
-  read, the slot is already `OneShot` -- the next poll starts a fresh
-  one-shot read with no stream to account for.
-- **OneShot → MultiShot**: `build_recv_stream` + store to slot is a
-  single synchronous step. If dropped before the store the slot stays
-  `OneShot`; the next iteration retries. If dropped after, the new
-  stream is live and the driver picks it up on the next wakeup.
+1. A CQE arrives containing the frame header plus the first ~64 KiB
+   of payload. The normal path runs: `copy_from_slice` into `Bytes`,
+   `handle_input` feeds the codec.
+
+2. `try_one_shot_large_recv` peeks at the codec head, sees a large
+   frame, returns `AccumulatePayload`. The codec state is unchanged.
+
+3. The caller calls `begin_supplied_payload_with_prefix`. The codec
+   extracts the buffered prefix (zero-copy `Bytes::slice` from the
+   single chunk) and enters `AwaitingSuppliedPayload`. A `BytesMut`
+   is pre-allocated for the full payload and the prefix is copied in.
+
+4. Subsequent CQEs are copied directly from the BUF_RING buffer into
+   the pre-allocated `BytesMut`, bypassing the codec entirely. Each
+   buffer is returned to the pool immediately after copying.
+
+5. If the payload fits within the pool (message <= pool capacity),
+   accumulation completes and `supply_payload` delivers the payload.
+   The slot stays MultiShot.
+
+6. If the payload exceeds the pool, the kernel exhausts the BUF_RING
+   and terminates the multi-shot SQE with `ENOBUFS`. This is the
+   transition mechanism: the kernel killed the SQE, so the fd is
+   free. The slot transitions to OneShot and a single `read_until`
+   pulls the remaining bytes in one syscall.
+
+7. The slot stays OneShot. Consecutive large messages use
+   `one_shot_with_prefix` directly -- extract prefix, `read_until`
+   remainder. No cancel, no rearm, no pool involvement. One syscall
+   per message.
+
+8. When a small frame arrives in OneShot mode,
+   `one_shot_recv_and_feed` re-arms the multi-shot stream once and
+   transitions back to MultiShot.
+
+### Why CancelToken does not work
+
+The obvious approach -- cancel the multi-shot SQE via compio's
+`CancelToken`, then switch to one-shot -- fails. compio's
+`Proactor::cancel_token` checks `key.has_result()` before submitting
+`ASYNC_CANCEL`. For a multi-shot key that has already delivered CQEs,
+this short-circuits: no `ASYNC_CANCEL` is submitted to the kernel.
+Five attempts to make cancel-based transition reliable all deadlocked
+in release builds (timing-dependent; some passed in debug).
+
+`ENOBUFS` sidesteps the problem. The kernel terminates the multi-shot
+SQE itself when the pool is exhausted. No `CancelToken` involved, no
+race, no timing dependency. For messages that fit within the pool,
+no transition is needed -- accumulation handles it entirely.
+
+### Cancel-safety
+
+The accumulation buffer lives in `DirectIoState::pending_acc` (shared
+state), not in the recv future's locals. If the recv future is dropped
+mid-accumulation (timeout, cancel), the partial buffer survives. The
+next `recv()` call or driver iteration detects `large_recv_pending != 0`
+and resumes accumulation. The OneShot `read_until` uses an `AccRestore`
+drop guard that saves the buffer back to `pending_acc` on cancellation.
+
+### Copy count
+
+Small messages (below threshold): 1 memcpy. BUF_RING buffer to
+`Bytes`, then zero-copy `Bytes::slice` through the codec.
+
+Large messages (above threshold): the first CQE is double-copied
+(BUF_RING to `Bytes` via `handle_input`, then prefix extracted and
+copied into the accumulator). Subsequent CQEs or the one-shot
+`read_until` are single-copy. For a 256 KiB message: ~1.25x memcpy.
+For 2 MiB: ~1.03x. For 32 MiB+: ~1.00x.
+
+### BUF_RING pool sizing
+
+The pool is per-runtime, shared by all connections. Default: 64
+buffers x 64 KiB = 4 MiB. This handles ~10-20 concurrent connections
+without `ENOBUFS` pressure on small-message workloads.
+
+The pool size no longer determines large-message performance. Messages
+that exceed the pool transition to one-shot automatically via ENOBUFS.
+A larger pool delays the transition (more CQEs accumulated before
+one-shot kicks in); a smaller pool triggers it sooner (one-shot
+handles more of the payload in a single syscall). The pool is purely
+a small-message burst-absorption knob. See `runtime.rs` for the
+sizing API.
 
 ## Things tried and dropped
 

@@ -73,6 +73,11 @@ enum PullOutcome {
     /// Stream errored. ENOBUFS is recoverable via re-arm; other errors
     /// are surfaced as fatal by the caller.
     Err(std::io::Error),
+    /// Large frame detected in multi-shot mode with a buffered prefix.
+    /// Codec is still in `Ready`; the outer loop must call
+    /// `begin_supplied_payload_with_prefix` and then accumulate the
+    /// remaining payload from subsequent CQEs.
+    StartAccumulation,
 }
 
 /// RAII guard for the [`DirectIoState`] recv claim. Released on drop:
@@ -1073,6 +1078,119 @@ impl Socket {
         }
 
         loop {
+            // ---- Accumulation phase ----
+            // Codec is in AwaitingSuppliedPayload. Pull remaining payload
+            // bytes and supply them. Two sub-modes:
+            //
+            // MultiShot: drain CQEs from the BUF_RING into the accumulator.
+            //   If ENOBUFS fires the kernel killed the multi-shot SQE for
+            //   us — transition to OneShot and let the next iteration
+            //   read_until the remainder in one syscall.
+            //
+            // OneShot: single read_until for whatever is left. This is the
+            //   steady state for huge messages (> pool size). Cancel-safe
+            //   via AccRestore: if the future is dropped mid-read, the
+            //   partial buffer is saved back to DirectIoState::pending_acc.
+            while state.large_recv_pending.load(Ordering::Acquire) != 0 {
+                let payload_len = state.large_recv_pending.load(Ordering::Acquire);
+
+                let is_one_shot = {
+                    let sg = state.recv_stream.0.lock().await;
+                    matches!(sg.as_ref(), Some(crate::socket::RecvStreamState::OneShot))
+                };
+
+                if is_one_shot {
+                    let fd = {
+                        let io = state.peer_io.lock().expect("peer_io");
+                        io.reader.fd_clone()
+                    };
+                    let mut restore = crate::socket::AccRestore {
+                        state: &state,
+                        buf: state.pending_acc.lock().expect("pending_acc").take(),
+                    };
+                    let acc = restore.buf.as_mut().expect("pending_acc missing");
+                    if let Err(_e) = fd.read_until(acc, payload_len).await {
+                        state.eof_signal.notify(usize::MAX);
+                        return Err(Error::Closed);
+                    }
+                    state.last_input_nanos.store(
+                        state.hb_epoch.elapsed().as_nanos() as u64,
+                        Ordering::Relaxed,
+                    );
+                    let payload = restore.buf.take().unwrap().freeze();
+                    state.large_recv_pending.store(0, Ordering::Release);
+                    let mut io = state.peer_io.lock().expect("peer_io");
+                    if let Err(_e) = io.codec.supply_payload(payload) {
+                        state.eof_signal.notify(usize::MAX);
+                        return Ok(None);
+                    }
+                    continue;
+                }
+
+                // MultiShot: pull one CQE
+                let stream_result = {
+                    let mut sguard = state.recv_stream.0.lock().await;
+                    let Some(crate::socket::RecvStreamState::MultiShot(cs)) = sguard.as_mut()
+                    else {
+                        state.eof_signal.notify(usize::MAX);
+                        return Err(Error::Closed);
+                    };
+                    compio::runtime::FutureExt::with_cancel(
+                        futures::StreamExt::next(&mut cs.stream),
+                        cs.cancel.clone(),
+                    )
+                    .await
+                };
+                match stream_result {
+                    Some(Ok(buf)) if !buf.is_empty() => {
+                        let mut acc_guard = state.pending_acc.lock().expect("pending_acc");
+                        let acc = acc_guard.as_mut().expect("pending_acc missing");
+                        let needed = payload_len - acc.len();
+                        let extra = if buf.len() <= needed {
+                            acc.extend_from_slice(&buf[..]);
+                            drop(buf);
+                            None
+                        } else {
+                            acc.extend_from_slice(&buf[..needed]);
+                            let e = Bytes::copy_from_slice(&buf[needed..]);
+                            drop(buf);
+                            Some(e)
+                        };
+                        state.last_input_nanos.store(
+                            state.hb_epoch.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                        if acc.len() >= payload_len {
+                            let payload = acc_guard.take().unwrap().freeze();
+                            drop(acc_guard);
+                            state.large_recv_pending.store(0, Ordering::Release);
+                            let mut io = state.peer_io.lock().expect("peer_io");
+                            if let Err(_e) = io.codec.supply_payload(payload) {
+                                state.eof_signal.notify(usize::MAX);
+                                return Ok(None);
+                            }
+                            if let Some(extra) = extra
+                                && let Err(_e) = io.codec.handle_input(extra)
+                            {
+                                state.eof_signal.notify(usize::MAX);
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    Some(Err(e)) if e.raw_os_error() == Some(105) => {
+                        // ENOBUFS: kernel terminated the multi-shot SQE.
+                        // Transition to OneShot — next iteration does
+                        // read_until for the remainder in one syscall.
+                        let mut sguard = state.recv_stream.0.lock().await;
+                        *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                    }
+                    _ => {
+                        state.eof_signal.notify(usize::MAX);
+                        return Err(Error::Closed);
+                    }
+                }
+            }
+
             // 1) Drain any user-facing events the driver left in the
             //    codec. Bail out (Ok(None)) if the handshake hasn't
             //    completed - we hold the lock so this is race-free.
@@ -1151,6 +1269,9 @@ impl Socket {
                         match crate::socket::one_shot_recv_and_feed(&state, &mut sguard).await {
                             crate::socket::OneShotLargeRecvOutcome::Skipped
                             | crate::socket::OneShotLargeRecvOutcome::Took => PullOutcome::Fed,
+                            crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => {
+                                PullOutcome::StartAccumulation
+                            }
                             crate::socket::OneShotLargeRecvOutcome::IoErr(e) => PullOutcome::Err(e),
                             crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => {
                                 PullOutcome::ProtoErr
@@ -1195,6 +1316,9 @@ impl Socket {
                                         crate::socket::OneShotLargeRecvOutcome::Skipped
                                         | crate::socket::OneShotLargeRecvOutcome::Took => {
                                             PullOutcome::Fed
+                                        }
+                                        crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => {
+                                            PullOutcome::StartAccumulation
                                         }
                                         crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
                                             PullOutcome::Err(e)
@@ -1270,6 +1394,20 @@ impl Socket {
                     if state.recv_stream.rearm(&state.peer_io).await.is_err() {
                         state.eof_signal.notify(usize::MAX);
                         return Err(Error::Closed);
+                    }
+                }
+                PullOutcome::StartAccumulation => {
+                    // Transition codec to AwaitingSuppliedPayload and
+                    // extract any buffered payload prefix. Store the
+                    // accumulator in DirectIoState so it survives
+                    // cancellation.
+                    let mut io = state.peer_io.lock().expect("peer_io");
+                    if let Some((plen, prefix)) = io.codec.begin_supplied_payload_with_prefix() {
+                        let mut buf = bytes::BytesMut::with_capacity(plen);
+                        buf.extend_from_slice(prefix.as_slice());
+                        drop(io);
+                        *state.pending_acc.lock().expect("pending_acc") = Some(buf);
+                        state.large_recv_pending.store(plen, Ordering::Release);
                     }
                 }
             }

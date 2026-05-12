@@ -1,42 +1,59 @@
 //! Runtime-builder helpers for sizing compio's `BUF_RING` buffer pool.
 //!
-//! omq-compio drives recv via compio's multi-shot recv with provided
-//! buffers (`BUF_RING`). The pool is per-runtime, sized once at builder
-//! time, and serves every connection on that runtime. compio's default
-//! is 8 buffers x 8 KiB, which is too small for non-trivial workloads:
-//! each in-flight CQE occupies a slot, and a single gigabit TCP burst
-//! can leave ~200 KiB queued in the kernel's recv buffer between
-//! consumer drains.
+//! omq-compio drives recv via io_uring multi-shot recv with provided
+//! buffers (`BUF_RING`). The pool is per-runtime, shared by every
+//! connection on that runtime, and sized once at builder time.
+//! compio's own default (8 buffers x 8 KiB) is too small for
+//! non-trivial workloads.
 //!
-//! Apply [`ProactorBuilderExt::with_omq_buffer_pool`] before passing the
-//! `ProactorBuilder` to [`compio::runtime::RuntimeBuilder::with_proactor`]
-//! to use omq-compio's recommended sizing (64 buffers x 64 KiB =
-//! 4 MiB per runtime). For larger messages or high-fan-out `PUB` /
-//! 10 `GbE` deployments, call
+//! Apply [`ProactorBuilderExt::with_omq_buffer_pool`] to use
+//! omq-compio's recommended sizing (64 buffers x 64 KiB = 4 MiB per
+//! runtime). For high-fan-out deployments, call
 //! [`ProactorBuilderExt::with_omq_buffer_pool_sized`] instead.
 //!
-//! ## Pool sizing recipe
+//! ## How the pool interacts with recv
 //!
-//! Slot size sets how much of one message fits in a single buffer.
-//! Messages bigger than the slot size are split across N slots and
-//! fed to the codec one chunk at a time, growing the codec's
-//! internal `BytesMut` with `extend_from_slice` on each. That cost
-//! is roughly linear in N, so the cheap fix for larger payloads is
-//! to grow the slot.
+//! **Small messages** (below [`Options::large_message_threshold`],
+//! default 128 KiB) stay on the multi-shot path: one
+//! `copy_from_slice` per CQE into `Bytes`, one zero-copy
+//! `Bytes::slice` out of the codec. Total: 1 memcpy per message.
 //!
-//! | Peak msg size | Recommended pool | Pool RAM per runtime |
+//! **Large messages** (above the threshold) use the accumulation
+//! path: subsequent CQEs are copied directly from the buffer into a
+//! single pre-allocated `BytesMut`, bypassing the codec's chunked
+//! buffer. If the payload exceeds the pool capacity, the kernel
+//! exhausts the pool and terminates the multi-shot SQE with
+//! `ENOBUFS`. The recv path transitions to one-shot mode and a
+//! single `read_until` pulls the remaining bytes in one syscall.
+//! Consecutive large messages stay in one-shot mode with zero
+//! pool involvement. A small message re-arms multi-shot.
+//!
+//! Any message size works with any pool configuration. The pool
+//! affects only `ENOBUFS` frequency on small-message bursts — large
+//! messages transition to one-shot automatically.
+//!
+//! ## Pool sizing
+//!
+//! The pool absorbs small-message bursts. The kernel fills all
+//! available buffers in a single `io_uring_enter` cycle; if the pool
+//! is exhausted, the multi-shot SQE terminates with `ENOBUFS` and
+//! must be re-armed. More buffers = more burst capacity before
+//! rearm. The default 64 buffers handles ~10-20 concurrent
+//! connections without rearm pressure.
+//!
+//! The pool does **not** need to be sized for large messages. A
+//! 2 GiB message works fine with the default 4 MiB pool — the
+//! first 4 MiB is accumulated from CQEs, then `ENOBUFS` triggers
+//! a one-shot `read_until` for the remaining ~2 GiB.
+//!
+//! | Scenario | Recommended call | Pool RAM |
 //! |---|---|---|
-//! | ≤ 64 KiB | [`ProactorBuilderExt::with_omq_buffer_pool`] (default 64 x 64 KiB) | 4 MiB |
-//! | ≤ 256 KiB | `with_omq_buffer_pool_sized(128, 256 * 1024)` | 32 MiB |
-//! | ≤ 1 MiB | `with_omq_buffer_pool_sized(64, 1024 * 1024)` | 64 MiB |
-//! | ≤ 16 MiB | `with_omq_buffer_pool_sized(16, 16 * 1024 * 1024)` | 256 MiB |
+//! | General use | [`with_omq_buffer_pool`](ProactorBuilderExt::with_omq_buffer_pool) (64 x 64 KiB) | 4 MiB |
+//! | High fan-out (100+ connections) | `with_omq_buffer_pool_sized(256, 64 * 1024)` | 16 MiB |
 //!
-//! Slot count sets how many slots can be in flight before `ENOBUFS`
-//! forces a rearm. More slots = better burst absorption but more
-//! pinned RAM; one connection rarely needs more than ~2 × peak
-//! inflight CQEs worth of slots.
+//! [`Options::large_message_threshold`]: omq_proto::options::Options::large_message_threshold
 //!
-//! Example:
+//! ## Example
 //!
 //! ```no_run
 //! use compio::driver::ProactorBuilder;

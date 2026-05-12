@@ -103,7 +103,7 @@ callers.
 DirectIoState {
   // Codec + read side
   peer_io: SharedPeerIo,           // Arc<std::sync::Mutex<PeerIo>>
-  recv_stream: LocalStream,        // async_lock::Mutex<Option<RecvStream>>
+  recv_stream: LocalStream,        // async_lock::Mutex<Option<RecvStreamState>>
 
   // Write side (separate from codec so codec lock can be dropped first)
   writer: async_lock::Mutex<WireWriter>,
@@ -122,12 +122,21 @@ DirectIoState {
   recv_codec_ready: Event,         // driver fed codec while claim=1 -> wake user
   eof_signal: Event,               // recv() signals EOF to driver
 
+  // Large-message accumulation (survives recv cancellation)
+  large_recv_pending: AtomicUsize, // payload_len when accumulating, 0 when idle
+  pending_acc: Mutex<Option<BytesMut>>,  // partial accumulation buffer
+  large_message_threshold: usize,  // from Options; 0 = disabled
+
   // Misc
   handshake_done: AtomicBool,
   last_input_nanos: AtomicU64,     // heartbeat input timestamp
   hb_epoch: Instant,               // monotonic origin for hb math
 }
 ```
+
+`RecvStreamState` is a two-variant enum: `MultiShot(CancellableRecvStream)`
+or `OneShot`. See "Large-message recv" below for the transition
+mechanism.
 
 `peer_io` is a **sync** mutex. The codec is driven from a single-thread
 runtime and the lock is never held across `.await`, so `.lock()` cannot
@@ -269,16 +278,14 @@ persistent SQE per connection: the kernel selects a buffer from the
 runtime's `BUF_RING` only when bytes are ready, posts a CQE carrying
 a `BufferRef`, and the stream yields it. Dropping the consumer
 future of `.next()` does NOT cancel the SQE -- bytes accumulate in
-the ring and are picked up by the next poll. Every `.next().await`
-poll site wraps with `.with_cancel(cancel.clone())` so the
-`SubmitMulti`'s first poll registers its op key with the token; the
-large-frame switch can later call `cancel.clone().cancel()` to
-submit an `IORING_OP_ASYNC_CANCEL` and drain pending CQEs
-deterministically.
+the ring and are picked up by the next poll.
 
-Stored in `DirectIoState::recv_stream: LocalStream`. `LocalStream::rearm`
-rebuilds it after `ENOBUFS` (the kernel terminates the multi-shot SQE
-when the pool is exhausted) -- a fresh stream gets a fresh token.
+Stored in `DirectIoState::recv_stream` as `RecvStreamState::MultiShot`.
+When a large message exhausts the BUF_RING pool, the kernel terminates
+the SQE with `ENOBUFS` and the recv path transitions to
+`RecvStreamState::OneShot` (see "Large-message recv" below). A small
+message in OneShot mode re-arms the multi-shot stream via
+`LocalStream::rearm`.
 
 ### `MessageEncoder` / `MessageDecoder`
 
@@ -616,15 +623,16 @@ Two separate scratch buffers amortize frame-header allocations:
 
 ## Runtime configuration
 
-The recv path uses `io_uring` provided buffers (`IORING_REGISTER_PBUF_RING`).
-Each runtime owns one `BufferPool` from which the kernel selects a slot
-on every multi-shot CQE. Pool size is set on the `ProactorBuilder`:
+The recv path uses io_uring provided buffers (`IORING_REGISTER_PBUF_RING`).
+Each runtime owns one `BufferPool` from which the kernel selects a
+buffer on every multi-shot CQE. Pool size is set on the
+`ProactorBuilder`:
 
 ```rust
 use omq_compio::runtime::ProactorBuilderExt;
 
 let mut proactor = ProactorBuilder::new();
-proactor.with_omq_buffer_pool();              // 128 x 32 KiB (4 MiB)
+proactor.with_omq_buffer_pool();              // 64 x 64 KiB (4 MiB)
 // or:
 proactor.with_omq_buffer_pool_sized(256, 64 * 1024);
 
@@ -634,57 +642,51 @@ let rt = RuntimeBuilder::new().with_proactor(proactor).build()?;
 `omq_compio::build_default_runtime()` is the convenience constructor;
 bench harnesses, integration tests, and `pyomq` use it. External
 callers building their own `Runtime` must call one of the helpers --
-the default 8 x 8 KiB pool is too small for sustained delivery and
-trips `ENOBUFS` rapidly. Each multi-shot CQE consumes one slot until
-the consumer drops the `BufferRef`, so a single connection in a
-gigabit burst can hold ~8 slots in flight.
-
-`ENOBUFS` is recoverable. The driver and the user both detect the
-errno on `stream.next()` and call `LocalStream::rearm` to rebuild the
-`RecvStream` from `WireReader::build_recv_stream()`. Bytes in the
-kernel socket buffer are picked up by the new SQE -- nothing is lost.
+compio's default 8 x 8 KiB pool is too small for sustained delivery.
 
 Linux >= 6.0 is required (multi-shot recv with provided buffers).
 
-### Pool sizing recipe
+### Pool sizing
 
-The default 128 x 32 KiB pool (4 MiB per runtime) is tuned for the
-common ZMQ workload: messages up to ~32 KiB. For larger payloads,
-slot size matters: a message that does not fit in one slot is split
-across N slots and each slot is fed to the codec separately, so per-
-chunk overhead grows linearly in N. A bigger slot is the cheap fix.
+The pool absorbs small-message bursts. The kernel fills all available
+buffers in a single `io_uring_enter` cycle; if the pool is exhausted,
+the multi-shot SQE terminates with `ENOBUFS`. For small messages this
+means a rearm (new multi-shot SQE). For large messages the recv path
+transitions to OneShot mode instead (see "Large-message recv" below).
 
-| Peak msg size | Recommended pool | Pool RAM per runtime |
-|---|---|---|
-| ≤ 32 KiB | `with_omq_buffer_pool()` (default 128 x 32 KiB) | 4 MiB |
-| ≤ 256 KiB | `with_omq_buffer_pool_sized(128, 256 * 1024)` | 32 MiB |
-| ≤ 1 MiB | `with_omq_buffer_pool_sized(64, 1024 * 1024)` | 64 MiB |
-| ≤ 16 MiB | `with_omq_buffer_pool_sized(16, 16 * 1024 * 1024)` | 256 MiB |
-| ≥ 100 MiB (one-off snapshots) | `with_omq_buffer_pool_sized(8, slot)` with `slot ≥ peak` | depends |
+The default 64 x 64 KiB pool (4 MiB per runtime) handles ~10-20
+concurrent connections without rearm pressure. The pool does **not**
+need to be sized for large messages -- a 2 GiB message works with the
+default 4 MiB pool. For high-fan-out deployments (100+ connections),
+increase the buffer count:
+`with_omq_buffer_pool_sized(256, 64 * 1024)` (16 MiB).
 
-Trade-offs:
+## Large-message recv
 
-- **Slot size** sets how much of one message fits in one buffer. Slots
-  bigger than peak msg size waste bytes on every smaller message.
-- **Slot count** sets how many slots can be in flight before `ENOBUFS`
-  forces a rearm. More slots = better burst absorption but more pinned
-  RAM. A single high-rate connection rarely needs more than `2 × peak
-  inflight CQEs` worth of slots.
-- For frames whose wire payload exceeds
-  `Options::large_message_threshold` (default 128 KiB), the recv path
-  switches to a cancel-and-drain + sized one-shot Recv, allocating one
-  contiguous `BytesMut` for the whole payload. The pool slots are not
-  used for that frame's tail, so very-large messages do not require a
-  proportionally-large pool. The cancel-drain prefix is bounded by one
-  or two pool slots; see "Zero-copy recv for large frames" in
-  `performance.md`. Set `Options::disable_large_message_path()` (or
-  `large_message_threshold(0)`) to keep every frame on the multi-shot
-  path -- useful for low-latency profiles where the per-cancel SQE-
-  rebuild cost (~tens of µs) is worse than the memcpy.
+When a frame's wire payload exceeds `Options::large_message_threshold`
+(default 128 KiB, user-configurable, `0` disables), the recv path
+bypasses the codec's `ChunkedInputBuf` and accumulates the payload
+into a single pre-allocated `BytesMut`. Two sub-modes handle the
+accumulation depending on whether the payload fits within the
+BUF_RING pool:
 
-If you don't know your workload, start with the default; reads
-exceeding the slot size still work (each chunk produces its own CQE),
-just slower than a single-slot delivery would be.
+**Accumulation (message <= pool capacity):** CQE data is copied
+directly from the BUF_RING buffer into the `BytesMut`, one buffer at
+a time. Each buffer is returned to the pool immediately. No codec
+involvement. When the `BytesMut` is full, `supply_payload` delivers
+the contiguous payload to the codec for decrypt and dispatch.
+
+**ENOBUFS transition (message > pool capacity):** The kernel exhausts
+the pool and terminates the multi-shot SQE with `ENOBUFS`. The recv
+path transitions to `RecvStreamState::OneShot` and a single
+`read_until` pulls the remaining bytes in one syscall. Consecutive
+large messages stay in OneShot mode with zero pool involvement. A
+small message re-arms multi-shot.
+
+The accumulation buffer lives in `DirectIoState::pending_acc` (behind
+a sync `Mutex`) so it survives recv-future cancellation. An
+`AccRestore` drop guard saves partial progress back to `pending_acc`
+during the OneShot `read_until` if the future is dropped.
 
 ## Concurrency model
 
