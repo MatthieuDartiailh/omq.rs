@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Compare zmq.rs vs omq-tokio vs omq-compio: single PUSH process → single PULL
-# process, TCP loopback, one process each. Each cell: 3 s timed window after
-# 500 ms warmup.
+# Compare zmq.rs vs omq-tokio vs omq-compio: single PUSH process -> single PULL
+# process, loopback. Each cell: 3 s timed window after 500 ms warmup.
 #
 # zmq.rs (crate: zeromq) is a pure-Rust async ZMQ implementation built on
 # tokio, making the omq-tokio comparison apples-to-apples (same runtime,
 # same thread model). omq-compio runs on a single io_uring thread for contrast.
 #
 # Usage:
-#   ./scripts/compare_zmqrs.sh                   # print table to stdout
-#   ./scripts/compare_zmqrs.sh --update-benchmarks  # update COMPARISONS.md section
-#   ./scripts/compare_zmqrs.sh [port]            # override base port (default 15655)
+#   ./scripts/compare_zmqrs.sh                     # TCP, print to stdout
+#   ./scripts/compare_zmqrs.sh --ipc               # IPC, print to stdout
+#   ./scripts/compare_zmqrs.sh --update-benchmarks # TCP, update COMPARISONS.md
+#   ./scripts/compare_zmqrs.sh --ipc --update-benchmarks
+#   ./scripts/compare_zmqrs.sh [port]              # override base TCP port (default 15655)
 
 set -euo pipefail
 
@@ -19,10 +20,12 @@ REPO="$SCRIPT_DIR/.."
 DURATION=3
 BASE_PORT=15655
 UPDATE_BENCHMARKS=false
+TRANSPORT=tcp
 
 for arg in "$@"; do
     case "$arg" in
         --update-benchmarks) UPDATE_BENCHMARKS=true ;;
+        --ipc) TRANSPORT=ipc ;;
         [0-9]*) BASE_PORT="$arg" ;;
     esac
 done
@@ -30,30 +33,38 @@ done
 # ---------- build ----------
 
 echo "==> building zmq.rs bench_peer..."
-(cd "$SCRIPT_DIR/zmqrs_bench_peer" && cargo build --release 2>/dev/null)
+(cd "$SCRIPT_DIR/zmqrs_bench_peer" && cargo build --release -q)
 ZMQRS_PEER="$SCRIPT_DIR/zmqrs_bench_peer/target/release/zmqrs_bench_peer"
 
 echo "==> building omq-tokio bench_peer..."
-cargo build --release -p omq-tokio --bin bench_peer_tokio 2>/dev/null
+cargo build --release -p omq-tokio --bin bench_peer_tokio -q
 TOKIO_PEER="$REPO/target/release/bench_peer_tokio"
 
 echo "==> building omq-compio bench_peer..."
-cargo build --release -p omq-compio --bin bench_peer 2>/dev/null
+cargo build --release -p omq-compio --bin bench_peer -q
 COMPIO_PEER="$REPO/target/release/bench_peer"
 
 # ---------- helpers ----------
 
-# run_cell <peer_binary> <port> <size>
-run_cell() {
-    local peer="$1" port="$2" size="$3"
+addr_for() {
+    local prefix="$1" idx="$2"
+    if [ "$TRANSPORT" = "ipc" ]; then
+        echo "ipc:///tmp/omq-bench-zmqrs-${prefix}-${idx}.sock"
+    else
+        echo "$((BASE_PORT + idx))"
+    fi
+}
 
-    "$peer" push "$port" "$size" &
+run_cell() {
+    local peer="$1" addr="$2" size="$3"
+
+    "$peer" push "$addr" "$size" &
     local push_pid=$!
 
     sleep 0.15
 
     local result
-    result=$("$peer" pull "$port" "$size" "$DURATION")
+    result=$("$peer" pull "$addr" "$size" "$DURATION")
 
     kill "$push_pid" 2>/dev/null || true
     wait "$push_pid" 2>/dev/null || true
@@ -61,7 +72,6 @@ run_cell() {
     echo "$result"
 }
 
-# fmt_msgs <msgs_per_sec>
 fmt_msgs() {
     awk -v v="$1" 'BEGIN {
         if (v >= 1e6)      printf "%.2fM", v/1e6
@@ -70,7 +80,6 @@ fmt_msgs() {
     }'
 }
 
-# fmt_bw <MB_per_sec>
 fmt_bw() {
     awk -v v="$1" 'BEGIN {
         if (v >= 1000) printf "%.1f GB/s", v/1000
@@ -78,7 +87,6 @@ fmt_bw() {
     }'
 }
 
-# fmt_size <bytes>
 fmt_size() {
     awk -v v="$1" 'BEGIN {
         if (v >= 1048576) printf "%g MiB", v/1048576
@@ -87,12 +95,11 @@ fmt_size() {
     }'
 }
 
-# speedup_str <omq_msgs> <zmqrs_msgs>
 speedup_str() {
     awk -v o="$1" -v z="$2" 'BEGIN {
         r = o/z
-        if (r >= 1.1) printf "**%.1f×**", r
-        else          printf "%.2f×", r
+        if (r >= 1.1) printf "**%.1fx**", r
+        else          printf "%.2fx", r
     }'
 }
 
@@ -114,21 +121,23 @@ OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
 SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152 8388608 33554432)
 
 echo ""
-echo "zmq.rs (zeromq $ZMQRS_VERSION) vs omq $OMQ_VERSION — TCP loopback, 2 processes, ${DURATION}s window + 500ms warmup"
+echo "zmq.rs (zeromq $ZMQRS_VERSION) vs omq $OMQ_VERSION - ${TRANSPORT^^} loopback, 2 processes, ${DURATION}s window + 500ms warmup"
 echo ""
 printf "%-10s  %20s  %22s  %22s\n" "" "zmq.rs" "omq-compio" "omq-tokio"
-printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | ×)" "(msg/s  |  MB/s  | ×)"
+printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
 echo "-----------------------------------------------------------------------------------------------------------"
 
 declare -a RES_SIZES RES_ZMQRS_MSGS RES_ZMQRS_MB RES_TOKIO_MSGS RES_TOKIO_MB RES_COMPIO_MSGS RES_COMPIO_MB
 
 idx=0
 for size in "${SIZES[@]}"; do
-    PORT=$((BASE_PORT + idx))
+    ADDR_Z=$(addr_for "z" "$idx")
+    ADDR_T=$(addr_for "t" "$idx")
+    ADDR_C=$(addr_for "c" "$idx")
 
-    zmqrs_raw=$(run_cell  "$ZMQRS_PEER"  "$((PORT + 200))" "$size")
-    tokio_raw=$(run_cell  "$TOKIO_PEER"  "$((PORT + 100))" "$size")
-    compio_raw=$(run_cell "$COMPIO_PEER" "$PORT"           "$size")
+    zmqrs_raw=$(run_cell  "$ZMQRS_PEER"  "$ADDR_Z" "$size")
+    tokio_raw=$(run_cell  "$TOKIO_PEER"  "$ADDR_T" "$size")
+    compio_raw=$(run_cell "$COMPIO_PEER" "$ADDR_C" "$size")
 
     zmqrs_msgs=$(echo "$zmqrs_raw"  | awk '{printf "%.0f", $1/$2}')
     zmqrs_mb=$(echo   "$zmqrs_raw"  | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
@@ -159,11 +168,15 @@ echo ""
 
 if [ "$UPDATE_BENCHMARKS" = true ]; then
     BENCHMARKS="$REPO/COMPARISONS.md"
-    MARKER="zmqrs_comparison"
+    if [ "$TRANSPORT" = "ipc" ]; then
+        MARKER="zmqrs_comparison_ipc"
+    else
+        MARKER="zmqrs_comparison"
+    fi
 
     MD=""
     MD+=$'\n'
-    MD+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
+    MD+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio x | omq-tokio msg/s | omq-tokio MB/s | tokio x |"$'\n'
     MD+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
 
     for i in "${!RES_SIZES[@]}"; do

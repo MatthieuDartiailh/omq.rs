@@ -1,9 +1,15 @@
 /*
- * Two-process TCP throughput peer for libzmq 4.x.
+ * Two-process throughput peer for libzmq 4.x.
  *
  * Usage:
- *   libzmq_bench_peer push <port> <msg_size_bytes>
- *   libzmq_bench_peer pull <port> <msg_size_bytes> <duration_secs>
+ *   libzmq_bench_peer push <addr> <msg_size_bytes>
+ *   libzmq_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
+ *
+ * <addr>: a port number (→ tcp://127.0.0.1:<port>) or a full ZMQ address
+ *         (e.g. ipc:///tmp/bench.sock or tcp://127.0.0.1:15555).
+ *
+ * Push: binds, sends <msg_size> byte messages forever.
+ * Pull: connects, warms up for 500 ms, then counts for <duration> seconds.
  *
  * Compile: gcc -O2 -o libzmq_bench_peer libzmq_bench_peer.c -lzmq
  *
@@ -16,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ctype.h>
 
 static double now_secs(void) {
     struct timespec ts;
@@ -28,18 +35,31 @@ static void die(const char *msg) {
     exit(1);
 }
 
+/* Returns a zmq address string. If s looks like a bare port number, expands
+ * it to tcp://127.0.0.1:<port>. Otherwise returns s unchanged (caller must
+ * not free the returned pointer if it equals s). */
+static const char *resolve_addr(const char *s, char *buf, size_t bufsz) {
+    int all_digits = 1;
+    for (const char *p = s; *p; p++) {
+        if (!isdigit((unsigned char)*p)) { all_digits = 0; break; }
+    }
+    if (all_digits && s[0] != '\0') {
+        snprintf(buf, bufsz, "tcp://127.0.0.1:%s", s);
+        return buf;
+    }
+    return s;
+}
+
 int main(int argc, char **argv) {
     if (argc < 4) goto usage;
 
     const char *role = argv[1];
-    int port        = atoi(argv[2]);
-    int size        = atoi(argv[3]);
+    char addr_buf[256];
+    const char *addr = resolve_addr(argv[2], addr_buf, sizeof(addr_buf));
+    int size = atoi(argv[3]);
 
     void *ctx = zmq_ctx_new();
     if (!ctx) die("zmq_ctx_new");
-
-    char addr[64];
-    snprintf(addr, sizeof(addr), "tcp://127.0.0.1:%d", port);
 
     if (strcmp(role, "push") == 0) {
         void *sock = zmq_socket(ctx, ZMQ_PUSH);
@@ -52,7 +72,6 @@ int main(int argc, char **argv) {
 
         for (;;) {
             if (zmq_send(sock, buf, size, 0) < 0) {
-                /* EINTR on SIGTERM is fine; anything else is a bug */
                 if (zmq_errno() == EINTR) break;
                 die("zmq_send");
             }
@@ -71,18 +90,15 @@ int main(int argc, char **argv) {
         zmq_msg_t msg;
         zmq_msg_init(&msg);
 
-        /* Warmup: drain for 500 ms. */
         double warmup_end = now_secs() + 0.5;
         while (now_secs() < warmup_end) {
             int rc = zmq_msg_recv(&msg, sock, ZMQ_DONTWAIT);
             if (rc < 0) {
-                /* Nothing ready; busy-spin is fine for 500 ms warmup. */
-                struct timespec ts = {0, 100000}; /* 100 µs */
+                struct timespec ts = {0, 100000};
                 nanosleep(&ts, NULL);
             }
         }
 
-        /* Timed window. Use blocking recv with a poll timeout. */
         long long count = 0;
         double t0 = now_secs();
         double deadline = t0 + duration;
@@ -98,7 +114,7 @@ int main(int argc, char **argv) {
             if (timeout_ms < 1) timeout_ms = 1;
             int rc = zmq_poll(items, 1, timeout_ms);
             if (rc < 0) break;
-            if (rc == 0) break; /* timeout */
+            if (rc == 0) break;
             if (items[0].revents & ZMQ_POLLIN) {
                 while (zmq_msg_recv(&msg, sock, ZMQ_DONTWAIT) >= 0) {
                     count++;
@@ -121,7 +137,8 @@ done:;
     return 0;
 
 usage:
-    fprintf(stderr, "usage: %s push <port> <size>\n", argv[0]);
-    fprintf(stderr, "       %s pull <port> <size> <duration_secs>\n", argv[0]);
+    fprintf(stderr, "usage: %s push <addr> <size>\n", argv[0]);
+    fprintf(stderr, "       %s pull <addr> <size> <duration_secs>\n", argv[0]);
+    fprintf(stderr, "<addr>: port number or full ZMQ address (tcp:// ipc://)\n");
     return 1;
 }

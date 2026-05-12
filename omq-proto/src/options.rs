@@ -75,11 +75,11 @@ pub struct Options {
     /// connect/accept. `None` leaves the OS default. Larger values
     /// reduce the number of kernel-to-userspace round-trips for large
     /// messages.
-    pub tcp_recv_buffer_size: Option<usize>,
+    pub recv_buffer_size: Option<usize>,
 
     /// `SO_SNDBUF` size in bytes. Applied to every TCP/IPC stream after
     /// connect/accept. `None` leaves the OS default.
-    pub tcp_send_buffer_size: Option<usize>,
+    pub send_buffer_size: Option<usize>,
 
     /// Active security mechanism. Defaults to `Null` (no encryption).
     pub mechanism: MechanismConfig,
@@ -271,8 +271,8 @@ impl Default for Options {
             router_mandatory: false,
             on_mute: OnMute::Block,
             tcp_keepalive: KeepAlive::default(),
-            tcp_recv_buffer_size: None,
-            tcp_send_buffer_size: None,
+            recv_buffer_size: None,
+            send_buffer_size: None,
             mechanism: MechanismConfig::Null,
             compression_dict: None,
             compression_auto_train: true,
@@ -389,14 +389,14 @@ impl Options {
     }
 
     #[must_use]
-    pub fn tcp_recv_buffer_size(mut self, bytes: usize) -> Self {
-        self.tcp_recv_buffer_size = Some(bytes);
+    pub fn recv_buffer_size(mut self, bytes: usize) -> Self {
+        self.recv_buffer_size = Some(bytes);
         self
     }
 
     #[must_use]
-    pub fn tcp_send_buffer_size(mut self, bytes: usize) -> Self {
-        self.tcp_send_buffer_size = Some(bytes);
+    pub fn send_buffer_size(mut self, bytes: usize) -> Self {
+        self.send_buffer_size = Some(bytes);
         self
     }
 
@@ -607,10 +607,10 @@ impl Options {
     /// Apply `SO_RCVBUF` and `SO_SNDBUF` to a connected socket.
     pub fn apply_socket_buffers<S: std::os::fd::AsFd>(&self, sock: &S) -> std::io::Result<()> {
         let sref = socket2::SockRef::from(sock);
-        if let Some(n) = self.tcp_recv_buffer_size {
+        if let Some(n) = self.recv_buffer_size {
             sref.set_recv_buffer_size(n)?;
         }
-        if let Some(n) = self.tcp_send_buffer_size {
+        if let Some(n) = self.send_buffer_size {
             sref.set_send_buffer_size(n)?;
         }
         Ok(())

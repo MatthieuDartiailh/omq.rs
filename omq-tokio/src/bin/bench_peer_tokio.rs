@@ -1,10 +1,13 @@
-//! Two-process TCP throughput peer for omq-tokio.
+//! Two-process throughput peer for omq-tokio.
 //!
 //! Usage:
-//!   `bench_peer` push \<port\> \<`msg_size_bytes`\>
-//!   `bench_peer` pull \<port\> \<`msg_size_bytes`\> \<`duration_secs`\>
+//!   `bench_peer_tokio` push \<addr\> \<`msg_size_bytes`\>
+//!   `bench_peer_tokio` pull \<addr\> \<`msg_size_bytes`\> \<`duration_secs`\>
 //!
-//! Push: binds <tcp://127.0.0.1>:\<port\>, sends \<`msg_size`\> byte messages forever.
+//! \<addr\>: a port number (`tcp://127.0.0.1:<port>`) or a full endpoint
+//!   (e.g. `ipc:///tmp/bench.sock`).
+//!
+//! Push: binds, sends \<`msg_size`\> byte messages forever.
 //! Pull: connects, warms up for 500 ms, then counts messages for \<duration\>
 //!       seconds and prints one line to stdout:
 //!         \<count\> \<`elapsed_secs`\> \<`msg_size`\>
@@ -16,10 +19,14 @@ use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 use std::net::Ipv4Addr;
 
-fn tcp_ep(port: u16) -> Endpoint {
-    Endpoint::Tcp {
-        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
-        port,
+fn parse_ep(s: &str) -> Endpoint {
+    if let Ok(port) = s.parse::<u16>() {
+        Endpoint::Tcp {
+            host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
+            port,
+        }
+    } else {
+        s.parse().expect("valid endpoint (port number or ipc:// path)")
     }
 }
 
@@ -42,19 +49,20 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("push") => {
-            let port: u16 = args[2].parse().expect("port");
+            let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
-            run_push(port, size).await;
+            run_push(ep, size).await;
         }
         Some("pull") => {
-            let port: u16 = args[2].parse().expect("port");
+            let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
-            run_pull(port, size, Duration::from_secs_f64(duration)).await;
+            run_pull(ep, size, Duration::from_secs_f64(duration)).await;
         }
         _ => {
-            eprintln!("usage: bench_peer push <port> <size>");
-            eprintln!("       bench_peer pull <port> <size> <duration_secs>");
+            eprintln!("usage: bench_peer_tokio push <addr> <size>");
+            eprintln!("       bench_peer_tokio pull <addr> <size> <duration_secs>");
+            eprintln!("<addr>: port number or full endpoint (tcp:// ipc://)");
             std::process::exit(1);
         }
     }
@@ -64,23 +72,23 @@ fn bench_options(msg_size: usize) -> Options {
     let mut o = Options::default();
     if msg_size >= 2 * 1024 * 1024 {
         let buf = msg_size * 2;
-        o = o.tcp_recv_buffer_size(buf).tcp_send_buffer_size(buf);
+        o = o.recv_buffer_size(buf).send_buffer_size(buf);
     }
     o
 }
 
-async fn run_push(port: u16, size: usize) {
+async fn run_push(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options(size));
-    push.bind(tcp_ep(port)).await.expect("push bind");
+    push.bind(ep).await.expect("push bind");
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
         push.send(Message::single(payload.clone())).await.unwrap();
     }
 }
 
-async fn run_pull(port: u16, size: usize, duration: Duration) {
+async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
     let pull = Socket::new(SocketType::Pull, bench_options(size));
-    pull.connect(tcp_ep(port)).await.expect("pull connect");
+    pull.connect(ep).await.expect("pull connect");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 

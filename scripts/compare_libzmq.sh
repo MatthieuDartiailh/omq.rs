@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Compare omq-compio + omq-tokio vs libzmq: single PUSH process → single PULL
-# process, TCP loopback. Each cell: 3 s timed window after 500 ms warmup.
+# Compare omq-compio + omq-tokio vs libzmq: single PUSH process -> single PULL
+# process, loopback. Each cell: 3 s timed window after 500 ms warmup.
 #
 # Usage:
-#   ./scripts/compare_libzmq.sh                   # print table to stdout
-#   ./scripts/compare_libzmq.sh --update-benchmarks  # update COMPARISONS.md section
-#   ./scripts/compare_libzmq.sh [port]            # override base port (default 15555)
+#   ./scripts/compare_libzmq.sh                     # TCP, print to stdout
+#   ./scripts/compare_libzmq.sh --ipc               # IPC, print to stdout
+#   ./scripts/compare_libzmq.sh --update-benchmarks # TCP, update COMPARISONS.md
+#   ./scripts/compare_libzmq.sh --ipc --update-benchmarks
+#   ./scripts/compare_libzmq.sh [port]              # override base TCP port (default 15555)
 
 set -euo pipefail
 
@@ -21,10 +23,12 @@ REPO="$SCRIPT_DIR/.."
 DURATION=3
 BASE_PORT=15555
 UPDATE_BENCHMARKS=false
+TRANSPORT=tcp
 
 for arg in "$@"; do
     case "$arg" in
         --update-benchmarks) UPDATE_BENCHMARKS=true ;;
+        --ipc) TRANSPORT=ipc ;;
         [0-9]*) BASE_PORT="$arg" ;;
     esac
 done
@@ -32,11 +36,11 @@ done
 # ---------- build ----------
 
 echo "==> building omq-compio bench_peer..."
-cargo build --release -p omq-compio --bin bench_peer 2>/dev/null
+cargo build --release -p omq-compio --bin bench_peer -q
 OMQ_PEER="$REPO/target/release/bench_peer"
 
 echo "==> building omq-tokio bench_peer..."
-cargo build --release -p omq-tokio --bin bench_peer_tokio 2>/dev/null
+cargo build --release -p omq-tokio --bin bench_peer_tokio -q
 TOKIO_PEER="$REPO/target/release/bench_peer_tokio"
 
 echo "==> building libzmq bench_peer..."
@@ -46,17 +50,27 @@ LIBZMQ_PEER="$SCRIPT_DIR/libzmq_bench_peer"
 
 # ---------- helpers ----------
 
-# run_cell <peer_binary> <port> <size>
-run_cell() {
-    local peer="$1" port="$2" size="$3"
+# addr_for <idx>  -> endpoint string for this iteration
+addr_for() {
+    local idx="$1"
+    if [ "$TRANSPORT" = "ipc" ]; then
+        echo "ipc:///tmp/omq-bench-libzmq-${idx}.sock"
+    else
+        echo "$((BASE_PORT + idx))"
+    fi
+}
 
-    "$peer" push "$port" "$size" &
+# run_cell <peer_binary> <addr> <size>
+run_cell() {
+    local peer="$1" addr="$2" size="$3"
+
+    "$peer" push "$addr" "$size" &
     local push_pid=$!
 
     sleep 0.15
 
     local result
-    result=$("$peer" pull "$port" "$size" "$DURATION")
+    result=$("$peer" pull "$addr" "$size" "$DURATION")
 
     kill "$push_pid" 2>/dev/null || true
     wait "$push_pid" 2>/dev/null || true
@@ -64,7 +78,6 @@ run_cell() {
     echo "$result"
 }
 
-# fmt_msgs <msgs_per_sec>  → e.g. "2,568k" or "540k"
 fmt_msgs() {
     awk -v v="$1" 'BEGIN {
         if (v >= 1e6)      printf "%.2fM", v/1e6
@@ -73,7 +86,6 @@ fmt_msgs() {
     }'
 }
 
-# fmt_bw <MB_per_sec>  → e.g. "329" or "4.4 GB/s"
 fmt_bw() {
     awk -v v="$1" 'BEGIN {
         if (v >= 1000) printf "%.1f GB/s", v/1000
@@ -81,7 +93,6 @@ fmt_bw() {
     }'
 }
 
-# fmt_size <bytes>
 fmt_size() {
     awk -v v="$1" 'BEGIN {
         if (v >= 1048576) printf "%g MiB", v/1048576
@@ -90,12 +101,11 @@ fmt_size() {
     }'
 }
 
-# ratio_str <omq_msgs> <zmq_msgs>
 ratio_str() {
     awk -v o="$1" -v z="$2" 'BEGIN {
         r = o/z
-        if (r >= 1.1) printf "**%.1f×**", r
-        else          printf "%.2f×", r
+        if (r >= 1.1) printf "**%.1fx**", r
+        else          printf "%.2fx", r
     }'
 }
 
@@ -110,22 +120,23 @@ ZMQ_VERSION=$(pkg-config --modversion libzmq 2>/dev/null || echo '?')
 
 echo ""
 echo "omq $OMQ_VERSION vs libzmq $ZMQ_VERSION"
-echo "TCP loopback, 2 processes, ${DURATION}s window + 500ms warmup"
+echo "${TRANSPORT^^} loopback, 2 processes, ${DURATION}s window + 500ms warmup"
 echo ""
 printf "%-10s  %20s  %22s  %22s\n" "" "libzmq" "omq-compio" "omq-tokio"
-printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | ×)" "(msg/s  |  MB/s  | ×)"
+printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
 echo "-----------------------------------------------------------------------------------------------------------"
 
 declare -a RESULTS_SIZES RESULTS_OMQ_MSGS RESULTS_OMQ_MB RESULTS_TOKIO_MSGS RESULTS_TOKIO_MB RESULTS_ZMQ_MSGS RESULTS_ZMQ_MB
 
 idx=0
 for size in "${SIZES[@]}"; do
-    # Use sequential ports to avoid overflow for large sizes.
-    PORT=$((BASE_PORT + idx))
+    ADDR=$(addr_for "$idx")
+    ADDR_B=$( [ "$TRANSPORT" = "ipc" ] && echo "ipc:///tmp/omq-bench-libzmq-b-${idx}.sock" || echo "$((BASE_PORT + 100 + idx))" )
+    ADDR_C=$( [ "$TRANSPORT" = "ipc" ] && echo "ipc:///tmp/omq-bench-libzmq-c-${idx}.sock" || echo "$((BASE_PORT + 200 + idx))" )
 
-    omq_raw=$(run_cell   "$OMQ_PEER"    "$PORT"            "$size")
-    tokio_raw=$(run_cell "$TOKIO_PEER"  "$((PORT + 100))"  "$size")
-    lzq_raw=$(run_cell   "$LIBZMQ_PEER" "$((PORT + 200))"  "$size")
+    omq_raw=$(run_cell   "$OMQ_PEER"    "$ADDR"   "$size")
+    tokio_raw=$(run_cell "$TOKIO_PEER"  "$ADDR_B" "$size")
+    lzq_raw=$(run_cell   "$LIBZMQ_PEER" "$ADDR_C" "$size")
 
     omq_msgs=$(echo   "$omq_raw"   | awk '{printf "%.0f", $1/$2}')
     omq_mb=$(echo     "$omq_raw"   | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
@@ -158,12 +169,15 @@ echo ""
 
 if [ "$UPDATE_BENCHMARKS" = true ]; then
     BENCHMARKS="$REPO/COMPARISONS.md"
-    MARKER="libzmq_comparison"
+    if [ "$TRANSPORT" = "ipc" ]; then
+        MARKER="libzmq_comparison_ipc"
+    else
+        MARKER="libzmq_comparison"
+    fi
 
-    # Build markdown table
     MD=""
     MD+=$'\n'
-    MD+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
+    MD+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio x | omq-tokio msg/s | omq-tokio MB/s | tokio x |"$'\n'
     MD+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
 
     for i in "${!RESULTS_SIZES[@]}"; do

@@ -85,7 +85,7 @@ fn bench_options(msg_size: usize) -> Options {
     }
     if msg_size >= 2 * 1024 * 1024 {
         let buf = msg_size * 2;
-        o = o.tcp_recv_buffer_size(buf).tcp_send_buffer_size(buf);
+        o = o.recv_buffer_size(buf).send_buffer_size(buf);
     }
     o
 }
