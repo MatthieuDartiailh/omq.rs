@@ -26,7 +26,8 @@ fn parse_ep(s: &str) -> Endpoint {
             port,
         }
     } else {
-        s.parse().expect("valid endpoint (port number or ipc:// path)")
+        s.parse()
+            .expect("valid endpoint (port number or ipc:// path)")
     }
 }
 
