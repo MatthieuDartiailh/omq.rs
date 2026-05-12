@@ -43,6 +43,10 @@ pub struct DriverConfig {
     pub heartbeat_timeout: Option<Duration>,
     /// `TTL` field of outgoing PING (peer-hint for when to assume dead).
     pub heartbeat_ttl: Option<Duration>,
+    /// Recv frames whose payload exceeds this threshold via a single
+    /// `read_exact` into a pre-sized buffer, bypassing the fixed
+    /// `read_buf` → codec copy path. `0` disables.
+    pub large_message_threshold: usize,
 }
 
 /// Commands accepted by a running [`ConnectionDriver`].
@@ -348,6 +352,25 @@ where
                         return Ok(()); // peer EOF
                     }
                     codec.handle_input(Bytes::copy_from_slice(&read_buf[..n]))?;
+                    if config.large_message_threshold > 0 {
+                        while let Some(info) = codec.peek_next_frame_payload_size()? {
+                            if info.payload_len < config.large_message_threshold {
+                                break;
+                            }
+                            let Some((plen, prefix)) =
+                                codec.begin_supplied_payload_with_prefix()
+                            else {
+                                break;
+                            };
+                            let mut buf = BytesMut::zeroed(plen);
+                            buf[..prefix.len()].copy_from_slice(prefix.as_slice());
+                            if prefix.len() < plen {
+                                reader.read_exact(&mut buf[prefix.len()..]).await?;
+                            }
+                            last_input = Instant::now();
+                            codec.supply_payload(buf.freeze())?;
+                        }
+                    }
                 }
 
                 res = flush_once(&mut writer, &mut codec), if want_write => {

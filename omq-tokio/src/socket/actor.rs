@@ -936,6 +936,10 @@ impl SocketDriver {
             heartbeat_interval: self.options.heartbeat_interval,
             heartbeat_timeout: self.options.heartbeat_timeout,
             heartbeat_ttl: self.options.heartbeat_ttl,
+            large_message_threshold: self
+                .options
+                .large_message_threshold
+                .unwrap_or(0),
         };
         let driver = ConnectionDriver::with_config(
             stream,

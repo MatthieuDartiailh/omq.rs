@@ -121,8 +121,9 @@ pub struct Options {
     /// any frame past four 32 KiB pool slots, large enough that the
     /// per-frame SQE-rebuild cost is amortised.
     ///
-    /// Ignored on `omq-tokio` (tokio's recv path doesn't use a buf-ring;
-    /// the field is accepted for API parity).
+    /// On `omq-tokio` the same threshold triggers a `read_exact` fast
+    /// path that reads large payloads into a single pre-sized buffer
+    /// instead of accumulating fixed-size reads through the codec.
     pub large_message_threshold: Option<usize>,
 }
 
