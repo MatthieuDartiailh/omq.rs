@@ -5,16 +5,30 @@
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-%3E%3D%201.93-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-> **3.5M msg/s** inproc | **6.13M msg/s** ipc | **6.58M msg/s** tcp
+> **3.5M msg/s** inproc | **6.85M msg/s** ipc | **6.71M msg/s** tcp (32 B, compio backend)
 >
 > **5.57 µs** inproc latency | **17.4 µs** ipc | **24.4 µs** tcp
 
-Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at all message sizes.
+Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at mid-size messages over TCP and IPC.
 
 - 11 standard socket types + 8 draft types
 - Transports: inproc / IPC / TCP; UDP (RADIO/DISH only)
 - Mechanisms: NULL / CURVE / BLAKE3ZMQ
 - Compression: `lz4+tcp://` and `zstd+tcp://`
+
+> **Wire-compatible with libzmq.** omq sockets interoperate with any libzmq peer - C, Python
+> (pyzmq), Ruby, Node - on any shared transport. Same ZMTP 3.x framing, same socket types, same
+> CURVE handshake.
+
+### vs. libzmq (TCP loopback, two processes)
+
+| Size | libzmq | omq-compio | x | omq-tokio | x |
+|------|--------|------------|---|-----------|---|
+| 512 B | 2.01M msg/s | 3.38M msg/s | **1.7x** | 3.99M msg/s | **2.0x** |
+| 2 KiB | 677k msg/s | 1.64M msg/s | **2.4x** | 1.34M msg/s | **2.0x** |
+| 8 KiB | 178k msg/s | 574k msg/s | **3.2x** | 491k msg/s | **2.8x** |
+
+[Full tables across all sizes and transports (TCP + IPC) ->](COMPARISONS.md)
 
 ## Install
 
@@ -22,6 +36,8 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at all message sizes.
 cargo add omq                                 # compio backend (default)
 cargo add omq --no-default-features --features tokio-backend
 ```
+
+If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv — just async Rust:
 
 ```rust
 use omq::{Message, Options, Socket, SocketType};
@@ -39,7 +55,7 @@ assert_eq!(&msg[0], b"hello");
 ### Accessing message frames
 
 A ZMQ message is one or more frames delivered atomically. Frame payloads
-are always contiguous — zero-copy `&[u8]` access with no fallback needed:
+are always contiguous - zero-copy `&[u8]` access with no fallback needed:
 
 ```rust
 let msg = pull.recv().await?;
@@ -104,28 +120,51 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 ## Design highlights
 
-- **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)): byte-in / events-out, no async.
-- **Per-socket HWM** with work-stealing send pumps on round-robin patterns;
-  per-connection queues on fan-out and identity-routed patterns.
-- **Always-contiguous frame payloads**: `&msg[0]` gives `&[u8]` directly,
-  no fallible borrow or coalesce step. Kernel stitches outbound frames via `writev`.
-- **Inproc bypasses ZMTP codec**: exchanges `InprocPeerSnapshot` at connect, no serialization.
-- **Identity collision detection**: duplicate identity on ROUTER/SERVER/PEER =>
-  `Error::IdentityCollision`.
-- **Strict per-pipe priority** (`priority` feature): nanomsg-style 1..=255 on
-  `Socket::connect_with`.
-- **Patricia-trie subscription matcher**: O(M) on topic length, not O(N×M).
-- **zstd dictionary auto-training** (`zstd+tcp://`): trains from first 1k
-  messages, ships to peer once, drops threshold from 512 B to 64 B.
-- **Encrypted inproc rejected at parse time**: `inproc://` + CURVE/BLAKE3ZMQ is a parse error.
-- **Monitor**: socket-like `Stream` with owned `PeerInfo` on every event.
-- **Python binding** ([`bindings/pyomq`](bindings/pyomq/)): PyO3 over `omq-compio`, sync + asyncio.
+| Feature | Details |
+|---------|---------|
+| **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)) | Byte-in / events-out; no async, no traits on the hot path. Mirrors `rustls::ConnectionCommon`. |
+| **Per-socket HWM** | Work-stealing send pumps on round-robin patterns; per-connection queues on fan-out and identity-routed patterns. |
+| **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly - no fallible borrow, no coalesce step. Kernel stitches outbound frames via `writev`. |
+| **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |
+| **Strict per-pipe priority** | nanomsg-style 1-255 tiers with `Socket::connect_with` (`priority` feature). |
+| **zstd dictionary auto-training** | Trains from first 1k messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |
+| **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
+| **Python binding** | PyO3 over `omq-compio`, sync + asyncio API. [`bindings/pyomq`](bindings/pyomq/). |
+
+## Python binding (pyomq)
+
+```sh
+pip install pyomq
+```
+
+```python
+import pyomq
+
+ctx = pyomq.Context()
+push = ctx.socket(pyomq.PUSH)
+push.connect("tcp://127.0.0.1:5555")
+push.send(b"hello")
+
+pull = ctx.socket(pyomq.PULL)
+pull.bind("tcp://127.0.0.1:5555")
+data = pull.recv()
+```
+
+Drop-in pyzmq replacement. 2.3-3.1x faster over TCP:
+
+| Size | pyomq | pyzmq | x |
+|------|-------|-------|---|
+| 512 B | 1.28M msg/s | 460k msg/s | **2.8x** |
+| 2 KiB | 902k msg/s | 347k msg/s | **2.6x** |
+| 8 KiB | 331k msg/s | 105k msg/s | **3.1x** |
+
+asyncio API available via `pyomq.asyncio`. Wheels for Linux x86_64 and aarch64, Python 3.9+.
 
 ## Benchmarks
 
 - [BENCHMARKS.md](BENCHMARKS.md): throughput / latency / compression tables
   across transports, message sizes, and backends (omq-compio vs omq-tokio).
-- [COMPARISONS.md](COMPARISONS.md): two-process TCP benchmarks against
+- [COMPARISONS.md](COMPARISONS.md): two-process TCP and IPC benchmarks against
   libzmq and zmq.rs.
 
 ## Documentation
