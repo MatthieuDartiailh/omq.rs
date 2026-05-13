@@ -106,6 +106,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 |-------------------|---------------------------------------------------|----------------------------------|
 | `compio-backend`  | (default) compio io_uring/IOCP backend            | -                                |
 | `tokio-backend`   | tokio multi-thread backend                        | -                                |
+| `plain`           | PLAIN username/password auth (RFC 24)             | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
 | `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
 | `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4-sys` |
