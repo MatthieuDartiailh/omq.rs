@@ -62,12 +62,14 @@ pub(crate) fn rounds() -> usize {
         .unwrap_or(DEFAULT_ROUNDS)
 }
 
-/// Hard ceiling per cell. Scales with the configured round budget so
-/// long overnight runs don't trip the timeout.
+/// Hard ceiling per cell — a hang guard, not a tight bound. The 30s
+/// base covers TCP setup, ZMTP handshake, subscription propagation,
+/// and wait_connected's own 30s deadline. The 2x round budget absorbs
+/// calibration overshoot.
 pub(crate) fn run_timeout() -> Duration {
     let r = rounds() as u32;
     let per = round_duration();
-    per.saturating_mul(r) + Duration::from_secs(10)
+    per.saturating_mul(r * 2) + Duration::from_secs(30)
 }
 
 /// `omq/benches/results.jsonl`. One row per cell.
