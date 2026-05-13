@@ -65,12 +65,19 @@ impl std::fmt::Debug for Keypair {
 /// Post-handshake symmetric session state. Each direction is
 /// independent: client→server and server→client get their own
 /// `(key, nonce)` pair from `derive_sessions`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionKeys {
     pub c2s_key: Hash,
     pub c2s_nonce: Nonce24,
     pub s2c_key: Hash,
     pub s2c_nonce: Nonce24,
+}
+
+impl std::fmt::Debug for SessionKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionKeys")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Server-side handshake state machine.
