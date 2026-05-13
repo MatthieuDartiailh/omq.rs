@@ -234,6 +234,14 @@ mid-accumulation -> next `recv()` resumes.
 Copy count: small messages 1x memcpy. Large messages: ~1.25x at
 256 KiB, ~1.03x at 2 MiB, ~1.00x at 32 MiB+.
 
+Current large-message ratios vs libzmq (compio):
+
+| size | TCP | IPC |
+|---|---|---|
+| 2 MiB | 1.4x | 2.0x |
+| 8 MiB | 1.2x | 1.6x |
+| 32 MiB | 1.01x | 1.9x |
+
 Why not `CancelToken`: compio's `cancel_token` checks
 `key.has_result()` and short-circuits for multi-shot keys that
 already delivered CQEs. Five attempts deadlocked in release
