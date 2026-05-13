@@ -22,6 +22,8 @@ use std::collections::VecDeque;
 use std::io::IoSlice;
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 #[cfg(feature = "curve")]
 use bytes::BufMut;
 use bytes::{Bytes, BytesMut};
@@ -761,12 +763,12 @@ impl Connection {
         self.out_bytes_total > self.front_consumed
     }
 
-    /// Borrow the queued outbound chunks as a `Vec<IoSlice>` ready for
+    /// Borrow the queued outbound chunks as `IoSlice`s ready for
     /// `write_vectored` / `sendmsg`. The first slice is offset by any
     /// `front_consumed` from a prior partial write. Empty when nothing
     /// is pending.
-    pub fn transmit_chunks(&self) -> Vec<IoSlice<'_>> {
-        let mut out = Vec::with_capacity(self.out_chunks.len());
+    pub fn transmit_chunks(&self) -> SmallVec<[IoSlice<'_>; 8]> {
+        let mut out = SmallVec::with_capacity(self.out_chunks.len());
         for (i, chunk) in self.out_chunks.iter().enumerate() {
             let start = if i == 0 { self.front_consumed } else { 0 };
             if start < chunk.len() {

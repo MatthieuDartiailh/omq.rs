@@ -599,6 +599,7 @@ where
         return Ok(());
     }
     let n = writer.write_vectored(&chunks).await?;
+    drop(chunks);
     if n == 0 {
         return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
     }
