@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::proto::mechanism::MechanismSetup;
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
 use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]
 use crate::proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey};
@@ -168,6 +168,14 @@ pub enum MechanismConfig {
         our_keypair: Blake3ZmqKeypair,
         server_public: Blake3ZmqPublicKey,
     },
+    /// PLAIN server side (RFC 24): authenticates incoming clients by
+    /// username + password. No encryption. The authenticator is
+    /// required — PLAIN without auth serves no purpose.
+    #[cfg(feature = "plain")]
+    PlainServer { authenticator: Authenticator },
+    /// PLAIN client side: sends username + password to the server.
+    #[cfg(feature = "plain")]
+    PlainClient { username: String, password: String },
 }
 
 impl MechanismConfig {
@@ -179,6 +187,8 @@ impl MechanismConfig {
             Self::CurveServer { .. } | Self::CurveClient { .. } => b"CURVE",
             #[cfg(feature = "blake3zmq")]
             Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => b"BLAKE3",
+            #[cfg(feature = "plain")]
+            Self::PlainServer { .. } | Self::PlainClient { .. } => b"PLAIN",
         }
     }
 
@@ -209,6 +219,8 @@ impl MechanismConfig {
             Self::Null => None,
             #[cfg(feature = "blake3zmq")]
             Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => None,
+            #[cfg(feature = "plain")]
+            Self::PlainServer { .. } | Self::PlainClient { .. } => None,
         }
     }
 
@@ -250,6 +262,15 @@ impl MechanismConfig {
             } => MechanismSetup::Blake3ZmqClient {
                 keypair: our_keypair.clone(),
                 server_public: *server_public,
+            },
+            #[cfg(feature = "plain")]
+            Self::PlainServer { authenticator } => MechanismSetup::PlainServer {
+                authenticator: authenticator.clone(),
+            },
+            #[cfg(feature = "plain")]
+            Self::PlainClient { username, password } => MechanismSetup::PlainClient {
+                username: username.clone(),
+                password: password.clone(),
             },
         }
     }
@@ -500,6 +521,38 @@ impl Options {
             }
             _ => panic!("authenticator requires a server-side encrypting mechanism"),
         }
+        self
+    }
+
+    /// Configure this socket as a PLAIN server (RFC 24). The
+    /// authenticator receives [`MechanismPeerInfo`] with `username`
+    /// and `password` populated; return `true` to admit the client.
+    /// No encryption is applied — use on trusted networks only.
+    #[cfg(feature = "plain")]
+    #[must_use]
+    pub fn plain_server<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
+    {
+        self.mechanism = MechanismConfig::PlainServer {
+            authenticator: Authenticator::new(f),
+        };
+        self
+    }
+
+    /// Configure this socket as a PLAIN client with the given
+    /// credentials. The server's authenticator decides admission.
+    #[cfg(feature = "plain")]
+    #[must_use]
+    pub fn plain_client(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.mechanism = MechanismConfig::PlainClient {
+            username: username.into(),
+            password: password.into(),
+        };
         self
     }
 

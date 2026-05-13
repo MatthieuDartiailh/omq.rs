@@ -14,7 +14,7 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
 - Two async backends: **compio** (io_uring, default) and **tokio**
 - 11 standard socket types + 8 draft types
 - Transports: inproc / IPC (including Linux abstract namespace) / TCP; UDP (RADIO/DISH only)
-- Mechanisms: NULL / CURVE / BLAKE3ZMQ
+- Mechanisms: NULL / PLAIN / CURVE / BLAKE3ZMQ
 - Compression: `lz4+tcp://` and `zstd+tcp://`
 - Pure Rust — no C dependencies unless you opt into lz4 or zstd
 

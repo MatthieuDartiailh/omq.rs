@@ -322,6 +322,8 @@ impl Server {
             let peer = MechanismPeerInfo {
                 mechanism: MechanismName::BLAKE3,
                 public_key: client_permanent,
+                username: None,
+                password: None,
             };
             if !auth.allow(&peer) {
                 return Err(self.fail("client public key not authorized"));

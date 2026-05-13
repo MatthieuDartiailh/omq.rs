@@ -51,6 +51,7 @@ impl MechanismName {
     /// null-padded to 20. The "ZMQ" suffix appears only in
     /// documentation and the protocol-id KDF context string,
     /// `BLAKE3ZMQ-1.0`.
+    pub const PLAIN: Self = Self::from_ascii_panic(b"PLAIN");
     pub const BLAKE3: Self = Self::from_ascii_panic(b"BLAKE3");
 
     /// Build a mechanism name. Panics at const-eval time if name > 20 bytes or

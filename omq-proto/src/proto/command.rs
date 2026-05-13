@@ -216,14 +216,14 @@ fn write_name(out: &mut BytesMut, name: &[u8]) {
 /// ready to embed in the handshake message body. Cfg-gated to
 /// avoid dead-code warnings in builds that don't include any
 /// mechanism that calls it.
-#[cfg(feature = "blake3zmq")]
+#[cfg(any(feature = "blake3zmq", feature = "plain"))]
 pub(crate) fn encode_properties(props: &PeerProperties) -> Vec<u8> {
     let mut buf = BytesMut::new();
     encode_properties_inner(props, &mut buf);
     buf.to_vec()
 }
 
-#[cfg(feature = "blake3zmq")]
+#[cfg(any(feature = "blake3zmq", feature = "plain"))]
 pub(crate) fn decode_properties(body: &[u8]) -> Result<PeerProperties> {
     decode_properties_inner(Bytes::copy_from_slice(body))
 }

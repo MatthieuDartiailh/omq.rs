@@ -84,7 +84,7 @@ run cargo test
 #    strategy alters the send-side data flow for every socket type,
 #    not just the priority test file).
 # ---------------------------------------------------------------- #
-for feature in curve blake3zmq lz4 zstd priority; do
+for feature in plain curve blake3zmq lz4 zstd priority; do
     par run cargo test -p omq-proto  --features "$feature"
     par run cargo test -p omq-tokio  --features "$feature"
     par run cargo test -p omq-compio --features "$feature"
@@ -96,7 +96,7 @@ par_wait
 #    cross-feature interactions (e.g. CURVE + zstd + priority all
 #    layered on the same connection).
 # ---------------------------------------------------------------- #
-all_features='curve blake3zmq lz4 zstd priority'
+all_features='plain curve blake3zmq lz4 zstd priority'
 par run cargo test -p omq-proto  --features "$all_features"
 par run cargo test -p omq-tokio  --features "$all_features"
 par run cargo test -p omq-compio --features "$all_features"

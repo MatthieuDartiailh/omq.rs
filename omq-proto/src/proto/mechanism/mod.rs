@@ -22,6 +22,11 @@ pub(crate) use blake3zmq::Blake3ZmqMechanism;
 #[cfg(feature = "blake3zmq")]
 pub use blake3zmq::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 
+#[cfg(feature = "plain")]
+pub mod plain;
+#[cfg(feature = "plain")]
+pub(crate) use plain::PlainMechanism;
+
 /// Mechanism setup passed to [`Connection::new`]. Equivalent in shape to
 /// `options::MechanismConfig` but lives at this layer so the codec can
 /// stay independent of `Options`.
@@ -60,6 +65,10 @@ pub enum MechanismSetup {
         keypair: Blake3ZmqKeypair,
         server_public: Blake3ZmqPublicKey,
     },
+    #[cfg(feature = "plain")]
+    PlainServer { authenticator: Authenticator },
+    #[cfg(feature = "plain")]
+    PlainClient { username: String, password: String },
 }
 
 impl MechanismSetup {
@@ -71,6 +80,8 @@ impl MechanismSetup {
             Self::CurveServer { .. } | Self::CurveClient { .. } => MechanismName::CURVE,
             #[cfg(feature = "blake3zmq")]
             Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => MechanismName::BLAKE3,
+            #[cfg(feature = "plain")]
+            Self::PlainServer { .. } | Self::PlainClient { .. } => MechanismName::PLAIN,
         }
     }
 
@@ -104,6 +115,14 @@ impl MechanismSetup {
             } => {
                 SecurityMechanism::Blake3Zmq(Blake3ZmqMechanism::new_client(keypair, server_public))
             }
+            #[cfg(feature = "plain")]
+            Self::PlainServer { authenticator } => {
+                SecurityMechanism::Plain(PlainMechanism::new_server(authenticator))
+            }
+            #[cfg(feature = "plain")]
+            Self::PlainClient { username, password } => {
+                SecurityMechanism::Plain(PlainMechanism::new_client(username, password))
+            }
         }
     }
 }
@@ -123,9 +142,12 @@ pub struct MechanismPeerInfo {
     /// cares - most callbacks just check `public_key`.
     pub mechanism: MechanismName,
     /// Peer's long-term 32-byte public key (CURVE / BLAKE3ZMQ are
-    /// both X25519 / Curve25519). For NULL there is no public key
-    /// and no authenticator is invoked.
+    /// both X25519 / Curve25519). Zeroed for PLAIN (no key exchange).
     pub public_key: [u8; 32],
+    /// PLAIN username. `None` for encrypting mechanisms.
+    pub username: Option<String>,
+    /// PLAIN password. `None` for encrypting mechanisms.
+    pub password: Option<String>,
 }
 
 /// Server-side admission callback shared by every encrypting
@@ -136,8 +158,8 @@ pub struct MechanismPeerInfo {
 #[derive(Clone)]
 pub struct Authenticator(
     #[cfg_attr(
-        not(any(feature = "curve", feature = "blake3zmq")),
-        allow(dead_code, reason = "only encrypting mechanisms call allow()")
+        not(any(feature = "curve", feature = "blake3zmq", feature = "plain")),
+        allow(dead_code, reason = "only non-NULL mechanisms call allow()")
     )]
     Arc<dyn Fn(&MechanismPeerInfo) -> bool + Send + Sync>,
 );
@@ -150,7 +172,7 @@ impl Authenticator {
         Self(Arc::new(f))
     }
 
-    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    #[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
     pub(crate) fn allow(&self, peer: &MechanismPeerInfo) -> bool {
         (self.0)(peer)
     }
@@ -178,7 +200,7 @@ pub(crate) enum MechanismStep {
     /// Consume more peer commands before handshake is done. (Used by
     /// multi-step mechanisms such as CURVE.)
     #[cfg_attr(
-        not(any(feature = "curve", feature = "blake3zmq")),
+        not(any(feature = "curve", feature = "blake3zmq", feature = "plain")),
         allow(dead_code, reason = "only multi-step mechanisms use Continue")
     )]
     Continue,
@@ -202,6 +224,8 @@ pub(crate) enum SecurityMechanism {
     Curve(CurveMechanism),
     #[cfg(feature = "blake3zmq")]
     Blake3Zmq(Blake3ZmqMechanism),
+    #[cfg(feature = "plain")]
+    Plain(PlainMechanism),
 }
 
 impl SecurityMechanism {
@@ -213,6 +237,8 @@ impl SecurityMechanism {
             Self::Curve(_) => MechanismName::CURVE,
             #[cfg(feature = "blake3zmq")]
             Self::Blake3Zmq(_) => MechanismName::BLAKE3,
+            #[cfg(feature = "plain")]
+            Self::Plain(_) => MechanismName::PLAIN,
         }
     }
 
@@ -241,6 +267,11 @@ impl SecurityMechanism {
             Self::Curve(m) => m.start(out, our_props),
             #[cfg(feature = "blake3zmq")]
             Self::Blake3Zmq(m) => m.start(out, our_props, our_greeting, peer_greeting),
+            #[cfg(feature = "plain")]
+            Self::Plain(m) => {
+                m.start(out, our_props);
+                Ok(())
+            }
         }
     }
 
@@ -256,6 +287,8 @@ impl SecurityMechanism {
             Self::Curve(m) => m.on_command(cmd, out),
             #[cfg(feature = "blake3zmq")]
             Self::Blake3Zmq(m) => m.on_command(cmd, out),
+            #[cfg(feature = "plain")]
+            Self::Plain(m) => m.on_command(cmd, out),
         }
     }
 
@@ -275,6 +308,8 @@ impl SecurityMechanism {
             Self::Blake3Zmq(m) => Ok(m
                 .build_transform(m.is_client())
                 .map(FrameTransform::Blake3Zmq)),
+            #[cfg(feature = "plain")]
+            Self::Plain(_) => Ok(None),
         }
     }
 }

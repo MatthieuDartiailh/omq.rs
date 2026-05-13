@@ -14,7 +14,7 @@
 
 #[cfg(feature = "priority")]
 pub use omq_proto::ConnectOpts;
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
 pub use omq_proto::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]
 pub use omq_proto::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};

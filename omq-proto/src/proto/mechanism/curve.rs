@@ -586,6 +586,8 @@ impl CurveMechanism {
             let peer = super::MechanismPeerInfo {
                 mechanism: crate::proto::greeting::MechanismName::CURVE,
                 public_key: *cl.as_bytes(),
+                username: None,
+                password: None,
             };
             if !auth.allow(&peer) {
                 return Err(Error::HandshakeFailed(

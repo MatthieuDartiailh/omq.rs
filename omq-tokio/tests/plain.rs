@@ -1,0 +1,221 @@
+//! PLAIN end-to-end integration tests: username/password handshake
+//! between two omq-tokio sockets.
+
+#![cfg(feature = "plain")]
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
+
+fn temp_ipc(name: &str) -> Endpoint {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("omq-plain-{name}-{}.sock", std::process::id()));
+    Endpoint::Ipc(IpcPath::Filesystem(dir))
+}
+
+fn accept_alice(peer: &omq_tokio::MechanismPeerInfo) -> bool {
+    peer.username.as_deref() == Some("alice") && peer.password.as_deref() == Some("secret")
+}
+
+#[tokio::test]
+async fn plain_push_pull_roundtrip() {
+    let ep = temp_ipc("push-pull");
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options::default().plain_server(accept_alice),
+    );
+    server.bind(ep.clone()).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default().plain_client("alice", "secret"),
+    );
+    client.connect(ep).await.unwrap();
+
+    client
+        .send(Message::single("hello over plain"))
+        .await
+        .unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over plain"[..]);
+}
+
+#[tokio::test]
+async fn plain_multipart_roundtrip() {
+    let ep = temp_ipc("multipart");
+
+    let pair_a = Socket::new(
+        SocketType::Pair,
+        Options::default().plain_server(accept_alice),
+    );
+    pair_a.bind(ep.clone()).await.unwrap();
+
+    let pair_b = Socket::new(
+        SocketType::Pair,
+        Options::default().plain_client("alice", "secret"),
+    );
+    pair_b.connect(ep).await.unwrap();
+
+    pair_b
+        .send(Message::multipart(["a", "bb", "ccc"]))
+        .await
+        .unwrap();
+
+    let m = tokio::time::timeout(Duration::from_secs(2), pair_a.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.len(), 3);
+    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
+    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
+}
+
+#[tokio::test]
+async fn plain_wrong_credentials_rejected() {
+    let ep = temp_ipc("wrong-creds");
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options::default().plain_server(accept_alice),
+    );
+    server.bind(ep.clone()).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default().plain_client("alice", "wrong"),
+    );
+    client.connect(ep).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let _ = tokio::time::timeout(
+        Duration::from_millis(50),
+        client.send(Message::single("ghost")),
+    )
+    .await;
+    let r = tokio::time::timeout(Duration::from_millis(200), server.recv()).await;
+    assert!(r.is_err(), "wrong credentials must prevent delivery");
+}
+
+#[tokio::test]
+async fn plain_authenticator_callback_runs() {
+    let ep = temp_ipc("auth-callback");
+
+    let saw = Arc::new(AtomicBool::new(false));
+    let saw_cb = saw.clone();
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options::default().plain_server(move |peer| {
+            saw_cb.store(true, Ordering::SeqCst);
+            accept_alice(peer)
+        }),
+    );
+    server.bind(ep.clone()).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default().plain_client("alice", "secret"),
+    );
+    client.connect(ep).await.unwrap();
+
+    client.send(Message::single("hi")).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saw.load(Ordering::SeqCst), "authenticator must run");
+}
+
+#[tokio::test]
+async fn plain_req_rep() {
+    let ep = temp_ipc("req-rep");
+
+    let rep = Socket::new(
+        SocketType::Rep,
+        Options::default().plain_server(accept_alice),
+    );
+    rep.bind(ep.clone()).await.unwrap();
+
+    let req = Socket::new(
+        SocketType::Req,
+        Options::default().plain_client("alice", "secret"),
+    );
+    req.connect(ep).await.unwrap();
+
+    req.send(Message::single("q")).await.unwrap();
+    let q = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
+
+    rep.send(Message::single("a")).await.unwrap();
+    let a = tokio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
+}
+
+#[tokio::test]
+async fn plain_dealer_router() {
+    let ep = temp_ipc("dealer-router");
+
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().plain_server(accept_alice),
+    );
+    router.bind(ep.clone()).await.unwrap();
+
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"d1"))
+            .plain_client("alice", "secret"),
+    );
+    dealer.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    dealer.send(Message::single("hi")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+}
+
+#[tokio::test]
+async fn plain_pub_sub() {
+    let ep = temp_ipc("pub-sub");
+
+    let p = Socket::new(
+        SocketType::Pub,
+        Options::default().plain_server(accept_alice),
+    );
+    p.bind(ep.clone()).await.unwrap();
+
+    let s = Socket::new(
+        SocketType::Sub,
+        Options::default().plain_client("alice", "secret"),
+    );
+    s.subscribe("").await.unwrap();
+    s.connect(ep).await.unwrap();
+
+    for _ in 0..30 {
+        let _ = p.send(Message::single("hello")).await;
+        if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(50), s.recv()).await {
+            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
+            return;
+        }
+    }
+    panic!("SUB never received over PLAIN");
+}

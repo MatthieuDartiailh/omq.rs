@@ -29,7 +29,7 @@ pub use monitor::{
     PeerCommandKind, PeerIdent, PeerInfo,
 };
 pub use options::{KeepAlive, MechanismConfig, OnMute, Options, ReconnectPolicy};
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
 pub use proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]
 pub use proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};

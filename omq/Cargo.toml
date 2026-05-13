@@ -29,6 +29,10 @@ blake3zmq = [
   "omq-compio?/blake3zmq",
   "omq-tokio?/blake3zmq",
 ]
+plain = [
+  "omq-compio?/plain",
+  "omq-tokio?/plain",
+]
 lz4 = [
   "omq-compio?/lz4",
   "omq-tokio?/lz4",
