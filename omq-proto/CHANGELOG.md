@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-13
+
+### Changed
+
+- **Breaking:** `Connection::transmit_chunks()` returns `SmallVec<[IoSlice; 8]>`
+  instead of `Vec<IoSlice>`, avoiding a heap allocation on typical flushes.
+- **Breaking:** Post-handshake READY/ERROR commands are now rejected as protocol
+  violations (ZMTP RFC 23), dropping the connection.
+- REQ/REP `pre_send` uses `into_parts_payload()` to move payloads instead of
+  double-cloning via `parts_payload()`.
+
+### Fixed
+
+- CURVE `cookie_key`, BLAKE3ZMQ `Keypair.secret`, and `CookieKeyring` keys are
+  now zeroized on drop via `Zeroizing<[u8; 32]>`.
+- `SessionKeys` `Debug` impl redacted — no longer prints session keys/nonces.
+
+### Refactored
+
+- BLAKE3ZMQ: replaced `Role` enum + `mem::replace` placeholder dance with flat
+  `Option` fields, matching CURVE's pattern.
+
 ## [0.5.0] - 2026-05-13
 
 ### Changed
