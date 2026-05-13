@@ -20,14 +20,13 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at mid-size messages over 
 > (pyzmq), Ruby, Node - on any shared transport. Same ZMTP 3.x framing, same socket types, same
 > CURVE handshake.
 
-### vs. libzmq (IPC, two processes)
+### vs. libzmq (TCP loopback, two processes)
 
 | Size | libzmq | omq-compio | × | omq-tokio | × |
 |------|--------|------------|---|-----------|---|
-| 512 B | 2.42M msg/s | 3.43M msg/s | **1.4×** | 4.04M msg/s | **1.7×** |
-| 8 KiB | 252k msg/s | 746k msg/s | **3.0×** | 459k msg/s | **1.8×** |
-| 512 KiB | 12k msg/s | 21k msg/s | **1.8×** | 11k msg/s | 0.92× |
-| 32 MiB | 86 msg/s | 163 msg/s | **1.9×** | 177 msg/s | **2.1×** |
+| 512 B | 1.96M msg/s | 3.50M msg/s | **1.8×** | 3.36M msg/s | **1.7×** |
+| 8 KiB | 178k msg/s | 599k msg/s | **3.4×** | 480k msg/s | **2.7×** |
+| 2 MiB | 2k msg/s | 4k msg/s | **1.5×** | 3k msg/s | **1.3×** |
 
 [Full tables across all sizes and transports (TCP + IPC) →](COMPARISONS.md)
 
