@@ -95,7 +95,11 @@ impl Drop for Blake3ZmqSecretKey {
 /// state machine. The state machine is built in `start` so we have
 /// the greeting bytes for `h0`.
 pub struct Blake3ZmqMechanism {
-    role: Role,
+    is_client: bool,
+    keypair: Option<HandshakeKeypair>,
+    cookie_keyring: Option<Arc<CookieKeyring>>,
+    authenticator: Option<super::Authenticator>,
+    server_public: Option<[u8; 32]>,
     state: HandshakeState,
 }
 
@@ -104,10 +108,7 @@ impl std::fmt::Debug for Blake3ZmqMechanism {
         f.debug_struct("Blake3ZmqMechanism")
             .field(
                 "role",
-                &match self.role {
-                    Role::Server { .. } => "server",
-                    Role::Client { .. } => "client",
-                },
+                if self.is_client { &"client" } else { &"server" },
             )
             .field(
                 "state",
@@ -119,20 +120,8 @@ impl std::fmt::Debug for Blake3ZmqMechanism {
                     HandshakeState::Failed => "failed",
                 },
             )
-            .finish()
+            .finish_non_exhaustive()
     }
-}
-
-enum Role {
-    Server {
-        keypair: HandshakeKeypair,
-        cookie_keyring: Arc<CookieKeyring>,
-        authenticator: Option<super::Authenticator>,
-    },
-    Client {
-        keypair: HandshakeKeypair,
-        server_public: [u8; 32],
-    },
 }
 
 enum HandshakeState {
@@ -151,14 +140,14 @@ impl Blake3ZmqMechanism {
         authenticator: Option<super::Authenticator>,
     ) -> Self {
         Self {
-            role: Role::Server {
-                keypair: HandshakeKeypair {
-                    public: keypair.public.0,
-                    secret: zeroize::Zeroizing::new(keypair.secret.0),
-                },
-                cookie_keyring,
-                authenticator,
-            },
+            is_client: false,
+            keypair: Some(HandshakeKeypair {
+                public: keypair.public.0,
+                secret: zeroize::Zeroizing::new(keypair.secret.0),
+            }),
+            cookie_keyring: Some(cookie_keyring),
+            authenticator,
+            server_public: None,
             state: HandshakeState::NotStarted,
         }
     }
@@ -166,13 +155,14 @@ impl Blake3ZmqMechanism {
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_client(keypair: Blake3ZmqKeypair, server_public: Blake3ZmqPublicKey) -> Self {
         Self {
-            role: Role::Client {
-                keypair: HandshakeKeypair {
-                    public: keypair.public.0,
-                    secret: zeroize::Zeroizing::new(keypair.secret.0),
-                },
-                server_public: server_public.0,
-            },
+            is_client: true,
+            keypair: Some(HandshakeKeypair {
+                public: keypair.public.0,
+                secret: zeroize::Zeroizing::new(keypair.secret.0),
+            }),
+            cookie_keyring: None,
+            authenticator: None,
+            server_public: Some(server_public.0),
             state: HandshakeState::NotStarted,
         }
     }
@@ -186,39 +176,28 @@ impl Blake3ZmqMechanism {
         peer_greeting: &[u8],
     ) -> Result<()> {
         let metadata = encode_properties(&our_props);
-        // The greetings need to be ordered (client_greeting, server_greeting)
-        // for the transcript. Each side knows its own role.
-        let role = std::mem::replace(&mut self.role, placeholder_role());
-        match role {
-            Role::Server {
-                keypair,
-                cookie_keyring,
-                authenticator,
-            } => {
-                let mut srv = HandshakeServer::new(keypair, cookie_keyring, metadata);
-                if let Some(auth) = authenticator {
-                    srv.set_authenticator(auth);
-                }
-                srv.set_greetings(peer_greeting, our_greeting);
-                self.state = HandshakeState::Server(srv);
-                self.role = role_placeholder_server();
+        let keypair = self.keypair.take().expect("start called twice");
+        if self.is_client {
+            let server_public = self.server_public.take().unwrap();
+            let mut cli = HandshakeClient::new(keypair, server_public, metadata);
+            cli.set_greetings(our_greeting, peer_greeting);
+            let hello = cli.build_hello().inspect_err(|_| {
+                self.state = HandshakeState::Failed;
+            })?;
+            out.push(Command::Unknown {
+                name: Bytes::from_static(b"HELLO"),
+                body: Bytes::from(hello),
+            });
+            self.state = HandshakeState::Client(cli);
+        } else {
+            let cookie_keyring = self.cookie_keyring.take().unwrap();
+            let authenticator = self.authenticator.take();
+            let mut srv = HandshakeServer::new(keypair, cookie_keyring, metadata);
+            if let Some(auth) = authenticator {
+                srv.set_authenticator(auth);
             }
-            Role::Client {
-                keypair,
-                server_public,
-            } => {
-                let mut cli = HandshakeClient::new(keypair, server_public, metadata);
-                cli.set_greetings(our_greeting, peer_greeting);
-                let hello = cli.build_hello().inspect_err(|_| {
-                    self.state = HandshakeState::Failed;
-                })?;
-                out.push(Command::Unknown {
-                    name: Bytes::from_static(b"HELLO"),
-                    body: Bytes::from(hello),
-                });
-                self.state = HandshakeState::Client(cli);
-                self.role = role_placeholder_client();
-            }
+            srv.set_greetings(peer_greeting, our_greeting);
+            self.state = HandshakeState::Server(srv);
         }
         Ok(())
     }
@@ -329,29 +308,7 @@ impl Blake3ZmqMechanism {
     }
 
     pub(crate) fn is_client(&self) -> bool {
-        matches!(self.role, Role::Client { .. })
+        self.is_client
     }
 }
 
-fn placeholder_role() -> Role {
-    Role::Server {
-        keypair: HandshakeKeypair {
-            public: [0u8; 32],
-            secret: zeroize::Zeroizing::new([0u8; 32]),
-        },
-        cookie_keyring: Arc::new(CookieKeyring::new()),
-        authenticator: None,
-    }
-}
-fn role_placeholder_server() -> Role {
-    placeholder_role()
-}
-fn role_placeholder_client() -> Role {
-    Role::Client {
-        keypair: HandshakeKeypair {
-            public: [0u8; 32],
-            secret: zeroize::Zeroizing::new([0u8; 32]),
-        },
-        server_public: [0u8; 32],
-    }
-}
