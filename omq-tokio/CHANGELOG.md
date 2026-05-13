@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-05-13
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.6.0.
+- Post-handshake READY/ERROR commands now drop the connection (protocol
+  violation per ZMTP RFC 23). Test updated accordingly.
+
 ## [0.2.7](https://github.com/paddor/omq.rs/compare/omq-tokio-v0.2.6...omq-tokio-v0.2.7) - 2026-05-12
 
 ### Changed
