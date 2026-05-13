@@ -126,9 +126,10 @@ run_cell() {
 
 fmt_msgs() {
     awk -v v="$1" 'BEGIN {
-        if (v >= 1e6)      printf "%.2fM", v/1e6
-        else if (v >= 1e3) printf "%.0fk", v/1e3
-        else               printf "%.0f", v
+        if (v >= 1e6)       printf "%.2fM", v/1e6
+        else if (v >= 10e3) printf "%.0fk", v/1e3
+        else if (v >= 1e3)  printf "%.1fk", v/1e3
+        else                printf "%.0f", v
     }'
 }
 

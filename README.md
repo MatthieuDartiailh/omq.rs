@@ -24,9 +24,9 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at mid-size messages over 
 
 | Size | libzmq | omq-compio | × | omq-tokio | × |
 |------|--------|------------|---|-----------|---|
-| 512 B | 1.96M msg/s | 3.50M msg/s | **1.8×** | 3.36M msg/s | **1.7×** |
-| 8 KiB | 178k msg/s | 599k msg/s | **3.4×** | 480k msg/s | **2.7×** |
-| 2 MiB | 2k msg/s | 4k msg/s | **1.5×** | 3k msg/s | **1.3×** |
+| 512 B | 1.99M msg/s | 3.55M msg/s | **1.8×** | 3.85M msg/s | **1.9×** |
+| 8 KiB | 188k msg/s | 607k msg/s | **3.2×** | 461k msg/s | **2.5×** |
+| 2 MiB | 2.7k msg/s | 3.8k msg/s | **1.4×** | 3.0k msg/s | **1.1×** |
 
 [Full tables across all sizes and transports (TCP + IPC) →](COMPARISONS.md)
 
