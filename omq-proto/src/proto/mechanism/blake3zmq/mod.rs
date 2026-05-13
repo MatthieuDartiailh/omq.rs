@@ -154,7 +154,7 @@ impl Blake3ZmqMechanism {
             role: Role::Server {
                 keypair: HandshakeKeypair {
                     public: keypair.public.0,
-                    secret: keypair.secret.0,
+                    secret: zeroize::Zeroizing::new(keypair.secret.0),
                 },
                 cookie_keyring,
                 authenticator,
@@ -169,7 +169,7 @@ impl Blake3ZmqMechanism {
             role: Role::Client {
                 keypair: HandshakeKeypair {
                     public: keypair.public.0,
-                    secret: keypair.secret.0,
+                    secret: zeroize::Zeroizing::new(keypair.secret.0),
                 },
                 server_public: server_public.0,
             },
@@ -337,7 +337,7 @@ fn placeholder_role() -> Role {
     Role::Server {
         keypair: HandshakeKeypair {
             public: [0u8; 32],
-            secret: [0u8; 32],
+            secret: zeroize::Zeroizing::new([0u8; 32]),
         },
         cookie_keyring: Arc::new(CookieKeyring::new()),
         authenticator: None,
@@ -350,7 +350,7 @@ fn role_placeholder_client() -> Role {
     Role::Client {
         keypair: HandshakeKeypair {
             public: [0u8; 32],
-            secret: [0u8; 32],
+            secret: zeroize::Zeroizing::new([0u8; 32]),
         },
         server_public: [0u8; 32],
     }

@@ -17,6 +17,7 @@
 //! bridge) is the next slice; data-phase AEAD is the slice after.
 
 use bytes::{BufMut, BytesMut};
+use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 use crate::proto::frame::{FLAG_COMMAND, FLAG_LONG, MAX_SHORT_FRAME_SIZE};
@@ -38,14 +39,17 @@ use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 /// Permanent X25519 keypair used by either side of the handshake.
 #[derive(Clone)]
 pub struct Keypair {
-    pub secret: X25519Secret,
+    pub secret: Zeroizing<X25519Secret>,
     pub public: X25519Public,
 }
 
 impl Keypair {
     pub fn generate() -> Self {
         let (secret, public) = ephemeral_keypair();
-        Self { secret, public }
+        Self {
+            secret: Zeroizing::new(secret),
+            public,
+        }
     }
 }
 

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use rand::RngCore;
 use rand::rngs::OsRng;
+use zeroize::Zeroizing;
 
 use crate::error::Result;
 
@@ -33,8 +34,8 @@ pub struct CookieKeyring {
 
 #[derive(Debug)]
 struct Inner {
-    current: Hash,
-    previous: Option<Hash>,
+    current: Zeroizing<Hash>,
+    previous: Option<Zeroizing<Hash>>,
     last_rotated: Instant,
     rotation_interval: Duration,
 }
@@ -45,8 +46,8 @@ impl CookieKeyring {
     }
 
     pub fn with_interval(rotation_interval: Duration) -> Self {
-        let mut k = [0u8; 32];
-        OsRng.fill_bytes(&mut k);
+        let mut k = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(k.as_mut());
         Self {
             inner: Mutex::new(Inner {
                 current: k,
@@ -60,14 +61,14 @@ impl CookieKeyring {
     /// Rotate if the current key has lived past `rotation_interval`,
     /// then return the (now-)current key. Called when building a
     /// WELCOME cookie.
-    pub fn current_key(&self) -> Hash {
+    pub fn current_key(&self) -> Zeroizing<Hash> {
         let mut g = self.inner.lock().expect("cookie keyring poisoned");
         if g.last_rotated.elapsed() >= g.rotation_interval {
-            g.previous = Some(g.current);
-            OsRng.fill_bytes(&mut g.current);
+            g.previous = Some(g.current.clone());
+            OsRng.fill_bytes(g.current.as_mut());
             g.last_rotated = Instant::now();
         }
-        g.current
+        g.current.clone()
     }
 
     /// Try to decrypt with the current key, falling back to the
@@ -83,7 +84,7 @@ impl CookieKeyring {
     ) -> Result<Vec<u8>> {
         let (current, previous) = {
             let g = self.inner.lock().expect("cookie keyring poisoned");
-            (g.current, g.previous)
+            (g.current.clone(), g.previous.clone())
         };
         let key1 = derive(&current);
         if let Ok(p) = aead_decrypt(&key1, nonce, ciphertext, aad) {
@@ -93,8 +94,6 @@ impl CookieKeyring {
             let key2 = derive(&prev);
             return aead_decrypt(&key2, nonce, ciphertext, aad);
         }
-        // No previous key; surface the original failure with a fresh
-        // attempt so the error message is right.
         aead_decrypt(&key1, nonce, ciphertext, aad)
     }
 
@@ -103,8 +102,8 @@ impl CookieKeyring {
     #[cfg(test)]
     pub fn rotate_now(&self) {
         let mut g = self.inner.lock().expect("cookie keyring poisoned");
-        g.previous = Some(g.current);
-        OsRng.fill_bytes(&mut g.current);
+        g.previous = Some(g.current.clone());
+        OsRng.fill_bytes(g.current.as_mut());
         g.last_rotated = Instant::now();
     }
 }
@@ -150,7 +149,7 @@ mod tests {
         let r = CookieKeyring::new();
         let key = r.current_key();
         let nonce = [0xa5u8; 24];
-        let ct = chacha20_blake3::ChaCha20Blake3::new(key).encrypt(&nonce, b"secret", b"aad");
+        let ct = chacha20_blake3::ChaCha20Blake3::new(*key).encrypt(&nonce, b"secret", b"aad");
 
         r.rotate_now();
         let pt = r
@@ -166,7 +165,7 @@ mod tests {
         let r = CookieKeyring::new();
         let key = r.current_key();
         let nonce = [0xa5u8; 24];
-        let ct = chacha20_blake3::ChaCha20Blake3::new(key).encrypt(&nonce, b"secret", b"aad");
+        let ct = chacha20_blake3::ChaCha20Blake3::new(*key).encrypt(&nonce, b"secret", b"aad");
 
         r.rotate_now();
         r.rotate_now();

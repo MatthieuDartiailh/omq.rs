@@ -12,6 +12,7 @@ use crypto_box::{
 };
 use crypto_secretbox::XSalsa20Poly1305;
 use rand::{RngCore, rngs::OsRng};
+use zeroize::Zeroizing;
 
 use super::{CurveKeypair, CurvePublicKey, MechanismStep};
 use crate::error::{Error, Result};
@@ -157,7 +158,7 @@ pub(crate) struct CurveMechanism {
     peer_eph_public: Option<PublicKey>,
 
     /// Server-only: random key encrypting the cookie inside WELCOME.
-    cookie_key: [u8; 32],
+    cookie_key: Zeroizing<[u8; 32]>,
     /// Client-only: cookie blob (96 bytes) received in WELCOME, echoed back
     /// in INITIATE.
     received_cookie: Vec<u8>,
@@ -190,7 +191,7 @@ impl CurveMechanism {
             our_eph_secret,
             our_eph_public,
             peer_eph_public: None,
-            cookie_key: [0u8; 32],
+            cookie_key: Zeroizing::new([0u8; 32]),
             received_cookie: Vec::new(),
             out_counter: 0,
             our_props: PeerProperties::default(),
@@ -207,8 +208,8 @@ impl CurveMechanism {
         let our_lt_public = PublicKey::from_bytes(*our_keypair.public.as_bytes());
         let our_eph_secret = SecretKey::generate(&mut OsRng);
         let our_eph_public = our_eph_secret.public_key();
-        let mut cookie_key = [0u8; 32];
-        OsRng.fill_bytes(&mut cookie_key);
+        let mut cookie_key = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(cookie_key.as_mut());
         Self {
             is_server: true,
             state: CurveState::Init,
@@ -411,7 +412,7 @@ impl CurveMechanism {
         let mut cookie_pt = [0u8; 64];
         cookie_pt[..32].copy_from_slice(cp.as_bytes());
         cookie_pt[32..].copy_from_slice(&self.our_eph_secret.to_bytes());
-        let cookie_box = XSalsa20Poly1305::new(&self.cookie_key.into())
+        let cookie_box = XSalsa20Poly1305::new(&(*self.cookie_key).into())
             .encrypt(&cookie_nonce.into(), &cookie_pt[..])
             .map_err(|_| Error::Protocol("CURVE cookie encrypt failed".into()))?;
         // Cookie wire = 16-byte cookie nonce suffix + 80-byte cookie ciphertext = 96 bytes.
@@ -521,7 +522,7 @@ impl CurveMechanism {
         let cookie_suffix: [u8; 16] = cookie[..16].try_into().unwrap();
         let cookie_box = &cookie[16..];
         let cookie_nonce = nonce_long(NONCE_COOKIE_PREFIX, &cookie_suffix);
-        let cookie_pt = XSalsa20Poly1305::new(&self.cookie_key.into())
+        let cookie_pt = XSalsa20Poly1305::new(&(*self.cookie_key).into())
             .decrypt(&cookie_nonce.into(), cookie_box)
             .map_err(|_| Error::HandshakeFailed("CURVE cookie invalid".into()))?;
         if cookie_pt.len() != 64 {
