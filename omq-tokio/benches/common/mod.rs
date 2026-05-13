@@ -64,7 +64,7 @@ pub(crate) fn rounds() -> usize {
 
 /// Hard ceiling per cell — a hang guard, not a tight bound. The 30s
 /// base covers TCP setup, ZMTP handshake, subscription propagation,
-/// and wait_connected's own 30s deadline. The 2x round budget absorbs
+/// and `wait_connected`'s own 30s deadline. The 2x round budget absorbs
 /// calibration overshoot.
 pub(crate) fn run_timeout() -> Duration {
     let r = rounds() as u32;
