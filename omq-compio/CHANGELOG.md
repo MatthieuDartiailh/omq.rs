@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-05-13
+
+### Changed
+
+- Large-message recv rewritten: accumulation + ENOBUFS-triggered one-shot
+  transition replaces the unreliable CancelToken-based cancel+drain path.
+  Messages above `Options::large_message_threshold` (default 128 KiB) are
+  accumulated into a pre-allocated `BytesMut`, bypassing the codec's
+  `ChunkedInputBuf` coalesce copy (~2× memcpy → ~1×). When the payload
+  exceeds the BUF_RING pool, the kernel terminates the multi-shot SQE
+  with `ENOBUFS`; the recv path transitions to one-shot and `read_until`
+  pulls the remainder in a single syscall. Consecutive large messages
+  stay in one-shot mode. A small message re-arms multi-shot.
+- Accumulation state (`pending_acc`, `large_recv_pending`) lives in
+  `DirectIoState` and survives recv-future cancellation. `AccRestore`
+  drop guard saves partial progress during one-shot `read_until`.
+- Removed dead cancel+drain code path from `try_one_shot_large_recv`.
+- Updated `runtime.rs` pool sizing docs: pool is a small-message
+  burst-absorption knob, not a large-message sizing requirement.
+
+### Performance
+
+- IPC bench_peer vs libzmq: 512 KiB 1.8×, 2 MiB 1.9×, 8 MiB 1.6×,
+  32 MiB 1.9× (was 0.72× at 32 MiB before this change).
+
 ## [0.2.12](https://github.com/paddor/omq.rs/compare/omq-compio-v0.2.11...omq-compio-v0.2.12) - 2026-05-12
 
 ### Changed
