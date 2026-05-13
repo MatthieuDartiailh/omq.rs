@@ -76,8 +76,8 @@ impl TypeState {
                 }
                 let mut new_msg = Message::new();
                 new_msg.push_part_payload(Payload::from_bytes(Bytes::new()));
-                for p in &msg.parts_payload() {
-                    new_msg.push_part_payload(p.clone());
+                for p in msg.into_parts_payload() {
+                    new_msg.push_part_payload(p);
                 }
                 self.req_awaiting_reply = true;
                 Ok(new_msg)
@@ -93,8 +93,8 @@ impl TypeState {
                     new_msg.push_part_payload(Payload::from_bytes(frame));
                 }
                 new_msg.push_part_payload(Payload::from_bytes(Bytes::new()));
-                for p in &msg.parts_payload() {
-                    new_msg.push_part_payload(p.clone());
+                for p in msg.into_parts_payload() {
+                    new_msg.push_part_payload(p);
                 }
                 Ok(new_msg)
             }
