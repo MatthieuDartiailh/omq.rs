@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-13
+
+### Changed
+
+- **Breaking:** Rename `tcp_recv_buffer_size` / `tcp_send_buffer_size` to
+  `recv_buffer_size` / `send_buffer_size` (they apply to IPC too).
+
 ## [0.4.0](https://github.com/paddor/omq.rs/compare/omq-proto-v0.3.2...omq-proto-v0.4.0) - 2026-05-12
 
 ### Changed
