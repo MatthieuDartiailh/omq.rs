@@ -43,9 +43,8 @@ fn omq_lz4_supported() -> bool {
         Ok(o) if o.status.success() => o,
         _ => return false,
     };
-    let version = match parse_cli_version(&String::from_utf8_lossy(&out.stdout)) {
-        Some(v) => v,
-        None => return false,
+    let Some(version) = parse_cli_version(&String::from_utf8_lossy(&out.stdout)) else {
+        return false;
     };
     if version < MIN_OMQ_CLI {
         return false;
@@ -83,7 +82,7 @@ impl ChildGuard {
     // Kill the whole process group (sh + yes + omq push pipeline children).
     fn kill(&mut self) {
         if let Some(c) = &self.0 {
-            unsafe { libc::kill(-(c.id() as libc::pid_t), libc::SIGKILL) };
+            unsafe { libc::kill(-c.id().cast_signed(), libc::SIGKILL) };
         }
     }
 }
@@ -91,7 +90,7 @@ impl ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         if let Some(mut c) = self.0.take() {
-            unsafe { libc::kill(-(c.id() as libc::pid_t), libc::SIGKILL) };
+            unsafe { libc::kill(-c.id().cast_signed(), libc::SIGKILL) };
             let _ = c.wait();
         }
     }
@@ -125,6 +124,14 @@ fn ephemeral_lz4_endpoint() -> (Endpoint, String) {
 /// monitor sees **no** mid-run `Disconnected`.
 #[tokio::test]
 async fn ruby_push_lz4_tcp_sustained() {
+    // 114-char unit × 5 = 570-byte payloads. lz4's MIN_COMPRESS_NO_DICT
+    // is 512 B, so each part takes the LZ4B envelope path (compressed
+    // body with `Frame_Content_Size` declared up-front).
+    const PAYLOAD_UNIT: &str = "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+         The quick brown fox jumps over the lazy dog.";
+    const RUN_FOR: Duration = Duration::from_secs(8);
+    const MIN_RECVD: usize = 600;
+
     if skip_if_no_omq_lz4() {
         return;
     }
@@ -135,11 +142,6 @@ async fn ruby_push_lz4_tcp_sustained() {
     pull.bind(rust_ep).await.unwrap();
     let mut mon = pull.monitor();
 
-    // 114-char unit × 5 = 570-byte payloads. lz4's MIN_COMPRESS_NO_DICT
-    // is 512 B, so each part takes the LZ4B envelope path (compressed
-    // body with `Frame_Content_Size` declared up-front).
-    const PAYLOAD_UNIT: &str = "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
-         The quick brown fox jumps over the lazy dog.";
     let expected = PAYLOAD_UNIT.repeat(5);
 
     let mut guard = ChildGuard::new(
@@ -172,8 +174,6 @@ async fn ruby_push_lz4_tcp_sustained() {
         }
     });
 
-    const RUN_FOR: Duration = Duration::from_secs(8);
-    const MIN_RECVD: usize = 600;
     let deadline = tokio::time::Instant::now() + RUN_FOR;
     let mut got = 0usize;
     while tokio::time::Instant::now() < deadline {
@@ -196,7 +196,7 @@ async fn ruby_push_lz4_tcp_sustained() {
         }
     }
 
-    let _ = guard.kill();
+    guard.kill();
     let _ = tokio::task::spawn_blocking(move || guard.take().wait()).await;
     drop(pull);
     let (dropped, first_drop) = monitor_task.await.unwrap();
@@ -212,29 +212,30 @@ async fn ruby_push_lz4_tcp_sustained() {
 }
 
 fn skip_if_no_ruby_omq_lz4() -> bool {
-    Command::new("ruby")
+    let ok = Command::new("ruby")
         .args(["-r", "omq/lz4", "-e", ""])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
-        .then_some(false)
-        .unwrap_or_else(|| {
-            eprintln!("skip: needs ruby with omq-lz4 gem");
-            true
-        })
+        .is_ok_and(|s| s.success());
+    if ok {
+        false
+    } else {
+        eprintln!("skip: needs ruby with omq-lz4 gem");
+        true
+    }
 }
 
-/// Ruby encodes a >4096-byte payload with block_size=4096 (LZ4M path),
+/// Ruby encodes a >4096-byte payload with `block_size=4096` (LZ4M path),
 /// Rust decodes the raw wire bytes and verifies the plaintext.
 #[test]
 fn ruby_lz4m_encode_rust_decode() {
+    const BLOCK_SIZE: usize = 4096;
+    const PAYLOAD_LEN: usize = BLOCK_SIZE + 2000;
+
     if skip_if_no_ruby_omq_lz4() {
         return;
     }
-
-    const BLOCK_SIZE: usize = 4096;
-    const PAYLOAD_LEN: usize = BLOCK_SIZE + 2000;
 
     let ruby = format!(
         r#"require "omq/lz4"; require "rlz4"
@@ -266,16 +267,18 @@ $stdout.write(wire)"#
     assert!(body.iter().all(|&b| b == b'B'));
 }
 
-/// Rust encodes a >4096-byte payload with block_size=4096 (LZ4M path),
+/// Rust encodes a >4096-byte payload with `block_size=4096` (LZ4M path),
 /// Ruby decodes the raw wire bytes and verifies the plaintext.
 #[test]
 fn rust_lz4m_encode_ruby_decode() {
-    if skip_if_no_ruby_omq_lz4() {
-        return;
-    }
+    use std::io::Write;
 
     const BLOCK_SIZE: usize = 4096;
     const PAYLOAD_LEN: usize = BLOCK_SIZE + 2000;
+
+    if skip_if_no_ruby_omq_lz4() {
+        return;
+    }
 
     let plain = vec![b'C'; PAYLOAD_LEN];
     let msg = Message::single(plain);
@@ -304,7 +307,6 @@ print "ok""#
         .spawn()
         .expect("spawn ruby decoder");
 
-    use std::io::Write;
     child.stdin.take().unwrap().write_all(&wire_bytes).unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(

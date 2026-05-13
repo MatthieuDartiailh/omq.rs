@@ -62,7 +62,8 @@ mod inner {
             // payload (skipping the optional dict shipment).
             let m = omq_compio::Message::single(plain.clone());
             let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
-                out.last().map_or(plain.len(), |m| m.byte_len())
+                out.last()
+                    .map_or(plain.len(), omq_compio::Message::byte_len)
             };
             let lz4_n = encoded_len(Lz4Encoder::new().encode(&m).unwrap());
             let zstd_n = encoded_len(ZstdEncoder::new().encode(&m).unwrap());
@@ -140,7 +141,8 @@ mod inner {
                 // Take the LAST message - the first message is the dict
                 // shipment to the peer (one-shot per connection); the
                 // payload is in the second message.
-                out.last().map_or(plain.len(), |m| m.byte_len())
+                out.last()
+                    .map_or(plain.len(), omq_compio::Message::byte_len)
             };
             let lz4_n = encoded_len(
                 Lz4Encoder::with_send_dict(lz4_dict.clone())
@@ -212,7 +214,8 @@ mod inner {
         use omq_proto::proto::transform::zstd::ZstdEncoder;
         let m = omq_compio::Message::single(plain.clone());
         let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
-            out.last().map_or(plain.len(), |m| m.byte_len())
+            out.last()
+                .map_or(plain.len(), omq_compio::Message::byte_len)
         };
         match transport {
             "lz4+tcp" => {
@@ -293,7 +296,9 @@ mod inner {
         let refs: Vec<&Socket> = pushes.iter().collect();
         common::wait_connected(&refs).await;
 
+        #[allow(clippy::arc_with_non_send_sync)]
         let pull = std::sync::Arc::new(pull);
+        #[allow(clippy::arc_with_non_send_sync)]
         let pushes = std::sync::Arc::new(pushes);
 
         let burst = |k: usize| {

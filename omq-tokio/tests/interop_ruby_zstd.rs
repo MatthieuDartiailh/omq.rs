@@ -48,7 +48,10 @@ impl ChildGuard {
     // Kill the whole process group (sh + yes + omq push pipeline children).
     fn kill(&mut self) {
         if let Some(c) = &self.0 {
-            unsafe { libc::kill(-(c.id() as libc::pid_t), libc::SIGKILL) };
+            #[allow(clippy::cast_possible_wrap)]
+            unsafe {
+                libc::kill(-(c.id() as libc::pid_t), libc::SIGKILL)
+            };
         }
     }
 }
@@ -56,7 +59,10 @@ impl ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         if let Some(mut c) = self.0.take() {
-            unsafe { libc::kill(-(c.id() as libc::pid_t), libc::SIGKILL) };
+            #[allow(clippy::cast_possible_wrap)]
+            unsafe {
+                libc::kill(-(c.id() as libc::pid_t), libc::SIGKILL)
+            };
             let _ = c.wait();
         }
     }
@@ -92,6 +98,11 @@ fn ephemeral_tcp_endpoint() -> (Endpoint, String) {
 ///   * the PULL socket monitor observes **no** mid-run `Disconnected`.
 #[tokio::test]
 async fn ruby_push_zstd_tcp_sustained() {
+    const PAYLOAD_UNIT: &str = "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+         The quick brown fox jumps over the lazy dog.";
+    const RUN_FOR: Duration = Duration::from_secs(8);
+    const MIN_RECVD: usize = 600;
+
     if skip_if_no_omq() {
         return;
     }
@@ -108,8 +119,6 @@ async fn ruby_push_zstd_tcp_sustained() {
     // shipment frame followed by compressed messages.
     //
     // `yes` produces a 114-char line; `* 3` → 342-byte payloads.
-    const PAYLOAD_UNIT: &str = "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
-         The quick brown fox jumps over the lazy dog.";
     let expected = PAYLOAD_UNIT.repeat(3);
 
     let mut guard = ChildGuard::new(
@@ -150,8 +159,6 @@ async fn ruby_push_zstd_tcp_sustained() {
     // (≈ 256 msgs at 402 B each). The fix this guards against is in
     // the dict-shipment wire format on the receive side, so we need to
     // run *past* the train threshold to exercise the dict path.
-    const RUN_FOR: Duration = Duration::from_secs(8);
-    const MIN_RECVD: usize = 600;
     let deadline = tokio::time::Instant::now() + RUN_FOR;
     let mut got = 0usize;
     while tokio::time::Instant::now() < deadline {
@@ -170,12 +177,12 @@ async fn ruby_push_zstd_tcp_sustained() {
                 }
             }
             Ok(Err(e)) => panic!("pull.recv error after {got} msgs: {e:?}"),
-            Err(_) => continue, // no message in this 1s window; keep waiting until deadline
+            Err(_) => {} // no message in this 1s window; keep waiting until deadline
         }
     }
 
     // Stop Ruby, then drain the monitor task to inspect any drops.
-    let _ = guard.kill();
+    let () = guard.kill();
     let _ = tokio::task::spawn_blocking(move || guard.take().wait()).await;
     drop(pull); // closes monitor stream, lets the monitor task exit
     let (dropped, first_drop) = monitor_task.await.unwrap();

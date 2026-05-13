@@ -153,6 +153,9 @@ async fn static_dict_survives_reconnect() {
 
 #[compio::test]
 async fn auto_train_survives_reconnect() {
+    const FIRST: usize = 120;
+    const SECOND: usize = 20;
+
     let (pull, ep) = pull_on_loopback().await;
 
     let make_payload = |i: usize| -> Vec<u8> {
@@ -167,7 +170,6 @@ async fn auto_train_survives_reconnect() {
         v
     };
 
-    const FIRST: usize = 120;
     {
         let push = Socket::new(
             SocketType::Push,
@@ -180,7 +182,6 @@ async fn auto_train_survives_reconnect() {
         push.close().await.unwrap();
     }
 
-    const SECOND: usize = 20;
     {
         let push = Socket::new(
             SocketType::Push,

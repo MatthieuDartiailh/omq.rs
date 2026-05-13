@@ -142,6 +142,7 @@ fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usize) -> 
                 wait_handshake(&mut mon).await;
 
                 let payload = Bytes::from(vec![b'x'; size]);
+                #[allow(clippy::arc_with_non_send_sync)]
                 let push = Arc::new(push);
 
                 let burst = |k: usize| {
@@ -178,7 +179,7 @@ async fn wait_handshake(mon: &mut MonitorStream) {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         match compio::time::timeout(Duration::from_millis(100), mon.recv()).await {
-            Ok(Ok(ev)) if matches!(ev, MonitorEvent::HandshakeSucceeded { .. }) => return,
+            Ok(Ok(MonitorEvent::HandshakeSucceeded { .. })) => return,
             _ if std::time::Instant::now() > deadline => {
                 panic!("bench: handshake never completed within 15s");
             }

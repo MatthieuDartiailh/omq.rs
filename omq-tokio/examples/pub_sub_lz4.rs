@@ -1,7 +1,7 @@
 //! Pub/sub with lz4+tcp:// compression.
 //!
 //! Run with:
-//!   cargo run -p omq-tokio --example pub_sub_lz4 --features lz4
+//!   cargo run -p omq-tokio --example `pub_sub_lz4` --features lz4
 
 use std::time::Duration;
 

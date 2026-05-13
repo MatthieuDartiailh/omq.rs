@@ -198,6 +198,9 @@ async fn static_dict_survives_reconnect() {
 // all messages from both connections must be received correctly.
 #[tokio::test]
 async fn auto_train_survives_reconnect() {
+    const FIRST: usize = 120; // > 103 training trigger point
+    const SECOND: usize = 20;
+
     let (pull, ep) = pull_on_loopback().await;
 
     // 1 000-byte messages: < TRAIN_MAX_SAMPLE_LEN (1 024), so collected as
@@ -215,7 +218,6 @@ async fn auto_train_survives_reconnect() {
     };
 
     // First connection: triggers training, then sends a few dict-compressed msgs.
-    const FIRST: usize = 120; // > 103 training trigger point
     {
         let push = Socket::new(
             SocketType::Push,
@@ -231,7 +233,6 @@ async fn auto_train_survives_reconnect() {
     // Second connection: fresh encoder, auto-train starts from scratch.
     // 20 msgs = 20 KiB, well below training threshold; sent as compressed
     // without dict (1 000 B > 512 B MIN_COMPRESS_NO_DICT).
-    const SECOND: usize = 20;
     {
         let push = Socket::new(
             SocketType::Push,
