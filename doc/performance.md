@@ -1,523 +1,218 @@
-# How omq beat libzmq
+# How to beat libzmq
 
-A technical article on the design choices and dead ends behind the
-performance numbers in [`../BENCHMARKS.md`](../BENCHMARKS.md) and
-[`../COMPARISONS.md`](../COMPARISONS.md). Audience: anyone building
-or maintaining a ZMQ-shaped library who wants to understand which
-optimisations stack and which look promising on paper but lose
-throughput in practice.
+Design choices and dead ends behind the throughput numbers in
+[`../COMPARISONS.md`](../COMPARISONS.md). For anyone building or
+maintaining a ZMQ-shaped library who wants to know which
+optimizations stack and which don't.
 
-This is not a tutorial on the codebase -- the structural docs in
-[`architecture.md`](architecture.md), [`compio.md`](compio.md), and
-[`tokio.md`](tokio.md) cover that. It is the story of how the wire
-throughput got to where it is, told in the order the decisions
-landed.
+For structure, see [`architecture.md`](architecture.md),
+[`compio.md`](compio.md), [`tokio.md`](tokio.md).
 
-## Premise
+## The problem
 
-Beating libzmq at small messages over a real TCP socket turned out to
-be the hardest part of the project. Large messages were comparatively
-easy: `writev` batching multi-chunk frames in one syscall vs. libzmq's
-separate `send()` calls for header + payload gave a 2-3x advantage
-above 2 KiB from the start. Small messages (128-512 B) were a
-different story.
+Beating libzmq at small messages over a real TCP socket is the
+hardest part. Large messages are easy: `writev` batching
+multi-chunk frames in one syscall vs. libzmq's separate `send()`
+for header + payload gives 2-3x above 2 KiB from the start.
 
-The reason small messages are hard: at 128 B, encoding is cheap and
-kernel round-trips dominate. libzmq's architecture separates the
-application thread from a dedicated I/O thread (`zmq_ctx_t` spawns one
-reaper + one I/O thread per context by default). The app encodes and
-hands a message to the I/O thread via a pipe; the I/O thread does the
-actual `send()`. This means the app loop and I/O are truly concurrent:
-while the app is encoding message N+1, the I/O thread is writing
-message N to the socket. At 128 B that overlap is the primary
+Small messages (8-128 B) are different. Encoding is cheap, kernel
+round-trips dominate. libzmq separates the application thread from
+a dedicated I/O thread: the app encodes and hands off via a pipe;
+the I/O thread writes. At 128 B that overlap is the primary
 advantage. A naive single-threaded ZMQ library cannot keep up.
 
-A pure-Rust ZMQ implementation that aspired to be a real drop-in for
-production workloads also had to clear a higher bar than throughput
-alone:
+## Starting point: pure Ruby
 
-- Cancel-safe `recv` -- futures dropped mid-read must not corrupt the
-  stream.
-- Automatic reconnect with exponential backoff.
-- All eleven standard socket types plus the eight DRAFT types
-  (CLIENT/SERVER/RADIO/DISH/SCATTER/GATHER/CHANNEL/PEER).
-- Inproc transport that bypasses ZMTP entirely.
-- UDP transport for RADIO/DISH.
-- TCP keepalive plumbing for long-idle connections (stock-feed style).
-- Lifecycle event monitoring as a first-class `Stream`.
-- Reverse-bind for PUB/SUB topologies.
-- LZ4 and zstd compression transports.
-- A pyzmq-compatible Python binding so existing users could drop the
-  C dependency without rewriting their code.
+The two-queue architecture comes from a sister project,
+[OMQ Ruby](https://github.com/paddor/omq) -- a pure-Ruby ZMTP
+implementation. One inbound queue and one outbound queue per
+socket, not per peer. Per-connection driver fibers push/pull
+between the queues and the wire. On a 2018 Mac Mini in a Linux
+VM, it pushes ~500k 128 B msg/s over TCP -- already faster than
+zmq.rs on the same wire, despite Ruby.
 
-These were not optional features; they were the table stakes that
-distinguish a ZMQ implementation from a toy.
+omq.rs is the Rust port of that idea, first targeting OMQ Ruby's
+throughput, then libzmq's.
 
-## Origin: a sister project in pure Ruby
+## Sans-I/O codec
 
-The architecture inherits its core shape from a sister project: a
-pure-Ruby ZMTP implementation, [OMQ
-Ruby](https://github.com/paddor/omq). That project began as an
-experiment to test a deliberately simple model -- "what if a ZMQ
-library uses just two `Async::Queue` instances per socket, one in and
-one out, with per-peer driver fibers in between?" The answer turned
-out to be that performance came out far above expectations, courtesy
-of `io-stream` and `io-event` which back the Ruby Async runtime with
-epoll on Linux (and io_uring when `liburing-dev` is installed). On a
-2018 Mac Mini in a Linux VM, OMQ Ruby pushes ~500k 128-byte
-messages/second over loopback TCP -- already faster than zmq.rs on the
-same wire, despite running on Ruby.
+The full ZMTP state machine -- greeting, mechanism handshake
+(NULL/CURVE/BLAKE3ZMQ), framing, compression transforms -- lives
+in `omq-proto` and never touches an fd. Bytes in via
+`Connection::handle_input`, events out via `poll_event`, outbound
+via `poll_transmit`/`advance_transmit`. Backends own I/O.
 
-That result raised the natural question: if a pure-Ruby implementation
-of this two-queue design clears half a million msg/s at 128 B, what
-ceiling does the same design hit in Rust on top of io_uring?
-
-The two-queue model:
-
-- Each socket has exactly one inbound queue and one outbound queue.
-  Not one per peer.
-- Per-connection driver fibers/tasks push decoded messages into the
-  one inbound queue and pull messages from the one outbound queue.
-- The outbound queue's bound is the socket's HWM. Backpressure is a
-  single cap, not a per-peer matrix.
-- Slow peers do not corner the socket. A blocked driver leaves
-  messages in the shared outbound queue; faster drivers steal them.
-  Head-of-line blocking patterns where one non-draining peer freezes
-  the socket simply do not arise.
-- Sender code never names a peer. Routing strategy decides; on
-  round-robin patterns, "any free driver picks up the next message"
-  is the natural shape.
-
-The contrast with libzmq is the per-pipe-per-peer pattern that mirrors
-ZMTP wire framing into the socket's internal data structures. libzmq
-needs that complexity because of its dedicated-I/O-thread design;
-without it the I/O thread has no way to multiplex peers fairly. The
-two-queue design lifts the multiplexing one layer up, into the
-work-stealing on the outbound queue, which makes the implementation
-substantially smaller.
-
-omq.rs -- this repository -- is the Rust port of that idea. The first
-target was matching OMQ Ruby's throughput on equivalent hardware. The
-second target was beating libzmq at small messages, where libzmq is
-strongest. Both targets eventually fell.
-[zmq.rs](https://github.com/zeromq/zmq.rs) was the obvious starting
-point in pure Rust. The feature gap at the time -- inproc, the DRAFT
-socket types, the compression transports, BLAKE3ZMQ -- combined with
-throughput that did not yet match what OMQ Ruby was doing on the
-same wire, made it easier to start fresh than to retrofit. The two
-projects share a lot of design sensibility, and several of the
-techniques described later in this article would apply to zmq.rs in
-principle as well.
-
-Two further motivations are worth mentioning. A pyzmq-compatible
-Python binding on top of a faster Rust core felt useful because a
-lot of scientists work in Python end-to-end. And years of poking
-around the ZMQ ecosystem kept turning up papers from CERN about
-their use of ZMQ and custom compression to move the huge data
-volumes their experiments produce. That combination -- ZMQ plus
-heavy compression -- kept the compression-transport work in this
-repository feeling worthwhile.
-
-## Sans-I/O codec split
-
-The ZMTP **state machine** -- not just the frame parser, but greeting,
-mechanism handshake (NULL/CURVE/BLAKE3ZMQ), framing, and the
-compression transforms -- lives in `omq-proto` and never touches a
-file descriptor. Bytes go in via `Connection::handle_input`, events
-come out via `poll_event`, outbound frames accumulate via
-`send_message` and are read via `poll_transmit` /
-`advance_transmit`. The runtime backends own the I/O loop.
-
-zmq.rs draws the line differently. Its `ZmqCodec` is a
-`tokio_util`-style `Decoder` / `Encoder` -- byte-level frame parsing
-is sans-I/O. But everything above it (greeting handshake, mechanism
-negotiation, per-connection state) is wired through
-`Box<dyn AsyncRead + AsyncWrite>` in `FramedIo` and lives inside the
-runtime layer. The codec is sans-I/O; the connection isn't.
-
-The shape `omq-proto` uses -- whole-protocol sans-I/O, the one
-`rustls::ConnectionCommon` and `quinn-proto` use -- matters for
-performance: a sans-I/O state machine can be driven from any runtime
-without forcing the runtime into its allocation patterns. The same
-crate now drives both a single-thread io_uring backend and a
-multi-thread tokio backend, with byte-for-byte identical wire
-output.
-
-It also keeps the test surface small. Greeting, mechanism handshake,
-frame parsing, subscription matching, and command framing all run in
-synchronous tests with no runtime present.
+This is the `rustls::ConnectionCommon`/`quinn-proto` shape. The
+same crate drives both the single-thread io_uring backend and the
+multi-thread tokio backend, byte-for-byte identical wire output.
+Test surface stays small: greeting, handshake, framing,
+subscription matching all run synchronously with no runtime.
 
 ## Multi-chunk frame payloads
 
-`Bytes::clone` is one atomic increment; `bytes.copy_from_slice` is a
-memcpy. The codec is built so that every layer can prepend its static
-prefix (sentinels, identities, ZMTP frame headers) by pushing one more
-`Bytes` onto a `Payload`, never by copying the payload itself.
+Every layer prepends its prefix (sentinels, identities, ZMTP
+headers) by pushing one more `Bytes` onto a `Payload` -- never
+copying the payload. At write time the codec flattens chunks into
+`Vec<IoSlice>` and the kernel stitches them via `writev`/`sendmsg`.
 
-```rust
-// Payload: 4-variant enum, 40 bytes. See "Inline small Payload" below.
-type Message = SmallVec<[Payload; 3]>;  // 3 frames inline
-```
-
-Inline storage covers the common shapes (single-chunk payloads,
-REQ/REP three-frame envelopes) so heap allocation is reserved for
-unusual cases. At write time the codec flattens the chunks into a
-`Vec<IoSlice>` and the kernel stitches them into one wire write via
-`writev` / `sendmsg`.
-
-The 2-3x advantage over libzmq at >= 2 KiB messages comes almost
-entirely from this. libzmq makes separate `send()` calls for the frame
-header and the payload because its zero-copy design pre-dates writev's
-ubiquity; omq does it in one syscall.
+The 2-3x advantage over libzmq at >= 2 KiB comes almost entirely
+from this.
 
 ## First Rust attempt: pure tokio actor
 
-The initial implementation followed the textbook actor shape, mostly
-because that is what zmq.rs does and the symmetry was useful for
-bisecting bugs:
+Per-socket `SocketDriver` actor, per-peer `ConnectionDriver` via
+flume. Every message round-trips through the actor.
 
-- Per-socket `SocketDriver` actor task owns peer table, type state,
-  routing strategy.
-- `Socket::send` -> `cmd_tx.send(SocketCommand::Send(msg)).await`.
-- Actor receives, encodes through codec mutex, hands to per-peer
-  `ConnectionDriver` via flume.
-- Per-peer driver wakes, calls `clone_transmit_chunks` (N atomic
-  increments), `write_vectored`, `advance_transmit` to bump the codec
-  cursor.
+Result: ~80k 128 B msg/s over TCP. zmq.rs: ~300k. libzmq: ~3M.
 
-It worked. It was correct. It was slow: ~80k 128-byte msg/s over
-TCP loopback. zmq.rs ran roughly 3x faster on the same hardware (~300k
-msg/s) -- the simple actor shape was leaving most of tokio's potential
-on the table -- but libzmq did 3M, ten times further out of reach.
-
-The hop count was the obvious culprit. Three context switches per
-send (`cmd_tx.send` + `tokio::spawn` + oneshot ack) plus a per-peer
-mpsc hop, all to deliver a message that the actor would forward
-unchanged. But hop count is a lot to fix all at once.
+Three context switches per send (`cmd_tx.send` + `tokio::spawn` +
+oneshot ack) plus a per-peer mpsc hop.
 
 ## Choosing an io_uring runtime
 
-Tokio's epoll-backed performance was disappointing enough to make
-io_uring the next obvious axis to push on. Three Rust io_uring
-runtimes were candidates: `glommio`, `monoio`, and `compio`.
+Tried `monoio` first. Working port, fast I/O, but the API was
+rough (buffer ownership, lifetimes, cancellation). `compio` had
+cleaner ergonomics (closer to tokio) and cross-platform support
+(io_uring on Linux, IOCP on Windows, kqueue on macOS). Stuck.
 
-`monoio` was tried first, on the strength of its GitHub star count and
-maturity at the time. A working port came together. The verdict on it
-was mixed: the I/O it delivered was fast, but the API was rougher than
-expected -- buffer ownership patterns, lifetime conventions, and the
-shape of cancellation each cut against the grain of how the code wanted
-to be written.
+omq-tokio is maintained as a second backend because tokio remains
+the runtime of choice for most Rust apps.
 
-`compio` kept turning up in side reading. Two things stood out: a
-cleaner async API (closer to standard tokio's ergonomics with proper
-buffer-passing semantics) and cross-platform support (io_uring on
-Linux, IOCP on Windows, kqueue on macOS) instead of Linux-only. The
-port to compio took less code and read more naturally, and stuck.
+## Even with io_uring, hops are the bottleneck
 
-omq-tokio is still maintained as the second backend because tokio
-remains the runtime of choice for most Rust applications and migrating
-an existing tokio service to a non-tokio runtime is a bigger ask than
-adding a dependency. Both backends expose an identical public `Socket`
-API, verified by a coverage matrix test that runs every socket type x
-transport combination on each backend.
+Naive io_uring port: throughput barely improved. io_uring's speed
+shows up only when the hot path is short enough to expose it. Two
+task hops + async-mutex per message means io_uring wins by a few
+percent over epoll, not an order of magnitude.
 
-## Even with io_uring, the actor shape is the bottleneck
+## Eliminating task hops on send
 
-Switching tokio for compio was not, by itself, a big jump. The naive
-io_uring port still had every message round-tripping through the
-SocketDriver task. Throughput barely improved.
+For PUSH/DEALER/PUB/PAIR/CLIENT/SCATTER/CHANNEL, `pre_send` is
+stateless. Routing through the actor mutates nothing.
 
-The point is worth dwelling on: io_uring is fast, but its speed shows
-up only when the application's hot path is short enough to expose it.
-A library that adds two task hops and an async-mutex acquire per
-message will see io_uring win by a few percent over epoll, not by an
-order of magnitude. The hops are the bottleneck.
+Fix (tokio): `SendSubmitter` clone from the routing strategy.
+`Socket::send` matches on type -- REQ/REP keep the actor (real
+per-message state), everything else pushes straight into the
+submitter.
 
-What follows is the sequence of hops that came out, smallest changes
-first.
+Fix (recv): connection driver gets a clone of the user-facing
+`recv_tx` and pushes directly, skipping the actor.
 
-## Eliminating spurious task hops on send
+**128 B PUSH/PULL TCP on tokio: 84k -> 4.0M msg/s (48x).**
 
-The actor existed to serialize state mutation. For PUSH / DEALER /
-PUB / PAIR / CLIENT / SCATTER / CHANNEL, however, `pre_send` is the
-identity function or a stateless frame-count assert. Routing those
-messages through the actor mutates nothing -- it just adds
-`cmd_tx.send().await` + per-message `tokio::spawn` + oneshot ack +
-flume push (~3 context switches) before the message reaches its peer.
+## Removing the pump task
 
-The fix on tokio: `Inner` gained a `SendSubmitter` clone built from
-the routing strategy before the driver starts. `Socket::send` matches
-on socket type. REQ / REP keep going through `cmd_tx` because their
-alternation bit is real per-message state. Everything else inline-
-validates frame count and pushes straight into the submitter.
+Round-robin routing kept a shared `DropQueue` receiver with a
+per-peer pump task. Three hops end-to-end.
 
-The recv side got the same treatment. For socket types whose recv
-path is plain fair-queue delivery, the connection driver gets a clone
-of the user-facing `recv_tx: async_channel::Sender<Message>` and
-pushes `Event::Message` straight into it, skipping the actor's event
-loop entirely. Per-peer ordering is preserved because a single driver
-task delivers in TCP order; backpressure still works because the
-channel is bounded (`recv_hwm`) and a full channel blocks the driver's
-read loop, halting TCP reads.
+Fix: each `ConnectionDriver` holds the shared receiver directly,
+greedily drains up to 256 messages per wakeup, encodes, flushes
+with one `write_vectored`. One hop for byte-stream sockets.
 
-| Bypassed (recv) | Through actor (recv) | Reason actor still on path |
-|---|---|---|
-| Pull, Dealer, Sub, XSub, Pair, Client, Channel, Gather | Rep, Router, Server, Peer | Identity-prefix prepending |
-|  | Dish | Group membership filter |
-|  | XPub | Subscribe-as-message (0x01/0x00) parsing |
+## Single-peer fast path (compio)
 
-128 B PUSH/PULL TCP loopback on tokio went from 84k msg/s to 4.0M
-msg/s after this change -- a ~48x lift on hop count alone, before any
-multi-core gains. The multi-core parallelism that tokio always had
-was suddenly visible because the actor was no longer the serialization
-bottleneck. zmq.rs runs the same tokio multi-thread runtime but routes
-every message through its socket actor's mpsc inbox; that's why
-omq-tokio widens on small messages even on the same wire.
+For sockets connected to one wire peer (PUSH/REQ/REP), even one
+channel hop costs measurable latency.
 
-## A second pump task hop, also gone
+`DirectIoState` contains an `EncodedQueue` behind a sync `Mutex`.
+`Socket::send` does `try_lock` (sync, not async), encodes ZMTP
+frames directly, returns. The driver drains and writes on its
+next loop.
 
-Independently of the actor bypass, the round-robin routing strategy
-kept a shared `DropQueue` receiver and spawned a pump task per peer:
-the pump raced `shared_rx`, forwarded one message at a time to the
-driver's inbox. Three task hops end-to-end.
+Sync `Mutex::try_lock` on a single-thread cooperative runtime
+almost never fails. Fallback: channel path. Second fallback:
+socket-wide shared queue.
 
-The pump went away. Each `ConnectionDriver` now holds the shared
-receiver directly and polls it in a dedicated `select!` arm. The arm
-greedily drains up to 256 messages or 512 KiB per wakeup, encodes
-them all, then flushes with one `write_all` + `write_vectored` cycle.
-Result: one task hop for byte-stream sockets. Pump tasks remain for
-inproc peers, which use a per-peer inbox.
+**128 B TCP compio: ~1.30M -> 1.48M msg/s.**
 
-## Single-peer fast path on compio
+## Direct-recv (compio)
 
-The compio backend did not have an actor in the strict tokio sense,
-but it did have a per-peer `cmd_tx` channel between the sender and the
-driver task. For sockets connected to one wire peer (the typical
-PUSH/REQ/REP shape), even one channel hop costs measurable latency.
+Before: `kernel -> driver wakeup -> codec -> channel push ->
+Socket::recv wakeup`. Two task hops.
 
-The compio fast path skips it entirely:
+Direct-recv: `Socket::recv` claims the fd via a one-byte atomic,
+pulls bytes from multi-shot recv, feeds the codec, drains a
+message -- all on the caller's task.
 
-- Each wire connection has a `DirectIoState` shared between the driver
-  and any sender.
-- `DirectIoState` contains an `EncodedQueue` -- a `VecDeque<Bytes>`
-  plus a contiguous `flat_buf: BytesMut`, behind a sync `Mutex`.
-- `Socket::send` acquires the queue with `try_lock` (sync, not async),
-  encodes the ZMTP frames directly into the queue, and returns.
-- The driver drains the queue and writes when it next loops.
+Cancel-safe by construction: multi-shot recv uses io_uring's
+`BUF_RING`, dropping the future does not cancel the SQE. Bytes
+accumulate as `BufferRef`s and are picked up by the next poll.
 
-A sync `Mutex::try_lock` on a single-thread cooperative runtime almost
-never fails, because the driver cannot preempt the sender. When it
-does fail (driver is mid-flush), the sender falls back to the channel
-path. If even that fails (peer dead, reconnect in flight), it falls
-back to the socket-wide shared queue, which is bounded by `send_hwm`
-and drained by the new driver after reconnect.
+**REQ/REP IPC RTT at 32 B:**
 
-This eliminates three things from the per-message cost:
+| stage | p50 RTT |
+|---|---|
+| baseline | ~150 µs |
+| send-side fast path | ~100 µs |
+| + direct-recv | <60 µs |
+| + later optimizations | ~20 µs |
 
-- Async-mutex acquisition between sender and driver.
-- The codec's `clone_transmit_chunks` (N atomic increments) and the
-  matching `advance_transmit` cursor bump.
-- One `cmd_tx.send_async().await` round-trip.
+## Iovec batching for small messages
 
-128 B TCP throughput on compio jumped from ~1.30M to 1.48M msg/s
-after this change. Still ~50 % below libzmq, but well within striking
-distance.
+At 128 B throughput peaks, the sender issued `writev` with 1000+
+tiny iovecs (2 per message: header + payload). Kernel limit is
+1024 per call.
 
-## Read-side fast path: direct-recv
+Fix: `EncodedQueue` keeps a `flat_buf: BytesMut`. Messages below
+`FLAT_THRESHOLD` (compio: 32 KiB, tokio: 48 KiB) are written
+contiguously into `flat_buf`. N small messages -> one iovec for
+the whole batch. Above the threshold, the original chunk-list path
+wins because memcpy of a large payload would dominate.
 
-The send-side wins above were measured in throughput; the read-side
-fast path shows up as latency -- REQ/REP round-trip time.
+Thresholds differ because per-iovec cost differs between runtimes.
 
-Before, every received message went `kernel -> driver wakeup ->
-codec parse -> channel push -> Socket::recv wakeup`. Two task hops
-between the kernel and a caller already blocked waiting for the
-data.
+**128 B TCP compio: 1.48M -> ~3.00M msg/s.** Past libzmq's 2.95M.
 
-Direct-recv collapses that to zero hops on the steady-state path
-for socket types that fair-queue from one peer (PULL, SUB, REP,
-PAIR, single-peer REQ). `Socket::recv` claims the FD via a one-byte
-atomic, pulls bytes from a multi-shot recv stream, feeds the codec,
-and drains a parsed message -- all on the caller's task. The driver
-notices the claim flip and parks on a separate signal; when recv
-finishes (or is dropped), the claim releases and the driver
-resumes. Auto-PONG flushes through the writer inline so heartbeats
-keep flowing under the claim.
+## One alloc per 7000 frames
 
-Cancel-safety is structural. The recv path uses io_uring's
-multi-shot recv against a registered `BUF_RING`: one persistent SQE
-per connection, the kernel pulls a buffer from the pool only when
-bytes are ready, and dropping the consumer future does not cancel
-the SQE. Bytes accumulate as `BufferRef`s in the runtime stream and
-are picked up by the next consumer poll. The lock discipline keeps
-extract-and-feed atomic: there is no `.await` between pulling a
-buffer and calling `handle_input`, so a drop in that window is
-impossible.
-
-REQ/REP IPC round-trip at 32-byte messages on compio:
-
-| stage                                  | p50 RTT  |
-|----------------------------------------|----------|
-| baseline, before any fast paths        | ~150 µs  |
-| send-side fast path only               | ~100 µs  |
-| send-side + direct-recv                | <60 µs   |
-| current, later optimisations stacked   | ~20 µs   |
-
-The <60 µs mark was the goal at the time these two paths landed.
-The further drop to ~20 µs came from later refinements -- static
-dispatch on the I/O halves, header scratch, codec-skip guards (see
-below) -- compounding once the dominant task-wake cost was gone.
-
-## Iovec count matters at small sizes
-
-After the big hop reductions, profiling showed the sender was issuing
-many `writev` calls each with 1000+ tiny iovecs at 128 B throughput
-peaks. For N back-to-back 128 B messages, the natural encoding pushes
-2 chunks per message to the iovec list (header `Bytes` + payload
-`Bytes`) -> 2N iovecs per `writev`. The kernel handles up to 1024
-iovecs per call, so the sender hits the limit fast and ends up
-splitting batches arbitrarily.
-
-The fix: pack small messages into one contiguous `BytesMut` region.
-
-`EncodedQueue` keeps a `flat_buf: BytesMut`. For messages below
-`FLAT_THRESHOLD`, the encoder writes header + payload bytes
-contiguously into `flat_buf`. No `Bytes` allocation, no Arc bump. N
-small messages land in one contiguous region. At flush,
-`flat_buf.split().freeze()` produces one `Bytes` covering all N
-messages -- one iovec for the whole batch.
-
-For messages at or above `FLAT_THRESHOLD`, the encoder falls back to
-the original chunk-list path: header `Bytes` from a reusable scratch
-buffer, payload `Bytes` cloned (Arc bump only). The arc-bump approach
-wins above the threshold because the memcpy of a large payload into
-flat_buf would dominate.
-
-The threshold ends up **different on the two backends** -- compio at
-32 KiB, tokio at 48 KiB -- because the per-iovec cost differs. On
-tokio's multi-thread runtime each syscall carries more scheduler and
-task-wake overhead per iovec, pushing the break-even point further
-out; a 32-64 KiB sweep peaked at 48 KiB, where 32 KiB messages jump
-from ~3.4 to ~5.0 GB/s while 64 KiB stays cleanly in the codec path.
-compio's cooperative single-thread scheduler has lower per-iovec
-cost, and the memcpy/arc-bump crossover lands at 32 KiB on that
-path. Below the threshold the flat path wins; above it the
-arc-bump + `write_vectored` path wins because the memcpy starts to
-dominate. Earlier in the project compio also fixed a catastrophic
-2 KiB regression (35.9k -> 405k msg/s on tokio) that an old 1 KiB
-threshold introduced; the calibrated values today are well past
-that.
-
-This single change (combined with skip guards on the codec's mutex
-when nothing has changed since the last iteration) lifted compio's
-128 B TCP throughput from 1.48M to ~3.00M msg/s -- past parity with
-libzmq's 2.95M on the same wire.
-
-## One alloc per 7000 frames, not per frame
-
-At 80k+ msg/s, per-frame `BytesMut::with_capacity(9)` calls for the
-1-9 byte ZMTP frame header showed up clearly in `samply` profiles as
-a steady stream of malloc/free traffic.
-
-`Connection::header_scratch: BytesMut` is a 64 KiB buffer that the
-codec holds across messages. Each `encode_frame_into` writes the
-header into the scratch, calls `split().freeze()` (which freezes the
-prefix into an owned `Bytes` and leaves the remainder mutable), and
-moves on. The buffer is replaced when remaining capacity drops below
-9 bytes -- one allocation per ~7000 frames in the worst case.
-
-A second scratch buffer in `EncodedQueue` does the same job for the
-direct-encode path on compio. Both are permanently allocated after
-the first warmup message; per-message allocator pressure goes to zero
-on the steady state.
+Per-frame `BytesMut::with_capacity(9)` for the 1-9 byte ZMTP
+header showed up in `samply`. Fix: `Connection::header_scratch`
+is a 64 KiB buffer, reused across messages. One allocation per
+~7000 frames.
 
 ## Static dispatch on transports
 
-The original transport abstraction was `Box<dyn DynReader>` /
-`Box<dyn DynWriter>`. Profiling showed the dynamic dispatch added
-allocator pressure and a vtable lookup on every read/write call --
-once per message at 80k+ msg/s, those allocations alone moved the
-profile flame graph noticeably.
-
-The replacement:
+Replaced `Box<dyn DynReader>`/`Box<dyn DynWriter>` with:
 
 ```rust
 enum WireReader { Tcp(OwnedReadHalf<TcpStream>), Ipc(OwnedReadHalf<UnixStream>) }
 enum WireWriter { Tcp(OwnedWriteHalf<TcpStream>), Ipc(OwnedWriteHalf<UnixStream>) }
 ```
 
-The compiler emits a static `match` at the call site. No heap alloc,
-no vtable. The variant set is closed -- new transports require an
-edit to the enum -- which is acceptable because new wire transports
-are very rare (one per decade for ZMQ).
+No heap alloc, no vtable. The variant set is closed -- new wire
+transports are rare.
 
-## Compression decoupled from the codec
+## Compression split
 
-`MessageTransform` was originally a single type holding both encode
-and decode state behind the same `PeerIo` mutex. Under `lz4+tcp` /
-`zstd+tcp`, the sender's `try_direct_encode` had to race
-`peer_io.try_lock()` against the driver's read loop. The driver holds
-`peer_io` for the entire `handle_input` call on every received chunk,
-so `try_lock` almost always lost -- forcing every compressed send
-through the slower `cmd_tx` path.
+`MessageTransform` held both encode and decode behind one
+`PeerIo` mutex. The driver holds that mutex during `handle_input`,
+so `try_lock` from the sender almost always lost.
 
-The split: `MessageEncoder` (send state: compression context, dict,
-out_buf) lives in `DirectIoState::encoder` under its own mutex.
-`MessageDecoder` (recv state: dict, decompress context) stays in
-`PeerIo`. The sender locks the encoder, compresses, then pushes
-results into `EncodedQueue` -- the same flush path as uncompressed
-messages. The driver's read-path lock no longer blocks the sender.
-
-The split also unlocked an ergonomic improvement on `Payload`: zero-
-copy accessors (`as_bytes`, `as_slice`, `is_contiguous`) so callers
-inspect single-chunk payloads without coalescing. Useful for the
-sentinel-prefix passthrough that lets sub-threshold messages skip the
-encoder entirely.
+Split: `MessageEncoder` in `DirectIoState::encoder` under its own
+mutex. `MessageDecoder` stays in `PeerIo`. Sender no longer
+blocked by the driver's read path.
 
 ## Inproc bypasses ZMTP
 
-Same-process `inproc://` connections do not need wire framing. There
-is nothing the wire format would protect against between two halves
-of the same address space.
+Same-process `inproc://` connections skip wire framing entirely.
+Global name registry, direct `InprocFrame` exchange via channels.
+Hot-path `SinglePart` variant is ~72 B. Throughput: ~3M msg/s
+for any size below 32 KiB, >100 GB/s nominal at 32 KiB+ (no
+kernel crossing).
 
-The inproc transport in omq has no driver, no codec, no handshake. A
-global registry maps names to `Sender<InprocConnectRequest>`; `bind`
-registers a name, `connect` sends a request, peers exchange an
-`InprocPeerSnapshot` (socket type + identity) synchronously, then
-messages flow as `InprocFrame` through flume channels.
+## Large-frame recv: accumulation + OneShot
 
-The hot-path `InprocFrame::SinglePart` variant carries `Option<Bytes>`
-(identity) and `Bytes` (body) inline (~72 B). The full `Message`
-struct is ~624 B; wrapping it in a box for the multipart case keeps
-the channel slot small on the hot path. inproc throughput on compio
-sits at ~3M msg/s for any size below 32 KiB and rises past 100 GB/s
-nominal at 32 KiB+ because no bytes ever cross the kernel.
+For large messages spanning multiple BUF_RING buffers, the codec's
+`split_to` hit its slow path: allocate + copy everything
+contiguous. Combined with the per-buffer copy on the way in: 2x
+memcpy of the full payload. At 512 KiB, 96% of recv-side
+instructions were in memcpy.
 
-## Large-frame recv: accumulation and one-shot transition
+Fix: when the codec's head frame exceeds `large_message_threshold`
+(default 128 KiB), the compio backend bypasses the codec's chunked
+buffer and accumulates into a single pre-allocated `BytesMut`.
 
-Up through the work above, the recv side did one userspace memcpy per
-BUF_RING buffer. Each multi-shot CQE delivered a `BufferRef` borrowing
-a pooled buffer; the driver did `Bytes::copy_from_slice(&buf[..])`,
-dropped the buffer back to the pool, and fed the owned `Bytes` to the
-codec. For small messages that fit in one buffer, `split_to` takes the
-fast path (zero-copy `Bytes::slice` from a single chunk). One memcpy
-total.
-
-For large messages spanning multiple buffers, the codec's
-`ChunkedInputBuf::split_to` hit its slow path: allocate a `BytesMut`,
-copy every contributing chunk into one contiguous buffer. Combined
-with the per-buffer copy on the way in, the total was 2x memcpy of
-the full payload. At 512 KiB, callgrind showed 96% of recv-side
-instructions in memcpy.
-
-The codec exposes `peek_next_frame_payload_size`,
-`begin_supplied_payload_with_prefix`, and `supply_payload` to let an
-I/O backend take over recv for one frame. When the codec's head frame
-exceeds `Options::large_message_threshold` (default 128 KiB,
-user-configurable), the compio backend bypasses the codec's chunked
-buffer and accumulates the payload into a single pre-allocated
-`BytesMut`.
-
-### The two recv modes
+Two recv modes:
 
 ```
 MultiShot ──[ENOBUFS during accumulation]──> OneShot
@@ -525,559 +220,166 @@ MultiShot ──[ENOBUFS during accumulation]──> OneShot
     └──────────[small frame]─────────────────────┘
 ```
 
-**MultiShot** (default): a persistent multi-shot recv SQE pulls from
-the io_uring BUF_RING pool. Each CQE delivers up to one buffer's
-worth (default 64 KiB). Small messages stay on this path permanently.
+**MultiShot** (default): persistent multi-shot recv SQE from
+BUF_RING pool. Small messages stay here permanently.
 
-**OneShot**: no multi-shot SQE. A single `read_until` pulls the
-payload directly into a pre-allocated `BytesMut` in one syscall.
-Used for large messages that exceed the BUF_RING pool capacity, and
-for consecutive large messages that follow.
+**OneShot**: a single `read_until` pulls the payload directly into
+pre-allocated `BytesMut`. Triggered when message exceeds pool
+capacity (kernel kills the multi-shot SQE with `ENOBUFS`).
 
-### How a large message is received
+Cancel-safe: the accumulation buffer lives in
+`DirectIoState::pending_acc`, not in the future's locals. Drop
+mid-accumulation -> next `recv()` resumes.
 
-1. A CQE arrives containing the frame header plus the first ~64 KiB
-   of payload. The normal path runs: `copy_from_slice` into `Bytes`,
-   `handle_input` feeds the codec.
+Copy count: small messages 1x memcpy. Large messages: ~1.25x at
+256 KiB, ~1.03x at 2 MiB, ~1.00x at 32 MiB+.
 
-2. `try_one_shot_large_recv` peeks at the codec head, sees a large
-   frame, returns `AccumulatePayload`. The codec state is unchanged.
-
-3. The caller calls `begin_supplied_payload_with_prefix`. The codec
-   extracts the buffered prefix (zero-copy `Bytes::slice` from the
-   single chunk) and enters `AwaitingSuppliedPayload`. A `BytesMut`
-   is pre-allocated for the full payload and the prefix is copied in.
-
-4. Subsequent CQEs are copied directly from the BUF_RING buffer into
-   the pre-allocated `BytesMut`, bypassing the codec entirely. Each
-   buffer is returned to the pool immediately after copying.
-
-5. If the payload fits within the pool (message <= pool capacity),
-   accumulation completes and `supply_payload` delivers the payload.
-   The slot stays MultiShot.
-
-6. If the payload exceeds the pool, the kernel exhausts the BUF_RING
-   and terminates the multi-shot SQE with `ENOBUFS`. This is the
-   transition mechanism: the kernel killed the SQE, so the fd is
-   free. The slot transitions to OneShot and a single `read_until`
-   pulls the remaining bytes in one syscall.
-
-7. The slot stays OneShot. Consecutive large messages use
-   `one_shot_with_prefix` directly -- extract prefix, `read_until`
-   remainder. No cancel, no rearm, no pool involvement. One syscall
-   per message.
-
-8. When a small frame arrives in OneShot mode,
-   `one_shot_recv_and_feed` re-arms the multi-shot stream once and
-   transitions back to MultiShot.
-
-### Why CancelToken does not work
-
-The obvious approach -- cancel the multi-shot SQE via compio's
-`CancelToken`, then switch to one-shot -- fails. compio's
-`Proactor::cancel_token` checks `key.has_result()` before submitting
-`ASYNC_CANCEL`. For a multi-shot key that has already delivered CQEs,
-this short-circuits: no `ASYNC_CANCEL` is submitted to the kernel.
-Five attempts to make cancel-based transition reliable all deadlocked
-in release builds (timing-dependent; some passed in debug).
-
-`ENOBUFS` sidesteps the problem. The kernel terminates the multi-shot
-SQE itself when the pool is exhausted. No `CancelToken` involved, no
-race, no timing dependency. For messages that fit within the pool,
-no transition is needed -- accumulation handles it entirely.
-
-### Cancel-safety
-
-The accumulation buffer lives in `DirectIoState::pending_acc` (shared
-state), not in the recv future's locals. If the recv future is dropped
-mid-accumulation (timeout, cancel), the partial buffer survives. The
-next `recv()` call or driver iteration detects `large_recv_pending != 0`
-and resumes accumulation. The OneShot `read_until` uses an `AccRestore`
-drop guard that saves the buffer back to `pending_acc` on cancellation.
-
-### Copy count
-
-Small messages (below threshold): 1 memcpy. BUF_RING buffer to
-`Bytes`, then zero-copy `Bytes::slice` through the codec.
-
-Large messages (above threshold): the first CQE is double-copied
-(BUF_RING to `Bytes` via `handle_input`, then prefix extracted and
-copied into the accumulator). Subsequent CQEs or the one-shot
-`read_until` are single-copy. For a 256 KiB message: ~1.25x memcpy.
-For 2 MiB: ~1.03x. For 32 MiB+: ~1.00x.
-
-### BUF_RING pool sizing
-
-The pool is per-runtime, shared by all connections. Default: 64
-buffers x 64 KiB = 4 MiB. This handles ~10-20 concurrent connections
-without `ENOBUFS` pressure on small-message workloads.
-
-The pool size no longer determines large-message performance. Messages
-that exceed the pool transition to one-shot automatically via ENOBUFS.
-A larger pool delays the transition (more CQEs accumulated before
-one-shot kicks in); a smaller pool triggers it sooner (one-shot
-handles more of the payload in a single syscall). The pool is purely
-a small-message burst-absorption knob. See `runtime.rs` for the
-sizing API.
-
-## Things tried and dropped
-
-The optimisations above are the ones that survived. Several plausible
-ideas did not.
-
-### Direct-write on send (reverted)
-
-After direct-recv landed, the natural next step was to do the
-same on the send side: `Socket::send` would acquire the writer lock,
-encode + `write_vectored` inline, and return -- skipping the driver
-entirely on the send path.
-
-Latency dropped from ~165 µs to ~85 µs RTT. A clean 2x win on paper.
-
-PUSH/PULL throughput at 128 B then collapsed by 4-7x (TCP: ~830k ->
-~115k msg/s).
-
-The cause turned out to be that the pre-bypass driver provided
-implicit cross-message batching for free. Producers pushed into
-`cmd_tx` and returned immediately; the driver drained N queued
-messages on its next iteration and issued one `writev` for all of
-them. The inline send path collapsed that into per-call inline
-encoding + writev: a hot single-producer loop did one syscall per
-message instead of one syscall per N.
-
-The lesson: a hop that looks like pure latency overhead may be
-providing implicit batching that is critical for throughput. Latency
-optimisations that bypass batching points must be measured against
-throughput before they are kept. The send-side bypass was reverted;
-the recv-side one was kept because it does not interact with cross-
-message batching on the send path.
-
-### TCP_CORK (reverted)
-
-Implemented as a `Corker { fd }` wrapper around the TCP write that
-toggled `setsockopt(TCP_CORK, on/off)` around each flush, with two
-strategies: cork on every flush, and cork only on multi-chunk frames.
-
-Both regressed throughput by 10-15 % on TCP-only benches, well
-outside noise.
-
-The reasons:
-
-- Each flush adds two `setsockopt` syscalls. At ~100k msg/s and
-  ~500 ns/syscall, that is a 5-10 % constant overhead with no
-  upside.
-- The savings CORK is supposed to deliver -- coalescing back-to-back
-  small writes into one TCP segment -- already came from
-  `write_vectored` on a single flush. Multi-chunk frames go to the
-  kernel as one `iovec` array -> one `sendmsg(2)` -> one segment when
-  the gather fits.
-- The cork-then-uncork pattern defeats the latency benefit of
-  `TCP_NODELAY`, which is on by default. CORK overrides NODELAY by
-  design, and uncorking flushes the buffer. Net effect for REQ/REP
-  is "wait -> send -> wait" instead of "send immediately."
-
-The `rzmq` project does ship CORK toggling but inside its io_uring
-backend, where the cork/uncork is a queued SQE rather than a syscall.
-That is the only model where the cost-benefit flips positive on
-Linux. The plumbing is not shipped here; it lives as a documented
-null result.
-
-### Allocation eliminations below the noise floor
-
-A handful of theoretically-justified changes were prepared and
-measured:
-
-- `Connection::transmit_chunks` returning `SmallVec<[IoSlice; 8]>`
-  instead of `Vec<IoSlice>` -- eliminates a small heap alloc per
-  flush. Inline storage covers the typical 1-2 chunk case.
-- Pre-sizing the codec's `in_buf` (8 KiB) and outbound chunk vec
-  (cap 8) -- skips the first-grow reallocation on every fresh
-  connection.
-
-Both are provably-correct allocation reductions. Both came in
-undetectable below the bench harness's noise floor (a single-cell
-delta under +/-20 % is noise at the standard 300 ms round duration).
-They are kept on a side branch in case future profiling under a
-real coverage tool (samply, perf, criterion at longer rounds) shows
-them moving the needle.
-
-The lesson is more about bench discipline than about the changes
-themselves. A bench that cannot resolve a 1 % alloc reduction will
-also fail to catch a 1 % regression sneaking in elsewhere. Some
-rounds-per-cell and round-duration knobs are tuned for fast iteration
-during development; long-form regression measurement needs longer
-rounds, multiple full-suite passes aggregated by median, and `taskset`
-pinning to remove scheduler noise.
-
-## Why libzmq is hard to beat at 128 B, and how it stops being hard
-
-libzmq's I/O thread overlaps app encoding with kernel writes. omq-
-compio is single-threaded by design: encoding and `write_vectored`
-run sequentially in the same task. That is a structural disadvantage
-on the send path that the implementation has to overcome by being
-shorter everywhere else.
-
-Stacked, the optimisations above do that:
-
-- No actor hop on send for non-REQ/REP types.
-- No pump task hop for byte-stream peers.
-- No async-mutex acquisition on the encode side.
-- One iovec per N small messages, not 2N.
-- One header allocation per ~7000 frames, not per frame.
-- No vtable / Box on the per-message hot path.
-- Sender encodes message N+1 while the driver writes message N
-  (the writer mutex is separate from the codec mutex, so the encode/
-  write pipeline overlaps even on a single-thread runtime).
-
-The last point is the structural answer to the I/O-thread question:
-omq does not have a separate I/O thread, but it does pipeline encode
-against write through careful lock decomposition. On a cooperative
-runtime that is enough.
-
-The result is that omq beats libzmq at every transport on every size
-on the bench machine, with the largest wins at 2-32 KiB (where the
-multi-chunk + writev advantage compounds with the hop reductions) and
-parity-to-1.4x at 128 B (where the I/O-thread advantage gets close to
-neutralised, but not quite).
+Why not `CancelToken`: compio's `cancel_token` checks
+`key.has_result()` and short-circuits for multi-shot keys that
+already delivered CQEs. Five attempts deadlocked in release
+builds. `ENOBUFS` sidesteps the problem -- the kernel terminates
+the SQE itself.
 
 ## Send-path route caching
 
-After the direct-encode fast path landed, perf profiling revealed that
-the send path's routing overhead was the next bottleneck. At 128 B
-over TCP, the profile showed `Socket::send` consuming ~15% of CPU
-time. The actual encoding (`try_direct_encode`) was only 3%. The
-other 12% was synchronization: lock acquisitions to look up the target
-peer and verify it was alive.
+Profiling at 128 B TCP: `Socket::send` was 15% CPU, of which only
+3% was encoding. The rest: four lock acquisitions and two
+`Arc<DirectIoState>` refcount bumps per message for a peer set
+that changes maybe once per benchmark.
 
-For a single-peer PUSH socket sending 128 B messages over TCP, each
-`send()` call performed:
+Fix 1: fused peer selection. One `direct_io` read instead of
+three. `peer_alive` eliminated.
 
-1. `out_peers.read()` -- RwLock to access the peer list.
-2. `peer_alive()` -- RwLock read on `direct_io` handle to check the
-   driver was still running.
-3. `peer_alive()` again -- a second check for the round-robin chosen
-   peer (the first check was `any_alive`, the second was per-candidate).
-4. `direct_io.read().clone()` -- a third RwLock read plus an Arc clone
-   to extract the `DirectIoState` that `try_direct_encode` needs.
+Fix 2: generation-gated cache. `peers_gen: AtomicU64` increments
+on any peer mutation. Cache hit skips the entire peer lookup.
+Cost: one atomic load + one uncontended mutex.
 
-Four lock acquisitions and two `Arc<DirectIoState>` refcount bumps per
-message, for a peer set that changes maybe once during the entire
-benchmark.
+**Inproc 128 B: 3.07M -> 3.42M msg/s (+11%).** TCP/IPC: ~3-5%
+(kernel dominates).
 
-**Fused peer selection.** The first fix collapsed these three
-`direct_io` reads into one: read the handle once, derive liveness from
-the same guard, and extract the Arc in the same pass. This removed the
-`peer_alive` helper entirely. The measured impact was within noise on
-TCP (the kernel syscalls dominate) but the code became a single-pass
-loop instead of scan-then-recheck.
+Recv-side cache was tried and reverted -- cross-thread Mutex
+contention was worse than the uncontended RwLock reads it replaced.
 
-**Generation-gated route cache.** The second fix added a generation
-counter (`peers_gen: AtomicU64`) that increments on any peer mutation
-(connect, accept, reconnect, driver exit, close). The send path
-checks the generation against a cached `CachedPeerRoute` stored in
-`SocketInner`. On cache hit (generation matches), the entire
-`out_peers.read()` + `direct_io.read()` sequence is skipped -- the
-send path goes straight to `slow_round_robin` with the cached
-`PeerOut` and `Arc<DirectIoState>`.
+## Closing the small-message recv gap (8 B - 32 B)
 
-The cache hit path costs one atomic load (`peers_gen`) and one
-uncontended mutex lock (to read the cached struct). The miss path
-populates the cache after the full peer lookup, so the next send is a
-hit.
+At this point omq beat libzmq from 128 B up but trailed at 8 B
+and 32 B IPC: ~3.8M vs ~8.4M msg/s (0.45x).
 
-This mattered most for inproc, where there are no kernel syscalls to
-dominate the profile: inproc 1-peer 128 B jumped from 3.07M to 3.42M
-msg/s (+11%). TCP and IPC gains were in the noise band (~3-5%), which
-is expected -- the eliminated overhead is ~10 ns per message, and the
-per-message budget at 2.7M msg/s over TCP is ~370 ns with most of it
-in the kernel.
+### Profile before (8 B IPC, PULL side)
 
-**What didn't work: caching on the recv side.** The recv path has an
-analogous `snapshot_direct_io_single_peer()` that reads `out_peers` +
-`direct_io` on every `recv()` call. Adding the same cache check there
-caused a regression: the `Mutex<CachedPeerRoute>` became contended
-between the send thread and recv thread (they run on separate compio
-runtimes). The Mutex lock/unlock overhead under cross-thread contention
-was worse than the two uncontended RwLock reads it replaced. The recv-
-side cache was removed. A future approach might use an `AtomicPtr`
-swap or per-thread caching, but the uncontended RwLock reads are cheap
-enough (~3-5 ns each) that this isn't a bottleneck worth the
-complexity.
-
-## Closing the small-message recv gap (8 B -- 32 B)
-
-At the point the optimizations above were done, omq beat libzmq at
-every size from 128 B up but trailed at 8 B and 32 B IPC: ~3.8M vs
-~8.4M msg/s (0.45×). Three rounds of work narrowed this to ~7.7M
-(0.92×). The bottleneck shifted from the send path to the recv path,
-specifically the per-message overhead in the codec and the recv_cache
-drain loop.
-
-### Profile before (8 B IPC, PULL side, bench_peer)
-
-| % | Function |
+| % | function |
 |---|---|
-| 20.4 | decode_assembled_frame (codec parsing) |
-| 18.3 | try_recv (cache pop + subscription check) |
-| 12.9 | __memmove_avx (Bytes::copy_from_slice of BUF_RING data) |
-| 8.1 | shared_clone (Bytes Arc increment) |
-| 7.8 | shared_drop (Bytes Arc decrement) |
-| 5.9 | ChunkedInputBuf::split_to |
-| 5.7 | Connection::drive |
-| 4.0 | peek_frame_header |
-| 2.9 | drain_remaining_user_events_into |
+| 20.4 | decode_assembled_frame |
+| 18.3 | try_recv |
+| 12.9 | memmove (Bytes::copy_from_slice) |
+| 8.1 | shared_clone (Arc increment) |
+| 7.8 | shared_drop (Arc decrement) |
 
-Three areas: codec parsing (38%), Bytes refcounting (16%), and cache
-drain overhead (18%).
+Three areas: codec parsing (38%), Bytes refcounting (16%), cache
+drain (18%).
 
 ### Round 1: recv cache + try_recv drain
 
-The bench loop calls `recv()` (which feeds the codec and returns
-one message) followed by `while try_recv().is_ok() {}` (drains the
-remaining batch from cache). Prior to this, only `recv()` was called
-per message. The drain loop alone doubled 8 B throughput from 3.8M
-to 6.9M msg/s by reducing the number of async `recv()` round-trips
-and I/O submissions.
+Bench loop calls `recv()` then `while try_recv().is_ok() {}`
+to drain the batch from cache instead of one async `recv()` per
+message.
+
+**8 B: 3.8M -> 6.9M msg/s.**
 
 ### Round 2: front_offset, inline Payload, PULL fast path
 
-**`front_offset` in `ChunkedInputBuf`.** The codec's `advance(2)` (skip
-the 2-byte frame header) used to call `Bytes::slice()` -- which clones
-the Arc backing the front chunk and drops the old reference. Two
-atomic RMW per frame, hundreds of frames per 4 KB buffer. A new
-`front_offset: usize` field tracks how many bytes have been consumed
-from the front chunk. `advance()` bumps the offset. `peek_array()`
-indexes directly into `front[front_offset..]` instead of iterating
-byte-by-byte through the `VecDeque`. `split_to()` reads from the
-offset. The front `Bytes` is only dropped when fully consumed --
-amortized over hundreds of frames.
+**`front_offset` in `ChunkedInputBuf`.** `advance(2)` (skip
+header) used `Bytes::slice()` -- Arc clone + drop per frame.
+New `front_offset: usize` field tracks consumed bytes. `advance`
+bumps the offset. Front `Bytes` dropped only when fully consumed.
 
-**Inline small `Payload`.** `Payload` was `SmallVec<[Bytes; 1]>` (40 B).
-Every decoded frame became a `Bytes` via `split_to` -- one Arc clone.
-The new representation is a four-variant enum:
+**Inline `Payload`.** Was `SmallVec<[Bytes; 1]>` (40 B). Now:
 
 ```rust
 enum PayloadInner {
     Empty,
     Inline { len: u8, data: [u8; 38] },  // no heap, no Arc
-    Single(Bytes),                         // 32 B
-    Multi(Vec<Bytes>),                     // 24 B, rare
+    Single(Bytes),
+    Multi(Vec<Bytes>),
 }
 ```
 
-`sizeof(Payload)` stays at 40 bytes. 38 is the largest inline
-capacity that fits (the Inline variant is 39 bytes; the enum pads
-to 40 for alignment with Single's 8-byte align). Covers every bench
-size up to 38 B including the 32 B cell. `ChunkedInputBuf::split_to`
-copies payloads up to 38 bytes into the inline variant -- zero Arc
-operations. Combined with `front_offset`, the per-frame cost on the
-codec hot path went from ~3 atomic ops to ~0 (one `Bytes` drop per
-chunk, amortized over hundreds of frames).
+38 B inline capacity covers every bench size up to 38 B.
+Per-frame cost: ~3 atomic ops -> ~0.
 
-The 7 callsites that iterate `Payload::chunks()` (all on the encode
-side) were updated: flat-buffer extends use `as_slice()` first, gather
-I/O paths use `is_contiguous()` + `as_bytes()`, inproc uses
-`as_chunk()`. The inline variant returns `&[]` from `chunks()` -- safe
-because inline payloads originate from the decode path and reach
-the encode path only via REP envelope recycling, where `as_bytes()`
-handles the materialization.
-
-**PULL fast path in `try_recv`.** Three levels of specialization
-based on socket type: REQ/REP/DISH lock per pop (needs type_state),
-SUB holds the lock with subscription filtering, PULL/PAIR skips
-both `post_recv_apply` and `matches_subscription` entirely.
+**PULL fast path in `try_recv`.** Three specialization levels:
+REQ/REP/DISH lock per pop, SUB holds lock for filtering,
+PULL/PAIR skips both entirely.
 
 ### Round 3: cross-crate inlining
 
-After Rounds 1-2, the numbers barely moved. Profiling explained
-why: every hot-path function showed up as a separate symbol in
-`perf report`. `split_to` alone was 11.9% self time.
+After Rounds 1-2, numbers barely moved. Every hot-path function
+was a separate symbol -- `split_to` alone was 11.9% self time.
+`omq-proto` and `omq-compio` are separate crates; without LTO
+the compiler cannot inline across the boundary.
 
-The codec lives in `omq-proto`. The socket layer lives in
-`omq-compio`. Without LTO, the compiler cannot inline across crate
-boundaries. Every `peek_array`, `advance`, `split_to`,
-`peek_frame_header`, `try_decode_frame`, `decode_assembled_frame`,
-`absorb_data_frame`, `poll_event` call was a real function call with
-full prologue/epilogue.
-
-Two fixes: `lto = "thin"` in the workspace `[profile.release]` and
-`[profile.bench]`, plus `#[inline]` annotations on all hot-path
-functions in `omq-proto` (ChunkedInputBuf methods, frame parsing,
-Connection methods, Payload constructors and accessors).
-
-After LTO, `perf report` collapsed the entire codec into one
-symbol (`Connection::handle_input` at 43.5%). The structural wins
-from Rounds 1-2 became visible.
-
-**Later update: LTO removed.** After the Payload-skip fast path
-landed (Round 8), the recv hot path no longer crosses crate
-boundaries -- `try_advance_ready` does header peek, buffer read,
-and Message construction all inside `omq-proto`. With the fast path
-handling all inline-sized single-frame messages, cross-crate
-inlining no longer matters for the dominant recv case.
-
-Measurement with the fast path in place:
-
-| config | 8 B msg/s | compile time |
-|--------|-----------|--------------|
-| `lto = false` | 7.85M | 6 s |
-| `lto = "thin"` | 7.57M | 8 s |
-| `lto = "fat"` | 7.70M | 24 s |
-
-Thin LTO was slightly *slower* than no LTO at 8 B -- LLVM's
-cross-module optimizer made different (worse) inlining decisions
-on `peek_frame_header`, pulling it out of `handle_input` as a
-separate call at 15% self time. Fat LTO recovered some of that
-but not enough to justify the 4x compile-time cost.
-
-Background on the two LTO modes: **thin LTO** runs a fast
-cross-module pass that imports and inlines selected function
-bodies across crate boundaries, then optimizes each module in
-parallel. It sees every crate's IR but applies only targeted
-cross-module transforms. **Fat LTO** merges all crate IR into a
-single LLVM module and runs the full optimization pipeline on it
--- the global view lets LLVM make better inlining and
-devirtualization decisions, but the single-threaded merge +
-optimize pass is slow. Neither mode guarantees that a function
-marked `#[inline]` will actually be inlined -- LLVM applies its
-own cost model and may decline.
-
-LTO is removed from the workspace profile. The `#[inline]`
-annotations stay -- they are free at compile time and still help
-the within-crate optimizer.
+Fix: `#[inline]` annotations on all hot-path functions in
+`omq-proto`. After the Payload-skip fast path landed (Round 8),
+the recv hot path no longer crosses crate boundaries --
+`try_advance_ready` does everything inside `omq-proto`. LTO is
+not needed; `#[inline]` annotations stay.
 
 ### Round 4: smaller Message, UnsafeCell recv_cache
 
-**`MESSAGE_INLINE_PARTS` 3 → 1.** `Message` was
-`SmallVec<[Payload; 3]>` = 128 bytes. For single-part PUSH/PULL,
-two of the three inline slots were dead weight copied in and out of
-the recv_cache on every message. Dropping to `[Payload; 1]` shrinks
-Message to 48 bytes -- 62% less copied per drain_remaining push and
-try_recv pop. Multi-part envelopes (REQ, ROUTER, compression
-transports) spill to the heap; acceptable for non-pipeline patterns.
+**`Message` inline parts 3 -> 1.** Was `SmallVec<[Payload; 3]>`
+= 128 B. Single-part PUSH/PULL: two dead slots copied per message.
+Now `[Payload; 1]` = 48 B. 62% less copied per push/pop.
 
-**`UnsafeCell` recv_cache.** On compio's single-threaded cooperative
-runtime, recv_cache is never contended. Replacing
-`Mutex<VecDeque<Message>>` with an `UnsafeCell`-backed `RecvCache`
-wrapper removes one atomic CAS + store per try_recv call (~8 ns).
-Requires an unsafe `Sync` impl on `SocketInner`, justified by
-compio's single-thread guarantee.
+**`UnsafeCell` recv_cache.** On compio's single-threaded runtime,
+recv_cache is never contended. Replaced `Mutex<VecDeque<Message>>`
+with `UnsafeCell`-backed wrapper. Removes one atomic CAS per
+try_recv (~8 ns).
 
-### Profile after rounds 3-4 (8 B IPC, PULL side)
+### Profile after rounds 3-4 (8 B IPC)
 
-| % | Function |
+| % | function |
 |---|---|
-| 66.3 | handle_input (all codec work, inlined) |
+| 66.3 | handle_input (all codec, inlined) |
 | 15.8 | drain_remaining_user_events_into |
-| 5.7 | bench_peer main (try_recv loop) |
-| 3.7 | SmallVec::drop |
-| 2.0 | __memmove_avx |
-| 1.3 | __memset_avx (Payload::inline zeroing) |
+| 5.7 | bench_peer main |
+| 2.0 | memmove |
 
-memcpy collapsed from 24% to 2% (smaller 48 B Messages). try_recv
-disappeared as a hotspot (UnsafeCell has no atomic overhead).
-`drain_remaining` became the #2 bottleneck at 15.8%.
+memcpy: 24% -> 2%. try_recv overhead: gone.
 
-### Round 5: codec-direct try_recv (partial)
+### Round 5: codec-direct try_recv
 
-`drain_remaining` pushes N messages from the codec's `Event` queue
-into `recv_cache`, one by one. Each push moves an 80-byte `Event`
-(the enum is larger than `Message` due to Command and
-HandshakeSucceeded variants), matches it, extracts the 48-byte
-Message, and pushes that into the VecDeque.
+Store `Arc<DirectIoState>` on `SocketInner`. PULL/PAIR's try_recv
+locks `peer_io` directly, pops one event per call. Skips
+`drain_remaining` entirely.
 
-Storing `Arc<DirectIoState>` directly on `SocketInner` (via
-`UnsafeCell`) lets try_recv lock `peer_io` and call
-`drain_one_user_event` directly -- one Mutex per call (same cost as
-the old recv_cache Mutex), but without the 80→48 byte copy overhead
-in drain_remaining.
+drain_remaining: 15.8% -> 0%. Replaced by
+`drain_one_user_event` at 11.1%.
 
-For PULL/PAIR, `try_direct_recv` no longer calls
-`drain_remaining_user_events_into`. Events stay in the codec's queue.
-try_recv locks `peer_io` directly and pops one event per call.
+### Round 6: separate message queue, batch swap
 
-This cut drain_remaining from 15.8% to 0% but replaced it with
-`drain_one_user_event` at 11.1% -- the peer_io Mutex + VecDeque pop
-of the 80-byte Event enum.
+**Separate `messages: VecDeque<Message>` in `Connection`.**
+`absorb_data_frame` pushes directly instead of wrapping in
+`Event::Message`. Data plane and control plane are separate
+queues.
 
-### Profile after round 5 (8 B IPC, PULL side)
+**Cache-first try_recv.** Check `recv_cache.pop_front()` before
+touching `peer_io`. After `drain_and_swap` fills the cache,
+~800 messages per batch pop with zero locking.
 
-| % | Function |
+### Profile after round 6 (8 B TCP)
+
+| % | function |
 |---|---|
-| 58.7 | handle_input (all codec work, inlined) |
-| 17.3 | bench_peer main (try_recv loop + Instant::now) |
-| 11.1 | drain_one_user_event (peer_io lock + poll_event) |
-| 6.0 | SmallVec::drop |
-| 1.6 | __memmove_avx |
-| 1.1 | __memset_avx |
+| 62.5 | handle_input |
+| 16.8 | bench_peer main |
+| 9.0 | VecDeque::push_back |
+| 8.3 | memmove |
 
-### Tried and discarded: codec-direct via cached_route
-
-Before the `direct_recv_io` approach, two attempts tried to reach
-`peer_io` through `cached_route` in try_recv:
-
-First attempt: lock `cached_route`, clone `Arc<DirectIoState>`,
-release, then try_lock `peer_io`. The Arc clone+drop added 2 atomic
-RMW per call; 2 mutex operations vs the cache path's 0 (UnsafeCell).
-Throughput halved.
-
-Second attempt: hold `cached_route` for the entire poll, avoiding
-the Arc clone. Still 2 mutex locks per call. Throughput halved again.
-The lesson: even uncontended, each Mutex lock/unlock is ~8 ns of
-atomic CAS + store. Two locks per try_recv call is strictly worse
-than the UnsafeCell cache path.
-
-### Round 6: separate message queue, batch swap, driver fix
-
-The remaining 11.1% in `drain_one_user_event` came from popping
-80-byte `Event` enums from the codec's event queue and matching on
-the variant. Three changes landed together:
-
-**Separate message queue in `Connection`.** `absorb_data_frame`
-pushes directly into `messages: VecDeque<Message>` instead of
-wrapping in `Event::Message` and pushing into `events`. Data plane
-and control plane are separate queues. Messages avoid the 80-byte
-Event enum entirely. `poll_message()` and `swap_messages()` expose
-the new queue to callers.
-
-**Driver event ordering fix.** Splitting the queue exposed an
-ordering bug. The tokio driver drained `poll_message()` before
-`poll_event()`. When a single `handle_input` produced both
-`HandshakeSucceeded` and the first data frames (common for pipelined
-sends), messages arrived at the actor before the handshake event.
-The actor's identity map was empty, so REP envelope stripping found
-the identity frame as the delimiter. Fix: drain events first, then
-messages -- in both the tokio driver (`engine/driver.rs`) and compio
-driver (`transport/driver.rs`). The compio driver had a separate
-bug: it still matched `Event::Message` from `poll_event()`, which
-the queue split had emptied. TCP/IPC messages were silently dropped
-until `poll_message()` was wired in.
-
-**Cache-first try_recv.** PULL/PAIR's `try_recv()` and `recv()`
-check `recv_cache.pop_front()` before touching `peer_io`. After
-`drain_and_swap` fills the cache from the codec's message queue,
-~800 messages per batch pop from cache with zero locking
-(UnsafeCell). Only when the cache empties does the next `recv()`
-re-enter the I/O path.
-
-Profile after round 6 (8 B TCP, PULL side):
-
-| % | Function |
-|---|---|
-| 62.5 | handle_input (codec parsing, all inlined) |
-| 16.8 | bench_peer main (try_recv cache pop + Instant::now) |
-| 9.0 | VecDeque::push_back (48 B Message into codec queue) |
-| 8.3 | __memmove_avx (VecDeque ring buffer copies) |
-| 2.1 | __memset_avx (Payload::inline + Message::from_inline zeroing) |
-
-The async overhead (flume channel checks, mutex, event-listener)
-dropped to noise. The codec parse + queue push + memcpy now account
-for >80% of all time.
+Async overhead dropped to noise. Codec + queue + memcpy: >80%.
 
 ### Round 7: Message enum, Payload internalized
 
-**`Message` as a custom enum.** Replaced `SmallVec<[Payload; 1]>`
-with a four-variant enum:
+Replaced `SmallVec<[Payload; 1]>` with a custom enum:
 
 ```rust
 enum MessageInner {
@@ -1088,301 +390,150 @@ enum MessageInner {
 }
 ```
 
-`sizeof(Message)` stays at 48 bytes. `Inline` covers every bench
-size through 39 B. `absorb_data_frame` constructs `Inline` directly
-for single-frame messages up to 39 B, `Single(Payload)` for larger
-ones. SmallVec dropped entirely -- no more SmallVec::drop in the
-profile (was 6%).
+48 B, covers up to 39 B inline. `absorb_data_frame` constructs
+`Inline` directly. SmallVec::drop disappeared from the profile
+(was 6%). `MaybeUninit` skips zeroing the 39 B array -- worth
+~13% at 8 B.
 
-**Payload removed from public API.** `Payload` stays `pub` in
-`omq-proto` (the codec and fuzz tests need it) but is no longer
-re-exported from omq-tokio or omq-compio. Users see only `Message`.
-New public API: `Deref<[u8]>`, `From<Message> for Bytes`,
-`msg.iter()`, `msg.pop_front()`, `msg.part_bytes(idx)`,
-`Message::with_prefix()`. ZMTP frame encoding moved to
-`frame::encode_message_flat/gather/prefixed_*` so `EncodedQueue`
-calls those instead of iterating `Payload` parts.
-
-**`MaybeUninit` in the Payload-skip fast path.** The fast path in
-`try_advance_ready` (Round 8 below) constructs `MessageInner::Inline`
-directly. Its `[u8; 39]` array would otherwise be zeroed on every
-message -- 39 bytes of memset for an 8 B payload. Two targeted
-`unsafe` blocks use `MaybeUninit` to skip the zeroing: one to
-create the uninit array, one to `transmute` it to `[u8; 39]` after
-`read_into_uninit` has initialized `data[..payload_len]`. The rest
-of message.rs stays safe (Payload::inline and Message::from_inline
-zero their arrays normally). Removing the zeroing is worth ~13% at
-8 B -- the difference between beating and trailing libzmq.
+`Payload` removed from the public API. Users see only `Message`.
 
 ### Round 8: Payload-skip fast path in the codec
 
-The codec's recv path went: `try_decode_frame` -> `Payload::inline`
-(copy N bytes into 38 B array) -> `absorb_data_frame` ->
-`Message::from_inline` (copy N bytes into 39 B array). Two copies
-of the payload data per message. At 8 B that is 16 B of redundant
-copies. At 32 B it is 64 B -- the same total as libzmq's single
-64 B `memcpy` of `msg_t`, except omq's copy is split across two
-intermediate structures.
+Before: `try_decode_frame` -> `Payload::inline` (copy N) ->
+`absorb_data_frame` -> `Message::from_inline` (copy N). Two
+copies per message.
 
-The fix: a fast path in `try_advance_ready` that combines header
-peek, buffer read, and Message construction in one step. When the
-frame is non-command, non-more, inline-sized, no crypto transform
-active, and no pending multi-part accumulation, the codec calls
-`ChunkedInputBuf::read_into` to copy the payload bytes directly
-into `MessageInner::Inline`'s `MaybeUninit` array. No `Frame`, no
-`Payload`, no intermediate copy. One memcpy of N bytes.
+Fix: `try_advance_ready` combines header peek, buffer read, and
+Message construction in one step. For non-command, non-more,
+inline-sized, no-crypto, no-multipart frames: one `read_into`
+directly into `MessageInner::Inline`. One memcpy.
 
-Per-message bytes written at 32 B, before and after:
+| path | copies | total bytes (32 B msg) |
+|---|---|---|
+| before: split_to -> Payload -> Message -> push_back | 3 | 112 B |
+| after: read_into -> Message -> push_back | 2 | 80 B |
+| libzmq: memcpy(msg_t) | 1 | 64 B |
 
-| path | copies | total bytes written |
-|------|--------|---------------------|
-| before: split_to -> Payload::inline -> Message::from_inline -> push_back | 3 | 32 + 32 + 48 = 112 |
-| after: read_into -> MessageInner::Inline -> push_back | 2 | 32 + 48 = 80 |
-| libzmq: memcpy(msg_t) | 1 | 64 |
-
-The remaining gap vs libzmq is the `VecDeque::push_back` copy: 48
-bytes per message, present in every path. libzmq's `yqueue_t`
-writes `msg_t` in-place into a pre-allocated chunk -- one pointer
-advance, no ring-buffer copy. Closing that gap requires replacing
-`VecDeque<Message>` with an arena/chunk allocator, a deeper
-structural change.
-
-### Dead end: arena recv (Bytes::slice instead of Payload::inline)
-
-An alternative approach was tested: `ChunkedInputBuf::split_to`
-returns `Payload::from_bytes(chunk.slice(..n))` instead of
-`Payload::inline` -- the decoded payload shares the 8 KB read
-buffer's Arc rather than copying into a stack array.
-
-Profile with arena recv (8 B TCP):
-
-| % | Function |
-|---|---|
-| 61.1 | handle_input |
-| 16.8 | bench_peer main |
-| 10.0 | Bytes::shared_drop (Arc decrement on Message drop) |
-| 8.6 | Bytes::promotable_even_clone (Arc increment on Bytes::slice) |
-
-Total throughput: unchanged. The Arc bump + drop (~10 ns for two
-atomics) costs the same as the inline copy + zeroing it replaced.
-A microbenchmark sweeping 1-64 B confirmed: inline wins or ties at
-every size up to 39 B. The crossover does not exist in this range
-because a single `fetch_add` on x86 (~5 ns) exceeds the cost of
-copying 39 bytes from L1 cache (~3-4 ns).
-
-This is the opposite of the conventional wisdom that "zero-copy is
-always faster." For payloads that fit in a cache line, the atomic
-operation in an Arc bump is more expensive than the copy.
+Remaining gap: `VecDeque::push_back` copies 48 B per message.
+libzmq's `yqueue_t` writes in-place (one pointer advance).
 
 ### Round 9: SmallVec for parts_payload()
 
-`Connection::send_message` and the four `encode_message_*` functions
-in `frame.rs` call `msg.parts_payload()`, which returned `Vec<Payload>`.
-For single-part messages (the dominant case), this allocated a `Vec`
-on every send -- one malloc+free per message just to iterate one
-element.
+`msg.parts_payload()` returned `Vec<Payload>` -- one malloc+free
+per single-part send. Fix: `SmallVec<[Payload; 1]>`.
 
-Fix: return `SmallVec<[Payload; 1]>` instead. The single-element case
-stores the `Payload` inline on the stack. No heap allocation, no
-free. Multi-part messages spill to the heap as before.
+**8 B IPC: 7.26M -> 7.83M msg/s (+8%).**
 
-This was initially benchmarked on `inproc-mt` where it showed no
-effect -- because inproc bypasses the codec entirely (`send_message`
-is never called). Re-benchmarked on IPC at 8 B (where the codec
-dominates and per-message overhead is maximal):
+### Dead end: arena recv (Bytes::slice)
 
-| | Vec (msg/s) | SmallVec (msg/s) | delta |
-|---|---|---|---|
-| 8 B IPC | 7.26M | 7.83M | **+8%** |
+Tried sharing the read buffer's Arc via `Bytes::slice` instead of
+inline copy. Arc bump + drop (~10 ns for two atomics) cost the
+same as the inline copy + zeroing. A microbenchmark confirmed:
+inline wins or ties at every size up to 39 B. For payloads that
+fit in a cache line, the atomic in an Arc bump is more expensive
+than the copy.
 
-Consistent across runs (Vec: 7.03–7.43M, SmallVec: 7.70–7.93M).
+### Net result
 
-### Net result (current)
+8 B TCP: 3.8M -> 8.2M msg/s (0.45x -> parity with libzmq).
+32 B TCP: 3.7M -> 6.6M msg/s (0.45x -> 0.74x).
 
-8 B TCP: 3.8M -> 8.2M msg/s (0.45x -> **0.99x** of libzmq).
-32 B TCP: 3.7M -> 6.6M msg/s (0.45x -> 0.74x of libzmq).
-
-## What remains
-
-### 32 B gap (0.74x)
-
-The profile at 32 B is dominated by the same codec parse (55%) +
-`VecDeque::push_back` (12%) + memmove (8%) as at 8 B, but the
-per-message payload copy is 32 B vs 8 B. Total bytes written per
-message: 80 B (32 B data + 48 B Message into VecDeque) vs libzmq's
-64 B (one `msg_t` memcpy into yqueue). The 25% byte overhead
-explains most of the remaining gap.
-
-Closing it requires one of:
-
-- **Chunk-based message queue.** Replace `VecDeque<Message>` with
-  a `yqueue`-style chunk allocator: 256 x 48 B Messages per chunk,
-  spare-chunk recycling. Messages are written in-place; the
-  consumer advances a read pointer. No per-message ring-buffer
-  copy. This is the structural equivalent of libzmq's approach
-  and would bring the total bytes written per message to 32 B
-  (one payload copy into the chunk slot), below libzmq's 64 B.
-
-- **Fused decode-and-deliver.** Instead of decode -> queue -> swap ->
-  pop, the codec yields messages via a callback or returns an
-  iterator. The consumer processes each message inline during
-  `handle_input`. No queue at all for the direct-recv path. This
-  is a deeper API change to the sans-I/O codec.
-
-### Other directions
-
-- **Multi-runtime for the remaining compio benches.** PUSH/PULL is
-  now multi-runtime (PULL on its own thread, PUSHes on another); the
-  numbers in `COMPARISONS.md` reflect that 2-core shape. PUB/SUB,
-  ROUTER/DEALER, and PAIR are still single-runtime and will gain
-  similar 20-40% once converted. REQ/REP and latency are roundtrip
-  patterns where multi-runtime adds inter-thread overhead with no
-  throughput win, so they stay single-runtime.
-- **Single-wire-peer bypass on tokio.** The compio fast path
-  (sender encodes directly into a per-peer queue, skipping the
-  per-peer command channel) has no equivalent on tokio yet. The
-  shape would be analogous: a per-peer EncodedQueue clone in
-  `RoundRobin` routing, claimed via `try_lock`.
-- **Profile-guided optimization.** Not yet attempted. Likely worth
-  a few percent at the small-message end where the hot path is
-  short enough to be PGO-shaped.
+Current (after further tuning, see COMPARISONS.md):
+8 B TCP: 8.72M vs libzmq 8.44M (**1.03x**).
+32 B TCP: 7.13M vs libzmq 8.45M (**0.84x**).
 
 ## Inproc cross-core: blume batching channel
 
-After the wire-transport work above, the inproc-mt numbers exposed a
-different bottleneck. At 32 B, inproc between two compio runtimes on
-two cores ran at 2.13M msg/s -- 25% slower than TCP (2.86M) on the
-same machine. TCP, which encodes ZMTP frames, crosses the kernel, and
-decodes on the other side, was beating a direct in-process channel.
+After wire-transport work, inproc-mt at 32 B ran at 2.13M msg/s
+-- 25% slower than TCP (2.86M). TCP, which encodes ZMTP frames
+and crosses the kernel, was beating a direct in-process channel.
 
-### Why TCP wins at small messages
-
-TCP's advantage is batching. The send-side driver accumulates many
-small messages into one `flat_buf`, writes them with one io_uring SQE.
-The receiver reads them all with one CQE. Two cross-core cache-line
-transfers for the whole batch: one for the data pages, one for the
-completion notification.
-
-Inproc used `flume::bounded` channels. Each `send_async` + `recv_async`
-involves per-message atomic operations and a wakeup notification. At
-32 B, the per-message cost is dominated by cache coherency: each send
-dirties a cache line on core A, each recv triggers a MESIF forwarding
-request from core B. Two cache-line round-trips per message, ~40-80 ns
-each on the i7-8700B's ring interconnect. That fixed cost per message
-is what TCP amortizes and flume does not.
+TCP's advantage: batching. Many small messages into one `flat_buf`,
+one io_uring SQE. Two cross-core cache-line transfers for the
+whole batch. Inproc used `flume::bounded` -- per-message atomics
+and wakeups. Two cache-line round-trips per message (~40-80 ns
+each).
 
 ### blume: batching MPSC channel
 
-The fix is a new channel crate, `blume`, that sits in the workspace.
-The core idea: produce one-at-a-time, consume in batches. The API
-matches flume's MPSC surface (`send_async`, `try_send`, `recv_async`,
-`try_recv`, `is_empty`, `is_disconnected`) so the swap is mechanical.
+Produce one-at-a-time, consume in batches. Key ideas:
 
-Internals: `Mutex<VecDeque<T>>` shared queue, `event_listener::Event`
-for async waking, local `VecDeque<T>` cache on the receiver. No unsafe.
-The key optimizations:
+**Coalesced wake.** Notify only on empty-to-non-empty transitions.
+N rapid sends -> one wake.
 
-**Coalesced wake.** The sender notifies the receiver only on
-empty-to-non-empty transitions. N rapid sends produce one wake.
-With flume, each send wakes the receiver independently.
+**Swap-drain.** Lock shared queue, `mem::swap` entire VecDeque
+into local cache. O(1). Subsequent pops: zero shared-state access.
 
-**Swap-drain.** When the receiver wakes, it locks the shared queue
-and `std::mem::swap`s the entire VecDeque into its local cache --
-O(1), one pointer swap. Subsequent `try_recv` calls pop from the
-local cache with zero shared-state access: no lock, no atomic, no
-cache-line transfer. The shared queue is touched once per batch,
-not once per message.
+Microbench (cross-thread, bounded(1024)):
 
-**Cache-first recv.** Both `recv_async` and `try_recv` check the
-local cache before touching the shared queue. After a swap-drain
-of N messages, the next N-1 receives are local VecDeque pops.
-
-### Microbenchmark: blume vs flume
-
-Cross-thread, 1 sender + 1 receiver, `bounded(1024)`, min of
-3 x 500 ms rounds:
-
-| mode | 0 B | 32 B | 128 B | 512 B | 2 KiB |
-|------|-----|------|-------|-------|-------|
-| blume try | 17.0M | 14.3M | 15.9M | 17.4M | 17.6M |
-| flume try | 9.2M | 8.3M | 8.0M | 8.0M | 7.9M |
-| **ratio** | **1.85x** | **1.72x** | **1.99x** | **2.18x** | **2.22x** |
-| blume async | 16.5M | 16.1M | 16.2M | 16.3M | 16.0M |
-| flume async | 4.6M | 4.7M | 5.1M | 4.7M | 4.5M |
-| **ratio** | **3.60x** | **3.45x** | **3.19x** | **3.51x** | **3.58x** |
-
-The async path shows the biggest gain (3.5x) because flume's
-`recv_async` involves an `event_listener` registration per call,
-while blume's local cache path avoids it entirely after the first
-wake.
-
-### Integration into omq-compio
-
-The swap targets the `in_tx`/`in_rx` channel pair on `SocketInner` --
-the per-socket inbound channel that all inproc peers and wire drivers
-push into. This is the hot path for inproc transport. Wire peer command
-channels (`DriverCommand`) and the MPMC shared send queue stay on
-flume.
-
-Files changed: `socket/inner.rs` (channel construction, `PeerOut::Inproc`
-sender type, error types), `socket/handle.rs` (recv error types),
-`transport/inproc.rs` (channel types in bind/connect/accept),
-`transport/driver.rs` (wire driver's `peer_in_tx` type).
+| mode | blume | flume | ratio |
+|---|---|---|---|
+| try (32 B) | 14.3M | 8.3M | 1.72x |
+| async (32 B) | 16.1M | 4.7M | 3.45x |
 
 ### Result
 
-Compio inproc-mt PUSH/PULL, 1 peer:
+| size | before (flume) | after (blume) | TCP |
+|---|---|---|---|
+| 32 B | 2.13M | 2.90M (+36%) | 2.86M |
+| 128 B | 2.36M | 2.51M (+6%) | 2.63M |
+| 512 B | 2.45M | 2.55M (+4%) | 2.19M |
+| 2 KiB | 2.30M | 2.71M (+18%) | 1.31M |
 
-| size | before (flume) | after (blume) | TCP | blume vs TCP |
-|------|---------------|---------------|-----|-------------|
-| 32 B | 2.13M | 2.90M (+36%) | 2.86M | **1.01x** |
-| 128 B | 2.36M | 2.51M (+6%) | 2.63M | 0.95x |
-| 512 B | 2.45M | 2.55M (+4%) | 2.19M | **1.16x** |
-| 2 KiB | 2.30M | 2.71M (+18%) | 1.31M | **2.07x** |
-
-At 32 B, inproc-mt went from 25% behind TCP to parity. The 128 B gap
-narrowed from 10% to 5%. 512 B and above, inproc wins comfortably.
-Single-thread inproc (~3.5M) was unaffected.
-
-The remaining 5% gap at 128 B is the Mutex cost on the sender side.
-Blume uses `Mutex<VecDeque>` for the shared queue; flume uses a
-lock-free queue internally. Swapping blume's internals to a lock-free
-MPSC queue (~100 lines of unsafe, Vyukov pattern) would close this,
-but the current Mutex approach is correct-by-construction with zero
-unsafe. Profiling under real workloads will decide whether the
-lock-free path is worth the complexity.
+At 32 B, inproc-mt went from 25% behind TCP to parity.
 
 ## Tokio inproc recv_direct
 
-Independently of the channel optimization, tokio's inproc path had a
-structural disadvantage. Wire transport connections (TCP, IPC) got
-`recv_direct` -- messages flow straight from the connection driver to
-the user's recv channel, bypassing the socket actor entirely. Inproc
-connections did not: every message went through the actor's event loop,
-adding a channel hop and a task wake per message.
+Wire connections got `recv_direct` (bypass actor). Inproc did not:
+every message went through the actor. Fix: `spawn_inproc_peer`
+checks `can_bypass_actor_recv` and passes `recv_tx` directly to
+the inproc driver.
 
-The fix: `spawn_inproc_peer` checks `can_bypass_actor_recv` (the same
-predicate used for wire connections) and passes the `recv_tx` channel
-to `inproc_peer_driver`. The driver sends messages directly to the
-user's recv channel instead of through `peer_out` -> actor.
+## Things tried and dropped
 
-This is a necessary but not sufficient fix for tokio inproc
-throughput. The send path still routes through a per-peer pump task
-(the wire path bypasses this via `shared_rx`). Adding `shared_rx`
-support to the inproc driver is the next step.
+**Direct-write on send.** Sender does inline `write_vectored`,
+skipping the driver. Latency: 165 µs -> 85 µs RTT. Throughput:
+830k -> 115k msg/s (4-7x collapse). The driver's implicit
+batching was critical -- per-call inline write means one syscall
+per message instead of one per N. Reverted.
 
-## Bug: zero-payload frame panic
+**TCP_CORK.** Two `setsockopt` syscalls per flush. Regressed
+10-15%. The coalescing it provides already comes from
+`write_vectored`. The `rzmq` project ships cork toggling inside
+io_uring (queued SQE, not syscall) -- that's the only model where
+cost-benefit flips.
 
-The PUB/SUB IPC benchmark panicked on startup in
-`ChunkedInputBuf::read_into_uninit` -- `chunks.front()` returned
-`None` on an empty buffer. Root cause: the bench's `wait_subscribed`
-helper sends empty probe messages (`Message::single("")`) to detect
-when subscriptions have propagated. That produces `[0x00, 0x00]` on
-the wire -- a valid zero-length ZMTP data frame. The inline fast path
-in `try_advance_ready` consumed the 2-byte header via `advance(2)`,
-draining the buffer, then called `read_into_uninit(0, ...)` which
-unconditionally dereferenced `chunks.front()`.
+**Sub-noise-floor alloc reductions.** `SmallVec<[IoSlice; 8]>` for
+transmit_chunks, pre-sizing codec buffers. Provably correct, but
+below bench noise floor. Kept on a side branch.
 
-Fix: early return in `read_into_uninit` when `n == 0`, matching
-`advance` and `split_to` which already handled the zero case. Empty
-messages are valid in ZMTP and must not panic.
+## Why the stacked optimizations work
+
+libzmq's I/O thread overlaps encoding with kernel writes.
+omq-compio is single-threaded: encoding and `write_vectored` run
+sequentially. That is a structural disadvantage the implementation
+has to overcome by being shorter everywhere else:
+
+- No actor hop on send for non-REQ/REP.
+- No pump task hop for byte-stream peers.
+- No async-mutex on encode.
+- One iovec per N small messages, not 2N.
+- One header alloc per ~7000 frames.
+- No vtable/Box on the hot path.
+- Encode/write pipelined via lock decomposition (writer mutex
+  separate from codec mutex).
+
+The last point is the structural answer: omq does not have a
+separate I/O thread, but it pipelines encode against write.
+
+## What remains
+
+**32 B gap (0.84x).** `VecDeque::push_back` copies 48 B per
+message vs libzmq's in-place write. Closing it requires either a
+chunk-based message queue (`yqueue`-style) or fused
+decode-and-deliver (callback/iterator from `handle_input`).
+
+**Single-wire-peer bypass on tokio.** The compio direct-encode
+fast path has no equivalent on tokio yet. Analogous shape: per-peer
+`EncodedQueue` clone, claimed via `try_lock`.
+
