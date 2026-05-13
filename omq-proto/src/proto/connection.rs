@@ -483,7 +483,7 @@ impl Connection {
 
         if flags.command {
             let cmd = command::decode(payload.as_bytes())?;
-            self.handle_post_handshake_command(cmd);
+            self.handle_post_handshake_command(cmd)?;
             return Ok(());
         }
 
@@ -495,7 +495,7 @@ impl Connection {
     fn dispatch_decrypted(&mut self, command: bool, more: bool, plaintext: Bytes) -> Result<()> {
         if command {
             let cmd = command::decode(plaintext)?;
-            self.handle_post_handshake_command(cmd);
+            self.handle_post_handshake_command(cmd)?;
         } else {
             self.absorb_data_frame(more, Payload::from_bytes(plaintext))?;
         }
@@ -535,8 +535,13 @@ impl Connection {
         Ok(true)
     }
 
-    fn handle_post_handshake_command(&mut self, cmd: Command) {
+    fn handle_post_handshake_command(&mut self, cmd: Command) -> Result<()> {
         match cmd {
+            Command::Ready(_) | Command::Error { .. } => {
+                return Err(Error::Protocol(
+                    "READY/ERROR command received after handshake".into(),
+                ));
+            }
             Command::Ping { context, .. } => {
                 // Auto-answer with PONG. PING TTL is advisory; we ignore it here
                 // (engine layer enforces heartbeat_timeout).
@@ -549,6 +554,7 @@ impl Connection {
             }
             other => self.events.push_back(Event::Command(other)),
         }
+        Ok(())
     }
 
     fn write_outbound_commands(&mut self, cmds: &[Command]) {

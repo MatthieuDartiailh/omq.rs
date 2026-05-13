@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use omq_tokio::{
-    ConnectionStatus, DisconnectReason, Endpoint, MonitorEvent, Options, PeerCommandKind, Socket,
+    ConnectionStatus, DisconnectReason, Endpoint, MonitorEvent, Options, Socket,
     SocketType,
 };
 
@@ -149,7 +149,7 @@ async fn multiple_monitors_each_see_events() {
 }
 
 #[tokio::test]
-async fn monitor_surfaces_peer_error_command() {
+async fn post_handshake_error_command_drops_connection() {
     use bytes::Bytes;
     use omq_tokio::engine::PeerOut;
     use omq_tokio::engine::{ConnectionDriver, DriverCommand};
@@ -160,11 +160,9 @@ async fn monitor_surfaces_peer_error_command() {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
-    // The omq Socket binds via TCP; we run a raw codec on the connect
-    // side so we can issue an arbitrary ZMTP command after the
-    // handshake. Inproc fast path now bypasses the codec entirely so
-    // we can't hand-roll a peer over inproc anymore - we need a
-    // byte-stream transport. TCP loopback fits.
+    // READY and ERROR are handshake-only commands per ZMTP RFC 23.
+    // Receiving one post-handshake is a protocol violation that must
+    // drop the connection.
     let port_holder = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
     let port = port_holder.local_addr().unwrap().port();
     drop(port_holder);
@@ -188,7 +186,6 @@ async fn monitor_surfaces_peer_error_command() {
         ConnectionDriver::new(stream, codec, inbox_rx, evt_tx, 0, CancellationToken::new());
     tokio::spawn(async move { driver.run().await });
 
-    // Wait for the peer-side handshake to complete before sending.
     loop {
         match tokio::time::timeout(Duration::from_millis(500), evt_rx.recv())
             .await
@@ -207,20 +204,16 @@ async fn monitor_surfaces_peer_error_command() {
         .await
         .unwrap();
 
-    let mut saw = None;
+    let mut saw_disconnect = false;
     for _ in 0..40 {
         if let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(100), mon.recv()).await
-            && let MonitorEvent::PeerCommand { command, .. } = ev
+            && matches!(ev, MonitorEvent::Disconnected { .. })
         {
-            saw = Some(command);
+            saw_disconnect = true;
             break;
         }
     }
-    let cmd = saw.expect("expected PeerCommand on monitor");
-    match cmd {
-        PeerCommandKind::Error { reason } => assert_eq!(reason, "boom"),
-        other @ PeerCommandKind::Unknown { .. } => panic!("expected Error, got {other:?}"),
-    }
+    assert!(saw_disconnect, "expected Disconnected after post-handshake ERROR");
 }
 
 #[tokio::test]
