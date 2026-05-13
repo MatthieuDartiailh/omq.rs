@@ -28,7 +28,7 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at mid-size messages over 
 | 8 KiB | 188k msg/s | 607k msg/s | **3.2×** | 461k msg/s | **2.5×** |
 | 2 MiB | 2.7k msg/s | 3.8k msg/s | **1.4×** | 3.0k msg/s | **1.1×** |
 
-[Full tables across all sizes and transports (TCP + IPC) →](COMPARISONS.md)
+[Full tables across all sizes and transports](COMPARISONS.md)
 
 ## Install
 
