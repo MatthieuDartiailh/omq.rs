@@ -489,7 +489,7 @@ impl CurveMechanism {
             .map_err(|_| Error::Protocol("CURVE VOUCH encrypt failed".into()))?;
 
         // Initiate plaintext = C_long_pub(32) + vouch_suffix(16) + vouch_box(80) + metadata.
-        let metadata = encode_metadata(&our_props);
+        let metadata = encode_metadata(&our_props)?;
         let mut init_pt = Vec::with_capacity(32 + 16 + 80 + metadata.len());
         init_pt.extend_from_slice(&our_lt_public_bytes);
         init_pt.extend_from_slice(&vouch_suffix);
@@ -604,7 +604,7 @@ impl CurveMechanism {
         let our_props = self.our_props.clone();
         let counter = self.next_out_counter();
         let nonce = nonce_short(NONCE_READY, counter);
-        let metadata = encode_metadata(&our_props);
+        let metadata = encode_metadata(&our_props)?;
         let ready_box = SalsaBox::new(&cp, &our_eph_secret)
             .encrypt(&nonce.into(), metadata.as_slice())
             .map_err(|_| Error::Protocol("CURVE READY encrypt failed".into()))?;
@@ -630,27 +630,30 @@ impl CurveMechanism {
 }
 
 /// Encode peer properties as a ZMTP property list (RFC 23 / 26).
-fn encode_metadata(props: &PeerProperties) -> Vec<u8> {
+fn encode_metadata(props: &PeerProperties) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     if let Some(t) = props.socket_type {
-        write_property(&mut out, b"Socket-Type", t.as_str().as_bytes());
+        write_property(&mut out, b"Socket-Type", t.as_str().as_bytes())?;
     }
     if let Some(id) = &props.identity {
-        write_property(&mut out, b"Identity", id);
+        write_property(&mut out, b"Identity", id)?;
     }
     for (k, v) in &props.other {
-        write_property(&mut out, k.as_bytes(), v);
+        write_property(&mut out, k.as_bytes(), v)?;
     }
-    out
+    Ok(out)
 }
 
-fn write_property(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
-    assert!(u8::try_from(name.len()).is_ok());
-    assert!(u32::try_from(value.len()).is_ok());
-    out.push(name.len() as u8);
+fn write_property(out: &mut Vec<u8>, name: &[u8], value: &[u8]) -> Result<()> {
+    let name_len =
+        u8::try_from(name.len()).map_err(|_| Error::Protocol("property name too long".into()))?;
+    let value_len = u32::try_from(value.len())
+        .map_err(|_| Error::Protocol("property value too long".into()))?;
+    out.push(name_len);
     out.extend_from_slice(name);
-    out.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    out.extend_from_slice(&value_len.to_be_bytes());
     out.extend_from_slice(value);
+    Ok(())
 }
 
 /// Decode a ZMTP property list as `PeerProperties`.
@@ -777,6 +780,23 @@ mod tests {
         let (more, pt) = c_tx.decrypt_message(&body).unwrap();
         assert!(more);
         assert_eq!(&pt[..], b"hi client");
+    }
+
+    #[test]
+    fn encode_metadata_rejects_overlong_property_name() {
+        let mut props = dummy_props(SocketType::Push);
+        let long_name = "x".repeat(256);
+        props.add(long_name, Bytes::from_static(b"v"));
+        let err = encode_metadata(&props).unwrap_err();
+        assert!(err.to_string().contains("property name too long"), "{err}");
+    }
+
+    #[test]
+    fn encode_metadata_accepts_max_length_property_name() {
+        let mut props = dummy_props(SocketType::Push);
+        let name = "x".repeat(255);
+        props.add(name, Bytes::from_static(b"v"));
+        assert!(encode_metadata(&props).is_ok());
     }
 
     #[test]
