@@ -1,48 +1,63 @@
 #!/usr/bin/env bash
 # Compare zmq.rs vs omq-tokio vs omq-compio: single PUSH process -> single PULL
-# process, loopback. Each cell: 3 s timed window after 500 ms warmup.
+# process. Each cell: 3 s timed window after 500 ms warmup.
 #
-# zmq.rs (crate: zeromq) is a pure-Rust async ZMQ implementation built on
-# tokio, making the omq-tokio comparison apples-to-apples (same runtime,
-# same thread model). omq-compio runs on a single io_uring thread for contrast.
+# zmq.rs (crate: zeromq) is a pure-Rust async ZMQ implementation on tokio,
+# making the omq-tokio comparison apples-to-apples. omq-compio runs on a
+# single io_uring thread for contrast.
+#
+# By default runs ipc and tcp in order. zeromq 0.6 does not support inproc.
+#
+# IPC: omq peers use Linux abstract-namespace sockets (ipc://@name).
+# zmq.rs does not support abstract namespaces and falls back to a socket
+# file (/tmp/omq-bench-zmqrs-z-N.sock), which is cleaned up after each run.
 #
 # Usage:
-#   ./scripts/compare_zmqrs.sh                     # TCP, print to stdout
-#   ./scripts/compare_zmqrs.sh --ipc               # IPC, print to stdout
-#   ./scripts/compare_zmqrs.sh --update-benchmarks # TCP, update COMPARISONS.md
+#   ./scripts/compare_zmqrs.sh                     # ipc + tcp
+#   ./scripts/compare_zmqrs.sh --ipc               # IPC only
+#   ./scripts/compare_zmqrs.sh --tcp               # TCP only
+#   ./scripts/compare_zmqrs.sh --update-benchmarks # update COMPARISONS.md
 #   ./scripts/compare_zmqrs.sh --ipc --update-benchmarks
-#   ./scripts/compare_zmqrs.sh [port]              # override base TCP port (default 15655)
+#   ./scripts/compare_zmqrs.sh [port]              # override base TCP port
 
 set -euo pipefail
 
 cleanup() {
-    trap - INT TERM
+    trap - INT TERM EXIT
     kill 0 2>/dev/null || true
     wait 2>/dev/null || true
-    rm -f /tmp/omq-bench-zmqrs-*.sock
+    rm -f /tmp/omq-bench-zmqrs-z-*.sock
 }
-trap cleanup INT TERM
+trap cleanup INT TERM EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$SCRIPT_DIR/.."
 DURATION=3
 BASE_PORT=15655
 UPDATE_BENCHMARKS=false
-TRANSPORT=tcp
+TRANSPORT_FILTER=""
 
 for arg in "$@"; do
     case "$arg" in
         --update-benchmarks) UPDATE_BENCHMARKS=true ;;
-        --ipc) TRANSPORT=ipc ;;
+        --ipc) TRANSPORT_FILTER=ipc ;;
+        --tcp) TRANSPORT_FILTER=tcp ;;
         -h|--help)
-            echo "Usage: $0 [--ipc] [--update-benchmarks] [port]"
-            echo "  --ipc               use IPC instead of TCP"
+            echo "Usage: $0 [--ipc] [--tcp] [--update-benchmarks] [port]"
+            echo "  --ipc               IPC only"
+            echo "  --tcp               TCP only"
             echo "  --update-benchmarks update COMPARISONS.md"
             echo "  port                override base TCP port (default $BASE_PORT)"
             exit 0 ;;
         [0-9]*) BASE_PORT="$arg" ;;
     esac
 done
+
+if [ -n "$TRANSPORT_FILTER" ]; then
+    TRANSPORTS=("$TRANSPORT_FILTER")
+else
+    TRANSPORTS=(ipc tcp)
+fi
 
 # ---------- build ----------
 
@@ -60,34 +75,52 @@ COMPIO_PEER="$REPO/target/release/bench_peer"
 
 # ---------- helpers ----------
 
+# addr_for <transport> <peer_prefix> <idx>
+#   peer_prefix: z=zmq.rs  t=omq-tokio  c=omq-compio
+#
+# zmq.rs IPC uses filesystem sockets (no abstract-namespace support).
+# omq peers use abstract-namespace sockets.
 addr_for() {
-    local prefix="$1" idx="$2"
-    if [ "$TRANSPORT" = "ipc" ]; then
-        echo "ipc:///tmp/omq-bench-zmqrs-${prefix}-${idx}.sock"
-    else
-        echo "$((BASE_PORT + idx))"
-    fi
+    local transport="$1" prefix="$2" idx="$3"
+    case "$transport" in
+        tcp)
+            local base
+            case "$prefix" in
+                z) base=$BASE_PORT ;;
+                t) base=$((BASE_PORT + 100)) ;;
+                c) base=$((BASE_PORT + 200)) ;;
+                *) base=$BASE_PORT ;;
+            esac
+            echo "$((base + idx))" ;;
+        ipc)
+            case "$prefix" in
+                z) echo "ipc:///tmp/omq-bench-zmqrs-z-${idx}.sock" ;;
+                *) echo "ipc://@omq-bench-zmqrs-${prefix}-${idx}" ;;
+            esac ;;
+    esac
 }
 
+# run_cell <transport> <peer_binary> <addr> <size>
 run_cell() {
-    local peer="$1" addr="$2" size="$3"
+    local transport="$1" peer="$2" addr="$3" size="$4"
 
-    # zmq.rs does not unlink IPC socket files before bind.
-    if [[ "$addr" == ipc://* ]]; then
-        rm -f "${addr#ipc://}"
+    if [ "$transport" = "inproc" ]; then
+        "$peer" inproc "$addr" "$size" "$DURATION"
+        return
     fi
+
+    # zmq.rs does not unlink stale IPC socket files before bind.
+    case "$addr" in
+        ipc:///tmp/*) rm -f "${addr#ipc://}" ;;
+    esac
 
     "$peer" push "$addr" "$size" &
     local push_pid=$!
-
     sleep 0.15
-
     local result
     result=$("$peer" pull "$addr" "$size" "$DURATION")
-
     kill "$push_pid" 2>/dev/null || true
     wait "$push_pid" 2>/dev/null || true
-
     echo "$result"
 }
 
@@ -122,7 +155,25 @@ speedup_str() {
     }'
 }
 
-# ---------- version strings ----------
+update_section() {
+    local benchmarks="$1" marker="$2" md="$3"
+    local begin_marker="<!-- BEGIN $marker -->"
+    local end_marker="<!-- END $marker -->"
+    if ! grep -q "$begin_marker" "$benchmarks"; then
+        echo "ERROR: marker '$begin_marker' not found in $benchmarks" >&2
+        exit 1
+    fi
+    python3 - "$benchmarks" "$begin_marker" "$end_marker" "$md" <<'EOF'
+import sys, re
+path, begin, end, content = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+text = open(path).read()
+new = re.sub(re.escape(begin) + r'.*?' + re.escape(end), begin + content + end, text, flags=re.DOTALL)
+open(path, 'w').write(new)
+print(f"Updated {path}")
+EOF
+}
+
+# ---------- versions ----------
 
 ZMQRS_VERSION=$(cargo metadata --format-version 1 \
     --manifest-path "$SCRIPT_DIR/zmqrs_bench_peer/Cargo.toml" 2>/dev/null \
@@ -138,101 +189,94 @@ OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
 # ---------- run ----------
 
 SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152 8388608 33554432)
+BENCHMARKS="$REPO/COMPARISONS.md"
 
-rm -f /tmp/omq-bench-zmqrs-*.sock
+run_comparison() {
+    local transport="$1"
+    local marker="zmqrs_comparison_${transport}"
 
-echo ""
-echo "zmq.rs (zeromq $ZMQRS_VERSION) vs omq $OMQ_VERSION - ${TRANSPORT^^} loopback, 2 processes, ${DURATION}s window + 500ms warmup"
-echo ""
-printf "%-10s  %20s  %22s  %22s\n" "" "zmq.rs" "omq-compio" "omq-tokio"
-printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
-echo "-----------------------------------------------------------------------------------------------------------"
+    local transport_label
+    case "$transport" in
+        ipc) transport_label="IPC (zmq.rs: socket file; omq: abstract namespace)" ;;
+        tcp) transport_label="TCP" ;;
+    esac
 
-declare -a RES_SIZES RES_ZMQRS_MSGS RES_ZMQRS_MB RES_TOKIO_MSGS RES_TOKIO_MB RES_COMPIO_MSGS RES_COMPIO_MB
+    echo ""
+    echo "zmq.rs (zeromq $ZMQRS_VERSION) vs omq $OMQ_VERSION — ${transport_label}, ${DURATION}s window + 500ms warmup"
+    echo ""
+    printf "%-10s  %20s  %22s  %22s\n" "" "zmq.rs" "omq-compio" "omq-tokio"
+    printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
+    echo "-----------------------------------------------------------------------------------------------------------"
 
-idx=0
-for size in "${SIZES[@]}"; do
-    ADDR_Z=$(addr_for "z" "$idx")
-    ADDR_T=$(addr_for "t" "$idx")
-    ADDR_C=$(addr_for "c" "$idx")
+    local -a res_sizes res_zmqrs_msgs res_zmqrs_mb res_tokio_msgs res_tokio_mb res_compio_msgs res_compio_mb
+    local idx=0
 
-    zmqrs_raw=$(run_cell  "$ZMQRS_PEER"  "$ADDR_Z" "$size")
-    tokio_raw=$(run_cell  "$TOKIO_PEER"  "$ADDR_T" "$size")
-    compio_raw=$(run_cell "$COMPIO_PEER" "$ADDR_C" "$size")
+    for size in "${SIZES[@]}"; do
+        local addr_z addr_t addr_c
+        addr_z=$(addr_for "$transport" "z" "$idx")
+        addr_t=$(addr_for "$transport" "t" "$idx")
+        addr_c=$(addr_for "$transport" "c" "$idx")
 
-    zmqrs_msgs=$(echo "$zmqrs_raw"  | awk '{printf "%.0f", $1/$2}')
-    zmqrs_mb=$(echo   "$zmqrs_raw"  | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
-    tokio_msgs=$(echo "$tokio_raw"  | awk '{printf "%.0f", $1/$2}')
-    tokio_mb=$(echo   "$tokio_raw"  | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
-    compio_msgs=$(echo "$compio_raw" | awk '{printf "%.0f", $1/$2}')
-    compio_mb=$(echo   "$compio_raw" | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
+        local zmqrs_raw tokio_raw compio_raw
+        zmqrs_raw=$(run_cell  "$transport" "$ZMQRS_PEER"  "$addr_z" "$size")
+        tokio_raw=$(run_cell  "$transport" "$TOKIO_PEER"  "$addr_t" "$size")
+        compio_raw=$(run_cell "$transport" "$COMPIO_PEER" "$addr_c" "$size")
 
-    tokio_x=$(speedup_str  "$tokio_msgs"  "$zmqrs_msgs")
-    compio_x=$(speedup_str "$compio_msgs" "$zmqrs_msgs")
+        local zmqrs_msgs zmqrs_mb tokio_msgs tokio_mb compio_msgs compio_mb
+        zmqrs_msgs=$(echo  "$zmqrs_raw"  | awk '{printf "%.0f", $1/$2}')
+        zmqrs_mb=$(echo    "$zmqrs_raw"  | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
+        tokio_msgs=$(echo  "$tokio_raw"  | awk '{printf "%.0f", $1/$2}')
+        tokio_mb=$(echo    "$tokio_raw"  | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
+        compio_msgs=$(echo "$compio_raw" | awk '{printf "%.0f", $1/$2}')
+        compio_mb=$(echo   "$compio_raw" | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
 
-    printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
-        "$(fmt_size "$size")" \
-        "$zmqrs_msgs"  "$zmqrs_mb" \
-        "$compio_msgs" "$compio_mb" "$compio_x" \
-        "$tokio_msgs"  "$tokio_mb"  "$tokio_x"
+        local tokio_x compio_x
+        tokio_x=$(speedup_str  "$tokio_msgs"  "$zmqrs_msgs")
+        compio_x=$(speedup_str "$compio_msgs" "$zmqrs_msgs")
 
-    RES_SIZES[$idx]=$size
-    RES_ZMQRS_MSGS[$idx]=$zmqrs_msgs;  RES_ZMQRS_MB[$idx]=$zmqrs_mb
-    RES_TOKIO_MSGS[$idx]=$tokio_msgs;  RES_TOKIO_MB[$idx]=$tokio_mb
-    RES_COMPIO_MSGS[$idx]=$compio_msgs; RES_COMPIO_MB[$idx]=$compio_mb
-    idx=$((idx + 1))
-done
+        printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
+            "$(fmt_size "$size")" \
+            "$zmqrs_msgs"  "$zmqrs_mb" \
+            "$compio_msgs" "$compio_mb" "$compio_x" \
+            "$tokio_msgs"  "$tokio_mb"  "$tokio_x"
 
-echo ""
-
-# ---------- --update-benchmarks ----------
-
-if [ "$UPDATE_BENCHMARKS" = true ]; then
-    BENCHMARKS="$REPO/COMPARISONS.md"
-    if [ "$TRANSPORT" = "ipc" ]; then
-        MARKER="zmqrs_comparison_ipc"
-    else
-        MARKER="zmqrs_comparison"
-    fi
-
-    MD=""
-    MD+=$'\n'
-    MD+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
-    MD+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
-
-    for i in "${!RES_SIZES[@]}"; do
-        sz=${RES_SIZES[$i]}
-        zmsg=${RES_ZMQRS_MSGS[$i]};  zmb=${RES_ZMQRS_MB[$i]}
-        tmsg=${RES_TOKIO_MSGS[$i]};  tmb=${RES_TOKIO_MB[$i]}
-        cmsg=${RES_COMPIO_MSGS[$i]}; cmb=${RES_COMPIO_MB[$i]}
-
-        label=$(fmt_size "$sz")
-
-        zmqrs_fmt=$(fmt_msgs "$zmsg");  zmqrs_bw=$(fmt_bw "$zmb")
-        tokio_fmt=$(fmt_msgs "$tmsg");  tokio_bw=$(fmt_bw "$tmb")
-        compio_fmt=$(fmt_msgs "$cmsg"); compio_bw=$(fmt_bw "$cmb")
-        tokio_ratio=$(speedup_str  "$tmsg" "$zmsg")
-        compio_ratio=$(speedup_str "$cmsg" "$zmsg")
-
-        MD+="| $label | $zmqrs_fmt | $zmqrs_bw | $compio_fmt | $compio_bw | $compio_ratio | $tokio_fmt | $tokio_bw | $tokio_ratio |"$'\n'
+        res_sizes[$idx]=$size
+        res_zmqrs_msgs[$idx]=$zmqrs_msgs;   res_zmqrs_mb[$idx]=$zmqrs_mb
+        res_tokio_msgs[$idx]=$tokio_msgs;   res_tokio_mb[$idx]=$tokio_mb
+        res_compio_msgs[$idx]=$compio_msgs; res_compio_mb[$idx]=$compio_mb
+        idx=$((idx + 1))
     done
-    MD+=$'\n'
 
-    BEGIN_MARKER="<!-- BEGIN $MARKER -->"
-    END_MARKER="<!-- END $MARKER -->"
+    echo ""
 
-    if ! grep -q "$BEGIN_MARKER" "$BENCHMARKS"; then
-        echo "ERROR: marker '$BEGIN_MARKER' not found in $BENCHMARKS" >&2
-        exit 1
+    if [ "$UPDATE_BENCHMARKS" = true ]; then
+        local md=$'\n'
+        md+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
+        md+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
+
+        for i in "${!res_sizes[@]}"; do
+            local sz zmsg zmb tmsg tmb cmsg cmb
+            sz=${res_sizes[$i]}
+            zmsg=${res_zmqrs_msgs[$i]};  zmb=${res_zmqrs_mb[$i]}
+            tmsg=${res_tokio_msgs[$i]};  tmb=${res_tokio_mb[$i]}
+            cmsg=${res_compio_msgs[$i]}; cmb=${res_compio_mb[$i]}
+
+            local label zmqrs_fmt zmqrs_bw tokio_fmt tokio_bw compio_fmt compio_bw tokio_r compio_r
+            label=$(fmt_size "$sz")
+            zmqrs_fmt=$(fmt_msgs "$zmsg");  zmqrs_bw=$(fmt_bw "$zmb")
+            tokio_fmt=$(fmt_msgs "$tmsg");  tokio_bw=$(fmt_bw "$tmb")
+            compio_fmt=$(fmt_msgs "$cmsg"); compio_bw=$(fmt_bw "$cmb")
+            tokio_r=$(speedup_str  "$tmsg" "$zmsg")
+            compio_r=$(speedup_str "$cmsg" "$zmsg")
+
+            md+="| $label | $zmqrs_fmt | $zmqrs_bw | $compio_fmt | $compio_bw | $compio_r | $tokio_fmt | $tokio_bw | $tokio_r |"$'\n'
+        done
+        md+=$'\n'
+
+        update_section "$BENCHMARKS" "$marker" "$md"
     fi
+}
 
-    python3 - "$BENCHMARKS" "$BEGIN_MARKER" "$END_MARKER" "$MD" <<'EOF'
-import sys
-path, begin, end, content = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-text = open(path).read()
-import re
-new = re.sub(re.escape(begin) + r'.*?' + re.escape(end), begin + content + end, text, flags=re.DOTALL)
-open(path, 'w').write(new)
-print(f"Updated {path}")
-EOF
-fi
+for transport in "${TRANSPORTS[@]}"; do
+    run_comparison "$transport"
+done
