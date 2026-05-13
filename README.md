@@ -9,12 +9,14 @@
 >
 > **5.57 µs** inproc latency | **17.4 µs** ipc | **24.4 µs** tcp
 
-Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at mid-size messages over TCP and IPC.
+Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all message sizes.
 
+- Two async backends: **compio** (io_uring, default) and **tokio**
 - 11 standard socket types + 8 draft types
-- Transports: inproc / IPC / TCP; UDP (RADIO/DISH only)
+- Transports: inproc / IPC (including Linux abstract namespace) / TCP; UDP (RADIO/DISH only)
 - Mechanisms: NULL / CURVE / BLAKE3ZMQ
 - Compression: `lz4+tcp://` and `zstd+tcp://`
+- Pure Rust — no C dependencies unless you opt into lz4 or zstd
 
 > **Wire-compatible with libzmq.** omq sockets interoperate with any libzmq peer - C, Python
 > (pyzmq), Ruby, Node - on any shared transport. Same ZMTP 3.x framing, same socket types, same
@@ -33,7 +35,7 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, faster at mid-size messages over 
 ## Install
 
 ```sh
-cargo add omq                                 # compio backend (default)
+cargo add omq                     # compio backend (default)
 cargo add omq --no-default-features --features tokio-backend
 ```
 
