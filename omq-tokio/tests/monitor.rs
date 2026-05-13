@@ -3,8 +3,7 @@
 use std::time::Duration;
 
 use omq_tokio::{
-    ConnectionStatus, DisconnectReason, Endpoint, MonitorEvent, Options, Socket,
-    SocketType,
+    ConnectionStatus, DisconnectReason, Endpoint, MonitorEvent, Options, Socket, SocketType,
 };
 
 fn inproc_ep(name: &str) -> Endpoint {
@@ -213,7 +212,10 @@ async fn post_handshake_error_command_drops_connection() {
             break;
         }
     }
-    assert!(saw_disconnect, "expected Disconnected after post-handshake ERROR");
+    assert!(
+        saw_disconnect,
+        "expected Disconnected after post-handshake ERROR"
+    );
 }
 
 #[tokio::test]

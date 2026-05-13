@@ -106,10 +106,7 @@ pub struct Blake3ZmqMechanism {
 impl std::fmt::Debug for Blake3ZmqMechanism {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Blake3ZmqMechanism")
-            .field(
-                "role",
-                if self.is_client { &"client" } else { &"server" },
-            )
+            .field("role", if self.is_client { &"client" } else { &"server" })
             .field(
                 "state",
                 &match self.state {
@@ -311,4 +308,3 @@ impl Blake3ZmqMechanism {
         self.is_client
     }
 }
-
