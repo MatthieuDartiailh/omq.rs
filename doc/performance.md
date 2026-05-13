@@ -215,9 +215,9 @@ buffer and accumulates into a single pre-allocated `BytesMut`.
 Two recv modes:
 
 ```
-MultiShot ──[ENOBUFS during accumulation]──> OneShot
-    ^                                            │
-    └──────────[small frame]─────────────────────┘
+MultiShot --[ENOBUFS during accumulation]--> OneShot
+    ^                                            |
+    +------------[small frame]-------------------+
 ```
 
 **MultiShot** (default): persistent multi-shot recv SQE from
