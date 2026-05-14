@@ -663,9 +663,6 @@ fn decode_metadata(mut body: &[u8]) -> Result<PeerProperties> {
     use crate::proto::SocketType;
     let mut props = PeerProperties::default();
     while !body.is_empty() {
-        if body.is_empty() {
-            break;
-        }
         let name_len = body[0] as usize;
         if body.len() < 1 + name_len + 4 {
             return Err(Error::HandshakeFailed("metadata truncated".into()));

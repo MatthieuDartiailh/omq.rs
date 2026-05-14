@@ -255,9 +255,6 @@ fn write_property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
 fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties> {
     let mut props = PeerProperties::default();
     while !body.is_empty() {
-        if body.is_empty() {
-            break;
-        }
         let name_len = body[0] as usize;
         if body.len() < 1 + name_len + 4 {
             return Err(Error::Protocol("READY property truncated".into()));

@@ -579,7 +579,6 @@ pub(crate) struct DirectIoState {
     /// construction. `0` means "never switch" (translated from `None`).
     /// Held here so the hot path doesn't reach back through the
     /// `SocketInner` to read it.
-    #[allow(dead_code)]
     pub(crate) large_message_threshold: usize,
 }
 
