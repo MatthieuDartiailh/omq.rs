@@ -76,8 +76,7 @@ async fn rust_plain_pull_from_pyzmq_push() {
     let pull = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(|peer| {
-            peer.username.as_deref() == Some("alice")
-                && peer.password.as_deref() == Some("s3cret")
+            peer.username.as_deref() == Some("alice") && peer.password.as_deref() == Some("s3cret")
         }),
     );
     pull.bind(loopback(port)).await.unwrap();
@@ -234,8 +233,7 @@ async fn rust_plain_pull_rejects_wrong_pyzmq_credentials() {
     let pull = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(|peer| {
-            peer.username.as_deref() == Some("alice")
-                && peer.password.as_deref() == Some("s3cret")
+            peer.username.as_deref() == Some("alice") && peer.password.as_deref() == Some("s3cret")
         }),
     );
     pull.bind(loopback(port)).await.unwrap();
@@ -280,10 +278,7 @@ async fn rust_plain_pull_rejects_null_pyzmq_push() {
     }
 
     let port = free_tcp_port();
-    let pull = Socket::new(
-        SocketType::Pull,
-        Options::default().plain_server(|_| true),
-    );
+    let pull = Socket::new(SocketType::Pull, Options::default().plain_server(|_| true));
     pull.bind(loopback(port)).await.unwrap();
 
     let script = r#"
