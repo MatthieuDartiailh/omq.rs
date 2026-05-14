@@ -20,7 +20,10 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
 - UDP transport (RADIO/DISH only)
 - `lz4+tcp://` transport with blazing-fast LZ4 compression
 - `zstd+tcp://` transport with Zstandard compression
-- Mechanisms: NULL / PLAIN / CURVE / BLAKE3ZMQ
+- NULL mechanism
+- PLAIN mechanism
+- CURVE mechanism
+- BLAKE3ZMQ mechanism
 
 > **Wire-compatible with libzmq.** omq sockets interoperate with any libzmq peer - C, Python
 > (pyzmq), Ruby, Node - on any shared transport. Same ZMTP 3.x framing, same socket types, same
