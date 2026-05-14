@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use omq_compio::{Endpoint, MonitorEvent, Options, Socket, SocketType};
+use omq_compio::{DisconnectReason, Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 use omq_proto::endpoint::Host;
 
 fn tcp_loopback(port: u16) -> Endpoint {
@@ -81,4 +81,178 @@ async fn closed_event_on_socket_drop() {
         .expect("monitor recv timeout")
         .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent::Closed), "{evt:?}");
+}
+
+// --- Disconnect events on PUB, SUB, REP, REQ (zeromq/zmq.rs#201) ---
+
+async fn drain_until_disconnect(
+    mon: &mut omq_compio::MonitorStream,
+) -> Option<DisconnectReason> {
+    for _ in 0..20 {
+        match compio::time::timeout(Duration::from_millis(500), mon.recv()).await {
+            Ok(Ok(MonitorEvent::Disconnected { reason, .. })) => return Some(reason),
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    None
+}
+
+async fn drain_until_handshake(mon: &mut omq_compio::MonitorStream) {
+    for _ in 0..10 {
+        match compio::time::timeout(Duration::from_millis(500), mon.recv()).await {
+            Ok(Ok(MonitorEvent::HandshakeSucceeded { .. })) => return,
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    panic!("HandshakeSucceeded never arrived");
+}
+
+fn bound_port(evt: MonitorEvent) -> u16 {
+    match evt {
+        MonitorEvent::Listening {
+            endpoint: Endpoint::Tcp { port, .. },
+        } => port,
+        other => panic!("expected Listening, got {other:?}"),
+    }
+}
+
+#[compio::test]
+async fn sub_sees_disconnect_when_pub_closes() {
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let mut pub_mon = publisher.monitor();
+    publisher.bind(tcp_loopback(0)).await.unwrap();
+    let port = bound_port(next_event(&mut pub_mon).await.unwrap());
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    let mut sub_mon = subscriber.monitor();
+    subscriber.connect(tcp_loopback(port)).await.unwrap();
+    drain_until_handshake(&mut sub_mon).await;
+
+    publisher.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut sub_mon)
+        .await
+        .expect("SUB must see Disconnected when PUB closes");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[compio::test]
+async fn pub_sees_disconnect_when_sub_closes() {
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let mut pub_mon = publisher.monitor();
+    publisher.bind(tcp_loopback(0)).await.unwrap();
+    let port = bound_port(next_event(&mut pub_mon).await.unwrap());
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    subscriber.connect(tcp_loopback(port)).await.unwrap();
+    drain_until_handshake(&mut pub_mon).await;
+
+    subscriber.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut pub_mon)
+        .await
+        .expect("PUB must see Disconnected when SUB closes");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[compio::test]
+async fn rep_sees_disconnect_when_req_closes() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let mut rep_mon = rep.monitor();
+    rep.bind(tcp_loopback(0)).await.unwrap();
+    let port = bound_port(next_event(&mut rep_mon).await.unwrap());
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(tcp_loopback(port)).await.unwrap();
+    drain_until_handshake(&mut rep_mon).await;
+
+    req.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut rep_mon)
+        .await
+        .expect("REP must see Disconnected when REQ closes");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[compio::test]
+async fn req_sees_disconnect_when_rep_closes() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let mut rep_mon = rep.monitor();
+    rep.bind(tcp_loopback(0)).await.unwrap();
+    let port = bound_port(next_event(&mut rep_mon).await.unwrap());
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    let mut req_mon = req.monitor();
+    req.connect(tcp_loopback(port)).await.unwrap();
+    drain_until_handshake(&mut req_mon).await;
+
+    rep.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut req_mon)
+        .await
+        .expect("REQ must see Disconnected when REP closes");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[compio::test]
+async fn pub_sees_disconnect_after_message_exchange() {
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let mut pub_mon = publisher.monitor();
+    publisher.bind(tcp_loopback(0)).await.unwrap();
+    let port = bound_port(next_event(&mut pub_mon).await.unwrap());
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    subscriber.connect(tcp_loopback(port)).await.unwrap();
+    subscriber.subscribe("").await.unwrap();
+    drain_until_handshake(&mut pub_mon).await;
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    publisher.send(Message::single("hello")).await.unwrap();
+    let msg = compio::time::timeout(Duration::from_millis(500), subscriber.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
+
+    subscriber.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut pub_mon)
+        .await
+        .expect("PUB must see Disconnected after message exchange");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[compio::test]
+async fn req_sees_disconnect_after_roundtrip() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let mut rep_mon = rep.monitor();
+    rep.bind(tcp_loopback(0)).await.unwrap();
+    let port = bound_port(next_event(&mut rep_mon).await.unwrap());
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    let mut req_mon = req.monitor();
+    req.connect(tcp_loopback(port)).await.unwrap();
+    drain_until_handshake(&mut req_mon).await;
+
+    req.send(Message::single("ping")).await.unwrap();
+    let request = compio::time::timeout(Duration::from_millis(500), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.part_bytes(0).unwrap(), &b"ping"[..]);
+    rep.send(Message::single("pong")).await.unwrap();
+    let reply = compio::time::timeout(Duration::from_millis(500), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"pong"[..]);
+
+    rep.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut req_mon)
+        .await
+        .expect("REQ must see Disconnected after roundtrip");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
 }

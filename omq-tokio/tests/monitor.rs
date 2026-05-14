@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use omq_tokio::{
-    ConnectionStatus, DisconnectReason, Endpoint, MonitorEvent, Options, Socket, SocketType,
+    ConnectionStatus, DisconnectReason, Endpoint, Message, MonitorEvent, Options, Socket,
+    SocketType,
 };
 
 fn inproc_ep(name: &str) -> Endpoint {
@@ -319,4 +320,169 @@ async fn monitor_emits_closed_on_socket_close() {
         }
     }
     assert!(saw_closed, "Closed event must be emitted on socket close");
+}
+
+// --- Disconnect events on PUB, SUB, REP, REQ (zeromq/zmq.rs#201) ---
+
+async fn drain_until_disconnect(
+    mon: &mut omq_tokio::MonitorStream,
+) -> Option<DisconnectReason> {
+    for _ in 0..20 {
+        match tokio::time::timeout(Duration::from_millis(500), mon.recv()).await {
+            Ok(Ok(MonitorEvent::Disconnected { reason, .. })) => return Some(reason),
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    None
+}
+
+async fn drain_until_handshake(mon: &mut omq_tokio::MonitorStream) {
+    for _ in 0..10 {
+        match tokio::time::timeout(Duration::from_millis(500), mon.recv()).await {
+            Ok(Ok(MonitorEvent::HandshakeSucceeded { .. })) => return,
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    panic!("HandshakeSucceeded never arrived");
+}
+
+#[tokio::test]
+async fn sub_sees_disconnect_when_pub_closes() {
+    let ep = inproc_ep("mon-sub-disc");
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    publisher.bind(ep.clone()).await.unwrap();
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    let mut sub_mon = subscriber.monitor();
+    subscriber.connect(ep).await.unwrap();
+    drain_until_handshake(&mut sub_mon).await;
+
+    publisher.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut sub_mon)
+        .await
+        .expect("SUB must see Disconnected when PUB closes");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[tokio::test]
+async fn pub_sees_disconnect_when_sub_closes() {
+    let ep = inproc_ep("mon-pub-disc");
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let mut pub_mon = publisher.monitor();
+    publisher.bind(ep.clone()).await.unwrap();
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    subscriber.connect(ep).await.unwrap();
+    drain_until_handshake(&mut pub_mon).await;
+
+    subscriber.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut pub_mon)
+        .await
+        .expect("PUB must see Disconnected when SUB closes");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[tokio::test]
+async fn rep_sees_disconnect_when_req_closes() {
+    let ep = inproc_ep("mon-rep-disc");
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let mut rep_mon = rep.monitor();
+    rep.bind(ep.clone()).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep).await.unwrap();
+    drain_until_handshake(&mut rep_mon).await;
+
+    req.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut rep_mon)
+        .await
+        .expect("REP must see Disconnected when REQ closes");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[tokio::test]
+async fn req_sees_disconnect_when_rep_closes() {
+    let ep = inproc_ep("mon-req-disc");
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(ep.clone()).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    let mut req_mon = req.monitor();
+    req.connect(ep).await.unwrap();
+    drain_until_handshake(&mut req_mon).await;
+
+    rep.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut req_mon)
+        .await
+        .expect("REQ must see Disconnected when REP closes");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[tokio::test]
+async fn pub_sees_disconnect_after_message_exchange() {
+    let ep = inproc_ep("mon-pub-disc-msg");
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let mut pub_mon = publisher.monitor();
+    publisher.bind(ep.clone()).await.unwrap();
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    subscriber.connect(ep).await.unwrap();
+    subscriber.subscribe("").await.unwrap();
+    drain_until_handshake(&mut pub_mon).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    publisher
+        .send(Message::single("hello"))
+        .await
+        .unwrap();
+    let msg = tokio::time::timeout(Duration::from_millis(500), subscriber.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
+
+    subscriber.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut pub_mon)
+        .await
+        .expect("PUB must see Disconnected after message exchange");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
+}
+
+#[tokio::test]
+async fn req_sees_disconnect_after_roundtrip() {
+    let ep = inproc_ep("mon-req-disc-msg");
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(ep.clone()).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    let mut req_mon = req.monitor();
+    req.connect(ep).await.unwrap();
+    drain_until_handshake(&mut req_mon).await;
+
+    req.send(Message::single("ping")).await.unwrap();
+    let request = tokio::time::timeout(Duration::from_millis(500), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.part_bytes(0).unwrap(), &b"ping"[..]);
+    rep.send(Message::single("pong")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_millis(500), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"pong"[..]);
+
+    rep.close().await.unwrap();
+
+    let reason = drain_until_disconnect(&mut req_mon)
+        .await
+        .expect("REQ must see Disconnected after roundtrip");
+    assert_eq!(reason, DisconnectReason::PeerClosed);
 }
