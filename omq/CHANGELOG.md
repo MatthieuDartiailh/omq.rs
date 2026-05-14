@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-14
+
+### Added
+
+- `plain` feature flag forwarded to both backends.
+
+### Changed
+
+- *(deps)* Bump `omq-compio` to 0.3.0, `omq-tokio` to 0.3.0.
+
 ## [0.2.7] - 2026-05-13
 
 ### Changed

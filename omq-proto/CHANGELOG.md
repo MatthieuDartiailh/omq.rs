@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-14
+
+### Added
+
+- PLAIN security mechanism (RFC 24): four-command handshake providing
+  username/password authentication. Feature-gated behind `plain` with zero deps.
+
+### Fixed
+
+- Return error instead of panicking on overlong CURVE metadata properties.
+
 ## [0.6.0] - 2026-05-13
 
 ### Changed

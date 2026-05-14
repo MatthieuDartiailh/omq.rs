@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-14
+
+### Added
+
+- PLAIN security mechanism support via `plain` feature flag.
+- PLAIN interop tests against libzmq via pyzmq.
+
+### Fixed
+
+- *(test)* Fix interop_ruby TCP port collisions (AddrInUse).
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.7.0.
+
 ## [0.2.8] - 2026-05-13
 
 ### Changed
