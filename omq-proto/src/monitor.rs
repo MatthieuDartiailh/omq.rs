@@ -119,6 +119,8 @@ pub enum DisconnectReason {
     LocalClose,
     /// Timeout, protocol violation, or I/O error.
     Error(String),
+    /// A new connection claimed the same routing identity.
+    Handover,
 }
 
 /// Rich context passed on per-connection events. Cheap to clone: heavy

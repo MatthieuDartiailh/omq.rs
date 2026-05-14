@@ -154,6 +154,13 @@ impl SendStrategy {
         }
     }
 
+    pub(crate) fn peer_for_identity(&self, identity: &Bytes) -> Option<u64> {
+        match self {
+            Self::Identity(s) => s.peer_for_identity(identity),
+            _ => None,
+        }
+    }
+
     /// Record a SUBSCRIBE from a peer. No-op except for `FanOut`.
     pub(crate) fn peer_subscribe(&self, peer_id: u64, prefix: Bytes) {
         if let Self::FanOut(s) = self {

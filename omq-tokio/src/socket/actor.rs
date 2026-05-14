@@ -805,6 +805,28 @@ impl SocketDriver {
         }
     }
 
+    fn evict_peer_for_handover(&mut self, peer_id: u64) {
+        self.send_strategy.connection_removed(peer_id);
+        self.recv_strategy.connection_removed(peer_id);
+        if let Some(peer) = self.peers.remove(&peer_id) {
+            peer.handle.cancel.cancel();
+            if let Some(info) = peer.info {
+                self.monitor.publish(MonitorEvent::Disconnected {
+                    endpoint: peer.endpoint,
+                    peer: info,
+                    reason: DisconnectReason::Handover,
+                });
+            }
+        }
+        match self.socket_type {
+            SocketType::Req => self.type_state.on_peer_disconnected(),
+            SocketType::Rep if self.peers.is_empty() => {
+                self.type_state.on_peer_disconnected();
+            }
+            _ => {}
+        }
+    }
+
     /// Snapshot for inproc bind/connect: socket type + identity. The
     /// inproc transport hands this to its peer at connect time so the
     /// synthesised handshake can populate `PeerProperties` without a
@@ -1109,6 +1131,11 @@ impl SocketDriver {
                     .identity
                     .clone()
                     .unwrap_or_else(|| generated_identity(peer_id));
+                if let Some(old_id) = self.send_strategy.peer_for_identity(&identity)
+                    && old_id != peer_id
+                {
+                    self.evict_peer_for_handover(old_id);
+                }
                 let (handle, subs_replay, peer_ident) = {
                     let Some(p) = self.peers.get_mut(&peer_id) else {
                         return;

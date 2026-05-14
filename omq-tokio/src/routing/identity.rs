@@ -150,6 +150,11 @@ impl IdentitySend {
         }
     }
 
+    pub(crate) fn peer_for_identity(&self, identity: &Bytes) -> Option<u64> {
+        let g = self.inner.lock().expect("identity inner poisoned");
+        g.identity_to_peer.get(identity).copied()
+    }
+
     pub(crate) fn shutdown(&self) {
         self.root_cancel.cancel();
     }

@@ -138,7 +138,7 @@ down and reconnects.
 | PUB fan-out: slow sub blocks all | Unless ZMQ_XPUB_NODROP | Per-sub independent queues | **=** better |
 | PUB fan-out: ref counting | Manual rm_refs on failure | Bytes Arc clone | **=** equivalent |
 | ROUTER mandatory | EHOSTUNREACH | Error::Unroutable | **=** |
-| ROUTER handover | Reassign old conn integral ID | Not implemented | **X** |
+| ROUTER handover | Reassign old conn integral ID | Always-on; evict old peer, `Disconnected(Handover)` | **=** better (no opt-in needed) |
 | ROUTER anonymous pipes | Separate set until identified | Not mentioned | **~** |
 | lb _dropping mode (mid-msg pipe death) | Silently consume remaining frames | Different architecture (whole-message queuing) | **N/A** |
 
@@ -251,6 +251,6 @@ down and reconnects.
 - **IPC wildcard address:** Cannot auto-generate a unique IPC path.
 - **TCP accept filters (allowlist):** Cannot restrict TCP connections by
   source address.
-- **ROUTER handover:** On duplicate routing identity, libzmq can reassign
-  the old connection a new integral ID and terminate it. omq.rs does not
-  support this.
+- **ROUTER handover:** Implemented. Always-on (libzmq gates behind
+  `ZMQ_ROUTER_HANDOVER`). Old connection is evicted with
+  `DisconnectReason::Handover`. Applies to ROUTER and SERVER.

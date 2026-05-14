@@ -92,12 +92,15 @@ pub(super) fn install_inproc_peer(
     };
     #[cfg(feature = "priority")]
     inner.rebuild_priority_view();
-    if !peer_identity.is_empty() {
-        inner
+    if !peer_identity.is_empty()
+        && let Some(old_idx) = inner
             .identity_to_slot
             .write()
             .expect("identity table")
-            .insert(peer_identity, idx);
+            .insert(peer_identity, idx)
+        && old_idx != idx
+    {
+        inner.evict_peer_for_handover(old_idx);
     }
     inner.on_peer_ready.notify(usize::MAX);
     // Synthesise HandshakeSucceeded - inproc has no wire handshake
@@ -241,12 +244,15 @@ pub(super) fn spawn_wire_driver(
                 }
                 slot.map(|s| s.out.clone())
             };
-            if !identity.is_empty() {
-                inner
+            if !identity.is_empty()
+                && let Some(old_idx) = inner
                     .identity_to_slot
                     .write()
                     .expect("identity table")
-                    .insert(identity, slot_idx);
+                    .insert(identity, slot_idx)
+                && old_idx != slot_idx
+            {
+                inner.evict_peer_for_handover(old_idx);
             }
             if matches!(inner.socket_type, SocketType::Sub | SocketType::XSub) {
                 let prefixes: Vec<Bytes> = inner.our_subs.read().expect("our_subs lock").clone();

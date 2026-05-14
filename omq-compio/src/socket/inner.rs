@@ -53,7 +53,7 @@ use omq_proto::proto::transform::MessageEncoder;
 use omq_proto::subscription::SubscriptionSet;
 use omq_proto::type_state::TypeState;
 
-use crate::monitor::{MonitorEvent, MonitorPublisher, PeerInfo};
+use crate::monitor::{DisconnectReason, MonitorEvent, MonitorPublisher, PeerInfo};
 use crate::transport::driver::DriverCommand;
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
 use crate::transport::peer_io::{CancellableRecvStream, SharedPeerIo, WireWriter};
@@ -1041,5 +1041,33 @@ impl SocketInner {
         idx.sort_by_key(|&i| peers[i].priority);
         drop(peers);
         *self.priority_view.write().expect("priority_view lock") = idx;
+    }
+
+    pub(super) fn evict_peer_for_handover(&self, slot_idx: usize) {
+        let peers = self.out_peers.read().expect("peers lock");
+        let Some(slot) = peers.get(slot_idx) else {
+            return;
+        };
+        match &slot.out {
+            PeerOut::Wire(handle) => {
+                let (dead_tx, _) = flume::bounded::<DriverCommand>(0);
+                *handle.write().expect("wire peer handle lock") = dead_tx;
+            }
+            PeerOut::Inproc { .. } => {}
+        }
+        if let Some(dio) = &slot.direct_io {
+            *dio.write().expect("direct_io handle lock") = None;
+        }
+        let info = slot.info.read().expect("info lock").clone();
+        if let Some(peer) = info {
+            self.monitor.publish(MonitorEvent::Disconnected {
+                endpoint: slot.endpoint.clone(),
+                peer,
+                reason: DisconnectReason::Handover,
+            });
+        }
+        // Suppress the driver's Disconnected on exit.
+        *slot.info.write().expect("info lock") = None;
+        self.peers_gen.fetch_add(1, Ordering::Release);
     }
 }
