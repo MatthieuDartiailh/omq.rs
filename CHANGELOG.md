@@ -6,6 +6,26 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-05-14
+
+### omq-proto 0.8.0
+
+- `DisconnectReason::Handover` variant for ROUTER/SERVER identity handover.
+
+### omq-compio 0.4.0
+
+- ROUTER/SERVER identity handover: new connection with duplicate identity
+  evicts the old peer.
+
+### omq-tokio 0.4.0
+
+- ROUTER/SERVER identity handover: new connection with duplicate identity
+  evicts the old peer.
+
+### omq 0.4.0
+
+- Bump `omq-compio` to 0.4.0, `omq-tokio` to 0.4.0.
+
 ## [0.2.6] - 2026-05-12
 
 ### omq-proto 0.4.0

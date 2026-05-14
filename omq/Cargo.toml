@@ -1,6 +1,6 @@
 [package]
 name = "omq"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -47,5 +47,5 @@ priority = [
 ]
 
 [dependencies]
-omq-compio = { path = "../omq-compio", version = "0.3.0", default-features = false, optional = true }
-omq-tokio  = { path = "../omq-tokio",  version = "0.3.0", default-features = false, optional = true }
+omq-compio = { path = "../omq-compio", version = "0.4.0", default-features = false, optional = true }
+omq-tokio  = { path = "../omq-tokio",  version = "0.4.0", default-features = false, optional = true }

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-14
+
+### Added
+
+- ROUTER/SERVER identity handover: when a new connection claims an identity
+  already held by an existing peer, the old connection is evicted.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.8.0.
+
 ## [0.3.0] - 2026-05-14
 
 ### Added
