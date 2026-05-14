@@ -8,7 +8,6 @@
 //! every socket type. This file isolates the compression-transform paths
 //! so the rest of the matrix can run without a `--features zstd` gate.
 
-use std::net::TcpListener as StdTcpListener;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -76,16 +75,27 @@ fn skip_if_no_omq() -> bool {
     false
 }
 
-fn ephemeral_tcp_endpoint() -> (Endpoint, String) {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let cli = format!("zstd+tcp://127.0.0.1:{port}");
-    let rust = Endpoint::ZstdTcp {
+/// Bind a PULL socket to `zstd+tcp://127.0.0.1:0` and return it plus
+/// the CLI endpoint string with the kernel-assigned port.
+async fn bind_zstd_pull() -> (Socket, String) {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let mut mon = pull.monitor();
+    pull.bind(Endpoint::ZstdTcp {
         host: Host::Ip("127.0.0.1".parse().unwrap()),
-        port,
+        port: 0,
+    })
+    .await
+    .unwrap();
+    let port = loop {
+        match mon.recv().await {
+            Ok(MonitorEvent::Listening {
+                endpoint: Endpoint::ZstdTcp { port, .. },
+            }) => break port,
+            Ok(_) => {}
+            other => panic!("expected Listening, got {other:?}"),
+        }
     };
-    (rust, cli)
+    (pull, format!("zstd+tcp://127.0.0.1:{port}"))
 }
 
 /// Sustained Ruby PUSH against a Rust zstd+tcp PULL bind.
@@ -107,10 +117,7 @@ async fn ruby_push_zstd_tcp_sustained() {
         return;
     }
 
-    let (rust_ep, cli_ep) = ephemeral_tcp_endpoint();
-
-    let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(rust_ep).await.unwrap();
+    let (pull, cli_ep) = bind_zstd_pull().await;
     let mut mon = pull.monitor();
 
     // Ruby PUSH at 100 Hz, ~400-byte payloads. The `-E` transform multiplies

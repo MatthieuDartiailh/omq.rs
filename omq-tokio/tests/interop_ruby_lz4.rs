@@ -12,7 +12,6 @@
 //! sustained traffic exercises the per-part `LZ4B` envelope and the
 //! plaintext-passthrough sentinel against a non-Rust encoder.
 
-use std::net::TcpListener as StdTcpListener;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -105,16 +104,25 @@ fn skip_if_no_omq_lz4() -> bool {
     false
 }
 
-fn ephemeral_lz4_endpoint() -> (Endpoint, String) {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let cli = format!("lz4+tcp://127.0.0.1:{port}");
-    let rust = Endpoint::Lz4Tcp {
+async fn bind_lz4_pull() -> (Socket, String) {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let mut mon = pull.monitor();
+    pull.bind(Endpoint::Lz4Tcp {
         host: Host::Ip("127.0.0.1".parse().unwrap()),
-        port,
+        port: 0,
+    })
+    .await
+    .unwrap();
+    let port = loop {
+        match mon.recv().await {
+            Ok(MonitorEvent::Listening {
+                endpoint: Endpoint::Lz4Tcp { port, .. },
+            }) => break port,
+            Ok(_) => {}
+            other => panic!("expected Listening, got {other:?}"),
+        }
     };
-    (rust, cli)
+    (pull, format!("lz4+tcp://127.0.0.1:{port}"))
 }
 
 /// Sustained Ruby PUSH against a Rust lz4+tcp PULL bind.
@@ -136,10 +144,7 @@ async fn ruby_push_lz4_tcp_sustained() {
         return;
     }
 
-    let (rust_ep, cli_ep) = ephemeral_lz4_endpoint();
-
-    let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(rust_ep).await.unwrap();
+    let (pull, cli_ep) = bind_lz4_pull().await;
     let mut mon = pull.monitor();
 
     let expected = PAYLOAD_UNIT.repeat(5);
