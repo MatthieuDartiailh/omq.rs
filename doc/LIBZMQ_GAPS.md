@@ -149,7 +149,7 @@ down and reconnects.
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
 | NULL | READY exchange + ZAP | READY exchange, no ZAP | **~** |
-| PLAIN | Username/password in HELLO | Not implemented | **X** |
+| PLAIN | Username/password in HELLO | Not implemented | **=** |
 | CURVE (RFC 26) | Full, with ZAP | Full, inline authenticator | **=** |
 | BLAKE3ZMQ | N/A (omq-native) | Full, with transcript binding | **=** omq-only |
 | ZAP protocol | Separate inproc socket | Not implemented; inline callback | **~** deliberate |
