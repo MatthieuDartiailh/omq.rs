@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-14
+
+### Changed
+
+- *(deps)* Bump `omq-compio` to 0.4.0 and `omq-proto` to 0.8.0.
+
 ## [0.2.4](https://github.com/paddor/omq.rs/compare/pyomq-v0.2.3...pyomq-v0.2.4) - 2026-05-12
 
 ### Changed
