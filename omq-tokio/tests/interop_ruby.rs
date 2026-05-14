@@ -80,6 +80,9 @@ struct Transport {
     cli: String,
 }
 
+/// Ephemeral TCP transport with a pre-reserved port. Used only when
+/// Ruby binds (REQ/REP test). Rust-bind tests use `bind_tcp` instead
+/// to avoid the bind-drop-rebind TOCTOU race.
 fn tcp_transport() -> Transport {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     let port = listener.local_addr().unwrap().port();
@@ -90,6 +93,34 @@ fn tcp_transport() -> Transport {
             port,
         },
         cli: format!("tcp://127.0.0.1:{port}"),
+    }
+}
+
+/// Bind the Rust socket and return the CLI endpoint string. For TCP,
+/// binds port 0 and reads the kernel-assigned port from the monitor
+/// to avoid the TOCTOU race in `tcp_transport()`. For IPC, binds
+/// directly and returns `t.cli`.
+async fn bind_tcp_or_ipc(sock: &Socket, t: &Transport) -> String {
+    if matches!(&t.rust, Endpoint::Tcp { .. }) {
+        let mut mon = sock.monitor();
+        sock.bind(Endpoint::Tcp {
+            host: Host::Ip("127.0.0.1".parse().unwrap()),
+            port: 0,
+        })
+        .await
+        .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), mon.recv()).await {
+                Ok(Ok(MonitorEvent::Listening {
+                    endpoint: Endpoint::Tcp { port, .. },
+                })) => return format!("tcp://127.0.0.1:{port}"),
+                Ok(Ok(_)) => {}
+                other => panic!("expected Listening event, got {other:?}"),
+            }
+        }
+    } else {
+        sock.bind(t.rust.clone()).await.unwrap();
+        t.cli.clone()
     }
 }
 
@@ -138,11 +169,11 @@ async fn wait_for_handshake(sock: &Socket) {
 
 async fn rust_push_to_ruby_pull(t: Transport) {
     let push = Socket::new(SocketType::Push, Options::default());
-    push.bind(t.rust.clone()).await.unwrap();
+    let cli = bind_tcp_or_ipc(&push, &t).await;
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["pull", "-c", &t.cli, "-A", "-n", "5"])
+            .args(["pull", "-c", &cli, "-A", "-n", "5"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -186,11 +217,11 @@ async fn rust_push_to_ruby_pull_ipc() {
 
 async fn ruby_push_to_rust_pull(t: Transport) {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(t.rust.clone()).await.unwrap();
+    let cli = bind_tcp_or_ipc(&pull, &t).await;
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["push", "-c", &t.cli, "-A"])
+            .args(["push", "-c", &cli, "-A"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -294,11 +325,11 @@ async fn rust_req_to_ruby_rep_ipc() {
 
 async fn rust_pub_to_ruby_sub(t: Transport) {
     let pubs = Socket::new(SocketType::Pub, Options::default());
-    pubs.bind(t.rust.clone()).await.unwrap();
+    let cli = bind_tcp_or_ipc(&pubs, &t).await;
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["sub", "-c", &t.cli, "-s", "weather.", "-A", "-n", "2"])
+            .args(["sub", "-c", &cli, "-s", "weather.", "-A", "-n", "2"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -357,14 +388,14 @@ async fn rust_pub_to_ruby_sub_ipc() {
 
 async fn rust_router_sees_ruby_dealer_identity(t: Transport) {
     let router = Socket::new(SocketType::Router, Options::default());
-    router.bind(t.rust.clone()).await.unwrap();
+    let cli = bind_tcp_or_ipc(&router, &t).await;
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
             .args([
                 "dealer",
                 "-c",
-                &t.cli,
+                &cli,
                 "--identity",
                 "worker-7",
                 "-A",
@@ -416,11 +447,11 @@ async fn rust_router_sees_ruby_dealer_identity_ipc() {
 
 async fn rust_radio_to_ruby_dish(t: Transport) {
     let radio = Socket::new(SocketType::Radio, Options::default());
-    radio.bind(t.rust.clone()).await.unwrap();
+    let cli = bind_tcp_or_ipc(&radio, &t).await;
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["dish", "-c", &t.cli, "-j", "weather", "-A", "-n", "2"])
+            .args(["dish", "-c", &cli, "-j", "weather", "-A", "-n", "2"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -502,20 +533,29 @@ async fn rust_curve_push_to_ruby_pull_tcp() {
         return;
     }
 
-    let t = tcp_transport();
     let server_kp = CurveKeypair::generate();
     let server_pub_z85 = server_kp.public.to_z85();
 
     let opts = Options::default().curve_server(server_kp);
     let push = Socket::new(SocketType::Push, opts);
-    push.bind(t.rust).await.unwrap();
+    let cli = bind_tcp_or_ipc(
+        &push,
+        &Transport {
+            rust: Endpoint::Tcp {
+                host: Host::Ip("127.0.0.1".parse().unwrap()),
+                port: 0,
+            },
+            cli: String::new(),
+        },
+    )
+    .await;
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
             .args([
                 "pull",
                 "-c",
-                &t.cli,
+                &cli,
                 "--curve-server-key",
                 &server_pub_z85,
                 "-A",
@@ -562,20 +602,29 @@ async fn ruby_curve_push_to_rust_pull_tcp() {
         return;
     }
 
-    let t = tcp_transport();
     let server_kp = CurveKeypair::generate();
     let server_pub_z85 = server_kp.public.to_z85();
 
     let opts = Options::default().curve_server(server_kp);
     let pull = Socket::new(SocketType::Pull, opts);
-    pull.bind(t.rust).await.unwrap();
+    let cli = bind_tcp_or_ipc(
+        &pull,
+        &Transport {
+            rust: Endpoint::Tcp {
+                host: Host::Ip("127.0.0.1".parse().unwrap()),
+                port: 0,
+            },
+            cli: String::new(),
+        },
+    )
+    .await;
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
             .args([
                 "push",
                 "-c",
-                &t.cli,
+                &cli,
                 "--curve-server-key",
                 &server_pub_z85,
                 "-A",

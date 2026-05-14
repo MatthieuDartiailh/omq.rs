@@ -61,7 +61,7 @@ async fn wait_for_handshake(sock: &Socket) {
     match tokio::time::timeout(Duration::from_secs(5), fut).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => panic!("PLAIN handshake error: {e}"),
-        Err(_) => panic!("PLAIN handshake did not complete within 5s"),
+        Err(e) => panic!("PLAIN handshake did not complete within 5s: {e}"),
     }
 }
 
