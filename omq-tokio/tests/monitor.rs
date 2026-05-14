@@ -324,9 +324,7 @@ async fn monitor_emits_closed_on_socket_close() {
 
 // --- Disconnect events on PUB, SUB, REP, REQ (zeromq/zmq.rs#201) ---
 
-async fn drain_until_disconnect(
-    mon: &mut omq_tokio::MonitorStream,
-) -> Option<DisconnectReason> {
+async fn drain_until_disconnect(mon: &mut omq_tokio::MonitorStream) -> Option<DisconnectReason> {
     for _ in 0..20 {
         match tokio::time::timeout(Duration::from_millis(500), mon.recv()).await {
             Ok(Ok(MonitorEvent::Disconnected { reason, .. })) => return Some(reason),
@@ -437,10 +435,7 @@ async fn pub_sees_disconnect_after_message_exchange() {
     drain_until_handshake(&mut pub_mon).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    publisher
-        .send(Message::single("hello"))
-        .await
-        .unwrap();
+    publisher.send(Message::single("hello")).await.unwrap();
     let msg = tokio::time::timeout(Duration::from_millis(500), subscriber.recv())
         .await
         .unwrap()

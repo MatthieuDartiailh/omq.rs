@@ -85,9 +85,7 @@ async fn closed_event_on_socket_drop() {
 
 // --- Disconnect events on PUB, SUB, REP, REQ (zeromq/zmq.rs#201) ---
 
-async fn drain_until_disconnect(
-    mon: &mut omq_compio::MonitorStream,
-) -> Option<DisconnectReason> {
+async fn drain_until_disconnect(mon: &mut omq_compio::MonitorStream) -> Option<DisconnectReason> {
     for _ in 0..20 {
         match compio::time::timeout(Duration::from_millis(500), mon.recv()).await {
             Ok(Ok(MonitorEvent::Disconnected { reason, .. })) => return Some(reason),
