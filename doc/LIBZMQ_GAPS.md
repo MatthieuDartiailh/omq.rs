@@ -28,7 +28,7 @@ implements today. See `doc/LIBZMQ_ERRORS.md` for the full libzmq catalog.
 omq.rs delegates low-level errno wrangling to tokio/compio. The Windows
 `WSAENOBUFS` and FreeBSD close quirks are platform bugs that could bite on
 those platforms. The write-error asymmetry is a deliberate design
-difference — libzmq keeps the engine alive to drain inbound; omq.rs tears
+difference: libzmq keeps the engine alive to drain inbound; omq.rs tears
 down and reconnects.
 
 ---

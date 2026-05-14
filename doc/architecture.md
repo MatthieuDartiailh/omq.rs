@@ -179,6 +179,33 @@ Compression-style schemes are runtime layers stacked on top of the TCP
 transport, not separate transports. The encoder/decoder live in
 `omq-proto` and are wired in by the backend after the ZMTP handshake.
 
+## Transport type dispatch
+
+Each backend needs a single concrete type for a peer's I/O channel
+that works for both TCP and IPC without threading a type parameter
+through every struct above it. Two approaches exist.
+
+`Box<dyn Trait>` erases the stream type at runtime: a fat pointer
+whose vtable is resolved on every read or write. No generics propagate
+upward, but every frame operation pays an indirect call that blocks
+inlining and cannot be predicted by the CPU branch predictor.
+
+omq uses a closed enum instead:
+
+```rust
+enum WireReader { Tcp(AsyncFd<TcpStream>), Ipc(AsyncFd<UnixStream>) }
+enum WireWriter { Tcp(OwnedWriteHalf<TcpStream>), Ipc(OwnedWriteHalf<UnixStream>) }
+```
+
+The enum erases the transport type for the same structural reason:
+`PeerIo` holds a `WireReader` with no type parameter. The compiler
+resolves the match statically and inlines through each arm.
+Hot-path reads and writes are direct calls at zero indirection cost.
+
+`Box<dyn>` would only be warranted if transports were user-extensible
+at runtime. The transport set is fixed at build time, so the enum is
+strictly better: same ergonomics, no vtable.
+
 ## Mechanisms
 
 | Name | Cargo feature | Notes |
