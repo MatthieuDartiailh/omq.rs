@@ -5,18 +5,22 @@
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-%3E%3D%201.93-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-> **3.5M msg/s** inproc | **6.85M msg/s** ipc | **6.71M msg/s** tcp (32 B, compio backend)
+> **3.6M msg/s** inproc | **6.93M msg/s** ipc | **7.21M msg/s** tcp
 >
-> **5.57 µs** inproc latency | **17.4 µs** ipc | **24.4 µs** tcp
+> **5.39 µs** inproc latency | **17.6 µs** ipc | **25.4 µs** tcp
 
 Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all message sizes.
 
 - Two async backends: **compio** (io_uring, default) and **tokio**
-- 11 standard socket types + 8 draft types
-- Transports: inproc / IPC (including Linux abstract namespace) / TCP; UDP (RADIO/DISH only)
+- 11 standard socket types
+- 8 draft socket types
+- inproc transport
+- IPC transport (including Linux abstract namespace)
+- TCP transport
+- UDP transport (RADIO/DISH only)
+- `lz4+tcp://` transport with blazing-fast LZ4 compression
+- `zstd+tcp://` transport with Zstandard compression
 - Mechanisms: NULL / PLAIN / CURVE / BLAKE3ZMQ
-- Compression: `lz4+tcp://` and `zstd+tcp://`
-- Pure Rust — no C dependencies unless you opt into lz4 or zstd
 
 > **Wire-compatible with libzmq.** omq sockets interoperate with any libzmq peer - C, Python
 > (pyzmq), Ruby, Node - on any shared transport. Same ZMTP 3.x framing, same socket types, same
