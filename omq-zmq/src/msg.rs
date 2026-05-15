@@ -339,21 +339,32 @@ pub extern "C" fn zmq_msg_send(
     sock: *mut libc::c_void,
     flags: c_int,
 ) -> c_int {
+    use std::sync::Arc;
+
     if msg.is_null() || sock.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
 
+    let sock_arc = unsafe { &*(sock.cast::<Arc<crate::socket::OmqSocket>>()) };
+
     let group = msg_group_bytes(msg);
-    let bytes = extract_bytes(msg);
-    let len = bytes.len();
+
+    // For KIND_BYTES, steal the arc instead of copying. Set boxed to null so
+    // zmq_msg_close (called on success below) skips the drop.
+    let r = unsafe { &mut *msg };
+    let bytes = if r.kind == KIND_BYTES && !r.boxed.is_null() {
+        let owned = unsafe { *Box::from_raw(r.boxed.cast::<Bytes>()) };
+        r.boxed = std::ptr::null_mut();
+        owned
+    } else {
+        extract_bytes(msg)
+    };
 
     if !group.is_empty() {
-        use std::sync::Arc;
-        let sock_arc = unsafe { &*(sock.cast::<Arc<crate::socket::OmqSocket>>()) };
         sock_arc.send_accum.lock().unwrap().push(group);
     }
 
-    let ret = crate::send_recv::zmq_send(sock, bytes.as_ptr().cast(), len, flags);
+    let ret = crate::send_recv::send_bytes(sock_arc, bytes, flags);
     if ret >= 0 {
         zmq_msg_close(msg);
     }

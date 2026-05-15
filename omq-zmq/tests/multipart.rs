@@ -279,6 +279,70 @@ fn msg_send_then_raw_recv() {
     zmq_ctx_term(ctx);
 }
 
+/// KIND_BYTES arc is stolen on `zmq_msg_send` — no copy, no double-free.
+///
+/// Pattern: send via raw API -> recv as KIND_BYTES -> forward via `zmq_msg_send`.
+/// After a successful send the msg is zeroed. Any double-free of the arc
+/// would crash immediately.
+#[test]
+fn kind_bytes_arc_stolen_on_zmq_msg_send() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let fwd_push = zmq_socket(ctx, ZMQ_PUSH);
+    let fwd_pull = zmq_socket(ctx, ZMQ_PULL);
+
+    let addr1 = CString::new("inproc://zero-copy-src").unwrap();
+    let addr2 = CString::new("inproc://zero-copy-dst").unwrap();
+    zmq_bind(pull, addr1.as_ptr());
+    zmq_connect(push, addr1.as_ptr());
+    zmq_bind(fwd_pull, addr2.as_ptr());
+    zmq_connect(fwd_push, addr2.as_ptr());
+    std::thread::sleep(Duration::from_millis(20));
+    set_timeo(pull, ZMQ_RCVTIMEO, 1000);
+    set_timeo(fwd_pull, ZMQ_RCVTIMEO, 1000);
+
+    let payload = b"zero-copy-kind-bytes";
+
+    for _ in 0..50 {
+        zmq_send(push, payload.as_ptr().cast(), payload.len(), 0);
+
+        // recv -> KIND_BYTES (boxed = Box<Bytes>, non-null)
+        let mut msg = ZmqMsg::new();
+        let rc = zmq_msg_recv(msg.0.as_mut_ptr().cast(), pull, 0);
+        assert_eq!(rc as usize, payload.len());
+
+        // boxed field lives at offset 40 in OmqMsgRepr (see repr layout in msg.rs).
+        const BOXED_OFFSET: usize = 40;
+        let boxed_before =
+            usize::from_ne_bytes(msg.0[BOXED_OFFSET..BOXED_OFFSET + 8].try_into().unwrap());
+        assert_ne!(boxed_before, 0, "boxed must be non-null after zmq_msg_recv");
+
+        // Forward. Arc should be stolen (r.boxed set to null) before zmq_msg_close runs.
+        // A double-free of the arc would crash here or at drop of the forwarded Bytes.
+        let rc = zmq_msg_send(msg.0.as_mut_ptr().cast(), fwd_push, 0);
+        assert_eq!(rc as usize, payload.len());
+
+        // zmq_msg_send zeros the msg on success.
+        assert_eq!(msg.0, [0u8; 64], "msg must be zeroed after zmq_msg_send");
+
+        // Verify forwarded data arrived intact.
+        let mut out = ZmqMsg::new();
+        let rc = zmq_msg_recv(out.0.as_mut_ptr().cast(), fwd_pull, 0);
+        assert_eq!(rc as usize, payload.len());
+        let data = zmq_msg_data(out.0.as_mut_ptr().cast());
+        let got = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), rc as usize) };
+        assert_eq!(got, payload);
+        zmq_msg_close(out.0.as_mut_ptr().cast());
+    }
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_close(fwd_push);
+    zmq_close(fwd_pull);
+    zmq_ctx_term(ctx);
+}
+
 /// Mixed `zmq_send` and `zmq_msg_recv`
 #[test]
 fn raw_send_then_msg_recv() {

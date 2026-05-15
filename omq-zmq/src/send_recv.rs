@@ -15,30 +15,14 @@ use crate::socket::OmqSocket;
 const ZMQ_DONTWAIT: c_int = 1;
 const ZMQ_SNDMORE: c_int = 2;
 
-#[unsafe(no_mangle)]
-pub extern "C" fn zmq_send(
-    sock_ptr: *mut libc::c_void,
-    buf: *const libc::c_void,
-    len: usize,
-    flags: c_int,
-) -> c_int {
-    if sock_ptr.is_null() {
-        return fail(libc::EFAULT);
-    }
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock
-        .ctx
-        .terminated
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        return fail(ETERM);
-    }
-
-    let bytes = if buf.is_null() || len == 0 {
-        Bytes::new()
-    } else {
-        Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) })
-    };
+/// Core send dispatch. Takes ownership of an already-constructed [`Bytes`].
+///
+/// Returns the number of bytes sent on success, or a negative errno on error.
+/// Callers that construct `bytes` from a raw-pointer + length should use the
+/// raw `len` as the success return value; here we use `bytes.len()` which is
+/// identical for all well-formed callers.
+pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c_int {
+    let len = bytes.len();
 
     // XSUB: intercept subscription frames (\x01topic / \x00topic) and
     // route to subscribe/unsubscribe instead of the send path.
@@ -106,6 +90,34 @@ pub extern "C" fn zmq_send(
         Ok(()) => len as c_int,
         Err(e) => fail(e),
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_send(
+    sock_ptr: *mut libc::c_void,
+    buf: *const libc::c_void,
+    len: usize,
+    flags: c_int,
+) -> c_int {
+    if sock_ptr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    if sock
+        .ctx
+        .terminated
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return fail(ETERM);
+    }
+
+    let bytes = if buf.is_null() || len == 0 {
+        Bytes::new()
+    } else {
+        Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) })
+    };
+
+    send_bytes(sock, bytes, flags)
 }
 
 #[unsafe(no_mangle)]
