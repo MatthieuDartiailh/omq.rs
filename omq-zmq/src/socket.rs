@@ -1,0 +1,572 @@
+//! Socket handle and `zmq_socket`/close/bind/connect/unbind/disconnect.
+
+use std::collections::VecDeque;
+use std::ffi::{CStr, c_int, c_void};
+use std::rc::Rc;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use std::net::{IpAddr, Ipv6Addr};
+
+use bytes::Bytes;
+use omq_compio::SocketType;
+use omq_compio::endpoint::{Endpoint, Host};
+
+use crate::context::{OmqContext, REG, next_socket_id};
+use crate::error::{ETERM, fail, map_omq_err, set_errno};
+use crate::opts::SocketOverlay;
+
+/// Rewrite `Host::Wildcard` to IPv6 unspecified (::) for dual-stack bind.
+fn ipv6_rewrite_wildcard(ep: Endpoint) -> Endpoint {
+    match ep {
+        Endpoint::Tcp {
+            host: Host::Wildcard,
+            port,
+        } => Endpoint::Tcp {
+            host: Host::Ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+            port,
+        },
+        other => other,
+    }
+}
+
+// Default channel capacity (matches default HWM).
+pub(crate) const DEFAULT_HWM: usize = 1000;
+
+/// Eventfd-based notification pair on Linux; pipe pair on other platforms.
+#[cfg(target_os = "linux")]
+pub(crate) struct NotifyFd {
+    /// eventfd signaled (+1) for each message delivered to `recv_rx`.
+    pub recv_fd: std::os::unix::io::RawFd,
+    /// eventfd signaled (+1) for each send slot freed.
+    pub send_fd: std::os::unix::io::RawFd,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct NotifyFd {
+    pub recv_read: std::os::unix::io::RawFd,
+    pub recv_write: std::os::unix::io::RawFd,
+    pub send_read: std::os::unix::io::RawFd,
+    pub send_write: std::os::unix::io::RawFd,
+}
+
+impl std::fmt::Debug for NotifyFd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NotifyFd { .. }")
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NotifyFd {
+    fn new() -> Self {
+        // Non-semaphore: a single read returns the accumulated count
+        // and resets to 0. This allows O(1) drain instead of O(N).
+        let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
+        let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
+        Self { recv_fd, send_fd }
+    }
+
+    fn close(&self) {
+        unsafe {
+            libc::close(self.recv_fd);
+            libc::close(self.send_fd);
+        }
+    }
+
+    pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
+        let val: u64 = 1;
+        unsafe {
+            libc::write(fd, (&raw const val).cast::<libc::c_void>(), 8);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl NotifyFd {
+    fn new() -> Self {
+        let mut fds = [-1i32; 2];
+        unsafe {
+            libc::pipe(fds.as_mut_ptr());
+        }
+        let (recv_read, recv_write) = (fds[0], fds[1]);
+        unsafe {
+            libc::pipe(fds.as_mut_ptr());
+        }
+        let (send_read, send_write) = (fds[0], fds[1]);
+        Self {
+            recv_read,
+            recv_write,
+            send_read,
+            send_write,
+        }
+    }
+
+    fn close(&self) {
+        unsafe {
+            libc::close(self.recv_read);
+            libc::close(self.recv_write);
+            libc::close(self.send_read);
+            libc::close(self.send_write);
+        }
+    }
+
+    pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
+        let b: u8 = 1;
+        unsafe {
+            libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
+        }
+    }
+
+    // Used in Phase 2 (ZMQ_FD polling).
+    #[allow(dead_code)]
+    pub(crate) fn signal_send(fd: std::os::unix::io::RawFd) {
+        let b: u8 = 1;
+        unsafe {
+            libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
+        }
+    }
+
+    pub(crate) fn consume_recv(fd: std::os::unix::io::RawFd) {
+        let mut b: u8 = 0;
+        unsafe {
+            libc::read(fd, (&raw mut b).cast::<libc::c_void>(), 1);
+        }
+    }
+
+    pub(crate) fn consume_send(fd: std::os::unix::io::RawFd) {
+        let mut b: u8 = 0;
+        unsafe {
+            libc::read(fd, (&raw mut b).cast::<libc::c_void>(), 1);
+        }
+    }
+}
+
+// socket_type read in Phase 3 (ZMQ_TYPE getsockopt).
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct OmqSocket {
+    pub id: u64,
+    pub thread_idx: usize,
+    pub ctx: Arc<OmqContext>,
+    pub socket_type: SocketType,
+    pub overlay: Mutex<SocketOverlay>,
+    pub sndtimeo_ms: AtomicI64,
+    pub rcvtimeo_ms: AtomicI64,
+    /// Accumulator for SNDMORE multipart assembly.
+    pub send_accum: Mutex<Vec<Bytes>>,
+    /// Leftover frames from a multipart recv (RCVMORE).
+    pub recv_drain: Mutex<VecDeque<Bytes>>,
+    pub send_tx: flume::Sender<omq_compio::Message>,
+    pub recv_rx: flume::Receiver<omq_compio::Message>,
+    pub last_endpoint: Mutex<Option<String>>,
+    pub notify: NotifyFd,
+    pub bound_or_connected: AtomicBool,
+    /// Dropping this cancels the recv pump task via the partner `close_rx`.
+    pub close_tx: flume::Sender<()>,
+    /// Deferred: consumed by `ensure_materialized` on first bind/connect.
+    pub send_rx: Mutex<Option<flume::Receiver<omq_compio::Message>>>,
+    pub recv_tx: Mutex<Option<flume::Sender<omq_compio::Message>>>,
+    pub close_rx: Mutex<Option<flume::Receiver<()>>>,
+}
+
+/// Map ZMQ socket-type integer to `SocketType`.
+fn map_socket_type(t: c_int) -> Option<SocketType> {
+    match t {
+        0 => Some(SocketType::Pair),
+        1 => Some(SocketType::Pub),
+        2 => Some(SocketType::Sub),
+        3 => Some(SocketType::Req),
+        4 => Some(SocketType::Rep),
+        5 => Some(SocketType::Dealer),
+        6 => Some(SocketType::Router),
+        7 => Some(SocketType::Pull),
+        8 => Some(SocketType::Push),
+        9 => Some(SocketType::XPub),
+        10 => Some(SocketType::XSub),
+        12 => Some(SocketType::Server),
+        13 => Some(SocketType::Client),
+        14 => Some(SocketType::Radio),
+        15 => Some(SocketType::Dish),
+        16 => Some(SocketType::Gather),
+        17 => Some(SocketType::Scatter),
+        19 => Some(SocketType::Peer),
+        20 => Some(SocketType::Channel),
+        _ => None,
+    }
+}
+
+/// Run `f` on the io thread identified by `thread_idx` and wait for the result.
+pub(crate) fn run_on<F, T>(ctx: &Arc<OmqContext>, thread_idx: usize, f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (otx, orx) = flume::bounded::<T>(1);
+    ctx.submit(
+        thread_idx,
+        Box::new(move || {
+            let _ = otx.send(f());
+        }),
+    );
+    orx.recv().expect("omq-zmq: io thread gone")
+}
+
+/// Run an async op on the socket from within the io thread.
+pub(crate) fn with_socket<F, Fut, T>(
+    ctx: &Arc<OmqContext>,
+    thread_idx: usize,
+    id: u64,
+    op: F,
+) -> Result<T, ()>
+where
+    F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = T> + 'static,
+    T: Send + 'static,
+{
+    let (otx, orx) = flume::bounded::<Option<T>>(1);
+    ctx.submit(
+        thread_idx,
+        Box::new(move || {
+            let sock = REG.with(|r| r.borrow().get(&id).cloned());
+            match sock {
+                Some(s) => {
+                    compio::runtime::spawn(async move {
+                        let out = op(s).await;
+                        let _ = otx.send(Some(out));
+                    })
+                    .detach();
+                }
+                None => {
+                    let _ = otx.send(None);
+                }
+            }
+        }),
+    );
+    orx.recv()
+        .expect("omq-zmq: io thread gone")
+        .ok_or(())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
+    if ctx_ptr.is_null() {
+        set_errno(libc::EFAULT);
+        return std::ptr::null_mut();
+    }
+    let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
+    if ctx.terminated.load(Ordering::Acquire) {
+        set_errno(ETERM);
+        return std::ptr::null_mut();
+    }
+    let Some(socket_type) = map_socket_type(type_int) else {
+        set_errno(libc::EINVAL);
+        return std::ptr::null_mut();
+    };
+
+    let overlay = SocketOverlay::default();
+    let hwm = overlay.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
+    let (send_tx, send_rx) = flume::bounded::<omq_compio::Message>(hwm);
+    let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
+    let (recv_tx, recv_rx) = flume::bounded::<omq_compio::Message>(recv_hwm);
+
+    let notify = NotifyFd::new();
+    let thread_idx = ctx.assign_thread();
+    let id = next_socket_id();
+
+    let (close_tx, close_rx) = flume::bounded::<()>(1);
+
+    let ctx_arc = ctx.clone();
+    ctx_arc.socket_opened();
+
+    let sock = Arc::new(OmqSocket {
+        id,
+        thread_idx,
+        ctx: ctx_arc,
+        socket_type,
+        overlay: Mutex::new(overlay),
+        sndtimeo_ms: AtomicI64::new(-1),
+        rcvtimeo_ms: AtomicI64::new(-1),
+        send_accum: Mutex::new(Vec::new()),
+        recv_drain: Mutex::new(VecDeque::new()),
+        send_tx,
+        recv_rx,
+        last_endpoint: Mutex::new(None),
+        notify,
+        bound_or_connected: AtomicBool::new(false),
+        close_tx,
+        send_rx: Mutex::new(Some(send_rx)),
+        recv_tx: Mutex::new(Some(recv_tx)),
+        close_rx: Mutex::new(Some(close_rx)),
+    });
+
+    Box::into_raw(Box::new(sock)).cast()
+}
+
+/// Materialize the omq-compio socket on the io thread with current overlay
+/// options, then start the send/recv pump tasks. Called once on first
+/// bind/connect so that options set between `zmq_socket` and first
+/// bind/connect (identity, HWM, security, etc.) take effect.
+pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
+    // CAS guarantees exactly one thread wins the materialization race.
+    if sock
+        .bound_or_connected
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // Another thread already materialized (or is materializing).
+        // Wait for it to finish by briefly spinning on REG presence.
+        let id = sock.id;
+        let ctx = &sock.ctx;
+        let thread_idx = sock.thread_idx;
+        run_on(ctx, thread_idx, move || {
+            // Once this job runs, the materializing thread's run_on
+            // has already completed (jobs are FIFO on the io thread).
+            assert!(
+                REG.with(|r| r.borrow().contains_key(&id)),
+                "socket not in REG after materialization"
+            );
+        });
+        return;
+    }
+    let opts = sock.overlay.lock().unwrap().to_options();
+    let socket_type = sock.socket_type;
+    let id = sock.id;
+
+    let send_rx = sock.send_rx.lock().unwrap().take().unwrap();
+    let recv_tx = sock.recv_tx.lock().unwrap().take().unwrap();
+    let close_rx = sock.close_rx.lock().unwrap().take().unwrap();
+
+    #[cfg(target_os = "linux")]
+    let recv_signal_fd = sock.notify.recv_fd;
+    #[cfg(not(target_os = "linux"))]
+    let recv_signal_fd = sock.notify.recv_write;
+
+    run_on(&sock.ctx, sock.thread_idx, move || {
+        let inner = Rc::new(omq_compio::Socket::new(socket_type, opts));
+        REG.with(|r| r.borrow_mut().insert(id, inner.clone()));
+
+        let s = inner.clone();
+        compio::runtime::spawn(async move {
+            let mut n = 0u32;
+            while let Ok(msg) = send_rx.recv_async().await {
+                let _ = s.send(msg).await;
+                n += 1;
+                // Yield periodically so the recv pump (and other tasks)
+                // get scheduled on this single-threaded runtime. Without
+                // this, inproc send (which completes synchronously) can
+                // starve other tasks indefinitely.
+                if n % 64 == 0 {
+                    compio::time::sleep(std::time::Duration::from_micros(1)).await;
+                }
+            }
+        })
+        .detach();
+
+        let s = inner;
+        compio::runtime::spawn(async move {
+            use futures::FutureExt as _;
+            loop {
+                futures::select! {
+                    result = s.recv().fuse() => {
+                        let Ok(msg) = result else { return; };
+                        if recv_tx.send_async(msg).await.is_err() {
+                            return;
+                        }
+                        NotifyFd::signal_recv(recv_signal_fd);
+                    }
+                    _ = close_rx.recv_async().fuse() => return,
+                }
+            }
+        })
+        .detach();
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
+    if sock_ptr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    let arc = unsafe { *Box::from_raw(sock_ptr.cast::<Arc<OmqSocket>>()) };
+
+    // Remove socket from registry on its io thread.
+    let id = arc.id;
+    let thread_idx = arc.thread_idx;
+    run_on(&arc.ctx, thread_idx, move || {
+        REG.with(|r| r.borrow_mut().remove(&id));
+    });
+
+    arc.notify.close();
+    arc.ctx.socket_closed();
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
+    if sock_ptr.is_null() || addr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    if sock.ctx.terminated.load(Ordering::Acquire) {
+        return fail(ETERM);
+    }
+    let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
+        return fail(libc::EINVAL);
+    };
+    let addr_str = addr_str.to_owned();
+    let Ok(mut endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
+        return fail(libc::EINVAL);
+    };
+
+    // ZMQ_IPV6: rewrite wildcard bind to IPv6 unspecified (dual-stack).
+    if sock.overlay.lock().unwrap().ipv6 {
+        endpoint = ipv6_rewrite_wildcard(endpoint);
+    }
+
+    ensure_materialized(sock);
+
+    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+        s.bind(endpoint).await
+    });
+
+    match result {
+        Ok(Ok(())) => {
+            *sock.last_endpoint.lock().unwrap() = Some(addr_str);
+            0
+        }
+        Ok(Err(ref e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
+    if sock_ptr.is_null() || addr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    if sock.ctx.terminated.load(Ordering::Acquire) {
+        return fail(ETERM);
+    }
+    let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
+        return fail(libc::EINVAL);
+    };
+    let addr_str = addr_str.to_owned();
+    let Ok(endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
+        return fail(libc::EINVAL);
+    };
+
+    ensure_materialized(sock);
+
+    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+        s.connect(endpoint).await
+    });
+
+    match result {
+        Ok(Ok(())) => {
+            *sock.last_endpoint.lock().unwrap() = Some(addr_str);
+            0
+        }
+        Ok(Err(ref e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
+    if sock_ptr.is_null() || addr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    if sock.ctx.terminated.load(Ordering::Acquire) {
+        return fail(ETERM);
+    }
+    let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
+        return fail(libc::EINVAL);
+    };
+    let addr_str = addr_str.to_owned();
+    let Ok(endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
+        return fail(libc::EINVAL);
+    };
+
+    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+        s.unbind(endpoint).await
+    });
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(ref e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
+    if sock_ptr.is_null() || addr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    if sock.ctx.terminated.load(Ordering::Acquire) {
+        return fail(ETERM);
+    }
+    let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
+        return fail(libc::EINVAL);
+    };
+    let addr_str = addr_str.to_owned();
+    let Ok(endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
+        return fail(libc::EINVAL);
+    };
+
+    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+        s.disconnect(endpoint).await
+    });
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(ref e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
+    if sock_ptr.is_null() || group.is_null() {
+        return fail(libc::EFAULT);
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    let Ok(g) = unsafe { CStr::from_ptr(group) }.to_str() else {
+        return fail(libc::EINVAL);
+    };
+    let g = Bytes::copy_from_slice(g.as_bytes());
+    ensure_materialized(sock);
+    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+        s.join(g).await
+    });
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(ref e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
+    if sock_ptr.is_null() || group.is_null() {
+        return fail(libc::EFAULT);
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    let Ok(g) = unsafe { CStr::from_ptr(group) }.to_str() else {
+        return fail(libc::EINVAL);
+    };
+    let g = Bytes::copy_from_slice(g.as_bytes());
+    ensure_materialized(sock);
+    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+        s.leave(g).await
+    });
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(ref e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
+}

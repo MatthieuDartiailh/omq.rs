@@ -1,0 +1,30 @@
+[package]
+name = "omq-zmq"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "libzmq-compatible C interface backed by omq (omq-compio)."
+publish = false
+
+[lib]
+name = "omq_zmq"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+omq-compio = { path = "../omq-compio", features = ["plain", "curve", "lz4", "zstd"] }
+compio = { version = "0.19.0-rc.1", features = ["runtime"] }
+bytes = "1"
+flume = { version = "0.11", default-features = false, features = ["async"] }
+futures = { version = "0.3", default-features = false, features = ["async-await"] }
+crypto_box = "0.9"
+libc = "0.2"
+
+[dev-dependencies]
+omq-compio = { path = "../omq-compio" }
+libc = "0.2"

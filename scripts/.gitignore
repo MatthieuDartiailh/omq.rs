@@ -1,2 +1,3 @@
 /libzmq_bench_peer
+/omq_zmq_bench_peer
 /plot_comparisons.py
