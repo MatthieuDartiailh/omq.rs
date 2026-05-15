@@ -79,7 +79,7 @@ fn build_pollfds(items: &[ZmqPollItem]) -> (Vec<libc::pollfd>, Vec<(usize, libc:
     (pfds, map)
 }
 
-/// Check zmq sockets for immediately available data (recv_drain or recv_rx)
+/// Check zmq sockets for immediately available data (`recv_drain` or `recv_rx`)
 /// without blocking. This catches frames already buffered in userspace that
 /// the eventfd doesn't reflect (e.g. remaining multipart frames).
 fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
@@ -92,8 +92,8 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
-            let has_buffered = !sock.recv_drain.lock().unwrap().is_empty()
-                || !sock.recv_rx.is_empty();
+            let has_buffered =
+                !sock.recv_drain.lock().unwrap().is_empty() || !sock.recv_rx.is_empty();
             if has_buffered {
                 item.revents |= ZMQ_POLLIN;
             }
@@ -109,7 +109,7 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
 }
 
 /// Drain all pending eventfd counters for zmq socket items so that
-/// libc::poll only wakes on messages that arrive after this point.
+/// `libc::poll` only wakes on messages that arrive after this point.
 fn drain_eventfds(items: &[ZmqPollItem]) {
     for item in items {
         if item.socket.is_null() {
@@ -163,7 +163,11 @@ pub extern "C" fn zmq_poll(
     // drain all counts so libc::poll only wakes on genuinely new data.
     drain_eventfds(items_slice);
 
-    let poll_timeout = if timeout_ms < 0 { -1 } else { timeout_ms as c_int };
+    let poll_timeout = if timeout_ms < 0 {
+        -1
+    } else {
+        timeout_ms as c_int
+    };
     let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, poll_timeout) };
     if rc < 0 {
         return crate::error::fail(unsafe { *libc::__errno_location() });

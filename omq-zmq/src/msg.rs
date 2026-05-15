@@ -108,8 +108,7 @@ pub extern "C" fn zmq_msg_init_data(
     r.size = size as u64;
     r.ptr = data.cast();
     r.free_fn = ffn.map_or(std::ptr::null_mut(), |f| {
-        (f as unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void))
-            as *mut libc::c_void
+        (f as unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void)) as *mut libc::c_void
     });
     r.hint = hint;
     r.boxed = std::ptr::null_mut();
@@ -272,11 +271,7 @@ pub extern "C" fn zmq_msg_get(msg: *const OmqMsgRepr, property: c_int) -> c_int 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn zmq_msg_set(
-    _msg: *mut OmqMsgRepr,
-    _property: c_int,
-    _val: c_int,
-) -> c_int {
+pub extern "C" fn zmq_msg_set(_msg: *mut OmqMsgRepr, _property: c_int, _val: c_int) -> c_int {
     0
 }
 
@@ -358,12 +353,7 @@ pub extern "C" fn zmq_msg_send(
         sock_arc.send_accum.lock().unwrap().push(group);
     }
 
-    let ret = crate::send_recv::zmq_send(
-        sock,
-        bytes.as_ptr().cast(),
-        len,
-        flags,
-    );
+    let ret = crate::send_recv::zmq_send(sock, bytes.as_ptr().cast(), len, flags);
     if ret >= 0 {
         zmq_msg_close(msg);
     }
@@ -395,7 +385,10 @@ pub extern "C" fn zmq_recvmsg(
 fn msg_group_bytes(msg: *mut OmqMsgRepr) -> bytes::Bytes {
     let r = unsafe { &*msg };
     let group_area = &r.reserved[4..];
-    let nul = group_area.iter().position(|&b| b == 0).unwrap_or(group_area.len());
+    let nul = group_area
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(group_area.len());
     if nul == 0 {
         return bytes::Bytes::new();
     }
@@ -415,9 +408,12 @@ pub extern "C" fn zmq_msg_recv(
     if msg.is_null() || sock_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    use std::sync::Arc;
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<crate::socket::OmqSocket>>()) };
-    if sock.ctx.terminated.load(std::sync::atomic::Ordering::Acquire) {
+    let sock = unsafe { &*(sock_ptr.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+    if sock
+        .ctx
+        .terminated
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
         return crate::error::fail(crate::error::ETERM);
     }
 
@@ -429,7 +425,7 @@ pub extern "C" fn zmq_msg_recv(
             let data_ptr = boxed.as_ptr().cast_mut();
             let r = unsafe { repr(msg) };
             r.kind = KIND_BYTES;
-            r.more = more as u8;
+            r.more = u8::from(more);
             r.pad = [0; 6];
             r.size = sz as u64;
             r.ptr = data_ptr;
@@ -437,7 +433,8 @@ pub extern "C" fn zmq_msg_recv(
             r.hint = std::ptr::null_mut();
             r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
             r.reserved = [0; 16];
-            sz as c_int
+            #[allow(clippy::cast_possible_wrap)]
+            { sz as c_int }
         }
         Err(e) => crate::error::fail(e),
     }
@@ -449,7 +446,5 @@ fn extract_bytes(msg: *const OmqMsgRepr) -> Bytes {
     if r.ptr.is_null() || r.size == 0 {
         return Bytes::new();
     }
-    Bytes::copy_from_slice(unsafe {
-        std::slice::from_raw_parts(r.ptr, r.size as usize)
-    })
+    Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(r.ptr, r.size as usize) })
 }

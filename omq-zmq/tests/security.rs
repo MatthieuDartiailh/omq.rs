@@ -1,4 +1,5 @@
 //! CURVE keypair generation, Z85 encode/decode, and end-to-end security tests.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -43,11 +44,7 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
 fn z85_encode_decode_roundtrip() {
     let data = [0x86u8, 0x4F, 0xD2, 0x6F, 0xB5, 0x59, 0xF7, 0x5B];
     let mut encoded = [0u8; 11]; // 8 bytes -> 10 Z85 chars + null
-    let ret = zmq_z85_encode(
-        encoded.as_mut_ptr().cast(),
-        data.as_ptr(),
-        data.len(),
-    );
+    let ret = zmq_z85_encode(encoded.as_mut_ptr().cast(), data.as_ptr(), data.len());
     assert!(!ret.is_null());
     let z85_str = std::str::from_utf8(&encoded[..10]).unwrap();
     assert_eq!(z85_str.len(), 10);
@@ -62,11 +59,7 @@ fn z85_encode_decode_roundtrip() {
 fn z85_invalid_size_returns_null() {
     let data = [0u8; 3]; // not multiple of 4
     let mut encoded = [0u8; 10];
-    let ret = zmq_z85_encode(
-        encoded.as_mut_ptr().cast(),
-        data.as_ptr(),
-        data.len(),
-    );
+    let ret = zmq_z85_encode(encoded.as_mut_ptr().cast(), data.as_ptr(), data.len());
     assert!(ret.is_null());
 }
 
@@ -125,10 +118,7 @@ fn curve_public_derives_from_secret() {
     zmq_curve_keypair(pub_key.as_mut_ptr().cast(), sec_key.as_mut_ptr().cast());
 
     let mut derived_pub = [0u8; 41];
-    let rc = zmq_curve_public(
-        derived_pub.as_mut_ptr().cast(),
-        sec_key.as_ptr().cast(),
-    );
+    let rc = zmq_curve_public(derived_pub.as_mut_ptr().cast(), sec_key.as_ptr().cast());
     assert_eq!(rc, 0);
     assert_eq!(&derived_pub[..40], &pub_key[..40]);
 }
@@ -163,11 +153,21 @@ fn curve_req_rep_tcp() {
     std::thread::sleep(Duration::from_millis(200));
 
     let rc = zmq_send(req, b"ping".as_ptr().cast(), 4, 0);
-    assert_eq!(rc, 4, "CURVE REQ send failed (errno={})", omq_zmq::zmq_errno());
+    assert_eq!(
+        rc,
+        4,
+        "CURVE REQ send failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
 
     let mut buf = [0u8; 64];
     let rc = zmq_recv(rep, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert_eq!(rc, 4, "CURVE REP recv failed (errno={})", omq_zmq::zmq_errno());
+    assert_eq!(
+        rc,
+        4,
+        "CURVE REP recv failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
     assert_eq!(&buf[..4], b"ping");
 
     let rc = zmq_send(rep, b"pong".as_ptr().cast(), 4, 0);

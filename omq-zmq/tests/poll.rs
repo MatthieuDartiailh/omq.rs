@@ -1,4 +1,5 @@
-//! zmq_poll smoke tests.
+//! `zmq_poll` smoke tests.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -13,6 +14,7 @@ use omq_zmq::{
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
+#[allow(dead_code)]
 const ZMQ_PAIR: i32 = 0;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
@@ -28,8 +30,18 @@ struct PollItem {
 }
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
+    zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
+    zmq_setsockopt(
+        sock,
+        ZMQ_SNDTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
 }
 
 #[test]
@@ -112,13 +124,27 @@ fn poll_multiple_sockets() {
     std::thread::sleep(Duration::from_millis(20));
 
     let mut items = [
-        PollItem { socket: pull1, fd: -1, events: ZMQ_POLLIN, revents: 0 },
-        PollItem { socket: pull2, fd: -1, events: ZMQ_POLLIN, revents: 0 },
+        PollItem {
+            socket: pull1,
+            fd: -1,
+            events: ZMQ_POLLIN,
+            revents: 0,
+        },
+        PollItem {
+            socket: pull2,
+            fd: -1,
+            events: ZMQ_POLLIN,
+            revents: 0,
+        },
     ];
 
     let rc = zmq_poll(items.as_mut_ptr().cast(), 2, 1000);
     assert!(rc >= 1);
-    assert_eq!(items[0].revents & ZMQ_POLLIN, 0, "pull1 should not be readable");
+    assert_eq!(
+        items[0].revents & ZMQ_POLLIN,
+        0,
+        "pull1 should not be readable"
+    );
     assert_ne!(items[1].revents & ZMQ_POLLIN, 0, "pull2 should be readable");
 
     zmq_close(push1);

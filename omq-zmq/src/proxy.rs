@@ -12,6 +12,8 @@ const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_DONTWAIT: i32 = 1;
 
+#[allow(clippy::large_stack_arrays)]
+#[allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 fn forward(from: *mut c_void, to: *mut c_void, capture: *mut c_void) -> libc::c_int {
     let mut buf = [0u8; 65536];
     loop {
@@ -38,6 +40,7 @@ fn forward(from: *mut c_void, to: *mut c_void, capture: *mut c_void) -> libc::c_
     0
 }
 
+#[allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 fn getsockopt_rcvmore(sock: *mut c_void) -> bool {
     let mut v: i32 = 0;
     let mut sz = std::mem::size_of::<i32>();
@@ -115,15 +118,10 @@ pub extern "C" fn zmq_proxy_steerable(
                         }];
                         zmq_poll(pause_items.as_mut_ptr(), 1, 100);
                         if (pause_items[0].revents & ZMQ_POLLIN) != 0 {
-                            let rc = zmq_recv(
-                                control,
-                                cmd.as_mut_ptr().cast(),
-                                cmd.len(),
-                                ZMQ_DONTWAIT,
-                            );
+                            let rc =
+                                zmq_recv(control, cmd.as_mut_ptr().cast(), cmd.len(), ZMQ_DONTWAIT);
                             if rc > 0 {
-                                let m =
-                                    std::str::from_utf8(&cmd[..rc as usize]).unwrap_or("");
+                                let m = std::str::from_utf8(&cmd[..rc as usize]).unwrap_or("");
                                 if m == "RESUME" {
                                     break;
                                 }
@@ -145,7 +143,11 @@ pub extern "C" fn zmq_proxy_steerable(
         }
 
         let fe_sock = unsafe { &*(frontend.cast::<Arc<OmqSocket>>()) };
-        if fe_sock.ctx.terminated.load(std::sync::atomic::Ordering::Acquire) {
+        if fe_sock
+            .ctx
+            .terminated
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return crate::error::fail(crate::error::ETERM);
         }
     }

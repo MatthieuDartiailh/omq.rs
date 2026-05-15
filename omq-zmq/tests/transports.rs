@@ -1,4 +1,5 @@
 //! Transport tests: IPC, IPC abstract namespace, lz4+tcp, zstd+tcp.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -20,8 +21,18 @@ const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
+    zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
+    zmq_setsockopt(
+        sock,
+        ZMQ_SNDTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
 }
 
 // --- IPC (filesystem path) ---
@@ -63,11 +74,7 @@ fn ipc_abstract_namespace() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    let addr = CString::new(format!(
-        "ipc://@omq-zmq-abstract-{}",
-        std::process::id()
-    ))
-    .unwrap();
+    let addr = CString::new(format!("ipc://@omq-zmq-abstract-{}", std::process::id())).unwrap();
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
@@ -94,11 +101,7 @@ fn ipc_abstract_pub_sub() {
     let pub_ = zmq_socket(ctx, ZMQ_PUB);
     let sub = zmq_socket(ctx, ZMQ_SUB);
 
-    let addr = CString::new(format!(
-        "ipc://@omq-zmq-abstract-ps-{}",
-        std::process::id()
-    ))
-    .unwrap();
+    let addr = CString::new(format!("ipc://@omq-zmq-abstract-ps-{}", std::process::id())).unwrap();
     zmq_bind(pub_, addr.as_ptr());
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub, addr.as_ptr());

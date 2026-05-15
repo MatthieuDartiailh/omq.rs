@@ -70,18 +70,11 @@ pub extern "C" fn zmq_z85_encode(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn zmq_z85_decode(
-    dest: *mut u8,
-    string: *const libc::c_char,
-) -> *mut u8 {
+pub extern "C" fn zmq_z85_decode(dest: *mut u8, string: *const libc::c_char) -> *mut u8 {
     if dest.is_null() || string.is_null() {
         return std::ptr::null_mut();
     }
-    let s = unsafe {
-        std::ffi::CStr::from_ptr(string)
-            .to_str()
-            .unwrap_or("")
-    };
+    let s = unsafe { std::ffi::CStr::from_ptr(string).to_str().unwrap_or("") };
     if s.len() % 5 != 0 {
         return std::ptr::null_mut();
     }

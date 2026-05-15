@@ -1,4 +1,5 @@
 //! Draft socket types: SERVER/CLIENT, RADIO/DISH, SCATTER/GATHER, PEER, CHANNEL.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -8,7 +9,7 @@ use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_join,
-    zmq_leave, zmq_msg_close, zmq_msg_init_buffer, zmq_msg_send, zmq_msg_set_group, zmq_recv,
+    zmq_msg_close, zmq_msg_init_buffer, zmq_msg_send, zmq_msg_set_group, zmq_recv,
     zmq_send, zmq_setsockopt, zmq_socket,
 };
 
@@ -42,8 +43,18 @@ fn radio_send(sock: *mut c_void, group: &std::ffi::CStr, data: &[u8]) -> i32 {
 }
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
+    zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
+    zmq_setsockopt(
+        sock,
+        ZMQ_SNDTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
 }
 
 fn get_type(sock: *mut c_void) -> i32 {
@@ -60,7 +71,7 @@ fn rcvmore(sock: *mut c_void) -> bool {
     v != 0
 }
 
-/// SERVER/CLIENT: SERVER receives [routing_id, body], replies [routing_id, body].
+/// SERVER/CLIENT: SERVER receives [`routing_id`, body], replies [`routing_id`, body].
 #[test]
 fn server_client_roundtrip() {
     let ctx = zmq_ctx_new();
@@ -82,7 +93,11 @@ fn server_client_roundtrip() {
     // SERVER recv: identity frame first (like ROUTER).
     let mut buf = [0u8; 64];
     let rc = zmq_recv(server, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert!(rc > 0, "server recv identity failed (errno={})", omq_zmq::zmq_errno());
+    assert!(
+        rc > 0,
+        "server recv identity failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
     let id_len = rc as usize;
     let id = buf[..id_len].to_vec();
     assert!(rcvmore(server), "identity frame should have more");
@@ -260,7 +275,11 @@ fn peer_inproc() {
     // A receives: [sender_identity="peer-b", body].
     let mut buf = [0u8; 64];
     let rc = zmq_recv(a, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert!(rc > 0, "peer A recv identity failed (errno={})", omq_zmq::zmq_errno());
+    assert!(
+        rc > 0,
+        "peer A recv identity failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
     assert_eq!(&buf[..rc as usize], b"peer-b");
     assert!(rcvmore(a));
 
@@ -275,7 +294,11 @@ fn peer_inproc() {
 
     // B receives: [sender_identity="peer-a", body].
     let rc = zmq_recv(b, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert!(rc > 0, "peer B recv identity failed (errno={})", omq_zmq::zmq_errno());
+    assert!(
+        rc > 0,
+        "peer B recv identity failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
     assert_eq!(&buf[..rc as usize], b"peer-a");
     assert!(rcvmore(b));
 

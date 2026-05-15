@@ -1,5 +1,6 @@
-//! Port of libzmq/tests/test_push_pull.cpp (subset)
+//! Port of `libzmq/tests/test_push_pull.cpp` (subset)
 //! PUSH/PULL: fan-out work distribution, multiple pushers/pullers.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -23,9 +24,11 @@ fn set_timeo(sock: *mut std::ffi::c_void, opt: i32, ms: i32) {
     zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
 }
 
-/// from libzmq/tests/test_push_pull.cpp: basic push/pull
+/// From `libzmq/tests/test_push_pull.cpp`: basic push/pull
 #[test]
 fn push_pull_basic_tcp() {
+    const N: usize = 10;
+
     let port = helpers::free_port();
     let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
 
@@ -40,7 +43,6 @@ fn push_pull_basic_tcp() {
     set_timeo(pull, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(push, ZMQ_SNDTIMEO, TIMEOUT_MS);
 
-    const N: usize = 10;
     let payload = b"message";
 
     for i in 0..N {
@@ -63,6 +65,9 @@ fn push_pull_basic_tcp() {
 /// Multiple pushers -> one puller (fan-in).
 #[test]
 fn push_pull_multiple_pushers() {
+    const N_PUSHERS: usize = 3;
+    const MSG_PER_PUSHER: usize = 5;
+
     let port = helpers::free_port();
     let addr_str = format!("tcp://127.0.0.1:{port}");
     let addr = CString::new(addr_str.clone()).unwrap();
@@ -70,9 +75,6 @@ fn push_pull_multiple_pushers() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
     zmq_bind(pull, addr.as_ptr());
-
-    const N_PUSHERS: usize = 3;
-    const MSG_PER_PUSHER: usize = 5;
 
     let mut pushers = Vec::new();
     for _ in 0..N_PUSHERS {
@@ -108,15 +110,15 @@ fn push_pull_multiple_pushers() {
 /// One pusher -> multiple pullers (work stealing / round-robin).
 #[test]
 fn push_pull_multiple_pullers() {
+    const N_PULLERS: usize = 3;
+    const TOTAL: usize = 30;
+
     let port = helpers::free_port();
     let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
 
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     zmq_bind(push, addr.as_ptr());
-
-    const N_PULLERS: usize = 3;
-    const TOTAL: usize = 30;
 
     let mut pullers = Vec::new();
     for _ in 0..N_PULLERS {
@@ -151,9 +153,10 @@ fn push_pull_multiple_pullers() {
         if received >= TOTAL {
             break;
         }
-        if std::time::Instant::now() >= deadline {
-            panic!("timeout waiting for all messages: got {received}/{TOTAL}");
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timeout waiting for all messages: got {received}/{TOTAL}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(received, TOTAL);
@@ -193,9 +196,9 @@ fn push_pull_inproc() {
     zmq_ctx_term(ctx);
 }
 
-/// DONTWAIT send to a socket with no connected peers returns EAGAIN
-/// (the peer-side channel is empty so send_tx.try_send fills up, or the
-/// socket returns WouldBlock internally).
+/// `DONTWAIT` send to a socket with no connected peers returns `EAGAIN`
+/// (the peer-side channel is empty so `send_tx.try_send` fills up, or the
+/// socket returns `WouldBlock` internally).
 /// Note: this tests the C-side channel HWM. Since the send pump may drain
 /// the C-side channel very quickly, the exact count before EAGAIN is not
 /// guaranteed — we only verify the errno is correct when EAGAIN does occur.

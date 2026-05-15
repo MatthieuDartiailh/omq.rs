@@ -1,5 +1,6 @@
-//! Multipart message tests using zmq_msg_* API.
-//! Tests SNDMORE accumulation, RCVMORE drain, zmq_msg_more flag.
+//! Multipart message tests using `zmq_msg_*` API.
+//! Tests `SNDMORE` accumulation, `RCVMORE` drain, `zmq_msg_more` flag.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -8,10 +9,10 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt,
-    zmq_msg_close, zmq_msg_copy, zmq_msg_data, zmq_msg_init, zmq_msg_init_buffer,
-    zmq_msg_init_data, zmq_msg_init_size, zmq_msg_more, zmq_msg_move, zmq_msg_recv,
-    zmq_msg_send, zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_msg_close,
+    zmq_msg_copy, zmq_msg_data, zmq_msg_init, zmq_msg_init_buffer, zmq_msg_init_data,
+    zmq_msg_init_size, zmq_msg_more, zmq_msg_move, zmq_msg_recv, zmq_msg_send, zmq_msg_size,
+    zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -43,7 +44,7 @@ fn rcvmore(sock: *mut c_void) -> bool {
     v != 0
 }
 
-/// zmq_msg_init / close lifecycle
+/// `zmq_msg_init` / close lifecycle
 #[test]
 fn msg_init_close() {
     let mut m = ZmqMsg::new();
@@ -52,7 +53,7 @@ fn msg_init_close() {
     assert_eq!(zmq_msg_close(m.0.as_mut_ptr().cast()), 0);
 }
 
-/// zmq_msg_init_size allocates writable memory
+/// `zmq_msg_init_size` allocates writable memory
 #[test]
 fn msg_init_size() {
     let mut m = ZmqMsg([0u8; 64]);
@@ -67,13 +68,17 @@ fn msg_init_size() {
     zmq_msg_close(m.0.as_mut_ptr().cast());
 }
 
-/// zmq_msg_init_buffer copies the buffer
+/// `zmq_msg_init_buffer` copies the buffer
 #[test]
 fn msg_init_buffer() {
     let payload = b"hello buffer";
     let mut m = ZmqMsg([0u8; 64]);
     assert_eq!(
-        zmq_msg_init_buffer(m.0.as_mut_ptr().cast(), payload.as_ptr().cast(), payload.len()),
+        zmq_msg_init_buffer(
+            m.0.as_mut_ptr().cast(),
+            payload.as_ptr().cast(),
+            payload.len()
+        ),
         0
     );
     assert_eq!(zmq_msg_size(m.0.as_ptr().cast()), payload.len());
@@ -84,7 +89,7 @@ fn msg_init_buffer() {
     zmq_msg_close(m.0.as_mut_ptr().cast());
 }
 
-/// zmq_msg_init_data with free_fn
+/// `zmq_msg_init_data` with `free_fn`
 #[test]
 fn msg_init_data_with_free_fn() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -116,14 +121,17 @@ fn msg_init_data_with_free_fn() {
     assert!(FREED.load(Ordering::SeqCst), "free_fn was not called");
 }
 
-/// zmq_msg_move transfers ownership; src becomes empty
+/// `zmq_msg_move` transfers ownership; src becomes empty
 #[test]
 fn msg_move() {
     let mut src = ZmqMsg([0u8; 64]);
     zmq_msg_init_buffer(src.0.as_mut_ptr().cast(), b"move-me".as_ptr().cast(), 7);
 
     let mut dst = ZmqMsg::new();
-    assert_eq!(zmq_msg_move(dst.0.as_mut_ptr().cast(), src.0.as_mut_ptr().cast()), 0);
+    assert_eq!(
+        zmq_msg_move(dst.0.as_mut_ptr().cast(), src.0.as_mut_ptr().cast()),
+        0
+    );
 
     assert_eq!(zmq_msg_size(dst.0.as_ptr().cast()), 7);
     assert_eq!(zmq_msg_size(src.0.as_ptr().cast()), 0);
@@ -132,14 +140,17 @@ fn msg_move() {
     zmq_msg_close(src.0.as_mut_ptr().cast());
 }
 
-/// zmq_msg_copy makes an independent copy
+/// `zmq_msg_copy` makes an independent copy
 #[test]
 fn msg_copy() {
     let mut src = ZmqMsg([0u8; 64]);
     zmq_msg_init_buffer(src.0.as_mut_ptr().cast(), b"copy-me".as_ptr().cast(), 7);
 
     let mut dst = ZmqMsg::new();
-    assert_eq!(zmq_msg_copy(dst.0.as_mut_ptr().cast(), src.0.as_ptr().cast()), 0);
+    assert_eq!(
+        zmq_msg_copy(dst.0.as_mut_ptr().cast(), src.0.as_ptr().cast()),
+        0
+    );
 
     assert_eq!(zmq_msg_size(dst.0.as_ptr().cast()), 7);
     assert_eq!(zmq_msg_size(src.0.as_ptr().cast()), 7);
@@ -148,7 +159,7 @@ fn msg_copy() {
     zmq_msg_close(src.0.as_mut_ptr().cast());
 }
 
-/// zmq_msg_send / zmq_msg_recv roundtrip
+/// `zmq_msg_send` / `zmq_msg_recv` roundtrip
 #[test]
 fn msg_send_recv_roundtrip() {
     let ctx = zmq_ctx_new();
@@ -163,7 +174,11 @@ fn msg_send_recv_roundtrip() {
 
     let payload = b"msg api roundtrip";
     let mut out_m = ZmqMsg([0u8; 64]);
-    zmq_msg_init_buffer(out_m.0.as_mut_ptr().cast(), payload.as_ptr().cast(), payload.len());
+    zmq_msg_init_buffer(
+        out_m.0.as_mut_ptr().cast(),
+        payload.as_ptr().cast(),
+        payload.len(),
+    );
     let rc = zmq_msg_send(out_m.0.as_mut_ptr().cast(), push, 0);
     assert_eq!(rc as usize, payload.len());
 
@@ -182,7 +197,7 @@ fn msg_send_recv_roundtrip() {
     zmq_ctx_term(ctx);
 }
 
-/// Multipart with zmq_msg_more flag set correctly
+/// Multipart with `zmq_msg_more` flag set correctly
 #[test]
 fn msg_more_flag_in_recv() {
     let ctx = zmq_ctx_new();
@@ -205,18 +220,30 @@ fn msg_more_flag_in_recv() {
     // Frame 1: more=1
     let rc = zmq_msg_recv(m.0.as_mut_ptr().cast(), pull, 0);
     assert_eq!(rc, 1);
-    assert_eq!(zmq_msg_more(m.0.as_ptr().cast()), 1, "frame 1 should have more=1");
+    assert_eq!(
+        zmq_msg_more(m.0.as_ptr().cast()),
+        1,
+        "frame 1 should have more=1"
+    );
     assert!(rcvmore(pull), "RCVMORE after frame 1");
 
     // Frame 2: more=1
     let rc = zmq_msg_recv(m.0.as_mut_ptr().cast(), pull, 0);
     assert_eq!(rc, 1);
-    assert_eq!(zmq_msg_more(m.0.as_ptr().cast()), 1, "frame 2 should have more=1");
+    assert_eq!(
+        zmq_msg_more(m.0.as_ptr().cast()),
+        1,
+        "frame 2 should have more=1"
+    );
 
     // Frame 3: more=0
     let rc = zmq_msg_recv(m.0.as_mut_ptr().cast(), pull, 0);
     assert_eq!(rc, 1);
-    assert_eq!(zmq_msg_more(m.0.as_ptr().cast()), 0, "frame 3 should have more=0");
+    assert_eq!(
+        zmq_msg_more(m.0.as_ptr().cast()),
+        0,
+        "frame 3 should have more=0"
+    );
     assert!(!rcvmore(pull), "RCVMORE should be clear after last frame");
 
     zmq_msg_close(m.0.as_mut_ptr().cast());
@@ -225,7 +252,7 @@ fn msg_more_flag_in_recv() {
     zmq_ctx_term(ctx);
 }
 
-/// Mixed zmq_msg_send and zmq_recv
+/// Mixed `zmq_msg_send` and `zmq_recv`
 #[test]
 fn msg_send_then_raw_recv() {
     let ctx = zmq_ctx_new();
@@ -252,7 +279,7 @@ fn msg_send_then_raw_recv() {
     zmq_ctx_term(ctx);
 }
 
-/// Mixed zmq_send and zmq_msg_recv
+/// Mixed `zmq_send` and `zmq_msg_recv`
 #[test]
 fn raw_send_then_msg_recv() {
     let ctx = zmq_ctx_new();

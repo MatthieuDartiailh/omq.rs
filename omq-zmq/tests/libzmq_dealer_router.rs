@@ -1,5 +1,7 @@
-//! Port of libzmq/tests/test_dealer_router.cpp (subset)
+//! Port of `libzmq/tests/test_dealer_router.cpp` (subset)
 //! DEALER/ROUTER: identity-routed, async request-reply.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
+#![allow(clippy::similar_names)]
 
 mod helpers;
 
@@ -17,6 +19,7 @@ const ZMQ_ROUTER: i32 = 6;
 const ZMQ_REQ: i32 = 3;
 const ZMQ_REP: i32 = 4;
 const ZMQ_SNDMORE: i32 = 2;
+#[allow(dead_code)]
 const ZMQ_DONTWAIT: i32 = 1;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
@@ -39,7 +42,7 @@ fn rcvmore(sock: *mut c_void) -> bool {
     v != 0
 }
 
-fn recv_frame<'a>(sock: *mut c_void, buf: &'a mut [u8]) -> &'a [u8] {
+fn recv_frame(sock: *mut c_void, buf: &mut [u8]) -> &[u8] {
     let rc = zmq_recv(sock, buf.as_mut_ptr().cast(), buf.len(), 0);
     assert!(rc >= 0, "recv failed (errno {})", omq_zmq::zmq_errno());
     &buf[..rc as usize]
@@ -154,11 +157,15 @@ fn dealer_router_tcp() {
         let mut plen = 0;
         loop {
             let more = rcvmore(router);
-            if !more { break; }
+            if !more {
+                break;
+            }
             let rc = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0);
             assert!(rc >= 0);
             plen = rc as usize;
-            if !rcvmore(router) { break; }
+            if !rcvmore(router) {
+                break;
+            }
         }
         if plen == 0 {
             // Payload was the immediately next frame after id (no delimiter).
@@ -171,7 +178,12 @@ fn dealer_router_tcp() {
         assert!(payload[..4].iter().all(|&b| b == i));
 
         // Reply.
-        zmq_send(router, id_buf[..id_len].as_ptr().cast(), id_len, ZMQ_SNDMORE);
+        zmq_send(
+            router,
+            id_buf[..id_len].as_ptr().cast(),
+            id_len,
+            ZMQ_SNDMORE,
+        );
         let reply = [i + 100; 2];
         zmq_send(router, reply.as_ptr().cast(), 2, 0);
 
@@ -188,6 +200,8 @@ fn dealer_router_tcp() {
 /// Multiple DEALERs -> one ROUTER
 #[test]
 fn multiple_dealers_one_router() {
+    const N: usize = 3;
+
     let ctx = zmq_ctx_new();
     let router = zmq_socket(ctx, ZMQ_ROUTER);
 
@@ -198,8 +212,6 @@ fn multiple_dealers_one_router() {
 
     set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
-
-    const N: usize = 3;
     let mut dealers = Vec::new();
     for i in 0..N {
         let d = zmq_socket(ctx, ZMQ_DEALER);
@@ -231,11 +243,15 @@ fn multiple_dealers_one_router() {
         let mut plen = 0;
         loop {
             let more = rcvmore(router);
-            if !more { break; }
+            if !more {
+                break;
+            }
             let rc = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0);
             assert!(rc >= 0);
             plen = rc as usize;
-            if !rcvmore(router) { break; }
+            if !rcvmore(router) {
+                break;
+            }
         }
         if plen == 0 {
             plen = zmq_recv(router, payload.as_mut_ptr().cast(), payload.len(), 0) as usize;
@@ -243,7 +259,12 @@ fn multiple_dealers_one_router() {
         assert!(plen > 0);
 
         // Echo.
-        zmq_send(router, id_buf[..id_len].as_ptr().cast(), id_len, ZMQ_SNDMORE);
+        zmq_send(
+            router,
+            id_buf[..id_len].as_ptr().cast(),
+            id_len,
+            ZMQ_SNDMORE,
+        );
         zmq_send(router, payload[..plen].as_ptr().cast(), plen, 0);
     }
 
@@ -302,8 +323,15 @@ fn req_through_dealer_router() {
         assert!(rc >= 0);
         let more = rcvmore(router_fe);
         let send_flags = if more { ZMQ_SNDMORE } else { 0 };
-        zmq_send(dealer_be, buf[..rc as usize].as_ptr().cast(), rc as usize, send_flags);
-        if !more { break; }
+        zmq_send(
+            dealer_be,
+            buf[..rc as usize].as_ptr().cast(),
+            rc as usize,
+            send_flags,
+        );
+        if !more {
+            break;
+        }
     }
 
     // REP receives "query".
@@ -320,8 +348,15 @@ fn req_through_dealer_router() {
         assert!(rc >= 0);
         let more = rcvmore(dealer_be);
         let send_flags = if more { ZMQ_SNDMORE } else { 0 };
-        zmq_send(router_fe, buf[..rc as usize].as_ptr().cast(), rc as usize, send_flags);
-        if !more { break; }
+        zmq_send(
+            router_fe,
+            buf[..rc as usize].as_ptr().cast(),
+            rc as usize,
+            send_flags,
+        );
+        if !more {
+            break;
+        }
     }
 
     // REQ receives "answer".

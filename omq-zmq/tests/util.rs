@@ -1,4 +1,5 @@
-//! Tests for utility functions: stopwatch, atomic_counter, version, has.
+//! Tests for utility functions: stopwatch, `atomic_counter`, version, has.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 use omq_zmq::{
     zmq_atomic_counter_dec, zmq_atomic_counter_destroy, zmq_atomic_counter_inc,

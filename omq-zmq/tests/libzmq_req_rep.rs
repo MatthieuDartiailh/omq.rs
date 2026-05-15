@@ -1,5 +1,7 @@
-//! Port of libzmq/tests/test_req_rep.cpp (subset)
+//! Port of `libzmq/tests/test_req_rep.cpp` (subset)
 //! REQ/REP: strict alternating send/recv state machine.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
+#![allow(clippy::similar_names)]
 
 mod helpers;
 
@@ -14,7 +16,9 @@ use omq_zmq::{
 
 const ZMQ_REQ: i32 = 3;
 const ZMQ_REP: i32 = 4;
+#[allow(dead_code)]
 const ZMQ_DEALER: i32 = 5;
+#[allow(dead_code)]
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
@@ -112,7 +116,7 @@ fn req_rep_basic_tcp() {
 }
 
 /// REQ/REP multipart: REP receives the routing envelope from REQ.
-/// From the libzmq perspective, zmq_recv on REP returns the payload frame only.
+/// From the libzmq perspective, `zmq_recv` on REP returns the payload frame only.
 #[test]
 fn req_rep_multipart_payload() {
     let ctx = zmq_ctx_new();
@@ -151,6 +155,8 @@ fn req_rep_multipart_payload() {
 /// Multiple clients -> one REP server (serial, one at a time)
 #[test]
 fn req_rep_multiple_clients() {
+    const N: usize = 3;
+
     let ctx = zmq_ctx_new();
     let rep = zmq_socket(ctx, ZMQ_REP);
 
@@ -161,8 +167,6 @@ fn req_rep_multiple_clients() {
 
     set_timeo(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
-
-    const N: usize = 3;
     let mut reqs = Vec::new();
     for _ in 0..N {
         let r = zmq_socket(ctx, ZMQ_REQ);

@@ -1,4 +1,5 @@
-//! zmq_setsockopt / zmq_getsockopt round-trip tests.
+//! `zmq_setsockopt` / `zmq_getsockopt` round-trip tests.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -12,6 +13,7 @@ use omq_zmq::{
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
+#[allow(dead_code)]
 const ZMQ_PUB: i32 = 1;
 const ZMQ_SUB: i32 = 2;
 const ZMQ_ROUTER: i32 = 6;
@@ -298,11 +300,11 @@ fn sndbuf_rcvbuf_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);
 
-    set_i32(s, ZMQ_SNDBUF, 65536);
-    assert_eq!(get_i32(s, ZMQ_SNDBUF), 65536);
+    set_i32(s, ZMQ_SNDBUF, 65_536);
+    assert_eq!(get_i32(s, ZMQ_SNDBUF), 65_536);
 
-    set_i32(s, ZMQ_RCVBUF, 131072);
-    assert_eq!(get_i32(s, ZMQ_RCVBUF), 131072);
+    set_i32(s, ZMQ_RCVBUF, 131_072);
+    assert_eq!(get_i32(s, ZMQ_RCVBUF), 131_072);
 
     zmq_close(s);
     zmq_ctx_term(ctx);
@@ -457,8 +459,12 @@ fn unimplemented_options_return_enotsup() {
     let enotsup = 156_384_713i32;
 
     for opt in [
-        ZMQ_BACKLOG, ZMQ_IMMEDIATE, ZMQ_CONNECT_TIMEOUT,
-        ZMQ_PROBE_ROUTER, ZMQ_REQ_CORRELATE, ZMQ_REQ_RELAXED,
+        ZMQ_BACKLOG,
+        ZMQ_IMMEDIATE,
+        ZMQ_CONNECT_TIMEOUT,
+        ZMQ_PROBE_ROUTER,
+        ZMQ_REQ_CORRELATE,
+        ZMQ_REQ_RELAXED,
         ZMQ_XPUB_NODROP,
     ] {
         let rc = set_i32(s, opt, 1);
@@ -509,7 +515,11 @@ fn events_after_send() {
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     let events = get_i32(pull, ZMQ_EVENTS);
-    assert_ne!(events & ZMQ_POLLIN_, 0, "pull should be readable after send");
+    assert_ne!(
+        events & ZMQ_POLLIN_,
+        0,
+        "pull should be readable after send"
+    );
 
     let mut buf = [0u8; 16];
     let timeo: i32 = 500;
@@ -517,7 +527,11 @@ fn events_after_send() {
     zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
 
     let events = get_i32(pull, ZMQ_EVENTS);
-    assert_eq!(events & ZMQ_POLLIN_, 0, "pull should not be readable after drain");
+    assert_eq!(
+        events & ZMQ_POLLIN_,
+        0,
+        "pull should not be readable after drain"
+    );
 
     zmq_close(push);
     zmq_close(pull);

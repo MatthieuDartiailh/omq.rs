@@ -1,8 +1,9 @@
-//! ZMQ_FD level-triggered behavior tests.
+//! `ZMQ_FD` level-triggered behavior tests.
 //!
 //! omq-zmq provides an accurate, level-triggered fd (eventfd on Linux,
-//! pipe on macOS). It is readable iff zmq_recv() would succeed without
+//! pipe on macOS). It is readable iff `zmq_recv()` would succeed without
 //! blocking. No spurious wakeups.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -23,7 +24,12 @@ const ZMQ_RCVTIMEO: i32 = 27;
 fn set_rcvtimeo(sock: *mut c_void, ms: i32) {
     use omq_zmq::zmq_setsockopt;
     let v = ms;
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, (&v as *const i32).cast(), size_of::<i32>());
+    zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&v as *const i32).cast(),
+        size_of::<i32>(),
+    );
 }
 
 fn get_fd(sock: *mut c_void) -> i32 {
@@ -56,7 +62,10 @@ fn fd_not_readable_when_empty() {
     assert!(fd >= 0);
 
     // No messages: fd must not be readable.
-    assert!(!fd_readable(fd, 0), "fd should not be readable when no messages");
+    assert!(
+        !fd_readable(fd, 0),
+        "fd should not be readable when no messages"
+    );
 
     zmq_close(pull);
     zmq_ctx_term(ctx);
@@ -119,17 +128,26 @@ fn fd_level_triggered_stays_readable() {
 
     // fd should still be readable (2 more messages pending).
     // Use a small timeout in case signal is slightly delayed.
-    assert!(fd_readable(fd, 200), "fd should remain readable (2 messages left)");
+    assert!(
+        fd_readable(fd, 200),
+        "fd should remain readable (2 messages left)"
+    );
 
     // Consume second.
     zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert!(fd_readable(fd, 200), "fd should remain readable (1 message left)");
+    assert!(
+        fd_readable(fd, 200),
+        "fd should remain readable (1 message left)"
+    );
 
     // Consume third.
     zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
 
     // Now empty: fd should not be readable.
-    assert!(!fd_readable(fd, 0), "fd should not be readable after draining");
+    assert!(
+        !fd_readable(fd, 0),
+        "fd should not be readable after draining"
+    );
 
     zmq_close(push);
     zmq_close(pull);
@@ -157,7 +175,10 @@ fn fd_not_readable_after_recv() {
     let mut buf = [0u8; 64];
     zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
 
-    assert!(!fd_readable(fd, 0), "fd should not be readable after consuming the only message");
+    assert!(
+        !fd_readable(fd, 0),
+        "fd should not be readable after consuming the only message"
+    );
 
     zmq_close(push);
     zmq_close(pull);

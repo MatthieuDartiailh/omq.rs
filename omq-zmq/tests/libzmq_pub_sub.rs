@@ -1,5 +1,6 @@
-//! Port of libzmq/tests/test_pub_sub.cpp (subset)
+//! Port of `libzmq/tests/test_pub_sub.cpp` (subset)
 //! PUB/SUB: topic-filtered fan-out.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -20,8 +21,18 @@ const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_UNSUBSCRIBE: i32 = 7;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
+    zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
+    zmq_setsockopt(
+        sock,
+        ZMQ_SNDTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
 }
 
 fn subscribe(sock: *mut c_void, prefix: &[u8]) {

@@ -1,4 +1,6 @@
 //! Basic bind/connect/send/recv tests (PUSH/PULL over TCP and inproc).
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
+#![allow(clippy::cast_possible_wrap)]
 
 mod helpers;
 
@@ -163,7 +165,12 @@ fn multipart_sndmore_rcvmore() {
     // RCVMORE via getsockopt
     let mut more: i32 = 0;
     let mut more_sz = size_of::<i32>();
-    zmq_getsockopt(pull, ZMQ_RCVMORE, (&mut more as *mut i32).cast(), &mut more_sz);
+    zmq_getsockopt(
+        pull,
+        ZMQ_RCVMORE,
+        (&mut more as *mut i32).cast(),
+        &mut more_sz,
+    );
     assert_ne!(more, 0, "expected RCVMORE after first frame");
 
     let n = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
@@ -175,7 +182,12 @@ fn multipart_sndmore_rcvmore() {
     assert_eq!(&buf[..5], b"part3");
 
     let mut more: i32 = 0;
-    zmq_getsockopt(pull, ZMQ_RCVMORE, (&mut more as *mut i32).cast(), &mut more_sz);
+    zmq_getsockopt(
+        pull,
+        ZMQ_RCVMORE,
+        (&mut more as *mut i32).cast(),
+        &mut more_sz,
+    );
     assert_eq!(more, 0, "expected no RCVMORE after last frame");
 
     zmq_close(push);

@@ -165,34 +165,41 @@ pub async fn connect(
     in_tx: blume::Sender<InprocFrame>,
 ) -> Result<InprocConn> {
     let req_tx = {
-        let mut reg = REGISTRY.lock().expect("inproc registry poisoned");
-        if let Some(tx) = reg.bound.get(name).cloned() {
-            tx
-        } else {
-            // Name not bound yet: register a waiter and wait.
-            let (notify_tx, notify_rx) = flume::bounded(1);
-            reg.waiting
-                .entry(name.to_string())
-                .or_default()
-                .push(notify_tx);
-            drop(reg);
+        let lookup = {
+            let mut reg = REGISTRY.lock().expect("inproc registry poisoned");
+            if let Some(tx) = reg.bound.get(name).cloned() {
+                Ok(tx)
+            } else {
+                // Name not bound yet: register a waiter.
+                let (notify_tx, notify_rx) = flume::bounded(1);
+                reg.waiting
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(notify_tx);
+                Err(notify_rx)
+            }
+        }; // reg dropped here, before any await
 
-            match compio::time::timeout(
-                std::time::Duration::from_secs(2),
-                notify_rx.recv_async(),
-            )
-            .await
-            {
-                Ok(Ok(tx)) => tx,
-                Ok(Err(_)) => {
-                    return Err(Error::InvalidEndpoint(format!(
-                        "inproc waiter channel closed: {name}"
-                    )));
-                }
-                Err(_) => {
-                    return Err(Error::InvalidEndpoint(format!(
-                        "no inproc binding: {name}"
-                    )));
+        match lookup {
+            Ok(tx) => tx,
+            Err(notify_rx) => {
+                match compio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    notify_rx.recv_async(),
+                )
+                .await
+                {
+                    Ok(Ok(tx)) => tx,
+                    Ok(Err(_)) => {
+                        return Err(Error::InvalidEndpoint(format!(
+                            "inproc waiter channel closed: {name}"
+                        )));
+                    }
+                    Err(_) => {
+                        return Err(Error::InvalidEndpoint(format!(
+                            "no inproc binding: {name}"
+                        )));
+                    }
                 }
             }
         }

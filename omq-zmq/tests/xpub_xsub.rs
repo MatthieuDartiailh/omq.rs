@@ -1,4 +1,6 @@
 //! XPUB/XSUB tests.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
+#![allow(clippy::similar_names)]
 
 mod helpers;
 
@@ -18,13 +20,25 @@ const ZMQ_XSUB: i32 = 10;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
+#[allow(dead_code)]
 const ZMQ_RCVMORE: i32 = 13;
+#[allow(dead_code)]
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_TYPE: i32 = 16;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
+    zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
+    zmq_setsockopt(
+        sock,
+        ZMQ_SNDTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
 }
 
 fn get_type(sock: *mut c_void) -> i32 {
@@ -89,7 +103,11 @@ fn xpub_receives_sub_notifications() {
     // XPUB should receive a subscription notification: 0x01 + "news".
     let mut buf = [0u8; 64];
     let rc = zmq_recv(xpub, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert!(rc >= 5, "xpub should receive sub notification (rc={rc}, errno={})", omq_zmq::zmq_errno());
+    assert!(
+        rc >= 5,
+        "xpub should receive sub notification (rc={rc}, errno={})",
+        omq_zmq::zmq_errno()
+    );
     assert_eq!(buf[0], 0x01);
     assert_eq!(&buf[1..rc as usize], b"news");
 
@@ -154,7 +172,12 @@ fn xpub_xsub_proxy_pattern() {
 
     // Forward from XSUB to XPUB.
     let rc = zmq_recv(xsub, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert_eq!(rc, 11, "xsub proxy recv failed (errno={})", omq_zmq::zmq_errno());
+    assert_eq!(
+        rc,
+        11,
+        "xsub proxy recv failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
     zmq_send(xpub, buf[..rc as usize].as_ptr().cast(), rc as usize, 0);
 
     // SUB receives.

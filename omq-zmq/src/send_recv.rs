@@ -26,7 +26,11 @@ pub extern "C" fn zmq_send(
         return fail(libc::EFAULT);
     }
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock.ctx.terminated.load(std::sync::atomic::Ordering::Acquire) {
+    if sock
+        .ctx
+        .terminated
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
         return fail(ETERM);
     }
 
@@ -45,18 +49,14 @@ pub extern "C" fn zmq_send(
             0x00 => (false, bytes.slice(1..)),
             _ => (true, bytes.clone()),
         };
-        let result = crate::socket::with_socket(
-            &sock.ctx,
-            sock.thread_idx,
-            sock.id,
-            move |s| async move {
+        let result =
+            crate::socket::with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
                 if subscribe {
                     s.subscribe(prefix).await
                 } else {
                     s.unsubscribe(prefix).await
                 }
-            },
-        );
+            });
         return match result {
             Ok(Ok(())) => len as c_int,
             Ok(Err(ref e)) => fail(crate::error::map_omq_err(e)),
@@ -130,7 +130,11 @@ pub extern "C" fn zmq_recv(
         return fail(libc::EFAULT);
     }
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock.ctx.terminated.load(std::sync::atomic::Ordering::Acquire) {
+    if sock
+        .ctx
+        .terminated
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
         return fail(ETERM);
     }
     match pop_recv_frame(sock, flags) {
@@ -148,10 +152,7 @@ pub extern "C" fn zmq_recv(
 /// Returns `(frame_bytes, more)` where `more` is true when the current
 /// multipart message has additional frames waiting in `recv_drain`.
 /// On error returns the errno value to pass to `fail()`.
-pub(crate) fn pop_recv_frame(
-    sock: &OmqSocket,
-    flags: c_int,
-) -> Result<(Bytes, bool), c_int> {
+pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
     // Drain leftover frames from a partially-consumed multipart message.
@@ -243,4 +244,3 @@ fn drain_recv_eventfd(sock: &OmqSocket) {
         while unsafe { libc::read(sock.notify.recv_read, (&raw mut byte).cast(), 1) } > 0 {}
     }
 }
-

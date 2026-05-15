@@ -1,5 +1,6 @@
-//! Port of libzmq/tests/test_pair_tcp.cpp
+//! Port of `libzmq/tests/test_pair_tcp.cpp`
 //! PAIR socket over TCP: bidirectional, single peer only.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -22,7 +23,7 @@ fn set_timeo(sock: *mut std::ffi::c_void, opt: i32, ms: i32) {
     zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
 }
 
-/// from libzmq/tests/test_pair_tcp.cpp
+/// from `libzmq/tests/test_pair_tcp.cpp`
 #[test]
 fn pair_tcp_basic() {
     let port = helpers::free_port();
@@ -106,6 +107,8 @@ fn pair_tcp_multipart() {
 
 #[test]
 fn pair_tcp_many_messages() {
+    const N: usize = 100;
+
     let port = helpers::free_port();
     let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
 
@@ -119,8 +122,6 @@ fn pair_tcp_many_messages() {
 
     set_timeo(sb, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(sc, ZMQ_RCVTIMEO, TIMEOUT_MS);
-
-    const N: usize = 100;
     let payload = [0xABu8; 64];
 
     for _ in 0..N {

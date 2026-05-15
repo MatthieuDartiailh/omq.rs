@@ -1,5 +1,6 @@
-//! Port of libzmq/tests/test_inproc.cpp (subset)
+//! Port of `libzmq/tests/test_inproc.cpp` (subset)
 //! Inproc transport: zero-copy in-process messaging.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -22,7 +23,12 @@ const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_SNDMORE: i32 = 2;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
+    zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
 }
 
 #[test]

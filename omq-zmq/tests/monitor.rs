@@ -1,4 +1,5 @@
-//! zmq_socket_monitor tests.
+//! `zmq_socket_monitor` tests.
+#![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
 
@@ -7,7 +8,7 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_send,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv,
     zmq_setsockopt, zmq_socket, zmq_socket_monitor,
 };
 
@@ -19,13 +20,24 @@ const ZMQ_SNDTIMEO: i32 = 28;
 
 const ZMQ_EVENT_LISTENING: u16 = 0x0008;
 const ZMQ_EVENT_ACCEPTED: u16 = 0x0020;
+#[allow(dead_code)]
 const ZMQ_EVENT_CONNECTED: u16 = 0x0001;
 const ZMQ_EVENT_HANDSHAKE_SUCCEEDED: u16 = 0x1000;
 const ZMQ_EVENT_ALL: i32 = 0xFFFF;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
-    zmq_setsockopt(sock, ZMQ_RCVTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
-    zmq_setsockopt(sock, ZMQ_SNDTIMEO, (&ms as *const i32).cast(), size_of::<i32>());
+    zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
+    zmq_setsockopt(
+        sock,
+        ZMQ_SNDTIMEO,
+        (&ms as *const i32).cast(),
+        size_of::<i32>(),
+    );
 }
 
 fn recv_monitor_event(mon: *mut c_void) -> Option<(u16, String)> {
@@ -54,7 +66,12 @@ fn monitor_receives_listening_and_accepted() {
 
     let mon_addr = CString::new("inproc://test-monitor").unwrap();
     let rc = zmq_socket_monitor(pull, mon_addr.as_ptr(), ZMQ_EVENT_ALL);
-    assert_eq!(rc, 0, "monitor setup failed (errno={})", omq_zmq::zmq_errno());
+    assert_eq!(
+        rc,
+        0,
+        "monitor setup failed (errno={})",
+        omq_zmq::zmq_errno()
+    );
 
     let mon = zmq_socket(ctx, ZMQ_PAIR);
     zmq_connect(mon, mon_addr.as_ptr());
@@ -69,7 +86,10 @@ fn monitor_receives_listening_and_accepted() {
     assert!(ev.is_some(), "expected LISTENING event");
     let (id, ep) = ev.unwrap();
     assert_eq!(id, ZMQ_EVENT_LISTENING, "event={id:#06x}");
-    assert!(ep.contains(&port.to_string()), "endpoint should contain port");
+    assert!(
+        ep.contains(&port.to_string()),
+        "endpoint should contain port"
+    );
 
     // Connect a PUSH socket.
     let push = zmq_socket(ctx, ZMQ_PUSH);
@@ -107,7 +127,7 @@ fn monitor_event_filter() {
 
     // Only subscribe to LISTENING events.
     let mon_addr = CString::new("inproc://test-monitor-filter").unwrap();
-    let rc = zmq_socket_monitor(pull, mon_addr.as_ptr(), ZMQ_EVENT_LISTENING as i32);
+    let rc = zmq_socket_monitor(pull, mon_addr.as_ptr(), i32::from(ZMQ_EVENT_LISTENING));
     assert_eq!(rc, 0);
 
     let mon = zmq_socket(ctx, ZMQ_PAIR);

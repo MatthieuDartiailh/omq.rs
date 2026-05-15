@@ -34,7 +34,7 @@ fn post_recv_needs_type_state(t: SocketType) -> bool {
     matches!(t, SocketType::Req | SocketType::Rep | SocketType::Dish)
 }
 
-/// Whether peer_identity is prepended to the inbound message in
+/// Whether `peer_identity` is prepended to the inbound message in
 /// `process_inbound_frame`. ROUTER/SERVER/PEER expose it to the application.
 /// REP strips it in `post_recv` but saves it in `rep_envelope` so the reply
 /// can be routed back to the originating peer via identity routing.

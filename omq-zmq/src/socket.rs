@@ -243,9 +243,7 @@ where
             }
         }),
     );
-    orx.recv()
-        .expect("omq-zmq: io thread gone")
-        .ok_or(())
+    orx.recv().expect("omq-zmq: io thread gone").ok_or(())
 }
 
 #[unsafe(no_mangle)]
@@ -356,7 +354,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
                 // get scheduled on this single-threaded runtime. Without
                 // this, inproc send (which completes synchronously) can
                 // starve other tasks indefinitely.
-                if n % 64 == 0 {
+                if n.is_multiple_of(64) {
                     compio::time::sleep(std::time::Duration::from_micros(1)).await;
                 }
             }
@@ -577,7 +575,7 @@ pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -
 /// on an inproc PAIR socket bound to `addr`.
 ///
 /// Frame layout (libzmq v1 monitor protocol):
-///   frame 1: event_id (u16 LE) + value (i32 LE) = 6 bytes
+///   frame 1: `event_id` (`u16` LE) + value (`i32` LE) = 6 bytes
 ///   frame 2: endpoint string (UTF-8)
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket_monitor(
@@ -624,6 +622,7 @@ pub extern "C" fn zmq_socket_monitor(
             use omq_compio::monitor::MonitorEvent;
 
             while let Ok(ev) = stream.recv().await {
+                #[allow(clippy::match_wildcard_for_single_variants)]
                 let (event_id, value, endpoint): (u16, i32, String) = match &ev {
                     MonitorEvent::Listening { endpoint } => (0x0008, 0, endpoint.to_string()),
                     MonitorEvent::Accepted { endpoint, .. } => (0x0020, 0, endpoint.to_string()),

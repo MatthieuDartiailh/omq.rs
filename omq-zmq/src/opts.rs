@@ -8,6 +8,7 @@ use bytes::Bytes;
 use omq_compio::options::{KeepAlive, MechanismConfig, ReconnectPolicy};
 
 #[derive(Clone, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SocketOverlay {
     pub send_hwm: Option<u32>,
     pub recv_hwm: Option<u32>,
@@ -70,17 +71,13 @@ impl SocketOverlay {
         };
         let mechanism = match &self.mechanism {
             MechanismOverlay::Null => MechanismConfig::Null,
-            MechanismOverlay::PlainServer => {
-                MechanismConfig::PlainServer {
-                    authenticator: omq_compio::Authenticator::new(|_| true),
-                }
-            }
-            MechanismOverlay::PlainClient { username, password } => {
-                MechanismConfig::PlainClient {
-                    username: username.clone(),
-                    password: password.clone(),
-                }
-            }
+            MechanismOverlay::PlainServer => MechanismConfig::PlainServer {
+                authenticator: omq_compio::Authenticator::new(|_| true),
+            },
+            MechanismOverlay::PlainClient { username, password } => MechanismConfig::PlainClient {
+                username: username.clone(),
+                password: password.clone(),
+            },
             MechanismOverlay::CurveServer { secret_key } => {
                 let sec = omq_compio::CurveSecretKey::from_bytes(*secret_key);
                 let crypto_sec = crypto_box::SecretKey::from(*secret_key);
@@ -98,15 +95,13 @@ impl SocketOverlay {
                 public_key,
                 secret_key,
                 server_key,
-            } => {
-                MechanismConfig::CurveClient {
-                    our_keypair: omq_compio::CurveKeypair {
-                        secret: omq_compio::CurveSecretKey::from_bytes(*secret_key),
-                        public: omq_compio::CurvePublicKey::from_bytes(*public_key),
-                    },
-                    server_public: omq_compio::CurvePublicKey::from_bytes(*server_key),
-                }
-            }
+            } => MechanismConfig::CurveClient {
+                our_keypair: omq_compio::CurveKeypair {
+                    secret: omq_compio::CurveSecretKey::from_bytes(*secret_key),
+                    public: omq_compio::CurvePublicKey::from_bytes(*public_key),
+                },
+                server_public: omq_compio::CurvePublicKey::from_bytes(*server_key),
+            },
         };
         omq_compio::Options {
             send_hwm: self.send_hwm,
@@ -197,8 +192,7 @@ pub extern "C" fn zmq_setsockopt(
     if sock.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    let sock_arc =
-        unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+    let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
 
     match option {
         ZMQ_SNDTIMEO => {
@@ -215,13 +209,11 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_SNDHWM => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().send_hwm =
-                if v <= 0 { None } else { Some(v as u32) };
+            sock_arc.overlay.lock().unwrap().send_hwm = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_RCVHWM => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().recv_hwm =
-                if v <= 0 { None } else { Some(v as u32) };
+            sock_arc.overlay.lock().unwrap().recv_hwm = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_LINGER => {
             let v = read_i32(optval, optvallen);
@@ -235,9 +227,7 @@ pub extern "C" fn zmq_setsockopt(
             if optval.is_null() {
                 return crate::error::fail(libc::EFAULT);
             }
-            let bytes = unsafe {
-                std::slice::from_raw_parts(optval.cast::<u8>(), optvallen)
-            };
+            let bytes = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
             sock_arc.overlay.lock().unwrap().identity = Bytes::copy_from_slice(bytes);
         }
         ZMQ_RECONNECT_IVL => {
@@ -290,11 +280,8 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_MAXMSGSIZE => {
             let v = read_i64(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().max_message_size = if v < 0 {
-                None
-            } else {
-                Some(v as usize)
-            };
+            sock_arc.overlay.lock().unwrap().max_message_size =
+                if v < 0 { None } else { Some(v as usize) };
         }
         ZMQ_ROUTER_MANDATORY => {
             let v = read_i32(optval, optvallen);
@@ -331,13 +318,11 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_SNDBUF => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().sndbuf =
-                if v <= 0 { None } else { Some(v as usize) };
+            sock_arc.overlay.lock().unwrap().sndbuf = if v <= 0 { None } else { Some(v as usize) };
         }
         ZMQ_RCVBUF => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().rcvbuf =
-                if v <= 0 { None } else { Some(v as usize) };
+            sock_arc.overlay.lock().unwrap().rcvbuf = if v <= 0 { None } else { Some(v as usize) };
         }
         ZMQ_XPUB_VERBOSE => {
             let v = read_i32(optval, optvallen);
@@ -444,6 +429,7 @@ pub extern "C" fn zmq_setsockopt(
             sock_arc.overlay.lock().unwrap().ipv6 = read_i32(optval, optvallen) != 0;
         }
         // Always-on in omq; accept silently.
+        #[allow(clippy::match_same_arms)]
         ZMQ_ROUTER_HANDOVER => {}
         // Not implemented; fail explicitly so callers know.
         ZMQ_BACKLOG | ZMQ_IMMEDIATE | ZMQ_CONNECT_TIMEOUT | ZMQ_PROBE_ROUTER
@@ -505,8 +491,7 @@ pub extern "C" fn zmq_getsockopt(
     if sock.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    let sock_arc =
-        unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+    let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
 
     match option {
         ZMQ_SNDTIMEO => write_i32(
@@ -526,12 +511,22 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_SNDHWM => write_i32(
             optval,
             optvallen,
-            sock_arc.overlay.lock().unwrap().send_hwm.map_or(0, |n| n as i32),
+            sock_arc
+                .overlay
+                .lock()
+                .unwrap()
+                .send_hwm
+                .map_or(0, |n| n as i32),
         ),
         ZMQ_RCVHWM => write_i32(
             optval,
             optvallen,
-            sock_arc.overlay.lock().unwrap().recv_hwm.map_or(0, |n| n as i32),
+            sock_arc
+                .overlay
+                .lock()
+                .unwrap()
+                .recv_hwm
+                .map_or(0, |n| n as i32),
         ),
         ZMQ_LINGER => {
             let v = sock_arc
@@ -724,11 +719,10 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_MECHANISM => {
             let v = match sock_arc.overlay.lock().unwrap().mechanism {
                 MechanismOverlay::Null => ZMQ_NULL,
-                MechanismOverlay::PlainServer | MechanismOverlay::PlainClient { .. } => {
-                    ZMQ_PLAIN
+                MechanismOverlay::PlainServer | MechanismOverlay::PlainClient { .. } => ZMQ_PLAIN,
+                MechanismOverlay::CurveServer { .. } | MechanismOverlay::CurveClient { .. } => {
+                    ZMQ_CURVE
                 }
-                MechanismOverlay::CurveServer { .. }
-                | MechanismOverlay::CurveClient { .. } => ZMQ_CURVE,
             };
             write_i32(optval, optvallen, v)
         }
@@ -764,10 +758,7 @@ pub extern "C" fn zmq_getsockopt(
         }
         ZMQ_CURVE_PUBLICKEY => {
             let ov = sock_arc.overlay.lock().unwrap();
-            if let MechanismOverlay::CurveClient {
-                ref public_key, ..
-            } = ov.mechanism
-            {
+            if let MechanismOverlay::CurveClient { ref public_key, .. } = ov.mechanism {
                 write_key(optval, optvallen, public_key)
             } else {
                 write_key(optval, optvallen, &[0; 32])
@@ -784,10 +775,7 @@ pub extern "C" fn zmq_getsockopt(
         }
         ZMQ_CURVE_SERVERKEY => {
             let ov = sock_arc.overlay.lock().unwrap();
-            if let MechanismOverlay::CurveClient {
-                ref server_key, ..
-            } = ov.mechanism
-            {
+            if let MechanismOverlay::CurveClient { ref server_key, .. } = ov.mechanism {
                 write_key(optval, optvallen, server_key)
             } else {
                 write_key(optval, optvallen, &[0; 32])
@@ -834,12 +822,11 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> [u8; 32] {
         key.copy_from_slice(slice);
     } else if optvallen >= 40 {
         let s = unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                optval.cast::<u8>(),
-                40,
-            ))
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(optval.cast::<u8>(), 40))
         };
-        if let Ok(decoded) = omq_compio::proto::z85::decode(s) && decoded.len() == 32 {
+        if let Ok(decoded) = omq_compio::proto::z85::decode(s)
+            && decoded.len() == 32
+        {
             key.copy_from_slice(&decoded);
         }
     }
@@ -905,16 +892,14 @@ fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -
     0
 }
 
-fn write_key(
-    optval: *mut libc::c_void,
-    optvallen: *mut usize,
-    key: &[u8; 32],
-) -> c_int {
+fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -> c_int {
     if optval.is_null() || optvallen.is_null() {
         return 0;
     }
     let avail = unsafe { *optvallen };
-    if avail >= 41 && let Ok(z85) = omq_compio::proto::z85::encode(key) {
+    if avail >= 41
+        && let Ok(z85) = omq_compio::proto::z85::encode(key)
+    {
         unsafe {
             std::ptr::copy_nonoverlapping(z85.as_ptr(), optval.cast::<u8>(), 40);
             *(optval.cast::<u8>()).add(40) = 0;

@@ -2,15 +2,15 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod context;
+pub mod curve;
 mod error;
 mod msg;
 mod opts;
+pub mod poll;
+pub mod proxy;
 mod send_recv;
 mod socket;
 mod util;
-pub mod curve;
-pub mod poll;
-pub mod proxy;
 
 pub use context::{
     zmq_ctx_destroy, zmq_ctx_get, zmq_ctx_new, zmq_ctx_set, zmq_ctx_shutdown, zmq_ctx_term,
@@ -21,8 +21,8 @@ pub use error::{zmq_errno, zmq_strerror};
 pub use msg::{
     zmq_msg_close, zmq_msg_copy, zmq_msg_data, zmq_msg_get, zmq_msg_gets, zmq_msg_group,
     zmq_msg_init, zmq_msg_init_buffer, zmq_msg_init_data, zmq_msg_init_size, zmq_msg_more,
-    zmq_msg_move, zmq_msg_recv, zmq_msg_routing_id, zmq_msg_send, zmq_msg_set, zmq_recvmsg,
-    zmq_msg_set_group, zmq_msg_set_routing_id, zmq_msg_size, zmq_sendmsg,
+    zmq_msg_move, zmq_msg_recv, zmq_msg_routing_id, zmq_msg_send, zmq_msg_set, zmq_msg_set_group,
+    zmq_msg_set_routing_id, zmq_msg_size, zmq_recvmsg, zmq_sendmsg,
 };
 pub use poll::zmq_poll;
 pub use proxy::{zmq_proxy, zmq_proxy_steerable};
