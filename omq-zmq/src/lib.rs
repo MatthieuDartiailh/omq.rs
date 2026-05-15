@@ -4,6 +4,7 @@
 mod context;
 pub mod curve;
 mod error;
+mod inproc_bypass;
 mod msg;
 mod opts;
 pub mod poll;

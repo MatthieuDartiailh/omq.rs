@@ -63,6 +63,13 @@ pub struct Producer<T> {
     cached_head: usize,
 }
 
+impl<T> Producer<T> {
+    /// Address of the shared ring (for debug identity checks).
+    pub fn ring_addr(&self) -> usize {
+        Arc::as_ptr(&self.ring) as usize
+    }
+}
+
 unsafe impl<T: Send> Send for Producer<T> {}
 
 /// Receiving half of an SPSC ring. `Send` but not `Sync`: only one
@@ -70,6 +77,13 @@ unsafe impl<T: Send> Send for Producer<T> {}
 pub struct Consumer<T> {
     ring: Arc<Ring<T>>,
     cached_tail: usize,
+}
+
+impl<T> Consumer<T> {
+    /// Address of the shared ring (for debug identity checks).
+    pub fn ring_addr(&self) -> usize {
+        Arc::as_ptr(&self.ring) as usize
+    }
 }
 
 unsafe impl<T: Send> Send for Consumer<T> {}

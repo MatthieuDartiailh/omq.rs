@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 omq-compio = { path = "../omq-compio", features = ["plain", "curve", "lz4", "zstd"] }
+blume = { path = "../blume" }
 compio = { version = "0.19.0-rc.1", features = ["runtime"] }
 bytes = "1"
 flume = { version = "0.11", default-features = false, features = ["async"] }

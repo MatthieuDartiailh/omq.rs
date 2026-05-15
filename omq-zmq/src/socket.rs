@@ -157,6 +157,12 @@ pub(crate) struct OmqSocket {
     pub send_accum: Mutex<Vec<Bytes>>,
     /// Send pump channel. Initialized in `ensure_materialized`.
     pub send_tx: std::sync::OnceLock<flume::Sender<omq_compio::Message>>,
+    /// Lock-free inproc bypass (sender half). Set once during connect;
+    /// accessed only from the zmq_send caller thread (zmq's single-thread
+    /// contract per socket).
+    pub bypass_send: std::cell::UnsafeCell<Option<crate::inproc_bypass::BypassSend>>,
+    /// Lock-free inproc bypass (receiver half).
+    pub bypass_recv: std::cell::UnsafeCell<Option<crate::inproc_bypass::BypassRecv>>,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub recv_drain: Mutex<VecDeque<Bytes>>,
     /// True when `recv_drain` is non-empty. Checked without the lock so the
@@ -249,6 +255,91 @@ where
     orx.recv().expect("omq-zmq: io thread gone").ok_or(())
 }
 
+fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {
+    matches!(
+        (a, b),
+        (SocketType::Push, SocketType::Pull) | (SocketType::Pull, SocketType::Push)
+    )
+}
+
+fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
+    let capacity = {
+        let s_ov = sender.overlay.lock().unwrap();
+        let r_ov = receiver.overlay.lock().unwrap();
+        let shwm = s_ov.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
+        let rhwm = r_ov.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
+        shwm.min(rhwm).max(16)
+    };
+
+    #[cfg(target_os = "linux")]
+    let recv_fd = receiver.notify.recv_fd;
+    #[cfg(not(target_os = "linux"))]
+    let recv_fd = receiver.notify.recv_write;
+
+    let (bsend, brecv) = crate::inproc_bypass::create_bypass(capacity, recv_fd);
+    // Safety: called from zmq_bind/zmq_connect before any send/recv.
+    unsafe { *sender.bypass_send.get() = Some(bsend) };
+    unsafe { *receiver.bypass_recv.get() = Some(brecv) };
+}
+
+/// Register an inproc bind. If there are pending connectors, install
+/// bypass pipes for eligible pairs.
+fn register_inproc_bind(sock: &Arc<OmqSocket>, name: &str) {
+    let ctx = &sock.ctx;
+    ctx.inproc_binds
+        .lock()
+        .unwrap()
+        .insert(name.to_owned(), Arc::downgrade(sock));
+
+    let waiters = ctx
+        .inproc_waiting
+        .lock()
+        .unwrap()
+        .remove(name)
+        .unwrap_or_default();
+    for w in waiters {
+        if let Some(connector) = w.upgrade() {
+            if is_bypass_eligible(connector.socket_type, sock.socket_type) {
+                let (sender, receiver) = if connector.socket_type == SocketType::Push {
+                    (&connector, sock)
+                } else {
+                    (sock, &connector)
+                };
+                try_install_bypass(sender, receiver);
+            }
+        }
+    }
+}
+
+/// Register an inproc connect. If the binder exists, install bypass.
+fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
+    let ctx = &sock.ctx;
+    let binder = ctx
+        .inproc_binds
+        .lock()
+        .unwrap()
+        .get(name)
+        .and_then(|w| w.upgrade());
+
+    if let Some(binder) = binder {
+        if is_bypass_eligible(sock.socket_type, binder.socket_type) {
+            let (sender, receiver) = if sock.socket_type == SocketType::Push {
+                (sock, &binder)
+            } else {
+                (&binder, sock)
+            };
+            try_install_bypass(sender, receiver);
+        }
+    } else {
+        ctx.inproc_waiting
+            .lock()
+            .unwrap()
+            .entry(name.to_owned())
+            .or_default()
+            .push(Arc::downgrade(sock));
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
     if ctx_ptr.is_null() {
@@ -284,6 +375,8 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         rcvtimeo_ms: AtomicI64::new(-1),
         send_accum: Mutex::new(Vec::new()),
         send_tx: std::sync::OnceLock::new(),
+        bypass_send: std::cell::UnsafeCell::new(None),
+        bypass_recv: std::cell::UnsafeCell::new(None),
         recv_drain: Mutex::new(VecDeque::new()),
         drain_nonempty: AtomicBool::new(false),
         recv_rx: std::sync::OnceLock::new(),
@@ -436,7 +529,10 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
 
     match result {
         Ok(Ok(resolved)) => {
-            *sock.last_endpoint.lock().unwrap() = resolved.or(Some(addr_str));
+            *sock.last_endpoint.lock().unwrap() = resolved.or(Some(addr_str.clone()));
+            if addr_str.starts_with("inproc://") {
+                register_inproc_bind(sock, &addr_str);
+            }
             0
         }
         Ok(Err(ref e)) => fail(map_omq_err(e)),
@@ -469,7 +565,10 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
 
     match result {
         Ok(Ok(())) => {
-            *sock.last_endpoint.lock().unwrap() = Some(addr_str);
+            *sock.last_endpoint.lock().unwrap() = Some(addr_str.clone());
+            if addr_str.starts_with("inproc://") {
+                register_inproc_connect(sock, &addr_str);
+            }
             0
         }
         Ok(Err(ref e)) => fail(map_omq_err(e)),

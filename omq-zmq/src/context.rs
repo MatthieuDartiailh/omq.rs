@@ -28,6 +28,12 @@ pub(crate) struct OmqContext {
     socket_notify: (Mutex<()>, Condvar),
     pub max_sockets: AtomicI32,
     pub max_msg_size: AtomicI64,
+    /// Zmq-layer inproc registry. Maps inproc name to the bound OmqSocket.
+    /// Used to install bypass pipes when both sides are present.
+    pub(crate) inproc_binds: Mutex<HashMap<String, std::sync::Weak<crate::socket::OmqSocket>>>,
+    /// Pending inproc connect requests waiting for a bind.
+    pub(crate) inproc_waiting:
+        Mutex<HashMap<String, Vec<std::sync::Weak<crate::socket::OmqSocket>>>>,
 }
 
 thread_local! {
@@ -89,6 +95,8 @@ impl OmqContext {
             socket_notify: (Mutex::new(()), Condvar::new()),
             max_sockets: AtomicI32::new(1023),
             max_msg_size: AtomicI64::new(-1),
+            inproc_binds: Mutex::new(HashMap::new()),
+            inproc_waiting: Mutex::new(HashMap::new()),
         })
     }
 

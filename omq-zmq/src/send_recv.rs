@@ -63,6 +63,15 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
     };
     let msg = omq_compio::Message::multipart(parts);
 
+    // Inproc bypass: push directly to lock-free SPSC ring.
+    // Safety: zmq contract guarantees single-threaded access per socket.
+    if let Some(bypass) = unsafe { &mut *sock.bypass_send.get() } {
+        return match bypass.push(msg) {
+            Ok(()) => len as c_int,
+            Err(_msg) => fail(libc::EAGAIN),
+        };
+    }
+
     let send_tx = sock.send_tx.get().expect("socket not connected");
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
@@ -165,8 +174,6 @@ pub extern "C" fn zmq_recv(
 pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
-    let rx = sock.recv_rx.get().expect("socket not connected");
-
     // Drain leftover frames from a partially-consumed multipart message.
     // drain_nonempty lets us skip the Mutex acquire on the common single-frame path.
     if sock.drain_nonempty.load(Ordering::Relaxed) {
@@ -175,9 +182,6 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
             let more = !drain.is_empty();
             if !more {
                 sock.drain_nonempty.store(false, Ordering::Relaxed);
-                if rx.is_empty() {
-                    drain_recv_eventfd(sock);
-                }
             }
             return Ok((frame, more));
         }
@@ -186,6 +190,27 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
 
     let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
+
+    // Inproc bypass: pop directly from lock-free SPSC ring.
+    // Safety: zmq contract guarantees single-threaded access per socket.
+    if let Some(bypass) = unsafe { &mut *sock.bypass_recv.get() } {
+        let msg = if dontwait {
+            match bypass.pop() {
+                Some(m) => m,
+                None => return Err(libc::EAGAIN),
+            }
+        } else {
+            loop {
+                if let Some(m) = bypass.pop() {
+                    break m;
+                }
+                std::thread::yield_now();
+            }
+        };
+        return decompose_message(sock, &msg);
+    }
+
+    let rx = sock.recv_rx.get().expect("socket not connected");
 
     let msg = if dontwait {
         match rx.try_recv() {
@@ -207,19 +232,25 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         }
     };
 
-    // Fast path: single-frame message (vast majority). Avoid Vec allocation.
+    decompose_message(sock, &msg)
+}
+
+/// Extract the first frame from a Message and stash remaining parts
+/// in recv_drain for subsequent RCVMORE calls.
+fn decompose_message(
+    sock: &OmqSocket,
+    msg: &omq_compio::Message,
+) -> Result<(Bytes, bool), c_int> {
+    use std::sync::atomic::Ordering;
+
     let dish = sock.socket_type == omq_compio::SocketType::Dish;
     let nparts = msg.len();
 
     if nparts <= 1 && !dish {
         let head = msg.part_bytes(0).unwrap_or_default();
-        if rx.is_empty() {
-            drain_recv_eventfd(sock);
-        }
         return Ok((head, false));
     }
 
-    // Slow path: multipart or DISH (needs group stripping).
     let start = if dish && nparts >= 2 { 1 } else { 0 };
     let head = msg.part_bytes(start).unwrap_or_default();
 
@@ -234,12 +265,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         }
     }
 
-    let more = remaining < nparts;
-    if !more && rx.is_empty() {
-        drain_recv_eventfd(sock);
-    }
-
-    Ok((head, more))
+    Ok((head, remaining < nparts))
 }
 
 /// Copy `src` into the caller-supplied buffer (truncate if needed).
