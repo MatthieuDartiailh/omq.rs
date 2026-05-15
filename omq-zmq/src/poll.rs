@@ -98,7 +98,7 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
                 item.revents |= ZMQ_POLLIN;
             }
         }
-        if (item.events & ZMQ_POLLOUT) != 0 && !sock.send_tx.is_full() {
+        if (item.events & ZMQ_POLLOUT) != 0 {
             item.revents |= ZMQ_POLLOUT;
         }
         if item.revents != 0 {

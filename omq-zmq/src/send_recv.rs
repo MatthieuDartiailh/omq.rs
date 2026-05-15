@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use flume::{RecvTimeoutError, SendTimeoutError, TryRecvError, TrySendError};
+use flume::{RecvTimeoutError, TryRecvError};
 
 use crate::error::{ETERM, fail};
 use crate::socket::OmqSocket;
@@ -66,23 +66,42 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
 
+    // Route sends directly to Socket::try_send / Socket::send via the io
+    // thread, eliminating the old send_tx channel and pump task.
+    //
+    // Latency: lower — no pump scheduling delay between zmq_send returning
+    // and Socket::send running.
+    // Throughput for blocking bulk sends: C thread blocks per-send via
+    // with_socket rather than fire-and-forget. For workloads that saturate
+    // the peer channel, throughput is bounded by with_socket round-trip.
+    // DONTWAIT throughput: unchanged — try_send_on has the same hop count
+    // as the old send_tx.try_send path.
     let result = if dontwait {
-        match sock.send_tx.try_send(msg) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(libc::EAGAIN),
-            Err(TrySendError::Disconnected(_)) => Err(ETERM),
-        }
+        crate::socket::try_send_on(&sock.ctx, sock.thread_idx, sock.id, msg)
     } else if sndtimeo > 0 {
-        let timeout = Duration::from_millis(sndtimeo as u64);
-        match sock.send_tx.send_timeout(msg, timeout) {
-            Ok(()) => Ok(()),
-            Err(SendTimeoutError::Timeout(_)) => Err(libc::EAGAIN),
-            Err(SendTimeoutError::Disconnected(_)) => Err(ETERM),
+        let timeout_dur = Duration::from_millis(sndtimeo as u64);
+        // with_socket returns Result<Result<Result<(), Error>, Elapsed>, ()>
+        match crate::socket::with_socket(
+            &sock.ctx,
+            sock.thread_idx,
+            sock.id,
+            move |s| async move { compio::time::timeout(timeout_dur, s.send(msg)).await },
+        ) {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(ref e))) => Err(crate::error::map_omq_err(e)),
+            Ok(Err(_elapsed)) => Err(libc::EAGAIN),
+            Err(()) => Err(ETERM),
         }
     } else {
-        match sock.send_tx.send(msg) {
-            Ok(()) => Ok(()),
-            Err(_) => Err(ETERM),
+        match crate::socket::with_socket(
+            &sock.ctx,
+            sock.thread_idx,
+            sock.id,
+            move |s| async move { s.send(msg).await },
+        ) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(ref e)) => Err(crate::error::map_omq_err(e)),
+            Err(()) => Err(ETERM),
         }
     };
 

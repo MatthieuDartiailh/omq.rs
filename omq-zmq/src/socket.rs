@@ -157,7 +157,6 @@ pub(crate) struct OmqSocket {
     pub send_accum: Mutex<Vec<Bytes>>,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub recv_drain: Mutex<VecDeque<Bytes>>,
-    pub send_tx: flume::Sender<omq_compio::Message>,
     pub recv_rx: flume::Receiver<omq_compio::Message>,
     pub last_endpoint: Mutex<Option<String>>,
     pub notify: NotifyFd,
@@ -165,7 +164,6 @@ pub(crate) struct OmqSocket {
     /// Dropping this cancels the recv pump task via the partner `close_rx`.
     pub close_tx: flume::Sender<()>,
     /// Deferred: consumed by `ensure_materialized` on first bind/connect.
-    pub send_rx: Mutex<Option<flume::Receiver<omq_compio::Message>>>,
     pub recv_tx: Mutex<Option<flume::Sender<omq_compio::Message>>>,
     pub close_rx: Mutex<Option<flume::Receiver<()>>>,
 }
@@ -246,6 +244,23 @@ where
     orx.recv().expect("omq-zmq: io thread gone").ok_or(())
 }
 
+/// Non-blocking send directly on the io thread. Returns `Err(EAGAIN)` when
+/// the socket has no peers or the peer channel is full (HWM), `Err(ETERM)`
+/// when the socket is gone.
+pub(crate) fn try_send_on(
+    ctx: &Arc<OmqContext>,
+    thread_idx: usize,
+    id: u64,
+    msg: omq_compio::Message,
+) -> Result<(), c_int> {
+    run_on(ctx, thread_idx, move || {
+        REG.with(|r| match r.borrow().get(&id) {
+            Some(s) => s.try_send(msg).map_err(|e| map_omq_err(&e)),
+            None => Err(ETERM),
+        })
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
     if ctx_ptr.is_null() {
@@ -263,8 +278,6 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
     };
 
     let overlay = SocketOverlay::default();
-    let hwm = overlay.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
-    let (send_tx, send_rx) = flume::bounded::<omq_compio::Message>(hwm);
     let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
     let (recv_tx, recv_rx) = flume::bounded::<omq_compio::Message>(recv_hwm);
 
@@ -287,13 +300,11 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         rcvtimeo_ms: AtomicI64::new(-1),
         send_accum: Mutex::new(Vec::new()),
         recv_drain: Mutex::new(VecDeque::new()),
-        send_tx,
         recv_rx,
         last_endpoint: Mutex::new(None),
         notify,
         bound_or_connected: AtomicBool::new(false),
         close_tx,
-        send_rx: Mutex::new(Some(send_rx)),
         recv_tx: Mutex::new(Some(recv_tx)),
         close_rx: Mutex::new(Some(close_rx)),
     });
@@ -331,7 +342,6 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     let socket_type = sock.socket_type;
     let id = sock.id;
 
-    let send_rx = sock.send_rx.lock().unwrap().take().unwrap();
     let recv_tx = sock.recv_tx.lock().unwrap().take().unwrap();
     let close_rx = sock.close_rx.lock().unwrap().take().unwrap();
 
@@ -343,23 +353,6 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     run_on(&sock.ctx, sock.thread_idx, move || {
         let inner = Rc::new(omq_compio::Socket::new(socket_type, opts));
         REG.with(|r| r.borrow_mut().insert(id, inner.clone()));
-
-        let s = inner.clone();
-        compio::runtime::spawn(async move {
-            let mut n = 0u32;
-            while let Ok(msg) = send_rx.recv_async().await {
-                let _ = s.send(msg).await;
-                n += 1;
-                // Yield periodically so the recv pump (and other tasks)
-                // get scheduled on this single-threaded runtime. Without
-                // this, inproc send (which completes synchronously) can
-                // starve other tasks indefinitely.
-                if n.is_multiple_of(64) {
-                    compio::time::sleep(std::time::Duration::from_micros(1)).await;
-                }
-            }
-        })
-        .detach();
 
         let s = inner;
         compio::runtime::spawn(async move {
