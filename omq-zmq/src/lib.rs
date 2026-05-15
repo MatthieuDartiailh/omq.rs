@@ -28,7 +28,8 @@ pub use poll::zmq_poll;
 pub use proxy::{zmq_proxy, zmq_proxy_steerable};
 pub use send_recv::{zmq_recv, zmq_send, zmq_send_const};
 pub use socket::{
-    zmq_bind, zmq_close, zmq_connect, zmq_disconnect, zmq_join, zmq_leave, zmq_socket, zmq_unbind,
+    zmq_bind, zmq_close, zmq_connect, zmq_disconnect, zmq_join, zmq_leave, zmq_socket,
+    zmq_socket_monitor, zmq_unbind,
 };
 pub use util::{
     zmq_atomic_counter_dec, zmq_atomic_counter_destroy, zmq_atomic_counter_inc,

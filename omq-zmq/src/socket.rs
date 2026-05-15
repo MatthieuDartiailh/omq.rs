@@ -573,11 +573,102 @@ pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -
     }
 }
 
+/// Start monitoring events on `sock`, publishing them as two-frame messages
+/// on an inproc PAIR socket bound to `addr`.
+///
+/// Frame layout (libzmq v1 monitor protocol):
+///   frame 1: event_id (u16 LE) + value (i32 LE) = 6 bytes
+///   frame 2: endpoint string (UTF-8)
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket_monitor(
-    _sock: *mut c_void,
-    _addr: *const libc::c_char,
-    _events: c_int,
+    sock_ptr: *mut c_void,
+    addr: *const libc::c_char,
+    events: c_int,
 ) -> c_int {
-    crate::error::fail(crate::error::ENOTSUP)
+    if sock_ptr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    // addr == NULL means stop monitoring.
+    if addr.is_null() {
+        return 0;
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
+        return fail(libc::EINVAL);
+    };
+    let addr_str = addr_str.to_owned();
+    let events_mask = events as u16;
+
+    ensure_materialized(sock);
+
+    let ctx_clone = sock.ctx.clone();
+    let thread_idx = sock.thread_idx;
+    let sock_id = sock.id;
+
+    // Subscribe to the omq monitor stream and start a forwarding task
+    // on the io thread.
+    let result = with_socket(&ctx_clone, thread_idx, sock_id, move |s| async move {
+        let mut stream = s.monitor();
+
+        // Create a PAIR socket for publishing events, bind it to addr.
+        let pair = std::rc::Rc::new(omq_compio::Socket::new(
+            omq_compio::SocketType::Pair,
+            omq_compio::Options::default(),
+        ));
+        let ep = omq_compio::Endpoint::from_str(&addr_str)
+            .map_err(|e| omq_compio::error::Error::InvalidEndpoint(e.to_string()))?;
+        pair.bind(ep).await?;
+
+        compio::runtime::spawn(async move {
+            use omq_compio::message::Message;
+            use omq_compio::monitor::MonitorEvent;
+
+            while let Ok(ev) = stream.recv().await {
+                let (event_id, value, endpoint): (u16, i32, String) = match &ev {
+                    MonitorEvent::Listening { endpoint } => (0x0008, 0, endpoint.to_string()),
+                    MonitorEvent::Accepted { endpoint, .. } => (0x0020, 0, endpoint.to_string()),
+                    MonitorEvent::Connected { endpoint, .. } => (0x0001, 0, endpoint.to_string()),
+                    MonitorEvent::ConnectDelayed { endpoint, .. } => {
+                        (0x0002, 0, endpoint.to_string())
+                    }
+                    MonitorEvent::HandshakeSucceeded { endpoint, .. } => {
+                        (0x1000, 0, endpoint.to_string())
+                    }
+                    MonitorEvent::HandshakeFailed { endpoint, .. } => {
+                        (0x2000, 0, endpoint.to_string())
+                    }
+                    MonitorEvent::Disconnected { endpoint, .. } => {
+                        (0x0200, 0, endpoint.to_string())
+                    }
+                    MonitorEvent::Closed => (0x0400, 0, String::new()),
+                    _ => continue,
+                };
+
+                if events_mask != 0xFFFF && (events_mask & event_id) == 0 {
+                    continue;
+                }
+
+                let mut header = [0u8; 6];
+                header[0..2].copy_from_slice(&event_id.to_le_bytes());
+                header[2..6].copy_from_slice(&value.to_le_bytes());
+
+                let msg = Message::multipart([
+                    bytes::Bytes::copy_from_slice(&header),
+                    bytes::Bytes::copy_from_slice(endpoint.as_bytes()),
+                ]);
+                if pair.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        Ok::<_, omq_compio::error::Error>(())
+    });
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(ref e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
 }
