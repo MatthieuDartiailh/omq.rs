@@ -624,6 +624,34 @@ impl Socket {
         Ok(())
     }
 
+    /// Like [`try_send`](Self::try_send) but returns the message on failure so
+    /// the caller can retry with an async send without cloning.
+    ///
+    /// On `pre_send` failure (protocol error), the message is consumed and
+    /// cannot be recovered; `Err((e, None))` is returned. On transient
+    /// failures like `WouldBlock`, `Err((e, Some(msg)))` gives the message back.
+    pub fn try_send_or_return(
+        &self,
+        msg: Message,
+    ) -> std::result::Result<(), (Error, Option<Message>)> {
+        let st = self.inner().socket_type;
+        let msg = if pre_send_needs_type_state(st) {
+            match self
+                .inner()
+                .type_state
+                .lock()
+                .expect("type_state lock")
+                .pre_send(st, msg)
+            {
+                Ok(m) => m,
+                Err(e) => return Err((e, None)),
+            }
+        } else {
+            msg
+        };
+        self.try_send_dispatch(&msg).map_err(|e| (e, Some(msg)))
+    }
+
     /// Non-blocking send. Returns `Err(Error::WouldBlock)` if the socket has no
     /// connected peers yet, or if the chosen peer's outbound channel is full
     /// (HWM reached). For fan-out socket types (PUB/XPUB/RADIO), delivers to
@@ -640,6 +668,11 @@ impl Socket {
         } else {
             msg
         };
+        self.try_send_dispatch(&msg)
+    }
+
+    fn try_send_dispatch(&self, msg: &Message) -> Result<()> {
+        let st = self.inner().socket_type;
         match st {
             SocketType::Push
             | SocketType::Dealer
@@ -647,15 +680,15 @@ impl Socket {
             | SocketType::Pair
             | SocketType::Client
             | SocketType::Scatter
-            | SocketType::Channel => self.try_send_round_robin(&msg),
+            | SocketType::Channel => self.try_send_round_robin(msg),
             SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Rep => {
-                self.try_send_identity_routed(&msg)
+                self.try_send_identity_routed(msg)
             }
             SocketType::Pub | SocketType::XPub => {
-                self.try_send_pub_filtered(&msg);
+                self.try_send_pub_filtered(msg);
                 Ok(())
             }
-            SocketType::Radio => self.try_send_radio(&msg),
+            SocketType::Radio => self.try_send_radio(msg),
             SocketType::Pull
             | SocketType::Sub
             | SocketType::XSub

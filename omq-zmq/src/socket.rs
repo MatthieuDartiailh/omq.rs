@@ -155,16 +155,21 @@ pub(crate) struct OmqSocket {
     pub rcvtimeo_ms: AtomicI64,
     /// Accumulator for SNDMORE multipart assembly.
     pub send_accum: Mutex<Vec<Bytes>>,
+    /// Send pump channel. Initialized in `ensure_materialized`.
+    pub send_tx: std::sync::OnceLock<flume::Sender<omq_compio::Message>>,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub recv_drain: Mutex<VecDeque<Bytes>>,
-    pub recv_rx: flume::Receiver<omq_compio::Message>,
+    /// True when `recv_drain` is non-empty. Checked without the lock so the
+    /// mutex is skipped entirely on the common single-frame recv path.
+    pub drain_nonempty: AtomicBool,
+    /// Initialized in `ensure_materialized` so that the channel capacity
+    /// reflects ZMQ_RCVHWM set between zmq_socket and zmq_bind/zmq_connect.
+    pub recv_rx: std::sync::OnceLock<flume::Receiver<omq_compio::Message>>,
     pub last_endpoint: Mutex<Option<String>>,
     pub notify: NotifyFd,
     pub bound_or_connected: AtomicBool,
     /// Dropping this cancels the recv pump task via the partner `close_rx`.
     pub close_tx: flume::Sender<()>,
-    /// Deferred: consumed by `ensure_materialized` on first bind/connect.
-    pub recv_tx: Mutex<Option<flume::Sender<omq_compio::Message>>>,
     pub close_rx: Mutex<Option<flume::Receiver<()>>>,
 }
 
@@ -244,23 +249,6 @@ where
     orx.recv().expect("omq-zmq: io thread gone").ok_or(())
 }
 
-/// Non-blocking send directly on the io thread. Returns `Err(EAGAIN)` when
-/// the socket has no peers or the peer channel is full (HWM), `Err(ETERM)`
-/// when the socket is gone.
-pub(crate) fn try_send_on(
-    ctx: &Arc<OmqContext>,
-    thread_idx: usize,
-    id: u64,
-    msg: omq_compio::Message,
-) -> Result<(), c_int> {
-    run_on(ctx, thread_idx, move || {
-        REG.with(|r| match r.borrow().get(&id) {
-            Some(s) => s.try_send(msg).map_err(|e| map_omq_err(&e)),
-            None => Err(ETERM),
-        })
-    })
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
     if ctx_ptr.is_null() {
@@ -277,10 +265,6 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         return std::ptr::null_mut();
     };
 
-    let overlay = SocketOverlay::default();
-    let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
-    let (recv_tx, recv_rx) = flume::bounded::<omq_compio::Message>(recv_hwm);
-
     let notify = NotifyFd::new();
     let thread_idx = ctx.assign_thread();
     let id = next_socket_id();
@@ -295,17 +279,18 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         thread_idx,
         ctx: ctx_arc,
         socket_type,
-        overlay: Mutex::new(overlay),
+        overlay: Mutex::new(SocketOverlay::default()),
         sndtimeo_ms: AtomicI64::new(-1),
         rcvtimeo_ms: AtomicI64::new(-1),
         send_accum: Mutex::new(Vec::new()),
+        send_tx: std::sync::OnceLock::new(),
         recv_drain: Mutex::new(VecDeque::new()),
-        recv_rx,
+        drain_nonempty: AtomicBool::new(false),
+        recv_rx: std::sync::OnceLock::new(),
         last_endpoint: Mutex::new(None),
         notify,
         bound_or_connected: AtomicBool::new(false),
         close_tx,
-        recv_tx: Mutex::new(Some(recv_tx)),
         close_rx: Mutex::new(Some(close_rx)),
     });
 
@@ -338,11 +323,19 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
         });
         return;
     }
-    let opts = sock.overlay.lock().unwrap().to_options();
+    let overlay = sock.overlay.lock().unwrap();
+    let opts = overlay.to_options();
+    let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
+    let send_hwm = overlay.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
+    drop(overlay);
+
+    let (recv_tx, recv_rx) = flume::bounded::<omq_compio::Message>(recv_hwm);
+    let _ = sock.recv_rx.set(recv_rx);
+    let (send_tx, send_rx) = flume::bounded::<omq_compio::Message>(send_hwm);
+    let _ = sock.send_tx.set(send_tx);
+
     let socket_type = sock.socket_type;
     let id = sock.id;
-
-    let recv_tx = sock.recv_tx.lock().unwrap().take().unwrap();
     let close_rx = sock.close_rx.lock().unwrap().take().unwrap();
 
     #[cfg(target_os = "linux")]
@@ -354,17 +347,35 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
         let inner = Rc::new(omq_compio::Socket::new(socket_type, opts));
         REG.with(|r| r.borrow_mut().insert(id, inner.clone()));
 
-        let s = inner;
+        // Recv pump
+        let s_recv = inner.clone();
+        let close_rx2 = close_rx.clone();
         compio::runtime::spawn(async move {
             use futures::FutureExt as _;
             loop {
                 futures::select! {
-                    result = s.recv().fuse() => {
+                    result = s_recv.recv().fuse() => {
                         let Ok(msg) = result else { return; };
                         if recv_tx.send_async(msg).await.is_err() {
                             return;
                         }
                         NotifyFd::signal_recv(recv_signal_fd);
+                    }
+                    _ = close_rx2.recv_async().fuse() => return,
+                }
+            }
+        })
+        .detach();
+
+        // Send pump
+        let s_send = inner;
+        compio::runtime::spawn(async move {
+            use futures::FutureExt as _;
+            loop {
+                futures::select! {
+                    msg = send_rx.recv_async().fuse() => {
+                        let Ok(msg) = msg else { return; };
+                        let _ = s_send.send(msg).await;
                     }
                     _ = close_rx.recv_async().fuse() => return,
                 }

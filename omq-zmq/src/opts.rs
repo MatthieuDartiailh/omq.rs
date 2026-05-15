@@ -542,7 +542,9 @@ pub extern "C" fn zmq_getsockopt(
             write_bytes(optval, optvallen, &ov.identity)
         }
         ZMQ_RCVMORE => {
-            let more = !sock_arc.recv_drain.lock().unwrap().is_empty();
+            let more = sock_arc
+                .drain_nonempty
+                .load(std::sync::atomic::Ordering::Relaxed);
             write_i32(optval, optvallen, i32::from(more))
         }
         ZMQ_TYPE => {
@@ -580,9 +582,14 @@ pub extern "C" fn zmq_getsockopt(
         }
         ZMQ_EVENTS => {
             let mut events = ZMQ_POLLOUT; // optimistic: always writable
-            if !sock_arc.recv_drain.lock().unwrap().is_empty()
-                || sock_arc.recv_rx.try_recv().is_ok()
-            {
+            let has_data = sock_arc
+                .drain_nonempty
+                .load(std::sync::atomic::Ordering::Relaxed)
+                || sock_arc
+                    .recv_rx
+                    .get()
+                    .is_some_and(|rx| !rx.is_empty());
+            if has_data {
                 events |= ZMQ_POLLIN;
             }
             write_i32(optval, optvallen, events)

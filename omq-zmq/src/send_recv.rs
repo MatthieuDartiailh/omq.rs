@@ -63,40 +63,25 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
     };
     let msg = omq_compio::Message::multipart(parts);
 
+    let send_tx = sock.send_tx.get().expect("socket not connected");
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
 
-    // Route sends directly to Socket::try_send / Socket::send via the io
-    // thread, eliminating the old send_tx channel and pump task.
-    //
-    // Latency: lower — no pump scheduling delay between zmq_send returning
-    // and Socket::send running.
-    // Throughput for blocking bulk sends: C thread blocks per-send via
-    // with_socket rather than fire-and-forget. For workloads that saturate
-    // the peer channel, throughput is bounded by with_socket round-trip.
-    // DONTWAIT throughput: unchanged — try_send_on has the same hop count
-    // as the old send_tx.try_send path.
     let result = if dontwait {
-        crate::socket::try_send_on(&sock.ctx, sock.thread_idx, sock.id, msg)
+        match send_tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(flume::TrySendError::Full(_)) => Err(libc::EAGAIN),
+            Err(flume::TrySendError::Disconnected(_)) => Err(ETERM),
+        }
     } else if sndtimeo > 0 {
-        let timeout_dur = Duration::from_millis(sndtimeo as u64);
-        // with_socket returns Result<Result<Result<(), Error>, Elapsed>, ()>
-        match crate::socket::with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
-            compio::time::timeout(timeout_dur, s.send(msg)).await
-        }) {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(ref e))) => Err(crate::error::map_omq_err(e)),
-            Ok(Err(_elapsed)) => Err(libc::EAGAIN),
-            Err(()) => Err(ETERM),
+        let timeout = Duration::from_millis(sndtimeo as u64);
+        match send_tx.send_timeout(msg, timeout) {
+            Ok(()) => Ok(()),
+            Err(flume::SendTimeoutError::Timeout(_)) => Err(libc::EAGAIN),
+            Err(flume::SendTimeoutError::Disconnected(_)) => Err(ETERM),
         }
     } else {
-        match crate::socket::with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
-            s.send(msg).await
-        }) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(ref e)) => Err(crate::error::map_omq_err(e)),
-            Err(()) => Err(ETERM),
-        }
+        send_tx.send(msg).map_err(|_| ETERM)
     };
 
     match result {
@@ -180,64 +165,77 @@ pub extern "C" fn zmq_recv(
 pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
+    let rx = sock.recv_rx.get().expect("socket not connected");
+
     // Drain leftover frames from a partially-consumed multipart message.
-    {
+    // drain_nonempty lets us skip the Mutex acquire on the common single-frame path.
+    if sock.drain_nonempty.load(Ordering::Relaxed) {
         let mut drain = sock.recv_drain.lock().unwrap();
         if let Some(frame) = drain.pop_front() {
             let more = !drain.is_empty();
-            if !more && sock.recv_rx.is_empty() {
-                drain_recv_eventfd(sock);
+            if !more {
+                sock.drain_nonempty.store(false, Ordering::Relaxed);
+                if rx.is_empty() {
+                    drain_recv_eventfd(sock);
+                }
             }
             return Ok((frame, more));
         }
+        sock.drain_nonempty.store(false, Ordering::Relaxed);
     }
 
     let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
 
     let msg = if dontwait {
-        match sock.recv_rx.try_recv() {
+        match rx.try_recv() {
             Ok(m) => m,
             Err(TryRecvError::Empty) => return Err(libc::EAGAIN),
             Err(TryRecvError::Disconnected) => return Err(ETERM),
         }
     } else if rcvtimeo > 0 {
         let timeout = Duration::from_millis(rcvtimeo as u64);
-        match sock.recv_rx.recv_timeout(timeout) {
+        match rx.recv_timeout(timeout) {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) => return Err(libc::EAGAIN),
             Err(RecvTimeoutError::Disconnected) => return Err(ETERM),
         }
     } else {
-        match sock.recv_rx.recv() {
+        match rx.recv() {
             Ok(m) => m,
             Err(_) => return Err(ETERM),
         }
     };
 
-    let mut parts: Vec<Bytes> = msg.iter().collect();
+    // Fast path: single-frame message (vast majority). Avoid Vec allocation.
+    let dish = sock.socket_type == omq_compio::SocketType::Dish;
+    let nparts = msg.len();
 
-    // DISH: message is [group, body]. Strip the group frame, deliver body only.
-    if sock.socket_type == omq_compio::SocketType::Dish && parts.len() >= 2 {
-        parts.remove(0);
+    if nparts <= 1 && !dish {
+        let head = msg.part_bytes(0).unwrap_or_default();
+        if rx.is_empty() {
+            drain_recv_eventfd(sock);
+        }
+        return Ok((head, false));
     }
 
-    let head = if parts.is_empty() {
-        Bytes::new()
-    } else {
-        parts.remove(0)
-    };
+    // Slow path: multipart or DISH (needs group stripping).
+    let start = if dish && nparts >= 2 { 1 } else { 0 };
+    let head = msg.part_bytes(start).unwrap_or_default();
 
-    if !parts.is_empty() {
-        sock.recv_drain.lock().unwrap().extend(parts);
+    let remaining = start + 1;
+    if remaining < nparts {
+        sock.drain_nonempty.store(true, Ordering::Relaxed);
+        let mut drain = sock.recv_drain.lock().unwrap();
+        for i in remaining..nparts {
+            if let Some(b) = msg.part_bytes(i) {
+                drain.push_back(b);
+            }
+        }
     }
 
-    let more = !sock.recv_drain.lock().unwrap().is_empty();
-
-    // Batch eventfd drain: only consume when the channel is empty AND
-    // no multipart frames remain. This keeps ZMQ_FD level-triggered
-    // accurate while avoiding a syscall on every message in a burst.
-    if !more && sock.recv_rx.is_empty() {
+    let more = remaining < nparts;
+    if !more && rx.is_empty() {
         drain_recv_eventfd(sock);
     }
 
