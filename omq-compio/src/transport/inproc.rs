@@ -104,9 +104,20 @@ struct InprocConnectRequest {
     accept_ack: flume::Sender<(InprocPeerSnapshot, blume::Sender<InprocFrame>)>,
 }
 
-/// Global registry of bound inproc names → request channel.
-static REGISTRY: LazyLock<Mutex<HashMap<String, flume::Sender<InprocConnectRequest>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+type ReqSender = flume::Sender<InprocConnectRequest>;
+
+struct InprocRegistry {
+    bound: HashMap<String, ReqSender>,
+    waiting: HashMap<String, Vec<flume::Sender<ReqSender>>>,
+}
+
+/// Global registry of bound inproc names and pending connectors.
+static REGISTRY: LazyLock<Mutex<InprocRegistry>> = LazyLock::new(|| {
+    Mutex::new(InprocRegistry {
+        bound: HashMap::new(),
+        waiting: HashMap::new(),
+    })
+});
 
 /// Default per-socket inbound capacity (whole messages).
 pub const DEFAULT_INPROC_HWM: usize = 1024;
@@ -123,12 +134,19 @@ pub fn bind(
     let (req_tx, req_rx) = flume::bounded(32);
     {
         let mut reg = REGISTRY.lock().expect("inproc registry poisoned");
-        if reg.contains_key(name) {
+        if reg.bound.contains_key(name) {
             return Err(Error::InvalidEndpoint(format!(
                 "inproc name already bound: {name}"
             )));
         }
-        reg.insert(name.to_string(), req_tx);
+        reg.bound.insert(name.to_string(), req_tx.clone());
+
+        // Wake any connectors that called connect() before this bind().
+        if let Some(waiters) = reg.waiting.remove(name) {
+            for waiter in waiters {
+                let _ = waiter.send(req_tx.clone());
+            }
+        }
     }
     Ok(InprocListener {
         name: name.to_string(),
@@ -138,19 +156,47 @@ pub fn bind(
     })
 }
 
-/// Connect to a previously-bound `name`. Hands the listener our
-/// shared `in_tx` (so it can deliver back to us); receives the
-/// listener's snapshot + `in_tx` in return.
+/// Connect to a bound (or not-yet-bound) `name`. If the name is
+/// not in the registry yet, parks until `bind()` wakes us (zero
+/// latency connect-before-bind). Falls back to a 2 s timeout.
 pub async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,
     in_tx: blume::Sender<InprocFrame>,
 ) -> Result<InprocConn> {
     let req_tx = {
-        let reg = REGISTRY.lock().expect("inproc registry poisoned");
-        reg.get(name).cloned()
-    }
-    .ok_or_else(|| Error::InvalidEndpoint(format!("no inproc binding: {name}")))?;
+        let mut reg = REGISTRY.lock().expect("inproc registry poisoned");
+        if let Some(tx) = reg.bound.get(name).cloned() {
+            tx
+        } else {
+            // Name not bound yet: register a waiter and wait.
+            let (notify_tx, notify_rx) = flume::bounded(1);
+            reg.waiting
+                .entry(name.to_string())
+                .or_default()
+                .push(notify_tx);
+            drop(reg);
+
+            match compio::time::timeout(
+                std::time::Duration::from_secs(2),
+                notify_rx.recv_async(),
+            )
+            .await
+            {
+                Ok(Ok(tx)) => tx,
+                Ok(Err(_)) => {
+                    return Err(Error::InvalidEndpoint(format!(
+                        "inproc waiter channel closed: {name}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(Error::InvalidEndpoint(format!(
+                        "no inproc binding: {name}"
+                    )));
+                }
+            }
+        }
+    };
 
     let (ack_tx, ack_rx) = flume::bounded(1);
     let request = InprocConnectRequest {
@@ -199,7 +245,7 @@ impl InprocListener {
             connector_in_tx,
             accept_ack,
         } = req;
-        // Best-effort ack: connector dropped before we got here ⇒
+        // Best-effort ack: connector dropped before we got here =>
         // they won't see our snapshot, we drop the channel halves.
         let _ = accept_ack.send((self.snapshot.clone(), self.in_tx.clone()));
         Ok(InprocConn {
@@ -212,7 +258,7 @@ impl InprocListener {
 impl Drop for InprocListener {
     fn drop(&mut self) {
         if let Ok(mut reg) = REGISTRY.lock() {
-            reg.remove(&self.name);
+            reg.bound.remove(&self.name);
         }
     }
 }

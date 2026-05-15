@@ -201,11 +201,12 @@ impl Socket {
             | SocketType::Dealer
             | SocketType::Req
             | SocketType::Pair
-            | SocketType::Rep
             | SocketType::Client
             | SocketType::Scatter
             | SocketType::Channel => self.send_round_robin(msg).await,
-            SocketType::Router | SocketType::Server | SocketType::Peer => {
+            // REP: pre_send added the peer identity as the first frame; route
+            // back to that specific peer (same as ROUTER identity routing).
+            SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Rep => {
                 self.send_identity_routed(msg).await
             }
             SocketType::Pub | SocketType::XPub => self.send_pub_filtered(msg).await,
@@ -644,11 +645,10 @@ impl Socket {
             | SocketType::Dealer
             | SocketType::Req
             | SocketType::Pair
-            | SocketType::Rep
             | SocketType::Client
             | SocketType::Scatter
             | SocketType::Channel => self.try_send_round_robin(&msg),
-            SocketType::Router | SocketType::Server | SocketType::Peer => {
+            SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Rep => {
                 self.try_send_identity_routed(&msg)
             }
             SocketType::Pub | SocketType::XPub => {

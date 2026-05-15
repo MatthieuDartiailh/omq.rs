@@ -34,13 +34,14 @@ fn post_recv_needs_type_state(t: SocketType) -> bool {
     matches!(t, SocketType::Req | SocketType::Rep | SocketType::Dish)
 }
 
-/// Identity-routed recv: the user-visible message is `[peer_identity,
-/// body...]` rather than `[body...]`. ROUTER, SERVER and PEER all
-/// identify their peers this way so a reply can be addressed back.
+/// Whether peer_identity is prepended to the inbound message in
+/// `process_inbound_frame`. ROUTER/SERVER/PEER expose it to the application.
+/// REP strips it in `post_recv` but saves it in `rep_envelope` so the reply
+/// can be routed back to the originating peer via identity routing.
 fn is_identity_recv(t: SocketType) -> bool {
     matches!(
         t,
-        SocketType::Router | SocketType::Server | SocketType::Peer
+        SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Rep
     )
 }
 
@@ -49,11 +50,14 @@ fn is_identity_recv(t: SocketType) -> bool {
 /// data only" — no ROUTER identity prefix, no XPUB/XSUB subscribe
 /// command surfacing, no UDP-only DISH. Other shapes go through the
 /// driver's inproc-frame hop.
+///
+/// REP is excluded: it needs peer identity tagging (for reply routing
+/// to the correct client) which only happens via `process_inbound_frame`.
 #[inline]
 fn direct_recv_eligible(t: SocketType) -> bool {
     matches!(
         t,
-        SocketType::Pull | SocketType::Sub | SocketType::Rep | SocketType::Pair | SocketType::Req
+        SocketType::Pull | SocketType::Sub | SocketType::Pair | SocketType::Req
     )
 }
 
