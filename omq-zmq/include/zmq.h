@@ -288,6 +288,10 @@ int   zmq_msg_init_data    (zmq_msg_t *msg_, void *data_, size_t size_,
                              zmq_free_fn *ffn_, void *hint_);
 int   zmq_msg_send         (zmq_msg_t *msg_, void *s_, int flags_);
 int   zmq_msg_recv         (zmq_msg_t *msg_, void *s_, int flags_);
+
+/*  Deprecated aliases (libzmq 3.x). */
+int   zmq_sendmsg           (zmq_msg_t *msg_, void *s_, int flags_);
+int   zmq_recvmsg           (zmq_msg_t *msg_, void *s_, int flags_);
 int   zmq_msg_close        (zmq_msg_t *msg_);
 int   zmq_msg_move         (zmq_msg_t *dest_, zmq_msg_t *src_);
 int   zmq_msg_copy         (zmq_msg_t *dest_, zmq_msg_t *src_);

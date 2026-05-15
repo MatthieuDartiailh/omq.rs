@@ -719,7 +719,7 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_LAST_ENDPOINT => {
             let ep = sock_arc.last_endpoint.lock().unwrap();
             let s = ep.as_deref().unwrap_or("");
-            write_bytes(optval, optvallen, s.as_bytes())
+            write_string(optval, optvallen, s.as_bytes())
         }
         ZMQ_MECHANISM => {
             let v = match sock_arc.overlay.lock().unwrap().mechanism {
@@ -742,17 +742,17 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_PLAIN_USERNAME => {
             let ov = sock_arc.overlay.lock().unwrap();
             if let MechanismOverlay::PlainClient { ref username, .. } = ov.mechanism {
-                write_bytes(optval, optvallen, username.as_bytes())
+                write_string(optval, optvallen, username.as_bytes())
             } else {
-                write_bytes(optval, optvallen, b"")
+                write_string(optval, optvallen, b"")
             }
         }
         ZMQ_PLAIN_PASSWORD => {
             let ov = sock_arc.overlay.lock().unwrap();
             if let MechanismOverlay::PlainClient { ref password, .. } = ov.mechanism {
-                write_bytes(optval, optvallen, password.as_bytes())
+                write_string(optval, optvallen, password.as_bytes())
             } else {
-                write_bytes(optval, optvallen, b"")
+                write_string(optval, optvallen, b"")
             }
         }
         ZMQ_CURVE_SERVER => {
@@ -885,6 +885,22 @@ fn write_bytes(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) ->
     unsafe {
         std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), copy_len);
         *optvallen = data.len();
+    }
+    0
+}
+
+fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
+    if optval.is_null() || optvallen.is_null() {
+        return 0;
+    }
+    let avail = unsafe { *optvallen };
+    let copy_len = data.len().min(avail);
+    unsafe {
+        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), copy_len);
+        if copy_len < avail {
+            *optval.cast::<u8>().add(copy_len) = 0;
+        }
+        *optvallen = data.len() + 1;
     }
     0
 }

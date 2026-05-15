@@ -21,8 +21,8 @@ pub use error::{zmq_errno, zmq_strerror};
 pub use msg::{
     zmq_msg_close, zmq_msg_copy, zmq_msg_data, zmq_msg_get, zmq_msg_gets, zmq_msg_group,
     zmq_msg_init, zmq_msg_init_buffer, zmq_msg_init_data, zmq_msg_init_size, zmq_msg_more,
-    zmq_msg_move, zmq_msg_recv, zmq_msg_routing_id, zmq_msg_send, zmq_msg_set,
-    zmq_msg_set_group, zmq_msg_set_routing_id, zmq_msg_size,
+    zmq_msg_move, zmq_msg_recv, zmq_msg_routing_id, zmq_msg_send, zmq_msg_set, zmq_recvmsg,
+    zmq_msg_set_group, zmq_msg_set_routing_id, zmq_msg_size, zmq_sendmsg,
 };
 pub use poll::zmq_poll;
 pub use proxy::{zmq_proxy, zmq_proxy_steerable};

@@ -370,6 +370,28 @@ pub extern "C" fn zmq_msg_send(
     ret
 }
 
+/// Deprecated `zmq_sendmsg`: args are (socket, msg, flags), swapped
+/// vs `zmq_msg_send` which is (msg, socket, flags).
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_sendmsg(
+    sock: *mut libc::c_void,
+    msg: *mut OmqMsgRepr,
+    flags: c_int,
+) -> c_int {
+    zmq_msg_send(msg, sock, flags)
+}
+
+/// Deprecated `zmq_recvmsg`: args are (socket, msg, flags), swapped
+/// vs `zmq_msg_recv` which is (msg, socket, flags).
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_recvmsg(
+    sock: *mut libc::c_void,
+    msg: *mut OmqMsgRepr,
+    flags: c_int,
+) -> c_int {
+    zmq_msg_recv(msg, sock, flags)
+}
+
 fn msg_group_bytes(msg: *mut OmqMsgRepr) -> bytes::Bytes {
     let r = unsafe { &*msg };
     let group_area = &r.reserved[4..];

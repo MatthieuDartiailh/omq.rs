@@ -427,12 +427,14 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     ensure_materialized(sock);
 
     let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
-        s.bind(endpoint).await
+        s.bind(endpoint.clone()).await?;
+        let resolved = s.last_bound_endpoint().map(|ep| ep.to_string());
+        Ok::<_, omq_compio::error::Error>(resolved)
     });
 
     match result {
-        Ok(Ok(())) => {
-            *sock.last_endpoint.lock().unwrap() = Some(addr_str);
+        Ok(Ok(resolved)) => {
+            *sock.last_endpoint.lock().unwrap() = resolved.or(Some(addr_str));
             0
         }
         Ok(Err(ref e)) => fail(map_omq_err(e)),
@@ -569,4 +571,13 @@ pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -
         Ok(Err(ref e)) => fail(map_omq_err(e)),
         Err(()) => fail(ETERM),
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_socket_monitor(
+    _sock: *mut c_void,
+    _addr: *const libc::c_char,
+    _events: c_int,
+) -> c_int {
+    crate::error::fail(crate::error::ENOTSUP)
 }

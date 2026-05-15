@@ -283,9 +283,13 @@ fn parse_host_port(rest: &str) -> Result<(Host, u16)> {
     let (host_str, port_str) = rest
         .rsplit_once(':')
         .ok_or_else(|| Error::InvalidEndpoint(format!("missing port in {rest}")))?;
-    let port: u16 = port_str
-        .parse()
-        .map_err(|_| Error::InvalidEndpoint(format!("invalid port {port_str}")))?;
+    let port: u16 = if port_str == "*" {
+        0
+    } else {
+        port_str
+            .parse()
+            .map_err(|_| Error::InvalidEndpoint(format!("invalid port {port_str}")))?
+    };
     let host = parse_host(host_str)?;
     Ok((host, port))
 }

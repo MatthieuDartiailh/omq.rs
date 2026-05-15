@@ -189,6 +189,17 @@ impl Socket {
         self.inner.monitor.subscribe()
     }
 
+    /// The resolved endpoint of the most recent `bind`, if any.
+    /// For wildcard binds (`tcp://...:*`) this contains the actual port.
+    pub fn last_bound_endpoint(&self) -> Option<Endpoint> {
+        self.inner
+            .listeners
+            .read()
+            .expect("listeners lock")
+            .last()
+            .map(|l| l.endpoint.clone())
+    }
+
     /// Bind to an endpoint. Returns once the listener is active (or, for UDP
     /// DISH, once the socket is bound and the recv loop is spawned).
     pub async fn bind(&self, endpoint: Endpoint) -> Result<()> {

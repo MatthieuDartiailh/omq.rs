@@ -345,10 +345,10 @@ fn plain_client_username_password() {
 
     let mut buf = [0u8; 64];
     let len = get_bytes(s, ZMQ_PLAIN_USERNAME, &mut buf);
-    assert_eq!(&buf[..len], b"alice");
+    assert_eq!(&buf[..len - 1], b"alice");
 
     let len = get_bytes(s, ZMQ_PLAIN_PASSWORD, &mut buf);
-    assert_eq!(&buf[..len], b"secret123");
+    assert_eq!(&buf[..len - 1], b"secret123");
 
     zmq_close(s);
     zmq_ctx_term(ctx);
@@ -481,7 +481,10 @@ fn last_endpoint_after_bind() {
 
     let mut buf = [0u8; 256];
     let len = get_bytes(s, ZMQ_LAST_ENDPOINT, &mut buf);
-    let got = std::str::from_utf8(&buf[..len]).unwrap();
+    let got = std::ffi::CStr::from_bytes_until_nul(&buf[..len])
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(got, addr_str);
 
     zmq_close(s);
