@@ -63,6 +63,22 @@ pub(super) fn install_inproc_peer(
     } else {
         None
     };
+    // SPSC fast path: only for the first inproc peer.
+    // Multi-peer falls back to blume.
+    let existing_peers = inner.out_peers.read().expect("peers lock").len();
+    if existing_peers == 0 {
+        if let Some(producer) = conn.spsc_send {
+            unsafe { *inner.spsc_send.get() = Some(producer) };
+        }
+        if let Some(consumer) = conn.spsc_recv {
+            unsafe { *inner.spsc_recv.get() = Some(consumer) };
+        }
+    } else {
+        // Disable SPSC: we're now multi-peer.
+        unsafe { *inner.spsc_send.get() = None };
+        unsafe { *inner.spsc_recv.get() = None };
+    }
+
     let out = PeerOut::Inproc {
         sender: conn.out,
         our_identity,

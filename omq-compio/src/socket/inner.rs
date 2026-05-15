@@ -155,6 +155,9 @@ pub(super) struct SocketInner {
     pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
     pub(super) in_tx: blume::Sender<InprocFrame>,
     pub(super) in_rx: blume::Receiver<InprocFrame>,
+    /// SPSC fast path for single-peer inproc. Set by install_inproc_peer.
+    pub(super) spsc_send: std::cell::UnsafeCell<Option<blume::spsc::Producer<InprocFrame>>>,
+    pub(super) spsc_recv: std::cell::UnsafeCell<Option<blume::spsc::Consumer<InprocFrame>>>,
     /// Batch-drain cache for the direct-recv path. `try_direct_recv` drains
     /// all codec events from one TCP delivery into here; `recv`/`try_recv`
     /// pop raw messages and apply `post_recv_apply`. Uncontended on a
@@ -1001,6 +1004,8 @@ impl SocketInner {
             cached_route: Mutex::new(None),
             in_tx,
             in_rx,
+            spsc_send: std::cell::UnsafeCell::new(None),
+            spsc_recv: std::cell::UnsafeCell::new(None),
             recv_cache: RecvCache::new(),
             direct_recv_io: UnsafeCell::new(None),
             on_peer_ready: Event::new(),

@@ -92,16 +92,34 @@ pub struct InprocPeerSnapshot {
 pub struct InprocConn {
     pub out: blume::Sender<InprocFrame>,
     pub peer: InprocPeerSnapshot,
+    /// SPSC fast-path producer (we send small frames here instead of
+    /// through `out`). Present only for eligible pairs (PUSH/PULL).
+    pub spsc_send: Option<blume::spsc::Producer<InprocFrame>>,
+    /// SPSC fast-path consumer (we recv small frames from here before
+    /// checking `in_rx`). Present only for eligible pairs.
+    pub spsc_recv: Option<blume::spsc::Consumer<InprocFrame>>,
 }
 
 /// Sent from connect to accept through the registry: connector's
 /// snapshot, connector's `in_tx` (so the listener knows where to
 /// reply), and an ack channel through which the listener returns
 /// its own snapshot + `in_tx`.
+/// SPSC halves sent back to the connector via the ack channel.
+struct SpscPair {
+    for_connector_send: Option<blume::spsc::Producer<InprocFrame>>,
+    for_connector_recv: Option<blume::spsc::Consumer<InprocFrame>>,
+}
+
+type AckPayload = (
+    InprocPeerSnapshot,
+    blume::Sender<InprocFrame>,
+    SpscPair,
+);
+
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
     connector_in_tx: blume::Sender<InprocFrame>,
-    accept_ack: flume::Sender<(InprocPeerSnapshot, blume::Sender<InprocFrame>)>,
+    accept_ack: flume::Sender<AckPayload>,
 }
 
 type ReqSender = flume::Sender<InprocConnectRequest>;
@@ -121,6 +139,15 @@ static REGISTRY: LazyLock<Mutex<InprocRegistry>> = LazyLock::new(|| {
 
 /// Default per-socket inbound capacity (whole messages).
 pub const DEFAULT_INPROC_HWM: usize = 1024;
+
+fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
+    matches!(
+        (a, b),
+        (SocketType::Push, SocketType::Pull)
+            | (SocketType::Pull, SocketType::Push)
+            | (SocketType::Pair, SocketType::Pair)
+    )
+}
 
 /// Bind to `name`. The returned listener yields one
 /// `InprocConn` per accepted connector. `in_tx` is the socket's
@@ -214,7 +241,7 @@ pub async fn connect(
         .send_async(request)
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc binding closed: {name}")))?;
-    let (listener_snapshot, listener_in_tx) = ack_rx
+    let (listener_snapshot, listener_in_tx, spsc_pair) = ack_rx
         .recv_async()
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc accept dropped: {name}")))?;
@@ -222,6 +249,8 @@ pub async fn connect(
     Ok(InprocConn {
         out: listener_in_tx,
         peer: listener_snapshot,
+        spsc_send: spsc_pair.for_connector_send,
+        spsc_recv: spsc_pair.for_connector_recv,
     })
 }
 
@@ -250,12 +279,38 @@ impl InprocListener {
             connector_in_tx,
             accept_ack,
         } = req;
-        // Best-effort ack: connector dropped before we got here =>
-        // they won't see our snapshot, we drop the channel halves.
-        let _ = accept_ack.send((self.snapshot.clone(), self.in_tx.clone()));
+
+        let eligible = is_spsc_eligible(self.snapshot.socket_type, connector.socket_type);
+        let (my_spsc_send, my_spsc_recv, connector_pair) = if eligible {
+            let (p1, c1) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
+            let (p2, c2) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
+            // p1/c1: listener→connector direction
+            // p2/c2: connector→listener direction
+            (
+                Some(p1),
+                Some(c2),
+                SpscPair {
+                    for_connector_send: Some(p2),
+                    for_connector_recv: Some(c1),
+                },
+            )
+        } else {
+            (
+                None,
+                None,
+                SpscPair {
+                    for_connector_send: None,
+                    for_connector_recv: None,
+                },
+            )
+        };
+
+        let _ = accept_ack.send((self.snapshot.clone(), self.in_tx.clone(), connector_pair));
         Ok(InprocConn {
             out: connector_in_tx,
             peer: connector,
+            spsc_send: my_spsc_send,
+            spsc_recv: my_spsc_recv,
         })
     }
 }

@@ -19,6 +19,8 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
+use crate::transport::inproc::InprocFrame;
+
 #[cfg(not(feature = "priority"))]
 use crate::socket::inner::{CachedPeerRoute, DirectIoState, FLAT_THRESHOLD};
 #[cfg(not(feature = "priority"))]
@@ -375,7 +377,18 @@ impl Socket {
         direct: Option<Arc<DirectIoState>>,
     ) -> Result<()> {
         match chosen {
-            PeerOut::Inproc { .. } => chosen.send(msg).await,
+            PeerOut::Inproc { ref our_identity, .. } => {
+                // SPSC fast path: bypass blume for single-peer inproc.
+                let spsc = unsafe { &mut *self.inner().spsc_send.get() };
+                if let Some(producer) = spsc {
+                    if !producer.is_full() {
+                        let frame = InprocFrame::message_from(our_identity.clone(), msg);
+                        let _ = producer.push(frame);
+                        return Ok(());
+                    }
+                }
+                chosen.send(msg).await
+            }
             PeerOut::Wire(_) if self.inner().options.conflate => {
                 // Conflate: always use the shared queue with drain-before-send
                 // so the queue holds only the latest message. Skip the single-

@@ -84,6 +84,25 @@ enum PullOutcome {
     StartAccumulation,
 }
 
+/// Yield to the runtime once, then resume. Zero-cost (no syscall).
+struct YieldOnce(bool);
+
+impl std::future::Future for YieldOnce {
+    type Output = ();
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            std::task::Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
 /// RAII guard for the [`DirectIoState`] recv claim. Released on drop:
 /// resets `recv_claim` to 0 (idle) and wakes the driver via
 /// `recv_state_changed` so it re-evaluates and resumes reading.
@@ -778,6 +797,34 @@ impl Socket {
             }
             if let Some(msg) = self.try_direct_recv().await? {
                 return Ok(msg);
+            }
+        }
+        // SPSC fast path: if a lock-free ring is installed, drain up
+        // to 8 frames per yield into recv_cache. Amortizes the yield
+        // cost across multiple recv() calls.
+        let spsc = unsafe { &mut *self.inner.spsc_recv.get() };
+        if let Some(consumer) = spsc {
+            let cache = self.inner.recv_cache.get();
+            if let Some(msg) = cache.pop_front() {
+                return Ok(msg);
+            }
+            loop {
+                let mut got = 0;
+                while let Some(frame) = consumer.pop() {
+                    if let Some(msg) = self.process_inbound_frame(frame)? {
+                        cache.push_back(msg);
+                        got += 1;
+                    }
+                }
+                if got > 0 {
+                    return Ok(cache.pop_front().expect("just pushed"));
+                }
+                YieldOnce(false).await;
+                if let Ok(frame) = self.inner.in_rx.try_recv() {
+                    if let Some(msg) = self.process_inbound_frame(frame)? {
+                        return Ok(msg);
+                    }
+                }
             }
         }
         loop {
