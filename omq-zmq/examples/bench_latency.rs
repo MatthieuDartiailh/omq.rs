@@ -1,11 +1,11 @@
 //! Round-trip latency benchmark: single REQ/REP pair over inproc.
 //!
 //! This is the primary target of the pump-removal in Part 2. The old path:
-//!   C → send_tx channel → pump task wakes → Socket::send
+//!   C → `send_tx` channel → pump task wakes → `Socket::send`
 //! New path:
-//!   C → run_on/with_socket → Socket::send directly on io thread
+//!   C → `run_on`/`with_socket` → `Socket::send` directly on io thread
 //!
-//! Run: cargo run --example bench_latency --release -p omq-zmq
+//! Run: `cargo run --example bench_latency --release -p omq-zmq`
 
 use std::ffi::CString;
 use std::time::Instant;
@@ -25,7 +25,7 @@ fn set_rcvtimeo(sock: *mut libc::c_void, ms: i32) {
     zmq_setsockopt(
         sock,
         ZMQ_RCVTIMEO,
-        (&ms as *const i32).cast(),
+        (&raw const ms).cast(),
         std::mem::size_of::<i32>(),
     );
 }
@@ -122,7 +122,7 @@ fn bench_push_pull_throughput(msg_size: usize, iters: usize) {
     }
     let elapsed = t.elapsed();
     let ns_per = elapsed.as_nanos() as f64 / iters as f64;
-    let gbps = (msg_size as f64 * iters as f64) / elapsed.as_secs_f64() / (1 << 30) as f64;
+    let gbps = (msg_size as f64 * iters as f64) / elapsed.as_secs_f64() / f64::from(1_u32 << 30);
     println!("PUSH/PULL inproc  sz={msg_size:>7}  {ns_per:8.0}ns/msg  {gbps:5.2} GB/s");
 
     zmq_close(push);

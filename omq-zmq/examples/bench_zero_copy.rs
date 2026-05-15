@@ -2,10 +2,10 @@
 //!
 //! Both paths do identical socket work: send → recv → fwd-send → fwd-recv.
 //! They differ only in whether the forwarding send copies the Bytes:
-//!   - zero-copy: zmq_msg_recv → zmq_msg_send  (KIND_BYTES arc stolen, 0 copies in fwd)
-//!   - copy:      zmq_msg_recv → zmq_send(ptr)  (1 copy in fwd-send via zmq_send)
+//!   - zero-copy: `zmq_msg_recv` → `zmq_msg_send`  (`KIND_BYTES` arc stolen, 0 copies in fwd)
+//!   - copy:      `zmq_msg_recv` → `zmq_send(ptr)`  (1 copy in fwd-send via `zmq_send`)
 //!
-//! Run: cargo run --example bench_zero_copy --release -p omq-zmq
+//! Run: `cargo run --example bench_zero_copy --release -p omq-zmq`
 
 use std::ffi::CString;
 use std::time::Instant;
@@ -35,7 +35,7 @@ fn set_rcvtimeo(sock: *mut libc::c_void, ms: i32) {
     zmq_setsockopt(
         sock,
         ZMQ_RCVTIMEO,
-        (&ms as *const i32).cast(),
+        (&raw const ms).cast(),
         std::mem::size_of::<i32>(),
     );
 }
@@ -81,10 +81,7 @@ fn sockets(
 }
 
 fn main() {
-    println!(
-        "{:<50}  {:>14}",
-        "benchmark", "latency"
-    );
+    println!("{:<50}  {:>14}", "benchmark", "latency");
     println!("{}", "-".repeat(70));
 
     for &msg_size in &[64usize, 256, 1024, 16 * 1024, 256 * 1024] {

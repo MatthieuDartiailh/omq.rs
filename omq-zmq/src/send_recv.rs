@@ -81,24 +81,18 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
     } else if sndtimeo > 0 {
         let timeout_dur = Duration::from_millis(sndtimeo as u64);
         // with_socket returns Result<Result<Result<(), Error>, Elapsed>, ()>
-        match crate::socket::with_socket(
-            &sock.ctx,
-            sock.thread_idx,
-            sock.id,
-            move |s| async move { compio::time::timeout(timeout_dur, s.send(msg)).await },
-        ) {
+        match crate::socket::with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+            compio::time::timeout(timeout_dur, s.send(msg)).await
+        }) {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(ref e))) => Err(crate::error::map_omq_err(e)),
             Ok(Err(_elapsed)) => Err(libc::EAGAIN),
             Err(()) => Err(ETERM),
         }
     } else {
-        match crate::socket::with_socket(
-            &sock.ctx,
-            sock.thread_idx,
-            sock.id,
-            move |s| async move { s.send(msg).await },
-        ) {
+        match crate::socket::with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+            s.send(msg).await
+        }) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(ref e)) => Err(crate::error::map_omq_err(e)),
             Err(()) => Err(ETERM),

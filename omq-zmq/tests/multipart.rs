@@ -279,9 +279,9 @@ fn msg_send_then_raw_recv() {
     zmq_ctx_term(ctx);
 }
 
-/// KIND_BYTES arc is stolen on `zmq_msg_send` — no copy, no double-free.
+/// `KIND_BYTES` arc is stolen on `zmq_msg_send` — no copy, no double-free.
 ///
-/// Pattern: send via raw API -> recv as KIND_BYTES -> forward via `zmq_msg_send`.
+/// Pattern: send via raw API -> recv as `KIND_BYTES` -> forward via `zmq_msg_send`.
 /// After a successful send the msg is zeroed. Any double-free of the arc
 /// would crash immediately.
 #[test]
@@ -313,9 +313,7 @@ fn kind_bytes_arc_stolen_on_zmq_msg_send() {
         assert_eq!(rc as usize, payload.len());
 
         // boxed field lives at offset 40 in OmqMsgRepr (see repr layout in msg.rs).
-        const BOXED_OFFSET: usize = 40;
-        let boxed_before =
-            usize::from_ne_bytes(msg.0[BOXED_OFFSET..BOXED_OFFSET + 8].try_into().unwrap());
+        let boxed_before = usize::from_ne_bytes(msg.0[40..48].try_into().unwrap());
         assert_ne!(boxed_before, 0, "boxed must be non-null after zmq_msg_recv");
 
         // Forward. Arc should be stolen (r.boxed set to null) before zmq_msg_close runs.
