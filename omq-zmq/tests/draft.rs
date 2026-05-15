@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_join,
-    zmq_msg_close, zmq_msg_init_buffer, zmq_msg_send, zmq_msg_set_group, zmq_recv,
-    zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_msg_close, zmq_msg_init_buffer, zmq_msg_send, zmq_msg_set_group, zmq_recv, zmq_send,
+    zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_SERVER: i32 = 12;

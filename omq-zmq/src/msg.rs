@@ -434,7 +434,9 @@ pub extern "C" fn zmq_msg_recv(
             r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
             r.reserved = [0; 16];
             #[allow(clippy::cast_possible_wrap)]
-            { sz as c_int }
+            {
+                sz as c_int
+            }
         }
         Err(e) => crate::error::fail(e),
     }

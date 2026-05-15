@@ -196,9 +196,7 @@ pub async fn connect(
                         )));
                     }
                     Err(_) => {
-                        return Err(Error::InvalidEndpoint(format!(
-                            "no inproc binding: {name}"
-                        )));
+                        return Err(Error::InvalidEndpoint(format!("no inproc binding: {name}")));
                     }
                 }
             }

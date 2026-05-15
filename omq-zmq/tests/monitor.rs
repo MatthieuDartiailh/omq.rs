@@ -8,8 +8,8 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv,
-    zmq_setsockopt, zmq_socket, zmq_socket_monitor,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_setsockopt,
+    zmq_socket, zmq_socket_monitor,
 };
 
 const ZMQ_PUSH: i32 = 8;
