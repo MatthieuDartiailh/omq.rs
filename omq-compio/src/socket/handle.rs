@@ -826,26 +826,28 @@ impl Socket {
                     }
                 }
             }
-            // SPSC not yet available. Race in_rx against on_peer_ready
-            // so we re-check SPSC when install_inproc_peer fires.
-            {
-                let peer_listener = self.inner.on_peer_ready.listen();
-                // TOCTOU guard: re-check after registering listener.
-                if unsafe { &*self.inner.spsc_recv.get() }.is_some() {
-                    continue;
+            while let Ok(frame) = self.inner.in_rx.try_recv() {
+                if let Some(msg) = self.process_inbound_frame(frame)? {
+                    return Ok(msg);
                 }
-                let in_rx_fut = self.inner.in_rx.recv_async();
-                futures::pin_mut!(in_rx_fut);
-                futures::pin_mut!(peer_listener);
-                futures::select_biased! {
-                    frame = in_rx_fut.fuse() => {
-                        let frame = frame.map_err(|_| Error::Closed)?;
-                        if let Some(msg) = self.process_inbound_frame(frame)? {
-                            return Ok(msg);
-                        }
+            }
+            // Block: race in_rx against on_peer_ready so we re-check
+            // SPSC when a cross-thread peer installs it.
+            let peer_listener = self.inner.on_peer_ready.listen();
+            if unsafe { &*self.inner.spsc_recv.get() }.is_some() {
+                continue;
+            }
+            futures::pin_mut!(peer_listener);
+            let in_rx_fut = self.inner.in_rx.recv_async();
+            futures::pin_mut!(in_rx_fut);
+            futures::select_biased! {
+                frame = in_rx_fut.fuse() => {
+                    let frame = frame.map_err(|_| Error::Closed)?;
+                    if let Some(msg) = self.process_inbound_frame(frame)? {
+                        return Ok(msg);
                     }
-                    () = peer_listener.fuse() => {}
                 }
+                () = peer_listener.fuse() => {}
             }
         }
     }

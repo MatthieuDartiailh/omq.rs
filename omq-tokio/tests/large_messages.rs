@@ -25,9 +25,13 @@ fn tcp_ep(port: u16) -> Endpoint {
 }
 
 async fn push_pull_large(size_bytes: usize) {
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let port = loop {
+        let p = loopback_port();
+        if pull.bind(tcp_ep(p)).await.is_ok() {
+            break p;
+        }
+    };
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(tcp_ep(port)).await.unwrap();
