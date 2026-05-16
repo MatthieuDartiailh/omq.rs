@@ -163,10 +163,6 @@ pub(super) struct SocketInner {
     pub(super) spsc_send_event: std::cell::UnsafeCell<Option<Arc<Event>>>,
     /// Event for the direction we RECEIVE (we listen when ring is empty).
     pub(super) spsc_recv_event: std::cell::UnsafeCell<Option<Arc<Event>>>,
-    /// Set by the recv side when it enters the SPSC inner loop. The
-    /// send side checks this before pushing to the ring; until set,
-    /// it falls through to blume so `in_rx` always has the message.
-    pub(super) spsc_recv_active: std::sync::atomic::AtomicBool,
     /// Batch-drain cache for the direct-recv path. `try_direct_recv` drains
     /// all codec events from one TCP delivery into here; `recv`/`try_recv`
     /// pop raw messages and apply `post_recv_apply`. Uncontended on a
@@ -1017,7 +1013,6 @@ impl SocketInner {
             spsc_recv: std::cell::UnsafeCell::new(None),
             spsc_send_event: std::cell::UnsafeCell::new(None),
             spsc_recv_event: std::cell::UnsafeCell::new(None),
-            spsc_recv_active: std::sync::atomic::AtomicBool::new(false),
             recv_cache: RecvCache::new(),
             direct_recv_io: UnsafeCell::new(None),
             on_peer_ready: Event::new(),
