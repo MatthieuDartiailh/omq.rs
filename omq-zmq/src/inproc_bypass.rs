@@ -64,13 +64,12 @@ pub(crate) fn create_bypass(
 }
 
 impl BypassSend {
-    /// Push a message. Returns Err(msg) if full.
-    /// Signals the receiver's eventfd if the ring was empty.
+    /// Push + flush a message. Returns Err(msg) if full.
+    /// Signals the receiver's eventfd if the ring was empty before flush.
     #[inline]
     pub(crate) fn push(&mut self, msg: omq_compio::Message) -> Result<(), omq_compio::Message> {
-        let was_empty = self.producer.is_empty();
         self.producer.push(msg)?;
-        if was_empty {
+        if let spsc::FlushResult::Flushed { was_empty: true, .. } = self.producer.flush() {
             NotifyFd::signal_recv(self.pipe.recv_signal_fd);
         }
         Ok(())
@@ -83,10 +82,10 @@ impl BypassSend {
 }
 
 impl BypassRecv {
-    /// Pop a message. Returns None if empty.
+    /// Prefetch + pop a message. Returns None if empty.
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<omq_compio::Message> {
-        self.consumer.pop()
+        self.consumer.prefetch_and_pop()
     }
 
     #[inline]

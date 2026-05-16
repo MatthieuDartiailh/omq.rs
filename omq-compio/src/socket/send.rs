@@ -384,6 +384,7 @@ impl Socket {
                     if !producer.is_full() {
                         let frame = InprocFrame::message_from(our_identity.clone(), msg);
                         let _ = producer.push(frame);
+                        producer.flush();
                         return Ok(());
                     }
                 }

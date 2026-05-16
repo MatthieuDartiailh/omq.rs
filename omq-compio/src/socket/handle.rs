@@ -799,9 +799,9 @@ impl Socket {
                 return Ok(msg);
             }
         }
-        // SPSC fast path: if a lock-free ring is installed, drain up
-        // to 8 frames per yield into recv_cache. Amortizes the yield
-        // cost across multiple recv() calls.
+        // SPSC fast path with ypipe-style prefetch.
+        // prefetch() does 1 Acquire load to grab all flushed items,
+        // then pop() reads with zero atomics until exhausted.
         let spsc = unsafe { &mut *self.inner.spsc_recv.get() };
         if let Some(consumer) = spsc {
             let cache = self.inner.recv_cache.get();
@@ -809,6 +809,7 @@ impl Socket {
                 return Ok(msg);
             }
             loop {
+                consumer.prefetch();
                 let mut got = 0;
                 while let Some(frame) = consumer.pop() {
                     if let Some(msg) = self.process_inbound_frame(frame)? {
