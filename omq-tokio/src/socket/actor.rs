@@ -198,6 +198,8 @@ pub(crate) struct SocketDriver {
     closing: bool,
     close_deadline: Option<Instant>,
     close_ack: Option<oneshot::Sender<Result<()>>>,
+    spsc_slot: super::handle::SpscSlot,
+    spsc_activated: super::handle::SpscActivated,
 }
 
 impl SocketDriver {
@@ -211,6 +213,8 @@ impl SocketDriver {
         monitor: MonitorPublisher,
         send_strategy: SendStrategy,
         send_submitter: SendSubmitter,
+        spsc_slot: super::handle::SpscSlot,
+        spsc_activated: super::handle::SpscActivated,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -241,6 +245,8 @@ impl SocketDriver {
             closing: false,
             close_deadline: None,
             close_ack: None,
+            spsc_slot,
+            spsc_activated,
         }
     }
 
@@ -1014,10 +1020,11 @@ impl SocketDriver {
             },
         );
 
-        // No more shim task: ConnectionDriver writes
-        // `(peer_id, PeerOut::Event(...))` directly to the
-        // SocketDriver's shared peer-out channel and emits
-        // `PeerOut::Closed` on its own exit path.
+        // Disable SPSC when a second peer of any type connects.
+        if self.peers.len() > 1 {
+            *self.spsc_slot.write().unwrap() = None;
+        }
+
         tokio::spawn(async move {
             let _ = driver.run().await;
         });
@@ -1100,13 +1107,25 @@ impl SocketDriver {
             out,
             in_rx,
             peer: _peer,
+            spsc,
         } = conn;
 
-        // Driver task. Writes events directly to the SocketDriver's
-        // shared peer-out channel and emits PeerOut::Closed on exit.
-        // No more shim. `max_message_size` is enforced inside the
-        // driver because the codec - which normally enforces it for
-        // byte-stream paths - is bypassed.
+        // Install SPSC for recv-side fast path (first eligible peer only).
+        // Only the RECEIVING socket sets recv_ready (gates the driver's
+        // ring push). The sender socket installs the slot too but does
+        // not activate - it only uses the ring for its own recv direction.
+        if let Some(ref s) = spsc
+            && self.peers.len() == 1
+        {
+            *self.spsc_slot.write().unwrap() = Some(s.clone());
+            if can_bypass_actor_recv(self.socket_type) {
+                s.recv_ready.store(true, std::sync::atomic::Ordering::Release);
+                self.spsc_activated.notify_one();
+            }
+        } else if self.peers.len() > 1 {
+            *self.spsc_slot.write().unwrap() = None;
+        }
+
         tokio::spawn(inproc_peer_driver(
             inbox_rx,
             in_rx,
@@ -1117,6 +1136,7 @@ impl SocketDriver {
             peer_props,
             self.options.max_message_size,
             recv_direct,
+            spsc,
         ));
     }
 
@@ -1417,6 +1437,7 @@ async fn inproc_peer_driver(
     peer_props: omq_proto::proto::command::PeerProperties,
     max_message_size: Option<usize>,
     recv_direct: Option<async_channel::Sender<omq_proto::message::Message>>,
+    spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
 ) {
     use crate::engine::{DriverCommand, PeerOut};
     use omq_proto::proto::greeting::ZMTP_MINOR;
@@ -1475,18 +1496,40 @@ async fn inproc_peer_driver(
                         {
                             return;
                         }
-                        match recv_direct.as_ref() {
-                            Some(tx) => {
-                                if tx.send(m).await.is_err() {
-                                    return;
-                                }
+                        // SPSC fast path: push to ring, notify consumer.
+                        // Falls back to recv_direct when ring is full.
+                        let m = if let Some(ref ring) = spsc
+                            && ring.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            let mut producer = ring.producer.lock().unwrap();
+                            if !producer.is_full() {
+                                let _ = producer.push(m);
+                                producer.flush();
+                                drop(producer);
+                                ring.notify.notify_one();
+
+                                None
+                            } else {
+                                Some(m)
                             }
-                            None => {
-                                if emit_event(&peer_out, peer_id, ZmtpEvent::Message(m))
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
+                        } else {
+
+                            Some(m)
+                        };
+                        if let Some(m) = m {
+                            match recv_direct.as_ref() {
+                                Some(tx) => {
+                                    if tx.send(m).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                None => {
+                                    if emit_event(&peer_out, peer_id, ZmtpEvent::Message(m))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
                                 }
                             }
                         }

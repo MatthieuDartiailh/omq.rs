@@ -1,6 +1,6 @@
 //! Public `Socket` handle.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use futures::channel::oneshot;
 use tokio::sync::mpsc;
@@ -15,6 +15,70 @@ use omq_proto::proto::SocketType;
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
 use crate::routing::{SendStrategy, SendSubmitter};
+use crate::transport::inproc::InprocSpsc;
+
+/// Shared slot for SPSC state. Written by the actor on eligible peer
+/// connect; read by `SpscAwareRecv` on every recv.
+pub(crate) type SpscSlot = Arc<RwLock<Option<Arc<InprocSpsc>>>>;
+
+/// Notified by the actor when SPSC is installed in the slot. Wakes
+/// any recv() that's blocked on the normal async_channel path.
+pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
+
+/// Recv channel that integrates SPSC awareness. Checks the ring before
+/// blocking on the async_channel, and races both when blocking.
+#[derive(Debug)]
+struct SpscAwareRecv {
+    rx: async_channel::Receiver<Message>,
+    spsc: SpscSlot,
+    activated: SpscActivated,
+}
+
+impl SpscAwareRecv {
+    async fn recv(&self) -> Result<Message> {
+        loop {
+            let pair = self.spsc.read().unwrap().clone();
+            if let Some(ref p) = pair {
+                if let Ok(mut consumer) = p.consumer.try_lock() {
+                    consumer.prefetch();
+                    if let Some(msg) = consumer.pop() {
+                        return Ok(msg);
+                    }
+                }
+                tokio::select! {
+                    biased;
+                    () = p.notify.notified() => continue,
+                    res = self.rx.recv() => {
+                        return res.map_err(|_| Error::Closed);
+                    }
+                }
+            }
+            tokio::select! {
+                biased;
+                res = self.rx.recv() => {
+                    return res.map_err(|_| Error::Closed);
+                }
+                () = self.activated.notified() => continue,
+            }
+        }
+    }
+
+    fn try_recv(&self) -> Result<Message> {
+        let pair = self.spsc.read().unwrap().clone();
+        if let Some(ref p) = pair {
+            if let Ok(mut consumer) = p.consumer.try_lock() {
+                consumer.prefetch();
+                if let Some(msg) = consumer.pop() {
+                    return Ok(msg);
+                }
+            }
+        }
+        self.rx.try_recv().map_err(|e| match e {
+            async_channel::TryRecvError::Empty => Error::WouldBlock,
+            async_channel::TryRecvError::Closed => Error::Closed,
+        })
+    }
+}
 
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
 /// driver task. Close happens via the explicit [`Socket::close`] method
@@ -38,7 +102,7 @@ pub struct Socket {
 struct Inner {
     socket_type: SocketType,
     cmd_tx: mpsc::Sender<SocketCommand>,
-    recv_rx: async_channel::Receiver<Message>,
+    recv_rx: SpscAwareRecv,
     monitor: MonitorPublisher,
     root_cancel: CancellationToken,
     /// Pre-built submitter for socket types that bypass the actor on send.
@@ -71,6 +135,8 @@ impl Socket {
         // moves into the driver.
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
         let send_submitter = send_strategy.submitter();
+        let spsc_slot: SpscSlot = Arc::new(RwLock::new(None));
+        let spsc_activated: SpscActivated = Arc::new(tokio::sync::Notify::new());
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -80,13 +146,19 @@ impl Socket {
             monitor.clone(),
             send_strategy,
             send_submitter.clone(),
+            spsc_slot.clone(),
+            spsc_activated.clone(),
         );
         spawn_driver(driver);
         Self {
             inner: Arc::new(Inner {
                 socket_type,
                 cmd_tx,
-                recv_rx,
+                recv_rx: SpscAwareRecv {
+                    rx: recv_rx,
+                    spsc: spsc_slot,
+                    activated: spsc_activated,
+                },
                 monitor,
                 root_cancel: cancel,
                 send_submitter,
@@ -173,10 +245,23 @@ impl Socket {
                 rx.await.map_err(|_| Error::Closed)?
             }
             _ => {
-                // pre_send is either a no-op identity transform or a pure
-                // frame-count check with no mutable TypeState. Bypass the
-                // actor: inline check + direct submitter.
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
+                // SPSC send fast path: push directly to ring.
+                // Gated on recv_ready (set by recv-side actor after
+                // installing SpscAwareRecv slot).
+                let spsc = self.inner.recv_rx.spsc.read().unwrap().clone();
+                if let Some(ref pair) = spsc
+                    && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    if let Ok(mut producer) = pair.producer.try_lock() {
+                        if !producer.is_full() {
+                            let _ = producer.push(msg);
+                            producer.flush();
+                            pair.notify.notify_one();
+                            return Ok(());
+                        }
+                    }
+                }
                 self.inner.send_submitter.send(msg).await
             }
         }
@@ -200,18 +285,14 @@ impl Socket {
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
-        self.inner.recv_rx.recv().await.map_err(|_| Error::Closed)
+        self.inner.recv_rx.recv().await
     }
 
     /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.
     pub fn try_recv(&self) -> Result<Message> {
-        use async_channel::TryRecvError;
-        self.inner.recv_rx.try_recv().map_err(|e| match e {
-            TryRecvError::Empty => Error::WouldBlock,
-            TryRecvError::Closed => Error::Closed,
-        })
+        self.inner.recv_rx.try_recv()
     }
 
     /// Subscribe to a topic prefix. Only valid on SUB / XSUB sockets; other

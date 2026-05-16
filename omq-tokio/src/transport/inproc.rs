@@ -14,7 +14,7 @@
 //! channel is wired up.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use bytes::Bytes;
 use futures::channel::oneshot;
@@ -23,6 +23,27 @@ use tokio::sync::mpsc;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::{Command, SocketType};
+
+/// Shared SPSC state for single-peer inproc fast path.
+#[derive(Debug)]
+pub struct InprocSpsc {
+    pub producer: Mutex<blume::spsc::Producer<Message>>,
+    pub consumer: Mutex<blume::spsc::Consumer<Message>>,
+    pub notify: tokio::sync::Notify,
+    /// Set by the actor after installing the slot in `SpscAwareRecv`.
+    /// The driver checks this before pushing; until set, it uses
+    /// recv_direct so the user's recv sees messages immediately.
+    pub recv_ready: std::sync::atomic::AtomicBool,
+}
+
+fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
+    matches!(
+        (a, b),
+        (SocketType::Push, SocketType::Pull)
+            | (SocketType::Pull, SocketType::Push)
+            | (SocketType::Pair, SocketType::Pair)
+    )
+}
 
 /// Frame exchanged between two inproc peers. Either a fully-
 /// assembled application Message or a ZMTP command (SUBSCRIBE,
@@ -51,6 +72,7 @@ pub struct InprocConn {
     pub out: mpsc::Sender<InprocFrame>,
     pub in_rx: mpsc::Receiver<InprocFrame>,
     pub peer: InprocPeerSnapshot,
+    pub spsc: Option<Arc<InprocSpsc>>,
 }
 
 /// Default per-direction inflight-message capacity. Holds whole
@@ -64,12 +86,9 @@ pub const DEFAULT_INPROC_HWM: usize = 1024;
 /// returns its own snapshot to the connector.
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
-    /// Listener consumes from this - frames the CONNECTOR sent.
     connector_to_listener_rx: mpsc::Receiver<InprocFrame>,
-    /// Listener sends through this - frames going TO the connector.
     listener_to_connector_tx: mpsc::Sender<InprocFrame>,
-    /// One-way reply: listener's snapshot.
-    accept_ack: oneshot::Sender<InprocPeerSnapshot>,
+    accept_ack: oneshot::Sender<(InprocPeerSnapshot, Option<Arc<InprocSpsc>>)>,
 }
 
 /// Global registry of bound inproc names → request channel.
@@ -114,7 +133,7 @@ pub async fn connect(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocC
     // (connector→listener) and (listener→connector) directions.
     let (c2l_tx, c2l_rx) = mpsc::channel::<InprocFrame>(DEFAULT_INPROC_HWM);
     let (l2c_tx, l2c_rx) = mpsc::channel::<InprocFrame>(DEFAULT_INPROC_HWM);
-    let (ack_tx, ack_rx) = oneshot::channel::<InprocPeerSnapshot>();
+    let (ack_tx, ack_rx) = oneshot::channel();
 
     let request = InprocConnectRequest {
         connector: snapshot,
@@ -127,7 +146,7 @@ pub async fn connect(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocC
         .send(request)
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc binding closed: {name}")))?;
-    let listener_snapshot = ack_rx
+    let (listener_snapshot, spsc) = ack_rx
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc accept dropped: {name}")))?;
 
@@ -135,6 +154,7 @@ pub async fn connect(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocC
         out: c2l_tx,
         in_rx: l2c_rx,
         peer: listener_snapshot,
+        spsc,
     })
 }
 
@@ -168,14 +188,23 @@ impl InprocListener {
             listener_to_connector_tx,
             accept_ack,
         } = req;
-        // Best-effort: connector dropped before we got here ⇒ we
-        // won't ack and we drop the channels, which the connector
-        // observes as Err on its ack_rx.
-        let _ = accept_ack.send(self.snapshot.clone());
+        let spsc = if is_spsc_eligible(self.snapshot.socket_type, connector.socket_type) {
+            let (p, c) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
+            Some(Arc::new(InprocSpsc {
+                producer: Mutex::new(p),
+                consumer: Mutex::new(c),
+                notify: tokio::sync::Notify::new(),
+                recv_ready: std::sync::atomic::AtomicBool::new(false),
+            }))
+        } else {
+            None
+        };
+        let _ = accept_ack.send((self.snapshot.clone(), spsc.clone()));
         Ok(InprocConn {
             out: listener_to_connector_tx,
             in_rx: connector_to_listener_rx,
             peer: connector,
+            spsc,
         })
     }
 }
