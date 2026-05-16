@@ -44,8 +44,7 @@ pub(crate) struct BypassSend {
 #[derive(Debug)]
 pub(crate) struct BypassRecv {
     pub(crate) consumer: spsc::Consumer<omq_compio::Message>,
-    // Kept alive so `InprocPipe` (and its recv_signal_fd) outlives the receiver.
-    _pipe: Arc<InprocPipe>,
+    pipe: Arc<InprocPipe>,
 }
 
 /// Create a bypass pair for an inproc PUSH/PULL connection.
@@ -63,7 +62,7 @@ pub(crate) fn create_bypass(
             producer,
             pipe: pipe.clone(),
         },
-        BypassRecv { consumer, _pipe: pipe },
+        BypassRecv { consumer, pipe },
     )
 }
 
@@ -81,14 +80,37 @@ impl BypassSend {
         }
         Ok(())
     }
-
 }
 
 impl BypassRecv {
     /// Prefetch + pop a message. Returns None if empty.
+    /// Drains the recv eventfd when the ring becomes empty so poll
+    /// sees the fd as not-readable after all messages are consumed.
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<omq_compio::Message> {
-        self.consumer.prefetch_and_pop()
+        let msg = self.consumer.prefetch_and_pop();
+        if msg.is_some() && self.consumer.is_empty() {
+            drain_recv_fd(self.pipe.recv_signal_fd);
+        }
+        msg
     }
+}
 
+#[cfg(target_os = "linux")]
+fn drain_recv_fd(fd: std::os::unix::io::RawFd) {
+    let mut buf = 0u64;
+    unsafe {
+        libc::read(fd, (&raw mut buf).cast::<libc::c_void>(), 8);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn drain_recv_fd(fd: std::os::unix::io::RawFd) {
+    let mut buf = [0u8; 64];
+    loop {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        if n <= 0 {
+            break;
+        }
+    }
 }

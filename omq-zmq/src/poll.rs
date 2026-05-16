@@ -95,7 +95,10 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
             let has_buffered = sock
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed)
-                || sock.recv_rx.get().is_some_and(|rx| !rx.is_empty());
+                || sock.recv_rx.get().is_some_and(|rx| !rx.is_empty())
+                || unsafe { &*sock.bypass_recv.get() }
+                    .as_ref()
+                    .is_some_and(|br| !br.consumer.is_empty());
             if has_buffered {
                 item.revents |= ZMQ_POLLIN;
             }

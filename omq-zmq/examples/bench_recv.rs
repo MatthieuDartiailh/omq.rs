@@ -39,7 +39,12 @@ fn unique_inproc() -> CString {
 fn get_last_endpoint(sock: *mut libc::c_void) -> CString {
     let mut buf = [0u8; 256];
     let mut len = buf.len();
-    zmq_getsockopt(sock, ZMQ_LAST_ENDPOINT, buf.as_mut_ptr().cast(), std::ptr::addr_of_mut!(len));
+    zmq_getsockopt(
+        sock,
+        ZMQ_LAST_ENDPOINT,
+        buf.as_mut_ptr().cast(),
+        std::ptr::addr_of_mut!(len),
+    );
     // len includes the trailing NUL; the string is len-1 bytes.
     let s = std::str::from_utf8(&buf[..len.saturating_sub(1)]).unwrap();
     CString::new(s).unwrap()

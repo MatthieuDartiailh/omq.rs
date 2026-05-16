@@ -275,4 +275,3 @@ fn copy_to_buf(buf: *mut libc::c_void, buf_len: usize, src: &[u8]) {
         std::ptr::copy_nonoverlapping(src.as_ptr(), buf.cast::<u8>(), copy_len);
     }
 }
-

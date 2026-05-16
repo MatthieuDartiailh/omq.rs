@@ -85,7 +85,10 @@ async fn pull_fair_queues_three_pushes() {
 
     let mut received = std::collections::HashSet::new();
     for _ in 0..15 {
-        let m = pull.recv().await.unwrap();
+        let m = compio::time::timeout(Duration::from_secs(5), pull.recv())
+            .await
+            .expect("pull recv timed out")
+            .unwrap();
         received.insert(String::from_utf8_lossy(&m.part_bytes(0).unwrap()).into_owned());
     }
     assert_eq!(received.len(), 15);
