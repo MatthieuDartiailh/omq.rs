@@ -791,6 +791,9 @@ impl Socket {
             if let Some(consumer) = spsc.as_mut() {
                 let event = unsafe { &*self.inner.spsc_recv_event.get() };
                 if let Some(e) = event.as_ref() {
+                    self.inner
+                        .spsc_recv_active
+                        .store(true, std::sync::atomic::Ordering::Release);
                     let cache = self.inner.recv_cache.get();
                     if let Some(msg) = cache.pop_front() {
                         return Ok(msg);
@@ -826,28 +829,18 @@ impl Socket {
                     }
                 }
             }
-            while let Ok(frame) = self.inner.in_rx.try_recv() {
-                if let Some(msg) = self.process_inbound_frame(frame)? {
-                    return Ok(msg);
-                }
-            }
-            // Block: race in_rx against on_peer_ready so we re-check
-            // SPSC when a cross-thread peer installs it.
-            let peer_listener = self.inner.on_peer_ready.listen();
-            if unsafe { &*self.inner.spsc_recv.get() }.is_some() {
-                continue;
-            }
-            futures::pin_mut!(peer_listener);
-            let in_rx_fut = self.inner.in_rx.recv_async();
-            futures::pin_mut!(in_rx_fut);
-            futures::select_biased! {
-                frame = in_rx_fut.fuse() => {
-                    let frame = frame.map_err(|_| Error::Closed)?;
-                    if let Some(msg) = self.process_inbound_frame(frame)? {
-                        return Ok(msg);
-                    }
-                }
-                () = peer_listener.fuse() => {}
+            // No SPSC. Use the plain in_rx path. If a cross-thread
+            // peer installs SPSC while we block here, the sender's
+            // ring-full overflow still delivers to in_rx. On the next
+            // recv() call we re-check SPSC at the top of this loop.
+            let frame = self
+                .inner
+                .in_rx
+                .recv_async()
+                .await
+                .map_err(|_| Error::Closed)?;
+            if let Some(msg) = self.process_inbound_frame(frame)? {
+                return Ok(msg);
             }
         }
     }

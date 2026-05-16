@@ -381,7 +381,12 @@ impl Socket {
                 ref our_identity, ..
             } => {
                 let spsc = unsafe { &mut *self.inner().spsc_send.get() };
-                if let Some(producer) = spsc {
+                if let Some(producer) = spsc
+                    && self
+                        .inner()
+                        .spsc_recv_active
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
                     let frame = InprocFrame::message_from(our_identity.clone(), msg);
                     let mut frame = frame;
                     loop {
