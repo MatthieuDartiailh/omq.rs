@@ -378,14 +378,25 @@ impl Socket {
     ) -> Result<()> {
         match chosen {
             PeerOut::Inproc { ref our_identity, .. } => {
-                // SPSC fast path: bypass blume for single-peer inproc.
                 let spsc = unsafe { &mut *self.inner().spsc_send.get() };
                 if let Some(producer) = spsc {
-                    if !producer.is_full() {
-                        let frame = InprocFrame::message_from(our_identity.clone(), msg);
-                        let _ = producer.push(frame);
-                        producer.flush();
-                        return Ok(());
+                    let frame = InprocFrame::message_from(our_identity.clone(), msg);
+                    let mut frame = frame;
+                    loop {
+                        match producer.push(frame) {
+                            Ok(()) => {
+                                producer.flush();
+                                let e = unsafe { &*self.inner().spsc_send_event.get() };
+                                if let Some(event) = e {
+                                    event.notify(usize::MAX);
+                                }
+                                return Ok(());
+                            }
+                            Err(returned) => {
+                                frame = returned;
+                                std::hint::spin_loop();
+                            }
+                        }
                     }
                 }
                 chosen.send(msg).await

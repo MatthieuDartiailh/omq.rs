@@ -155,9 +155,14 @@ pub(super) struct SocketInner {
     pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
     pub(super) in_tx: blume::Sender<InprocFrame>,
     pub(super) in_rx: blume::Receiver<InprocFrame>,
-    /// SPSC fast path for single-peer inproc. Set by install_inproc_peer.
+    /// SPSC fast path for cross-thread single-peer inproc.
+    /// Set by `install_inproc_peer` when the peer is on a different thread.
     pub(super) spsc_send: std::cell::UnsafeCell<Option<blume::spsc::Producer<InprocFrame>>>,
     pub(super) spsc_recv: std::cell::UnsafeCell<Option<blume::spsc::Consumer<InprocFrame>>>,
+    /// Event for the direction we SEND (we call notify after push+flush).
+    pub(super) spsc_send_event: std::cell::UnsafeCell<Option<Arc<Event>>>,
+    /// Event for the direction we RECEIVE (we listen when ring is empty).
+    pub(super) spsc_recv_event: std::cell::UnsafeCell<Option<Arc<Event>>>,
     /// Batch-drain cache for the direct-recv path. `try_direct_recv` drains
     /// all codec events from one TCP delivery into here; `recv`/`try_recv`
     /// pop raw messages and apply `post_recv_apply`. Uncontended on a
@@ -1006,6 +1011,8 @@ impl SocketInner {
             in_rx,
             spsc_send: std::cell::UnsafeCell::new(None),
             spsc_recv: std::cell::UnsafeCell::new(None),
+            spsc_send_event: std::cell::UnsafeCell::new(None),
+            spsc_recv_event: std::cell::UnsafeCell::new(None),
             recv_cache: RecvCache::new(),
             direct_recv_io: UnsafeCell::new(None),
             on_peer_ready: Event::new(),

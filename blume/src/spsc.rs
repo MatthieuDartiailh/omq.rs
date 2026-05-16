@@ -1,9 +1,9 @@
 //! Lock-free bounded SPSC ring with ypipe-style batched flush/prefetch.
 //!
 //! Three pointers:
-//! - `head`: consumer read position (AtomicUsize, consumer-owned)
+//! - `head`: consumer read position (`AtomicUsize`, consumer-owned)
 //! - `tail`: writer position (plain usize, producer-only, no atomic)
-//! - `flush`: last flushed position (AtomicUsize, producer writes, consumer reads)
+//! - `flush`: last flushed position (`AtomicUsize`, producer writes, consumer reads)
 //!
 //! `push` writes to the ring with zero atomics. `flush` makes all
 //! pending writes visible with one Release store. `pop` reads with
@@ -153,8 +153,13 @@ impl<T> Producer<T> {
     }
 
     #[inline]
-    pub fn is_full(&self) -> bool {
-        self.tail - self.cached_head >= self.ring.capacity()
+    pub fn is_full(&mut self) -> bool {
+        if self.tail - self.cached_head >= self.ring.capacity() {
+            self.cached_head = self.ring.head.0.load(Ordering::Acquire);
+            self.tail - self.cached_head >= self.ring.capacity()
+        } else {
+            false
+        }
     }
 
     #[inline]

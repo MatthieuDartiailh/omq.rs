@@ -12,7 +12,9 @@
 //! blume Senders are atomic-refcounted handles).
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+
+use event_listener::Event;
 
 use bytes::Bytes;
 
@@ -98,6 +100,14 @@ pub struct InprocConn {
     /// SPSC fast-path consumer (we recv small frames from here before
     /// checking `in_rx`). Present only for eligible pairs.
     pub spsc_recv: Option<blume::spsc::Consumer<InprocFrame>>,
+    /// True when the peer is on a different thread.
+    pub cross_thread: bool,
+    /// Shared event for the direction WE SEND in. We call `notify()`
+    /// after pushing; the peer listens when its ring is empty.
+    pub spsc_send_event: Option<Arc<Event>>,
+    /// Shared event for the direction WE RECEIVE from. We listen on
+    /// this; the peer calls `notify()` after pushing.
+    pub spsc_recv_event: Option<Arc<Event>>,
 }
 
 /// Sent from connect to accept through the registry: connector's
@@ -108,6 +118,10 @@ pub struct InprocConn {
 struct SpscPair {
     for_connector_send: Option<blume::spsc::Producer<InprocFrame>>,
     for_connector_recv: Option<blume::spsc::Consumer<InprocFrame>>,
+    /// Event for the connector→listener direction (connector notifies, listener listens).
+    c2l_event: Option<Arc<Event>>,
+    /// Event for the listener→connector direction (listener notifies, connector listens).
+    l2c_event: Option<Arc<Event>>,
 }
 
 type AckPayload = (
@@ -119,6 +133,7 @@ type AckPayload = (
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
     connector_in_tx: blume::Sender<InprocFrame>,
+    connector_thread: std::thread::ThreadId,
     accept_ack: flume::Sender<AckPayload>,
 }
 
@@ -234,6 +249,7 @@ pub async fn connect(
     let request = InprocConnectRequest {
         connector: snapshot,
         connector_in_tx: in_tx,
+        connector_thread: std::thread::current().id(),
         accept_ack: ack_tx,
     };
 
@@ -246,11 +262,20 @@ pub async fn connect(
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc accept dropped: {name}")))?;
 
+    // The accept ran on the binder's thread. If we're on a different
+    // thread, the SPSC ring can be used without cooperative yield issues.
+    // The accept side already computed cross_thread from our connector_thread.
+    // We just recompute the same thing here (our thread vs accept's thread
+    // doesn't matter since both sides agreed in the handshake).
+    let cross_thread = spsc_pair.for_connector_send.is_some();
     Ok(InprocConn {
         out: listener_in_tx,
         peer: listener_snapshot,
         spsc_send: spsc_pair.for_connector_send,
         spsc_recv: spsc_pair.for_connector_recv,
+        cross_thread,
+        spsc_send_event: spsc_pair.c2l_event,
+        spsc_recv_event: spsc_pair.l2c_event,
     })
 }
 
@@ -277,30 +302,41 @@ impl InprocListener {
         let InprocConnectRequest {
             connector,
             connector_in_tx,
+            connector_thread,
             accept_ack,
         } = req;
 
-        let eligible = is_spsc_eligible(self.snapshot.socket_type, connector.socket_type);
-        let (my_spsc_send, my_spsc_recv, connector_pair) = if eligible {
+        let cross_thread = connector_thread != std::thread::current().id();
+        let eligible =
+            cross_thread && is_spsc_eligible(self.snapshot.socket_type, connector.socket_type);
+        let (my_spsc_send, my_spsc_recv, my_send_event, my_recv_event, connector_pair) = if eligible {
             let (p1, c1) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
             let (p2, c2) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
-            // p1/c1: listener→connector direction
-            // p2/c2: connector→listener direction
+            let c2l = Arc::new(Event::new());
+            let l2c = Arc::new(Event::new());
             (
                 Some(p1),
                 Some(c2),
+                Some(l2c.clone()),
+                Some(c2l.clone()),
                 SpscPair {
                     for_connector_send: Some(p2),
                     for_connector_recv: Some(c1),
+                    c2l_event: Some(c2l),
+                    l2c_event: Some(l2c),
                 },
             )
         } else {
             (
                 None,
                 None,
+                None,
+                None,
                 SpscPair {
                     for_connector_send: None,
                     for_connector_recv: None,
+                    c2l_event: None,
+                    l2c_event: None,
                 },
             )
         };
@@ -311,6 +347,9 @@ impl InprocListener {
             peer: connector,
             spsc_send: my_spsc_send,
             spsc_recv: my_spsc_recv,
+            cross_thread,
+            spsc_send_event: my_send_event,
+            spsc_recv_event: my_recv_event,
         })
     }
 }

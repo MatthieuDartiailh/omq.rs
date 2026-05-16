@@ -63,20 +63,26 @@ pub(super) fn install_inproc_peer(
     } else {
         None
     };
-    // SPSC fast path: only for the first inproc peer.
-    // Multi-peer falls back to blume.
+    // SPSC fast path: only for the first cross-thread inproc peer.
     let existing_peers = inner.out_peers.read().expect("peers lock").len();
-    if existing_peers == 0 {
+    if existing_peers == 0 && conn.cross_thread {
         if let Some(producer) = conn.spsc_send {
             unsafe { *inner.spsc_send.get() = Some(producer) };
         }
         if let Some(consumer) = conn.spsc_recv {
             unsafe { *inner.spsc_recv.get() = Some(consumer) };
         }
-    } else {
-        // Disable SPSC: we're now multi-peer.
+        if let Some(e) = conn.spsc_send_event {
+            unsafe { *inner.spsc_send_event.get() = Some(e) };
+        }
+        if let Some(e) = conn.spsc_recv_event {
+            unsafe { *inner.spsc_recv_event.get() = Some(e) };
+        }
+    } else if existing_peers > 0 {
         unsafe { *inner.spsc_send.get() = None };
         unsafe { *inner.spsc_recv.get() = None };
+        unsafe { *inner.spsc_send_event.get() = None };
+        unsafe { *inner.spsc_recv_event.get() = None };
     }
 
     let out = PeerOut::Inproc {
