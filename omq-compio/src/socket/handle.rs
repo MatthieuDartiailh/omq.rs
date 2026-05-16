@@ -794,26 +794,25 @@ impl Socket {
         }
         // Per-peer SPSC fair-queue + blume in_rx for wire/same-thread.
         loop {
-            let cache = self.inner.recv_cache.get();
-            if let Some(msg) = cache.pop_front() {
+            // recv_cache: leftover from wire direct-recv drain.
+            if let Some(msg) = self.inner.recv_cache.get().pop_front() {
                 return Ok(msg);
             }
 
-            // Fair-queue across per-peer inproc consumers.
+            // Fair-queue: pop one frame from the next consumer that
+            // has data. One item per call keeps delivery fair across
+            // peers; the caller's next recv() advances fq_index.
             let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
             if !recv_state.consumers.is_empty() {
                 let n = recv_state.consumers.len();
-                let start = recv_state.fq_index % n;
+                let start = recv_state.fq_index;
                 for i in 0..n {
                     let idx = (start + i) % n;
-                    if recv_state.consumers[idx].prefetch() > 0 {
-                        while let Some(frame) = recv_state.consumers[idx].pop() {
-                            if let Some(msg) = self.process_inbound_frame(frame)? {
-                                cache.push_back(msg);
-                            }
-                        }
+                    while let Some(frame) =
+                        recv_state.consumers[idx].prefetch_and_pop()
+                    {
                         recv_state.fq_index = idx + 1;
-                        if let Some(msg) = cache.pop_front() {
+                        if let Some(msg) = self.process_inbound_frame(frame)? {
                             return Ok(msg);
                         }
                     }
@@ -838,7 +837,7 @@ impl Socket {
             let inproc_listener = self.inner.inproc_recv_event.listen();
             let peer_listener = self.inner.on_peer_ready.listen();
             let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
-            if recv_state.consumers.iter_mut().any(|c| c.prefetch() > 0) {
+            if recv_state.consumers.iter().any(|c| !c.is_empty()) {
                 continue;
             }
             let in_rx_fut = self.inner.in_rx.recv_async();
@@ -983,14 +982,11 @@ impl Socket {
                 }
             }
         }
-        // Check per-peer inproc consumers.
         let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
         for c in &mut recv_state.consumers {
-            if c.prefetch() > 0 {
-                while let Some(frame) = c.pop() {
-                    if let Some(msg) = self.process_inbound_frame(frame)? {
-                        return Ok(msg);
-                    }
+            while let Some(frame) = c.prefetch_and_pop() {
+                if let Some(msg) = self.process_inbound_frame(frame)? {
+                    return Ok(msg);
                 }
             }
         }

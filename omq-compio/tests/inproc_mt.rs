@@ -152,3 +152,57 @@ fn spsc_preserves_ordering() {
     push_thread.join().unwrap();
     pull_thread.join().unwrap();
 }
+
+/// Multi-PUSH cross-thread to one PULL.
+#[test]
+fn multi_push_cross_thread() {
+    const N: usize = 300;
+    const PEERS: usize = 3;
+    let ep = inproc_ep("spsc-multi-push");
+    let count = Arc::new(AtomicUsize::new(0));
+    let ready = Arc::new(Barrier::new(1 + PEERS));
+
+    let pull_count = count.clone();
+    let pull_ready = ready.clone();
+    let pull_ep = ep.clone();
+    let pull_thread = std::thread::spawn(move || {
+        let rt = compio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let pull = Socket::new(SocketType::Pull, Options::default());
+            pull.bind(pull_ep).await.unwrap();
+            pull_ready.wait();
+            for _ in 0..(N * PEERS) {
+                let r = compio::time::timeout(Duration::from_secs(5), pull.recv()).await;
+                r.expect("recv timed out").unwrap();
+                pull_count.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    });
+
+    let mut push_threads = Vec::new();
+    for i in 0..PEERS {
+        let ep = ep.clone();
+        let ready = ready.clone();
+        push_threads.push(std::thread::spawn(move || {
+            let rt = compio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                ready.wait();
+                compio::time::sleep(Duration::from_millis(20)).await;
+                let push = Socket::new(SocketType::Push, Options::default());
+                push.connect(ep).await.unwrap();
+                compio::time::sleep(Duration::from_millis(20)).await;
+                for j in 0..N {
+                    push.send(Message::single(format!("p{i}-{j}")))
+                        .await
+                        .unwrap();
+                }
+            });
+        }));
+    }
+
+    for t in push_threads {
+        t.join().unwrap();
+    }
+    pull_thread.join().unwrap();
+    assert_eq!(count.load(Ordering::Relaxed), N * PEERS);
+}
