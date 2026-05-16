@@ -198,7 +198,9 @@ pub(crate) struct SocketDriver {
     closing: bool,
     close_deadline: Option<Instant>,
     close_ack: Option<oneshot::Sender<Result<()>>>,
-    spsc_slot: super::handle::SpscSlot,
+    consumers: super::handle::SpscConsumers,
+    send_ring: super::handle::SpscSendRing,
+    recv_notify: super::handle::SpscRecvNotify,
     spsc_activated: super::handle::SpscActivated,
 }
 
@@ -213,7 +215,9 @@ impl SocketDriver {
         monitor: MonitorPublisher,
         send_strategy: SendStrategy,
         send_submitter: SendSubmitter,
-        spsc_slot: super::handle::SpscSlot,
+        consumers: super::handle::SpscConsumers,
+        send_ring: super::handle::SpscSendRing,
+        recv_notify: super::handle::SpscRecvNotify,
         spsc_activated: super::handle::SpscActivated,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
@@ -245,7 +249,9 @@ impl SocketDriver {
             closing: false,
             close_deadline: None,
             close_ack: None,
-            spsc_slot,
+            consumers,
+            send_ring,
+            recv_notify,
             spsc_activated,
         }
     }
@@ -628,7 +634,13 @@ impl SocketDriver {
         }
         reject_encrypted_inproc(&endpoint, &self.options.mechanism)?;
         let snapshot = self.inproc_snapshot();
-        let mut listener = bind_any(&endpoint, &snapshot).await?;
+        let mut listener = bind_any(
+            &endpoint,
+            &snapshot,
+            &self.recv_notify,
+            self.options.max_message_size,
+        )
+        .await?;
         let resolved = endpoint.rewrap_tcp(listener.local_endpoint().clone());
         self.monitor.publish(MonitorEvent::Listening {
             endpoint: resolved.clone(),
@@ -680,10 +692,11 @@ impl SocketDriver {
         let monitor_ep = endpoint.clone();
         let tx_for_delay = tx.clone();
         let snapshot = self.inproc_snapshot();
+        let recv_notify = self.recv_notify.clone();
         let task = tokio::spawn(async move {
             let ep_for_dial = dialer_ep.clone();
             let result = dial_with_backoff(
-                || connect_any(&ep_for_dial, &snapshot),
+                || connect_any(&ep_for_dial, &snapshot, &recv_notify),
                 policy,
                 &child_cancel,
                 |delay, attempt| {
@@ -1020,9 +1033,9 @@ impl SocketDriver {
             },
         );
 
-        // Disable SPSC when a second peer of any type connects.
+        // Disable send fast path when a second peer of any type connects.
         if self.peers.len() > 1 {
-            *self.spsc_slot.write().unwrap() = None;
+            *self.send_ring.write().unwrap() = None;
         }
 
         tokio::spawn(async move {
@@ -1110,21 +1123,21 @@ impl SocketDriver {
             spsc,
         } = conn;
 
-        // Install SPSC for recv-side fast path (first eligible peer only).
-        // Only the RECEIVING socket sets recv_ready (gates the driver's
-        // ring push). The sender socket installs the slot too but does
-        // not activate - it only uses the ring for its own recv direction.
-        if let Some(ref s) = spsc
-            && self.peers.len() == 1
-        {
-            *self.spsc_slot.write().unwrap() = Some(s.clone());
+        // Per-peer SPSC: always add to consumers Vec (recv side).
+        // Send fast path ring: single-peer only.
+        if let Some(ref s) = spsc {
+            self.consumers.write().unwrap().push(s.clone());
             if can_bypass_actor_recv(self.socket_type) {
                 s.recv_ready
                     .store(true, std::sync::atomic::Ordering::Release);
-                self.spsc_activated.notify_one();
             }
-        } else if self.peers.len() > 1 {
-            *self.spsc_slot.write().unwrap() = None;
+            self.spsc_activated.notify_one();
+
+            if self.peers.len() == 1 {
+                *self.send_ring.write().unwrap() = Some(s.clone());
+            } else {
+                *self.send_ring.write().unwrap() = None;
+            }
         }
 
         tokio::spawn(inproc_peer_driver(
@@ -1497,11 +1510,9 @@ async fn inproc_peer_driver(
                         {
                             return;
                         }
-                        // SPSC fast path: push to ring, notify consumer.
-                        // Falls back to recv_direct when ring is full.
-                        let m = if let Some(ref ring) = spsc
-                            && ring.recv_ready.load(std::sync::atomic::Ordering::Acquire)
-                        {
+                        // Per-peer SPSC: always try the ring first.
+                        // Falls back to recv_direct/actor on full.
+                        let m = if let Some(ref ring) = spsc {
                             let mut producer = ring.producer.lock().unwrap();
                             if producer.is_full() {
                                 Some(m)
@@ -1509,7 +1520,7 @@ async fn inproc_peer_driver(
                                 let _ = producer.push(m);
                                 producer.flush();
                                 drop(producer);
-                                ring.notify.notify_one();
+                                ring.recv_notify.notify_one();
                                 None
                             }
                         } else {

@@ -24,16 +24,21 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::{Command, SocketType};
 
-/// Shared SPSC state for single-peer inproc fast path.
+/// Per-peer SPSC state for inproc fast path.
 #[derive(Debug)]
 pub struct InprocSpsc {
     pub producer: Mutex<blume::spsc::Producer<Message>>,
     pub consumer: Mutex<blume::spsc::Consumer<Message>>,
-    pub notify: tokio::sync::Notify,
-    /// Set by the actor after installing the slot in `SpscAwareRecv`.
-    /// The driver checks this before pushing; until set, it uses
-    /// `recv_direct` so the user's recv sees messages immediately.
+    /// Receiver socket's shared recv notification. The driver and
+    /// send fast path notify this after push so `recv()` wakes up.
+    pub recv_notify: Arc<tokio::sync::Notify>,
+    /// Gates the send fast path (`Socket::send` bypassing the actor).
+    /// Set by the actor after installing the ring. The per-peer
+    /// driver does NOT check this; it always tries the ring first.
     pub recv_ready: std::sync::atomic::AtomicBool,
+    /// Receiver's max message size. The send fast path checks this
+    /// before pushing (the driver checks separately). `None` = no limit.
+    pub max_message_size: Option<usize>,
 }
 
 fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
@@ -42,6 +47,20 @@ fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
         (SocketType::Push, SocketType::Pull)
             | (SocketType::Pull, SocketType::Push)
             | (SocketType::Pair, SocketType::Pair)
+    )
+}
+
+fn is_recv_side(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Pull
+            | SocketType::Dealer
+            | SocketType::Sub
+            | SocketType::XSub
+            | SocketType::Pair
+            | SocketType::Client
+            | SocketType::Channel
+            | SocketType::Gather
     )
 }
 
@@ -88,6 +107,7 @@ struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
     connector_to_listener_rx: mpsc::Receiver<InprocFrame>,
     listener_to_connector_tx: mpsc::Sender<InprocFrame>,
+    connector_recv_notify: Arc<tokio::sync::Notify>,
     accept_ack: oneshot::Sender<(InprocPeerSnapshot, Option<Arc<InprocSpsc>>)>,
 }
 
@@ -99,7 +119,12 @@ static REGISTRY: LazyLock<Mutex<HashMap<String, mpsc::Sender<InprocConnectReques
 /// `InprocConn` per accepted connector. `snapshot` is captured
 /// here so we can hand it back to each connector synchronously
 /// during `accept`.
-pub fn bind(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocListener> {
+pub fn bind(
+    name: &str,
+    snapshot: InprocPeerSnapshot,
+    recv_notify: Arc<tokio::sync::Notify>,
+    max_message_size: Option<usize>,
+) -> Result<InprocListener> {
     let (tx, rx) = mpsc::channel(32);
     {
         let mut reg = REGISTRY.lock().expect("inproc registry poisoned");
@@ -116,6 +141,8 @@ pub fn bind(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocListener> 
             name: name.to_string(),
         },
         snapshot,
+        recv_notify,
+        max_message_size,
         incoming: rx,
     })
 }
@@ -123,7 +150,11 @@ pub fn bind(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocListener> 
 /// Connect to a previously-bound `name`. Creates two channels
 /// (one per direction), sends the listener-side halves through
 /// the registry, awaits the listener's snapshot reply.
-pub async fn connect(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocConn> {
+pub async fn connect(
+    name: &str,
+    snapshot: InprocPeerSnapshot,
+    recv_notify: Arc<tokio::sync::Notify>,
+) -> Result<InprocConn> {
     let req_tx = {
         let reg = REGISTRY.lock().expect("inproc registry poisoned");
         reg.get(name).cloned()
@@ -139,6 +170,7 @@ pub async fn connect(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocC
         connector: snapshot,
         connector_to_listener_rx: c2l_rx,
         listener_to_connector_tx: l2c_tx,
+        connector_recv_notify: recv_notify,
         accept_ack: ack_tx,
     };
 
@@ -164,6 +196,8 @@ pub struct InprocListener {
     name: String,
     endpoint: omq_proto::endpoint::Endpoint,
     snapshot: InprocPeerSnapshot,
+    recv_notify: Arc<tokio::sync::Notify>,
+    max_message_size: Option<usize>,
     incoming: mpsc::Receiver<InprocConnectRequest>,
 }
 
@@ -186,15 +220,28 @@ impl InprocListener {
             connector,
             connector_to_listener_rx,
             listener_to_connector_tx,
+            connector_recv_notify,
             accept_ack,
         } = req;
         let spsc = if is_spsc_eligible(self.snapshot.socket_type, connector.socket_type) {
             let (p, c) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
+            let listener_is_recv = is_recv_side(self.snapshot.socket_type);
+            let notify = if listener_is_recv {
+                self.recv_notify.clone()
+            } else {
+                connector_recv_notify
+            };
+            let mms = if listener_is_recv {
+                self.max_message_size
+            } else {
+                None
+            };
             Some(Arc::new(InprocSpsc {
                 producer: Mutex::new(p),
                 consumer: Mutex::new(c),
-                notify: tokio::sync::Notify::new(),
+                recv_notify: notify,
                 recv_ready: std::sync::atomic::AtomicBool::new(false),
+                max_message_size: mms,
             }))
         } else {
             None
@@ -229,19 +276,22 @@ mod tests {
         }
     }
 
+    fn notify() -> Arc<tokio::sync::Notify> {
+        Arc::new(tokio::sync::Notify::new())
+    }
+
     #[tokio::test]
     async fn bind_connect_accept_exchange() {
-        let mut l = bind("test-bca", snap(SocketType::Pull)).unwrap();
+        let mut l = bind("test-bca", snap(SocketType::Pull), notify(), None).unwrap();
+        let n = notify();
         let connector =
-            tokio::spawn(async move { connect("test-bca", snap(SocketType::Push)).await });
+            tokio::spawn(async move { connect("test-bca", snap(SocketType::Push), n).await });
         let server_side = l.accept().await.unwrap();
         let client_side = connector.await.unwrap().unwrap();
 
-        // Snapshots crossed over correctly.
         assert_eq!(server_side.peer.socket_type, SocketType::Push);
         assert_eq!(client_side.peer.socket_type, SocketType::Pull);
 
-        // Send a message client→server.
         client_side
             .out
             .send(InprocFrame::Message(Message::single("hi")))
@@ -264,9 +314,9 @@ mod tests {
 
     #[tokio::test]
     async fn double_bind_rejected() {
-        let _l = bind("test-dup", snap(SocketType::Pair)).unwrap();
+        let _l = bind("test-dup", snap(SocketType::Pair), notify(), None).unwrap();
         assert!(matches!(
-            bind("test-dup", snap(SocketType::Pair)),
+            bind("test-dup", snap(SocketType::Pair), notify(), None),
             Err(Error::InvalidEndpoint(_))
         ));
     }
@@ -274,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn connect_without_bind_fails() {
         assert!(matches!(
-            connect("test-unbound", snap(SocketType::Push)).await,
+            connect("test-unbound", snap(SocketType::Push), notify()).await,
             Err(Error::InvalidEndpoint(_))
         ));
     }
@@ -282,8 +332,8 @@ mod tests {
     #[tokio::test]
     async fn listener_drop_releases_name() {
         {
-            let _l = bind("test-drop", snap(SocketType::Pair)).unwrap();
+            let _l = bind("test-drop", snap(SocketType::Pair), notify(), None).unwrap();
         }
-        let _l2 = bind("test-drop", snap(SocketType::Pair)).unwrap();
+        let _l2 = bind("test-drop", snap(SocketType::Pair), notify(), None).unwrap();
     }
 }

@@ -17,61 +17,78 @@ use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
 use crate::routing::{SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocSpsc;
 
-/// Shared slot for SPSC state. Written by the actor on eligible peer
-/// connect; read by `SpscAwareRecv` on every recv.
-pub(crate) type SpscSlot = Arc<RwLock<Option<Arc<InprocSpsc>>>>;
+/// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
+pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
 
-/// Notified by the actor when SPSC is installed in the slot. Wakes
+/// Single-peer send fast path ring. Actor sets/clears.
+pub(crate) type SpscSendRing = Arc<RwLock<Option<Arc<InprocSpsc>>>>;
+
+/// Shared recv notification. All inproc producers notify this.
+pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
+
+/// Notified by the actor when the consumers Vec changes. Wakes
 /// any `recv()` that's blocked on the normal `async_channel` path.
 pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
 
-/// Recv channel that integrates SPSC awareness. Checks the ring before
-/// blocking on the `async_channel`, and races both when blocking.
+/// Recv channel that integrates per-peer SPSC awareness. Fair-queues
+/// across per-peer consumers, then falls back to the `async_channel`.
 #[derive(Debug)]
 struct SpscAwareRecv {
     rx: async_channel::Receiver<Message>,
-    spsc: SpscSlot,
+    /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
+    consumers: Arc<std::sync::RwLock<Vec<Arc<InprocSpsc>>>>,
+    /// Shared recv notification. All drivers/senders notify this.
+    recv_notify: Arc<tokio::sync::Notify>,
+    /// Notified when consumers Vec changes (new peer added).
     activated: SpscActivated,
+    /// Single-peer send fast path ring (None when sender has >1 peer).
+    send_ring: Arc<std::sync::RwLock<Option<Arc<InprocSpsc>>>>,
 }
 
 impl SpscAwareRecv {
     #[allow(clippy::needless_continue)]
     async fn recv(&self) -> Result<Message> {
         loop {
-            let pair = self.spsc.read().unwrap().clone();
-            if let Some(ref p) = pair {
+            // Fair-queue across per-peer consumers.
+            let consumers = self.consumers.read().unwrap().clone();
+            for p in &consumers {
                 if let Ok(mut consumer) = p.consumer.try_lock() {
                     consumer.prefetch();
                     if let Some(msg) = consumer.pop() {
                         return Ok(msg);
                     }
                 }
+            }
+
+            if consumers.is_empty() {
                 tokio::select! {
                     biased;
-                    () = p.notify.notified() => continue,
                     res = self.rx.recv() => {
                         return res.map_err(|_| Error::Closed);
                     }
+                    () = self.activated.notified() => continue,
                 }
-            }
-            tokio::select! {
-                biased;
-                res = self.rx.recv() => {
-                    return res.map_err(|_| Error::Closed);
+            } else {
+                tokio::select! {
+                    biased;
+                    () = self.recv_notify.notified() => continue,
+                    res = self.rx.recv() => {
+                        return res.map_err(|_| Error::Closed);
+                    }
+                    () = self.activated.notified() => continue,
                 }
-                () = self.activated.notified() => continue,
             }
         }
     }
 
     fn try_recv(&self) -> Result<Message> {
-        let pair = self.spsc.read().unwrap().clone();
-        if let Some(ref p) = pair
-            && let Ok(mut consumer) = p.consumer.try_lock()
-        {
-            consumer.prefetch();
-            if let Some(msg) = consumer.pop() {
-                return Ok(msg);
+        let consumers = self.consumers.read().unwrap().clone();
+        for p in &consumers {
+            if let Ok(mut consumer) = p.consumer.try_lock() {
+                consumer.prefetch();
+                if let Some(msg) = consumer.pop() {
+                    return Ok(msg);
+                }
             }
         }
         self.rx.try_recv().map_err(|e| match e {
@@ -136,8 +153,10 @@ impl Socket {
         // moves into the driver.
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
         let send_submitter = send_strategy.submitter();
-        let spsc_slot: SpscSlot = Arc::new(RwLock::new(None));
+        let consumers: Arc<RwLock<Vec<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(Vec::new()));
+        let recv_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
         let spsc_activated: SpscActivated = Arc::new(tokio::sync::Notify::new());
+        let send_ring: Arc<RwLock<Option<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(None));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -147,7 +166,9 @@ impl Socket {
             monitor.clone(),
             send_strategy,
             send_submitter.clone(),
-            spsc_slot.clone(),
+            consumers.clone(),
+            send_ring.clone(),
+            recv_notify.clone(),
             spsc_activated.clone(),
         );
         spawn_driver(driver);
@@ -157,8 +178,10 @@ impl Socket {
                 cmd_tx,
                 recv_rx: SpscAwareRecv {
                     rx: recv_rx,
-                    spsc: spsc_slot,
+                    consumers,
+                    recv_notify,
                     activated: spsc_activated,
+                    send_ring,
                 },
                 monitor,
                 root_cancel: cancel,
@@ -249,16 +272,19 @@ impl Socket {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
                 // SPSC send fast path: push directly to ring.
                 // Gated on recv_ready (set by recv-side actor after
-                // installing SpscAwareRecv slot).
-                let spsc = self.inner.recv_rx.spsc.read().unwrap().clone();
+                // installing the ring). Single-peer only.
+                let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
                 if let Some(ref pair) = spsc
                     && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+                    && pair
+                        .max_message_size
+                        .is_none_or(|max| msg.byte_len() <= max)
                     && let Ok(mut producer) = pair.producer.try_lock()
                     && !producer.is_full()
                 {
                     let _ = producer.push(msg);
                     producer.flush();
-                    pair.notify.notify_one();
+                    pair.recv_notify.notify_one();
                     return Ok(());
                 }
                 self.inner.send_submitter.send(msg).await

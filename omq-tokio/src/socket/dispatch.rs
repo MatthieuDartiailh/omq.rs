@@ -166,6 +166,8 @@ impl AnyListener {
 pub(super) async fn bind_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
+    recv_notify: &std::sync::Arc<tokio::sync::Notify>,
+    max_message_size: Option<usize>,
 ) -> Result<AnyListener> {
     if endpoint.is_tcp_family() {
         return Ok(AnyListener::Tcp(
@@ -176,6 +178,8 @@ pub(super) async fn bind_any(
         Endpoint::Inproc { name } => Ok(AnyListener::Inproc(inproc_transport::bind(
             name,
             snapshot.clone(),
+            recv_notify.clone(),
+            max_message_size,
         )?)),
         Endpoint::Ipc(_) => Ok(AnyListener::Ipc(IpcTransport::bind(endpoint).await?)),
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
@@ -186,6 +190,7 @@ pub(super) async fn bind_any(
 pub(super) async fn connect_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
+    recv_notify: &std::sync::Arc<tokio::sync::Notify>,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
         let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
@@ -197,7 +202,8 @@ pub(super) async fn connect_any(
     }
     match endpoint {
         Endpoint::Inproc { name } => {
-            let conn = inproc_transport::connect(name, snapshot.clone()).await?;
+            let conn =
+                inproc_transport::connect(name, snapshot.clone(), recv_notify.clone()).await?;
             Ok(AnyConn::Inproc {
                 conn,
                 peer_ident: PeerIdent::Inproc(name.clone()),

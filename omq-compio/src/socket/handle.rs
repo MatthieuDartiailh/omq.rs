@@ -224,7 +224,12 @@ impl Socket {
     #[allow(clippy::unused_async)]
     async fn bind_inproc(&self, name: String) -> Result<()> {
         let snapshot = self.inner.snapshot();
-        let listener = inproc::bind(&name, snapshot, self.inner.in_tx.clone())?;
+        let listener = inproc::bind(
+            &name,
+            snapshot,
+            self.inner.in_tx.clone(),
+            self.inner.inproc_recv_event.clone(),
+        )?;
         let resolved = Endpoint::Inproc { name: name.clone() };
         self.inner.monitor.publish(MonitorEvent::Listening {
             endpoint: resolved.clone(),
@@ -470,7 +475,13 @@ impl Socket {
         match endpoint {
             Endpoint::Inproc { name } => {
                 let snapshot = self.inner.snapshot();
-                let conn = inproc::connect(&name, snapshot, self.inner.in_tx.clone()).await?;
+                let conn = inproc::connect(
+                    &name,
+                    snapshot,
+                    self.inner.in_tx.clone(),
+                    self.inner.inproc_recv_event.clone(),
+                )
+                .await?;
                 let conn_id = self
                     .inner
                     .next_connection_id
@@ -781,71 +792,68 @@ impl Socket {
                 return Ok(msg);
             }
         }
-        // SPSC ring + events are set up during inproc handshake for
-        // SPSC fast path for cross-thread inproc. Re-checked each
-        // iteration: recv() may enter the in_rx fallback before the
-        // peer is installed, then install_inproc_peer populates SPSC
-        // and notifies on_peer_ready.
+        // Per-peer SPSC fair-queue + blume in_rx for wire/same-thread.
         loop {
-            let spsc = unsafe { &mut *self.inner.spsc_recv.get() };
-            if let Some(consumer) = spsc.as_mut() {
-                let event = unsafe { &*self.inner.spsc_recv_event.get() };
-                if let Some(e) = event.as_ref() {
-                    let cache = self.inner.recv_cache.get();
-                    if let Some(msg) = cache.pop_front() {
-                        return Ok(msg);
-                    }
-                    loop {
-                        let listener = e.listen();
-                        if consumer.prefetch() > 0 {
-                            while let Some(frame) = consumer.pop() {
-                                if let Some(msg) = self.process_inbound_frame(frame)? {
-                                    cache.push_back(msg);
-                                }
-                            }
-                            if let Some(msg) = cache.pop_front() {
-                                return Ok(msg);
+            let cache = self.inner.recv_cache.get();
+            if let Some(msg) = cache.pop_front() {
+                return Ok(msg);
+            }
+
+            // Fair-queue across per-peer inproc consumers.
+            let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
+            if !recv_state.consumers.is_empty() {
+                let n = recv_state.consumers.len();
+                let start = recv_state.fq_index % n;
+                for i in 0..n {
+                    let idx = (start + i) % n;
+                    if recv_state.consumers[idx].prefetch() > 0 {
+                        while let Some(frame) = recv_state.consumers[idx].pop() {
+                            if let Some(msg) = self.process_inbound_frame(frame)? {
+                                cache.push_back(msg);
                             }
                         }
-                        // Race SPSC event against in_rx: the sender
-                        // overflows to blume when the ring is truly full.
-                        let in_rx_fut = self.inner.in_rx.recv_async();
-                        futures::pin_mut!(listener);
-                        futures::pin_mut!(in_rx_fut);
-                        futures::select_biased! {
-                            () = listener.fuse() => {}
-                            frame = in_rx_fut.fuse() => {
-                                let frame = frame.map_err(|_| Error::Closed)?;
-                                if let Some(msg) =
-                                    self.process_inbound_frame(frame)?
-                                {
-                                    return Ok(msg);
-                                }
-                            }
+                        recv_state.fq_index = idx + 1;
+                        if let Some(msg) = cache.pop_front() {
+                            return Ok(msg);
                         }
                     }
                 }
             }
-            // SPSC not yet available. Race in_rx against on_peer_ready
-            // so we re-check SPSC when install_inproc_peer fires.
-            {
-                let peer_listener = self.inner.on_peer_ready.listen();
-                // TOCTOU guard: re-check after registering listener.
-                if unsafe { &*self.inner.spsc_recv.get() }.is_some() {
+
+            // Check in_rx (wire peers + same-thread inproc).
+            match self.inner.in_rx.try_recv() {
+                Ok(frame) => {
+                    if let Some(msg) = self.process_inbound_frame(frame)? {
+                        return Ok(msg);
+                    }
                     continue;
                 }
-                let in_rx_fut = self.inner.in_rx.recv_async();
-                futures::pin_mut!(in_rx_fut);
-                futures::pin_mut!(peer_listener);
-                futures::select_biased! {
-                    frame = in_rx_fut.fuse() => {
-                        let frame = frame.map_err(|_| Error::Closed)?;
-                        if let Some(msg) = self.process_inbound_frame(frame)? {
-                            return Ok(msg);
-                        }
-                    }
-                    () = peer_listener.fuse() => {}
+                Err(blume::TryRecvError::Disconnected) if recv_state.consumers.is_empty() => {
+                    return Err(Error::Closed);
                 }
+                _ => {}
+            }
+
+            // Block: register listeners, TOCTOU re-check, then select.
+            let inproc_listener = self.inner.inproc_recv_event.listen();
+            let peer_listener = self.inner.on_peer_ready.listen();
+            let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
+            if recv_state.consumers.iter_mut().any(|c| c.prefetch() > 0) {
+                continue;
+            }
+            let in_rx_fut = self.inner.in_rx.recv_async();
+            futures::pin_mut!(inproc_listener);
+            futures::pin_mut!(in_rx_fut);
+            futures::pin_mut!(peer_listener);
+            futures::select_biased! {
+                () = inproc_listener.fuse() => {}
+                frame = in_rx_fut.fuse() => {
+                    let frame = frame.map_err(|_| Error::Closed)?;
+                    if let Some(msg) = self.process_inbound_frame(frame)? {
+                        return Ok(msg);
+                    }
+                }
+                () = peer_listener.fuse() => {}
             }
         }
     }
@@ -970,6 +978,17 @@ impl Socket {
                 if let Some(ref state) = *dio {
                     let mut io = state.peer_io.lock().expect("peer_io");
                     if let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache) {
+                        return Ok(msg);
+                    }
+                }
+            }
+        }
+        // Check per-peer inproc consumers.
+        let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
+        for c in &mut recv_state.consumers {
+            if c.prefetch() > 0 {
+                while let Some(frame) = c.pop() {
+                    if let Some(msg) = self.process_inbound_frame(frame)? {
                         return Ok(msg);
                     }
                 }

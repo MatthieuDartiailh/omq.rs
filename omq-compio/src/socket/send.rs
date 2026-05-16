@@ -246,13 +246,13 @@ impl Socket {
             if let Some(ref cr) = *cache
                 && cr.generation == cur_gen
             {
-                Some((cr.out.clone(), cr.direct.clone()))
+                Some((cr.out.clone(), cr.direct.clone(), cr.slot_idx))
             } else {
                 None
             }
         };
-        if let Some((out, direct)) = cached {
-            return self.slow_round_robin(out, msg, 1, direct).await;
+        if let Some((out, direct, slot_idx)) = cached {
+            return self.slow_round_robin(out, msg, 1, direct, slot_idx).await;
         }
 
         loop {
@@ -314,11 +314,11 @@ impl Socket {
                                 .as_ref()
                                 .and_then(|h| h.read().expect("direct_io handle lock").clone())
                         };
-                        (p.out.clone(), n, direct)
+                        (p.out.clone(), n, direct, idx)
                     })
                 }
             };
-            if let Some((chosen, peer_count, direct)) = chosen {
+            if let Some((chosen, peer_count, direct, slot_idx)) = chosen {
                 // Populate cache for single-peer sockets.
                 if peer_count == 1 {
                     let cur_gen = inner.peers_gen.load(Ordering::Acquire);
@@ -326,9 +326,12 @@ impl Socket {
                         generation: cur_gen,
                         out: chosen.clone(),
                         direct: direct.clone(),
+                        slot_idx,
                     });
                 }
-                return self.slow_round_robin(chosen, msg, peer_count, direct).await;
+                return self
+                    .slow_round_robin(chosen, msg, peer_count, direct, slot_idx)
+                    .await;
             }
             let listener = inner.on_peer_ready.listen();
             if !inner.out_peers.read().expect("peers lock").is_empty() {
@@ -375,23 +378,21 @@ impl Socket {
         msg: Message,
         peer_count: usize,
         direct: Option<Arc<DirectIoState>>,
+        slot_idx: usize,
     ) -> Result<()> {
         match chosen {
             PeerOut::Inproc {
                 ref our_identity, ..
             } => {
-                let spsc = unsafe { &mut *self.inner().spsc_send.get() };
-                if let Some(producer) = spsc {
+                let pipes = unsafe { &mut *self.inner().inproc_send_pipes.get() };
+                if let Some(Some(pipe)) = pipes.get_mut(slot_idx) {
                     let frame = InprocFrame::message_from(our_identity.clone(), msg);
                     let mut frame = frame;
                     loop {
-                        match producer.push(frame) {
+                        match pipe.producer.push(frame) {
                             Ok(()) => {
-                                producer.flush();
-                                let e = unsafe { &*self.inner().spsc_send_event.get() };
-                                if let Some(event) = e {
-                                    event.notify(usize::MAX);
-                                }
+                                pipe.producer.flush();
+                                pipe.notify.notify(usize::MAX);
                                 return Ok(());
                             }
                             Err(returned) => {

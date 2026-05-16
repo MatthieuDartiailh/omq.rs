@@ -63,26 +63,27 @@ pub(super) fn install_inproc_peer(
     } else {
         None
     };
-    // SPSC fast path: only for the first cross-thread inproc peer.
-    let existing_peers = inner.out_peers.read().expect("peers lock").len();
-    if existing_peers == 0 && conn.cross_thread {
-        if let Some(producer) = conn.spsc_send {
-            unsafe { *inner.spsc_send.get() = Some(producer) };
+    // Per-peer SPSC pipes for cross-thread eligible inproc.
+    {
+        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+        let slot = inner.out_peers.read().expect("peers lock").len();
+        while pipes.len() <= slot {
+            pipes.push(None);
         }
-        if let Some(consumer) = conn.spsc_recv {
-            unsafe { *inner.spsc_recv.get() = Some(consumer) };
+        if conn.cross_thread {
+            if let Some(producer) = conn.spsc_send {
+                pipes[slot] = Some(super::inner::InprocSendPipe {
+                    producer,
+                    notify: conn
+                        .peer_recv_event
+                        .expect("cross-thread eligible must have peer_recv_event"),
+                });
+            }
+            if let Some(consumer) = conn.spsc_recv {
+                let recv = unsafe { &mut *inner.inproc_recv.get() };
+                recv.consumers.push(consumer);
+            }
         }
-        if let Some(e) = conn.spsc_send_event {
-            unsafe { *inner.spsc_send_event.get() = Some(e) };
-        }
-        if let Some(e) = conn.spsc_recv_event {
-            unsafe { *inner.spsc_recv_event.get() = Some(e) };
-        }
-    } else if existing_peers > 0 {
-        unsafe { *inner.spsc_send.get() = None };
-        unsafe { *inner.spsc_recv.get() = None };
-        unsafe { *inner.spsc_send_event.get() = None };
-        unsafe { *inner.spsc_recv_event.get() = None };
     }
 
     let out = PeerOut::Inproc {
@@ -125,6 +126,7 @@ pub(super) fn install_inproc_peer(
         inner.evict_peer_for_handover(old_idx);
     }
     inner.on_peer_ready.notify(usize::MAX);
+    inner.inproc_recv_event.notify(usize::MAX);
     // Synthesise HandshakeSucceeded - inproc has no wire handshake
     // but consumers expect the same monitor signal as wire peers.
     inner.monitor.publish(MonitorEvent::HandshakeSucceeded {
@@ -182,6 +184,14 @@ pub(super) fn install_accepted_wire_peer(
     );
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);
+    // Pad inproc_send_pipes for parallel indexing with out_peers.
+    {
+        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+        let slot = inner.out_peers.read().expect("peers lock").len();
+        while pipes.len() <= slot {
+            pipes.push(None);
+        }
+    }
     let slot_idx = {
         let mut peers = inner.out_peers.write().expect("peers lock");
         let idx = peers.len();
