@@ -1119,7 +1119,8 @@ impl SocketDriver {
         {
             *self.spsc_slot.write().unwrap() = Some(s.clone());
             if can_bypass_actor_recv(self.socket_type) {
-                s.recv_ready.store(true, std::sync::atomic::Ordering::Release);
+                s.recv_ready
+                    .store(true, std::sync::atomic::Ordering::Release);
                 self.spsc_activated.notify_one();
             }
         } else if self.peers.len() > 1 {

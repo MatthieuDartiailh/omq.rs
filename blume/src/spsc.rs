@@ -12,8 +12,8 @@
 
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[repr(align(64))]
 struct Padded<T>(T);
@@ -34,8 +34,9 @@ impl<T> Ring<T> {
     fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "capacity must be > 0");
         let cap = capacity.next_power_of_two();
-        let buf: Vec<UnsafeCell<MaybeUninit<T>>> =
-            (0..cap).map(|_| UnsafeCell::new(MaybeUninit::uninit())).collect();
+        let buf: Vec<UnsafeCell<MaybeUninit<T>>> = (0..cap)
+            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+            .collect();
         Self {
             buf: buf.into_boxed_slice(),
             mask: cap - 1,
@@ -109,8 +110,16 @@ unsafe impl<T: Send> Send for Consumer<T> {}
 pub fn spsc<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     let ring = Arc::new(Ring::new(capacity));
     (
-        Producer { ring: ring.clone(), tail: 0, cached_head: 0 },
-        Consumer { ring, head: 0, cached_flush: 0 },
+        Producer {
+            ring: ring.clone(),
+            tail: 0,
+            cached_head: 0,
+        },
+        Consumer {
+            ring,
+            head: 0,
+            cached_flush: 0,
+        },
     )
 }
 
@@ -169,7 +178,8 @@ impl<T> Producer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.tail.wrapping_sub(self.ring.head.0.load(Ordering::Acquire))
+        self.tail
+            .wrapping_sub(self.ring.head.0.load(Ordering::Acquire))
     }
 
     #[inline]
@@ -187,9 +197,7 @@ impl<T> Consumer<T> {
         if self.head == self.cached_flush {
             return None;
         }
-        let val = unsafe {
-            (*self.ring.buf[self.head & self.ring.mask].get()).assume_init_read()
-        };
+        let val = unsafe { (*self.ring.buf[self.head & self.ring.mask].get()).assume_init_read() };
         self.head += 1;
         // Publish consumed position so producer can reuse slots.
         self.ring.head.0.store(self.head, Ordering::Release);
@@ -217,8 +225,7 @@ impl<T> Consumer<T> {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.head == self.cached_flush
-            && self.ring.flush.0.load(Ordering::Acquire) == self.head
+        self.head == self.cached_flush && self.ring.flush.0.load(Ordering::Acquire) == self.head
     }
 
     #[inline]
@@ -228,7 +235,11 @@ impl<T> Consumer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.ring.flush.0.load(Ordering::Acquire).wrapping_sub(self.head)
+        self.ring
+            .flush
+            .0
+            .load(Ordering::Acquire)
+            .wrapping_sub(self.head)
     }
 }
 
@@ -293,7 +304,13 @@ mod tests {
         let (mut p, mut c) = spsc::<u32>(4);
         p.push(1).unwrap();
         let r = p.flush();
-        assert_eq!(r, FlushResult::Flushed { count: 1, was_empty: true });
+        assert_eq!(
+            r,
+            FlushResult::Flushed {
+                count: 1,
+                was_empty: true
+            }
+        );
 
         p.push(2).unwrap();
         let r = p.flush();

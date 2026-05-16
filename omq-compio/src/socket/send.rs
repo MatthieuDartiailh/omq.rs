@@ -377,7 +377,9 @@ impl Socket {
         direct: Option<Arc<DirectIoState>>,
     ) -> Result<()> {
         match chosen {
-            PeerOut::Inproc { ref our_identity, .. } => {
+            PeerOut::Inproc {
+                ref our_identity, ..
+            } => {
                 let spsc = unsafe { &mut *self.inner().spsc_send.get() };
                 if let Some(producer) = spsc {
                     let frame = InprocFrame::message_from(our_identity.clone(), msg);

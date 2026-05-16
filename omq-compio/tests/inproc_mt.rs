@@ -99,9 +99,7 @@ fn spsc_overflow_to_blume_still_delivers() {
             let push = Socket::new(SocketType::Push, Options::default());
             push.connect(ep).await.unwrap();
             for i in 0..N {
-                push.send(Message::single(format!("{i:06}")))
-                    .await
-                    .unwrap();
+                push.send(Message::single(format!("{i:06}"))).await.unwrap();
             }
         });
     });
@@ -146,9 +144,7 @@ fn spsc_preserves_ordering() {
             push.connect(ep).await.unwrap();
             compio::time::sleep(Duration::from_millis(30)).await;
             for i in 0..N {
-                push.send(Message::single(format!("{i}")))
-                    .await
-                    .unwrap();
+                push.send(Message::single(format!("{i}"))).await.unwrap();
             }
         });
     });

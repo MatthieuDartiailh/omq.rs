@@ -124,11 +124,7 @@ struct SpscPair {
     l2c_event: Option<Arc<Event>>,
 }
 
-type AckPayload = (
-    InprocPeerSnapshot,
-    blume::Sender<InprocFrame>,
-    SpscPair,
-);
+type AckPayload = (InprocPeerSnapshot, blume::Sender<InprocFrame>, SpscPair);
 
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
@@ -309,7 +305,8 @@ impl InprocListener {
         let cross_thread = connector_thread != std::thread::current().id();
         let eligible =
             cross_thread && is_spsc_eligible(self.snapshot.socket_type, connector.socket_type);
-        let (my_spsc_send, my_spsc_recv, my_send_event, my_recv_event, connector_pair) = if eligible {
+        let (my_spsc_send, my_spsc_recv, my_send_event, my_recv_event, connector_pair) = if eligible
+        {
             let (p1, c1) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
             let (p2, c2) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
             let c2l = Arc::new(Event::new());
