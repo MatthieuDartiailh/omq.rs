@@ -19,8 +19,6 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
-use crate::transport::inproc::InprocFrame;
-
 #[cfg(not(feature = "priority"))]
 use crate::socket::inner::{CachedPeerRoute, DirectIoState, FLAT_THRESHOLD};
 #[cfg(not(feature = "priority"))]
@@ -185,6 +183,29 @@ impl Socket {
     /// REQ/REP envelope wrapping happens inline via `TypeState`.
     pub async fn send(&self, msg: Message) -> Result<()> {
         let st = self.inner().socket_type;
+        // Inproc ypipe fast path: single cross-thread peer, no routing
+        // needed. Bypasses Mutex, PeerOut clone, generation check.
+        if matches!(st, SocketType::Push | SocketType::Pair) && !pre_send_needs_type_state(st) {
+            let pipes = unsafe { &mut *self.inner().inproc_send_pipes.get() };
+            if let [Some(pipe)] = pipes.as_mut_slice() {
+                let mut msg = msg;
+                loop {
+                    match pipe.producer.push(msg) {
+                        Ok(()) => {
+                            pipe.producer.flush();
+                            if pipe.parked.load(Ordering::Acquire) {
+                                pipe.notify.notify(usize::MAX);
+                            }
+                            return Ok(());
+                        }
+                        Err(returned) => {
+                            msg = returned;
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+            }
+        }
         // TypeState's pre_send is a no-op for round-robin / fan-out
         // socket types - only REQ / REP / draft single-frame types
         // touch it. Skip the mutex acquisition entirely when not
@@ -381,22 +402,21 @@ impl Socket {
         slot_idx: usize,
     ) -> Result<()> {
         match chosen {
-            PeerOut::Inproc {
-                ref our_identity, ..
-            } => {
+            PeerOut::Inproc { .. } => {
                 let pipes = unsafe { &mut *self.inner().inproc_send_pipes.get() };
                 if let Some(Some(pipe)) = pipes.get_mut(slot_idx) {
-                    let frame = InprocFrame::message_from(our_identity.clone(), msg);
-                    let mut frame = frame;
+                    let mut msg = msg;
                     loop {
-                        match pipe.producer.push(frame) {
+                        match pipe.producer.push(msg) {
                             Ok(()) => {
                                 pipe.producer.flush();
-                                pipe.notify.notify(usize::MAX);
+                                if pipe.parked.load(Ordering::Acquire) {
+                                    pipe.notify.notify(usize::MAX);
+                                }
                                 return Ok(());
                             }
                             Err(returned) => {
-                                frame = returned;
+                                msg = returned;
                                 std::hint::spin_loop();
                             }
                         }

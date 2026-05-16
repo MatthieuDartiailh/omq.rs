@@ -27,26 +27,11 @@ use omq_proto::proto::{Command, SocketType};
 /// headers, no greeting, no codec - both ends are in-process.
 ///
 /// In-flight slot moved through the inproc flume channel. Rust
-/// enums are sized to their largest variant; if we stored a full
-/// `Message` (~552 B) inline, every per-message memcpy would carry
-/// that whole struct even for single-part 128 B payloads. To keep
-/// the slot small for the hot path:
-///
-/// - `SinglePart` (single-part, single-chunk - PUSH / PUB with
-///   `Message::single(bytes)`) holds just a `Bytes` body. ~72 B.
-/// - `Message` boxes the full struct so the inline footprint is
-///   one pointer. Multipart messages pay one heap alloc per send;
-///   the channel slot stays small.
-///
-/// Identity-routing sockets (ROUTER) read `peer_identity` to
-/// know which peer a message came from. Empty identity collapses
-/// to `None` so PUSH/PULL/PAIR don't carry it.
+/// Frame exchanged over blume `in_tx`/`in_rx` for wire, same-thread,
+/// and non-SPSC-eligible inproc peers. SPSC-eligible cross-thread
+/// peers bypass this entirely (Message goes through the ypipe ring).
 #[derive(Debug)]
 pub enum InprocFrame {
-    SinglePart {
-        peer_identity: Option<Bytes>,
-        body: Bytes,
-    },
     Message(Box<InprocFullMessage>),
     Command(Command),
 }
@@ -68,12 +53,6 @@ impl InprocFrame {
         } else {
             Some(identity)
         };
-        if msg.len() == 1 {
-            return Self::SinglePart {
-                peer_identity,
-                body: msg.part_bytes(0).unwrap_or_default(),
-            };
-        }
         Self::Message(Box::new(InprocFullMessage { peer_identity, msg }))
     }
 }
@@ -94,17 +73,19 @@ pub struct InprocPeerSnapshot {
 pub struct InprocConn {
     pub out: blume::Sender<InprocFrame>,
     pub peer: InprocPeerSnapshot,
-    /// SPSC fast-path producer (we send small frames here instead of
+    /// SPSC fast-path producer (we push Messages here instead of
     /// through `out`). Present only for eligible cross-thread pairs.
-    pub spsc_send: Option<blume::spsc::Producer<InprocFrame>>,
-    /// SPSC fast-path consumer (we recv small frames from here before
+    pub spsc_send: Option<blume::spsc::Producer<Message>>,
+    /// SPSC fast-path consumer (we pop Messages from here before
     /// checking `in_rx`). Present only for eligible cross-thread pairs.
-    pub spsc_recv: Option<blume::spsc::Consumer<InprocFrame>>,
+    pub spsc_recv: Option<blume::spsc::Consumer<Message>>,
     /// True when the peer is on a different thread.
     pub cross_thread: bool,
     /// Remote socket's shared recv Event. We notify after push+flush
     /// so the peer's recv loop wakes up.
     pub peer_recv_event: Option<Arc<Event>>,
+    /// Remote socket's parked flag. We check before notify.
+    pub peer_parked: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Sent from connect to accept through the registry: connector's
@@ -113,10 +94,10 @@ pub struct InprocConn {
 /// its own snapshot + `in_tx`.
 /// SPSC halves sent back to the connector via the ack channel.
 struct SpscPair {
-    for_connector_send: Option<blume::spsc::Producer<InprocFrame>>,
-    for_connector_recv: Option<blume::spsc::Consumer<InprocFrame>>,
-    /// Listener's shared recv Event (connector notifies after push).
+    for_connector_send: Option<blume::spsc::Producer<Message>>,
+    for_connector_recv: Option<blume::spsc::Consumer<Message>>,
     listener_recv_event: Option<Arc<Event>>,
+    listener_parked: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 type AckPayload = (InprocPeerSnapshot, blume::Sender<InprocFrame>, SpscPair);
@@ -126,6 +107,7 @@ struct InprocConnectRequest {
     connector_in_tx: blume::Sender<InprocFrame>,
     connector_thread: std::thread::ThreadId,
     connector_recv_event: Arc<Event>,
+    connector_parked: Arc<std::sync::atomic::AtomicBool>,
     accept_ack: flume::Sender<AckPayload>,
 }
 
@@ -165,6 +147,7 @@ pub fn bind(
     snapshot: InprocPeerSnapshot,
     in_tx: blume::Sender<InprocFrame>,
     recv_event: Arc<Event>,
+    parked: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InprocListener> {
     let (req_tx, req_rx) = flume::bounded(32);
     {
@@ -188,6 +171,7 @@ pub fn bind(
         snapshot,
         in_tx,
         recv_event,
+        parked,
         incoming: req_rx,
     })
 }
@@ -200,6 +184,7 @@ pub async fn connect(
     snapshot: InprocPeerSnapshot,
     in_tx: blume::Sender<InprocFrame>,
     recv_event: Arc<Event>,
+    parked: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InprocConn> {
     let req_tx = {
         let lookup = {
@@ -246,6 +231,7 @@ pub async fn connect(
         connector_in_tx: in_tx,
         connector_thread: std::thread::current().id(),
         connector_recv_event: recv_event,
+        connector_parked: parked,
         accept_ack: ack_tx,
     };
 
@@ -271,6 +257,7 @@ pub async fn connect(
         spsc_recv: spsc_pair.for_connector_recv,
         cross_thread,
         peer_recv_event: spsc_pair.listener_recv_event,
+        peer_parked: spsc_pair.listener_parked,
     })
 }
 
@@ -281,6 +268,7 @@ pub struct InprocListener {
     snapshot: InprocPeerSnapshot,
     in_tx: blume::Sender<InprocFrame>,
     recv_event: Arc<Event>,
+    parked: Arc<std::sync::atomic::AtomicBool>,
     incoming: flume::Receiver<InprocConnectRequest>,
 }
 
@@ -300,6 +288,7 @@ impl InprocListener {
             connector_in_tx,
             connector_thread,
             connector_recv_event,
+            connector_parked,
             accept_ack,
         } = req;
 
@@ -316,6 +305,7 @@ impl InprocListener {
                     for_connector_send: Some(p2),
                     for_connector_recv: Some(c1),
                     listener_recv_event: Some(self.recv_event.clone()),
+                    listener_parked: Some(self.parked.clone()),
                 },
             )
         } else {
@@ -326,6 +316,7 @@ impl InprocListener {
                     for_connector_send: None,
                     for_connector_recv: None,
                     listener_recv_event: None,
+                    listener_parked: None,
                 },
             )
         };
@@ -337,6 +328,11 @@ impl InprocListener {
             spsc_send: my_spsc_send,
             spsc_recv: my_spsc_recv,
             cross_thread,
+            peer_parked: if eligible {
+                Some(connector_parked)
+            } else {
+                None
+            },
             peer_recv_event: if eligible {
                 Some(connector_recv_event)
             } else {

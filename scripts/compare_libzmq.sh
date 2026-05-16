@@ -99,12 +99,12 @@ addr_for() {
     esac
 }
 
-# run_cell <transport> <peer_binary> <addr_or_name> <size>
+# run_cell <transport> <peer_binary> <addr_or_name> <size> [subcommand]
 run_cell() {
-    local transport="$1" peer="$2" addr="$3" size="$4"
+    local transport="$1" peer="$2" addr="$3" size="$4" subcmd="${5:-}"
 
     if [ "$transport" = "inproc" ]; then
-        "$peer" inproc "$addr" "$size" "$DURATION"
+        "$peer" "${subcmd:-inproc}" "$addr" "$size" "$DURATION"
         return
     fi
 
@@ -195,9 +195,16 @@ run_comparison() {
     echo ""
     echo "omq $OMQ_VERSION vs libzmq $ZMQ_VERSION — ${transport_label}, ${DURATION}s window + 500ms warmup"
     echo ""
-    printf "%-10s  %20s  %22s  %22s\n" "" "libzmq" "omq-compio" "omq-tokio"
-    printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
-    echo "-----------------------------------------------------------------------------------------------------------"
+
+    if [ "$transport" = "inproc" ]; then
+        printf "%-10s  %20s  %22s  %22s  %22s\n" "" "libzmq" "omq-compio (mt)" "omq-compio (st)" "omq-tokio"
+        printf "%-10s  %20s  %22s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
+        echo "------------------------------------------------------------------------------------------------------------------------------"
+    else
+        printf "%-10s  %20s  %22s  %22s\n" "" "libzmq" "omq-compio" "omq-tokio"
+        printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
+        echo "-----------------------------------------------------------------------------------------------------------"
+    fi
 
     local -a res_sizes res_omq_msgs res_omq_mb res_tokio_msgs res_tokio_mb res_zmq_msgs res_zmq_mb
     local idx=0
@@ -225,11 +232,26 @@ run_comparison() {
         omq_ratio=$(ratio_str   "$omq_msgs"   "$lzq_msgs")
         tokio_ratio=$(ratio_str "$tokio_msgs" "$lzq_msgs")
 
-        printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
-            "$(fmt_size "$size")" \
-            "$lzq_msgs"   "$lzq_mb" \
-            "$omq_msgs"   "$omq_mb"   "$omq_ratio" \
-            "$tokio_msgs" "$tokio_mb" "$tokio_ratio"
+        if [ "$transport" = "inproc" ]; then
+            local omq_st_raw omq_st_msgs omq_st_mb omq_st_ratio
+            omq_st_raw=$(run_cell "$transport" "$OMQ_PEER" "$addr_o-st" "$size" "inproc-st")
+            omq_st_msgs=$(echo "$omq_st_raw" | awk '{printf "%.0f", $1/$2}')
+            omq_st_mb=$(echo   "$omq_st_raw" | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
+            omq_st_ratio=$(ratio_str "$omq_st_msgs" "$lzq_msgs")
+
+            printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
+                "$(fmt_size "$size")" \
+                "$lzq_msgs"    "$lzq_mb" \
+                "$omq_msgs"    "$omq_mb"    "$omq_ratio" \
+                "$omq_st_msgs" "$omq_st_mb" "$omq_st_ratio" \
+                "$tokio_msgs"  "$tokio_mb"  "$tokio_ratio"
+        else
+            printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
+                "$(fmt_size "$size")" \
+                "$lzq_msgs"   "$lzq_mb" \
+                "$omq_msgs"   "$omq_mb"   "$omq_ratio" \
+                "$tokio_msgs" "$tokio_mb" "$tokio_ratio"
+        fi
 
         res_sizes[$idx]=$size
         res_omq_msgs[$idx]=$omq_msgs;   res_omq_mb[$idx]=$omq_mb

@@ -144,8 +144,11 @@ pub(super) struct CachedPeerRoute {
 /// socket's recv Event. Drop flushes remaining items and wakes
 /// the remote recv loop.
 pub(super) struct InprocSendPipe {
-    pub(super) producer: blume::spsc::Producer<InprocFrame>,
+    pub(super) producer: blume::spsc::Producer<Message>,
     pub(super) notify: Arc<Event>,
+    /// Set by the remote recv loop when it parks in select.
+    /// Cleared when it wakes. Producers skip notify when false.
+    pub(super) parked: Arc<AtomicBool>,
 }
 
 impl Drop for InprocSendPipe {
@@ -157,7 +160,7 @@ impl Drop for InprocSendPipe {
 
 /// Per-socket inproc recv state: per-peer consumers + fair-queue index.
 pub(super) struct InprocRecvState {
-    pub(super) consumers: Vec<blume::spsc::Consumer<InprocFrame>>,
+    pub(super) consumers: Vec<blume::spsc::Consumer<Message>>,
     pub(super) fq_index: usize,
 }
 
@@ -183,9 +186,13 @@ pub(super) struct SocketInner {
     pub(super) inproc_send_pipes: UnsafeCell<Vec<Option<InprocSendPipe>>>,
     /// Per-peer SPSC recv consumers + fair-queue index.
     pub(super) inproc_recv: UnsafeCell<InprocRecvState>,
-    /// Single shared recv notification. All remote inproc senders
-    /// notify this after push+flush; `recv()` listens on it.
+    /// Single shared recv notification. Remote inproc senders
+    /// notify this when `inproc_parked` is true.
     pub(super) inproc_recv_event: Arc<Event>,
+    /// True when recv is parked in select (waiting for data).
+    /// Producers check this to skip notification when consumer
+    /// is actively draining.
+    pub(super) inproc_parked: Arc<AtomicBool>,
     /// Batch-drain cache for the direct-recv path. `try_direct_recv` drains
     /// all codec events from one TCP delivery into here; `recv`/`try_recv`
     /// pop raw messages and apply `post_recv_apply`. Uncontended on a
@@ -1038,6 +1045,7 @@ impl SocketInner {
                 fq_index: 0,
             }),
             inproc_recv_event: Arc::new(Event::new()),
+            inproc_parked: Arc::new(AtomicBool::new(false)),
             recv_cache: RecvCache::new(),
             direct_recv_io: UnsafeCell::new(None),
             on_peer_ready: Event::new(),

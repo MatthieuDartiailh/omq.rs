@@ -77,6 +77,9 @@ pub(super) fn install_inproc_peer(
                     notify: conn
                         .peer_recv_event
                         .expect("cross-thread eligible must have peer_recv_event"),
+                    parked: conn
+                        .peer_parked
+                        .expect("cross-thread eligible must have peer_parked"),
                 });
             }
             if let Some(consumer) = conn.spsc_recv {

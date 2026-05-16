@@ -229,6 +229,7 @@ impl Socket {
             snapshot,
             self.inner.in_tx.clone(),
             self.inner.inproc_recv_event.clone(),
+            self.inner.inproc_parked.clone(),
         )?;
         let resolved = Endpoint::Inproc { name: name.clone() };
         self.inner.monitor.publish(MonitorEvent::Listening {
@@ -480,6 +481,7 @@ impl Socket {
                     snapshot,
                     self.inner.in_tx.clone(),
                     self.inner.inproc_recv_event.clone(),
+                    self.inner.inproc_parked.clone(),
                 )
                 .await?;
                 let conn_id = self
@@ -799,45 +801,44 @@ impl Socket {
                 return Ok(msg);
             }
 
-            // Fair-queue: pop one frame from the next consumer that
-            // has data. One item per call keeps delivery fair across
-            // peers; the caller's next recv() advances fq_index.
+            // Fair-queue: pop one Message from the next consumer.
             let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
             if !recv_state.consumers.is_empty() {
                 let n = recv_state.consumers.len();
                 let start = recv_state.fq_index;
                 for i in 0..n {
                     let idx = (start + i) % n;
-                    while let Some(frame) =
-                        recv_state.consumers[idx].prefetch_and_pop()
-                    {
+                    if let Some(msg) = recv_state.consumers[idx].prefetch_and_pop() {
                         recv_state.fq_index = idx + 1;
-                        if let Some(msg) = self.process_inbound_frame(frame)? {
-                            return Ok(msg);
-                        }
+                        self.inner.inproc_parked.store(false, Ordering::Release);
+                        return Ok(msg);
                     }
                 }
             }
 
             // Check in_rx (wire peers + same-thread inproc).
-            match self.inner.in_rx.try_recv() {
-                Ok(frame) => {
-                    if let Some(msg) = self.process_inbound_frame(frame)? {
-                        return Ok(msg);
+            if !self.inner.in_rx.is_empty() || recv_state.consumers.is_empty() {
+                match self.inner.in_rx.try_recv() {
+                    Ok(frame) => {
+                        if let Some(msg) = self.process_inbound_frame(frame)? {
+                            return Ok(msg);
+                        }
+                        continue;
                     }
-                    continue;
+                    Err(blume::TryRecvError::Disconnected) if recv_state.consumers.is_empty() => {
+                        return Err(Error::Closed);
+                    }
+                    _ => {}
                 }
-                Err(blume::TryRecvError::Disconnected) if recv_state.consumers.is_empty() => {
-                    return Err(Error::Closed);
-                }
-                _ => {}
             }
 
-            // Block: register listeners, TOCTOU re-check, then select.
+            // About to park: register listener, set parked flag, TOCTOU.
             let inproc_listener = self.inner.inproc_recv_event.listen();
             let peer_listener = self.inner.on_peer_ready.listen();
+            self.inner.inproc_parked.store(true, Ordering::Release);
             let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
             if recv_state.consumers.iter().any(|c| !c.is_empty()) {
+                self.inner.inproc_parked.store(false, Ordering::Release);
                 continue;
             }
             let in_rx_fut = self.inner.in_rx.recv_async();
@@ -847,6 +848,7 @@ impl Socket {
             futures::select_biased! {
                 () = inproc_listener.fuse() => {}
                 frame = in_rx_fut.fuse() => {
+                    self.inner.inproc_parked.store(false, Ordering::Release);
                     let frame = frame.map_err(|_| Error::Closed)?;
                     if let Some(msg) = self.process_inbound_frame(frame)? {
                         return Ok(msg);
@@ -854,6 +856,7 @@ impl Socket {
                 }
                 () = peer_listener.fuse() => {}
             }
+            self.inner.inproc_parked.store(false, Ordering::Release);
         }
     }
 
@@ -864,34 +867,6 @@ impl Socket {
     fn process_inbound_frame(&self, frame: InprocFrame) -> Result<Option<Message>> {
         let st = self.inner.socket_type;
         match frame {
-            InprocFrame::SinglePart {
-                peer_identity,
-                body,
-            } => {
-                if let Some(max) = self.inner.options.max_message_size
-                    && body.len() > max
-                {
-                    return Ok(None);
-                }
-                let msg = if is_identity_recv(st) {
-                    let id = peer_identity.unwrap_or_default();
-                    Message::with_prefix(id, Message::single(body))
-                } else {
-                    Message::single(body)
-                };
-                if !self.matches_subscription(&msg) {
-                    return Ok(None);
-                }
-                if post_recv_needs_type_state(st) {
-                    self.inner
-                        .type_state
-                        .lock()
-                        .expect("type_state lock")
-                        .post_recv(st, msg)
-                } else {
-                    Ok(Some(msg))
-                }
-            }
             InprocFrame::Message(boxed) => {
                 let crate::transport::inproc::InprocFullMessage { peer_identity, msg } = *boxed;
                 if let Some(max) = self.inner.options.max_message_size
@@ -984,10 +959,8 @@ impl Socket {
         }
         let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
         for c in &mut recv_state.consumers {
-            while let Some(frame) = c.prefetch_and_pop() {
-                if let Some(msg) = self.process_inbound_frame(frame)? {
-                    return Ok(msg);
-                }
+            if let Some(msg) = c.prefetch_and_pop() {
+                return Ok(msg);
             }
         }
         loop {
@@ -1087,19 +1060,11 @@ impl Socket {
     }
 
     /// Process one `InprocFrame` from `in_rx` for the direct-recv
-    /// fallback race. Only handles the variants that the
-    /// direct-recv-eligible socket types (Pull / Sub / Rep / Pair
-    /// / Req) actually receive: `SinglePart` and Message. Command is
-    /// XPub-only and not eligible for direct recv anyway.
+    /// fallback race. Command is XPub-only and not eligible for
+    /// direct recv.
     fn process_inproc_frame_for_direct(&self, frame: InprocFrame) -> Result<Option<Message>> {
         let max = self.inner.options.max_message_size;
         match frame {
-            InprocFrame::SinglePart { body, .. } => {
-                if max.is_some_and(|m| body.len() > m) {
-                    return Ok(None);
-                }
-                self.post_recv_apply(Message::single(body))
-            }
             InprocFrame::Message(boxed) => {
                 let crate::transport::inproc::InprocFullMessage { msg, .. } = *boxed;
                 if max.is_some_and(|m| msg.byte_len() > m) {

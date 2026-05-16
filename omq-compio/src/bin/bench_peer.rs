@@ -66,10 +66,17 @@ fn main() {
                 let duration: f64 = args[4].parse().expect("duration_secs");
                 run_inproc(name, size, Duration::from_secs_f64(duration)).await;
             }
+            Some("inproc-st") => {
+                let name = args[2].clone();
+                let size: usize = args[3].parse().expect("msg_size");
+                let duration: f64 = args[4].parse().expect("duration_secs");
+                run_inproc_same_thread(name, size, Duration::from_secs_f64(duration)).await;
+            }
             _ => {
                 eprintln!("usage: bench_peer push <endpoint> <size>");
                 eprintln!("       bench_peer pull <endpoint> <size> <duration_secs>");
                 eprintln!("       bench_peer inproc <name> <size> <duration_secs>");
+                eprintln!("       bench_peer inproc-st <name> <size> <duration_secs>");
                 std::process::exit(1);
             }
         }
@@ -98,21 +105,59 @@ fn bench_options(msg_size: usize) -> Options {
 }
 
 async fn run_inproc(name: String, size: usize, duration: Duration) {
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    };
+
     let ep = Endpoint::Inproc { name };
-    let push = Socket::new(SocketType::Push, bench_options(size));
-    push.bind(ep.clone()).await.expect("push bind");
+    let stop = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(Barrier::new(2));
+
+    let push_ep = ep.clone();
+    let push_stop = stop.clone();
+    let push_ready = ready.clone();
+    std::thread::spawn(move || {
+        let rt = build_default_runtime().expect("push runtime");
+        rt.block_on(async move {
+            let push = Socket::new(SocketType::Push, bench_options(size));
+            push.bind(push_ep).await.expect("push bind");
+            push_ready.wait();
+            let payload = Bytes::from(vec![b'x'; size]);
+            while !push_stop.load(Ordering::Relaxed) {
+                if push.send(Message::single(payload.clone())).await.is_err() {
+                    break;
+                }
+            }
+        });
+    });
+
+    ready.wait();
     let pull = Socket::new(SocketType::Pull, bench_options(size));
     pull.connect(ep).await.expect("pull connect");
+    compio::time::sleep(Duration::from_millis(500)).await;
 
-    let payload = Bytes::from(vec![b'x'; size]);
-    compio::runtime::spawn(async move {
-        loop {
-            if push.send(Message::single(payload.clone())).await.is_err() {
-                break;
-            }
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        pull.recv().await.unwrap();
+        count += 1;
+        while pull.try_recv().is_ok() {
+            count += 1;
         }
-    })
-    .detach();
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    stop.store(true, Ordering::Relaxed);
+    println!("{count} {elapsed:.6} {size}");
+}
+
+async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
+    let pull = Socket::new(SocketType::Pull, bench_options(size));
+    pull.connect(ep).await.expect("pull connect");
 
     compio::time::sleep(Duration::from_millis(500)).await;
 
@@ -133,9 +178,22 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
     println!("{count} {elapsed:.6} {size}");
 }
 
-async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
+async fn run_inproc_same_thread(name: String, size: usize, duration: Duration) {
+    let ep = Endpoint::Inproc { name };
+    let push = Socket::new(SocketType::Push, bench_options(size));
+    push.bind(ep.clone()).await.expect("push bind");
     let pull = Socket::new(SocketType::Pull, bench_options(size));
     pull.connect(ep).await.expect("pull connect");
+
+    let payload = Bytes::from(vec![b'x'; size]);
+    compio::runtime::spawn(async move {
+        loop {
+            if push.send(Message::single(payload.clone())).await.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
 
     compio::time::sleep(Duration::from_millis(500)).await;
 
