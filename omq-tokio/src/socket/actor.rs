@@ -1427,7 +1427,7 @@ fn can_bypass_actor_recv(t: SocketType) -> bool {
 /// exchange), then forwards Messages and Commands between the
 /// `SocketDriver`'s inbox and the partner's channels until either
 /// side drops.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
     mut in_rx: mpsc::Receiver<InprocFrame>,
@@ -1503,18 +1503,16 @@ async fn inproc_peer_driver(
                             && ring.recv_ready.load(std::sync::atomic::Ordering::Acquire)
                         {
                             let mut producer = ring.producer.lock().unwrap();
-                            if !producer.is_full() {
+                            if producer.is_full() {
+                                Some(m)
+                            } else {
                                 let _ = producer.push(m);
                                 producer.flush();
                                 drop(producer);
                                 ring.notify.notify_one();
-
                                 None
-                            } else {
-                                Some(m)
                             }
                         } else {
-
                             Some(m)
                         };
                         if let Some(m) = m {

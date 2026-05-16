@@ -22,11 +22,11 @@ use crate::transport::inproc::InprocSpsc;
 pub(crate) type SpscSlot = Arc<RwLock<Option<Arc<InprocSpsc>>>>;
 
 /// Notified by the actor when SPSC is installed in the slot. Wakes
-/// any recv() that's blocked on the normal async_channel path.
+/// any `recv()` that's blocked on the normal `async_channel` path.
 pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
 
 /// Recv channel that integrates SPSC awareness. Checks the ring before
-/// blocking on the async_channel, and races both when blocking.
+/// blocking on the `async_channel`, and races both when blocking.
 #[derive(Debug)]
 struct SpscAwareRecv {
     rx: async_channel::Receiver<Message>,
@@ -35,6 +35,7 @@ struct SpscAwareRecv {
 }
 
 impl SpscAwareRecv {
+    #[allow(clippy::needless_continue)]
     async fn recv(&self) -> Result<Message> {
         loop {
             let pair = self.spsc.read().unwrap().clone();
@@ -65,12 +66,12 @@ impl SpscAwareRecv {
 
     fn try_recv(&self) -> Result<Message> {
         let pair = self.spsc.read().unwrap().clone();
-        if let Some(ref p) = pair {
-            if let Ok(mut consumer) = p.consumer.try_lock() {
-                consumer.prefetch();
-                if let Some(msg) = consumer.pop() {
-                    return Ok(msg);
-                }
+        if let Some(ref p) = pair
+            && let Ok(mut consumer) = p.consumer.try_lock()
+        {
+            consumer.prefetch();
+            if let Some(msg) = consumer.pop() {
+                return Ok(msg);
             }
         }
         self.rx.try_recv().map_err(|e| match e {
@@ -252,15 +253,13 @@ impl Socket {
                 let spsc = self.inner.recv_rx.spsc.read().unwrap().clone();
                 if let Some(ref pair) = spsc
                     && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+                    && let Ok(mut producer) = pair.producer.try_lock()
+                    && !producer.is_full()
                 {
-                    if let Ok(mut producer) = pair.producer.try_lock() {
-                        if !producer.is_full() {
-                            let _ = producer.push(msg);
-                            producer.flush();
-                            pair.notify.notify_one();
-                            return Ok(());
-                        }
-                    }
+                    let _ = producer.push(msg);
+                    producer.flush();
+                    pair.notify.notify_one();
+                    return Ok(());
                 }
                 self.inner.send_submitter.send(msg).await
             }

@@ -39,7 +39,7 @@ fn unique_inproc() -> CString {
 fn get_last_endpoint(sock: *mut libc::c_void) -> CString {
     let mut buf = [0u8; 256];
     let mut len = buf.len();
-    zmq_getsockopt(sock, ZMQ_LAST_ENDPOINT, buf.as_mut_ptr().cast(), &mut len);
+    zmq_getsockopt(sock, ZMQ_LAST_ENDPOINT, buf.as_mut_ptr().cast(), std::ptr::addr_of_mut!(len));
     // len includes the trailing NUL; the string is len-1 bytes.
     let s = std::str::from_utf8(&buf[..len.saturating_sub(1)]).unwrap();
     CString::new(s).unwrap()
@@ -50,6 +50,7 @@ fn bench_push_pull(transport: &str, msg_size: usize, batch: usize) {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
+    #[allow(clippy::cast_possible_wrap)]
     let hwm = (batch as i32) * 2;
     set_opt_i32(push, ZMQ_SNDHWM, hwm);
     set_opt_i32(pull, ZMQ_RCVHWM, hwm);
@@ -108,9 +109,7 @@ fn bench_push_pull(transport: &str, msg_size: usize, batch: usize) {
     // Convert ns/msg to millions of messages per second.
     let best_mmps = 1_000.0 / best;
     let median_mmps = 1_000.0 / median;
-    println!(
-        "  sz={msg_size:>7}  best={best_mmps:6.2}  median={median_mmps:6.2}  M msg/s"
-    );
+    println!("  sz={msg_size:>7}  best={best_mmps:6.2}  median={median_mmps:6.2}  M msg/s");
 
     zmq_close(push);
     zmq_close(pull);
@@ -185,9 +184,7 @@ fn bench_req_rep(transport: &str, msg_size: usize, iters: usize) {
     // Convert ns/rt to thousands of round-trips per second.
     let best_krt = 1_000_000.0 / best;
     let median_krt = 1_000_000.0 / median;
-    println!(
-        "  sz={msg_size:>7}  best={best_krt:7.1}  median={median_krt:7.1}  k rt/s"
-    );
+    println!("  sz={msg_size:>7}  best={best_krt:7.1}  median={median_krt:7.1}  k rt/s");
 
     zmq_close(req);
     zmq_close(rep);

@@ -1,0 +1,33 @@
+[package]
+name = "omq-zeromq"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Drop-in zeromq crate replacement backed by omq-tokio"
+
+[lib]
+name = "zeromq"
+
+[lints]
+workspace = true
+
+[dependencies]
+omq-tokio = { path = "../omq-tokio", version = "0.4.0", default-features = false }
+omq-proto = { path = "../omq-proto", version = "0.8.0", default-features = false }
+bytes = "1"
+libc = "0.2"
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[[bin]]
+name = "bench_peer_zeromq"
+path = "src/bin/bench_peer_zeromq.rs"
+
+[features]
+default = []
+ipc-transport = []

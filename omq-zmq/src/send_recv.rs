@@ -207,7 +207,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
                 std::thread::yield_now();
             }
         };
-        return decompose_message(sock, &msg);
+        return Ok(decompose_message(sock, &msg));
     }
 
     let rx = sock.recv_rx.get().expect("socket not connected");
@@ -232,15 +232,12 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         }
     };
 
-    decompose_message(sock, &msg)
+    Ok(decompose_message(sock, &msg))
 }
 
-/// Extract the first frame from a Message and stash remaining parts
-/// in recv_drain for subsequent RCVMORE calls.
-fn decompose_message(
-    sock: &OmqSocket,
-    msg: &omq_compio::Message,
-) -> Result<(Bytes, bool), c_int> {
+/// Extract the first frame from a `Message` and stash remaining parts
+/// in `recv_drain` for subsequent `RCVMORE` calls.
+fn decompose_message(sock: &OmqSocket, msg: &omq_compio::Message) -> (Bytes, bool) {
     use std::sync::atomic::Ordering;
 
     let dish = sock.socket_type == omq_compio::SocketType::Dish;
@@ -248,10 +245,10 @@ fn decompose_message(
 
     if nparts <= 1 && !dish {
         let head = msg.part_bytes(0).unwrap_or_default();
-        return Ok((head, false));
+        return (head, false);
     }
 
-    let start = if dish && nparts >= 2 { 1 } else { 0 };
+    let start = usize::from(dish && nparts >= 2);
     let head = msg.part_bytes(start).unwrap_or_default();
 
     let remaining = start + 1;
@@ -265,7 +262,7 @@ fn decompose_message(
         }
     }
 
-    Ok((head, remaining < nparts))
+    (head, remaining < nparts)
 }
 
 /// Copy `src` into the caller-supplied buffer (truncate if needed).
@@ -279,17 +276,3 @@ fn copy_to_buf(buf: *mut libc::c_void, buf_len: usize, src: &[u8]) {
     }
 }
 
-/// Drain all pending recv eventfd credits in one read. Non-semaphore
-/// eventfd returns the accumulated counter and resets to 0 atomically.
-fn drain_recv_eventfd(sock: &OmqSocket) {
-    #[cfg(target_os = "linux")]
-    {
-        let mut val: u64 = 0;
-        unsafe { libc::read(sock.notify.recv_fd, (&raw mut val).cast(), 8) };
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let mut byte = 0u8;
-        while unsafe { libc::read(sock.notify.recv_read, (&raw mut byte).cast(), 1) } > 0 {}
-    }
-}

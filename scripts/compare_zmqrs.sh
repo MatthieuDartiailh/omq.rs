@@ -73,6 +73,10 @@ echo "==> building omq-compio bench_peer..."
 cargo build --release -p omq-compio --bin bench_peer -q
 COMPIO_PEER="$REPO/target/release/bench_peer"
 
+echo "==> building omq-zeromq bench_peer..."
+cargo build --release -p omq-zeromq --bin bench_peer_zeromq -q
+ZEROMQ_PEER="$REPO/target/release/bench_peer_zeromq"
+
 # ---------- helpers ----------
 
 # addr_for <transport> <peer_prefix> <idx>
@@ -89,12 +93,14 @@ addr_for() {
                 z) base=$BASE_PORT ;;
                 t) base=$((BASE_PORT + 100)) ;;
                 c) base=$((BASE_PORT + 200)) ;;
+                q) base=$((BASE_PORT + 300)) ;;
                 *) base=$BASE_PORT ;;
             esac
             echo "$((base + idx))" ;;
         ipc)
             case "$prefix" in
                 z) echo "ipc:///tmp/omq-bench-zmqrs-z-${idx}.sock" ;;
+                q) echo "ipc://@omq-bench-zmqrs-q-${idx}" ;;
                 *) echo "ipc://@omq-bench-zmqrs-${prefix}-${idx}" ;;
             esac ;;
     esac
@@ -205,46 +211,53 @@ run_comparison() {
     echo ""
     echo "zmq.rs (zeromq $ZMQRS_VERSION) vs omq $OMQ_VERSION — ${transport_label}, ${DURATION}s window + 500ms warmup"
     echo ""
-    printf "%-10s  %20s  %22s  %22s\n" "" "zmq.rs" "omq-compio" "omq-tokio"
-    printf "%-10s  %20s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
-    echo "-----------------------------------------------------------------------------------------------------------"
+    printf "%-10s  %20s  %22s  %22s  %22s\n" "" "zmq.rs" "omq-compio" "omq-tokio" "omq-zeromq"
+    printf "%-10s  %20s  %22s  %22s  %22s\n" "msg size" "(msg/s  |  MB/s)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)" "(msg/s  |  MB/s  | x)"
+    echo "------------------------------------------------------------------------------------------------------------------------------"
 
-    local -a res_sizes res_zmqrs_msgs res_zmqrs_mb res_tokio_msgs res_tokio_mb res_compio_msgs res_compio_mb
+    local -a res_sizes res_zmqrs_msgs res_zmqrs_mb res_tokio_msgs res_tokio_mb res_compio_msgs res_compio_mb res_zeromq_msgs res_zeromq_mb
     local idx=0
 
     for size in "${SIZES[@]}"; do
-        local addr_z addr_t addr_c
+        local addr_z addr_t addr_c addr_q
         addr_z=$(addr_for "$transport" "z" "$idx")
         addr_t=$(addr_for "$transport" "t" "$idx")
         addr_c=$(addr_for "$transport" "c" "$idx")
+        addr_q=$(addr_for "$transport" "q" "$idx")
 
-        local zmqrs_raw tokio_raw compio_raw
+        local zmqrs_raw tokio_raw compio_raw zeromq_raw
         zmqrs_raw=$(run_cell  "$transport" "$ZMQRS_PEER"  "$addr_z" "$size")
         tokio_raw=$(run_cell  "$transport" "$TOKIO_PEER"  "$addr_t" "$size")
         compio_raw=$(run_cell "$transport" "$COMPIO_PEER" "$addr_c" "$size")
+        zeromq_raw=$(run_cell "$transport" "$ZEROMQ_PEER" "$addr_q" "$size")
 
-        local zmqrs_msgs zmqrs_mb tokio_msgs tokio_mb compio_msgs compio_mb
+        local zmqrs_msgs zmqrs_mb tokio_msgs tokio_mb compio_msgs compio_mb zeromq_msgs zeromq_mb
         zmqrs_msgs=$(echo  "$zmqrs_raw"  | awk '{printf "%.0f", $1/$2}')
         zmqrs_mb=$(echo    "$zmqrs_raw"  | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
         tokio_msgs=$(echo  "$tokio_raw"  | awk '{printf "%.0f", $1/$2}')
         tokio_mb=$(echo    "$tokio_raw"  | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
         compio_msgs=$(echo "$compio_raw" | awk '{printf "%.0f", $1/$2}')
         compio_mb=$(echo   "$compio_raw" | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
+        zeromq_msgs=$(echo "$zeromq_raw" | awk '{printf "%.0f", $1/$2}')
+        zeromq_mb=$(echo   "$zeromq_raw" | awk -v s="$size" '{printf "%.1f", ($1*s)/$2/1e6}')
 
-        local tokio_x compio_x
+        local tokio_x compio_x zeromq_x
         tokio_x=$(speedup_str  "$tokio_msgs"  "$zmqrs_msgs")
         compio_x=$(speedup_str "$compio_msgs" "$zmqrs_msgs")
+        zeromq_x=$(speedup_str "$zeromq_msgs" "$zmqrs_msgs")
 
-        printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
+        printf "  %7s    %9s msg/s  %6s MB/s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s    %9s msg/s  %6s MB/s  %6s\n" \
             "$(fmt_size "$size")" \
             "$zmqrs_msgs"  "$zmqrs_mb" \
             "$compio_msgs" "$compio_mb" "$compio_x" \
-            "$tokio_msgs"  "$tokio_mb"  "$tokio_x"
+            "$tokio_msgs"  "$tokio_mb"  "$tokio_x" \
+            "$zeromq_msgs" "$zeromq_mb" "$zeromq_x"
 
         res_sizes[$idx]=$size
         res_zmqrs_msgs[$idx]=$zmqrs_msgs;   res_zmqrs_mb[$idx]=$zmqrs_mb
         res_tokio_msgs[$idx]=$tokio_msgs;   res_tokio_mb[$idx]=$tokio_mb
         res_compio_msgs[$idx]=$compio_msgs; res_compio_mb[$idx]=$compio_mb
+        res_zeromq_msgs[$idx]=$zeromq_msgs; res_zeromq_mb[$idx]=$zeromq_mb
         idx=$((idx + 1))
     done
 
@@ -252,25 +265,28 @@ run_comparison() {
 
     if [ "$UPDATE_BENCHMARKS" = true ]; then
         local md=$'\n'
-        md+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
-        md+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
+        md+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × | omq-zeromq msg/s | omq-zeromq MB/s | zeromq × |"$'\n'
+        md+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|-----------------|----------------|---------|"$'\n'
 
         for i in "${!res_sizes[@]}"; do
-            local sz zmsg zmb tmsg tmb cmsg cmb
+            local sz zmsg zmb tmsg tmb cmsg cmb qmsg qmb
             sz=${res_sizes[$i]}
             zmsg=${res_zmqrs_msgs[$i]};  zmb=${res_zmqrs_mb[$i]}
             tmsg=${res_tokio_msgs[$i]};  tmb=${res_tokio_mb[$i]}
             cmsg=${res_compio_msgs[$i]}; cmb=${res_compio_mb[$i]}
+            qmsg=${res_zeromq_msgs[$i]}; qmb=${res_zeromq_mb[$i]}
 
-            local label zmqrs_fmt zmqrs_bw tokio_fmt tokio_bw compio_fmt compio_bw tokio_r compio_r
+            local label zmqrs_fmt zmqrs_bw tokio_fmt tokio_bw compio_fmt compio_bw zeromq_fmt zeromq_bw tokio_r compio_r zeromq_r
             label=$(fmt_size "$sz")
             zmqrs_fmt=$(fmt_msgs "$zmsg");  zmqrs_bw=$(fmt_bw "$zmb")
             tokio_fmt=$(fmt_msgs "$tmsg");  tokio_bw=$(fmt_bw "$tmb")
             compio_fmt=$(fmt_msgs "$cmsg"); compio_bw=$(fmt_bw "$cmb")
+            zeromq_fmt=$(fmt_msgs "$qmsg"); zeromq_bw=$(fmt_bw "$qmb")
             tokio_r=$(speedup_str  "$tmsg" "$zmsg")
             compio_r=$(speedup_str "$cmsg" "$zmsg")
+            zeromq_r=$(speedup_str "$qmsg" "$zmsg")
 
-            md+="| $label | $zmqrs_fmt | $zmqrs_bw | $compio_fmt | $compio_bw | $compio_r | $tokio_fmt | $tokio_bw | $tokio_r |"$'\n'
+            md+="| $label | $zmqrs_fmt | $zmqrs_bw | $compio_fmt | $compio_bw | $compio_r | $tokio_fmt | $tokio_bw | $tokio_r | $zeromq_fmt | $zeromq_bw | $zeromq_r |"$'\n'
         done
         md+=$'\n'
 

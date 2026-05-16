@@ -585,10 +585,7 @@ pub extern "C" fn zmq_getsockopt(
             let has_data = sock_arc
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed)
-                || sock_arc
-                    .recv_rx
-                    .get()
-                    .is_some_and(|rx| !rx.is_empty());
+                || sock_arc.recv_rx.get().is_some_and(|rx| !rx.is_empty());
             if has_data {
                 events |= ZMQ_POLLIN;
             }

@@ -1,4 +1,4 @@
-//! Lock-free inproc bypass: connects zmq_send and zmq_recv directly
+//! Lock-free inproc bypass: connects `zmq_send` and `zmq_recv` directly
 //! via a SPSC ring, completely bypassing the io thread for eligible
 //! socket types (PUSH/PULL).
 //!
@@ -7,8 +7,8 @@
 //! `Message` into the ring from its C thread; the receiver pops from
 //! its C thread. Zero channel crossings, zero io thread involvement.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use blume::spsc;
 
@@ -33,18 +33,19 @@ impl std::fmt::Debug for InprocPipe {
     }
 }
 
-/// Sender half installed on the PUSH socket's OmqSocket.
+/// Sender half installed on the PUSH socket's `OmqSocket`.
 #[derive(Debug)]
 pub(crate) struct BypassSend {
     pub(crate) producer: spsc::Producer<omq_compio::Message>,
     pub(crate) pipe: Arc<InprocPipe>,
 }
 
-/// Receiver half installed on the PULL socket's OmqSocket.
+/// Receiver half installed on the PULL socket's `OmqSocket`.
 #[derive(Debug)]
 pub(crate) struct BypassRecv {
     pub(crate) consumer: spsc::Consumer<omq_compio::Message>,
-    pub(crate) pipe: Arc<InprocPipe>,
+    // Kept alive so `InprocPipe` (and its recv_signal_fd) outlives the receiver.
+    _pipe: Arc<InprocPipe>,
 }
 
 /// Create a bypass pair for an inproc PUSH/PULL connection.
@@ -58,8 +59,11 @@ pub(crate) fn create_bypass(
         recv_signal_fd,
     });
     (
-        BypassSend { producer, pipe: pipe.clone() },
-        BypassRecv { consumer, pipe },
+        BypassSend {
+            producer,
+            pipe: pipe.clone(),
+        },
+        BypassRecv { consumer, _pipe: pipe },
     )
 }
 
@@ -69,16 +73,15 @@ impl BypassSend {
     #[inline]
     pub(crate) fn push(&mut self, msg: omq_compio::Message) -> Result<(), omq_compio::Message> {
         self.producer.push(msg)?;
-        if let spsc::FlushResult::Flushed { was_empty: true, .. } = self.producer.flush() {
+        if let spsc::FlushResult::Flushed {
+            was_empty: true, ..
+        } = self.producer.flush()
+        {
             NotifyFd::signal_recv(self.pipe.recv_signal_fd);
         }
         Ok(())
     }
 
-    #[inline]
-    pub(crate) fn is_full(&self) -> bool {
-        self.producer.is_full()
-    }
 }
 
 impl BypassRecv {
@@ -88,13 +91,4 @@ impl BypassRecv {
         self.consumer.prefetch_and_pop()
     }
 
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.consumer.is_empty()
-    }
-
-    #[inline]
-    pub(crate) fn len(&self) -> usize {
-        self.consumer.len()
-    }
 }

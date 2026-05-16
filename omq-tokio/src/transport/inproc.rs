@@ -32,7 +32,7 @@ pub struct InprocSpsc {
     pub notify: tokio::sync::Notify,
     /// Set by the actor after installing the slot in `SpscAwareRecv`.
     /// The driver checks this before pushing; until set, it uses
-    /// recv_direct so the user's recv sees messages immediately.
+    /// `recv_direct` so the user's recv sees messages immediately.
     pub recv_ready: std::sync::atomic::AtomicBool,
 }
 

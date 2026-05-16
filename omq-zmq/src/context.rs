@@ -28,7 +28,7 @@ pub(crate) struct OmqContext {
     socket_notify: (Mutex<()>, Condvar),
     pub max_sockets: AtomicI32,
     pub max_msg_size: AtomicI64,
-    /// Zmq-layer inproc registry. Maps inproc name to the bound OmqSocket.
+    /// Zmq-layer inproc registry. Maps inproc name to the bound `OmqSocket`.
     /// Used to install bypass pipes when both sides are present.
     pub(crate) inproc_binds: Mutex<HashMap<String, std::sync::Weak<crate::socket::OmqSocket>>>,
     /// Pending inproc connect requests waiting for a bind.
@@ -64,6 +64,7 @@ fn build_compio_runtime() -> std::io::Result<compio::runtime::Runtime> {
 }
 
 impl OmqContext {
+    #[allow(clippy::arc_with_non_send_sync)]
     fn new(n_io_threads: usize) -> Arc<Self> {
         let n = n_io_threads.max(1);
         let terminated = Arc::new(AtomicBool::new(false));

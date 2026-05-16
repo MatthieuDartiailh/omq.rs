@@ -158,7 +158,7 @@ pub(crate) struct OmqSocket {
     /// Send pump channel. Initialized in `ensure_materialized`.
     pub send_tx: std::sync::OnceLock<flume::Sender<omq_compio::Message>>,
     /// Lock-free inproc bypass (sender half). Set once during connect;
-    /// accessed only from the zmq_send caller thread (zmq's single-thread
+    /// accessed only from the `zmq_send` caller thread (ZMQ's single-thread
     /// contract per socket).
     pub bypass_send: std::cell::UnsafeCell<Option<crate::inproc_bypass::BypassSend>>,
     /// Lock-free inproc bypass (receiver half).
@@ -169,7 +169,7 @@ pub(crate) struct OmqSocket {
     /// mutex is skipped entirely on the common single-frame recv path.
     pub drain_nonempty: AtomicBool,
     /// Initialized in `ensure_materialized` so that the channel capacity
-    /// reflects ZMQ_RCVHWM set between zmq_socket and zmq_bind/zmq_connect.
+    /// reflects `ZMQ_RCVHWM` set between `zmq_socket` and `zmq_bind`/`zmq_connect`.
     pub recv_rx: std::sync::OnceLock<flume::Receiver<omq_compio::Message>>,
     pub last_endpoint: Mutex<Option<String>>,
     pub notify: NotifyFd,
@@ -298,20 +298,21 @@ fn register_inproc_bind(sock: &Arc<OmqSocket>, name: &str) {
         .remove(name)
         .unwrap_or_default();
     for w in waiters {
-        if let Some(connector) = w.upgrade() {
-            if is_bypass_eligible(connector.socket_type, sock.socket_type) {
-                let (sender, receiver) = if connector.socket_type == SocketType::Push {
-                    (&connector, sock)
-                } else {
-                    (sock, &connector)
-                };
-                try_install_bypass(sender, receiver);
-            }
+        if let Some(connector) = w.upgrade()
+            && is_bypass_eligible(connector.socket_type, sock.socket_type)
+        {
+            let (sender, receiver) = if connector.socket_type == SocketType::Push {
+                (&connector, sock)
+            } else {
+                (sock, &connector)
+            };
+            try_install_bypass(sender, receiver);
         }
     }
 }
 
 /// Register an inproc connect. If the binder exists, install bypass.
+#[allow(clippy::collapsible_if)]
 fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
     let ctx = &sock.ctx;
     let binder = ctx
@@ -319,7 +320,7 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
         .lock()
         .unwrap()
         .get(name)
-        .and_then(|w| w.upgrade());
+        .and_then(std::sync::Weak::upgrade);
 
     if let Some(binder) = binder {
         if is_bypass_eligible(sock.socket_type, binder.socket_type) {
@@ -341,6 +342,7 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
 }
 
 #[unsafe(no_mangle)]
+#[allow(clippy::arc_with_non_send_sync)]
 pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
     if ctx_ptr.is_null() {
         set_errno(libc::EFAULT);
