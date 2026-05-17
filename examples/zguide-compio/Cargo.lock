@@ -36,7 +36,7 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "blume"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "event-listener",
 ]
@@ -743,14 +743,14 @@ dependencies = [
 
 [[package]]
 name = "omq"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omq-compio",
 ]
 
 [[package]]
 name = "omq-compio"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "async-lock",
  "blume",
@@ -763,6 +763,7 @@ dependencies = [
  "omq-proto",
  "smallvec",
  "socket2 0.6.3",
+ "yring",
 ]
 
 [[package]]
@@ -1552,6 +1553,10 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "yring"
+version = "0.2.0"
 
 [[package]]
 name = "zerocopy"

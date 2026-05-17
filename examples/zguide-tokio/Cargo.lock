@@ -15,6 +15,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "blume"
+version = "0.2.0"
+dependencies = [
+ "event-listener",
+]
+
+[[package]]
 name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -194,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "omq"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omq-tokio",
 ]
@@ -213,9 +220,10 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "async-channel",
+ "blume",
  "bytes",
  "flume",
  "futures",
@@ -227,6 +235,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "yring",
 ]
 
 [[package]]
@@ -521,6 +530,10 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "yring"
+version = "0.2.0"
 
 [[package]]
 name = "zerocopy"
