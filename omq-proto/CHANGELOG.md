@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-17
+
+### Added
+
+- Doc comments on all public API items for docs.rs coverage.
+
 ## [0.8.0] - 2026-05-14
 
 ### Added

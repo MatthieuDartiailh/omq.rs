@@ -6,6 +6,16 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-05-17
+
+### omq-proto 0.8.1, blume 0.2.1, omq-zeromq 0.2.2
+
+- Doc comments on all public API items for docs.rs coverage.
+
+### omq-compio 0.5.2, omq-tokio 0.5.2, omq 0.5.1, omq-zmq 0.1.2
+
+- Dependency version bumps only.
+
 ## [0.2.7] - 2026-05-14
 
 ### omq-proto 0.8.0
