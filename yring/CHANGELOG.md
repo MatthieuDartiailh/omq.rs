@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-17
+
+### Added
+
+- `async` feature: `AsyncProducer` (auto-wakes on flush) and `AsyncConsumer`
+  (implements `futures_core::Stream`). No runtime dependency.
+- `examples/basic.rs`: cross-thread producer/consumer demonstration.
+- `benches/throughput.rs`: u64 and 128-byte throughput benchmark.
+
 ## [0.1.0] - 2026-05-17
 
 ### Added
