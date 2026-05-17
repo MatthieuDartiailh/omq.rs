@@ -257,6 +257,9 @@ run_comparison() {
         res_omq_msgs[$idx]=$omq_msgs;   res_omq_mb[$idx]=$omq_mb
         res_tokio_msgs[$idx]=$tokio_msgs; res_tokio_mb[$idx]=$tokio_mb
         res_zmq_msgs[$idx]=$lzq_msgs;   res_zmq_mb[$idx]=$lzq_mb
+        if [ "$transport" = "inproc" ]; then
+            res_omq_st_msgs[$idx]=$omq_st_msgs; res_omq_st_mb[$idx]=$omq_st_mb
+        fi
         idx=$((idx + 1))
     done
 
@@ -264,8 +267,13 @@ run_comparison() {
 
     if [ "$UPDATE_BENCHMARKS" = true ]; then
         local md=$'\n'
-        md+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
-        md+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
+        if [ "$transport" = "inproc" ]; then
+            md+="| Size | libzmq msg/s | libzmq MB/s | compio-mt msg/s | compio-mt MB/s | mt × | compio-st msg/s | compio-st MB/s | st × | tokio msg/s | tokio MB/s | tokio × |"$'\n'
+            md+="|-------|-------------|------------|----------------|---------------|------|----------------|---------------|------|------------|-----------|---------|"$'\n'
+        else
+            md+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
+            md+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
+        fi
 
         for i in "${!res_sizes[@]}"; do
             local sz omsg omb tmsg tmb zmsg zmb
@@ -282,7 +290,15 @@ run_comparison() {
             omq_r=$(ratio_str   "$omsg" "$zmsg")
             tokio_r=$(ratio_str "$tmsg" "$zmsg")
 
-            md+="| $label | $zmq_fmt | $zmq_bw | $omq_fmt | $omq_bw | $omq_r | $tokio_fmt | $tokio_bw | $tokio_r |"$'\n'
+            if [ "$transport" = "inproc" ]; then
+                local omq_st_fmt omq_st_bw omq_st_r
+                omq_st_fmt=$(fmt_msgs "${res_omq_st_msgs[$i]}")
+                omq_st_bw=$(fmt_bw "${res_omq_st_mb[$i]}")
+                omq_st_r=$(ratio_str "${res_omq_st_msgs[$i]}" "$zmsg")
+                md+="| $label | $zmq_fmt | $zmq_bw | $omq_fmt | $omq_bw | $omq_r | $omq_st_fmt | $omq_st_bw | $omq_st_r | $tokio_fmt | $tokio_bw | $tokio_r |"$'\n'
+            else
+                md+="| $label | $zmq_fmt | $zmq_bw | $omq_fmt | $omq_bw | $omq_r | $tokio_fmt | $tokio_bw | $tokio_r |"$'\n'
+            fi
         done
         md+=$'\n'
 
