@@ -27,8 +27,8 @@ use omq_proto::proto::{Command, SocketType};
 /// Per-peer SPSC state for inproc fast path.
 #[derive(Debug)]
 pub struct InprocSpsc {
-    pub producer: Mutex<blume::spsc::Producer<Message>>,
-    pub consumer: Mutex<blume::spsc::Consumer<Message>>,
+    pub producer: Mutex<yring::Producer<Message>>,
+    pub consumer: Mutex<yring::Consumer<Message>>,
     /// Receiver socket's shared recv notification. The driver and
     /// send fast path notify this after push so `recv()` wakes up.
     pub recv_notify: Arc<tokio::sync::Notify>,
@@ -224,7 +224,7 @@ impl InprocListener {
             accept_ack,
         } = req;
         let spsc = if is_spsc_eligible(self.snapshot.socket_type, connector.socket_type) {
-            let (p, c) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
+            let (p, c) = yring::spsc(DEFAULT_INPROC_HWM);
             let listener_is_recv = is_recv_side(self.snapshot.socket_type);
             let notify = if listener_is_recv {
                 self.recv_notify.clone()

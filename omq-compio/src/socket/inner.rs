@@ -144,7 +144,7 @@ pub(super) struct CachedPeerRoute {
 /// socket's recv Event. Drop flushes remaining items and wakes
 /// the remote recv loop.
 pub(super) struct InprocSendPipe {
-    pub(super) producer: blume::spsc::Producer<Message>,
+    pub(super) producer: yring::Producer<Message>,
     pub(super) notify: Arc<Event>,
     /// Set by the remote recv loop when it parks in select.
     /// Cleared when it wakes. Producers skip notify when false.
@@ -164,7 +164,7 @@ impl Drop for InprocSendPipe {
 
 /// Per-socket inproc recv state: per-peer consumers + fair-queue index.
 pub(super) struct InprocRecvState {
-    pub(super) consumers: Vec<blume::spsc::Consumer<Message>>,
+    pub(super) consumers: Vec<yring::Consumer<Message>>,
     pub(super) fq_index: usize,
 }
 

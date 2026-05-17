@@ -1,4 +1,4 @@
-//! Lock-free bounded SPSC ring with ypipe-style batched flush/prefetch.
+//! Bounded SPSC ring with ypipe-style batched flush/prefetch.
 //!
 //! Three pointers:
 //! - `head`: consumer read position (`AtomicUsize`, consumer-owned)

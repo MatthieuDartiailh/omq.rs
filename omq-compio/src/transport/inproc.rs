@@ -75,10 +75,10 @@ pub struct InprocConn {
     pub peer: InprocPeerSnapshot,
     /// SPSC fast-path producer (we push Messages here instead of
     /// through `out`). Present only for eligible cross-thread pairs.
-    pub spsc_send: Option<blume::spsc::Producer<Message>>,
+    pub spsc_send: Option<yring::Producer<Message>>,
     /// SPSC fast-path consumer (we pop Messages from here before
     /// checking `in_rx`). Present only for eligible cross-thread pairs.
-    pub spsc_recv: Option<blume::spsc::Consumer<Message>>,
+    pub spsc_recv: Option<yring::Consumer<Message>>,
     /// True when the peer is on a different thread.
     pub cross_thread: bool,
     /// Remote socket's shared recv Event. We notify after push+flush
@@ -94,8 +94,8 @@ pub struct InprocConn {
 /// its own snapshot + `in_tx`.
 /// SPSC halves sent back to the connector via the ack channel.
 struct SpscPair {
-    for_connector_send: Option<blume::spsc::Producer<Message>>,
-    for_connector_recv: Option<blume::spsc::Consumer<Message>>,
+    for_connector_send: Option<yring::Producer<Message>>,
+    for_connector_recv: Option<yring::Consumer<Message>>,
     listener_recv_event: Option<Arc<Event>>,
     listener_parked: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -296,8 +296,8 @@ impl InprocListener {
         let eligible =
             cross_thread && is_spsc_eligible(self.snapshot.socket_type, connector.socket_type);
         let (my_spsc_send, my_spsc_recv, connector_pair) = if eligible {
-            let (p1, c1) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
-            let (p2, c2) = blume::spsc::spsc(DEFAULT_INPROC_HWM);
+            let (p1, c1) = yring::spsc(DEFAULT_INPROC_HWM);
+            let (p2, c2) = yring::spsc(DEFAULT_INPROC_HWM);
             (
                 Some(p1),
                 Some(c2),

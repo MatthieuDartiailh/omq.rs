@@ -10,8 +10,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use blume::spsc;
-
 use crate::socket::NotifyFd;
 
 /// Shared state between the sender and receiver halves of an inproc bypass.
@@ -33,14 +31,14 @@ impl std::fmt::Debug for InprocPipe {
 /// Sender half installed on the PUSH socket's `OmqSocket`.
 #[derive(Debug)]
 pub(crate) struct BypassSend {
-    pub(crate) producer: spsc::Producer<omq_compio::Message>,
+    pub(crate) producer: yring::Producer<omq_compio::Message>,
     pub(crate) pipe: Arc<InprocPipe>,
 }
 
 /// Receiver half installed on the PULL socket's `OmqSocket`.
 #[derive(Debug)]
 pub(crate) struct BypassRecv {
-    pub(crate) consumer: spsc::Consumer<omq_compio::Message>,
+    pub(crate) consumer: yring::Consumer<omq_compio::Message>,
     pipe: Arc<InprocPipe>,
 }
 
@@ -49,7 +47,7 @@ pub(crate) fn create_bypass(
     capacity: usize,
     recv_signal_fd: std::os::unix::io::RawFd,
 ) -> (BypassSend, BypassRecv) {
-    let (producer, consumer) = spsc::spsc(capacity);
+    let (producer, consumer) = yring::spsc(capacity);
     let pipe = Arc::new(InprocPipe {
         closed: AtomicBool::new(false),
         recv_signal_fd,
@@ -69,7 +67,7 @@ impl BypassSend {
     #[inline]
     pub(crate) fn push(&mut self, msg: omq_compio::Message) -> Result<(), omq_compio::Message> {
         self.producer.push(msg)?;
-        if let spsc::FlushResult::Flushed {
+        if let yring::FlushResult::Flushed {
             was_empty: true, ..
         } = self.producer.flush()
         {
