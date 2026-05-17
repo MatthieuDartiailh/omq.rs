@@ -16,7 +16,6 @@ use rand::{Rng, RngCore, SeedableRng};
 use omq_compio::proto::{
     SocketType, command,
     connection::{Connection, ConnectionConfig, Role},
-    frame,
     mechanism::MechanismSetup,
     z85,
 };

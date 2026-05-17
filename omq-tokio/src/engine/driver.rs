@@ -13,7 +13,7 @@ use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
-/// Batch-encode messages from a try_recv source, then flush flat_buf + codec.
+/// Batch-encode messages from a `try_recv` source, then flush `flat_buf` + codec.
 macro_rules! batch_encode_flush {
     ($first:expr, $try_recv:expr, $encoder:expr, $codec:expr, $flat_buf:expr, $writer:expr) => {{
         let use_flat = $encoder.is_none() && !$codec.has_frame_transform();
