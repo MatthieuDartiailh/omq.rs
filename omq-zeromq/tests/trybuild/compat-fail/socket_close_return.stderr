@@ -1,8 +1,0 @@
-error[E0308]: mismatched types
- --> tests/trybuild/compat-fail/socket_close_return.rs:4:5
-  |
-4 |     socket.close().await
-  |     ^^^^^^^^^^^^^^^^^^^^ expected `Vec<ZmqError>`, found `Result<(), ZmqError>`
-  |
-  = note: expected struct `Vec<ZmqError>`
-               found enum `Result<(), ZmqError>`

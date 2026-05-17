@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `zeromq::util`
- --> tests/trybuild/compat-fail/peer_identity_util_path.rs:1:13
-  |
-1 | use zeromq::util::PeerIdentity;
-  |             ^^^^ could not find `util` in `zeromq`

@@ -50,7 +50,8 @@ async fn disconnected_event_on_close() {
     {}
 
     // Close the push socket to trigger disconnect
-    push.close().await.unwrap();
+    let errors = push.close().await;
+    assert!(errors.is_empty());
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Pull should see a disconnected event eventually

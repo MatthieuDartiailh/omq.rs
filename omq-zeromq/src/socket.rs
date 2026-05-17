@@ -22,7 +22,7 @@ pub trait Socket: Sized + Send {
     async fn connect(&mut self, endpoint: &str) -> ZmqResult<()>;
 
     #[allow(async_fn_in_trait)]
-    async fn close(&mut self) -> ZmqResult<()>;
+    async fn close(self) -> Vec<ZmqError>;
 
     fn monitor(&mut self) -> MonitorStream;
 }
@@ -79,9 +79,11 @@ impl Inner {
         self.socket.connect(ep).await.map_err(ZmqError::from)
     }
 
-    async fn close(&mut self) -> ZmqResult<()> {
-        let socket = self.socket.clone();
-        socket.close().await.map_err(ZmqError::from)
+    async fn close(self) -> Vec<ZmqError> {
+        match self.socket.close().await {
+            Ok(()) => vec![],
+            Err(e) => vec![ZmqError::from(e)],
+        }
     }
 
     fn monitor(&mut self) -> MonitorStream {
@@ -174,7 +176,7 @@ macro_rules! define_socket {
                 self.inner.connect(endpoint).await
             }
 
-            async fn close(&mut self) -> ZmqResult<()> {
+            async fn close(self) -> Vec<ZmqError> {
                 self.inner.close().await
             }
 

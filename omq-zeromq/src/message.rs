@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 use omq_proto::message::Message;
 
+use crate::ZmqError;
+
 /// A ZeroMQ multipart message, consisting of zero or more frames.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ZmqMessage {
@@ -112,6 +114,43 @@ impl From<Bytes> for ZmqMessage {
         let mut msg = Self::new();
         msg.push_back(b);
         msg
+    }
+}
+
+impl From<Vec<Bytes>> for ZmqMessage {
+    fn from(frames: Vec<Bytes>) -> Self {
+        Self {
+            parts: VecDeque::from(frames),
+        }
+    }
+}
+
+impl From<VecDeque<Bytes>> for ZmqMessage {
+    fn from(parts: VecDeque<Bytes>) -> Self {
+        Self { parts }
+    }
+}
+
+impl TryFrom<ZmqMessage> for String {
+    type Error = ZmqError;
+
+    fn try_from(mut msg: ZmqMessage) -> Result<Self, Self::Error> {
+        if msg.len() != 1 {
+            return Err(ZmqError::Other("expected single-frame message"));
+        }
+        let frame = msg.pop_front().unwrap();
+        String::from_utf8(frame.to_vec()).map_err(|_| ZmqError::Other("invalid UTF-8"))
+    }
+}
+
+impl TryFrom<ZmqMessage> for Vec<u8> {
+    type Error = ZmqError;
+
+    fn try_from(mut msg: ZmqMessage) -> Result<Self, Self::Error> {
+        if msg.len() != 1 {
+            return Err(ZmqError::Other("expected single-frame message"));
+        }
+        Ok(msg.pop_front().unwrap().to_vec())
     }
 }
 

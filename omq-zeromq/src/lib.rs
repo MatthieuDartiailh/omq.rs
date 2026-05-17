@@ -12,6 +12,7 @@ pub mod options;
 pub mod prelude;
 pub mod proxy;
 pub mod socket;
+pub mod util;
 
 pub use endpoint::{Endpoint, TryIntoEndpoint};
 pub use error::{ZmqError, ZmqResult};
