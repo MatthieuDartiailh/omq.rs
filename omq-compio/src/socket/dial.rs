@@ -27,6 +27,39 @@ use super::inner::{
 };
 use super::{cmd_channel_capacity, pub_side_peer_sub, radio_side_peer_groups};
 
+/// Retry-loop: call `connect_fn` with backoff per `policy` until it succeeds
+/// or the policy is exhausted. Returns `None` if the policy gave up.
+async fn dial_with_backoff<T, F, Fut>(
+    inner: &SocketInner,
+    endpoint: &Endpoint,
+    policy: ReconnectPolicy,
+    first_attempt: bool,
+    connect_fn: F,
+) -> Option<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    use omq_proto::backoff::next_delay;
+    let mut attempt: u32 = 0;
+    loop {
+        if let Ok(s) = connect_fn().await {
+            return Some(s);
+        }
+        attempt = attempt.saturating_add(1);
+        if matches!(policy, ReconnectPolicy::Disabled) && first_attempt {
+            return None;
+        }
+        let delay = next_delay(&policy, attempt)?;
+        inner.monitor.publish(MonitorEvent::ConnectDelayed {
+            endpoint: endpoint.clone(),
+            retry_in: delay,
+            attempt,
+        });
+        compio::time::sleep(delay).await;
+    }
+}
+
 fn reset_peer_channel(
     inner: &SocketInner,
     handle: &WirePeerHandle,
@@ -168,30 +201,15 @@ async fn dial_supervisor_tcp(
     peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
     #[cfg(feature = "priority")] priority: u8,
 ) {
-    use omq_proto::backoff::next_delay;
-
     let mut slot_idx: Option<usize> = None;
     loop {
-        let mut attempt: u32 = 0;
-        let stream = loop {
-            if let Ok(s) = tcp_transport::connect(&plain).await {
-                break Some(s);
-            }
-            attempt = attempt.saturating_add(1);
-            if matches!(policy, ReconnectPolicy::Disabled) && slot_idx.is_none() {
-                return;
-            }
-            let Some(delay) = next_delay(&policy, attempt) else {
-                break None;
-            };
-            inner.monitor.publish(MonitorEvent::ConnectDelayed {
-                endpoint: wrapper.clone(),
-                retry_in: delay,
-                attempt,
-            });
-            compio::time::sleep(delay).await;
+        let Some(stream) = dial_with_backoff(&inner, &wrapper, policy, slot_idx.is_none(), || {
+            tcp_transport::connect(&plain)
+        })
+        .await
+        else {
+            return;
         };
-        let Some(stream) = stream else { return };
         // Apply per-socket TCP keepalive policy, if any. compio's
         // TcpStream doesn't expose AsFd directly; `to_poll_fd()` does
         // and shares the fd, so the original stream stays intact.
@@ -330,34 +348,19 @@ async fn dial_supervisor_ipc(
     peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
     #[cfg(feature = "priority")] priority: u8,
 ) {
-    use omq_proto::backoff::next_delay;
-
     let ep_ident = match &endpoint {
         Endpoint::Ipc(p) => format!("{p}"),
         _ => String::new(),
     };
     let mut slot_idx: Option<usize> = None;
     loop {
-        let mut attempt: u32 = 0;
-        let stream = loop {
-            if let Ok(s) = ipc_transport::connect(&endpoint).await {
-                break Some(s);
-            }
-            attempt = attempt.saturating_add(1);
-            if matches!(policy, ReconnectPolicy::Disabled) && slot_idx.is_none() {
-                return;
-            }
-            let Some(delay) = next_delay(&policy, attempt) else {
-                break None;
-            };
-            inner.monitor.publish(MonitorEvent::ConnectDelayed {
-                endpoint: endpoint.clone(),
-                retry_in: delay,
-                attempt,
-            });
-            compio::time::sleep(delay).await;
+        let Some(stream) = dial_with_backoff(&inner, &endpoint, policy, slot_idx.is_none(), || {
+            ipc_transport::connect(&endpoint)
+        })
+        .await
+        else {
+            return;
         };
-        let Some(stream) = stream else { return };
         if let Ok(poll_fd) = stream.to_poll_fd() {
             let _ = inner.options.apply_socket_buffers(&poll_fd);
         }
