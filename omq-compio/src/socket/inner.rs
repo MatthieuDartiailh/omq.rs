@@ -149,6 +149,10 @@ pub(super) struct InprocSendPipe {
     /// Set by the remote recv loop when it parks in select.
     /// Cleared when it wakes. Producers skip notify when false.
     pub(super) parked: Arc<AtomicBool>,
+    /// True when the peer is on a different thread. Cross-thread:
+    /// spin-wait on full (receiver drains independently). Same-thread:
+    /// fall back to blume (spin would deadlock).
+    pub(super) cross_thread: bool,
 }
 
 impl Drop for InprocSendPipe {

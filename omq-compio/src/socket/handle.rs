@@ -810,26 +810,32 @@ impl Socket {
                     let idx = (start + i) % n;
                     if let Some(msg) = recv_state.consumers[idx].prefetch_and_pop() {
                         recv_state.fq_index = idx + 1;
+                        if self
+                            .inner
+                            .options
+                            .max_message_size
+                            .is_some_and(|max| msg.byte_len() > max)
+                        {
+                            continue;
+                        }
                         self.inner.inproc_parked.store(false, Ordering::Release);
                         return Ok(msg);
                     }
                 }
             }
 
-            // Check in_rx (wire peers + same-thread inproc).
-            if !self.inner.in_rx.is_empty() || recv_state.consumers.is_empty() {
-                match self.inner.in_rx.try_recv() {
-                    Ok(frame) => {
-                        if let Some(msg) = self.process_inbound_frame(frame)? {
-                            return Ok(msg);
-                        }
-                        continue;
+            // Check in_rx (wire peers, same-thread inproc, ring-full overflow).
+            match self.inner.in_rx.try_recv() {
+                Ok(frame) => {
+                    if let Some(msg) = self.process_inbound_frame(frame)? {
+                        return Ok(msg);
                     }
-                    Err(blume::TryRecvError::Disconnected) if recv_state.consumers.is_empty() => {
-                        return Err(Error::Closed);
-                    }
-                    _ => {}
+                    continue;
                 }
+                Err(blume::TryRecvError::Disconnected) if recv_state.consumers.is_empty() => {
+                    return Err(Error::Closed);
+                }
+                _ => {}
             }
 
             // About to park: register listener, set parked flag, TOCTOU.
@@ -958,8 +964,12 @@ impl Socket {
             }
         }
         let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
+        let max = self.inner.options.max_message_size;
         for c in &mut recv_state.consumers {
             if let Some(msg) = c.prefetch_and_pop() {
+                if max.is_some_and(|m| msg.byte_len() > m) {
+                    continue;
+                }
                 return Ok(msg);
             }
         }

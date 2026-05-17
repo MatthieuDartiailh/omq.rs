@@ -199,8 +199,12 @@ impl Socket {
                             return Ok(());
                         }
                         Err(returned) => {
-                            msg = returned;
-                            std::hint::spin_loop();
+                            if pipe.cross_thread {
+                                msg = returned;
+                                std::hint::spin_loop();
+                            } else {
+                                return self.send_round_robin(returned).await;
+                            }
                         }
                     }
                 }
@@ -404,7 +408,7 @@ impl Socket {
         match chosen {
             PeerOut::Inproc { .. } => {
                 let pipes = unsafe { &mut *self.inner().inproc_send_pipes.get() };
-                if let Some(Some(pipe)) = pipes.get_mut(slot_idx) {
+                let msg = if let Some(Some(pipe)) = pipes.get_mut(slot_idx) {
                     let mut msg = msg;
                     loop {
                         match pipe.producer.push(msg) {
@@ -415,13 +419,16 @@ impl Socket {
                                 }
                                 return Ok(());
                             }
-                            Err(returned) => {
+                            Err(returned) if pipe.cross_thread => {
                                 msg = returned;
                                 std::hint::spin_loop();
                             }
+                            Err(returned) => break returned,
                         }
                     }
-                }
+                } else {
+                    msg
+                };
                 chosen.send(msg).await
             }
             PeerOut::Wire(_) if self.inner().options.conflate => {

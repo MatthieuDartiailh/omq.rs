@@ -534,9 +534,60 @@ has to overcome by being shorter everywhere else:
 The last point is the structural answer: omq does not have a
 separate I/O thread, but it pipelines encode against write.
 
+## Inproc per-peer ypipe: 3M -> 17M msg/s
+
+Each SPSC-eligible inproc connection (PUSH/PULL, PAIR) gets a
+dedicated `blume::spsc` ring (1024-slot, lock-free). Per-peer
+rings replace the shared blume MPSC channel. The ring carries
+`Message` directly (48 B by value); no `InprocFrame` wrapper, no
+`Bytes` clone, no heap allocation for messages <=39 B.
+
+Send fast path (PUSH/PAIR, single peer): one `UnsafeCell` access
+to the per-peer producer, push, flush. No Mutex, no PeerOut clone,
+no generation check.
+
+Recv fair-queue: round-robin `prefetch_and_pop()` across per-peer
+consumers. One message per `recv()` call; `try_recv()` also polls
+consumers. PULL/PAIR skip `process_inbound_frame` entirely (no
+identity routing, no subscription filtering).
+
+Conditional notify via `inproc_parked: Arc<AtomicBool>`: recv sets
+it before blocking in select, clears on wake. Producers skip
+`Event::notify` when the consumer is actively draining. Under
+sustained throughput the notify path is never hit.
+
+Cross-thread only. Same-thread stays on blume: a bounded ring
+with spin-on-full cannot coexist with same-thread sequential
+send-all-then-recv-all patterns (no concurrent consumer to drain
+the ring, so the sender deadlocks at capacity). A fallback to
+blume on ring-full was tried but breaks FIFO ordering (messages
+sent after the overflow go through the ring, arriving before the
+overflow messages buffered in blume).
+
+### Profile (8 B cross-thread)
+
+| % | function |
+|---|---|
+| 3.2 | SPSC push+flush (the actual work) |
+| 17.6 | send() routing |
+| 8.4 | Event::notify |
+| 6.9 | scoped_tls (compio TLS) |
+
+Ring work is 3.2% of cycles. The rest is async runtime machinery.
+
+### Result
+
+| size | before | after (mt) | libzmq |
+|---|---|---|---|
+| 8 B | 3.1M | **16.8M** | 10.7M |
+| 32 B | 3.1M | **15.2M** | 9.9M |
+| 128 B | 3.1M | **12.2M** | 2.9M |
+
+Cross-thread omq-compio: 1.6x libzmq at 8 B, 4x at 128 B.
+
 ## What remains
 
-**32 B gap (0.84x).** `VecDeque::push_back` copies 48 B per
+**32 B TCP gap (0.84x).** `VecDeque::push_back` copies 48 B per
 message vs libzmq's in-place write. Closing it requires either a
 chunk-based message queue (`yqueue`-style) or fused
 decode-and-deliver (callback/iterator from `handle_input`).
@@ -544,4 +595,10 @@ decode-and-deliver (callback/iterator from `handle_input`).
 **Single-wire-peer bypass on tokio.** The compio direct-encode
 fast path has no equivalent on tokio yet. Analogous shape: per-peer
 `EncodedQueue` clone, claimed via `try_lock`.
+
+**Same-thread inproc (~4M).** Uses blume (no ypipe). The ypipe
+ring cannot serve same-thread sequential send-all-then-recv-all
+patterns without deadlock or ordering violations. Same-thread
+throughput is bounded by blume's Mutex + VecDeque path and compio's
+per-task-poll overhead (~39% of cycles).
 

@@ -63,29 +63,26 @@ pub(super) fn install_inproc_peer(
     } else {
         None
     };
-    // Per-peer SPSC pipes for cross-thread eligible inproc.
+    // Per-peer SPSC pipes for eligible inproc (same-thread or cross-thread).
     {
         let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
         let slot = inner.out_peers.read().expect("peers lock").len();
         while pipes.len() <= slot {
             pipes.push(None);
         }
-        if conn.cross_thread {
-            if let Some(producer) = conn.spsc_send {
-                pipes[slot] = Some(super::inner::InprocSendPipe {
-                    producer,
-                    notify: conn
-                        .peer_recv_event
-                        .expect("cross-thread eligible must have peer_recv_event"),
-                    parked: conn
-                        .peer_parked
-                        .expect("cross-thread eligible must have peer_parked"),
-                });
-            }
-            if let Some(consumer) = conn.spsc_recv {
-                let recv = unsafe { &mut *inner.inproc_recv.get() };
-                recv.consumers.push(consumer);
-            }
+        if let Some(producer) = conn.spsc_send {
+            pipes[slot] = Some(super::inner::InprocSendPipe {
+                producer,
+                notify: conn
+                    .peer_recv_event
+                    .expect("eligible must have peer_recv_event"),
+                parked: conn.peer_parked.expect("eligible must have peer_parked"),
+                cross_thread: conn.cross_thread,
+            });
+        }
+        if let Some(consumer) = conn.spsc_recv {
+            let recv = unsafe { &mut *inner.inproc_recv.get() };
+            recv.consumers.push(consumer);
         }
     }
 
