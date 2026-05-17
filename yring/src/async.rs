@@ -28,7 +28,9 @@ impl<T> Drop for AsyncRing<T> {
         let flush = *self.ring.flush.0.get_mut();
         for i in head..flush {
             unsafe {
-                self.ring.buf[i & self.ring.mask].get_mut().assume_init_drop();
+                self.ring.buf[i & self.ring.mask]
+                    .get_mut()
+                    .assume_init_drop();
             }
         }
         // Zero out the ring's counters so its own Drop doesn't double-free.
