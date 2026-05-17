@@ -219,3 +219,106 @@ async fn plain_pub_sub() {
     }
     panic!("SUB never received over PLAIN");
 }
+
+#[tokio::test]
+async fn plain_empty_message() {
+    let ep = temp_ipc("empty-msg");
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options::default().plain_server(accept_alice),
+    );
+    server.bind(ep.clone()).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default().plain_client("alice", "secret"),
+    );
+    client.connect(ep).await.unwrap();
+
+    client
+        .send(Message::single(bytes::Bytes::new()))
+        .await
+        .unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(m.part_bytes(0).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn plain_large_message() {
+    let ep = temp_ipc("large-msg");
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options::default().plain_server(accept_alice),
+    );
+    server.bind(ep.clone()).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default().plain_client("alice", "secret"),
+    );
+    client.connect(ep).await.unwrap();
+
+    let data = vec![0xAB_u8; 256 * 1024];
+    client.send(Message::single(data.clone())).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().to_vec(), data);
+}
+
+#[tokio::test]
+async fn plain_reconnect_after_server_restart() {
+    use omq_tokio::options::ReconnectPolicy;
+
+    let ep = temp_ipc("reconnect");
+
+    let server1 = Socket::new(
+        SocketType::Pull,
+        Options::default().plain_server(accept_alice),
+    );
+    server1.bind(ep.clone()).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default()
+            .plain_client("alice", "secret")
+            .reconnect(ReconnectPolicy::Fixed(Duration::from_millis(50))),
+    );
+    client.connect(ep.clone()).await.unwrap();
+
+    client.send(Message::single("before")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), server1.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"before"[..]);
+
+    server1.close().await.unwrap();
+
+    let server2 = Socket::new(
+        SocketType::Pull,
+        Options::default().plain_server(accept_alice),
+    );
+    let mut bound = false;
+    for _ in 0..20 {
+        if server2.bind(ep.clone()).await.is_ok() {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(bound);
+
+    client.send(Message::single("after")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(5), server2.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"after"[..]);
+}

@@ -448,3 +448,113 @@ async fn blake3zmq_pub_sub() {
     }
     panic!("SUB never received over BLAKE3ZMQ");
 }
+
+#[tokio::test]
+async fn blake3zmq_empty_message() {
+    let server_kp = Blake3ZmqKeypair::generate();
+    let client_kp = Blake3ZmqKeypair::generate();
+    let server_pub = server_kp.public;
+    let ep = inproc_ep("blake3-empty");
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options::default().blake3zmq_server(server_kp),
+    );
+    server.bind(ep.clone()).await.unwrap();
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default().blake3zmq_client(client_kp, server_pub),
+    );
+    client.connect(ep).await.unwrap();
+
+    client
+        .send(Message::single(bytes::Bytes::new()))
+        .await
+        .unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(m.part_bytes(0).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn blake3zmq_large_message() {
+    let server_kp = Blake3ZmqKeypair::generate();
+    let client_kp = Blake3ZmqKeypair::generate();
+    let server_pub = server_kp.public;
+    let ep = inproc_ep("blake3-large");
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options::default().blake3zmq_server(server_kp),
+    );
+    server.bind(ep.clone()).await.unwrap();
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default().blake3zmq_client(client_kp, server_pub),
+    );
+    client.connect(ep).await.unwrap();
+
+    let data = vec![0xCD_u8; 256 * 1024];
+    client.send(Message::single(data.clone())).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().to_vec(), data);
+}
+
+#[tokio::test]
+async fn blake3zmq_reconnect_after_server_restart() {
+    use omq_tokio::options::ReconnectPolicy;
+
+    let server_kp = Blake3ZmqKeypair::generate();
+    let client_kp = Blake3ZmqKeypair::generate();
+    let server_pub = server_kp.public;
+    let ep = inproc_ep("blake3-reconnect");
+
+    let server1 = Socket::new(
+        SocketType::Pull,
+        Options::default().blake3zmq_server(server_kp.clone()),
+    );
+    server1.bind(ep.clone()).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default()
+            .blake3zmq_client(client_kp, server_pub)
+            .reconnect(ReconnectPolicy::Fixed(Duration::from_millis(50))),
+    );
+    client.connect(ep.clone()).await.unwrap();
+
+    client.send(Message::single("before")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), server1.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"before"[..]);
+
+    server1.close().await.unwrap();
+
+    let server2 = Socket::new(
+        SocketType::Pull,
+        Options::default().blake3zmq_server(server_kp),
+    );
+    let mut bound = false;
+    for _ in 0..20 {
+        if server2.bind(ep.clone()).await.is_ok() {
+            bound = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(bound);
+
+    client.send(Message::single("after")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(5), server2.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"after"[..]);
+}

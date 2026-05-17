@@ -8,6 +8,7 @@ use bytes::Bytes;
 use omq_proto::proto::transform::train_zdict;
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use rand::RngCore;
 
 /// Train a small ZDICT-format dict from 200 copies of `seed`. Used by
 /// the static-dict tests so the bytes pass `with_send_dict`'s ZDICT
@@ -139,6 +140,96 @@ async fn dict_roundtrip_small_payload() {
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap().to_vec(), plain);
     }
+}
+
+#[tokio::test]
+async fn empty_message_roundtrip() {
+    let (pull, ep) = pull_on_loopback().await;
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+
+    push.send(Message::single(Bytes::new())).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(1), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(m.part_bytes(0).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn single_byte_roundtrip() {
+    let (pull, ep) = pull_on_loopback().await;
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+
+    push.send(Message::single(Bytes::from_static(&[0x42])))
+        .await
+        .unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(1), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &[0x42][..]);
+}
+
+#[tokio::test]
+async fn incompressible_data_roundtrip() {
+    let (pull, ep) = pull_on_loopback().await;
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+
+    let mut random = vec![0u8; 8192];
+    rand::thread_rng().fill_bytes(&mut random);
+    push.send(Message::single(random.clone())).await.unwrap();
+
+    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().to_vec(), random);
+}
+
+#[tokio::test]
+async fn req_rep_over_zstd() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let mut mon = rep.monitor();
+    rep.bind(Endpoint::ZstdTcp {
+        host: Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        port: 0,
+    })
+    .await
+    .unwrap();
+    let port = match tokio::time::timeout(Duration::from_millis(500), mon.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        MonitorEvent::Listening {
+            endpoint: Endpoint::ZstdTcp { port, .. },
+        } => port,
+        other => panic!("unexpected {other:?}"),
+    };
+    let ep = Endpoint::ZstdTcp {
+        host: Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        port,
+    };
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep).await.unwrap();
+
+    req.send(Message::single("question")).await.unwrap();
+    let q = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(q.part_bytes(0).unwrap(), &b"question"[..]);
+
+    rep.send(Message::single("answer")).await.unwrap();
+    let a = tokio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.part_bytes(0).unwrap(), &b"answer"[..]);
 }
 
 #[tokio::test]
