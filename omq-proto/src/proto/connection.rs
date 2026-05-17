@@ -537,13 +537,10 @@ impl Connection {
 
     fn handle_post_handshake_command(&mut self, cmd: Command) -> Result<()> {
         match cmd {
-            Command::Ready(_) => {
+            Command::Ready(_) | Command::Error { .. } => {
                 return Err(Error::Protocol(
-                    "READY command received after handshake".into(),
+                    "READY/ERROR command received after handshake".into(),
                 ));
-            }
-            Command::Error { .. } => {
-                self.events.push_back(Event::Command(cmd));
             }
             Command::Ping { context, .. } => {
                 // Auto-answer with PONG. PING TTL is advisory; we ignore it here

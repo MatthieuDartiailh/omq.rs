@@ -1202,33 +1202,8 @@ impl SocketDriver {
                 if self.closing {
                     return;
                 }
-                // Legacy ZMTP 3.0 SUBSCRIBE/CANCEL: a single-frame
-                // message whose body starts with 0x01 / 0x00. pyzmq
-                // XSUB and older libzmq paths emit these instead of
-                // the 3.1 wire commands. PUB/XPUB must honor both.
-                if matches!(self.socket_type, SocketType::Pub | SocketType::XPub) && msg.len() == 1
-                {
-                    let body = msg.part_bytes(0).unwrap_or_default();
-                    if let Some((tag, prefix)) = body.split_first() {
-                        match tag {
-                            0x01 => {
-                                self.send_strategy
-                                    .peer_subscribe(peer_id, bytes::Bytes::copy_from_slice(prefix));
-                                // XPub surfaces the subscribe notification as a
-                                // message; Pub silently consumes it.
-                                if self.socket_type != SocketType::XPub {
-                                    return;
-                                }
-                            }
-                            0x00 => {
-                                self.send_strategy.peer_cancel(peer_id, prefix);
-                                if self.socket_type != SocketType::XPub {
-                                    return;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                if self.handle_legacy_subscribe(peer_id, &msg) {
+                    return;
                 }
                 // IdentityRecv runs first (for ROUTER/REP) to prepend the
                 // peer identity. Then type_state splits off the envelope
@@ -1282,6 +1257,30 @@ impl SocketDriver {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// Handle legacy ZMTP 3.0 subscribe/cancel (single-frame message with
+    /// 0x01/0x00 prefix). Returns true if the message was consumed.
+    fn handle_legacy_subscribe(&mut self, peer_id: u64, msg: &Message) -> bool {
+        if !matches!(self.socket_type, SocketType::Pub | SocketType::XPub) || msg.len() != 1 {
+            return false;
+        }
+        let body = msg.part_bytes(0).unwrap_or_default();
+        let Some((tag, prefix)) = body.split_first() else {
+            return false;
+        };
+        match tag {
+            0x01 => {
+                self.send_strategy
+                    .peer_subscribe(peer_id, bytes::Bytes::copy_from_slice(prefix));
+                self.socket_type != SocketType::XPub
+            }
+            0x00 => {
+                self.send_strategy.peer_cancel(peer_id, prefix);
+                self.socket_type != SocketType::XPub
+            }
+            _ => false,
         }
     }
 
