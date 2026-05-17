@@ -315,78 +315,40 @@ impl_recv!(PeerSocket);
 
 // --- Split halves ---
 
-/// Send half of a split `DealerSocket`.
-#[derive(Debug)]
-pub struct DealerSendHalf {
-    socket: omq_tokio::Socket,
+macro_rules! impl_split_halves {
+    ($socket:ident, $send:ident, $recv:ident) => {
+        #[derive(Debug)]
+        pub struct $send {
+            socket: omq_tokio::Socket,
+        }
+
+        #[derive(Debug)]
+        pub struct $recv {
+            socket: omq_tokio::Socket,
+        }
+
+        impl $socket {
+            pub fn split(self) -> ($send, $recv) {
+                let clone = self.inner.socket.clone();
+                ($send { socket: self.inner.socket }, $recv { socket: clone })
+            }
+        }
+
+        impl $send {
+            pub async fn send(&mut self, message: ZmqMessage) -> ZmqResult<()> {
+                let msg = message.to_omq();
+                self.socket.send(msg).await.map_err(ZmqError::from)
+            }
+        }
+
+        impl $recv {
+            pub async fn recv(&mut self) -> ZmqResult<ZmqMessage> {
+                let msg = self.socket.recv().await.map_err(ZmqError::from)?;
+                Ok(ZmqMessage::from_omq(&msg))
+            }
+        }
+    };
 }
 
-/// Receive half of a split `DealerSocket`.
-#[derive(Debug)]
-pub struct DealerRecvHalf {
-    socket: omq_tokio::Socket,
-}
-
-impl DealerSocket {
-    pub fn split(self) -> (DealerSendHalf, DealerRecvHalf) {
-        let clone = self.inner.socket.clone();
-        (
-            DealerSendHalf {
-                socket: self.inner.socket,
-            },
-            DealerRecvHalf { socket: clone },
-        )
-    }
-}
-
-impl DealerSendHalf {
-    pub async fn send(&mut self, message: ZmqMessage) -> ZmqResult<()> {
-        let msg = message.to_omq();
-        self.socket.send(msg).await.map_err(ZmqError::from)
-    }
-}
-
-impl DealerRecvHalf {
-    pub async fn recv(&mut self) -> ZmqResult<ZmqMessage> {
-        let msg = self.socket.recv().await.map_err(ZmqError::from)?;
-        Ok(ZmqMessage::from_omq(&msg))
-    }
-}
-
-/// Send half of a split `RouterSocket`.
-#[derive(Debug)]
-pub struct RouterSendHalf {
-    socket: omq_tokio::Socket,
-}
-
-/// Receive half of a split `RouterSocket`.
-#[derive(Debug)]
-pub struct RouterRecvHalf {
-    socket: omq_tokio::Socket,
-}
-
-impl RouterSocket {
-    pub fn split(self) -> (RouterSendHalf, RouterRecvHalf) {
-        let clone = self.inner.socket.clone();
-        (
-            RouterSendHalf {
-                socket: self.inner.socket,
-            },
-            RouterRecvHalf { socket: clone },
-        )
-    }
-}
-
-impl RouterSendHalf {
-    pub async fn send(&mut self, message: ZmqMessage) -> ZmqResult<()> {
-        let msg = message.to_omq();
-        self.socket.send(msg).await.map_err(ZmqError::from)
-    }
-}
-
-impl RouterRecvHalf {
-    pub async fn recv(&mut self) -> ZmqResult<ZmqMessage> {
-        let msg = self.socket.recv().await.map_err(ZmqError::from)?;
-        Ok(ZmqMessage::from_omq(&msg))
-    }
-}
+impl_split_halves!(DealerSocket, DealerSendHalf, DealerRecvHalf);
+impl_split_halves!(RouterSocket, RouterSendHalf, RouterRecvHalf);
