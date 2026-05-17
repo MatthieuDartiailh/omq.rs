@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "omq-compio"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-lock",
  "blume",
