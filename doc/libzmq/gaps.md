@@ -1,7 +1,7 @@
 # libzmq v4.3.5 vs omq.rs — Error Handling Gap Analysis
 
 Compares error/edge-case handling in libzmq v4.3.5 against what omq.rs
-implements today. See `doc/LIBZMQ_ERRORS.md` for the full libzmq catalog.
+implements today. See `errors.md` for the full libzmq catalog.
 
 ## Legend
 
