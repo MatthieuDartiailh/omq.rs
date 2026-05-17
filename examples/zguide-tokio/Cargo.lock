@@ -16,7 +16,7 @@ dependencies = [
 
 [[package]]
 name = "blume"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "event-listener",
 ]
@@ -201,14 +201,14 @@ dependencies = [
 
 [[package]]
 name = "omq"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "omq-tokio",
 ]
 
 [[package]]
 name = "omq-proto"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bytes",
  "patricia_tree",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-channel",
  "blume",
