@@ -211,6 +211,7 @@ strictly better: same ergonomics, no vtable.
 | Name | Cargo feature | Notes |
 |---|---|---|
 | `NULL` | always available | RFC 23 |
+| `PLAIN` | `plain` | RFC 24, username/password with authenticator callback |
 | `CURVE` | `curve` | RFC 26, X25519 + ChaCha20Poly1305 |
 | `BLAKE3ZMQ` | `blake3zmq` | OMQ-native, Noise XX + BLAKE3 + ChaCha20-BLAKE3, [RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md), unaudited |
 
@@ -247,7 +248,7 @@ behind).
 | `src/proto/greeting.rs` | ZMTP greeting state machine |
 | `src/proto/command.rs` | ZMTP commands (SUBSCRIBE, PING, etc.) |
 | `src/proto/chunked_buf.rs` | `ChunkedInputBuf` -- zero-copy multi-chunk input buffer |
-| `src/proto/mechanism/` | Mechanism dispatch + handshakes (NULL / CURVE / BLAKE3ZMQ) |
+| `src/proto/mechanism/` | Mechanism dispatch + handshakes (NULL / PLAIN / CURVE / BLAKE3ZMQ) |
 | `src/proto/transform/` | LZ4 and Zstd per-part encoder/decoder |
 | `src/endpoint.rs` | URI parsing (`tcp://`, `ipc://`, `lz4+tcp://`, etc.) |
 | `src/options.rs` | `Options` builder (HWM, identity, keepalive, mechanism) |
@@ -266,7 +267,7 @@ behind).
 | `src/transport/peer_io.rs` | `PeerIo`, `WireReader`/`WireWriter`, `RecvStream` |
 | `src/transport/tcp.rs` | TCP bind/connect/accept |
 | `src/transport/ipc.rs` | IPC bind/connect |
-| `src/transport/inproc.rs` | In-process transport (no ZMTP, blume channels) |
+| `src/transport/inproc.rs` | In-process transport (no ZMTP; blume MPSC for fan-in, yring SPSC for eligible cross-thread pairs) |
 | `src/monitor.rs` | `MonitorPublisher` + `MonitorStream` |
 
 ### omq-tokio
