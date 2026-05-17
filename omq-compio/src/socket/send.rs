@@ -261,10 +261,7 @@ impl Socket {
     /// is connected yet the message is placed in the queue and returns
     /// immediately; the pump drains it once a peer connects.
     #[cfg(not(feature = "priority"))]
-    #[cfg(not(feature = "priority"))]
-    fn select_peer(
-        &self,
-    ) -> Option<(PeerOut, usize, Option<Arc<DirectIoState>>, usize)> {
+    fn select_peer(&self) -> Option<(PeerOut, usize, Option<Arc<DirectIoState>>, usize)> {
         let inner = self.inner();
         let peers = inner.out_peers.read().expect("peers lock");
         if peers.is_empty() {

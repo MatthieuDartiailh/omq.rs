@@ -330,7 +330,12 @@ macro_rules! impl_split_halves {
         impl $socket {
             pub fn split(self) -> ($send, $recv) {
                 let clone = self.inner.socket.clone();
-                ($send { socket: self.inner.socket }, $recv { socket: clone })
+                (
+                    $send {
+                        socket: self.inner.socket,
+                    },
+                    $recv { socket: clone },
+                )
             }
         }
 
