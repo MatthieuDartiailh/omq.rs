@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "blume"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "event-listener",
 ]
