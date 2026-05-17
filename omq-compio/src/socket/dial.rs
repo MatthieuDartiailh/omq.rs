@@ -38,7 +38,7 @@ async fn dial_with_backoff<T, F, Fut>(
 ) -> Option<T>
 where
     F: Fn() -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<T>>,
+    Fut: std::future::Future<Output = Result<T, omq_proto::error::Error>>,
 {
     use omq_proto::backoff::next_delay;
     let mut attempt: u32 = 0;

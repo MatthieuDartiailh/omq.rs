@@ -13,6 +13,33 @@ use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
+/// Batch-encode messages from a try_recv source, then flush flat_buf + codec.
+macro_rules! batch_encode_flush {
+    ($first:expr, $try_recv:expr, $encoder:expr, $codec:expr, $flat_buf:expr, $writer:expr) => {{
+        let use_flat = $encoder.is_none() && !$codec.has_frame_transform();
+        encode_flat_or_codec(&$first, $encoder, $codec, use_flat, $flat_buf, $writer).await?;
+        let mut count = 1usize;
+        let mut bytes = $first.byte_len();
+        while count < SHARED_MAX_BATCH_MSGS && bytes < SHARED_MAX_BATCH_BYTES {
+            match $try_recv {
+                Some(next) => {
+                    bytes += next.byte_len();
+                    encode_flat_or_codec(&next, $encoder, $codec, use_flat, $flat_buf, $writer)
+                        .await?;
+                    count += 1;
+                }
+                None => break,
+            }
+        }
+        if !$flat_buf.is_empty() {
+            $writer.write_all(&$flat_buf.split()).await?;
+        }
+        while $codec.has_pending_transmit() {
+            flush_once($writer, $codec).await?;
+        }
+    }};
+}
+
 const READ_BUF_SIZE: usize = 256 * 1024;
 
 /// Max messages one shared-queue batch encodes before flushing.
@@ -379,55 +406,26 @@ where
 
                 cmd = inbox.recv() => match cmd {
                     Some(DriverCommand::SendMessage(first)) => {
-                        // Batch-encode like the shared_msg_rx arm: drain
-                        // inbox with try_recv after the first message so
-                        // the priority path also benefits from flat-buf and
-                        // issues one write per batch instead of one per msg.
-                        let use_flat = encoder.is_none() && !codec.has_frame_transform();
-                        encode_flat_or_codec(
-                            &first,
-                            &mut encoder,
-                            &mut codec,
-                            use_flat,
-                            &mut flat_buf,
-                            &mut writer,
-                        )
-                        .await?;
-                        let mut count = 1usize;
-                        let mut bytes = first.byte_len();
                         let mut closing = false;
-                        while count < SHARED_MAX_BATCH_MSGS && bytes < SHARED_MAX_BATCH_BYTES {
+                        batch_encode_flush!(
+                            first,
                             match inbox.try_recv() {
-                                Ok(DriverCommand::SendMessage(next)) => {
-                                    bytes += next.byte_len();
-                                    encode_flat_or_codec(
-                                        &next,
-                                        &mut encoder,
-                                        &mut codec,
-                                        use_flat,
-                                        &mut flat_buf,
-                                        &mut writer,
-                                    )
-                                    .await?;
-                                    count += 1;
-                                }
+                                Ok(DriverCommand::SendMessage(m)) => Some(m),
                                 Ok(DriverCommand::SendCommand(c)) => {
-                                    codec.send_command(&c)?;
-                                    break;
+                                    let _ = codec.send_command(&c);
+                                    None
                                 }
                                 Ok(DriverCommand::Close) => {
                                     closing = true;
-                                    break;
+                                    None
                                 }
-                                Err(_) => break,
-                            }
-                        }
-                        if !flat_buf.is_empty() {
-                            writer.write_all(&flat_buf.split()).await?;
-                        }
-                        while codec.has_pending_transmit() {
-                            flush_once(&mut writer, &mut codec).await?;
-                        }
+                                Err(_) => None,
+                            },
+                            &mut encoder,
+                            &mut codec,
+                            &mut flat_buf,
+                            &mut writer
+                        );
                         if closing {
                             drain_writes(&mut writer, &mut codec).await.ok();
                             return Ok(());
@@ -453,58 +451,18 @@ where
                 }, if codec.is_ready() => {
                     match msg {
                         None => {
-                            // Shared queue disconnected — socket is shutting down.
                             drain_writes(&mut writer, &mut codec).await.ok();
                             return Ok(());
                         }
                         Some(first) => {
-                            // Use the flat path when no transform is active:
-                            // encode directly into flat_buf (contiguous bytes)
-                            // rather than codec.out_chunks (Vec<IoSlice> per flush).
-                            let use_flat =
-                                encoder.is_none() && !codec.has_frame_transform();
-                            encode_flat_or_codec(
-                                &first,
+                            batch_encode_flush!(
+                                first,
+                                shared_msg_rx.as_ref().and_then(|rx| rx.try_recv().ok()),
                                 &mut encoder,
                                 &mut codec,
-                                use_flat,
                                 &mut flat_buf,
-                                &mut writer,
-                            )
-                            .await?;
-                            let mut count = 1usize;
-                            let mut bytes = first.byte_len();
-                            if let Some(ref rx) = shared_msg_rx {
-                                while count < SHARED_MAX_BATCH_MSGS
-                                    && bytes < SHARED_MAX_BATCH_BYTES
-                                {
-                                    match rx.try_recv() {
-                                        Ok(next) => {
-                                            bytes += next.byte_len();
-                                            encode_flat_or_codec(
-                                                &next,
-                                                &mut encoder,
-                                                &mut codec,
-                                                use_flat,
-                                                &mut flat_buf,
-                                                &mut writer,
-                                            )
-                                            .await?;
-                                            count += 1;
-                                        }
-                                        Err(_) => break,
-                                    }
-                                }
-                            }
-                            // Flush any remaining flat_buf (small messages from
-                            // the tail of the batch) in one write_all call.
-                            if !flat_buf.is_empty() {
-                                writer.write_all(&flat_buf.split()).await?;
-                            }
-                            // Flush any large messages encoded via the codec path.
-                            while codec.has_pending_transmit() {
-                                flush_once(&mut writer, &mut codec).await?;
-                            }
+                                &mut writer
+                            );
                         }
                     }
                 },
