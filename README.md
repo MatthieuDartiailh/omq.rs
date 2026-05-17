@@ -141,6 +141,20 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
 | **Python binding** | PyO3 over `omq-compio`, sync + asyncio API. [`bindings/pyomq`](bindings/pyomq/). |
 
+## C API (omq-zmq)
+
+[`omq-zmq`](omq-zmq/) is a libzmq-compatible C interface backed by omq-compio.
+Link against `libomq_zmq.so` instead of `libzmq.so` and existing C/C++
+code works without source changes. No dependency on libzmq, libsodium,
+or any C libraries.
+
+## zmq.rs compatibility (omq-zeromq)
+
+[`omq-zeromq`](omq-zeromq/) is a drop-in replacement for the
+[`zeromq`](https://crates.io/crates/zeromq) Rust crate, backed by
+omq-tokio. Rename the dependency and existing zmq.rs code compiles
+against omq.
+
 ## Python binding (pyomq)
 
 ```sh
