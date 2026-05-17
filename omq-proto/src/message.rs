@@ -222,11 +222,14 @@ impl FrameFlags {
 /// A single ZMTP frame on the wire.
 #[derive(Clone, Debug, Default)]
 pub struct Frame {
+    /// Wire flags (MORE, COMMAND).
     pub flags: FrameFlags,
+    /// Frame body.
     pub payload: Payload,
 }
 
 impl Frame {
+    /// Create a frame with explicit flags.
     pub fn new(payload: impl Into<Payload>, flags: FrameFlags) -> Self {
         Self {
             flags,
@@ -234,6 +237,7 @@ impl Frame {
         }
     }
 
+    /// Create a data frame. `more = true` sets the MORE flag.
     pub fn data(payload: impl Into<Payload>, more: bool) -> Self {
         let flags = if more {
             FrameFlags::MORE
@@ -243,6 +247,7 @@ impl Frame {
         Self::new(payload, flags)
     }
 
+    /// Create a COMMAND frame.
     pub fn command(payload: impl Into<Payload>) -> Self {
         Self::new(payload, FrameFlags::COMMAND)
     }
@@ -287,6 +292,7 @@ impl Message {
         }
     }
 
+    /// Create a multi-part message from an iterator of byte-like values.
     pub fn multipart<I, P>(parts: I) -> Self
     where
         I: IntoIterator<Item = P>,
@@ -320,6 +326,7 @@ impl Message {
         }
     }
 
+    /// Whether the message has zero parts.
     pub fn is_empty(&self) -> bool {
         matches!(self.inner, MessageInner::Empty)
     }

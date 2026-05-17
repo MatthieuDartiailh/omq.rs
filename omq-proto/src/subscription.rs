@@ -16,6 +16,7 @@ pub struct SubscriptionSet {
 }
 
 impl SubscriptionSet {
+    /// Create an empty subscription set.
     pub fn new() -> Self {
         Self::default()
     }

@@ -74,7 +74,9 @@ pub enum EndpointRole {
 /// `"@tcp://*:5555"` or `">tcp://host:5555"` or just `"tcp://host:5555"`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EndpointSpec {
+    /// Bind, connect, or socket-type default.
     pub role: EndpointRole,
+    /// The transport address.
     pub endpoint: Endpoint,
 }
 

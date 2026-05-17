@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use crate::error::{SendError, TrySendError};
 use crate::shared::Shared;
 
+/// Sending half of a blume channel. Cloneable (MPSC).
 pub struct Sender<T> {
     pub(crate) shared: Arc<Shared<T>>,
 }
@@ -14,22 +15,27 @@ impl<T> Sender<T> {
         Self { shared }
     }
 
+    /// Send a value, waiting asynchronously if the channel is full.
     pub async fn send_async(&self, val: T) -> Result<(), SendError<T>> {
         self.shared.send_async(val).await
     }
 
+    /// Try to send without blocking. Fails if full or disconnected.
     pub fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
         self.shared.try_send(val)
     }
 
+    /// Send a value, blocking the current thread if the channel is full.
     pub fn send(&self, val: T) -> Result<(), SendError<T>> {
         self.shared.send_blocking(val)
     }
 
+    /// Whether the receiver has been dropped.
     pub fn is_disconnected(&self) -> bool {
         self.shared.is_recv_disconnected()
     }
 
+    /// Whether the send-side queue is empty.
     pub fn is_empty(&self) -> bool {
         self.shared.is_send_empty()
     }

@@ -45,17 +45,17 @@ pub(crate) const MECHANISM_BYTES: usize = 20;
 pub struct MechanismName([u8; MECHANISM_BYTES]);
 
 impl MechanismName {
+    /// NULL mechanism (no encryption, no authentication).
     pub const NULL: Self = Self::from_ascii_panic(b"NULL");
+    /// CURVE mechanism (`CurveZMQ`, RFC 26).
     pub const CURVE: Self = Self::from_ascii_panic(b"CURVE");
-    /// BLAKE3ZMQ wire name per its RFC §7: 6 ASCII octets `BLAKE3`,
-    /// null-padded to 20. The "ZMQ" suffix appears only in
-    /// documentation and the protocol-id KDF context string,
-    /// `BLAKE3ZMQ-1.0`.
+    /// PLAIN mechanism (RFC 24, username + password, no encryption).
     pub const PLAIN: Self = Self::from_ascii_panic(b"PLAIN");
+    /// BLAKE3ZMQ mechanism (non-standard, omq-to-omq only).
     pub const BLAKE3: Self = Self::from_ascii_panic(b"BLAKE3");
 
-    /// Build a mechanism name. Panics at const-eval time if name > 20 bytes or
-    /// contains non-ASCII.
+    /// Build a mechanism name from an ASCII byte slice. Panics if
+    /// `name` exceeds 20 bytes or contains non-ASCII / NUL.
     #[track_caller]
     pub const fn from_ascii_panic(name: &[u8]) -> Self {
         assert!(name.len() <= MECHANISM_BYTES, "mechanism name too long");
@@ -70,6 +70,7 @@ impl MechanismName {
         Self(bytes)
     }
 
+    /// Construct from a raw 20-byte zero-padded wire representation.
     pub fn from_padded(bytes: &[u8; MECHANISM_BYTES]) -> Self {
         Self(*bytes)
     }
@@ -108,9 +109,13 @@ impl std::fmt::Debug for MechanismName {
 /// A decoded ZMTP greeting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Greeting {
+    /// ZMTP major version (always 3 for this implementation).
     pub major: u8,
+    /// ZMTP minor version (0 or 1).
     pub minor: u8,
+    /// Security mechanism name advertised in this greeting.
     pub mechanism: MechanismName,
+    /// Whether this peer is the server side of the mechanism handshake.
     pub as_server: bool,
 }
 

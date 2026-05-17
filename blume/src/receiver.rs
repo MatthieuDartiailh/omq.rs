@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::error::{RecvError, TryRecvError};
 use crate::shared::Shared;
 
+/// Receiving half of a blume channel. Not cloneable (single consumer).
 pub struct Receiver<T> {
     pub(crate) shared: Arc<Shared<T>>,
     cache: Mutex<VecDeque<T>>,
@@ -18,11 +19,13 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Try to receive one value without blocking.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         let mut cache = self.cache.lock().expect("blume: poisoned");
         self.shared.try_recv_one(&mut cache)
     }
 
+    /// Receive one value, waiting asynchronously until available.
     pub async fn recv_async(&self) -> Result<T, RecvError> {
         {
             let mut cache = self.cache.lock().expect("blume: poisoned");
@@ -49,6 +52,7 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Drain all pending values into `out` in one swap. Waits if empty.
     pub async fn recv_batch(&self, out: &mut Vec<T>) -> Result<usize, RecvError> {
         {
             let mut cache = self.cache.lock().expect("blume: poisoned");
@@ -84,6 +88,7 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Whether both the local cache and the shared queue are empty.
     pub fn is_empty(&self) -> bool {
         let cache = self.cache.lock().expect("blume: poisoned");
         cache.is_empty() && self.shared.is_send_empty()

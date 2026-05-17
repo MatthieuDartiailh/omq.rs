@@ -133,12 +133,14 @@ impl<T> Shared<T> {
     }
 }
 
+/// Create a bounded channel with the given capacity.
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     assert!(cap > 0, "blume: bounded capacity must be > 0");
     let shared = Shared::new(cap);
     (Sender::new(Arc::clone(&shared)), Receiver::new(shared))
 }
 
+/// Create an unbounded channel (grows without backpressure).
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Shared::new(usize::MAX);
     (Sender::new(Arc::clone(&shared)), Receiver::new(shared))

@@ -205,11 +205,13 @@ impl MechanismConfig {
         }
     }
 
+    /// Whether this config selects the CURVE mechanism (server or client).
     #[cfg(feature = "curve")]
     pub fn is_curve(&self) -> bool {
         matches!(self, Self::CurveServer { .. } | Self::CurveClient { .. })
     }
 
+    /// The CURVE secret key, if this config selects CURVE. `None` otherwise.
     #[cfg(feature = "curve")]
     pub fn curve_secret(&self) -> Option<&CurveSecretKey> {
         match self {
@@ -304,6 +306,7 @@ impl Default for Options {
 }
 
 impl Options {
+    /// Create options with default values.
     pub fn new() -> Self {
         Self::default()
     }

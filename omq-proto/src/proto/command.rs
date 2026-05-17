@@ -70,6 +70,7 @@ pub enum CommandKind {
 }
 
 impl Command {
+    /// Discriminant tag for this command variant.
     pub fn kind(&self) -> CommandKind {
         match self {
             Self::Ready(_) => CommandKind::Ready,
@@ -92,12 +93,16 @@ impl Command {
 /// can inspect them.
 #[derive(Clone, Debug, Default)]
 pub struct PeerProperties {
+    /// Peer's declared socket type (from the `Socket-Type` property).
     pub socket_type: Option<SocketType>,
+    /// Peer's routing identity (from the `Identity` property).
     pub identity: Option<Bytes>,
+    /// All other properties carried in the READY command.
     pub other: Vec<(String, Bytes)>,
 }
 
 impl PeerProperties {
+    /// Create empty peer properties.
     pub fn new() -> Self {
         Self::default()
     }
@@ -116,6 +121,7 @@ impl PeerProperties {
         self
     }
 
+    /// Append an arbitrary name-value property.
     pub fn add(&mut self, name: impl Into<String>, value: Bytes) {
         self.other.push((name.into(), value));
     }

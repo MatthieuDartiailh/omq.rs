@@ -69,14 +69,20 @@ pub enum Role {
 /// Configuration for a new [`Connection`].
 #[derive(Clone, Debug)]
 pub struct ConnectionConfig {
+    /// Server (bind) or client (connect) side of the TCP pairing.
     pub role: Role,
+    /// ZMTP socket type advertised to the peer.
     pub socket_type: SocketType,
+    /// Routing identity sent in the READY command. Empty = anonymous.
     pub identity: bytes::Bytes,
+    /// Reject inbound messages larger than this (bytes). `None` = no limit.
     pub max_message_size: Option<usize>,
+    /// Security mechanism to negotiate during the handshake.
     pub mechanism: MechanismSetup,
 }
 
 impl ConnectionConfig {
+    /// Create a config with NULL mechanism and default options.
     pub fn new(role: Role, socket_type: SocketType) -> Self {
         Self {
             role,
@@ -105,6 +111,7 @@ impl ConnectionConfig {
         self
     }
 
+    /// Wire-level mechanism name derived from the configured mechanism.
     pub fn mechanism_name(&self) -> MechanismName {
         self.mechanism.wire_name()
     }

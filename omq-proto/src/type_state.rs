@@ -29,6 +29,7 @@ pub struct TypeState {
 }
 
 impl TypeState {
+    /// Create default type state (no pending envelope, no awaiting-reply).
     pub fn new() -> Self {
         Self::default()
     }

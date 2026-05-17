@@ -1,3 +1,9 @@
+//! Compatibility layer for migrating from zmq.rs to omq.
+//!
+//! Provides zmq.rs-compatible types (`ZmqMessage`, `Socket`, `SocketRecv`,
+//! `SocketSend`, `ZmqError`) backed by omq under the hood. Drop-in
+//! replacement for most zmq.rs usage with minimal code changes.
+
 pub mod endpoint;
 pub mod error;
 pub mod message;
