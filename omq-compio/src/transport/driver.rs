@@ -581,89 +581,16 @@ pub(crate) async fn run_connection(
             }
         }
 
-        // 3a) Flush codec buffer — used for transforms, cmd-channel messages,
-        //     heartbeat PINGs, and pre-handshake traffic. Skipped
-        //     post-handshake when nothing has dirtied the codec this
-        //     iteration; acquiring the async mutex is not free.
-        //
-        //     The writer lock is acquired FIRST and held across the entire
-        //     snapshot → write → advance critical section. The recv-direct
-        //     path (`Socket::recv` → handle.rs flush) follows the same
-        //     discipline. This serializes the two flush paths so they can't
-        //     both clone-and-write the same codec bytes (which would
-        //     duplicate output on the wire and over-advance the codec,
-        //     panicking in `advance_transmit`).
-        let wrote_from_codec = if !state.handshake_done.load(Ordering::Relaxed) || codec_maybe_dirty
-        {
-            let mut writer = state.writer.lock().await;
-            let chunks = {
-                let io = peer_io.lock().expect("peer_io");
-                if io.codec.has_pending_transmit() {
-                    let mut c = io.codec.clone_transmit_chunks();
-                    if c.len() > 1024 {
-                        c.truncate(1024);
-                    }
-                    c
-                } else {
-                    codec_maybe_dirty = false; // confirmed clean
-                    Vec::new()
-                }
-            }; // codec lock released; writer lock still held
-            if chunks.is_empty() {
-                false
-            } else {
-                let (res, _returned) = writer.write_vectored(chunks).await;
-                let written = res.map_err(Error::Io)?;
-                if written == 0 {
-                    return Ok(());
-                }
-                peer_io
-                    .lock()
-                    .expect("peer_io")
-                    .codec
-                    .advance_transmit(written);
-                true
+        // 3a) Flush codec buffer.
+        if !state.handshake_done.load(Ordering::Relaxed) || codec_maybe_dirty {
+            let flushed = flush_codec_to_wire(&state, &peer_io, &mut codec_maybe_dirty).await?;
+            if flushed {
+                continue;
             }
-        } else {
-            false
-        };
-        if wrote_from_codec {
-            continue;
         }
 
-        // 3b) Flush EncodedQueue — fast-path direct encodes from the sender.
-        //     Drains the queue into `drain_buf` (reused across iterations to
-        //     avoid per-drain Vec allocation), then write_vectored. On partial
-        //     write, unwritten chunks are returned to the front of the queue.
-        let wrote_from_eq = {
-            drain_buf.clear();
-            {
-                let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-                eq.drain_into_vec(&mut drain_buf, 1024);
-            }
-            if drain_buf.is_empty() {
-                false
-            } else {
-                let tmp = std::mem::take(&mut drain_buf);
-                let (res, returned) = state.writer.lock().await.write_vectored(tmp).await;
-                let written = res.map_err(Error::Io)?;
-                if written == 0 {
-                    return Ok(());
-                }
-                let total_drained: usize = returned.iter().map(Bytes::len).sum();
-                if written < total_drained {
-                    state
-                        .encoded_queue
-                        .lock()
-                        .expect("encoded_queue")
-                        .put_back_unwritten(returned, written);
-                } else {
-                    drain_buf = returned; // reuse allocation on clean flush
-                }
-                true
-            }
-        };
-        if wrote_from_eq {
+        // 3b) Flush EncodedQueue.
+        if flush_encoded_queue(&state, &mut drain_buf).await? {
             continue;
         }
 
@@ -1080,13 +1007,71 @@ pub(crate) async fn run_connection(
                 }
             }
             () = transmit_ready_fut.fuse() => {
-                // Fast-path sender encoded data while we were parked.
-                // Two sub-cases: encoded_queue (handled by step 3b) or
-                // codec-direct (transform path; handled by step 3a).
-                // We can't distinguish them here, so mark codec dirty
-                // conservatively — step 3a will clear it if empty.
                 codec_maybe_dirty = true;
             }
         }
     }
+}
+
+async fn flush_codec_to_wire(
+    state: &DirectIoState,
+    peer_io: &SharedPeerIo,
+    codec_maybe_dirty: &mut bool,
+) -> Result<bool> {
+    let mut writer = state.writer.lock().await;
+    let chunks = {
+        let io = peer_io.lock().expect("peer_io");
+        if io.codec.has_pending_transmit() {
+            let mut c = io.codec.clone_transmit_chunks();
+            if c.len() > 1024 {
+                c.truncate(1024);
+            }
+            c
+        } else {
+            *codec_maybe_dirty = false;
+            return Ok(false);
+        }
+    };
+    if chunks.is_empty() {
+        return Ok(false);
+    }
+    let (res, _returned) = writer.write_vectored(chunks).await;
+    let written = res.map_err(Error::Io)?;
+    if written == 0 {
+        return Ok(false);
+    }
+    peer_io
+        .lock()
+        .expect("peer_io")
+        .codec
+        .advance_transmit(written);
+    Ok(true)
+}
+
+async fn flush_encoded_queue(state: &DirectIoState, drain_buf: &mut Vec<Bytes>) -> Result<bool> {
+    drain_buf.clear();
+    {
+        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+        eq.drain_into_vec(drain_buf, 1024);
+    }
+    if drain_buf.is_empty() {
+        return Ok(false);
+    }
+    let tmp = std::mem::take(drain_buf);
+    let (res, returned) = state.writer.lock().await.write_vectored(tmp).await;
+    let written = res.map_err(Error::Io)?;
+    if written == 0 {
+        return Ok(false);
+    }
+    let total_drained: usize = returned.iter().map(Bytes::len).sum();
+    if written < total_drained {
+        state
+            .encoded_queue
+            .lock()
+            .expect("encoded_queue")
+            .put_back_unwritten(returned, written);
+    } else {
+        *drain_buf = returned;
+    }
+    Ok(true)
 }
