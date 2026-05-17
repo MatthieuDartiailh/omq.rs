@@ -509,15 +509,7 @@ impl CurveMechanism {
         Ok(body.freeze())
     }
 
-    fn parse_initiate(&mut self, body: &[u8]) -> Result<PeerProperties> {
-        if body.len() < 96 + 8 + 16 {
-            return Err(Error::HandshakeFailed("CURVE INITIATE too short".into()));
-        }
-        let cookie = &body[..96];
-        let counter = u64::from_be_bytes(body[96..104].try_into().unwrap());
-        let init_box = &body[104..];
-
-        // Decrypt cookie to recover (Cp, our_eph_secret).
+    fn decrypt_cookie(&self, cookie: &[u8]) -> Result<()> {
         let cookie_suffix: [u8; 16] = cookie[..16].try_into().unwrap();
         let cookie_box = &cookie[16..];
         let cookie_nonce = nonce_long(NONCE_COOKIE_PREFIX, &cookie_suffix);
@@ -530,9 +522,6 @@ impl CurveMechanism {
             ));
         }
         let cookie_cp_bytes: [u8; 32] = cookie_pt[..32].try_into().unwrap();
-        let cookie_ss_bytes: [u8; 32] = cookie_pt[32..].try_into().unwrap();
-        // Verify the cookie's recovered Cp matches the peer's eph key from
-        // the parent state. This is the anti-replay check.
         let expected_cp = self
             .peer_eph_public
             .as_ref()
@@ -542,11 +531,42 @@ impl CurveMechanism {
                 "CURVE cookie does not match HELLO Cp".into(),
             ));
         }
-        // Recover our transient secret used at HELLO time. (It was the same;
-        // we're stateful here so this is a sanity check.) Skip; we already
-        // hold `self.our_eph_secret`.
-        let _ = cookie_ss_bytes;
+        Ok(())
+    }
 
+    fn verify_vouch(
+        &self,
+        vouch_suffix: &[u8; 16],
+        vouch_box: &[u8],
+        cl: &PublicKey,
+        expected_cp: &PublicKey,
+    ) -> Result<()> {
+        let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, vouch_suffix);
+        let vouch_pt = SalsaBox::new(cl, &self.our_eph_secret)
+            .decrypt(&vouch_nonce.into(), vouch_box)
+            .map_err(|_| Error::HandshakeFailed("CURVE VOUCH invalid".into()))?;
+        if vouch_pt.len() != 64
+            || &vouch_pt[..32] != expected_cp.as_bytes()
+            || &vouch_pt[32..] != self.our_lt_public.as_bytes()
+        {
+            return Err(Error::HandshakeFailed(
+                "CURVE VOUCH content mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn parse_initiate(&mut self, body: &[u8]) -> Result<PeerProperties> {
+        if body.len() < 96 + 8 + 16 {
+            return Err(Error::HandshakeFailed("CURVE INITIATE too short".into()));
+        }
+        let cookie = &body[..96];
+        let counter = u64::from_be_bytes(body[96..104].try_into().unwrap());
+        let init_box = &body[104..];
+
+        self.decrypt_cookie(cookie)?;
+
+        let expected_cp = self.peer_eph_public.as_ref().unwrap();
         let nonce = nonce_short(NONCE_INITIATE, counter);
         let init_pt = SalsaBox::new(expected_cp, &self.our_eph_secret)
             .decrypt(&nonce.into(), init_box)
@@ -562,25 +582,8 @@ impl CurveMechanism {
         let metadata = &init_pt[128..];
 
         let cl = PublicKey::from_bytes(cl_bytes);
-        // Verify the vouch.
-        let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, &vouch_suffix);
-        // RFC 26: vouch box is opened on the server side using the server's
-        // TRANSIENT secret + the client's long-term public.
-        let vouch_pt = SalsaBox::new(&cl, &self.our_eph_secret)
-            .decrypt(&vouch_nonce.into(), vouch_box)
-            .map_err(|_| Error::HandshakeFailed("CURVE VOUCH invalid".into()))?;
-        if vouch_pt.len() != 64
-            || &vouch_pt[..32] != expected_cp.as_bytes()
-            || &vouch_pt[32..] != self.our_lt_public.as_bytes()
-        {
-            return Err(Error::HandshakeFailed(
-                "CURVE VOUCH content mismatch".into(),
-            ));
-        }
+        self.verify_vouch(&vouch_suffix, vouch_box, &cl, expected_cp)?;
 
-        // Run authenticator (if installed) against the now-verified
-        // client long-term public key. Rejection aborts the
-        // handshake.
         if let Some(auth) = &self.authenticator {
             let peer = super::MechanismPeerInfo {
                 mechanism: crate::proto::greeting::MechanismName::CURVE,
