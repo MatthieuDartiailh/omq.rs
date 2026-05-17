@@ -4,18 +4,19 @@
 # everything" entry point. Exits non-zero on the first failing step.
 #
 # Knobs:
-#   OMQ_SKIP_FUZZ=1     skip the ~1 M-iter hand-rolled fuzz suites
+#   OMQ_FUZZ=1          opt in to the ~1 M-iter hand-rolled fuzz suites
 #   OMQ_SKIP_PYOMQ=1    skip the pyomq build + pytest pass
 #   OMQ_TEST_RETRIES=N  retry each step up to N times (default 1) -
 #                       a few inproc priority tests are sensitive to
 #                       multi-thread scheduler timing on heavily loaded
 #                       runners; one retry is usually enough.
+#   OMQ_TEST_JOBS=N     max parallel test steps (default 4)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 retries="${OMQ_TEST_RETRIES:-1}"
-jobs="${OMQ_TEST_JOBS:-2}"
+jobs="${OMQ_TEST_JOBS:-4}"
 
 run() {
     echo "::: $*"
@@ -111,10 +112,10 @@ par run cargo test -p omq --no-default-features --features tokio-backend
 par_wait
 
 # ---------------------------------------------------------------- #
-# 5) Hand-rolled fuzz suites (~1 M iters each; slow). Skip with
-#    `OMQ_SKIP_FUZZ=1` during fast iteration.
+# 5) Hand-rolled fuzz suites (~1 M iters each; slow). Opt in with
+#    `OMQ_FUZZ=1`.
 # ---------------------------------------------------------------- #
-if [[ "${OMQ_SKIP_FUZZ:-}" != "1" ]]; then
+if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
     par run cargo test -p omq-tokio  --features fuzz --release
     par run cargo test -p omq-compio --features fuzz --release
     par_wait
