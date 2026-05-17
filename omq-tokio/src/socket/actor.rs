@@ -1125,13 +1125,15 @@ impl SocketDriver {
             inbox_rx,
             in_rx,
             out,
-            self.peer_out_tx.clone(),
-            peer_id,
-            child_cancel,
-            peer_props,
-            self.options.max_message_size,
-            recv_direct,
-            spsc,
+            InprocDriverCtx {
+                peer_out: self.peer_out_tx.clone(),
+                peer_id,
+                cancel: child_cancel,
+                peer_props,
+                max_message_size: self.options.max_message_size,
+                recv_direct,
+                spsc,
+            },
         ));
     }
 
@@ -1417,14 +1419,7 @@ fn can_bypass_actor_recv(t: SocketType) -> bool {
 /// Inproc fast path connection driver. Replaces the
 /// `engine::ConnectionDriver` / ZMTP codec stack for in-process
 /// peers. Synthesises `HandshakeSucceeded` immediately (no greeting
-/// exchange), then forwards Messages and Commands between the
-/// `SocketDriver`'s inbox and the partner's channels until either
-/// side drops.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn inproc_peer_driver(
-    mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
-    mut in_rx: mpsc::Receiver<InprocFrame>,
-    out: mpsc::Sender<InprocFrame>,
+struct InprocDriverCtx {
     peer_out: mpsc::Sender<(u64, crate::engine::PeerOut)>,
     peer_id: u64,
     cancel: tokio_util::sync::CancellationToken,
@@ -1432,12 +1427,32 @@ async fn inproc_peer_driver(
     max_message_size: Option<usize>,
     recv_direct: Option<async_channel::Sender<omq_proto::message::Message>>,
     spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
+}
+
+/// exchange), then forwards Messages and Commands between the
+/// `SocketDriver`'s inbox and the partner's channels until either
+/// side drops.
+#[allow(clippy::too_many_lines)]
+async fn inproc_peer_driver(
+    mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
+    mut in_rx: mpsc::Receiver<InprocFrame>,
+    out: mpsc::Sender<InprocFrame>,
+    ctx: InprocDriverCtx,
 ) {
     use crate::engine::{DriverCommand, PeerOut};
     use omq_proto::proto::greeting::ZMTP_MINOR;
 
-    // Always emit PeerOut::Closed when the driver exits, no matter
-    // which branch terminated. Mirrors the byte-stream path.
+    let InprocDriverCtx {
+        peer_out,
+        peer_id,
+        cancel,
+        peer_props,
+        max_message_size,
+        recv_direct,
+        spsc,
+    } = ctx;
+
+    #[allow(clippy::items_after_statements)]
     async fn emit_event(
         peer_out: &mpsc::Sender<(u64, crate::engine::PeerOut)>,
         peer_id: u64,
