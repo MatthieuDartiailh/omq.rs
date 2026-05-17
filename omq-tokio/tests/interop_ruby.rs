@@ -55,18 +55,32 @@ impl Drop for ChildGuard {
     }
 }
 
+const MIN_OMQ_CLI: (u32, u32, u32) = (0, 17, 1);
+
+fn parse_cli_version(out: &str) -> Option<(u32, u32, u32)> {
+    let token = out.split_whitespace().find(|w| w.contains('.'))?;
+    let mut it = token.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
 fn omq_available() -> bool {
-    Command::new("omq")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    let out = match Command::new("omq").arg("--version").output() {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let Some(version) = parse_cli_version(&String::from_utf8_lossy(&out.stdout)) else {
+        return false;
+    };
+    version >= MIN_OMQ_CLI
 }
 
 fn skip_if_no_omq() -> bool {
     if !omq_available() {
-        eprintln!("skip: `omq` (gem install omq-cli) not on PATH");
+        let (mj, mn, pt) = MIN_OMQ_CLI;
+        eprintln!("skip: needs `omq` CLI >= {mj}.{mn}.{pt} (gem install omq-cli)");
         return true;
     }
     false
