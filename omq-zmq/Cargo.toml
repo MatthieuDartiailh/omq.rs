@@ -7,7 +7,6 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "libzmq-compatible C interface backed by omq (omq-compio)."
-publish = false
 
 [lib]
 name = "omq_zmq"
@@ -17,7 +16,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 workspace = true
 
 [dependencies]
-omq-compio = { path = "../omq-compio", features = ["plain", "curve", "lz4", "zstd"] }
+omq-compio = { path = "../omq-compio", version = "0.5.0", features = ["plain", "curve", "lz4", "zstd"] }
 yring = { path = "../yring", version = "0.1.0" }
 compio = { version = "0.19.0-rc.1", features = ["runtime"] }
 bytes = "1"

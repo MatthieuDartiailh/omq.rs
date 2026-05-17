@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-17
+
+### Changed
+
+- *(deps)* Replace `blume::spsc` with standalone `yring` crate.
+- *(deps)* Bump `blume` to 0.2.0.
+
 ## [0.4.0] - 2026-05-14
 
 ### Added
