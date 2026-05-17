@@ -68,20 +68,23 @@ fn direct_recv_eligible(t: SocketType) -> bool {
 /// preserving the cancellation-safety invariant: dropping the recv
 /// future at any earlier `.await` does not lose any kernel bytes.
 enum PullOutcome {
-    /// `handle_input` consumed a non-empty buffer.
     Fed,
-    /// Stream terminated cleanly (peer closed) or yielded an empty buffer.
     Eof,
-    /// Codec rejected input as a protocol error.
     ProtoErr,
-    /// Stream errored. ENOBUFS is recoverable via re-arm; other errors
-    /// are surfaced as fatal by the caller.
     Err(std::io::Error),
-    /// Large frame detected in multi-shot mode with a buffered prefix.
-    /// Codec is still in `Ready`; the outer loop must call
-    /// `begin_supplied_payload_with_prefix` and then accumulate the
-    /// remaining payload from subsequent CQEs.
     StartAccumulation,
+}
+
+impl From<crate::socket::OneShotLargeRecvOutcome> for PullOutcome {
+    fn from(o: crate::socket::OneShotLargeRecvOutcome) -> Self {
+        match o {
+            crate::socket::OneShotLargeRecvOutcome::Skipped
+            | crate::socket::OneShotLargeRecvOutcome::Took => Self::Fed,
+            crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => Self::StartAccumulation,
+            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => Self::Err(e),
+            crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => Self::ProtoErr,
+        }
+    }
 }
 
 /// RAII guard for the [`DirectIoState`] recv claim. Released on drop:
@@ -1131,19 +1134,6 @@ impl Socket {
         }
 
         loop {
-            // ---- Accumulation phase ----
-            // Codec is in AwaitingSuppliedPayload. Pull remaining payload
-            // bytes and supply them. Two sub-modes:
-            //
-            // MultiShot: drain CQEs from the BUF_RING into the accumulator.
-            //   If ENOBUFS fires the kernel killed the multi-shot SQE for
-            //   us — transition to OneShot and let the next iteration
-            //   read_until the remainder in one syscall.
-            //
-            // OneShot: single read_until for whatever is left. This is the
-            //   steady state for huge messages (> pool size). Cancel-safe
-            //   via AccRestore: if the future is dropped mid-read, the
-            //   partial buffer is saved back to DirectIoState::pending_acc.
             while state.large_recv_pending.load(Ordering::Acquire) != 0 {
                 let payload_len = state.large_recv_pending.load(Ordering::Acquire);
 
@@ -1319,17 +1309,9 @@ impl Socket {
                 match sguard.as_mut() {
                     None => PullOutcome::Eof,
                     Some(crate::socket::RecvStreamState::OneShot) => {
-                        match crate::socket::one_shot_recv_and_feed(&state, &mut sguard).await {
-                            crate::socket::OneShotLargeRecvOutcome::Skipped
-                            | crate::socket::OneShotLargeRecvOutcome::Took => PullOutcome::Fed,
-                            crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => {
-                                PullOutcome::StartAccumulation
-                            }
-                            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => PullOutcome::Err(e),
-                            crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => {
-                                PullOutcome::ProtoErr
-                            }
-                        }
+                        crate::socket::one_shot_recv_and_feed(&state, &mut sguard)
+                            .await
+                            .into()
                     }
                     Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
                         // See driver.rs `stream_arm`: `.with_cancel` registers
@@ -1360,26 +1342,9 @@ impl Socket {
                                         state.hb_epoch.elapsed().as_nanos() as u64,
                                         Ordering::Relaxed,
                                     );
-                                    match crate::socket::try_one_shot_large_recv(
-                                        &state,
-                                        &mut sguard,
-                                    )
-                                    .await
-                                    {
-                                        crate::socket::OneShotLargeRecvOutcome::Skipped
-                                        | crate::socket::OneShotLargeRecvOutcome::Took => {
-                                            PullOutcome::Fed
-                                        }
-                                        crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => {
-                                            PullOutcome::StartAccumulation
-                                        }
-                                        crate::socket::OneShotLargeRecvOutcome::IoErr(e) => {
-                                            PullOutcome::Err(e)
-                                        }
-                                        crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => {
-                                            PullOutcome::ProtoErr
-                                        }
-                                    }
+                                    crate::socket::try_one_shot_large_recv(&state, &mut sguard)
+                                        .await
+                                        .into()
                                 }
                             }
                         }
@@ -1464,46 +1429,41 @@ impl Socket {
                     }
                 }
             }
-            // Flush any codec output from handle_input (e.g. auto-PONGs).
-            // Acquire the writer lock FIRST and hold it across the entire
-            // snapshot → write → advance sequence; the driver's step 3a
-            // flush follows the same discipline. Without that serialization,
-            // the driver's heartbeat PING (enqueued under the codec lock and
-            // flushed in step 3a) could be cloned by both paths and written
-            // twice, then double-advanced, panicking in `advance_transmit`.
-            // The driver path (when its select-arm fires while we hold the
-            // claim) blocks on `state.writer` until we drop our guard.
-            loop {
-                let mut writer = state.writer.lock().await;
-                let chunks = {
-                    let io = state.peer_io.lock().expect("peer_io");
-                    if !io.codec.has_pending_transmit() {
-                        break;
-                    }
-                    let mut c = io.codec.clone_transmit_chunks();
-                    if c.len() > 1024 {
-                        c.truncate(1024);
-                    }
-                    c
-                };
-                if chunks.is_empty() {
+            Self::flush_codec_output(&state).await?;
+        }
+    }
+
+    async fn flush_codec_output(state: &Arc<DirectIoState>) -> Result<()> {
+        loop {
+            let mut writer = state.writer.lock().await;
+            let chunks = {
+                let io = state.peer_io.lock().expect("peer_io");
+                if !io.codec.has_pending_transmit() {
                     break;
                 }
-                let (res, _returned) = writer.write_vectored(chunks).await;
-                let written = res.map_err(Error::Io)?;
-                if written == 0 {
-                    state.eof_signal.notify(usize::MAX);
-                    return Err(Error::Closed);
+                let mut c = io.codec.clone_transmit_chunks();
+                if c.len() > 1024 {
+                    c.truncate(1024);
                 }
-                state
-                    .peer_io
-                    .lock()
-                    .expect("peer_io")
-                    .codec
-                    .advance_transmit(written);
+                c
+            };
+            if chunks.is_empty() {
+                break;
             }
-            // Loop back to drain the freshly-parsed events.
+            let (res, _returned) = writer.write_vectored(chunks).await;
+            let written = res.map_err(Error::Io)?;
+            if written == 0 {
+                state.eof_signal.notify(usize::MAX);
+                return Err(Error::Closed);
+            }
+            state
+                .peer_io
+                .lock()
+                .expect("peer_io")
+                .codec
+                .advance_transmit(written);
         }
+        Ok(())
     }
 
     /// Graceful close. Drains pending sends up to `Options::linger`,
