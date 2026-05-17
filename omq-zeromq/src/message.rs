@@ -377,6 +377,32 @@ mod tests {
     }
 
     #[test]
+    fn try_into_string_empty_message_fails() {
+        let msg = ZmqMessage::new();
+        let result: Result<String, _> = msg.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_into_vec_u8_empty_message_fails() {
+        let msg = ZmqMessage::new();
+        let result: Result<Vec<u8>, _> = msg.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_empty_vec_bytes() {
+        let msg = ZmqMessage::from(Vec::<Bytes>::new());
+        assert!(msg.is_empty());
+    }
+
+    #[test]
+    fn from_empty_vecdeque_bytes() {
+        let msg = ZmqMessage::from(VecDeque::<Bytes>::new());
+        assert!(msg.is_empty());
+    }
+
+    #[test]
     fn large_frame() {
         let data = vec![0xAB_u8; 1_000_000];
         let msg = ZmqMessage::from(data.clone());
