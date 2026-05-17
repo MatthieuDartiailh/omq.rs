@@ -1137,68 +1137,14 @@ impl SocketDriver {
         ));
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_peer_event(&mut self, peer_id: u64, event: ZmtpEvent) {
         match event {
             ZmtpEvent::HandshakeSucceeded {
                 peer_minor,
                 peer_properties,
             } => {
-                let identity = peer_properties
-                    .identity
-                    .clone()
-                    .unwrap_or_else(|| generated_identity(peer_id));
-                if let Some(old_id) = self.send_strategy.peer_for_identity(&identity)
-                    && old_id != peer_id
-                {
-                    self.evict_peer_for_handover(old_id);
-                }
-                let (handle, subs_replay, peer_ident) = {
-                    let Some(p) = self.peers.get_mut(&peer_id) else {
-                        return;
-                    };
-                    p.identity = identity.clone();
-                    let info = PeerInfo {
-                        connection_id: peer_id,
-                        peer_address: peer_ident_socket_addr(&p.ident),
-                        peer_identity: peer_properties.identity.clone(),
-                        peer_properties: peer_properties.clone(),
-                        zmtp_version: (3, peer_minor),
-                    };
-                    p.info = Some(info.clone());
-                    self.monitor.publish(MonitorEvent::HandshakeSucceeded {
-                        endpoint: p.endpoint.clone(),
-                        peer: info,
-                    });
-                    (
-                        p.handle.clone(),
-                        self.subscriptions.clone(),
-                        p.ident.clone(),
-                    )
-                };
-                #[cfg(feature = "priority")]
-                {
-                    let _ = peer_ident;
-                    let prio = self
-                        .peers
-                        .get(&peer_id)
-                        .map_or(omq_proto::DEFAULT_PRIORITY, |p| p.priority);
-                    self.send_strategy.connection_added_with_priority(
-                        peer_id,
-                        handle.clone(),
-                        identity.clone(),
-                        prio,
-                    );
-                }
-                #[cfg(not(feature = "priority"))]
-                self.send_strategy.connection_added(
-                    peer_id,
-                    handle.clone(),
-                    identity.clone(),
-                    matches!(peer_ident, PeerIdent::Inproc(_)),
-                );
-                self.recv_strategy.connection_added(peer_id, identity);
-                self.replay_state_to_peer(&handle, subs_replay).await;
+                self.handle_handshake_succeeded(peer_id, peer_minor, peer_properties)
+                    .await;
             }
             ZmtpEvent::Message(msg) => {
                 if self.closing {
@@ -1207,19 +1153,9 @@ impl SocketDriver {
                 if self.handle_legacy_subscribe(peer_id, &msg) {
                     return;
                 }
-                // IdentityRecv runs first (for ROUTER/REP) to prepend the
-                // peer identity. Then type_state splits off the envelope
-                // (for REP) or strips the empty delimiter (for REQ).
-                // We pre-deliver through the identity-aware recv strategy
-                // because it owns the per-peer identity map; afterward we
-                // apply the per-type transform to the result. To keep the
-                // existing recv channel as the single user-visible outlet
-                // we push the transformed message into it directly when
-                // the type has a post-recv transform.
                 if self.type_state_needs_transform() {
                     let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg).await;
                     let Some(wrapped) = wrapped else { return };
-                    // None: malformed or out-of-order frame for the current state; drop.
                     if let Ok(Some(m)) = self.type_state.post_recv(self.socket_type, wrapped)
                         && self.recv_tx.send(m).await.is_err()
                     {
@@ -1229,36 +1165,101 @@ impl SocketDriver {
                     self.begin_close(None, Some(Duration::ZERO));
                 }
             }
-            ZmtpEvent::Command(cmd) => {
-                use omq_proto::proto::Command;
-                match cmd {
-                    Command::Subscribe(prefix) => {
-                        self.send_strategy.peer_subscribe(peer_id, prefix.clone());
-                        if self.socket_type == SocketType::XPub {
-                            let _ = self.recv_tx.send(xpub_notification(0x01, &prefix)).await;
-                        }
-                    }
-                    Command::Cancel(prefix) => {
-                        self.send_strategy.peer_cancel(peer_id, &prefix);
-                        if self.socket_type == SocketType::XPub {
-                            let _ = self.recv_tx.send(xpub_notification(0x00, &prefix)).await;
-                        }
-                    }
-                    Command::Join(group) => {
-                        self.send_strategy.peer_join(peer_id, &group);
-                    }
-                    Command::Leave(group) => {
-                        self.send_strategy.peer_leave(peer_id, &group);
-                    }
-                    Command::Error { reason } => {
-                        self.publish_peer_command(peer_id, PeerCommandKind::Error { reason });
-                    }
-                    Command::Unknown { name, body } => {
-                        self.publish_peer_command(peer_id, PeerCommandKind::Unknown { name, body });
-                    }
-                    _ => {}
+            ZmtpEvent::Command(cmd) => self.handle_peer_command(peer_id, cmd).await,
+        }
+    }
+
+    async fn handle_handshake_succeeded(
+        &mut self,
+        peer_id: u64,
+        peer_minor: u8,
+        peer_properties: std::sync::Arc<omq_proto::proto::command::PeerProperties>,
+    ) {
+        let identity = peer_properties
+            .identity
+            .clone()
+            .unwrap_or_else(|| generated_identity(peer_id));
+        if let Some(old_id) = self.send_strategy.peer_for_identity(&identity)
+            && old_id != peer_id
+        {
+            self.evict_peer_for_handover(old_id);
+        }
+        let (handle, subs_replay, peer_ident) = {
+            let Some(p) = self.peers.get_mut(&peer_id) else {
+                return;
+            };
+            p.identity = identity.clone();
+            let info = PeerInfo {
+                connection_id: peer_id,
+                peer_address: peer_ident_socket_addr(&p.ident),
+                peer_identity: peer_properties.identity.clone(),
+                peer_properties: peer_properties.clone(),
+                zmtp_version: (3, peer_minor),
+            };
+            p.info = Some(info.clone());
+            self.monitor.publish(MonitorEvent::HandshakeSucceeded {
+                endpoint: p.endpoint.clone(),
+                peer: info,
+            });
+            (
+                p.handle.clone(),
+                self.subscriptions.clone(),
+                p.ident.clone(),
+            )
+        };
+        #[cfg(feature = "priority")]
+        {
+            let _ = peer_ident;
+            let prio = self
+                .peers
+                .get(&peer_id)
+                .map_or(omq_proto::DEFAULT_PRIORITY, |p| p.priority);
+            self.send_strategy.connection_added_with_priority(
+                peer_id,
+                handle.clone(),
+                identity.clone(),
+                prio,
+            );
+        }
+        #[cfg(not(feature = "priority"))]
+        self.send_strategy.connection_added(
+            peer_id,
+            handle.clone(),
+            identity.clone(),
+            matches!(peer_ident, PeerIdent::Inproc(_)),
+        );
+        self.recv_strategy.connection_added(peer_id, identity);
+        self.replay_state_to_peer(&handle, subs_replay).await;
+    }
+
+    async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
+        use omq_proto::proto::Command;
+        match cmd {
+            Command::Subscribe(prefix) => {
+                self.send_strategy.peer_subscribe(peer_id, prefix.clone());
+                if self.socket_type == SocketType::XPub {
+                    let _ = self.recv_tx.send(xpub_notification(0x01, &prefix)).await;
                 }
             }
+            Command::Cancel(prefix) => {
+                self.send_strategy.peer_cancel(peer_id, &prefix);
+                if self.socket_type == SocketType::XPub {
+                    let _ = self.recv_tx.send(xpub_notification(0x00, &prefix)).await;
+                }
+            }
+            Command::Join(group) => {
+                self.send_strategy.peer_join(peer_id, &group);
+            }
+            Command::Leave(group) => {
+                self.send_strategy.peer_leave(peer_id, &group);
+            }
+            Command::Error { reason } => {
+                self.publish_peer_command(peer_id, PeerCommandKind::Error { reason });
+            }
+            Command::Unknown { name, body } => {
+                self.publish_peer_command(peer_id, PeerCommandKind::Unknown { name, body });
+            }
+            _ => {}
         }
     }
 
