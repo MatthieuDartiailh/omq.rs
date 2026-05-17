@@ -67,25 +67,12 @@ impl Blake3ZmqKeypair {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Blake3ZmqPublicKey(pub [u8; 32]);
 
-#[derive(Clone)]
+#[derive(Clone, zeroize::ZeroizeOnDrop)]
 pub struct Blake3ZmqSecretKey(pub [u8; 32]);
 
 impl std::fmt::Debug for Blake3ZmqSecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Blake3ZmqSecretKey(<redacted>)")
-    }
-}
-
-impl Drop for Blake3ZmqSecretKey {
-    fn drop(&mut self) {
-        // Best-effort zeroize. When the actual mechanism lands, switch
-        // to the `zeroize` crate's `Zeroizing<[u8; 32]>` for compile-
-        // time guarantees.
-        for b in &mut self.0 {
-            unsafe {
-                std::ptr::write_volatile(std::ptr::from_mut::<u8>(b), 0);
-            }
-        }
     }
 }
 

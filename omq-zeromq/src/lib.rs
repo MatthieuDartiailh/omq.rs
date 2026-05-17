@@ -7,7 +7,7 @@ pub mod prelude;
 pub mod proxy;
 pub mod socket;
 
-pub use endpoint::{Endpoint, Host, Transport, TryIntoEndpoint};
+pub use endpoint::{Endpoint, TryIntoEndpoint};
 pub use error::{ZmqError, ZmqResult};
 pub use message::ZmqMessage;
 pub use monitor::{MonitorStream, SocketEvent};

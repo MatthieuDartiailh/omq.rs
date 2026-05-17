@@ -19,9 +19,6 @@ pub(crate) struct InprocPipe {
     pub(crate) closed: AtomicBool,
     /// Receiver's recv eventfd. Signaled by the sender when the pipe
     /// transitions from empty to non-empty.
-    #[cfg(target_os = "linux")]
-    pub(crate) recv_signal_fd: std::os::unix::io::RawFd,
-    #[cfg(not(target_os = "linux"))]
     pub(crate) recv_signal_fd: std::os::unix::io::RawFd,
 }
 

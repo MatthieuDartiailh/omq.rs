@@ -6,8 +6,6 @@
 //! Subscription filtering (SUB/XSUB) and group filtering (DISH) sit
 //! on top of this as recv-side filters.
 
-use std::collections::HashSet;
-
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
@@ -16,24 +14,18 @@ use omq_proto::message::Message;
 #[derive(Debug)]
 pub(crate) struct FairQueueRecv {
     recv_tx: async_channel::Sender<Message>,
-    peers: HashSet<u64>,
 }
 
 impl FairQueueRecv {
     pub(crate) fn new(recv_tx: async_channel::Sender<Message>) -> Self {
-        Self {
-            recv_tx,
-            peers: HashSet::new(),
-        }
+        Self { recv_tx }
     }
 
-    pub(crate) fn connection_added(&mut self, peer_id: u64) {
-        self.peers.insert(peer_id);
-    }
+    #[allow(clippy::unused_self)]
+    pub(crate) fn connection_added(&mut self, _peer_id: u64) {}
 
-    pub(crate) fn connection_removed(&mut self, peer_id: u64) {
-        self.peers.remove(&peer_id);
-    }
+    #[allow(clippy::unused_self)]
+    pub(crate) fn connection_removed(&mut self, _peer_id: u64) {}
 
     pub(crate) async fn deliver(&self, _peer_id: u64, msg: Message) -> Result<()> {
         self.recv_tx.send(msg).await.map_err(|_| Error::Closed)

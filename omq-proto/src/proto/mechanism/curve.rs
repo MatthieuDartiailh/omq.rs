@@ -348,10 +348,9 @@ impl CurveMechanism {
 
     fn build_hello(&mut self) -> Result<Bytes> {
         let server_pub = self.peer_lt_public.clone().expect("client has server pub");
-        let our_eph_secret = self.our_eph_secret.clone();
         let counter = self.next_out_counter();
         let nonce = nonce_short(NONCE_HELLO, counter);
-        let signature_box = SalsaBox::new(&server_pub, &our_eph_secret)
+        let signature_box = SalsaBox::new(&server_pub, &self.our_eph_secret)
             .encrypt(&nonce.into(), &[0u8; 64][..])
             .map_err(|_| Error::Protocol("CURVE HELLO encrypt failed".into()))?;
         // Body layout: version(2) + padding(72) + Cp(32) + nonce(8) + sig(80) = 194
@@ -602,12 +601,10 @@ impl CurveMechanism {
 
     fn build_ready(&mut self) -> Result<Bytes> {
         let cp = self.peer_eph_public.clone().expect("server has Cp");
-        let our_eph_secret = self.our_eph_secret.clone();
-        let our_props = self.our_props.clone();
         let counter = self.next_out_counter();
         let nonce = nonce_short(NONCE_READY, counter);
-        let metadata = encode_metadata(&our_props)?;
-        let ready_box = SalsaBox::new(&cp, &our_eph_secret)
+        let metadata = encode_metadata(&self.our_props)?;
+        let ready_box = SalsaBox::new(&cp, &self.our_eph_secret)
             .encrypt(&nonce.into(), metadata.as_slice())
             .map_err(|_| Error::Protocol("CURVE READY encrypt failed".into()))?;
         let mut body = BytesMut::with_capacity(8 + ready_box.len());

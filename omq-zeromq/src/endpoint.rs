@@ -24,23 +24,6 @@ impl fmt::Display for Endpoint {
     }
 }
 
-/// Transport type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Transport {
-    Tcp,
-    Ipc,
-    Inproc,
-    Udp,
-}
-
-/// Host portion of a TCP endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Host {
-    Localhost,
-    Any,
-    Specific(String),
-}
-
 /// Trait for types that can be converted to an omq `Endpoint`.
 pub trait TryIntoEndpoint {
     fn try_into(&self) -> ZmqResult<omq_proto::Endpoint>;

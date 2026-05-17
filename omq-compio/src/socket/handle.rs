@@ -600,17 +600,15 @@ impl Socket {
         let peers = self.inner.out_peers.read().expect("peers lock");
         for p in peers.iter() {
             if p.connection_id == connection_id {
+                let info = p.info.read().expect("info lock");
                 return Ok(Some(crate::monitor::ConnectionStatus {
                     connection_id: p.connection_id,
                     endpoint: p.endpoint.clone(),
-                    identity: p
-                        .info
-                        .read()
-                        .expect("info lock")
+                    identity: info
                         .as_ref()
                         .and_then(|i| i.peer_identity.clone())
                         .unwrap_or_default(),
-                    peer_info: p.info.read().expect("info lock").clone(),
+                    peer_info: info.clone(),
                 }));
             }
         }

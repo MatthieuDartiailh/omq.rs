@@ -84,8 +84,14 @@ impl SendStrategy {
             SocketType::Router | SocketType::Rep | SocketType::Server | SocketType::Peer => {
                 Self::Identity(IdentitySend::new(options))
             }
-            // Everything else -- round-robin.
-            _ => Self::RoundRobin(RoundRobinSend::new(options)),
+            // Round-robin send.
+            SocketType::Req
+            | SocketType::Dealer
+            | SocketType::Push
+            | SocketType::Pair
+            | SocketType::Client
+            | SocketType::Scatter
+            | SocketType::Channel => Self::RoundRobin(RoundRobinSend::new(options)),
         }
     }
 

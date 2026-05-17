@@ -612,11 +612,6 @@ pub(crate) struct DirectIoState {
     /// so the next consumer (direct-recv or driver) can resume without
     /// losing the bytes already pulled from the multi-shot stream.
     pub(crate) pending_acc: Mutex<Option<BytesMut>>,
-    /// Notified by the codec-feeder side when `large_recv_pending`
-    /// transitions from 0 to a non-zero value, so the parked recv
-    /// loop wakes promptly. Re-armable.
-    #[allow(dead_code)]
-    pub(crate) large_recv_signal: Event,
     /// Threshold mirrored from `Options::large_message_threshold` at
     /// construction. `0` means "never switch" (translated from `None`).
     /// Held here so the hot path doesn't reach back through the
@@ -836,7 +831,6 @@ impl DirectIoState {
             driver_in_select: AtomicBool::new(false),
             large_recv_pending: AtomicUsize::new(0),
             pending_acc: Mutex::new(None),
-            large_recv_signal: Event::new(),
             large_message_threshold,
         })
     }

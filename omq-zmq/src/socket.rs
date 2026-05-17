@@ -117,29 +117,6 @@ impl NotifyFd {
             libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
         }
     }
-
-    // Used in Phase 2 (ZMQ_FD polling).
-    #[allow(dead_code)]
-    pub(crate) fn signal_send(fd: std::os::unix::io::RawFd) {
-        let b: u8 = 1;
-        unsafe {
-            libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
-        }
-    }
-
-    pub(crate) fn consume_recv(fd: std::os::unix::io::RawFd) {
-        let mut b: u8 = 0;
-        unsafe {
-            libc::read(fd, (&raw mut b).cast::<libc::c_void>(), 1);
-        }
-    }
-
-    pub(crate) fn consume_send(fd: std::os::unix::io::RawFd) {
-        let mut b: u8 = 0;
-        unsafe {
-            libc::read(fd, (&raw mut b).cast::<libc::c_void>(), 1);
-        }
-    }
 }
 
 // socket_type read in Phase 3 (ZMQ_TYPE getsockopt).

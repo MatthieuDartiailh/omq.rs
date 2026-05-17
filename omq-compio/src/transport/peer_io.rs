@@ -200,15 +200,6 @@ impl WireRecvFd {
         }
         Ok(buf.freeze())
     }
-
-    /// Convenience: allocate a sized [`BytesMut`] and call
-    /// [`read_until`] up to `len` bytes.
-    #[allow(dead_code)]
-    pub(crate) async fn recv_exact(&self, len: usize) -> io::Result<BytesMut> {
-        let mut buf = BytesMut::with_capacity(len);
-        self.read_until(&mut buf, len).await?;
-        Ok(buf)
-    }
 }
 
 impl From<AsyncFd<TcpStream>> for WireReader {
