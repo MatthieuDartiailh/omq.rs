@@ -318,6 +318,65 @@ mod tests {
     }
 
     #[test]
+    fn from_vec_bytes() {
+        let frames = vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")];
+        let msg = ZmqMessage::from(frames);
+        assert_eq!(msg.len(), 2);
+        assert_eq!(msg.get(0).unwrap().as_ref(), b"a");
+        assert_eq!(msg.get(1).unwrap().as_ref(), b"b");
+    }
+
+    #[test]
+    fn from_vecdeque_bytes() {
+        let mut frames = VecDeque::new();
+        frames.push_back(Bytes::from_static(b"x"));
+        frames.push_back(Bytes::from_static(b"y"));
+        let msg = ZmqMessage::from(frames);
+        assert_eq!(msg.len(), 2);
+        assert_eq!(msg.get(0).unwrap().as_ref(), b"x");
+        assert_eq!(msg.get(1).unwrap().as_ref(), b"y");
+    }
+
+    #[test]
+    fn try_into_string() {
+        let msg = ZmqMessage::from("hello");
+        let s: String = msg.try_into().unwrap();
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn try_into_string_multiframe_fails() {
+        let mut msg = ZmqMessage::new();
+        msg.push_back(Bytes::from_static(b"a"));
+        msg.push_back(Bytes::from_static(b"b"));
+        let result: Result<String, _> = msg.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_into_string_invalid_utf8_fails() {
+        let msg = ZmqMessage::from(vec![0xFF, 0xFE]);
+        let result: Result<String, _> = msg.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_into_vec_u8() {
+        let msg = ZmqMessage::from("data");
+        let v: Vec<u8> = msg.try_into().unwrap();
+        assert_eq!(v, b"data");
+    }
+
+    #[test]
+    fn try_into_vec_u8_multiframe_fails() {
+        let mut msg = ZmqMessage::new();
+        msg.push_back(Bytes::from_static(b"a"));
+        msg.push_back(Bytes::from_static(b"b"));
+        let result: Result<Vec<u8>, _> = msg.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn large_frame() {
         let data = vec![0xAB_u8; 1_000_000];
         let msg = ZmqMessage::from(data.clone());
