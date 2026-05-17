@@ -5,9 +5,9 @@
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-%3E%3D%201.93-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-> **3.6M msg/s** inproc | **6.93M msg/s** ipc | **7.21M msg/s** tcp
+> **16.4M msg/s** inproc | **7.2M msg/s** ipc | **7.2M msg/s** tcp
 >
-> **5.39 µs** inproc latency | **17.6 µs** ipc | **25.4 µs** tcp
+> **2.5 µs** inproc latency | **14.7 µs** ipc | **21.4 µs** tcp
 
 Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all message sizes.
 
