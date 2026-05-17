@@ -149,7 +149,7 @@ down and reconnects.
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
 | NULL | READY exchange + ZAP | READY exchange, no ZAP | **~** |
-| PLAIN | Username/password in HELLO | Not implemented | **=** |
+| PLAIN | Username/password in HELLO | Username/password with authenticator callback | **=** |
 | CURVE (RFC 26) | Full, with ZAP | Full, inline authenticator | **=** |
 | BLAKE3ZMQ | N/A (omq-native) | Full, with transcript binding | **=** omq-only |
 | ZAP protocol | Separate inproc socket | Not implemented; inline callback | **~** deliberate |
@@ -242,8 +242,6 @@ down and reconnects.
 
 ### Features
 
-- **PLAIN mechanism:** Not implemented. Low priority — PLAIN sends
-  credentials in cleartext and is rarely used in production.
 - **ZAP:** Not implemented. Deliberate — inline authenticator callback
   serves the same purpose without the inproc socket complexity.
 - **IPC peer credential filtering (SO_PEERCRED):** Cannot restrict IPC
