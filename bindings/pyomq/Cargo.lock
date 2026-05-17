@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "blume"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "event-listener",
 ]
@@ -101,9 +101,9 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cc"
-version = "1.2.61"
+version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d16d90359e986641506914ba71350897565610e87ce0ad9e6f28569db3dd5c6d"
+checksum = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -147,9 +147,9 @@ dependencies = [
 
 [[package]]
 name = "compio"
-version = "0.19.0-rc.1"
+version = "0.19.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6242aa6428e7ddb40bb94e0bdb0be763910f2958c10b889d0e46257c4dc9b48a"
+checksum = "7e2dc4aaf309e18c4a375ad7af8b8c2c11ff39e2598f0e83dd8700118c7e5973"
 dependencies = [
  "compio-buf",
  "compio-driver",
@@ -174,9 +174,9 @@ dependencies = [
 
 [[package]]
 name = "compio-driver"
-version = "0.12.0-rc.1"
+version = "0.12.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "483adb513cf30a13df217731fed86bfceeb31f1c76c5d06655f17d573d73283e"
+checksum = "be16d4436494c0e3f4d732a08fd4ecc22a30594db854b076e9cd927b3de86140"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -189,6 +189,7 @@ dependencies = [
  "futures-util",
  "io-uring",
  "libc",
+ "linux-raw-sys",
  "mod_use",
  "once_cell",
  "pastey",
@@ -203,9 +204,9 @@ dependencies = [
 
 [[package]]
 name = "compio-executor"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d2bf1fd5802cb0947c524a63b41774f3417798191911abc1b8cf5869a57e30"
+checksum = "864d72c185d06cb30a08cb372c21f08bbba13fdaf1cefbc1e1fb488fe87ef02c"
 dependencies = [
  "cfg-if",
  "compio-log",
@@ -217,9 +218,9 @@ dependencies = [
 
 [[package]]
 name = "compio-io"
-version = "0.10.0-rc.1"
+version = "0.10.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72072da3504bc891fb86b61bb39b750161cdbf58569a07ff1596d842a31b5ea4"
+checksum = "5a03ad0bb4fe619922d95fa2f8635c426f0434d3a6305da41ebebe85782daace"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -254,9 +255,9 @@ dependencies = [
 
 [[package]]
 name = "compio-net"
-version = "0.12.0-rc.1"
+version = "0.12.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98cdef754ba42402adc34ba3e77d92cf17afe44fb960f21ae91af073056e1ec3"
+checksum = "11e4817866aaeb33b316669747f1f7ff301ee78e6f5ce940db0f00230b9f0c81"
 dependencies = [
  "cfg-if",
  "compio-buf",
@@ -267,6 +268,7 @@ dependencies = [
  "futures-util",
  "libc",
  "once_cell",
+ "pin-project-lite",
  "socket2 0.6.3",
  "synchrony",
  "widestring",
@@ -275,9 +277,9 @@ dependencies = [
 
 [[package]]
 name = "compio-quic"
-version = "0.8.0-rc.1"
+version = "0.8.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fff6b8c95460ad6e36647f622caaf7b7cd5d0b0b253e6d1fd2f301ff9264f4b"
+checksum = "a544e3eb2796be816230da1d1582ff4f5056e04f73d915c422bba8f4b89691e7"
 dependencies = [
  "cfg_aliases",
  "compio-buf",
@@ -298,9 +300,9 @@ dependencies = [
 
 [[package]]
 name = "compio-runtime"
-version = "0.12.0-rc.1"
+version = "0.12.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ecdda70991838e9f99b4a0c98df7cd35ac12d705aabe0d14edd52a13eef0377"
+checksum = "0e85c39d4994e573abf3e13761dbe6377cd444f010fc18cbd0ac5ca7a1492f4d"
 dependencies = [
  "cfg-if",
  "compio-buf",
@@ -661,9 +663,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.17.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "heck"
@@ -734,9 +736,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.97"
+version = "0.3.98"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1840c94c045fbcf8ba2812c95db44499f7c64910a912551aaaa541decebcacf"
+checksum = "67df7112613f8bfd9150013a0314e196f4800d3201ae742489d999db2f979f08"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -866,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "omq-compio"
-version = "0.4.0"
+version = "0.5.2"
 dependencies = [
  "async-lock",
  "blume",
@@ -879,11 +881,12 @@ dependencies = [
  "omq-proto",
  "smallvec",
  "socket2 0.6.3",
+ "yring",
 ]
 
 [[package]]
 name = "omq-proto"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -1431,9 +1434,9 @@ dependencies = [
 
 [[package]]
 name = "synchrony"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c174d82fd56da8214ec095cfe4568e59e5ccb49d060e70c2f98e3ba352b23e45"
+checksum = "416090a4d8f6358526df5f9f65dfe28750b8b7bfd1fd8a5620f483fc4a75722c"
 dependencies = [
  "event-listener",
  "futures-util",
@@ -1642,9 +1645,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.120"
+version = "0.2.121"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df52b6d9b87e0c74c9edfa1eb2d9bf85e5d63515474513aa50fa181b3c4f5db1"
+checksum = "49ace1d07c165b0864824eee619580c4689389afa9dc9ed3a4c75040d82e6790"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -1655,9 +1658,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.120"
+version = "0.2.121"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78b1041f495fb322e64aca85f5756b2172e35cd459376e67f2a6c9dffcedb103"
+checksum = "8e68e6f4afd367a562002c05637acb8578ff2dea1943df76afb9e83d177c8578"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -1665,9 +1668,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.120"
+version = "0.2.121"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dcd0ff20416988a18ac686d4d4d0f6aae9ebf08a389ff5d29012b05af2a1b41"
+checksum = "d95a9ec35c64b2a7cb35d3fead40c4238d0940c86d107136999567a4703259f2"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -1678,9 +1681,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.120"
+version = "0.2.121"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49757b3c82ebf16c57d69365a142940b384176c24df52a087fb748e2085359ea"
+checksum = "c4e0100b01e9f0d03189a92b96772a1fb998639d981193d7dbab487302513441"
 dependencies = [
  "unicode-ident",
 ]
@@ -1822,9 +1825,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winnow"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
+checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 dependencies = [
  "memchr",
 ]
@@ -1846,6 +1849,10 @@ dependencies = [
  "serde",
  "zeroize",
 ]
+
+[[package]]
+name = "yring"
+version = "0.2.0"
 
 [[package]]
 name = "zerocopy"

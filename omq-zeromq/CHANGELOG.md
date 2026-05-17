@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-17
+
+### Added
+
+- `From<Vec<Bytes>>` and `From<VecDeque<Bytes>>` for `ZmqMessage`.
+- `TryFrom<ZmqMessage>` for `String` and `Vec<u8>` (single-frame messages).
+- `util` module re-exporting `PeerIdentity` for zmq.rs import path compatibility.
+- `trybuild` compatibility test suite documenting API gaps with zmq.rs.
+
+### Changed
+
+- **Breaking:** `Socket::close()` now takes `self` and returns `Vec<ZmqError>`, matching the zmq.rs signature.
+
 ## [0.2.2] - 2026-05-17
 
 ### Added
