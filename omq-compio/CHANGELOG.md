@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-05-17
+
+### Fixed
+
+- Inproc connect-before-bind now works on the single-threaded runtime. The connect is deferred to a background task that waits indefinitely for the bind, matching TCP/IPC reconnect behavior.
+
 ## [0.5.3] - 2026-05-17
 
 ### Changed
