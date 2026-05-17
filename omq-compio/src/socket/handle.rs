@@ -479,32 +479,61 @@ impl Socket {
         match endpoint {
             Endpoint::Inproc { name } => {
                 let snapshot = self.inner.snapshot();
-                let conn = inproc::connect(
-                    &name,
-                    snapshot,
-                    self.inner.in_tx.clone(),
-                    self.inner.inproc_recv_event.clone(),
-                    self.inner.inproc_parked.clone(),
-                )
-                .await?;
-                let conn_id = self
-                    .inner
-                    .next_connection_id
-                    .fetch_add(1, Ordering::Relaxed);
-                let ep = Endpoint::Inproc { name: name.clone() };
-                self.inner.monitor.publish(MonitorEvent::Connected {
-                    endpoint: ep.clone(),
-                    peer_ident: PeerIdent::Inproc(name),
-                    connection_id: conn_id,
-                });
-                install_inproc_peer(
-                    &self.inner,
-                    conn,
-                    ep,
-                    conn_id,
+                let in_tx = self.inner.in_tx.clone();
+                let recv_event = self.inner.inproc_recv_event.clone();
+                let parked = self.inner.inproc_parked.clone();
+
+                if inproc::is_bound(&name) {
+                    let conn = inproc::connect(&name, snapshot, in_tx, recv_event, parked).await?;
+                    let conn_id = self
+                        .inner
+                        .next_connection_id
+                        .fetch_add(1, Ordering::Relaxed);
+                    let ep = Endpoint::Inproc { name: name.clone() };
+                    self.inner.monitor.publish(MonitorEvent::Connected {
+                        endpoint: ep.clone(),
+                        peer_ident: PeerIdent::Inproc(name),
+                        connection_id: conn_id,
+                    });
+                    install_inproc_peer(
+                        &self.inner,
+                        conn,
+                        ep,
+                        conn_id,
+                        #[cfg(feature = "priority")]
+                        priority,
+                    );
+                } else {
+                    let inner = self.inner.clone();
+                    let name_clone = name.clone();
                     #[cfg(feature = "priority")]
-                    priority,
-                );
+                    let priority = priority;
+                    compio::runtime::spawn(async move {
+                        let Ok(conn) =
+                            inproc::connect(&name_clone, snapshot, in_tx, recv_event, parked).await
+                        else {
+                            return;
+                        };
+                        let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+                        let ep = Endpoint::Inproc {
+                            name: name_clone.clone(),
+                        };
+                        inner.monitor.publish(MonitorEvent::Connected {
+                            endpoint: ep.clone(),
+                            peer_ident: PeerIdent::Inproc(name_clone),
+                            connection_id: conn_id,
+                        });
+                        install_inproc_peer(
+                            &inner,
+                            conn,
+                            ep,
+                            conn_id,
+                            #[cfg(feature = "priority")]
+                            priority,
+                        );
+                    })
+                    .detach();
+                }
                 Ok(())
             }
             Endpoint::Ipc(_) => {

@@ -126,6 +126,15 @@ static REGISTRY: LazyLock<Mutex<InprocRegistry>> = LazyLock::new(|| {
     })
 });
 
+/// Returns true if `name` is currently bound in the inproc registry.
+pub fn is_bound(name: &str) -> bool {
+    REGISTRY
+        .lock()
+        .expect("inproc registry poisoned")
+        .bound
+        .contains_key(name)
+}
+
 /// Default per-socket inbound capacity (whole messages).
 pub const DEFAULT_INPROC_HWM: usize = 1024;
 
@@ -177,8 +186,7 @@ pub fn bind(
 }
 
 /// Connect to a bound (or not-yet-bound) `name`. If the name is
-/// not in the registry yet, parks until `bind()` wakes us (zero
-/// latency connect-before-bind). Falls back to a 2 s timeout.
+/// not in the registry yet, parks until `bind()` wakes us.
 pub async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,
@@ -204,24 +212,14 @@ pub async fn connect(
 
         match lookup {
             Ok(tx) => tx,
-            Err(notify_rx) => {
-                match compio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    notify_rx.recv_async(),
-                )
-                .await
-                {
-                    Ok(Ok(tx)) => tx,
-                    Ok(Err(_)) => {
-                        return Err(Error::InvalidEndpoint(format!(
-                            "inproc waiter channel closed: {name}"
-                        )));
-                    }
-                    Err(_) => {
-                        return Err(Error::InvalidEndpoint(format!("no inproc binding: {name}")));
-                    }
+            Err(notify_rx) => match notify_rx.recv_async().await {
+                Ok(tx) => tx,
+                Err(_) => {
+                    return Err(Error::InvalidEndpoint(format!(
+                        "inproc waiter channel closed: {name}"
+                    )));
                 }
-            }
+            },
         }
     };
 

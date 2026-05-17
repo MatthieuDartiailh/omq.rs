@@ -50,20 +50,14 @@ async fn dealer_to_dealer() {
     dealer_b.connect(ep("dealer-dealer-comp")).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
-    dealer_b
-        .send(Message::single("from-b"))
-        .await
-        .unwrap();
+    dealer_b.send(Message::single("from-b")).await.unwrap();
     let msg = compio::time::timeout(Duration::from_secs(2), dealer_a.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(msg.part_bytes(0).unwrap(), &b"from-b"[..]);
 
-    dealer_a
-        .send(Message::single("from-a"))
-        .await
-        .unwrap();
+    dealer_a.send(Message::single("from-a")).await.unwrap();
     let msg = compio::time::timeout(Duration::from_secs(2), dealer_b.recv())
         .await
         .unwrap()
@@ -95,10 +89,7 @@ async fn dealer_to_dealer_multiple_rounds() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            msg.part_bytes(0).unwrap(),
-            format!("req-{i}").as_bytes()
-        );
+        assert_eq!(msg.part_bytes(0).unwrap(), format!("req-{i}").as_bytes());
 
         dealer_a
             .send(Message::single(format!("rep-{i}")))
@@ -108,9 +99,6 @@ async fn dealer_to_dealer_multiple_rounds() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            msg.part_bytes(0).unwrap(),
-            format!("rep-{i}").as_bytes()
-        );
+        assert_eq!(msg.part_bytes(0).unwrap(), format!("rep-{i}").as_bytes());
     }
 }

@@ -1,6 +1,7 @@
 //! Connect-before-bind: the dialer connects before the listener binds.
 //! The dialer must retry until the listener appears, then deliver messages.
-//! Tested across inproc, IPC, and TCP for PUSH/PULL, REQ/REP, and PAIR.
+//! Tested across inproc, IPC, TCP, lz4+tcp, and zstd+tcp for PUSH/PULL,
+//! REQ/REP, and PAIR.
 
 use std::time::Duration;
 
@@ -26,6 +27,26 @@ fn tcp_ep(port: u16) -> Endpoint {
         host: omq_compio::endpoint::Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
         port,
     }
+}
+
+#[cfg(feature = "lz4")]
+fn lz4_ep(port: u16) -> Endpoint {
+    Endpoint::Lz4Tcp {
+        host: omq_compio::endpoint::Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
+        port,
+    }
+}
+
+#[cfg(feature = "zstd")]
+fn zstd_ep(port: u16) -> Endpoint {
+    Endpoint::ZstdTcp {
+        host: omq_compio::endpoint::Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
+        port,
+    }
+}
+
+fn inproc_ep(name: &str) -> Endpoint {
+    Endpoint::Inproc { name: name.into() }
 }
 
 fn ipc_ep(name: &str) -> Endpoint {
@@ -61,6 +82,11 @@ async fn push_pull_connect_before_bind(ep: Endpoint) {
         .unwrap()
         .unwrap();
     assert_eq!(m.part_bytes(0).unwrap(), &b"late"[..]);
+}
+
+#[compio::test]
+async fn push_pull_connect_before_bind_inproc() {
+    push_pull_connect_before_bind(inproc_ep("cbb-pp-comp-inproc")).await;
 }
 
 #[compio::test]
@@ -100,6 +126,11 @@ async fn req_rep_connect_before_bind(ep: Endpoint) {
 }
 
 #[compio::test]
+async fn req_rep_connect_before_bind_inproc() {
+    req_rep_connect_before_bind(inproc_ep("cbb-rr-comp-inproc")).await;
+}
+
+#[compio::test]
 async fn req_rep_connect_before_bind_ipc() {
     req_rep_connect_before_bind(ipc_ep("cbb-rr-comp")).await;
 }
@@ -136,6 +167,11 @@ async fn pair_connect_before_bind(ep: Endpoint) {
 }
 
 #[compio::test]
+async fn pair_connect_before_bind_inproc() {
+    pair_connect_before_bind(inproc_ep("cbb-pair-comp-inproc")).await;
+}
+
+#[compio::test]
 async fn pair_connect_before_bind_ipc() {
     pair_connect_before_bind(ipc_ep("cbb-pair-comp")).await;
 }
@@ -143,4 +179,32 @@ async fn pair_connect_before_bind_ipc() {
 #[compio::test]
 async fn pair_connect_before_bind_tcp() {
     pair_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+// -- lz4+tcp -----------------------------------------------------------------
+
+#[cfg(feature = "lz4")]
+#[compio::test]
+async fn push_pull_connect_before_bind_lz4() {
+    push_pull_connect_before_bind(lz4_ep(free_tcp_port())).await;
+}
+
+#[cfg(feature = "lz4")]
+#[compio::test]
+async fn req_rep_connect_before_bind_lz4() {
+    req_rep_connect_before_bind(lz4_ep(free_tcp_port())).await;
+}
+
+// -- zstd+tcp ----------------------------------------------------------------
+
+#[cfg(feature = "zstd")]
+#[compio::test]
+async fn push_pull_connect_before_bind_zstd() {
+    push_pull_connect_before_bind(zstd_ep(free_tcp_port())).await;
+}
+
+#[cfg(feature = "zstd")]
+#[compio::test]
+async fn req_rep_connect_before_bind_zstd() {
+    req_rep_connect_before_bind(zstd_ep(free_tcp_port())).await;
 }
