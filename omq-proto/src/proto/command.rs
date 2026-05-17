@@ -228,7 +228,7 @@ pub(crate) fn decode_properties(body: &[u8]) -> Result<PeerProperties> {
     decode_properties_inner(Bytes::copy_from_slice(body))
 }
 
-fn encode_properties_inner(props: &PeerProperties, out: &mut BytesMut) {
+pub(crate) fn encode_properties_inner(props: &PeerProperties, out: &mut BytesMut) {
     if let Some(t) = props.socket_type {
         write_property(out, b"Socket-Type", t.as_str().as_bytes());
     }
@@ -252,7 +252,7 @@ fn write_property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
     out.put_slice(value);
 }
 
-fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties> {
+pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties> {
     let mut props = PeerProperties::default();
     while !body.is_empty() {
         let name_len = body[0] as usize;

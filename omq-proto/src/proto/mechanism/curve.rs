@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 use super::{CurveKeypair, CurvePublicKey, MechanismStep};
 use crate::error::{Error, Result};
-use crate::proto::command::{Command, PeerProperties};
+use crate::proto::command::{self, Command, PeerProperties};
 
 const NONCE_HELLO: &[u8; 16] = b"CurveZMQHELLO---";
 const NONCE_INITIATE: &[u8; 16] = b"CurveZMQINITIATE";
@@ -628,73 +628,19 @@ impl CurveMechanism {
     }
 }
 
-/// Encode peer properties as a ZMTP property list (RFC 23 / 26).
 fn encode_metadata(props: &PeerProperties) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    if let Some(t) = props.socket_type {
-        write_property(&mut out, b"Socket-Type", t.as_str().as_bytes())?;
+    for (k, _) in &props.other {
+        if k.len() > 255 {
+            return Err(Error::Protocol("property name too long".into()));
+        }
     }
-    if let Some(id) = &props.identity {
-        write_property(&mut out, b"Identity", id)?;
-    }
-    for (k, v) in &props.other {
-        write_property(&mut out, k.as_bytes(), v)?;
-    }
-    Ok(out)
+    let mut out = BytesMut::new();
+    command::encode_properties_inner(props, &mut out);
+    Ok(out.to_vec())
 }
 
-fn write_property(out: &mut Vec<u8>, name: &[u8], value: &[u8]) -> Result<()> {
-    let name_len =
-        u8::try_from(name.len()).map_err(|_| Error::Protocol("property name too long".into()))?;
-    let value_len = u32::try_from(value.len())
-        .map_err(|_| Error::Protocol("property value too long".into()))?;
-    out.push(name_len);
-    out.extend_from_slice(name);
-    out.extend_from_slice(&value_len.to_be_bytes());
-    out.extend_from_slice(value);
-    Ok(())
-}
-
-/// Decode a ZMTP property list as `PeerProperties`.
-fn decode_metadata(mut body: &[u8]) -> Result<PeerProperties> {
-    use crate::proto::SocketType;
-    let mut props = PeerProperties::default();
-    while !body.is_empty() {
-        let name_len = body[0] as usize;
-        if body.len() < 1 + name_len + 4 {
-            return Err(Error::HandshakeFailed("metadata truncated".into()));
-        }
-        let name = &body[1..=name_len];
-        let value_len =
-            u32::from_be_bytes(body[1 + name_len..1 + name_len + 4].try_into().unwrap()) as usize;
-        let val_start = 1 + name_len + 4;
-        if body.len() < val_start + value_len {
-            return Err(Error::HandshakeFailed("metadata value truncated".into()));
-        }
-        let value = &body[val_start..val_start + value_len];
-        body = &body[val_start + value_len..];
-
-        let name_str = std::str::from_utf8(name)
-            .map_err(|_| Error::HandshakeFailed("metadata name not ASCII".into()))?;
-        if name_str.eq_ignore_ascii_case("Socket-Type") {
-            let t = SocketType::from_wire(value).ok_or_else(|| {
-                Error::HandshakeFailed(format!(
-                    "unknown peer socket type: {}",
-                    String::from_utf8_lossy(value)
-                ))
-            })?;
-            props.socket_type = Some(t);
-        } else if name_str.eq_ignore_ascii_case("Identity") {
-            if !value.is_empty() {
-                props.identity = Some(Bytes::copy_from_slice(value));
-            }
-        } else {
-            props
-                .other
-                .push((name_str.to_string(), Bytes::copy_from_slice(value)));
-        }
-    }
-    Ok(props)
+fn decode_metadata(body: &[u8]) -> Result<PeerProperties> {
+    command::decode_properties_inner(Bytes::copy_from_slice(body))
 }
 
 #[cfg(test)]
