@@ -217,8 +217,8 @@ pub(super) fn install_accepted_wire_peer(
     #[cfg(feature = "priority")]
     inner.rebuild_priority_view();
     inner.on_peer_ready.notify(usize::MAX);
-    spawn_wire_driver(
-        inner.clone(),
+    spawn_wire_driver(WireDriverConfig {
+        inner: inner.clone(),
         state,
         direct_io_handle,
         cmd_rx,
@@ -226,11 +226,25 @@ pub(super) fn install_accepted_wire_peer(
         endpoint,
         connection_id,
         info_holder,
-        peer_addr,
+        peer_address: peer_addr,
         peer_sub,
         peer_groups,
-    )
+    })
     .detach();
+}
+
+pub(super) struct WireDriverConfig {
+    pub(super) inner: Arc<SocketInner>,
+    pub(super) state: Arc<DirectIoState>,
+    pub(super) direct_io_handle: DirectIoHandle,
+    pub(super) cmd_rx: flume::Receiver<DriverCommand>,
+    pub(super) slot_idx: usize,
+    pub(super) endpoint: Endpoint,
+    pub(super) connection_id: u64,
+    pub(super) info_holder: Arc<RwLock<Option<PeerInfo>>>,
+    pub(super) peer_address: Option<std::net::SocketAddr>,
+    pub(super) peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
+    pub(super) peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
 }
 
 /// Spawn the connection-driver task that runs the ZMTP codec for one
@@ -238,22 +252,21 @@ pub(super) fn install_accepted_wire_peer(
 /// can await its exit. Caller must already have built the
 /// [`DirectIoState`] (the codec, reader, writer, `poll_fd`, claim atomics
 /// all live there).
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn spawn_wire_driver(
-    inner: Arc<SocketInner>,
-    state: Arc<DirectIoState>,
-    direct_io_handle: DirectIoHandle,
-    cmd_rx: flume::Receiver<DriverCommand>,
-    slot_idx: usize,
-    endpoint: Endpoint,
-    connection_id: u64,
-    info_holder: Arc<RwLock<Option<PeerInfo>>>,
-    peer_address: Option<std::net::SocketAddr>,
-    peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
-) -> compio::runtime::JoinHandle<()> {
+pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinHandle<()> {
+    let WireDriverConfig {
+        inner,
+        state,
+        direct_io_handle,
+        cmd_rx,
+        slot_idx,
+        endpoint,
+        connection_id,
+        info_holder,
+        peer_address,
+        peer_sub,
+        peer_groups,
+    } = cfg;
     let (snap_tx, snap_rx) = flume::bounded::<InprocPeerSnapshot>(1);
 
     // Snap listener: when the driver completes the handshake it sends

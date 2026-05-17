@@ -88,19 +88,19 @@ async fn install_and_run(
     inner.rebuild_priority_view();
     inner.on_peer_ready.notify(usize::MAX);
 
-    let driver_join = super::install::spawn_wire_driver(
-        inner.clone(),
+    let driver_join = super::install::spawn_wire_driver(super::install::WireDriverConfig {
+        inner: inner.clone(),
         state,
-        direct_io_handle.clone(),
+        direct_io_handle: direct_io_handle.clone(),
         cmd_rx,
-        idx,
-        endpoint.clone(),
-        conn_id,
-        info_holder.clone(),
-        peer_addr,
-        peer_sub.cloned(),
-        peer_groups.cloned(),
-    );
+        slot_idx: idx,
+        endpoint: endpoint.clone(),
+        connection_id: conn_id,
+        info_holder: info_holder.clone(),
+        peer_address: peer_addr,
+        peer_sub: peer_sub.cloned(),
+        peer_groups: peer_groups.cloned(),
+    });
     let _ = driver_join.await;
 }
 
