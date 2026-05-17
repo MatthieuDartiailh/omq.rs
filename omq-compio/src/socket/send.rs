@@ -313,6 +313,7 @@ impl Socket {
         Some((p.out.clone(), n, direct, idx))
     }
 
+    #[cfg(not(feature = "priority"))]
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
         let inner = self.inner();
 
@@ -764,6 +765,7 @@ impl Socket {
         self.try_slow_round_robin(&chosen, msg.clone(), peer_count)
     }
 
+    #[cfg(not(feature = "priority"))]
     fn try_send_via_shared(&self, msg: Message) -> Result<()> {
         let stx = self
             .inner()
