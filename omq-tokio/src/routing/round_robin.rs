@@ -154,7 +154,7 @@ struct PriorityPeer {
 #[cfg(feature = "priority")]
 #[derive(Clone)]
 pub(crate) struct Submitter {
-    peers: Arc<RwLock<Vec<PriorityPeer>>>,
+    peers: Arc<RwLock<Arc<Vec<PriorityPeer>>>>,
     rr_index: Arc<AtomicUsize>,
     on_change: Arc<tokio::sync::Notify>,
 }
@@ -182,10 +182,7 @@ impl Submitter {
     /// notification and retry.
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         loop {
-            let snapshot: Vec<PriorityPeer> = {
-                let peers = self.peers.read().expect("peers lock");
-                peers.clone()
-            };
+            let snapshot = self.peers.read().expect("peers lock").clone();
             if snapshot.is_empty() {
                 let waiter = self.on_change.notified();
                 if !self.peers.read().expect("peers lock").is_empty() {
@@ -246,15 +243,18 @@ impl Submitter {
     }
 
     fn has_live_peer(&self) -> bool {
-        let peers = self.peers.read().expect("peers lock");
-        peers.iter().any(|p| !p.handle.inbox.is_closed())
+        self.peers
+            .read()
+            .expect("peers lock")
+            .iter()
+            .any(|p| !p.handle.inbox.is_closed())
     }
 }
 
 #[cfg(feature = "priority")]
 #[derive(Debug)]
 pub(crate) struct RoundRobinSend {
-    peers: Arc<RwLock<Vec<PriorityPeer>>>,
+    peers: Arc<RwLock<Arc<Vec<PriorityPeer>>>>,
     rr_index: Arc<AtomicUsize>,
     on_change: Arc<tokio::sync::Notify>,
     root_cancel: CancellationToken,
@@ -264,7 +264,7 @@ pub(crate) struct RoundRobinSend {
 impl RoundRobinSend {
     pub(crate) fn new(_options: &Options) -> Self {
         Self {
-            peers: Arc::new(RwLock::new(Vec::new())),
+            peers: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             rr_index: Arc::new(AtomicUsize::new(0)),
             on_change: Arc::new(tokio::sync::Notify::new()),
             root_cancel: CancellationToken::new(),
@@ -282,24 +282,28 @@ impl RoundRobinSend {
         handle: DriverHandle,
         priority: u8,
     ) {
-        let mut peers = self.peers.write().expect("peers lock");
-        peers.push(PriorityPeer {
+        let mut guard = self.peers.write().expect("peers lock");
+        let mut new_peers = (**guard).clone();
+        new_peers.push(PriorityPeer {
             peer_id,
             priority,
             handle,
         });
-        peers.sort_by_key(|p| p.priority);
-        drop(peers);
-        // Wake any submitter awaiting a peer-set change (notify_waiters
-        // wakes all current waiters; new waiters after this call see a
-        // fresh state on next read).
+        new_peers.sort_by_key(|p| p.priority);
+        *guard = Arc::new(new_peers);
+        drop(guard);
         self.on_change.notify_waiters();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
-        let mut peers = self.peers.write().expect("peers lock");
-        peers.retain(|p| p.peer_id != peer_id);
-        drop(peers);
+        let mut guard = self.peers.write().expect("peers lock");
+        let new_peers: Vec<_> = guard
+            .iter()
+            .filter(|p| p.peer_id != peer_id)
+            .cloned()
+            .collect();
+        *guard = Arc::new(new_peers);
+        drop(guard);
         self.on_change.notify_waiters();
     }
 
