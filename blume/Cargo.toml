@@ -15,7 +15,7 @@ workspace = true
 event-listener = "5"
 
 [dev-dependencies]
-flume = { version = "0.11", default-features = false, features = ["async"] }
+flume = { version = "0.12", default-features = false, features = ["async"] }
 futures-lite = "2"
 
 [[bench]]

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-05-17
+
+### Changed
+
+- *(deps)* Bump `flume` to 0.12, `socket2` to 0.6.
+
 ## [0.5.2] - 2026-05-17
 
 ### Changed

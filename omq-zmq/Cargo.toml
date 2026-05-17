@@ -1,6 +1,6 @@
 [package]
 name = "omq-zmq"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -20,7 +20,7 @@ omq-compio = { path = "../omq-compio", version = "0.5.2", features = ["plain", "
 yring = { path = "../yring", version = "0.2.0" }
 compio = { version = "0.19.0-rc.1", features = ["runtime"] }
 bytes = "1"
-flume = { version = "0.11", default-features = false, features = ["async"] }
+flume = { version = "0.12", default-features = false, features = ["async"] }
 futures = { version = "0.3", default-features = false, features = ["async-await"] }
 crypto_box = "0.9"
 libc = "0.2"
