@@ -10,28 +10,33 @@
 //! zero atomics. `prefetch` loads all flushed items with one Acquire
 //! load. Result: 1 atomic per batch on each side.
 
+#[cfg(feature = "async")]
+mod r#async;
+#[cfg(feature = "async")]
+pub use r#async::{AsyncConsumer, AsyncProducer, async_spsc};
+
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[repr(align(64))]
-struct Padded<T>(T);
+pub(crate) struct Padded<T>(pub(crate) T);
 
-struct Ring<T> {
-    buf: Box<[UnsafeCell<MaybeUninit<T>>]>,
-    mask: usize,
+pub(crate) struct Ring<T> {
+    pub(crate) buf: Box<[UnsafeCell<MaybeUninit<T>>]>,
+    pub(crate) mask: usize,
     /// Consumer read position. Written by consumer, read by producer.
-    head: Padded<AtomicUsize>,
+    pub(crate) head: Padded<AtomicUsize>,
     /// Last flushed position. Written by producer, read by consumer.
-    flush: Padded<AtomicUsize>,
+    pub(crate) flush: Padded<AtomicUsize>,
 }
 
 unsafe impl<T: Send> Send for Ring<T> {}
 unsafe impl<T: Send> Sync for Ring<T> {}
 
 impl<T> Ring<T> {
-    fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "capacity must be > 0");
         let cap = capacity.next_power_of_two();
         let buf: Vec<UnsafeCell<MaybeUninit<T>>> = (0..cap)
@@ -45,7 +50,7 @@ impl<T> Ring<T> {
         }
     }
 
-    fn capacity(&self) -> usize {
+    pub(crate) fn capacity(&self) -> usize {
         self.mask + 1
     }
 }

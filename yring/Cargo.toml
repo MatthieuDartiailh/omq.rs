@@ -11,5 +11,20 @@ readme = "README.md"
 keywords = ["spsc", "ring-buffer", "lock-free", "ypipe", "batching"]
 categories = ["concurrency", "data-structures"]
 
+[features]
+default = []
+async = ["dep:atomic-waker", "dep:futures-core"]
+
+[dependencies]
+atomic-waker = { version = "1", optional = true }
+futures-core = { version = "0.3", optional = true, default-features = false }
+
+[dev-dependencies]
+futures-lite = "2"
+
+[[bench]]
+name = "throughput"
+harness = false
+
 [lints]
 workspace = true
