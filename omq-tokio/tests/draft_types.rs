@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use omq_tokio::{Endpoint, Error, Message, Options, Socket, SocketType};
 
+use bytes::Bytes;
+
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
@@ -169,4 +171,195 @@ async fn peer_bidirectional_identity_routing() {
         .unwrap();
     assert_eq!(got.part_bytes(0).unwrap(), &b"peer-a"[..]);
     assert_eq!(got.part_bytes(1).unwrap(), &b"hello b"[..]);
+}
+
+#[tokio::test]
+async fn client_server_multiple_clients() {
+    let ep = inproc_ep("draft-cs-multi");
+    let server = Socket::new(SocketType::Server, Options::default());
+    server.bind(ep.clone()).await.unwrap();
+
+    let mut clients = Vec::new();
+    for i in 0..3u8 {
+        let c = Socket::new(
+            SocketType::Client,
+            Options::default().identity(Bytes::from(vec![b'c', b'0' + i])),
+        );
+        c.connect(ep.clone()).await.unwrap();
+        clients.push(c);
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for (i, c) in clients.iter().enumerate() {
+        c.send(Message::single(format!("from-{i}"))).await.unwrap();
+    }
+
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let m = tokio::time::timeout(Duration::from_millis(500), server.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let id = m.part_bytes(0).unwrap();
+        let body = m.part_bytes(1).unwrap();
+        server
+            .send(Message::multipart([
+                id.clone(),
+                Bytes::from(format!("re:{}", String::from_utf8_lossy(&body))),
+            ]))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+
+    for c in &clients {
+        let reply = tokio::time::timeout(Duration::from_millis(500), c.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reply.part_bytes(0).unwrap().starts_with(b"re:from-"));
+    }
+    assert_eq!(ids.len(), 3);
+}
+
+#[tokio::test]
+async fn scatter_gather_multiple_scatterers() {
+    let ep = inproc_ep("draft-sg-multi-scatter");
+    let gather = Socket::new(SocketType::Gather, Options::default());
+    gather.bind(ep.clone()).await.unwrap();
+
+    let mut scatterers = Vec::new();
+    for _ in 0..3 {
+        let s = Socket::new(SocketType::Scatter, Options::default());
+        s.connect(ep.clone()).await.unwrap();
+        scatterers.push(s);
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for (i, s) in scatterers.iter().enumerate() {
+        for j in 0..5 {
+            s.send(Message::single(format!("s{i}-m{j}"))).await.unwrap();
+        }
+    }
+
+    let mut received = std::collections::HashSet::new();
+    for _ in 0..15 {
+        let m = tokio::time::timeout(Duration::from_millis(500), gather.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        received.insert(String::from_utf8_lossy(&m.part_bytes(0).unwrap()).into_owned());
+    }
+    assert_eq!(received.len(), 15);
+}
+
+#[tokio::test]
+async fn scatter_gather_multiple_gatherers() {
+    let ep = inproc_ep("draft-sg-multi-gather");
+    let scatter = Socket::new(SocketType::Scatter, Options::default());
+    scatter.bind(ep.clone()).await.unwrap();
+
+    let gatherers: Vec<Socket> = (0..3)
+        .map(|_| Socket::new(SocketType::Gather, Options::default()))
+        .collect();
+    for g in &gatherers {
+        g.connect(ep.clone()).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for i in 0..30 {
+        scatter
+            .send(Message::single(format!("m{i}")))
+            .await
+            .unwrap();
+    }
+
+    let mut total = 0;
+    for g in &gatherers {
+        while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(200), g.recv()).await {
+            total += 1;
+        }
+    }
+    assert_eq!(total, 30);
+}
+
+#[tokio::test]
+async fn channel_multiple_messages() {
+    let ep = inproc_ep("draft-channel-multi-msg");
+    let a = Socket::new(SocketType::Channel, Options::default());
+    a.bind(ep.clone()).await.unwrap();
+    let b = Socket::new(SocketType::Channel, Options::default());
+    b.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for i in 0..20 {
+        a.send(Message::single(format!("a-{i}"))).await.unwrap();
+    }
+    for i in 0..20 {
+        let m = tokio::time::timeout(Duration::from_millis(500), b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap(), format!("a-{i}").as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn peer_three_way() {
+    let ep_a = inproc_ep("draft-peer3-a");
+    let ep_b = inproc_ep("draft-peer3-b");
+
+    let a = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"A")),
+    );
+    a.bind(ep_a.clone()).await.unwrap();
+
+    let b = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"B")),
+    );
+    b.bind(ep_b.clone()).await.unwrap();
+    b.connect(ep_a.clone()).await.unwrap();
+
+    let c = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"C")),
+    );
+    c.connect(ep_a).await.unwrap();
+    c.connect(ep_b).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // C -> A
+    c.send(Message::multipart(["A", "hello from C"]))
+        .await
+        .unwrap();
+    let m = tokio::time::timeout(Duration::from_millis(500), a.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"C"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"hello from C"[..]);
+
+    // A -> C
+    a.send(Message::multipart(["C", "reply from A"]))
+        .await
+        .unwrap();
+    let m = tokio::time::timeout(Duration::from_millis(500), c.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"A"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"reply from A"[..]);
+
+    // C -> B
+    c.send(Message::multipart(["B", "hello from C"]))
+        .await
+        .unwrap();
+    let m = tokio::time::timeout(Duration::from_millis(500), b.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"C"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"hello from C"[..]);
 }
