@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `String: TryFrom<ZmqMessage>` is not satisfied
+ --> tests/trybuild/compat-fail/message_try_into_string.rs:6:29
+  |
+6 |     let _body: String = msg.try_into().unwrap();
+  |                             ^^^^^^^^ the trait `From<ZmqMessage>` is not implemented for `String`
+  |
+  = help: the following other types implement trait `From<T>`:
+            `String` implements `From<&String>`
+            `String` implements `From<&mut str>`
+            `String` implements `From<&str>`
+            `String` implements `From<Box<str>>`
+            `String` implements `From<Cow<'_, str>>`
+            `String` implements `From<char>`
+  = note: required for `ZmqMessage` to implement `Into<String>`
+  = note: required for `String` to implement `TryFrom<ZmqMessage>`
+  = note: required for `ZmqMessage` to implement `TryInto<String>`

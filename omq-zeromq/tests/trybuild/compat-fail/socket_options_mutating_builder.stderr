@@ -1,0 +1,29 @@
+warning: variable does not need to be mutable
+ --> tests/trybuild/compat-fail/socket_options_mutating_builder.rs:5:9
+  |
+5 |     let mut options = SocketOptions::default();
+  |         ----^^^^^^^
+  |         |
+  |         help: remove this `mut`
+  |
+  = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0382]: use of moved value: `options`
+ --> tests/trybuild/compat-fail/socket_options_mutating_builder.rs:7:5
+  |
+5 |     let mut options = SocketOptions::default();
+  |         ----------- move occurs because `options` has type `SocketOptions`, which does not implement the `Copy` trait
+6 |     options.no_connect_timeout();
+  |             -------------------- `options` moved due to this method call
+7 |     options.connect_timeout(Duration::from_secs(5));
+  |     ^^^^^^^ value used here after move
+  |
+note: `SocketOptions::no_connect_timeout` takes ownership of the receiver `self`, which moves `options`
+ --> src/options.rs
+  |
+  |     pub fn no_connect_timeout(mut self) -> Self {
+  |                                   ^^^^
+help: you can `clone` the value and consume it, but this might not be your desired behavior
+  |
+6 |     options.clone().no_connect_timeout();
+  |            ++++++++
