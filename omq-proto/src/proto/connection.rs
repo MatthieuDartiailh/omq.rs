@@ -537,10 +537,13 @@ impl Connection {
 
     fn handle_post_handshake_command(&mut self, cmd: Command) -> Result<()> {
         match cmd {
-            Command::Ready(_) | Command::Error { .. } => {
+            Command::Ready(_) => {
                 return Err(Error::Protocol(
-                    "READY/ERROR command received after handshake".into(),
+                    "READY command received after handshake".into(),
                 ));
+            }
+            Command::Error { .. } => {
+                self.events.push_back(Event::Command(cmd));
             }
             Command::Ping { context, .. } => {
                 // Auto-answer with PONG. PING TTL is advisory; we ignore it here
@@ -604,10 +607,14 @@ impl Connection {
     }
 
     fn emit_command_frame(&mut self, payload: Bytes) {
-        let f = crate::message::Frame {
-            flags: crate::message::FrameFlags::COMMAND,
-            payload: Payload::from_bytes(payload),
-        };
+        self.emit_frame(
+            crate::message::FrameFlags::COMMAND,
+            Payload::from_bytes(payload),
+        );
+    }
+
+    fn emit_frame(&mut self, flags: crate::message::FrameFlags, payload: Payload) {
+        let f = crate::message::Frame { flags, payload };
         let plen = f.payload.len();
         self.out_bytes_total += frame::header_len_for(plen) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
@@ -651,13 +658,7 @@ impl Connection {
                 } else {
                     crate::message::FrameFlags::LAST
                 };
-                let f = crate::message::Frame {
-                    flags,
-                    payload: part.clone(),
-                };
-                let plen = f.payload.len();
-                self.out_bytes_total += frame::header_len_for(plen) + plen;
-                frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
+                self.emit_frame(flags, part.clone());
             }
         }
         Ok(())
@@ -697,13 +698,7 @@ impl Connection {
         } else {
             crate::message::FrameFlags::LAST
         };
-        let f = crate::message::Frame {
-            flags,
-            payload: Payload::from_bytes(wire.freeze()),
-        };
-        let plen = f.payload.len();
-        self.out_bytes_total += frame::header_len_for(plen) + plen;
-        frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
+        self.emit_frame(flags, Payload::from_bytes(wire.freeze()));
         Ok(())
     }
 
@@ -727,13 +722,7 @@ impl Connection {
             unreachable!("send_part_blake3zmq called without blake3zmq transform");
         };
         let ciphertext = tx.encrypt(&aad[..aad_len], &plaintext)?;
-        let f = crate::message::Frame {
-            flags,
-            payload: Payload::from_bytes(Bytes::from(ciphertext)),
-        };
-        let plen = f.payload.len();
-        self.out_bytes_total += frame::header_len_for(plen) + plen;
-        frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
+        self.emit_frame(flags, Payload::from_bytes(Bytes::from(ciphertext)));
         Ok(())
     }
 

@@ -14,6 +14,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use smallvec::SmallVec;
+
 use bytes::Bytes;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -71,7 +73,7 @@ impl Submitter {
         // Clone the queues of matching peers under a short lock; do the
         // async queue send outside the lock to avoid holding it across
         // `.await`.
-        let targets: Vec<DropQueue> = {
+        let targets: SmallVec<[DropQueue; 8]> = {
             let g = self.inner.lock().expect("fanout inner poisoned");
             g.peers
                 .values()
@@ -88,9 +90,11 @@ impl Submitter {
         if targets.is_empty() {
             return Ok(());
         }
-        for q in &targets {
+        let last = targets.len() - 1;
+        for q in &targets[..last] {
             q.send(forwarded.clone()).await?;
         }
+        targets[last].send(forwarded).await?;
         Ok(())
     }
 }

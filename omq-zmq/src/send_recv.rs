@@ -55,13 +55,16 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
     }
 
     // Drain accumulated parts + current frame into one message.
-    let parts: Vec<Bytes> = {
+    let msg = {
         let mut accum = sock.send_accum.lock().unwrap();
-        let mut v: Vec<Bytes> = accum.drain(..).collect();
-        v.push(bytes);
-        v
+        if accum.is_empty() {
+            omq_compio::Message::single(bytes)
+        } else {
+            let mut v: Vec<Bytes> = accum.drain(..).collect();
+            v.push(bytes);
+            omq_compio::Message::multipart(v)
+        }
     };
-    let msg = omq_compio::Message::multipart(parts);
 
     // Inproc bypass: push directly to lock-free SPSC ring.
     // Safety: zmq contract guarantees single-threaded access per socket.

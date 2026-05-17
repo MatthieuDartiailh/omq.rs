@@ -781,61 +781,35 @@ impl SocketDriver {
                 self.handle_peer_event(peer_id, event).await;
             }
             InternalEvent::PeerClosed { peer_id, reason } => {
-                self.send_strategy.connection_removed(peer_id);
-                self.recv_strategy.connection_removed(peer_id);
-                if let Some(peer) = self.peers.remove(&peer_id) {
-                    // Restart the dial loop when a dialer-initiated connection
-                    // drops mid-session and the reconnect policy allows it.
-                    if peer.is_client
-                        && !self.closing
-                        && !matches!(self.options.reconnect, ReconnectPolicy::Disabled)
-                    {
-                        let ep = peer.endpoint.clone();
-                        // Remove the stale entry (its task already exited after
-                        // sending Connected) so the fresh one doesn't duplicate it.
-                        self.dialers.retain(|d| d.endpoint != ep);
-                        self.start_dial(
-                            ep,
-                            #[cfg(feature = "priority")]
-                            peer.priority,
-                        );
-                    }
-                    if let Some(info) = peer.info {
-                        self.monitor.publish(MonitorEvent::Disconnected {
-                            endpoint: peer.endpoint,
-                            peer: info,
-                            reason,
-                        });
-                    }
-                }
-                // REQ: reset the send/recv alternation flag so the socket
-                // can issue a fresh request on reconnect.
-                // REP: reset only when no other peer remains; clearing a
-                // stale envelope when the client that sent the pending
-                // request drops is safe and prevents permanent wedge.
-                match self.socket_type {
-                    SocketType::Req => self.type_state.on_peer_disconnected(),
-                    SocketType::Rep if self.peers.is_empty() => {
-                        self.type_state.on_peer_disconnected();
-                    }
-                    _ => {}
+                if let Some(peer) = self.remove_peer(peer_id, reason)
+                    && peer.is_client
+                    && !self.closing
+                    && !matches!(self.options.reconnect, ReconnectPolicy::Disabled)
+                {
+                    let ep = peer.endpoint.clone();
+                    self.dialers.retain(|d| d.endpoint != ep);
+                    self.start_dial(
+                        ep,
+                        #[cfg(feature = "priority")]
+                        peer.priority,
+                    );
                 }
             }
         }
     }
 
-    fn evict_peer_for_handover(&mut self, peer_id: u64) {
+    fn remove_peer(&mut self, peer_id: u64, reason: DisconnectReason) -> Option<PeerEntry> {
         self.send_strategy.connection_removed(peer_id);
         self.recv_strategy.connection_removed(peer_id);
-        if let Some(peer) = self.peers.remove(&peer_id) {
-            peer.handle.cancel.cancel();
-            if let Some(info) = peer.info {
-                self.monitor.publish(MonitorEvent::Disconnected {
-                    endpoint: peer.endpoint,
-                    peer: info,
-                    reason: DisconnectReason::Handover,
-                });
-            }
+        let peer = self.peers.remove(&peer_id);
+        if let Some(ref peer) = peer
+            && let Some(ref info) = peer.info
+        {
+            self.monitor.publish(MonitorEvent::Disconnected {
+                endpoint: peer.endpoint.clone(),
+                peer: info.clone(),
+                reason,
+            });
         }
         match self.socket_type {
             SocketType::Req => self.type_state.on_peer_disconnected(),
@@ -843,6 +817,13 @@ impl SocketDriver {
                 self.type_state.on_peer_disconnected();
             }
             _ => {}
+        }
+        peer
+    }
+
+    fn evict_peer_for_handover(&mut self, peer_id: u64) {
+        if let Some(peer) = self.remove_peer(peer_id, DisconnectReason::Handover) {
+            peer.handle.cancel.cancel();
         }
     }
 

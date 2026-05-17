@@ -46,21 +46,27 @@ struct SpscAwareRecv {
 }
 
 impl SpscAwareRecv {
+    fn try_drain_consumers(&self) -> Option<Message> {
+        let consumers = self.consumers.read().unwrap().clone();
+        for p in &consumers {
+            if let Ok(mut consumer) = p.consumer.try_lock() {
+                consumer.prefetch();
+                if let Some(msg) = consumer.pop() {
+                    return Some(msg);
+                }
+            }
+        }
+        None
+    }
+
     #[allow(clippy::needless_continue)]
     async fn recv(&self) -> Result<Message> {
         loop {
-            // Fair-queue across per-peer consumers.
-            let consumers = self.consumers.read().unwrap().clone();
-            for p in &consumers {
-                if let Ok(mut consumer) = p.consumer.try_lock() {
-                    consumer.prefetch();
-                    if let Some(msg) = consumer.pop() {
-                        return Ok(msg);
-                    }
-                }
+            if let Some(msg) = self.try_drain_consumers() {
+                return Ok(msg);
             }
 
-            if consumers.is_empty() {
+            if self.consumers.read().unwrap().is_empty() {
                 tokio::select! {
                     biased;
                     res = self.rx.recv() => {
@@ -82,14 +88,8 @@ impl SpscAwareRecv {
     }
 
     fn try_recv(&self) -> Result<Message> {
-        let consumers = self.consumers.read().unwrap().clone();
-        for p in &consumers {
-            if let Ok(mut consumer) = p.consumer.try_lock() {
-                consumer.prefetch();
-                if let Some(msg) = consumer.pop() {
-                    return Ok(msg);
-                }
-            }
+        if let Some(msg) = self.try_drain_consumers() {
+            return Ok(msg);
         }
         self.rx.try_recv().map_err(|e| match e {
             async_channel::TryRecvError::Empty => Error::WouldBlock,

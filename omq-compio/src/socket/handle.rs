@@ -622,17 +622,17 @@ impl Socket {
         let peers = self.inner.out_peers.read().expect("peers lock");
         Ok(peers
             .iter()
-            .map(|p| crate::monitor::ConnectionStatus {
-                connection_id: p.connection_id,
-                endpoint: p.endpoint.clone(),
-                identity: p
-                    .info
-                    .read()
-                    .expect("info lock")
-                    .as_ref()
-                    .and_then(|i| i.peer_identity.clone())
-                    .unwrap_or_default(),
-                peer_info: p.info.read().expect("info lock").clone(),
+            .map(|p| {
+                let info = p.info.read().expect("info lock");
+                crate::monitor::ConnectionStatus {
+                    connection_id: p.connection_id,
+                    endpoint: p.endpoint.clone(),
+                    identity: info
+                        .as_ref()
+                        .and_then(|i| i.peer_identity.clone())
+                        .unwrap_or_default(),
+                    peer_info: info.clone(),
+                }
             })
             .collect())
     }
@@ -755,31 +755,40 @@ impl Socket {
     /// consistent and the connection remains usable; the next
     /// `recv()` continues from there.
     #[allow(clippy::too_many_lines)]
+    fn drain_recv_cache(&self, st: SocketType) -> Result<Option<Message>> {
+        if post_recv_needs_type_state(st) {
+            loop {
+                let raw = self.inner.recv_cache.get().pop_front();
+                let Some(raw) = raw else { break };
+                if let Some(out) = self.post_recv_apply(raw)? {
+                    return Ok(Some(out));
+                }
+            }
+        } else if self.needs_subscription_filter() {
+            let cache = self.inner.recv_cache.get();
+            while let Some(raw) = cache.pop_front() {
+                if self.matches_subscription(&raw) {
+                    return Ok(Some(raw));
+                }
+            }
+        } else {
+            let cache = self.inner.recv_cache.get();
+            if let Some(msg) = cache.pop_front() {
+                return Ok(Some(msg));
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn recv(&self) -> Result<Message> {
         use futures::FutureExt;
         let st = self.inner.socket_type;
         if direct_recv_eligible(st) {
-            if post_recv_needs_type_state(st) {
-                loop {
-                    let raw = self.inner.recv_cache.get().pop_front();
-                    let Some(raw) = raw else { break };
-                    if let Some(out) = self.post_recv_apply(raw)? {
-                        return Ok(out);
-                    }
-                }
-            } else if self.needs_subscription_filter() {
+            if let Some(msg) = self.drain_recv_cache(st)? {
+                return Ok(msg);
+            }
+            if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
                 let cache = self.inner.recv_cache.get();
-                while let Some(raw) = cache.pop_front() {
-                    if self.matches_subscription(&raw) {
-                        return Ok(raw);
-                    }
-                }
-            } else {
-                // PULL/PAIR: check recv_cache first (filled by swap_messages).
-                let cache = self.inner.recv_cache.get();
-                if let Some(msg) = cache.pop_front() {
-                    return Ok(msg);
-                }
                 let dio = unsafe { &*self.inner.direct_recv_io.get() };
                 if let Some(ref state) = *dio
                     && let Ok(mut io) = state.peer_io.try_lock()
@@ -931,29 +940,13 @@ impl Socket {
     pub fn try_recv(&self) -> Result<Message> {
         let st = self.inner.socket_type;
         if direct_recv_eligible(st) {
-            if post_recv_needs_type_state(st) {
-                loop {
-                    let raw = self.inner.recv_cache.get().pop_front();
-                    let Some(raw) = raw else { break };
-                    if let Some(out) = self.post_recv_apply(raw)? {
-                        return Ok(out);
-                    }
-                }
-            } else if self.needs_subscription_filter() {
-                let cache = self.inner.recv_cache.get();
-                while let Some(raw) = cache.pop_front() {
-                    if self.matches_subscription(&raw) {
-                        return Ok(raw);
-                    }
-                }
-            } else {
-                // PULL/PAIR: check recv_cache first (filled by swap_messages).
-                let cache = self.inner.recv_cache.get();
-                if let Some(msg) = cache.pop_front() {
-                    return Ok(msg);
-                }
+            if let Some(msg) = self.drain_recv_cache(st)? {
+                return Ok(msg);
+            }
+            if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
                 let dio = unsafe { &*self.inner.direct_recv_io.get() };
                 if let Some(ref state) = *dio {
+                    let cache = self.inner.recv_cache.get();
                     let mut io = state.peer_io.lock().expect("peer_io");
                     if let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache) {
                         return Ok(msg);

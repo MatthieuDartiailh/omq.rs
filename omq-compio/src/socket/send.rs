@@ -772,6 +772,20 @@ impl Socket {
         self.try_slow_round_robin(&chosen, msg.clone(), peer_count)
     }
 
+    fn try_send_via_shared(&self, msg: Message) -> Result<()> {
+        let stx = self
+            .inner()
+            .shared_send_tx
+            .read()
+            .expect("shared_send_tx lock")
+            .clone()
+            .ok_or(Error::Closed)?;
+        stx.try_send(msg).map_err(|e| match e {
+            flume::TrySendError::Full(_) => Error::WouldBlock,
+            flume::TrySendError::Disconnected(_) => Error::Closed,
+        })
+    }
+
     #[cfg(not(feature = "priority"))]
     fn try_slow_round_robin(
         &self,
@@ -788,50 +802,16 @@ impl Socket {
                 let tx = handle.read().expect("wire peer handle lock").clone();
                 match tx.try_send(DriverCommand::SendMessage(msg.clone())) {
                     Ok(()) => Ok(()),
-                    Err(flume::TrySendError::Full(_)) => {
-                        let stx = self
-                            .inner()
-                            .shared_send_tx
-                            .read()
-                            .expect("shared_send_tx lock")
-                            .clone()
-                            .ok_or(Error::Closed)?;
-                        stx.try_send(msg).map_err(|e| match e {
-                            flume::TrySendError::Full(_) => Error::WouldBlock,
-                            flume::TrySendError::Disconnected(_) => Error::Closed,
-                        })
-                    }
+                    Err(flume::TrySendError::Full(_)) => self.try_send_via_shared(msg),
                     Err(flume::TrySendError::Disconnected(cmd)) => {
                         let DriverCommand::SendMessage(msg) = cmd else {
                             return Err(Error::Closed);
                         };
-                        let stx = self
-                            .inner()
-                            .shared_send_tx
-                            .read()
-                            .expect("shared_send_tx lock")
-                            .clone()
-                            .ok_or(Error::Closed)?;
-                        stx.try_send(msg).map_err(|e| match e {
-                            flume::TrySendError::Full(_) => Error::WouldBlock,
-                            flume::TrySendError::Disconnected(_) => Error::Closed,
-                        })
+                        self.try_send_via_shared(msg)
                     }
                 }
             }
-            PeerOut::Wire(_) => {
-                let stx = self
-                    .inner()
-                    .shared_send_tx
-                    .read()
-                    .expect("shared_send_tx lock")
-                    .clone()
-                    .ok_or(Error::Closed)?;
-                stx.try_send(msg).map_err(|e| match e {
-                    flume::TrySendError::Full(_) => Error::WouldBlock,
-                    flume::TrySendError::Disconnected(_) => Error::Closed,
-                })
-            }
+            PeerOut::Wire(_) => self.try_send_via_shared(msg),
         }
     }
 

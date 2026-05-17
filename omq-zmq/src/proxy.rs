@@ -71,28 +71,32 @@ pub extern "C" fn zmq_proxy_steerable(
     let has_control = !control.is_null();
     let npoll = if has_control { 3 } else { 2 };
 
+    let mut poll_items = vec![
+        ZmqPollItem {
+            socket: frontend,
+            fd: -1,
+            events: ZMQ_POLLIN,
+            revents: 0,
+        },
+        ZmqPollItem {
+            socket: backend,
+            fd: -1,
+            events: ZMQ_POLLIN,
+            revents: 0,
+        },
+    ];
+    if has_control {
+        poll_items.push(ZmqPollItem {
+            socket: control,
+            fd: -1,
+            events: ZMQ_POLLIN,
+            revents: 0,
+        });
+    }
+
     loop {
-        let mut poll_items = vec![
-            ZmqPollItem {
-                socket: frontend,
-                fd: -1,
-                events: ZMQ_POLLIN,
-                revents: 0,
-            },
-            ZmqPollItem {
-                socket: backend,
-                fd: -1,
-                events: ZMQ_POLLIN,
-                revents: 0,
-            },
-        ];
-        if has_control {
-            poll_items.push(ZmqPollItem {
-                socket: control,
-                fd: -1,
-                events: ZMQ_POLLIN,
-                revents: 0,
-            });
+        for item in &mut poll_items {
+            item.revents = 0;
         }
 
         let rc = zmq_poll(poll_items.as_mut_ptr(), npoll, 100);

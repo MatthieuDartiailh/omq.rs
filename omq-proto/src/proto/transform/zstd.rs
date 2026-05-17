@@ -106,7 +106,7 @@ pub fn train_zdict(samples: &[&[u8]], capacity: usize) -> Option<Bytes> {
 }
 
 struct TrainState {
-    samples: Vec<Bytes>,
+    samples: Vec<Vec<u8>>,
     total_bytes: usize,
 }
 
@@ -245,7 +245,7 @@ impl ZstdEncoder {
         if plain.len() >= TRAIN_MAX_SAMPLE_LEN {
             return;
         }
-        state.samples.push(Bytes::copy_from_slice(plain));
+        state.samples.push(plain.to_vec());
         state.total_bytes += plain.len();
         if state.samples.len() < TRAIN_MAX_SAMPLES && state.total_bytes < TRAIN_MAX_BYTES {
             return;
