@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-05-18
+
+### Added
+
+- `EncodedQueue`: port of omq-compio's unified flat+gather encoding queue. Replaces the separate `flat_buf` and codec write paths with a single drain-based flush that reuses a `Vec<Bytes>` across iterations.
+- Configurable batch byte cap via `OMQ_BATCH_BYTES` env var (default 1 MiB, up from hard-coded 512 KiB).
+
+### Changed
+
+- `FLAT_THRESHOLD` raised from 48 KiB to 64 KiB.
+- `flush_once` now uses `transmit_chunks_capped(128)` to bound iovec count.
+- *(deps)* Bump `omq-proto` to 0.8.4.
+
+### Fixed
+
+- Exclude PAIR from inproc SPSC eligibility: both sides receive, so concurrent recv would compete for messages from the same ring.
+
 ## [0.5.4] - 2026-05-18
 
 ### Added
