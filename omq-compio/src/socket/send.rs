@@ -20,7 +20,9 @@ use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
 #[cfg(not(feature = "priority"))]
-use crate::socket::inner::{CachedPeerRoute, DirectIoState, FLAT_THRESHOLD};
+use crate::socket::inner::{CachedPeerRoute, DirectIoState};
+#[cfg(not(feature = "priority"))]
+use crate::socket::encoded_queue::FLAT_THRESHOLD;
 #[cfg(not(feature = "priority"))]
 use crate::transport::driver::DriverCommand;
 

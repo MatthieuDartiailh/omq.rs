@@ -270,27 +270,12 @@ async fn encode_outbound_message(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn process_handshake_succeeded(
+fn drain_pending_commands(
     state: &DirectIoState,
     io: &mut PeerIo,
-    peer_properties: &Arc<PeerProperties>,
-    monitor_ctx: Option<&MonitorCtx>,
     pending_cmds: &mut VecDeque<DriverCommand>,
     closing: &mut bool,
-    deadline: &mut Option<Instant>,
-    hb_next: &mut Option<Instant>,
-    hb_interval: Option<Duration>,
-) -> Result<Bytes> {
-    io.handshake_done = true;
-    state.handshake_done.store(true, Ordering::Relaxed);
-    *deadline = None;
-    if let Some(iv) = hb_interval {
-        *hb_next = Some(Instant::now() + iv);
-    }
-    let peer_identity = peer_properties.identity.clone().unwrap_or_else(|| {
-        monitor_ctx.map_or_else(Bytes::new, |ctx| generated_identity(ctx.connection_id))
-    });
+) -> Result<()> {
     while let Some(cmd) = pending_cmds.pop_front() {
         match cmd {
             DriverCommand::SendMessage(m) => {
@@ -322,6 +307,31 @@ fn process_handshake_succeeded(
             DriverCommand::Close => *closing = true,
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_handshake_succeeded(
+    state: &DirectIoState,
+    io: &mut PeerIo,
+    peer_properties: &Arc<PeerProperties>,
+    monitor_ctx: Option<&MonitorCtx>,
+    pending_cmds: &mut VecDeque<DriverCommand>,
+    closing: &mut bool,
+    deadline: &mut Option<Instant>,
+    hb_next: &mut Option<Instant>,
+    hb_interval: Option<Duration>,
+) -> Result<Bytes> {
+    io.handshake_done = true;
+    state.handshake_done.store(true, Ordering::Relaxed);
+    *deadline = None;
+    if let Some(iv) = hb_interval {
+        *hb_next = Some(Instant::now() + iv);
+    }
+    let peer_identity = peer_properties.identity.clone().unwrap_or_else(|| {
+        monitor_ctx.map_or_else(Bytes::new, |ctx| generated_identity(ctx.connection_id))
+    });
+    drain_pending_commands(state, io, pending_cmds, closing)?;
     Ok(peer_identity)
 }
 

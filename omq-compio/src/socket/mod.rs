@@ -21,18 +21,22 @@ pub(crate) use omq_proto::endpoint::reject_encrypted_inproc;
 mod bind;
 mod connect;
 mod dial;
+mod direct_io;
+mod encoded_queue;
 mod handle;
 mod inner;
 mod install;
+mod peer;
 mod recv;
 mod send;
 
 pub use handle::Socket;
 
-pub(crate) use inner::{
-    AccRestore, DirectIoState, FLAT_THRESHOLD, OneShotLargeRecvOutcome, RecvStreamState,
-    one_shot_recv_and_feed, try_one_shot_large_recv,
+pub(crate) use direct_io::{
+    DirectIoState, OneShotLargeRecvOutcome, one_shot_recv_and_feed, try_one_shot_large_recv,
 };
+pub(crate) use encoded_queue::FLAT_THRESHOLD;
+pub(crate) use inner::{AccRestore, RecvStreamState};
 
 /// Per-peer cmd channel capacity, sized off `Options::send_hwm`.
 /// When conflate is enabled the shared send queue is cap-1 (drain-before-send),
