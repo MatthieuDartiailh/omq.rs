@@ -549,10 +549,7 @@ where
         let n = writer.write_vectored(&iovecs).await?;
         drop(iovecs);
         if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "write returned 0",
-            ));
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
         }
         let total: usize = drain_buf.iter().map(Bytes::len).sum();
         if n < total {
