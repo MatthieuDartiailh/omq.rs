@@ -99,6 +99,35 @@ impl From<crate::socket::OneShotLargeRecvOutcome> for StreamArmOutcome {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
+struct DriverLoopState {
+    closing: bool,
+    deadline: Option<Instant>,
+    hb_next: Option<Instant>,
+    pending_cmds: VecDeque<DriverCommand>,
+    codec_maybe_dirty: bool,
+    codec_has_input: bool,
+    shared_closed: bool,
+    peer_identity: Bytes,
+    drain_buf: Vec<Bytes>,
+}
+
+impl DriverLoopState {
+    fn new(handshake_timeout: Option<Duration>) -> Self {
+        Self {
+            closing: false,
+            deadline: handshake_timeout.map(|t| Instant::now() + t),
+            hb_next: None,
+            pending_cmds: VecDeque::new(),
+            codec_maybe_dirty: true,
+            codec_has_input: true,
+            shared_closed: false,
+            peer_identity: Bytes::new(),
+            drain_buf: Vec::with_capacity(64),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum DriverCommand {
     SendMessage(Message),
@@ -227,112 +256,108 @@ pub(crate) fn build_peer_io(
 
 /// Encode a user message through the appropriate path (transform /
 /// crypto / plain) and return whether the batch cap was reached.
-async fn encode_outbound_message(
-    state: &DirectIoState,
-    peer_io: &SharedPeerIo,
-    m: &Message,
-    cap: usize,
-    codec_maybe_dirty: &mut bool,
-) -> Result<bool> {
-    if state.has_transform {
-        let mut enc = state.encoder.lock().await;
-        let wires = enc
-            .as_mut()
-            .expect("has_transform but no encoder")
-            .encode(m)?;
-        drop(enc);
-        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-        let cr = eq.total_bytes() >= cap;
-        for wire in &wires {
-            if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                eq.encode_and_push_flat(wire);
-            } else {
-                eq.encode_and_push(wire);
-            }
-        }
-        Ok(cr)
-    } else if state.uses_crypto {
-        let mut io = peer_io.lock().expect("peer_io");
-        io.codec.send_message(m)?;
-        let cr = io.codec.pending_transmit_size() >= cap;
-        drop(io);
-        *codec_maybe_dirty = true;
-        Ok(cr)
-    } else {
-        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-        let cr = eq.total_bytes() >= cap;
-        if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-            eq.encode_and_push_flat(m);
-        } else {
-            eq.encode_and_push(m);
-        }
-        Ok(cr)
-    }
-}
-
-fn drain_pending_commands(
-    state: &DirectIoState,
-    io: &mut PeerIo,
-    pending_cmds: &mut VecDeque<DriverCommand>,
-    closing: &mut bool,
-) -> Result<()> {
-    while let Some(cmd) = pending_cmds.pop_front() {
-        match cmd {
-            DriverCommand::SendMessage(m) => {
-                if state.has_transform {
-                    let mut enc = state
-                        .encoder
-                        .try_lock()
-                        .expect("encoder uncontended during handshake drain");
-                    let wires = enc
-                        .as_mut()
-                        .expect("has_transform but no encoder")
-                        .encode(&m)?;
-                    drop(enc);
-                    let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-                    for wire in &wires {
-                        if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                            eq.encode_and_push_flat(wire);
-                        } else {
-                            eq.encode_and_push(wire);
-                        }
-                    }
+impl DriverLoopState {
+    async fn encode_outbound_message(
+        &mut self,
+        state: &DirectIoState,
+        peer_io: &SharedPeerIo,
+        m: &Message,
+        cap: usize,
+    ) -> Result<bool> {
+        if state.has_transform {
+            let mut enc = state.encoder.lock().await;
+            let wires = enc
+                .as_mut()
+                .expect("has_transform but no encoder")
+                .encode(m)?;
+            drop(enc);
+            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+            let cr = eq.total_bytes() >= cap;
+            for wire in &wires {
+                if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
+                    eq.encode_and_push_flat(wire);
                 } else {
-                    io.codec.send_message(&m)?;
+                    eq.encode_and_push(wire);
                 }
             }
-            DriverCommand::SendCommand(c) => {
-                io.codec.send_command(&c)?;
+            Ok(cr)
+        } else if state.uses_crypto {
+            let mut io = peer_io.lock().expect("peer_io");
+            io.codec.send_message(m)?;
+            let cr = io.codec.pending_transmit_size() >= cap;
+            drop(io);
+            self.codec_maybe_dirty = true;
+            Ok(cr)
+        } else {
+            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+            let cr = eq.total_bytes() >= cap;
+            if m.byte_len() < crate::socket::FLAT_THRESHOLD {
+                eq.encode_and_push_flat(m);
+            } else {
+                eq.encode_and_push(m);
             }
-            DriverCommand::Close => *closing = true,
+            Ok(cr)
         }
     }
-    Ok(())
-}
 
-#[allow(clippy::too_many_arguments)]
-fn process_handshake_succeeded(
-    state: &DirectIoState,
-    io: &mut PeerIo,
-    peer_properties: &Arc<PeerProperties>,
-    monitor_ctx: Option<&MonitorCtx>,
-    pending_cmds: &mut VecDeque<DriverCommand>,
-    closing: &mut bool,
-    deadline: &mut Option<Instant>,
-    hb_next: &mut Option<Instant>,
-    hb_interval: Option<Duration>,
-) -> Result<Bytes> {
-    io.handshake_done = true;
-    state.handshake_done.store(true, Ordering::Relaxed);
-    *deadline = None;
-    if let Some(iv) = hb_interval {
-        *hb_next = Some(Instant::now() + iv);
+    fn drain_pending_commands(
+        &mut self,
+        state: &DirectIoState,
+        io: &mut PeerIo,
+    ) -> Result<()> {
+        while let Some(cmd) = self.pending_cmds.pop_front() {
+            match cmd {
+                DriverCommand::SendMessage(m) => {
+                    if state.has_transform {
+                        let mut enc = state
+                            .encoder
+                            .try_lock()
+                            .expect("encoder uncontended during handshake drain");
+                        let wires = enc
+                            .as_mut()
+                            .expect("has_transform but no encoder")
+                            .encode(&m)?;
+                        drop(enc);
+                        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                        for wire in &wires {
+                            if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
+                                eq.encode_and_push_flat(wire);
+                            } else {
+                                eq.encode_and_push(wire);
+                            }
+                        }
+                    } else {
+                        io.codec.send_message(&m)?;
+                    }
+                }
+                DriverCommand::SendCommand(c) => {
+                    io.codec.send_command(&c)?;
+                }
+                DriverCommand::Close => self.closing = true,
+            }
+        }
+        Ok(())
     }
-    let peer_identity = peer_properties.identity.clone().unwrap_or_else(|| {
-        monitor_ctx.map_or_else(Bytes::new, |ctx| generated_identity(ctx.connection_id))
-    });
-    drain_pending_commands(state, io, pending_cmds, closing)?;
-    Ok(peer_identity)
+
+    fn process_handshake_succeeded(
+        &mut self,
+        state: &DirectIoState,
+        io: &mut PeerIo,
+        peer_properties: &Arc<PeerProperties>,
+        monitor_ctx: Option<&MonitorCtx>,
+        hb_interval: Option<Duration>,
+    ) -> Result<()> {
+        io.handshake_done = true;
+        state.handshake_done.store(true, Ordering::Relaxed);
+        self.deadline = None;
+        if let Some(iv) = hb_interval {
+            self.hb_next = Some(Instant::now() + iv);
+        }
+        self.peer_identity = peer_properties.identity.clone().unwrap_or_else(|| {
+            monitor_ctx.map_or_else(Bytes::new, |ctx| generated_identity(ctx.connection_id))
+        });
+        self.drain_pending_commands(state, io)
+    }
 }
 
 async fn dispatch_command(
@@ -592,75 +617,72 @@ async fn pull_stream(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn drain_inbox(
-    first: DriverCommand,
-    inbox: &Receiver<DriverCommand>,
-    state: &DirectIoState,
-    peer_io: &SharedPeerIo,
-    pending_cmds: &mut VecDeque<DriverCommand>,
-    closing: &mut bool,
-    codec_maybe_dirty: &mut bool,
-    cap: usize,
-) -> Result<()> {
-    let mut next = Some(first);
-    while let Some(cmd) = next.take() {
-        let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
-            match cmd {
-                DriverCommand::SendMessage(m) => {
-                    encode_outbound_message(
-                        state, peer_io, &m, cap, codec_maybe_dirty,
-                    )
-                    .await?
+impl DriverLoopState {
+    async fn drain_inbox(
+        &mut self,
+        first: DriverCommand,
+        inbox: &Receiver<DriverCommand>,
+        state: &DirectIoState,
+        peer_io: &SharedPeerIo,
+        cap: usize,
+    ) -> Result<()> {
+        let mut next = Some(first);
+        while let Some(cmd) = next.take() {
+            let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
+                match cmd {
+                    DriverCommand::SendMessage(m) => {
+                        self.encode_outbound_message(state, peer_io, &m, cap)
+                            .await?
+                    }
+                    DriverCommand::SendCommand(c) => {
+                        let mut io = peer_io.lock().expect("peer_io");
+                        io.codec.send_command(&c)?;
+                        let cr = io.codec.pending_transmit_size() >= cap;
+                        drop(io);
+                        self.codec_maybe_dirty = true;
+                        cr
+                    }
+                    DriverCommand::Close => {
+                        self.closing = true;
+                        false
+                    }
                 }
-                DriverCommand::SendCommand(c) => {
-                    let mut io = peer_io.lock().expect("peer_io");
-                    io.codec.send_command(&c)?;
-                    let cr = io.codec.pending_transmit_size() >= cap;
-                    drop(io);
-                    *codec_maybe_dirty = true;
-                    cr
-                }
-                DriverCommand::Close => {
-                    *closing = true;
-                    false
-                }
+            } else {
+                self.pending_cmds.push_back(cmd);
+                false
+            };
+            if cap_reached {
+                break;
             }
-        } else {
-            pending_cmds.push_back(cmd);
-            false
-        };
-        if cap_reached {
-            break;
+            next = inbox.try_recv().ok();
         }
-        next = inbox.try_recv().ok();
+        Ok(())
     }
-    Ok(())
-}
 
-async fn drain_shared(
-    first: Message,
-    shared: &Receiver<Message>,
-    state: &DirectIoState,
-    peer_io: &SharedPeerIo,
-    pending_cmds: &mut VecDeque<DriverCommand>,
-    codec_maybe_dirty: &mut bool,
-    cap: usize,
-) -> Result<()> {
-    let mut next = Some(first);
-    while let Some(m) = next.take() {
-        let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
-            encode_outbound_message(state, peer_io, &m, cap, codec_maybe_dirty).await?
-        } else {
-            pending_cmds.push_back(DriverCommand::SendMessage(m));
-            false
-        };
-        if cap_reached {
-            break;
+    async fn drain_shared(
+        &mut self,
+        first: Message,
+        shared: &Receiver<Message>,
+        state: &DirectIoState,
+        peer_io: &SharedPeerIo,
+        cap: usize,
+    ) -> Result<()> {
+        let mut next = Some(first);
+        while let Some(m) = next.take() {
+            let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
+                self.encode_outbound_message(state, peer_io, &m, cap)
+                    .await?
+            } else {
+                self.pending_cmds.push_back(DriverCommand::SendMessage(m));
+                false
+            };
+            if cap_reached {
+                break;
+            }
+            next = shared.try_recv().ok();
         }
-        next = shared.try_recv().ok();
+        Ok(())
     }
-    Ok(())
 }
 
 /// Drive one connection through the ZMTP codec. The reader, writer,
@@ -687,7 +709,6 @@ pub(crate) async fn run_connection(
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {
     let peer_io: SharedPeerIo = state.peer_io.clone();
-    let handshake_timeout = options.handshake_timeout;
     let hb_interval = options.heartbeat_interval;
     let hb_timeout = options
         .heartbeat_timeout
@@ -697,44 +718,11 @@ pub(crate) async fn run_connection(
         .heartbeat_ttl
         .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
         .unwrap_or(0);
-    // Reused across iterations to avoid per-drain Vec allocation.
-    let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
-
-    // Commands (including queued messages) waiting for the handshake to complete.
-    // Drained post-handshake. Dropped on handshake failure — callers observe
-    // loss via MonitorEvent::HandshakeFailed published by spawn_wire_driver.
-    let mut pending_cmds: VecDeque<DriverCommand> = VecDeque::new();
-    let mut deadline: Option<Instant> = handshake_timeout.map(|t| Instant::now() + t);
+    let mut ls = DriverLoopState::new(options.handshake_timeout);
     state.last_input_nanos.store(
         state.hb_epoch.elapsed().as_nanos() as u64,
         Ordering::Relaxed,
     );
-    let mut hb_next: Option<Instant> = None;
-    // Set when we receive `DriverCommand::Close`. We don't bail
-    // immediately; we let the codec drain pending_cmds (post-
-    // handshake), flush every transmit chunk to the wire, and then
-    // exit. Socket::close caps the wall-clock budget, so a stuck
-    // peer gets force-canceled there.
-    let mut closing = false;
-    // Set once `shared_msg_rx` has returned None - the socket's
-    // shared send queue closed (the socket is on its way down).
-    // We stop selecting on it but keep running until pending writes
-    // flush; the per-peer inbox still carries the eventual Close.
-    let mut shared_closed = false;
-    // The peer's identity (their READY property), captured at
-    // handshake. Empty until then. Tag each inbound Message with it
-    // so identity-routing sockets (ROUTER) can recover the source.
-    let mut peer_identity = bytes::Bytes::new();
-
-    // Whether the codec received new bytes this iteration (set in read_ready
-    // arm; cleared at top of loop). Guards step 1: post-handshake, step 1
-    // is a no-op unless new bytes arrived.
-    let mut codec_has_input = true; // conservative until handshake clears it
-    // Whether the codec's pending-transmit buffer was dirtied this iteration
-    // (set in cmd/shared/hb arms; cleared when step 3a finds it empty).
-    // Guards step 3a: post-handshake, step 3a is a no-op on the plain-tcp
-    // send-only fast path where nothing encodes into the codec.
-    let mut codec_maybe_dirty = true; // conservative until step 3a clears it
 
     loop {
         use futures::FutureExt;
@@ -750,11 +738,11 @@ pub(crate) async fn run_connection(
         // write, we exit cleanly. Pre-handshake closes wait here for
         // the handshake (or its own timeout); a stuck peer is bounded
         // by Socket::close's wall-clock budget.
-        if closing {
+        if ls.closing {
             let io = peer_io.lock().expect("peer_io");
             let eq = state.encoded_queue.lock().expect("encoded_queue");
             if io.handshake_done
-                && pending_cmds.is_empty()
+                && ls.pending_cmds.is_empty()
                 && !io.codec.has_pending_transmit()
                 && eq.is_empty()
             {
@@ -771,9 +759,9 @@ pub(crate) async fn run_connection(
         let post_handshake = state.handshake_done.load(Ordering::Relaxed);
         let recv_claimed = state.recv_claim.load(Ordering::Acquire) == 1;
         let drained: SmallVec<[Drained; 8]> = if !post_handshake
-            || (codec_has_input && !recv_claimed)
+            || (ls.codec_has_input && !recv_claimed)
         {
-            codec_has_input = false; // consumed; re-set by stream arm
+            ls.codec_has_input = false; // consumed; re-set by stream arm
             let mut io = peer_io.lock().expect("peer_io");
             let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
             // Control-plane events first (handshake must precede messages).
@@ -784,18 +772,14 @@ pub(crate) async fn run_connection(
                         peer_properties,
                     } => {
                         if !io.handshake_done {
-                            peer_identity = process_handshake_succeeded(
+                            ls.process_handshake_succeeded(
                                 &state,
                                 &mut io,
                                 &peer_properties,
                                 monitor_ctx.as_ref(),
-                                &mut pending_cmds,
-                                &mut closing,
-                                &mut deadline,
-                                &mut hb_next,
                                 hb_interval,
                             )?;
-                            codec_maybe_dirty = true;
+                            ls.codec_maybe_dirty = true;
                             out.push(Drained::Handshake {
                                 peer_minor,
                                 peer_properties,
@@ -830,7 +814,7 @@ pub(crate) async fn run_connection(
             &peer_in_tx,
             &peer_snapshot_tx,
             monitor_ctx.as_ref(),
-            &peer_identity,
+            &ls.peer_identity,
         )
         .await?
         {
@@ -838,15 +822,15 @@ pub(crate) async fn run_connection(
         }
 
         // 3a) Flush codec buffer.
-        if !state.handshake_done.load(Ordering::Relaxed) || codec_maybe_dirty {
-            let flushed = flush_codec_to_wire(&state, &peer_io, &mut codec_maybe_dirty).await?;
+        if !state.handshake_done.load(Ordering::Relaxed) || ls.codec_maybe_dirty {
+            let flushed = ls.flush_codec_to_wire(&state, &peer_io).await?;
             if flushed {
                 continue;
             }
         }
 
         // 3b) Flush EncodedQueue.
-        if flush_encoded_queue(&state, &mut drain_buf).await? {
+        if ls.flush_encoded_queue(&state).await? {
             continue;
         }
 
@@ -907,9 +891,9 @@ pub(crate) async fn run_connection(
             }
         };
         let cmd_fut = inbox.recv_async();
-        let timeout_fut = maybe_sleep_until(deadline);
-        let hb_fut = maybe_sleep_until(hb_next);
-        let shared_active = shared_msg_rx.as_ref().filter(|_| !shared_closed);
+        let timeout_fut = maybe_sleep_until(ls.deadline);
+        let hb_fut = maybe_sleep_until(ls.hb_next);
+        let shared_active = shared_msg_rx.as_ref().filter(|_| !ls.shared_closed);
         let shared_fut = async {
             match shared_active {
                 Some(rx) => rx.recv_async().await.ok(),
@@ -955,10 +939,10 @@ pub(crate) async fn run_connection(
                 {
                     let mut io = peer_io.lock().expect("peer_io");
                     let _ = io.codec.send_command(&ping);
-                    codec_maybe_dirty = true;
+                    ls.codec_maybe_dirty = true;
                 }
                 if let Some(iv) = hb_interval {
-                    hb_next = Some(Instant::now() + iv);
+                    ls.hb_next = Some(Instant::now() + iv);
                 }
             }
             outcome = stream_arm.fuse() => {
@@ -970,7 +954,7 @@ pub(crate) async fn run_connection(
                         // notification may have been consumed by the
                         // now-dropped listener. Force step 3a to check
                         // the codec.
-                        codec_maybe_dirty = true;
+                        ls.codec_maybe_dirty = true;
                     }
                     StreamArmOutcome::Eof => return Ok(()),
                     StreamArmOutcome::ProtoErr(e) => return Err(e),
@@ -991,10 +975,10 @@ pub(crate) async fn run_connection(
                         } else if state.recv_stream.rearm(&peer_io).await.is_err() {
                             return Ok(());
                         }
-                        codec_maybe_dirty = true;
+                        ls.codec_maybe_dirty = true;
                     }
                     StreamArmOutcome::Fed => {
-                        codec_has_input = true;
+                        ls.codec_has_input = true;
                         // If the user set the claim while we were
                         // parked on stream.next, notify so its
                         // pull_and_feed select can break out and drain
@@ -1005,7 +989,7 @@ pub(crate) async fn run_connection(
                         // handle_input may auto-generate output (e.g. PONG
                         // in response to PING) — mark codec dirty so step 3a
                         // flushes it before try_direct_recv can race it.
-                        codec_maybe_dirty = true;
+                        ls.codec_maybe_dirty = true;
                     }
                     StreamArmOutcome::AccData(bytes) => {
                         let payload_len =
@@ -1030,100 +1014,96 @@ pub(crate) async fn run_connection(
                             if let Some(extra) = extra {
                                 io.codec.handle_input(extra)?;
                             }
-                            codec_has_input = true;
-                            codec_maybe_dirty = true;
+                            ls.codec_has_input = true;
+                            ls.codec_maybe_dirty = true;
                         }
                     }
                 }
             }
             cmd = cmd_fut.fuse() => {
                 let Ok(cmd) = cmd else { return Ok(()) };
-                drain_inbox(
-                    cmd, &inbox, &state, &peer_io, &mut pending_cmds,
-                    &mut closing, &mut codec_maybe_dirty, cap,
-                )
-                .await?;
+                ls.drain_inbox(cmd, &inbox, &state, &peer_io, cap)
+                    .await?;
             }
             msg = shared_fut.fuse() => {
                 let Some(m) = msg else {
-                    shared_closed = true;
+                    ls.shared_closed = true;
                     continue;
                 };
                 let shared = shared_msg_rx
                     .as_ref()
                     .expect("shared_fut only ready when rx is Some");
-                drain_shared(
-                    m, shared, &state, &peer_io, &mut pending_cmds,
-                    &mut codec_maybe_dirty, cap,
-                )
-                .await?;
+                ls.drain_shared(m, shared, &state, &peer_io, cap)
+                    .await?;
             }
             () = transmit_ready_fut.fuse() => {
-                codec_maybe_dirty = true;
+                ls.codec_maybe_dirty = true;
             }
         }
     }
 }
 
-async fn flush_codec_to_wire(
-    state: &DirectIoState,
-    peer_io: &SharedPeerIo,
-    codec_maybe_dirty: &mut bool,
-) -> Result<bool> {
-    let mut writer = state.writer.lock().await;
-    let chunks = {
-        let io = peer_io.lock().expect("peer_io");
-        if io.codec.has_pending_transmit() {
-            let mut c = io.codec.clone_transmit_chunks();
-            if c.len() > 1024 {
-                c.truncate(1024);
+impl DriverLoopState {
+    async fn flush_codec_to_wire(
+        &mut self,
+        state: &DirectIoState,
+        peer_io: &SharedPeerIo,
+    ) -> Result<bool> {
+        let mut writer = state.writer.lock().await;
+        let chunks = {
+            let io = peer_io.lock().expect("peer_io");
+            if io.codec.has_pending_transmit() {
+                let mut c = io.codec.clone_transmit_chunks();
+                if c.len() > 1024 {
+                    c.truncate(1024);
+                }
+                c
+            } else {
+                self.codec_maybe_dirty = false;
+                return Ok(false);
             }
-            c
-        } else {
-            *codec_maybe_dirty = false;
+        };
+        if chunks.is_empty() {
             return Ok(false);
         }
-    };
-    if chunks.is_empty() {
-        return Ok(false);
-    }
-    let (res, _returned) = writer.write_vectored(chunks).await;
-    let written = res.map_err(Error::Io)?;
-    if written == 0 {
-        return Ok(false);
-    }
-    peer_io
-        .lock()
-        .expect("peer_io")
-        .codec
-        .advance_transmit(written);
-    Ok(true)
-}
-
-async fn flush_encoded_queue(state: &DirectIoState, drain_buf: &mut Vec<Bytes>) -> Result<bool> {
-    drain_buf.clear();
-    {
-        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
-        eq.drain_into_vec(drain_buf, 1024);
-    }
-    if drain_buf.is_empty() {
-        return Ok(false);
-    }
-    let tmp = std::mem::take(drain_buf);
-    let (res, returned) = state.writer.lock().await.write_vectored(tmp).await;
-    let written = res.map_err(Error::Io)?;
-    if written == 0 {
-        return Ok(false);
-    }
-    let total_drained: usize = returned.iter().map(Bytes::len).sum();
-    if written < total_drained {
-        state
-            .encoded_queue
+        let (res, _returned) = writer.write_vectored(chunks).await;
+        let written = res.map_err(Error::Io)?;
+        if written == 0 {
+            return Ok(false);
+        }
+        peer_io
             .lock()
-            .expect("encoded_queue")
-            .put_back_unwritten(returned, written);
-    } else {
-        *drain_buf = returned;
+            .expect("peer_io")
+            .codec
+            .advance_transmit(written);
+        Ok(true)
     }
-    Ok(true)
+
+    async fn flush_encoded_queue(&mut self, state: &DirectIoState) -> Result<bool> {
+        self.drain_buf.clear();
+        {
+            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+            eq.drain_into_vec(&mut self.drain_buf, 1024);
+        }
+        if self.drain_buf.is_empty() {
+            return Ok(false);
+        }
+        let tmp = std::mem::take(&mut self.drain_buf);
+        let (res, returned) = state.writer.lock().await.write_vectored(tmp).await;
+        let written = res.map_err(Error::Io)?;
+        if written == 0 {
+            return Ok(false);
+        }
+        let total_drained: usize = returned.iter().map(Bytes::len).sum();
+        if written < total_drained {
+            state
+                .encoded_queue
+                .lock()
+                .expect("encoded_queue")
+                .put_back_unwritten(returned, written);
+        } else {
+            self.drain_buf = returned;
+        }
+        Ok(true)
+    }
 }
