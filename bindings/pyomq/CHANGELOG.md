@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-18
+
+### Fixed
+
+- `destroy_socket`: wait for pump tasks to drain and call `sock.close()` before returning. Previously leaked driver tasks and buffers on every Context/Socket teardown cycle.
+
+### Added
+
+- Soak test suite (7 scenarios) covering PUSH/PULL throughput, reconnect storm, PUB/SUB churn, peer churn, REQ/REP cycles, context/socket creation churn, and large messages. Each monitors RSS for memory leaks.
+
 ## [0.3.0] - 2026-05-14
 
 ### Changed
