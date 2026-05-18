@@ -507,6 +507,7 @@ impl Socket {
                     let inner = self.inner.clone();
                     let name_clone = name.clone();
                     #[cfg(feature = "priority")]
+                    #[allow(clippy::redundant_locals)]
                     let priority = priority;
                     compio::runtime::spawn(async move {
                         let Ok(conn) =
