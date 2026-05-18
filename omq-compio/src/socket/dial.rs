@@ -335,7 +335,7 @@ pub(super) fn connect_ipc_with_reconnect(
         });
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn dial_supervisor_ipc(
     inner: Arc<SocketInner>,
     endpoint: Endpoint,

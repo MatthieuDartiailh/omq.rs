@@ -256,7 +256,6 @@ impl Socket {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     pub async fn close(self) -> Result<()> {
         let was_closed = self.inner.closed.swap(true, Ordering::SeqCst);
         if was_closed {

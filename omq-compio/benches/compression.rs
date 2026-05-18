@@ -49,7 +49,6 @@ mod inner {
         rt.block_on(async_main());
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn async_main() {
         let transports = active_transports();
         if transports.is_empty() {

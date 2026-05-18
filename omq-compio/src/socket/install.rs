@@ -252,7 +252,125 @@ pub(super) struct WireDriverConfig {
 /// can await its exit. Caller must already have built the
 /// [`DirectIoState`] (the codec, reader, writer, `poll_fd`, claim atomics
 /// all live there).
-#[allow(clippy::too_many_lines)]
+fn spawn_snap_listener(
+    inner: Arc<SocketInner>,
+    snap_rx: flume::Receiver<InprocPeerSnapshot>,
+    slot_idx: usize,
+) {
+    compio::runtime::spawn(async move {
+        let Ok(snap) = snap_rx.recv_async().await else {
+            return;
+        };
+        let identity = snap.identity.clone();
+        let (out, prev_identity) = {
+            let peers = inner.out_peers.read().expect("peers lock");
+            let slot = peers.get(slot_idx);
+            let prev = slot.and_then(|s| {
+                s.peer
+                    .read()
+                    .expect("peer lock")
+                    .as_ref()
+                    .map(|p| p.identity.clone())
+            });
+            if let Some(s) = slot {
+                *s.peer.write().expect("peer lock") = Some(snap);
+            }
+            (slot.map(|s| s.out.clone()), prev)
+        };
+        if !identity.is_empty() {
+            let mut table = inner.identity_to_slot.write().expect("identity table");
+            if let Some(prev) = prev_identity
+                && prev != identity
+                && table.get(&prev) == Some(&slot_idx)
+            {
+                table.remove(&prev);
+            }
+            if let Some(old_idx) = table.insert(identity, slot_idx)
+                && old_idx != slot_idx
+            {
+                drop(table);
+                inner.evict_peer_for_handover(old_idx);
+            }
+        }
+        if matches!(inner.socket_type, SocketType::Sub | SocketType::XSub) {
+            let prefixes: Vec<Bytes> = inner.our_subs.read().expect("our_subs lock").clone();
+            if let Some(out) = out.as_ref() {
+                for p in prefixes {
+                    let _ = out
+                        .send_command(omq_proto::proto::Command::Subscribe(p))
+                        .await;
+                }
+            }
+        }
+        if matches!(inner.socket_type, SocketType::Dish) {
+            let groups: Vec<Bytes> = inner
+                .joined_groups
+                .read()
+                .expect("joined_groups lock")
+                .iter()
+                .cloned()
+                .collect();
+            if let Some(out) = out {
+                for g in groups {
+                    let _ = out.send_command(omq_proto::proto::Command::Join(g)).await;
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+fn handle_driver_exit(
+    inner: &Arc<SocketInner>,
+    res: &omq_proto::error::Result<()>,
+    info_holder: &Arc<RwLock<Option<PeerInfo>>>,
+    endpoint: &Endpoint,
+    connection_id: u64,
+    socket_type: SocketType,
+    peer_address: Option<std::net::SocketAddr>,
+) {
+    let info = info_holder.read().expect("peer_info lock").clone();
+    if let Some(peer) = info {
+        let reason = match res {
+            Ok(()) => DisconnectReason::PeerClosed,
+            Err(e) => DisconnectReason::Error(format!("{e}")),
+        };
+        inner.monitor.publish(MonitorEvent::Disconnected {
+            endpoint: endpoint.clone(),
+            peer,
+            reason,
+        });
+    } else if let Err(e) = res {
+        let peer_ident = peer_address.map_or_else(
+            || PeerIdent::Path(format!("{endpoint}")),
+            PeerIdent::Socket,
+        );
+        inner.monitor.publish(MonitorEvent::HandshakeFailed {
+            endpoint: endpoint.clone(),
+            peer_ident,
+            reason: format!("{e}"),
+        });
+    }
+    let should_reset = match socket_type {
+        SocketType::Req => true,
+        SocketType::Rep => {
+            let peers = inner.out_peers.read().expect("peers lock");
+            !peers.iter().any(|s| {
+                s.connection_id != connection_id
+                    && s.info.read().expect("info lock").is_some()
+            })
+        }
+        _ => false,
+    };
+    if should_reset {
+        inner
+            .type_state
+            .lock()
+            .expect("type_state lock")
+            .on_peer_disconnected();
+    }
+}
+
 pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinHandle<()> {
     let WireDriverConfig {
         inner,
@@ -268,78 +386,7 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
         peer_groups,
     } = cfg;
     let (snap_tx, snap_rx) = flume::bounded::<InprocPeerSnapshot>(1);
-
-    // Snap listener: when the driver completes the handshake it sends
-    // one snapshot. Update PeerSlot.peer + identity_to_slot so ROUTER
-    // outbound can route by identity, and replay our SUB / XSUB
-    // subscriptions over the wire so the new publisher knows what we
-    // want.
-    {
-        let inner = inner.clone();
-        compio::runtime::spawn(async move {
-            let Ok(snap) = snap_rx.recv_async().await else {
-                return;
-            };
-            let identity = snap.identity.clone();
-            let (out, prev_identity) = {
-                let peers = inner.out_peers.read().expect("peers lock");
-                let slot = peers.get(slot_idx);
-                let prev = slot.and_then(|s| {
-                    s.peer
-                        .read()
-                        .expect("peer lock")
-                        .as_ref()
-                        .map(|p| p.identity.clone())
-                });
-                if let Some(s) = slot {
-                    *s.peer.write().expect("peer lock") = Some(snap);
-                }
-                (slot.map(|s| s.out.clone()), prev)
-            };
-            if !identity.is_empty() {
-                let mut table = inner.identity_to_slot.write().expect("identity table");
-                if let Some(prev) = prev_identity
-                    && prev != identity
-                    && table.get(&prev) == Some(&slot_idx)
-                {
-                    table.remove(&prev);
-                }
-                if let Some(old_idx) = table.insert(identity, slot_idx)
-                    && old_idx != slot_idx
-                {
-                    drop(table);
-                    inner.evict_peer_for_handover(old_idx);
-                }
-            }
-            if matches!(inner.socket_type, SocketType::Sub | SocketType::XSub) {
-                let prefixes: Vec<Bytes> = inner.our_subs.read().expect("our_subs lock").clone();
-                if let Some(out) = out.as_ref() {
-                    for p in prefixes {
-                        let _ = out
-                            .send_command(omq_proto::proto::Command::Subscribe(p))
-                            .await;
-                    }
-                }
-            }
-            // DISH: replay joined groups to new RADIO peer so
-            // TCP/IPC RADIO/DISH filtering works through reconnects.
-            if matches!(inner.socket_type, SocketType::Dish) {
-                let groups: Vec<Bytes> = inner
-                    .joined_groups
-                    .read()
-                    .expect("joined_groups lock")
-                    .iter()
-                    .cloned()
-                    .collect();
-                if let Some(out) = out {
-                    for g in groups {
-                        let _ = out.send_command(omq_proto::proto::Command::Join(g)).await;
-                    }
-                }
-            }
-        })
-        .detach();
-    }
+    spawn_snap_listener(inner.clone(), snap_rx, slot_idx);
 
     let socket_type = inner.socket_type;
     let options = inner.options.clone();
@@ -349,7 +396,6 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
     } else {
         None
     };
-    let peer_address_for_exit = peer_address; // Copy; used in exit closure for HandshakeFailed
     let monitor_ctx = MonitorCtx {
         monitor: inner.monitor.clone(),
         endpoint: endpoint.clone(),
@@ -374,61 +420,18 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
             Some(monitor_ctx),
         )
         .await;
-        // Disengage the fast path before the dial supervisor swaps in
-        // a fresh PeerIo; while this is `None`, Socket::send falls
-        // back to cmd_tx and waits.
         *direct_io_for_exit.write().expect("direct_io handle lock") = None;
         inner
             .peers_gen
             .fetch_add(1, std::sync::atomic::Ordering::Release);
-        let info = info_holder.read().expect("peer_info lock").clone();
-        if let Some(peer) = info {
-            // Post-handshake teardown: publish Disconnected with reason.
-            let reason = match res {
-                Ok(()) => DisconnectReason::PeerClosed,
-                Err(e) => DisconnectReason::Error(format!("{e}")),
-            };
-            inner_for_exit.monitor.publish(MonitorEvent::Disconnected {
-                endpoint: endpoint_for_exit,
-                peer,
-                reason,
-            });
-        } else if let Err(ref e) = res {
-            // Handshake never completed. Any messages queued in
-            // pending_cmds (send() already returned Ok) are dropped here.
-            // Publish HandshakeFailed so callers can observe the loss.
-            let peer_ident = peer_address_for_exit.map_or_else(
-                || PeerIdent::Path(format!("{endpoint_for_exit}")),
-                PeerIdent::Socket,
-            );
-            inner_for_exit
-                .monitor
-                .publish(MonitorEvent::HandshakeFailed {
-                    endpoint: endpoint_for_exit,
-                    peer_ident,
-                    reason: format!("{e}"),
-                });
-        }
-        // REQ: reset the send/recv alternation flag so the socket can
-        // issue a fresh request once reconnected.
-        // REP: reset only when no other peer remains, preventing the
-        // socket from being permanently wedged with a stale envelope.
-        let should_reset = match socket_type {
-            SocketType::Req => true,
-            SocketType::Rep => {
-                let peers = inner_for_exit.out_peers.read().expect("peers lock");
-                !peers.iter().any(|s| {
-                    s.connection_id != connection_id && s.info.read().expect("info lock").is_some()
-                })
-            }
-            _ => false,
-        };
-        if should_reset {
-            inner_for_exit
-                .type_state
-                .lock()
-                .expect("type_state lock")
-                .on_peer_disconnected();
-        }
+        handle_driver_exit(
+            &inner_for_exit,
+            &res,
+            &info_holder,
+            &endpoint_for_exit,
+            connection_id,
+            socket_type,
+            peer_address,
+        );
     })
 }
