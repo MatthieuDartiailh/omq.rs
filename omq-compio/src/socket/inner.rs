@@ -300,9 +300,6 @@ pub(super) struct UdpDialerEntry {
     pub(super) sock: Arc<compio::net::UdpSocket>,
 }
 
-
-
-
 impl SocketInner {
     pub(super) fn new(socket_type: SocketType, options: Options) -> Arc<Self> {
         let (in_tx, in_rx) = match options.recv_hwm {

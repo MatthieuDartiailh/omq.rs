@@ -7,11 +7,11 @@ use omq_proto::proto::SocketType;
 use crate::monitor::{MonitorEvent, PeerIdent};
 use crate::transport::inproc;
 
+use super::Socket;
 use super::dial::{connect_ipc_with_reconnect, connect_tcp_with_reconnect};
 use super::inner::UdpDialerEntry;
 use super::install::install_inproc_peer;
 use super::reject_encrypted_inproc;
-use super::Socket;
 
 impl Socket {
     /// Queue a connect attempt. Returns immediately; the background dial

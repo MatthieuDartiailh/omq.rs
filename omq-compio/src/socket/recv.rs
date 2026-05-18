@@ -9,8 +9,8 @@ use omq_proto::proto::{Event, SocketType};
 use crate::transport::inproc::InprocFrame;
 use crate::transport::peer_io::PeerIo;
 
-use super::inner::DirectIoState;
 use super::Socket;
+use super::inner::DirectIoState;
 
 enum RecvAction {
     Return(Option<Message>),
@@ -70,18 +70,13 @@ impl Drop for ClaimGuard<'_> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn accumulate_large_recv(
-    state: &Arc<DirectIoState>,
-) -> Result<RecvAction> {
+async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction> {
     while state.large_recv_pending.load(Ordering::Acquire) != 0 {
         let payload_len = state.large_recv_pending.load(Ordering::Acquire);
 
         let is_one_shot = {
             let sg = state.recv_stream.0.lock().await;
-            matches!(
-                sg.as_ref(),
-                Some(crate::socket::RecvStreamState::OneShot)
-            )
+            matches!(sg.as_ref(), Some(crate::socket::RecvStreamState::OneShot))
         };
 
         if is_one_shot {
@@ -245,9 +240,7 @@ async fn handle_pull_outcome(
         }
         PullOutcome::StartAccumulation => {
             let mut io = state.peer_io.lock().expect("peer_io");
-            if let Some((plen, prefix)) =
-                io.codec.begin_supplied_payload_with_prefix()
-            {
+            if let Some((plen, prefix)) = io.codec.begin_supplied_payload_with_prefix() {
                 let mut buf = bytes::BytesMut::with_capacity(plen);
                 buf.extend_from_slice(prefix.as_slice());
                 drop(io);
@@ -545,10 +538,7 @@ impl Socket {
         }
     }
 
-    fn drain_codec_for_recv(
-        &self,
-        state: &Arc<DirectIoState>,
-    ) -> Result<RecvAction> {
+    fn drain_codec_for_recv(&self, state: &Arc<DirectIoState>) -> Result<RecvAction> {
         let drained = {
             let mut io = state.peer_io.lock().expect("peer_io");
             if !io.handshake_done {
@@ -655,12 +645,10 @@ impl Socket {
                     drop(guard);
                     return Ok(None);
                 }
-                outcome => {
-                    match handle_pull_outcome(outcome, &state).await? {
-                        RecvAction::Return(msg) => return Ok(msg),
-                        RecvAction::Retry | RecvAction::Proceed => {}
-                    }
-                }
+                outcome => match handle_pull_outcome(outcome, &state).await? {
+                    RecvAction::Return(msg) => return Ok(msg),
+                    RecvAction::Retry | RecvAction::Proceed => {}
+                },
             }
             Self::flush_codec_output(&state).await?;
         }

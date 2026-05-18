@@ -300,11 +300,7 @@ impl DriverLoopState {
         }
     }
 
-    fn drain_pending_commands(
-        &mut self,
-        state: &DirectIoState,
-        io: &mut PeerIo,
-    ) -> Result<()> {
+    fn drain_pending_commands(&mut self, state: &DirectIoState, io: &mut PeerIo) -> Result<()> {
         while let Some(cmd) = self.pending_cmds.pop_front() {
             match cmd {
                 DriverCommand::SendMessage(m) => {
@@ -386,8 +382,7 @@ async fn dispatch_command(
         }
         Command::Error { reason } => {
             if let Some(ctx) = monitor_ctx
-                && let Some(info) =
-                    ctx.peer_info.read().expect("peer_info lock").clone()
+                && let Some(info) = ctx.peer_info.read().expect("peer_info lock").clone()
             {
                 ctx.monitor.publish(MonitorEvent::PeerCommand {
                     endpoint: ctx.endpoint.clone(),
@@ -398,8 +393,7 @@ async fn dispatch_command(
         }
         Command::Unknown { name, body } => {
             if let Some(ctx) = monitor_ctx
-                && let Some(info) =
-                    ctx.peer_info.read().expect("peer_info lock").clone()
+                && let Some(info) = ctx.peer_info.read().expect("peer_info lock").clone()
             {
                 ctx.monitor.publish(MonitorEvent::PeerCommand {
                     endpoint: ctx.endpoint.clone(),
@@ -436,9 +430,7 @@ async fn dispatch_drained_events(
                 peer_properties,
             } => {
                 let snap = InprocPeerSnapshot {
-                    socket_type: peer_properties
-                        .socket_type
-                        .unwrap_or(SocketType::Pair),
+                    socket_type: peer_properties.socket_type.unwrap_or(SocketType::Pair),
                     identity: peer_identity.clone(),
                 };
                 let _ = peer_snapshot_tx.send(snap);
@@ -450,8 +442,7 @@ async fn dispatch_drained_events(
                         peer_properties: peer_properties.clone(),
                         zmtp_version: (3, peer_minor),
                     };
-                    *ctx.peer_info.write().expect("peer_info lock") =
-                        Some(info.clone());
+                    *ctx.peer_info.write().expect("peer_info lock") = Some(info.clone());
                     ctx.monitor.publish(MonitorEvent::HandshakeSucceeded {
                         endpoint: ctx.endpoint.clone(),
                         peer: info,
@@ -459,23 +450,16 @@ async fn dispatch_drained_events(
                 }
             }
             Drained::Msg(m) => {
-                if matches!(socket_type, SocketType::Pub | SocketType::XPub)
-                    && m.len() == 1
-                {
+                if matches!(socket_type, SocketType::Pub | SocketType::XPub) && m.len() == 1 {
                     let body = m.part_bytes(0).unwrap();
                     if let Some((tag, prefix)) = body.split_first() {
                         let cmd = match tag {
-                            0x01 => Some(Command::Subscribe(
-                                bytes::Bytes::copy_from_slice(prefix),
-                            )),
-                            0x00 => Some(Command::Cancel(
-                                bytes::Bytes::copy_from_slice(prefix),
-                            )),
+                            0x01 => Some(Command::Subscribe(bytes::Bytes::copy_from_slice(prefix))),
+                            0x00 => Some(Command::Cancel(bytes::Bytes::copy_from_slice(prefix))),
                             _ => None,
                         };
                         if let Some(c) = cmd {
-                            handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, c)
-                                .await?;
+                            handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, c).await?;
                             continue;
                         }
                     }
@@ -603,13 +587,9 @@ async fn pull_stream(
                     };
                     match handle_result {
                         Err(e) => StreamArmOutcome::ProtoErr(e),
-                        Ok(()) => {
-                            crate::socket::try_one_shot_large_recv(
-                                state, &mut sguard,
-                            )
+                        Ok(()) => crate::socket::try_one_shot_large_recv(state, &mut sguard)
                             .await
-                            .into()
-                        }
+                            .into(),
                     }
                 }
             }
@@ -758,54 +738,53 @@ pub(crate) async fn run_connection(
         //    order.
         let post_handshake = state.handshake_done.load(Ordering::Relaxed);
         let recv_claimed = state.recv_claim.load(Ordering::Acquire) == 1;
-        let drained: SmallVec<[Drained; 8]> = if !post_handshake
-            || (ls.codec_has_input && !recv_claimed)
-        {
-            ls.codec_has_input = false; // consumed; re-set by stream arm
-            let mut io = peer_io.lock().expect("peer_io");
-            let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
-            // Control-plane events first (handshake must precede messages).
-            while let Some(ev) = io.codec.poll_event() {
-                match ev {
-                    Event::HandshakeSucceeded {
-                        peer_minor,
-                        peer_properties,
-                    } => {
-                        if !io.handshake_done {
-                            ls.process_handshake_succeeded(
-                                &state,
-                                &mut io,
-                                &peer_properties,
-                                monitor_ctx.as_ref(),
-                                hb_interval,
-                            )?;
-                            ls.codec_maybe_dirty = true;
-                            out.push(Drained::Handshake {
-                                peer_minor,
-                                peer_properties,
-                            });
+        let drained: SmallVec<[Drained; 8]> =
+            if !post_handshake || (ls.codec_has_input && !recv_claimed) {
+                ls.codec_has_input = false; // consumed; re-set by stream arm
+                let mut io = peer_io.lock().expect("peer_io");
+                let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
+                // Control-plane events first (handshake must precede messages).
+                while let Some(ev) = io.codec.poll_event() {
+                    match ev {
+                        Event::HandshakeSucceeded {
+                            peer_minor,
+                            peer_properties,
+                        } => {
+                            if !io.handshake_done {
+                                ls.process_handshake_succeeded(
+                                    &state,
+                                    &mut io,
+                                    &peer_properties,
+                                    monitor_ctx.as_ref(),
+                                    hb_interval,
+                                )?;
+                                ls.codec_maybe_dirty = true;
+                                out.push(Drained::Handshake {
+                                    peer_minor,
+                                    peer_properties,
+                                });
+                            }
                         }
+                        Event::Message(_) => unreachable!("messages use poll_message"),
+                        Event::Command(c) => out.push(Drained::Cmd(c)),
                     }
-                    Event::Message(_) => unreachable!("messages use poll_message"),
-                    Event::Command(c) => out.push(Drained::Cmd(c)),
                 }
-            }
-            // Data-plane messages (separate queue since message-queue split).
-            while let Some(m) = io.codec.poll_message() {
-                let m = if let Some(dec) = io.decoder.as_mut() {
-                    match dec.decode(m)? {
-                        Some(plain) => plain,
-                        None => continue,
-                    }
-                } else {
-                    m
-                };
-                out.push(Drained::Msg(m));
-            }
-            out
-        } else {
-            SmallVec::new()
-        };
+                // Data-plane messages (separate queue since message-queue split).
+                while let Some(m) = io.codec.poll_message() {
+                    let m = if let Some(dec) = io.decoder.as_mut() {
+                        match dec.decode(m)? {
+                            Some(plain) => plain,
+                            None => continue,
+                        }
+                    } else {
+                        m
+                    };
+                    out.push(Drained::Msg(m));
+                }
+                out
+            } else {
+                SmallVec::new()
+            };
 
         // 2) Dispatch drained events outside the lock.
         if dispatch_drained_events(

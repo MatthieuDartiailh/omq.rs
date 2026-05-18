@@ -10,10 +10,10 @@ use crate::transport::inproc::{self, InprocFrame};
 use crate::transport::ipc as ipc_transport;
 use crate::transport::tcp as tcp_transport;
 
+use super::Socket;
 use super::inner::ListenerEntry;
 use super::install::{install_accepted_wire_peer, install_inproc_peer};
 use super::reject_encrypted_inproc;
-use super::Socket;
 
 impl Socket {
     /// Bind to an endpoint. Returns once the listener is active (or, for UDP
