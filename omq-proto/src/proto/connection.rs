@@ -767,8 +767,19 @@ impl Connection {
     /// `front_consumed` from a prior partial write. Empty when nothing
     /// is pending.
     pub fn transmit_chunks(&self) -> SmallVec<[IoSlice<'_>; 8]> {
-        let mut out = SmallVec::with_capacity(self.out_chunks.len());
+        self.transmit_chunks_capped(self.out_chunks.len())
+    }
+
+    /// Like [`transmit_chunks`] but returns at most `max` iovecs.
+    /// Prevents heap-spilling the `SmallVec` when hundreds of chunks
+    /// accumulate in a large batch.
+    pub fn transmit_chunks_capped(&self, max: usize) -> SmallVec<[IoSlice<'_>; 8]> {
+        let cap = max.min(self.out_chunks.len());
+        let mut out = SmallVec::with_capacity(cap);
         for (i, chunk) in self.out_chunks.iter().enumerate() {
+            if out.len() >= max {
+                break;
+            }
             let start = if i == 0 { self.front_consumed } else { 0 };
             if start < chunk.len() {
                 out.push(IoSlice::new(&chunk[start..]));
