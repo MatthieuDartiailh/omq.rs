@@ -1,4 +1,4 @@
-//! PAIR exclusive 1-to-1 throughput. Mirrors `omq/bench/pair/omq.rb`.
+//! PAIR exclusive 1-to-1 throughput.
 
 #[path = "common/mod.rs"]
 mod common;

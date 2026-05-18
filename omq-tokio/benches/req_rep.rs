@@ -1,5 +1,4 @@
-//! REQ/REP synchronous roundtrip throughput. Mirrors
-//! `omq/bench/req_rep/omq.rb`.
+//! REQ/REP synchronous roundtrip throughput.
 
 #[path = "common/mod.rs"]
 mod common;

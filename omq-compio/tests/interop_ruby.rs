@@ -110,7 +110,7 @@ fn tcp_transport() -> Transport {
 
 fn ipc_transport(name: &str) -> Transport {
     let path = std::env::temp_dir().join(format!(
-        "omq-rs-compio-interop-{name}-{}-{}.sock",
+        "omq-compio-interop-{name}-{}-{}.sock",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

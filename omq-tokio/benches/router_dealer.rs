@@ -1,5 +1,4 @@
-//! ROUTER/DEALER throughput: DEALER sends, ROUTER receives. Mirrors
-//! `omq/bench/router_dealer/omq.rb`.
+//! ROUTER/DEALER throughput: DEALER sends, ROUTER receives.
 
 #[path = "common/mod.rs"]
 mod common;

@@ -1,6 +1,5 @@
 //! PUB/SUB fan-out throughput. PUB sends N, each SUB receives all N.
-//! `msgs/s` reported is publish rate. Mirrors
-//! `omq/bench/pub_sub/omq.rb`.
+//! `msgs/s` reported is publish rate.
 
 #[path = "common/mod.rs"]
 mod common;

@@ -142,7 +142,7 @@ fn ipc_transport(name: &str) -> Transport {
     // Filesystem path under the test target dir keeps the socket inside
     // the cargo workspace and avoids /tmp permission quirks.
     let path = std::env::temp_dir().join(format!(
-        "omq-rs-interop-{name}-{}-{}.sock",
+        "omq-interop-{name}-{}-{}.sock",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

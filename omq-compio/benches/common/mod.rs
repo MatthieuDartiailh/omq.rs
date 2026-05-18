@@ -126,7 +126,7 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
         "ipc" => {
             let mut dir = std::env::temp_dir();
             dir.push(format!(
-                "omq-compio-bench-{}-{seq}.sock",
+                "omq-bench-{}-{seq}.sock",
                 std::process::id()
             ));
             let _ = std::fs::remove_file(&dir);
