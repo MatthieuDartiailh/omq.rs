@@ -1,4 +1,3 @@
-use std::ops::ControlFlow;
 use std::sync::{Arc, atomic::Ordering};
 
 use bytes::Bytes;
@@ -12,6 +11,12 @@ use crate::transport::peer_io::PeerIo;
 
 use super::inner::DirectIoState;
 use super::Socket;
+
+enum RecvAction {
+    Return(Option<Message>),
+    Retry,
+    Proceed,
+}
 
 #[inline]
 fn post_recv_needs_type_state(t: SocketType) -> bool {
@@ -67,7 +72,7 @@ impl Drop for ClaimGuard<'_> {
 #[allow(clippy::too_many_lines)]
 async fn accumulate_large_recv(
     state: &Arc<DirectIoState>,
-) -> Result<ControlFlow<Option<Message>>> {
+) -> Result<RecvAction> {
     while state.large_recv_pending.load(Ordering::Acquire) != 0 {
         let payload_len = state.large_recv_pending.load(Ordering::Acquire);
 
@@ -90,7 +95,7 @@ async fn accumulate_large_recv(
             };
             let acc = restore.buf.as_mut().expect("pending_acc missing");
             if let Err(_e) = fd.read_until(acc, payload_len).await {
-                state.eof_signal.notify(usize::MAX);
+                state.signal_eof();
                 return Err(Error::Closed);
             }
             state.last_input_nanos.store(
@@ -101,8 +106,8 @@ async fn accumulate_large_recv(
             state.large_recv_pending.store(0, Ordering::Release);
             let mut io = state.peer_io.lock().expect("peer_io");
             if let Err(_e) = io.codec.supply_payload(payload) {
-                state.eof_signal.notify(usize::MAX);
-                return Ok(ControlFlow::Break(None));
+                state.signal_eof();
+                return Ok(RecvAction::Return(None));
             }
             continue;
         }
@@ -110,7 +115,7 @@ async fn accumulate_large_recv(
         let stream_result = {
             let mut sguard = state.recv_stream.0.lock().await;
             let Some(crate::socket::RecvStreamState::MultiShot(cs)) = sguard.as_mut() else {
-                state.eof_signal.notify(usize::MAX);
+                state.signal_eof();
                 return Err(Error::Closed);
             };
             compio::runtime::FutureExt::with_cancel(
@@ -144,14 +149,14 @@ async fn accumulate_large_recv(
                     state.large_recv_pending.store(0, Ordering::Release);
                     let mut io = state.peer_io.lock().expect("peer_io");
                     if let Err(_e) = io.codec.supply_payload(payload) {
-                        state.eof_signal.notify(usize::MAX);
-                        return Ok(ControlFlow::Break(None));
+                        state.signal_eof();
+                        return Ok(RecvAction::Return(None));
                     }
                     if let Some(extra) = extra
                         && let Err(_e) = io.codec.handle_input(extra)
                     {
-                        state.eof_signal.notify(usize::MAX);
-                        return Ok(ControlFlow::Break(None));
+                        state.signal_eof();
+                        return Ok(RecvAction::Return(None));
                     }
                 }
             }
@@ -160,12 +165,12 @@ async fn accumulate_large_recv(
                 *sguard = Some(crate::socket::RecvStreamState::OneShot);
             }
             _ => {
-                state.eof_signal.notify(usize::MAX);
+                state.signal_eof();
                 return Err(Error::Closed);
             }
         }
     }
-    Ok(ControlFlow::Continue(()))
+    Ok(RecvAction::Proceed)
 }
 
 async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
@@ -216,27 +221,27 @@ async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
 async fn handle_pull_outcome(
     outcome: PullOutcome,
     state: &Arc<DirectIoState>,
-) -> Result<ControlFlow<Option<Message>>> {
+) -> Result<RecvAction> {
     match outcome {
-        PullOutcome::Fed => Ok(ControlFlow::Continue(())),
+        PullOutcome::Fed => Ok(RecvAction::Proceed),
         PullOutcome::Eof => {
-            state.eof_signal.notify(usize::MAX);
+            state.signal_eof();
             Err(Error::Closed)
         }
         PullOutcome::ProtoErr => {
-            state.eof_signal.notify(usize::MAX);
-            Ok(ControlFlow::Break(None))
+            state.signal_eof();
+            Ok(RecvAction::Return(None))
         }
         PullOutcome::Err(e) => {
             if e.raw_os_error() != Some(105) {
-                state.eof_signal.notify(usize::MAX);
+                state.signal_eof();
                 return Err(Error::Closed);
             }
             if state.recv_stream.rearm(&state.peer_io).await.is_err() {
-                state.eof_signal.notify(usize::MAX);
+                state.signal_eof();
                 return Err(Error::Closed);
             }
-            Ok(ControlFlow::Continue(()))
+            Ok(RecvAction::Proceed)
         }
         PullOutcome::StartAccumulation => {
             let mut io = state.peer_io.lock().expect("peer_io");
@@ -249,7 +254,7 @@ async fn handle_pull_outcome(
                 *state.pending_acc.lock().expect("pending_acc") = Some(buf);
                 state.large_recv_pending.store(plen, Ordering::Release);
             }
-            Ok(ControlFlow::Continue(()))
+            Ok(RecvAction::Proceed)
         }
     }
 }
@@ -543,43 +548,43 @@ impl Socket {
     fn drain_codec_for_recv(
         &self,
         state: &Arc<DirectIoState>,
-    ) -> Result<ControlFlow<Option<Message>, bool>> {
+    ) -> Result<RecvAction> {
         let drained = {
             let mut io = state.peer_io.lock().expect("peer_io");
             if !io.handshake_done {
-                return Ok(ControlFlow::Break(None));
+                return Ok(RecvAction::Return(None));
             }
             let cache = self.inner().recv_cache.get();
             self.drain_and_swap(&mut io, cache)?
         };
         let Some(msg) = drained else {
-            return Ok(ControlFlow::Continue(false));
+            return Ok(RecvAction::Proceed);
         };
         if let Some(out) = self.post_recv_apply(msg)? {
-            return Ok(ControlFlow::Break(Some(out)));
+            return Ok(RecvAction::Return(Some(out)));
         }
         if post_recv_needs_type_state(self.inner().socket_type) {
             loop {
                 let raw = self.inner().recv_cache.get().pop_front();
                 let Some(raw) = raw else { break };
                 if let Some(out) = self.post_recv_apply(raw)? {
-                    return Ok(ControlFlow::Break(Some(out)));
+                    return Ok(RecvAction::Return(Some(out)));
                 }
             }
         } else if self.needs_subscription_filter() {
             let cache = self.inner().recv_cache.get();
             while let Some(raw) = cache.pop_front() {
                 if self.matches_subscription(&raw) {
-                    return Ok(ControlFlow::Break(Some(raw)));
+                    return Ok(RecvAction::Return(Some(raw)));
                 }
             }
         } else {
             let cache = self.inner().recv_cache.get();
             if let Some(raw) = cache.pop_front() {
-                return Ok(ControlFlow::Break(Some(raw)));
+                return Ok(RecvAction::Return(Some(raw)));
             }
         }
-        Ok(ControlFlow::Continue(true))
+        Ok(RecvAction::Retry)
     }
 
     async fn try_direct_recv(&self) -> Result<Option<Message>> {
@@ -619,14 +624,14 @@ impl Socket {
 
         loop {
             match accumulate_large_recv(&state).await? {
-                ControlFlow::Break(msg) => return Ok(msg),
-                ControlFlow::Continue(()) => {}
+                RecvAction::Return(msg) => return Ok(msg),
+                RecvAction::Retry | RecvAction::Proceed => {}
             }
 
             match self.drain_codec_for_recv(&state)? {
-                ControlFlow::Break(msg) => return Ok(msg),
-                ControlFlow::Continue(true) => continue,
-                ControlFlow::Continue(false) => {}
+                RecvAction::Return(msg) => return Ok(msg),
+                RecvAction::Retry => continue,
+                RecvAction::Proceed => {}
             }
 
             let pf = pull_and_feed(&state);
@@ -652,8 +657,8 @@ impl Socket {
                 }
                 outcome => {
                     match handle_pull_outcome(outcome, &state).await? {
-                        ControlFlow::Break(msg) => return Ok(msg),
-                        ControlFlow::Continue(()) => {}
+                        RecvAction::Return(msg) => return Ok(msg),
+                        RecvAction::Retry | RecvAction::Proceed => {}
                     }
                 }
             }
@@ -681,7 +686,7 @@ impl Socket {
             let (res, _returned) = writer.write_vectored(chunks).await;
             let written = res.map_err(Error::Io)?;
             if written == 0 {
-                state.eof_signal.notify(usize::MAX);
+                state.signal_eof();
                 return Err(Error::Closed);
             }
             state

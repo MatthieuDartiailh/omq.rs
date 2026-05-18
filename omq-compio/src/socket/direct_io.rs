@@ -180,6 +180,11 @@ pub(crate) async fn one_shot_recv_and_feed(
 }
 
 impl DirectIoState {
+    #[inline]
+    pub(crate) fn signal_eof(&self) {
+        self.eof_signal.notify(usize::MAX);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         peer_io: SharedPeerIo,
