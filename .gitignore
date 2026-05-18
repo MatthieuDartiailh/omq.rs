@@ -11,7 +11,7 @@ Cargo.lock.bak
 uv.lock
 .DS_Store
 /tmp/
-**/benches/results.jsonl
+**/benches/results*.jsonl
 **/.venv/
 __pycache__/
 *.egg-info/

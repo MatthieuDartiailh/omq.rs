@@ -179,63 +179,42 @@ if options[:update_benchmarks]
     text.sub(re, "#{b}#{new_content}#{e}")
   end
 
-  # push_pull_compio_1peer — compio, push_pull, peers=1, by transport
-  build_push_pull_compio = lambda do
-    transports = %w[inproc inproc-mt ipc tcp lz4+tcp zstd+tcp].select do |t|
-      SIZE_LABELS.keys.any? { |s| latest.call('compio', 'push_pull', t, 1, s) }
-    end
+  # push_pull_1peer — both backends, push_pull, peers=1, core transports
+  build_push_pull_1peer = lambda do
+    cols = [
+      ['inproc compio',    'compio', 'inproc'],
+      ['inproc-mt compio', 'compio', 'inproc-mt'],
+      ['inproc tokio',     'tokio',  'inproc'],
+      ['ipc compio',       'compio', 'ipc'],
+      ['ipc tokio',        'tokio',  'ipc'],
+      ['tcp compio',       'compio', 'tcp'],
+      ['tcp tokio',        'tokio',  'tcp'],
+    ].select { |_, b, t| SIZE_LABELS.keys.any? { |s| latest.call(b, 'push_pull', t, 1, s) } }
     sizes = SIZE_LABELS.keys.select do |s|
-      transports.any? { |t| latest.call('compio', 'push_pull', t, 1, s) }
+      cols.any? { |_, b, t| latest.call(b, 'push_pull', t, 1, s) }
     end
-    return "\n(no push_pull compio data)\n" if transports.empty?
+    return "\n(no push_pull data)\n" if cols.empty?
 
-    out = +"\n"
-    out << "| Size | #{transports.join(' | ')} |\n"
-    out << "|---|#{transports.map { '---' }.join('|')}|\n"
-    sizes.each do |sz|
-      cells = transports.map { |t| throughput_cell(latest.call('compio', 'push_pull', t, 1, sz)) }
-      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
-    end
-    out << "\n"
-    out
-  end
-
-  # backend_comparison — both backends, push_pull, peers=1
-  build_backend_comparison = lambda do
-    transports = %w[inproc ipc tcp]
-    sizes = SIZE_LABELS.keys.select do |s|
-      transports.any? do |t|
-        latest.call('compio', 'push_pull', t, 1, s) || latest.call('tokio', 'push_pull', t, 1, s)
-      end
-    end
-    return "\n(no push_pull data)\n" if sizes.empty?
-
-    hdrs = transports.flat_map { |t| ["#{t} compio", "#{t} tokio"] }
+    hdrs = cols.map(&:first)
     out = +"\n"
     out << "| Size | #{hdrs.join(' | ')} |\n"
     out << "|---|#{hdrs.map { '---' }.join('|')}|\n"
     sizes.each do |sz|
-      cells = transports.flat_map do |t|
-        [
-          format_si(latest.call('compio', 'push_pull', t, 1, sz)&.fetch(:msgs_s, nil)) || '—',
-          format_si(latest.call('tokio',  'push_pull', t, 1, sz)&.fetch(:msgs_s, nil)) || '—',
-        ]
-      end
+      cells = cols.map { |_, b, t| throughput_cell(latest.call(b, 'push_pull', t, 1, sz)) }
       out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
     end
     out << "\n"
     out
   end
 
-  # latency_percentiles — both backends, latency bench, peers=1, p50/p99/p999 µs
+  # latency_percentiles — both backends, latency bench, peers=1, core transports
   build_latency_percentiles = lambda do
-    lat_sizes = [32, 128, 512, 2_048, 8_192, 32_768, 131_072]
-    transports = %w[inproc ipc tcp lz4+tcp zstd+tcp].select do |t|
-      lat_sizes.any? do |s|
+    transports = %w[inproc ipc tcp].select do |t|
+      SIZE_LABELS.keys.any? do |s|
         latest.call('compio', 'latency', t, 1, s) || latest.call('tokio', 'latency', t, 1, s)
       end
     end
-    sizes = lat_sizes.select do |s|
+    sizes = SIZE_LABELS.keys.select do |s|
       transports.any? do |t|
         latest.call('compio', 'latency', t, 1, s) || latest.call('tokio', 'latency', t, 1, s)
       end
@@ -243,8 +222,8 @@ if options[:update_benchmarks]
     return "\n(no latency data)\n" if transports.empty?
 
     out = +"\n"
-    out << "| transport | size | compio p50 | compio p99 | compio p999 | tokio p50 | tokio p99 | tokio p999 |\n"
-    out << "|---|---|---|---|---|---|---|---|\n"
+    out << "| transport | size | compio p50 | compio p99 | tokio p50 | tokio p99 |\n"
+    out << "|---|---|---|---|---|---|\n"
     transports.each do |t|
       sizes.each do |sz|
         c  = latest.call('compio', 'latency', t, 1, sz)
@@ -253,42 +232,69 @@ if options[:update_benchmarks]
         out << "| #{t} | #{size_label(sz)} |"
         out << " #{format_us(c&.fetch(:p50_us, nil))} |"
         out << " #{format_us(c&.fetch(:p99_us, nil))} |"
-        out << " #{format_us(c&.fetch(:p999_us, nil))} |"
         out << " #{format_us(tk&.fetch(:p50_us, nil))} |"
-        out << " #{format_us(tk&.fetch(:p99_us, nil))} |"
-        out << " #{format_us(tk&.fetch(:p999_us, nil))} |\n"
+        out << " #{format_us(tk&.fetch(:p99_us, nil))} |\n"
       end
     end
     out << "\n"
     out
   end
 
-  # push_pull_8peer — both backends, push_pull, peers=8
+  # push_pull_8peer — both backends, push_pull, peers=8, core transports
   build_push_pull_8peer = lambda do
-    transports = %w[inproc ipc tcp]
+    cols = [
+      ['inproc compio', 'compio', 'inproc'],
+      ['inproc tokio',  'tokio',  'inproc'],
+      ['ipc compio',    'compio', 'ipc'],
+      ['ipc tokio',     'tokio',  'ipc'],
+      ['tcp compio',    'compio', 'tcp'],
+      ['tcp tokio',     'tokio',  'tcp'],
+    ].select { |_, b, t| SIZE_LABELS.keys.any? { |s| latest.call(b, 'push_pull', t, 8, s) } }
     sizes = SIZE_LABELS.keys.select do |s|
-      transports.any? do |t|
-        latest.call('compio', 'push_pull', t, 8, s) || latest.call('tokio', 'push_pull', t, 8, s)
-      end
+      cols.any? { |_, b, t| latest.call(b, 'push_pull', t, 8, s) }
     end
-    return "\n(no push_pull 8-peer data)\n" if sizes.empty?
+    return "\n(no push_pull 8-peer data)\n" if cols.empty?
 
-    hdrs = transports.flat_map { |t| ["#{t} compio", "#{t} tokio"] }
+    hdrs = cols.map(&:first)
     out = +"\n"
     out << "| Size | #{hdrs.join(' | ')} |\n"
     out << "|---|#{hdrs.map { '---' }.join('|')}|\n"
     sizes.each do |sz|
-      cells = transports.flat_map do |t|
-        [
-          format_si(latest.call('compio', 'push_pull', t, 8, sz)&.fetch(:msgs_s, nil)) || '—',
-          format_si(latest.call('tokio',  'push_pull', t, 8, sz)&.fetch(:msgs_s, nil)) || '—',
-        ]
-      end
+      cells = cols.map { |_, b, t| throughput_cell(latest.call(b, 'push_pull', t, 8, sz)) }
       out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
     end
     out << "\n"
     out
   end
+
+  # Generic throughput table builder for a single pattern/peer-count combo.
+  build_throughput_table = lambda do |pattern, peers, transports, empty_msg|
+    cols = transports.flat_map do |t|
+      [["#{t} compio", 'compio', t], ["#{t} tokio", 'tokio', t]]
+    end.select { |_, b, t| SIZE_LABELS.keys.any? { |s| latest.call(b, pattern, t, peers, s) } }
+    sizes = SIZE_LABELS.keys.select do |s|
+      cols.any? { |_, b, t| latest.call(b, pattern, t, peers, s) }
+    end
+    return "\n(#{empty_msg})\n" if cols.empty?
+
+    hdrs = cols.map(&:first)
+    out = +"\n"
+    out << "| Size | #{hdrs.join(' | ')} |\n"
+    out << "|---|#{hdrs.map { '---' }.join('|')}|\n"
+    sizes.each do |sz|
+      cells = cols.map { |_, b, t| throughput_cell(latest.call(b, pattern, t, peers, sz)) }
+      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
+    end
+    out << "\n"
+    out
+  end
+
+  core_transports = %w[inproc ipc tcp]
+
+  build_req_rep_1peer       = -> { build_throughput_table.call('req_rep',        1, core_transports, 'no req_rep data') }
+  build_pub_sub_3peer       = -> { build_throughput_table.call('pub_sub',        3, core_transports, 'no pub_sub data') }
+  build_router_dealer_3peer = -> { build_throughput_table.call('router_dealer',  3, core_transports, 'no router_dealer data') }
+  build_pair_1peer          = -> { build_throughput_table.call('pair',           1, core_transports, 'no pair data') }
 
   # push_pull_priority — both backends, push_pull, peers=1, priority feature
   latest_priority = lambda do |backend, pattern, transport, peers, msg_size|
@@ -327,12 +333,97 @@ if options[:update_benchmarks]
     out
   end
 
+  # compression_push_pull — tcp vs lz4+tcp vs zstd+tcp, both backends, push_pull, peers=1
+  build_compression_push_pull = lambda do
+    cols = [
+      ['tcp compio',  'compio', 'tcp'],
+      ['lz4 compio',  'compio', 'lz4+tcp'],
+      ['zstd compio', 'compio', 'zstd+tcp'],
+      ['tcp tokio',   'tokio',  'tcp'],
+      ['lz4 tokio',   'tokio',  'lz4+tcp'],
+      ['zstd tokio',  'tokio',  'zstd+tcp'],
+    ].select { |_, b, t| SIZE_LABELS.keys.any? { |s| latest.call(b, 'push_pull', t, 1, s) } }
+    sizes = SIZE_LABELS.keys.select do |s|
+      cols.any? { |_, b, t| latest.call(b, 'push_pull', t, 1, s) }
+    end
+    return "\n(no compression push_pull data — run: bench_run.rb --features 'lz4 zstd')\n" if cols.empty?
+
+    hdrs = cols.map(&:first)
+    out = +"\n"
+    out << "| Size | #{hdrs.join(' | ')} |\n"
+    out << "|---|#{hdrs.map { '---' }.join('|')}|\n"
+    sizes.each do |sz|
+      cells = cols.map { |_, b, t| throughput_cell(latest.call(b, 'push_pull', t, 1, sz)) }
+      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
+    end
+    out << "\n"
+    out
+  end
+
+  # compression_req_rep — tcp vs lz4+tcp vs zstd+tcp, both backends, req_rep, peers=1
+  build_compression_req_rep = lambda do
+    cols = [
+      ['tcp compio',  'compio', 'tcp'],
+      ['lz4 compio',  'compio', 'lz4+tcp'],
+      ['zstd compio', 'compio', 'zstd+tcp'],
+      ['tcp tokio',   'tokio',  'tcp'],
+      ['lz4 tokio',   'tokio',  'lz4+tcp'],
+      ['zstd tokio',  'tokio',  'zstd+tcp'],
+    ].select { |_, b, t| SIZE_LABELS.keys.any? { |s| latest.call(b, 'req_rep', t, 1, s) } }
+    sizes = SIZE_LABELS.keys.select do |s|
+      cols.any? { |_, b, t| latest.call(b, 'req_rep', t, 1, s) }
+    end
+    return "\n(no compression req_rep data — run: bench_run.rb --features 'lz4 zstd')\n" if cols.empty?
+
+    hdrs = cols.map(&:first)
+    out = +"\n"
+    out << "| Size | #{hdrs.join(' | ')} |\n"
+    out << "|---|#{hdrs.map { '---' }.join('|')}|\n"
+    sizes.each do |sz|
+      cells = cols.map { |_, b, t| throughput_cell(latest.call(b, 'req_rep', t, 1, sz)) }
+      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
+    end
+    out << "\n"
+    out
+  end
+
+
+  # mechanism_frame — end-to-end mechanism cost over TCP from omq-compio bench
+  build_mechanism_frame = lambda do
+    mechanisms = %w[NULL CURVE BLAKE3ZMQ].select do |m|
+      SIZE_LABELS.keys.any? { |s| latest.call('compio', 'mechanism', m, 1, s) }
+    end
+    sizes = SIZE_LABELS.keys.select do |s|
+      mechanisms.any? { |m| latest.call('compio', 'mechanism', m, 1, s) }
+    end
+    return "\n(no mechanism data — run: cargo bench -p omq-compio --bench mechanism --features 'curve blake3zmq')\n" if mechanisms.empty?
+
+    out = +"\n"
+    out << "| Size | #{mechanisms.join(' | ')} |\n"
+    out << "|---|#{mechanisms.map { '---:' }.join('|')}|\n"
+    sizes.each do |sz|
+      cells = mechanisms.map do |m|
+        row = latest.call('compio', 'mechanism', m, 1, sz)
+        row ? format_mbps_short(row[:mbps]) : '—'
+      end
+      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
+    end
+    out << "\n"
+    out
+  end
+
   bm = File.read(BENCHMARKS_PATH)
-  bm = replace_block.call(bm, 'push_pull_compio_1peer', build_push_pull_compio.call)
-  bm = replace_block.call(bm, 'backend_comparison',     build_backend_comparison.call)
+  bm = replace_block.call(bm, 'push_pull_1peer',        build_push_pull_1peer.call)
   bm = replace_block.call(bm, 'latency_percentiles',    build_latency_percentiles.call)
   bm = replace_block.call(bm, 'push_pull_8peer',        build_push_pull_8peer.call)
+  bm = replace_block.call(bm, 'req_rep_1peer',           build_req_rep_1peer.call)
+  bm = replace_block.call(bm, 'pub_sub_3peer',          build_pub_sub_3peer.call)
+  bm = replace_block.call(bm, 'router_dealer_3peer',    build_router_dealer_3peer.call)
+  bm = replace_block.call(bm, 'pair_1peer',             build_pair_1peer.call)
+  bm = replace_block.call(bm, 'compression_push_pull',  build_compression_push_pull.call)
+  bm = replace_block.call(bm, 'compression_req_rep',    build_compression_req_rep.call)
   bm = replace_block.call(bm, 'push_pull_priority',     build_push_pull_priority.call)
+  bm = replace_block.call(bm, 'mechanism_frame',        build_mechanism_frame.call)
   File.write(BENCHMARKS_PATH, bm)
 
   run_counts = rows_by_backend.transform_values { |rows| rows.map { |r| r[:run_id] }.uniq.size }

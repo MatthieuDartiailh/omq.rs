@@ -36,8 +36,9 @@ OptionParser.new do |o|
   o.on('--all-sizes',        'Full 32 B–128 KiB size sweep (default: 128 B/2 KiB/8 KiB)') {
     options[:all_sizes] = true
   }
-  o.on('--with-priority',    'Also run push_pull with priority (→ results_priority.jsonl)') {
+  o.on('--with-priority',    'Run push_pull with priority feature only (→ results_priority.jsonl)') {
     options[:with_priority] = true
+    options[:skip_main] = true
   }
   o.on('--id RUN_ID',        'Override run ID (default: timestamp)')       { |v| options[:id]             = v }
 end.parse!
@@ -63,18 +64,33 @@ transport_groups = if ENV['OMQ_BENCH_TRANSPORTS']
                      base
                    end
 
-options[:backends].each do |backend|
-  crate = "omq-#{backend}"
-  transport_groups.each do |transport|
-    cmd = %w[cargo bench -p] + [crate]
-    cmd += ['--features', options[:features]] if options[:features]
-    cmd += ['--bench',    options[:bench]]    if options[:bench]
+COMPRESSION_TRANSPORTS = %w[lz4+tcp zstd+tcp].freeze
+COMPRESSION_BENCHES = {
+  'compio' => %w[push_pull req_rep compression],
+  'tokio'  => %w[push_pull req_rep],
+}.freeze
 
-    env = {}
-    env['OMQ_BENCH_TRANSPORTS'] = transport if transport
-    label = transport ? "#{crate} [#{transport}]" : crate
-    puts "\n--- #{label} ---"
-    system(env, *cmd, chdir: ROOT) || abort("#{label} bench failed")
+unless options[:skip_main]
+  options[:backends].each do |backend|
+    crate = "omq-#{backend}"
+    transport_groups.each do |transport|
+      cmd = %w[cargo bench -p] + [crate]
+      cmd += ['--features', options[:features]] if options[:features]
+
+      if options[:bench]
+        cmd += ['--bench', options[:bench]]
+      elsif transport && COMPRESSION_TRANSPORTS.include?(transport)
+        COMPRESSION_BENCHES.fetch(backend, %w[push_pull req_rep]).each do |b|
+          cmd += ['--bench', b]
+        end
+      end
+
+      env = {}
+      env['OMQ_BENCH_TRANSPORTS'] = transport if transport
+      label = transport ? "#{crate} [#{transport}]" : crate
+      puts "\n--- #{label} ---"
+      system(env, *cmd, chdir: ROOT) || abort("#{label} bench failed")
+    end
   end
 end
 
@@ -88,6 +104,13 @@ if options[:with_priority]
     system(*cmd, chdir: ROOT) || abort("#{crate} priority bench failed")
   end
   ENV.delete('OMQ_BENCH_RESULTS_SUFFIX')
+end
+
+feats = options[:features] || ''
+if feats.include?('curve') && feats.include?('blake3zmq')
+  puts "\n--- mechanism (omq-compio, tcp) ---"
+  cmd = %w[cargo bench -p omq-compio --bench mechanism --features] + ['curve blake3zmq']
+  system(*cmd, chdir: ROOT) || abort('mechanism bench failed')
 end
 
 puts "\n=== done (#{run_id}) ==="

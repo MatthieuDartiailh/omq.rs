@@ -20,7 +20,7 @@ fn main() {
     rt.block_on(async {
         common::print_header("REQ/REP Latency (serial ping-pong)");
         let mut seq = 0usize;
-        for transport in common::all_transports() {
+        for transport in common::transports() {
             println!("--- {transport} ---");
             println!(
                 "  {:>6}  {:>10}  {:>10}  {:>10}  {:>10}",

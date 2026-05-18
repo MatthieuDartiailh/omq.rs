@@ -30,7 +30,19 @@ mod inner {
 
     const PATTERN: &str = "compression_json";
     const PEER_COUNTS: &[usize] = &[1];
-    const TRANSPORTS: &[&str] = &["tcp", "lz4+tcp", "zstd+tcp"];
+    const SUPPORTED_TRANSPORTS: &[&str] = &["tcp", "lz4+tcp", "zstd+tcp"];
+
+    fn active_transports() -> Vec<String> {
+        let all = common::all_transports();
+        let filtered: Vec<String> = all
+            .into_iter()
+            .filter(|t| SUPPORTED_TRANSPORTS.contains(&t.as_str()))
+            .collect();
+        if filtered.is_empty() {
+            return Vec::new();
+        }
+        filtered
+    }
 
     pub(super) fn compio_main() {
         let rt = build_default_runtime().expect("compio runtime");
@@ -39,54 +51,20 @@ mod inner {
 
     #[allow(clippy::too_many_lines)]
     async fn async_main() {
-        use omq_proto::proto::transform::lz4::Lz4Encoder;
-        use omq_proto::proto::transform::zstd::ZstdEncoder;
-        common::print_header("PUSH/PULL - JSON payloads (virtual throughput)");
-        println!("note: loopback has no bandwidth scarcity, so compression's CPU");
-        println!("cost dominates over its wire-byte savings. The compression ratio");
-        println!("printed below is the multiplier that compression saves on a");
-        println!("bandwidth-bounded link: virtual throughput on a 1 Gbps WAN ≈");
-        println!("(125 MB/s × ratio).\n");
-
-        // Print compression ratios up front so users can interpret the
-        // virtual-throughput numbers in light of where the bench CAN'T
-        // show the win (loopback) vs where compression actually helps
-        // (real networks).
-        println!("--- compression ratios on this JSON template ---");
-        for &size in &[128usize, 256, 512, 1024, 2048, 4096, 16384] {
-            let plain = json_payload(size);
-            // The transform's encode returns a SmallVec of Messages
-            // (`TransformedOut`). First message is the encoded payload;
-            // a second message can appear when a dict is being shipped.
-            // Take the LAST message's parts so we measure just the
-            // payload (skipping the optional dict shipment).
-            let m = omq_compio::Message::single(plain.clone());
-            let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
-                out.last()
-                    .map_or(plain.len(), omq_compio::Message::byte_len)
-            };
-            let lz4_n = encoded_len(Lz4Encoder::new().encode(&m).unwrap());
-            let zstd_n = encoded_len(ZstdEncoder::new().encode(&m).unwrap());
-            let lz4_ratio = plain.len() as f64 / lz4_n as f64;
-            let zstd_ratio = plain.len() as f64 / zstd_n as f64;
-            println!(
-                "  {:>6}: plain={}  lz4={} ({:.2}×)  zstd={} ({:.2}×)",
-                format!("{size}B"),
-                plain.len(),
-                lz4_n,
-                lz4_ratio,
-                zstd_n,
-                zstd_ratio,
-            );
+        let transports = active_transports();
+        if transports.is_empty() {
+            return;
         }
-        println!();
+
+        common::print_header("PUSH/PULL - JSON payloads (virtual throughput)");
 
         let peer_counts = common::peers_override();
         let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
         let sizes = common::sizes();
 
         let mut seq = 0usize;
-        for transport in TRANSPORTS {
+        for transport in &transports {
+            let transport = transport.as_str();
             for &peers in peer_counts {
                 common::print_subheader(transport, peers);
                 for &approx_size in &sizes {
@@ -114,62 +92,23 @@ mod inner {
                         cell.elapsed.as_secs_f64(),
                         cell.n,
                     );
-                    common::append_jsonl(PATTERN, transport, peers, actual, cell);
+                    append_compression_jsonl(PATTERN, transport, peers, actual, cell, wire_mbps);
                 }
                 println!();
             }
         }
 
-        // -------------------------------------------------------------
-        // With-dict pass: small payloads, where the per-message frame /
-        // codebook overhead would otherwise dominate. A dict primes the
-        // codec with common byte sequences from the message family, so
-        // even a 256 B record can compress well.
-        // -------------------------------------------------------------
-        println!("--- with-dict compression ratios on this JSON template ---");
         let zstd_dict = train_zstd_dict();
         let lz4_dict = train_lz4_dict();
-        println!(
-            "  trained dicts: zstd={} B  lz4={} B",
-            zstd_dict.len(),
-            lz4_dict.len()
-        );
-        for &size in &[128usize, 256, 512, 1024, 2048] {
-            let plain = json_payload(size);
-            let m = omq_compio::Message::single(plain.clone());
-            let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
-                // Take the LAST message - the first message is the dict
-                // shipment to the peer (one-shot per connection); the
-                // payload is in the second message.
-                out.last()
-                    .map_or(plain.len(), omq_compio::Message::byte_len)
-            };
-            let lz4_n = encoded_len(
-                Lz4Encoder::with_send_dict(lz4_dict.clone())
-                    .unwrap()
-                    .encode(&m)
-                    .unwrap(),
-            );
-            let zstd_n = encoded_len(
-                ZstdEncoder::with_send_dict(zstd_dict.clone())
-                    .unwrap()
-                    .encode(&m)
-                    .unwrap(),
-            );
-            println!(
-                "  {:>6}: plain={}  lz4={} ({:.2}×)  zstd={} ({:.2}×)",
-                format!("{size}B"),
-                plain.len(),
-                lz4_n,
-                plain.len() as f64 / lz4_n as f64,
-                zstd_n,
-                plain.len() as f64 / zstd_n as f64,
-            );
-        }
-        println!();
+
+        let dict_transports: Vec<&str> = transports
+            .iter()
+            .map(String::as_str)
+            .filter(|t| *t != "tcp")
+            .collect();
 
         println!("--- with-dict throughput, small payloads ---");
-        for transport in &["lz4+tcp", "zstd+tcp"] {
+        for transport in &dict_transports {
             for &peers in peer_counts {
                 common::print_subheader(transport, peers);
                 let dict = if *transport == "lz4+tcp" {
@@ -198,10 +137,50 @@ mod inner {
                         cell.elapsed.as_secs_f64(),
                         cell.n,
                     );
-                    common::append_jsonl("compression_json_dict", transport, peers, actual, cell);
+                    append_compression_jsonl(
+                        "compression_json_dict",
+                        transport,
+                        peers,
+                        actual,
+                        cell,
+                        wire_mbps,
+                    );
                 }
                 println!();
             }
+        }
+    }
+
+    fn append_compression_jsonl(
+        pattern: &str,
+        transport: &str,
+        peers: usize,
+        msg_size: usize,
+        c: common::Cell,
+        wire_mbps: f64,
+    ) {
+        if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
+            return;
+        }
+        let path = common::results_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let row = format!(
+            r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"msg_count":{n},"elapsed":{el},"mbps":{mbps},"msgs_s":{msgs_s},"wire_mbps":{wire_mbps}}}"#,
+            run = common::run_id(),
+            n = c.n,
+            el = c.elapsed.as_secs_f64(),
+            mbps = c.mbps,
+            msgs_s = c.msgs_s,
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write as _;
+            let _ = writeln!(f, "{row}");
         }
     }
 

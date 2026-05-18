@@ -1,7 +1,7 @@
-//! PUSH/PULL over IPC with NULL vs CURVE vs BLAKE3ZMQ mechanisms.
+//! PUSH/PULL over TCP with NULL vs CURVE vs BLAKE3ZMQ mechanisms.
 //!
 //! Measures real end-to-end throughput including handshake, encryption,
-//! and decryption overhead. Single peer, Unix-domain socket.
+//! and decryption overhead. Single peer, loopback TCP.
 //!
 //! Run:
 //!   cargo bench -p omq-compio --bench mechanism --features 'curve blake3zmq'
@@ -18,6 +18,7 @@ use omq_compio::{
     Message, MonitorEvent, MonitorStream, Options, ProactorBuilderExt, Socket, SocketType,
 };
 
+const PATTERN: &str = "mechanism";
 const DEFAULT_SIZES: &[usize] = &[2_048, 8_192, 32_768];
 
 fn sizes() -> Vec<usize> {
@@ -37,16 +38,17 @@ fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
 
 fn main() {
     eprintln!("mechanism pid={}", std::process::id());
-    common::print_header("PUSH/PULL mechanism");
+    common::print_header("PUSH/PULL mechanism (tcp)");
 
     let sizes = sizes();
     let mut seq = 0usize;
 
-    println!("--- NULL (ipc) ---");
+    println!("--- NULL (tcp) ---");
     for &size in &sizes {
         seq += 1;
         let cell = run_cell(Options::default(), Options::default(), size, seq);
         common::print_cell(size, cell);
+        common::append_jsonl(PATTERN, "NULL", 1, size, cell);
     }
     println!();
 
@@ -57,7 +59,7 @@ fn main() {
         let client_kp = CurveKeypair::generate();
         let server_pub = server_kp.public;
 
-        println!("--- CURVE (ipc) ---");
+        println!("--- CURVE (tcp) ---");
         for &size in &sizes {
             seq += 1;
             let cell = run_cell(
@@ -67,6 +69,7 @@ fn main() {
                 seq,
             );
             common::print_cell(size, cell);
+            common::append_jsonl(PATTERN, "CURVE", 1, size, cell);
         }
         println!();
     }
@@ -78,7 +81,7 @@ fn main() {
         let client_kp = Blake3ZmqKeypair::generate();
         let server_pub = server_kp.public;
 
-        println!("--- BLAKE3ZMQ (ipc) ---");
+        println!("--- BLAKE3ZMQ (tcp) ---");
         for &size in &sizes {
             seq += 1;
             let cell = run_cell(
@@ -88,13 +91,14 @@ fn main() {
                 seq,
             );
             common::print_cell(size, cell);
+            common::append_jsonl(PATTERN, "BLAKE3ZMQ", 1, size, cell);
         }
         println!();
     }
 }
 
 fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usize) -> common::Cell {
-    let ep = common::endpoint("ipc", seq);
+    let ep = common::endpoint("tcp", seq);
     let pull_count = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(Barrier::new(2));

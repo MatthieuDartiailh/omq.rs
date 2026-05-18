@@ -41,7 +41,7 @@ fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
 }
 
 const PATTERN: &str = "push_pull";
-const PEER_COUNTS: &[usize] = &[1, 3, 8];
+const PEER_COUNTS: &[usize] = &[1, 8];
 
 fn main() {
     eprintln!("push_pull pid={}", std::process::id());
