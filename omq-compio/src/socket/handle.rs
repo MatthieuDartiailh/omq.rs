@@ -1,6 +1,7 @@
 //! Public [`Socket`] handle and the `impl Socket` block - every
 //! `&self` method on the public API surface lives here.
 
+use std::ops::ControlFlow;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
 
@@ -98,6 +99,196 @@ impl Drop for ClaimGuard<'_> {
     fn drop(&mut self) {
         self.state.recv_claim.store(0, Ordering::Release);
         self.state.recv_state_changed.notify(usize::MAX);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn accumulate_large_recv(
+    state: &Arc<DirectIoState>,
+) -> Result<ControlFlow<Option<Message>>> {
+    while state.large_recv_pending.load(Ordering::Acquire) != 0 {
+        let payload_len = state.large_recv_pending.load(Ordering::Acquire);
+
+        let is_one_shot = {
+            let sg = state.recv_stream.0.lock().await;
+            matches!(
+                sg.as_ref(),
+                Some(crate::socket::RecvStreamState::OneShot)
+            )
+        };
+
+        if is_one_shot {
+            let fd = {
+                let io = state.peer_io.lock().expect("peer_io");
+                io.reader.fd_clone()
+            };
+            let mut restore = crate::socket::AccRestore {
+                state,
+                buf: state.pending_acc.lock().expect("pending_acc").take(),
+            };
+            let acc = restore.buf.as_mut().expect("pending_acc missing");
+            if let Err(_e) = fd.read_until(acc, payload_len).await {
+                state.eof_signal.notify(usize::MAX);
+                return Err(Error::Closed);
+            }
+            state.last_input_nanos.store(
+                state.hb_epoch.elapsed().as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+            let payload = restore.buf.take().unwrap().freeze();
+            state.large_recv_pending.store(0, Ordering::Release);
+            let mut io = state.peer_io.lock().expect("peer_io");
+            if let Err(_e) = io.codec.supply_payload(payload) {
+                state.eof_signal.notify(usize::MAX);
+                return Ok(ControlFlow::Break(None));
+            }
+            continue;
+        }
+
+        let stream_result = {
+            let mut sguard = state.recv_stream.0.lock().await;
+            let Some(crate::socket::RecvStreamState::MultiShot(cs)) = sguard.as_mut() else {
+                state.eof_signal.notify(usize::MAX);
+                return Err(Error::Closed);
+            };
+            compio::runtime::FutureExt::with_cancel(
+                futures::StreamExt::next(&mut cs.stream),
+                cs.cancel.clone(),
+            )
+            .await
+        };
+        match stream_result {
+            Some(Ok(buf)) if !buf.is_empty() => {
+                let mut acc_guard = state.pending_acc.lock().expect("pending_acc");
+                let acc = acc_guard.as_mut().expect("pending_acc missing");
+                let needed = payload_len - acc.len();
+                let extra = if buf.len() <= needed {
+                    acc.extend_from_slice(&buf[..]);
+                    drop(buf);
+                    None
+                } else {
+                    acc.extend_from_slice(&buf[..needed]);
+                    let e = Bytes::copy_from_slice(&buf[needed..]);
+                    drop(buf);
+                    Some(e)
+                };
+                state.last_input_nanos.store(
+                    state.hb_epoch.elapsed().as_nanos() as u64,
+                    Ordering::Relaxed,
+                );
+                if acc.len() >= payload_len {
+                    let payload = acc_guard.take().unwrap().freeze();
+                    drop(acc_guard);
+                    state.large_recv_pending.store(0, Ordering::Release);
+                    let mut io = state.peer_io.lock().expect("peer_io");
+                    if let Err(_e) = io.codec.supply_payload(payload) {
+                        state.eof_signal.notify(usize::MAX);
+                        return Ok(ControlFlow::Break(None));
+                    }
+                    if let Some(extra) = extra
+                        && let Err(_e) = io.codec.handle_input(extra)
+                    {
+                        state.eof_signal.notify(usize::MAX);
+                        return Ok(ControlFlow::Break(None));
+                    }
+                }
+            }
+            Some(Err(e)) if e.raw_os_error() == Some(105) => {
+                let mut sguard = state.recv_stream.0.lock().await;
+                *sguard = Some(crate::socket::RecvStreamState::OneShot);
+            }
+            _ => {
+                state.eof_signal.notify(usize::MAX);
+                return Err(Error::Closed);
+            }
+        }
+    }
+    Ok(ControlFlow::Continue(()))
+}
+
+async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
+    let mut sguard = state.recv_stream.0.lock().await;
+    match sguard.as_mut() {
+        None => PullOutcome::Eof,
+        Some(crate::socket::RecvStreamState::OneShot) => {
+            crate::socket::one_shot_recv_and_feed(state, &mut sguard)
+                .await
+                .into()
+        }
+        Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
+            let buf = compio::runtime::FutureExt::with_cancel(
+                futures::StreamExt::next(&mut cs.stream),
+                cs.cancel.clone(),
+            )
+            .await;
+            match buf {
+                None => PullOutcome::Eof,
+                Some(Err(e)) => PullOutcome::Err(e),
+                Some(Ok(buf)) => {
+                    if buf.is_empty() {
+                        return PullOutcome::Eof;
+                    }
+                    let handle_result = {
+                        let mut io = state.peer_io.lock().expect("peer_io");
+                        let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
+                        drop(buf);
+                        io.codec.handle_input(bytes)
+                    };
+                    if handle_result.is_err() {
+                        PullOutcome::ProtoErr
+                    } else {
+                        state.last_input_nanos.store(
+                            state.hb_epoch.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                        crate::socket::try_one_shot_large_recv(state, &mut sguard)
+                            .await
+                            .into()
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_pull_outcome(
+    outcome: PullOutcome,
+    state: &Arc<DirectIoState>,
+) -> Result<ControlFlow<Option<Message>>> {
+    match outcome {
+        PullOutcome::Fed => Ok(ControlFlow::Continue(())),
+        PullOutcome::Eof => {
+            state.eof_signal.notify(usize::MAX);
+            Err(Error::Closed)
+        }
+        PullOutcome::ProtoErr => {
+            state.eof_signal.notify(usize::MAX);
+            Ok(ControlFlow::Break(None))
+        }
+        PullOutcome::Err(e) => {
+            if e.raw_os_error() != Some(105) {
+                state.eof_signal.notify(usize::MAX);
+                return Err(Error::Closed);
+            }
+            if state.recv_stream.rearm(&state.peer_io).await.is_err() {
+                state.eof_signal.notify(usize::MAX);
+                return Err(Error::Closed);
+            }
+            Ok(ControlFlow::Continue(()))
+        }
+        PullOutcome::StartAccumulation => {
+            let mut io = state.peer_io.lock().expect("peer_io");
+            if let Some((plen, prefix)) =
+                io.codec.begin_supplied_payload_with_prefix()
+            {
+                let mut buf = bytes::BytesMut::with_capacity(plen);
+                buf.extend_from_slice(prefix.as_slice());
+                drop(io);
+                *state.pending_acc.lock().expect("pending_acc") = Some(buf);
+                state.large_recv_pending.store(plen, Ordering::Release);
+            }
+            Ok(ControlFlow::Continue(()))
+        }
     }
 }
 
@@ -1121,12 +1312,51 @@ impl Socket {
     ///   - another `recv()` already holds the claim,
     ///   - the handshake hasn't completed yet (driver still owns
     ///     the read path until handshake).
-    #[allow(clippy::too_many_lines)]
+    fn drain_codec_for_recv(
+        &self,
+        state: &Arc<DirectIoState>,
+    ) -> Result<ControlFlow<Option<Message>, bool>> {
+        let drained = {
+            let mut io = state.peer_io.lock().expect("peer_io");
+            if !io.handshake_done {
+                return Ok(ControlFlow::Break(None));
+            }
+            let cache = self.inner.recv_cache.get();
+            self.drain_and_swap(&mut io, cache)?
+        };
+        let Some(msg) = drained else {
+            return Ok(ControlFlow::Continue(false));
+        };
+        if let Some(out) = self.post_recv_apply(msg)? {
+            return Ok(ControlFlow::Break(Some(out)));
+        }
+        if post_recv_needs_type_state(self.inner.socket_type) {
+            loop {
+                let raw = self.inner.recv_cache.get().pop_front();
+                let Some(raw) = raw else { break };
+                if let Some(out) = self.post_recv_apply(raw)? {
+                    return Ok(ControlFlow::Break(Some(out)));
+                }
+            }
+        } else if self.needs_subscription_filter() {
+            let cache = self.inner.recv_cache.get();
+            while let Some(raw) = cache.pop_front() {
+                if self.matches_subscription(&raw) {
+                    return Ok(ControlFlow::Break(Some(raw)));
+                }
+            }
+        } else {
+            let cache = self.inner.recv_cache.get();
+            if let Some(raw) = cache.pop_front() {
+                return Ok(ControlFlow::Break(Some(raw)));
+            }
+        }
+        Ok(ControlFlow::Continue(true))
+    }
+
     async fn try_direct_recv(&self) -> Result<Option<Message>> {
         use futures::FutureExt;
 
-        // Fall back if the driver has already buffered messages into
-        // in_rx - they must be drained in arrival order.
         if !self.inner.in_rx.is_empty() {
             return Ok(None);
         }
@@ -1145,7 +1375,6 @@ impl Socket {
         let Some(state) = state else {
             return Ok(None);
         };
-        // Cache for try_recv's direct codec access.
         // SAFETY: single-threaded compio runtime.
         unsafe { *self.inner.direct_recv_io.get() = Some(state.clone()) };
         if state
@@ -1156,306 +1385,47 @@ impl Socket {
             return Ok(None);
         }
         let guard = ClaimGuard { state: &state };
-        // Race-safe recheck: between the first peek and the claim
-        // flip, the driver could have enqueued into in_rx (it stops
-        // reading on its next iteration). Bail if so.
         if !self.inner.in_rx.is_empty() {
             return Ok(None);
         }
 
         loop {
-            while state.large_recv_pending.load(Ordering::Acquire) != 0 {
-                let payload_len = state.large_recv_pending.load(Ordering::Acquire);
-
-                let is_one_shot = {
-                    let sg = state.recv_stream.0.lock().await;
-                    matches!(sg.as_ref(), Some(crate::socket::RecvStreamState::OneShot))
-                };
-
-                if is_one_shot {
-                    let fd = {
-                        let io = state.peer_io.lock().expect("peer_io");
-                        io.reader.fd_clone()
-                    };
-                    let mut restore = crate::socket::AccRestore {
-                        state: &state,
-                        buf: state.pending_acc.lock().expect("pending_acc").take(),
-                    };
-                    let acc = restore.buf.as_mut().expect("pending_acc missing");
-                    if let Err(_e) = fd.read_until(acc, payload_len).await {
-                        state.eof_signal.notify(usize::MAX);
-                        return Err(Error::Closed);
-                    }
-                    state.last_input_nanos.store(
-                        state.hb_epoch.elapsed().as_nanos() as u64,
-                        Ordering::Relaxed,
-                    );
-                    let payload = restore.buf.take().unwrap().freeze();
-                    state.large_recv_pending.store(0, Ordering::Release);
-                    let mut io = state.peer_io.lock().expect("peer_io");
-                    if let Err(_e) = io.codec.supply_payload(payload) {
-                        state.eof_signal.notify(usize::MAX);
-                        return Ok(None);
-                    }
-                    continue;
-                }
-
-                // MultiShot: pull one CQE
-                let stream_result = {
-                    let mut sguard = state.recv_stream.0.lock().await;
-                    let Some(crate::socket::RecvStreamState::MultiShot(cs)) = sguard.as_mut()
-                    else {
-                        state.eof_signal.notify(usize::MAX);
-                        return Err(Error::Closed);
-                    };
-                    compio::runtime::FutureExt::with_cancel(
-                        futures::StreamExt::next(&mut cs.stream),
-                        cs.cancel.clone(),
-                    )
-                    .await
-                };
-                match stream_result {
-                    Some(Ok(buf)) if !buf.is_empty() => {
-                        let mut acc_guard = state.pending_acc.lock().expect("pending_acc");
-                        let acc = acc_guard.as_mut().expect("pending_acc missing");
-                        let needed = payload_len - acc.len();
-                        let extra = if buf.len() <= needed {
-                            acc.extend_from_slice(&buf[..]);
-                            drop(buf);
-                            None
-                        } else {
-                            acc.extend_from_slice(&buf[..needed]);
-                            let e = Bytes::copy_from_slice(&buf[needed..]);
-                            drop(buf);
-                            Some(e)
-                        };
-                        state.last_input_nanos.store(
-                            state.hb_epoch.elapsed().as_nanos() as u64,
-                            Ordering::Relaxed,
-                        );
-                        if acc.len() >= payload_len {
-                            let payload = acc_guard.take().unwrap().freeze();
-                            drop(acc_guard);
-                            state.large_recv_pending.store(0, Ordering::Release);
-                            let mut io = state.peer_io.lock().expect("peer_io");
-                            if let Err(_e) = io.codec.supply_payload(payload) {
-                                state.eof_signal.notify(usize::MAX);
-                                return Ok(None);
-                            }
-                            if let Some(extra) = extra
-                                && let Err(_e) = io.codec.handle_input(extra)
-                            {
-                                state.eof_signal.notify(usize::MAX);
-                                return Ok(None);
-                            }
-                        }
-                    }
-                    Some(Err(e)) if e.raw_os_error() == Some(105) => {
-                        // ENOBUFS: kernel terminated the multi-shot SQE.
-                        // Transition to OneShot — next iteration does
-                        // read_until for the remainder in one syscall.
-                        let mut sguard = state.recv_stream.0.lock().await;
-                        *sguard = Some(crate::socket::RecvStreamState::OneShot);
-                    }
-                    _ => {
-                        state.eof_signal.notify(usize::MAX);
-                        return Err(Error::Closed);
-                    }
-                }
+            match accumulate_large_recv(&state).await? {
+                ControlFlow::Break(msg) => return Ok(msg),
+                ControlFlow::Continue(()) => {}
             }
 
-            // 1) Drain any user-facing events the driver left in the
-            //    codec. Bail out (Ok(None)) if the handshake hasn't
-            //    completed - we hold the lock so this is race-free.
-            //    After the first message, drain remaining codec events
-            //    into recv_cache so try_recv() can pop them without
-            //    re-acquiring peer_io. Lock order: peer_io → recv_cache.
-            let drained = {
-                let mut io = state.peer_io.lock().expect("peer_io");
-                if !io.handshake_done {
-                    return Ok(None);
-                }
-                let cache = self.inner.recv_cache.get();
-                self.drain_and_swap(&mut io, cache)?
-            };
-            if let Some(msg) = drained {
-                if let Some(out) = self.post_recv_apply(msg)? {
-                    return Ok(Some(out));
-                }
-                // First message filtered (SUB/REQ/REP). Drain cache for
-                // a match before returning to the wire.
-                if post_recv_needs_type_state(self.inner.socket_type) {
-                    loop {
-                        let raw = self.inner.recv_cache.get().pop_front();
-                        let Some(raw) = raw else { break };
-                        if let Some(out) = self.post_recv_apply(raw)? {
-                            return Ok(Some(out));
-                        }
-                    }
-                } else if self.needs_subscription_filter() {
-                    let cache = self.inner.recv_cache.get();
-                    while let Some(raw) = cache.pop_front() {
-                        if self.matches_subscription(&raw) {
-                            return Ok(Some(raw));
-                        }
-                    }
-                } else {
-                    let cache = self.inner.recv_cache.get();
-                    if let Some(raw) = cache.pop_front() {
-                        return Ok(Some(raw));
-                    }
-                }
-                continue;
+            match self.drain_codec_for_recv(&state)? {
+                ControlFlow::Break(msg) => return Ok(msg),
+                ControlFlow::Continue(true) => continue,
+                ControlFlow::Continue(false) => {}
             }
 
-            // 2) Race the multi-shot recv stream against an in_rx
-            //    fire. The driver may have parsed an event under the
-            //    [`PeerIo`] lock while we were releasing it (small
-            //    window, but real on a single-threaded runtime:
-            //    drain-events-under-lock → release → forward-to-in_rx
-            //    is two steps). If in_rx wins, drop the claim and
-            //    process the buffered frame inline so we never deadlock
-            //    waiting on the stream while the driver has a message
-            //    in its hand.
-            //
-            //    The multi-shot stream is cancel-safe by construction:
-            //    its persistent SQE survives consumer-future drops, so
-            //    losing this select arm to in_rx does not lose any
-            //    bytes - they remain queued in the BUF_RING for the
-            //    next consumer to pick up. `recv_async` on blume is
-            //    cancel-safe by construction.
-            //    Cancel-safety invariant: NO `.await` between extracting
-            //    the BufferRef from the stream and feeding it to
-            //    `handle_input`. If the recv future is dropped in that
-            //    window, `BufferRef::drop` returns the slot to the ring
-            //    with its bytes unfed, desyncing ZMTP framing. We
-            //    achieve atomicity by deferring the peer_io lock to
-            //    AFTER `stream.next()` returns - and `peer_io` is a
-            //    sync mutex (`std::sync::Mutex`) so its acquire is not
-            //    an `.await`. The "never hold peer_io across `.await`"
-            //    invariant elsewhere keeps the sync lock from blocking.
-            let pull_and_feed = async {
-                let mut sguard = state.recv_stream.0.lock().await;
-                match sguard.as_mut() {
-                    None => PullOutcome::Eof,
-                    Some(crate::socket::RecvStreamState::OneShot) => {
-                        crate::socket::one_shot_recv_and_feed(&state, &mut sguard)
-                            .await
-                            .into()
-                    }
-                    Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
-                        // See driver.rs `stream_arm`: `.with_cancel` registers
-                        // the SubmitMulti op key with the per-stream token so
-                        // the large-frame switch can drain pending CQEs.
-                        let buf = compio::runtime::FutureExt::with_cancel(
-                            futures::StreamExt::next(&mut cs.stream),
-                            cs.cancel.clone(),
-                        )
-                        .await;
-                        match buf {
-                            None => PullOutcome::Eof,
-                            Some(Err(e)) => PullOutcome::Err(e),
-                            Some(Ok(buf)) => {
-                                if buf.is_empty() {
-                                    return PullOutcome::Eof;
-                                }
-                                let handle_result = {
-                                    let mut io = state.peer_io.lock().expect("peer_io");
-                                    let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
-                                    drop(buf);
-                                    io.codec.handle_input(bytes)
-                                };
-                                if handle_result.is_err() {
-                                    PullOutcome::ProtoErr
-                                } else {
-                                    state.last_input_nanos.store(
-                                        state.hb_epoch.elapsed().as_nanos() as u64,
-                                        Ordering::Relaxed,
-                                    );
-                                    crate::socket::try_one_shot_large_recv(&state, &mut sguard)
-                                        .await
-                                        .into()
-                                }
-                            }
-                        }
-                    }
-                }
-            };
+            let pf = pull_and_feed(&state);
             let inrx_fut = self.inner.in_rx.recv_async();
-            // Driver may win the stream pull race by sampling claim=0
-            // before we set it. After feeding, it notifies this event
-            // so we break out of pull_and_feed and re-drain the codec.
-            // Listener must be created BEFORE entering the select arm
-            // body so the signal isn't lost on a notify between
-            // "claim acquired" and "listener attached".
             let codec_ready_fut = state.recv_codec_ready.listen();
-            futures::pin_mut!(pull_and_feed);
+            futures::pin_mut!(pf);
             futures::pin_mut!(inrx_fut);
             futures::pin_mut!(codec_ready_fut);
             let outcome = futures::select_biased! {
                 frame = inrx_fut.fuse() => {
                     let frame = frame.map_err(|_| Error::Closed)?;
-                    // Drop claim via RAII before returning.
                     drop(guard);
                     return self.process_inproc_frame_for_direct(frame);
                 }
                 () = codec_ready_fut.fuse() => PullOutcome::Fed,
-                outcome = pull_and_feed.fuse() => outcome,
+                outcome = pf.fuse() => outcome,
             };
 
             match outcome {
-                PullOutcome::Fed => {
-                    // Ordering: while we held the recv_stream lock the
-                    // driver may have parsed events into in_rx. Those
-                    // events are older than anything we just fed, so
-                    // bail to the channel path before draining
-                    // codec-fresh events that would jump the queue.
-                    if !self.inner.in_rx.is_empty() {
-                        drop(guard);
-                        return Ok(None);
-                    }
-                    // Loop back to drain the freshly-parsed events.
-                }
-                PullOutcome::Eof => {
-                    state.eof_signal.notify(usize::MAX);
-                    return Err(Error::Closed);
-                }
-                PullOutcome::ProtoErr => {
-                    // Codec rejected input (e.g. MessageTooLarge).
-                    // Mirror the driver: drop this connection silently
-                    // rather than surfacing a codec-level protocol error
-                    // to the user. Notify eof_signal so the driver -
-                    // parked on it while our claim is held - wakes and
-                    // exits cleanly.
-                    state.eof_signal.notify(usize::MAX);
+                PullOutcome::Fed if !self.inner.in_rx.is_empty() => {
+                    drop(guard);
                     return Ok(None);
                 }
-                PullOutcome::Err(e) => {
-                    // Linux ENOBUFS = 105. Multi-shot recv is
-                    // terminated by the kernel when the BUF_RING is
-                    // exhausted; rearm to keep draining. Other errors
-                    // are fatal.
-                    if e.raw_os_error() != Some(105) {
-                        state.eof_signal.notify(usize::MAX);
-                        return Err(Error::Closed);
-                    }
-                    if state.recv_stream.rearm(&state.peer_io).await.is_err() {
-                        state.eof_signal.notify(usize::MAX);
-                        return Err(Error::Closed);
-                    }
-                }
-                PullOutcome::StartAccumulation => {
-                    // Transition codec to AwaitingSuppliedPayload and
-                    // extract any buffered payload prefix. Store the
-                    // accumulator in DirectIoState so it survives
-                    // cancellation.
-                    let mut io = state.peer_io.lock().expect("peer_io");
-                    if let Some((plen, prefix)) = io.codec.begin_supplied_payload_with_prefix() {
-                        let mut buf = bytes::BytesMut::with_capacity(plen);
-                        buf.extend_from_slice(prefix.as_slice());
-                        drop(io);
-                        *state.pending_acc.lock().expect("pending_acc") = Some(buf);
-                        state.large_recv_pending.store(plen, Ordering::Release);
+                outcome => {
+                    match handle_pull_outcome(outcome, &state).await? {
+                        ControlFlow::Break(msg) => return Ok(msg),
+                        ControlFlow::Continue(()) => {}
                     }
                 }
             }
