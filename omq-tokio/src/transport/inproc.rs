@@ -42,11 +42,14 @@ pub struct InprocSpsc {
 }
 
 fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
+    // PAIR+PAIR cannot share a single SPSC ring because both sides
+    // receive: concurrent recv on both sockets would compete for
+    // messages from the same ring, causing messages to reach the
+    // wrong socket. PUSH/PULL is safe because only the PULL side
+    // consumes.
     matches!(
         (a, b),
-        (SocketType::Push, SocketType::Pull)
-            | (SocketType::Pull, SocketType::Push)
-            | (SocketType::Pair, SocketType::Pair)
+        (SocketType::Push, SocketType::Pull) | (SocketType::Pull, SocketType::Push)
     )
 }
 

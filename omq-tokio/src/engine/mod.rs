@@ -8,5 +8,6 @@
 //! The socket actor composes one of these per peer.
 
 pub mod driver;
+mod encoded_queue;
 
 pub use driver::{ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut};
