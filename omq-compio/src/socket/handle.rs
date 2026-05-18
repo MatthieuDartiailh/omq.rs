@@ -1,7 +1,3 @@
-//! Public [`Socket`] handle and the `impl Socket` block - every
-//! `&self` method on the public API surface lives here.
-
-use std::ops::ControlFlow;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
 
@@ -9,288 +5,13 @@ use bytes::Bytes;
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
-use omq_proto::message::Message;
 use omq_proto::options::Options;
-use omq_proto::proto::{Event, SocketType};
+use omq_proto::proto::SocketType;
 
-use crate::monitor::{MonitorEvent, MonitorStream, PeerIdent};
+use crate::monitor::{MonitorEvent, MonitorStream};
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::{self, InprocFrame};
-use crate::transport::ipc as ipc_transport;
-use crate::transport::peer_io::PeerIo;
-use crate::transport::tcp as tcp_transport;
 
-use super::dial::{connect_ipc_with_reconnect, connect_tcp_with_reconnect};
-use super::inner::{
-    DirectIoState, ListenerEntry, PeerOut, SocketInner, UdpDialerEntry, WirePeerHandle,
-};
-use super::install::{install_accepted_wire_peer, install_inproc_peer};
-use super::reject_encrypted_inproc;
-
-/// Mirror of [`super::send::pre_send_needs_type_state`] for the recv path:
-/// REQ / REP touch state, DISH validates two-frame `[group, body]`
-/// shape. Everything else just returns the message unchanged.
-#[inline]
-fn post_recv_needs_type_state(t: SocketType) -> bool {
-    matches!(t, SocketType::Req | SocketType::Rep | SocketType::Dish)
-}
-
-/// Whether `peer_identity` is prepended to the inbound message in
-/// `process_inbound_frame`. ROUTER/SERVER/PEER expose it to the application.
-/// REP strips it in `post_recv` but saves it in `rep_envelope` so the reply
-/// can be routed back to the originating peer via identity routing.
-fn is_identity_recv(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Rep
-    )
-}
-
-/// Recv-direct fast path eligibility. The path is taken when there's
-/// exactly one wire peer and the socket type's recv stream is "user
-/// data only" — no ROUTER identity prefix, no XPUB/XSUB subscribe
-/// command surfacing, no UDP-only DISH. Other shapes go through the
-/// driver's inproc-frame hop.
-///
-/// REP is excluded: it needs peer identity tagging (for reply routing
-/// to the correct client) which only happens via `process_inbound_frame`.
-#[inline]
-fn direct_recv_eligible(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Pull | SocketType::Sub | SocketType::Pair | SocketType::Req
-    )
-}
-
-/// Outcome of the multi-shot recv stream pull-and-feed select arm.
-/// Materialising the cases as an enum lets us complete the
-/// extract-buffer-and-feed-codec sequence synchronously inside the
-/// arm (no `.await` between buffer extract and `handle_input`),
-/// preserving the cancellation-safety invariant: dropping the recv
-/// future at any earlier `.await` does not lose any kernel bytes.
-enum PullOutcome {
-    Fed,
-    Eof,
-    ProtoErr,
-    Err(std::io::Error),
-    StartAccumulation,
-}
-
-impl From<crate::socket::OneShotLargeRecvOutcome> for PullOutcome {
-    fn from(o: crate::socket::OneShotLargeRecvOutcome) -> Self {
-        match o {
-            crate::socket::OneShotLargeRecvOutcome::Skipped
-            | crate::socket::OneShotLargeRecvOutcome::Took => Self::Fed,
-            crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => Self::StartAccumulation,
-            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => Self::Err(e),
-            crate::socket::OneShotLargeRecvOutcome::ProtoErr(_) => Self::ProtoErr,
-        }
-    }
-}
-
-/// RAII guard for the [`DirectIoState`] recv claim. Released on drop:
-/// resets `recv_claim` to 0 (idle) and wakes the driver via
-/// `recv_state_changed` so it re-evaluates and resumes reading.
-struct ClaimGuard<'a> {
-    state: &'a Arc<DirectIoState>,
-}
-
-impl Drop for ClaimGuard<'_> {
-    fn drop(&mut self) {
-        self.state.recv_claim.store(0, Ordering::Release);
-        self.state.recv_state_changed.notify(usize::MAX);
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-async fn accumulate_large_recv(
-    state: &Arc<DirectIoState>,
-) -> Result<ControlFlow<Option<Message>>> {
-    while state.large_recv_pending.load(Ordering::Acquire) != 0 {
-        let payload_len = state.large_recv_pending.load(Ordering::Acquire);
-
-        let is_one_shot = {
-            let sg = state.recv_stream.0.lock().await;
-            matches!(
-                sg.as_ref(),
-                Some(crate::socket::RecvStreamState::OneShot)
-            )
-        };
-
-        if is_one_shot {
-            let fd = {
-                let io = state.peer_io.lock().expect("peer_io");
-                io.reader.fd_clone()
-            };
-            let mut restore = crate::socket::AccRestore {
-                state,
-                buf: state.pending_acc.lock().expect("pending_acc").take(),
-            };
-            let acc = restore.buf.as_mut().expect("pending_acc missing");
-            if let Err(_e) = fd.read_until(acc, payload_len).await {
-                state.eof_signal.notify(usize::MAX);
-                return Err(Error::Closed);
-            }
-            state.last_input_nanos.store(
-                state.hb_epoch.elapsed().as_nanos() as u64,
-                Ordering::Relaxed,
-            );
-            let payload = restore.buf.take().unwrap().freeze();
-            state.large_recv_pending.store(0, Ordering::Release);
-            let mut io = state.peer_io.lock().expect("peer_io");
-            if let Err(_e) = io.codec.supply_payload(payload) {
-                state.eof_signal.notify(usize::MAX);
-                return Ok(ControlFlow::Break(None));
-            }
-            continue;
-        }
-
-        let stream_result = {
-            let mut sguard = state.recv_stream.0.lock().await;
-            let Some(crate::socket::RecvStreamState::MultiShot(cs)) = sguard.as_mut() else {
-                state.eof_signal.notify(usize::MAX);
-                return Err(Error::Closed);
-            };
-            compio::runtime::FutureExt::with_cancel(
-                futures::StreamExt::next(&mut cs.stream),
-                cs.cancel.clone(),
-            )
-            .await
-        };
-        match stream_result {
-            Some(Ok(buf)) if !buf.is_empty() => {
-                let mut acc_guard = state.pending_acc.lock().expect("pending_acc");
-                let acc = acc_guard.as_mut().expect("pending_acc missing");
-                let needed = payload_len - acc.len();
-                let extra = if buf.len() <= needed {
-                    acc.extend_from_slice(&buf[..]);
-                    drop(buf);
-                    None
-                } else {
-                    acc.extend_from_slice(&buf[..needed]);
-                    let e = Bytes::copy_from_slice(&buf[needed..]);
-                    drop(buf);
-                    Some(e)
-                };
-                state.last_input_nanos.store(
-                    state.hb_epoch.elapsed().as_nanos() as u64,
-                    Ordering::Relaxed,
-                );
-                if acc.len() >= payload_len {
-                    let payload = acc_guard.take().unwrap().freeze();
-                    drop(acc_guard);
-                    state.large_recv_pending.store(0, Ordering::Release);
-                    let mut io = state.peer_io.lock().expect("peer_io");
-                    if let Err(_e) = io.codec.supply_payload(payload) {
-                        state.eof_signal.notify(usize::MAX);
-                        return Ok(ControlFlow::Break(None));
-                    }
-                    if let Some(extra) = extra
-                        && let Err(_e) = io.codec.handle_input(extra)
-                    {
-                        state.eof_signal.notify(usize::MAX);
-                        return Ok(ControlFlow::Break(None));
-                    }
-                }
-            }
-            Some(Err(e)) if e.raw_os_error() == Some(105) => {
-                let mut sguard = state.recv_stream.0.lock().await;
-                *sguard = Some(crate::socket::RecvStreamState::OneShot);
-            }
-            _ => {
-                state.eof_signal.notify(usize::MAX);
-                return Err(Error::Closed);
-            }
-        }
-    }
-    Ok(ControlFlow::Continue(()))
-}
-
-async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
-    let mut sguard = state.recv_stream.0.lock().await;
-    match sguard.as_mut() {
-        None => PullOutcome::Eof,
-        Some(crate::socket::RecvStreamState::OneShot) => {
-            crate::socket::one_shot_recv_and_feed(state, &mut sguard)
-                .await
-                .into()
-        }
-        Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
-            let buf = compio::runtime::FutureExt::with_cancel(
-                futures::StreamExt::next(&mut cs.stream),
-                cs.cancel.clone(),
-            )
-            .await;
-            match buf {
-                None => PullOutcome::Eof,
-                Some(Err(e)) => PullOutcome::Err(e),
-                Some(Ok(buf)) => {
-                    if buf.is_empty() {
-                        return PullOutcome::Eof;
-                    }
-                    let handle_result = {
-                        let mut io = state.peer_io.lock().expect("peer_io");
-                        let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
-                        drop(buf);
-                        io.codec.handle_input(bytes)
-                    };
-                    if handle_result.is_err() {
-                        PullOutcome::ProtoErr
-                    } else {
-                        state.last_input_nanos.store(
-                            state.hb_epoch.elapsed().as_nanos() as u64,
-                            Ordering::Relaxed,
-                        );
-                        crate::socket::try_one_shot_large_recv(state, &mut sguard)
-                            .await
-                            .into()
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn handle_pull_outcome(
-    outcome: PullOutcome,
-    state: &Arc<DirectIoState>,
-) -> Result<ControlFlow<Option<Message>>> {
-    match outcome {
-        PullOutcome::Fed => Ok(ControlFlow::Continue(())),
-        PullOutcome::Eof => {
-            state.eof_signal.notify(usize::MAX);
-            Err(Error::Closed)
-        }
-        PullOutcome::ProtoErr => {
-            state.eof_signal.notify(usize::MAX);
-            Ok(ControlFlow::Break(None))
-        }
-        PullOutcome::Err(e) => {
-            if e.raw_os_error() != Some(105) {
-                state.eof_signal.notify(usize::MAX);
-                return Err(Error::Closed);
-            }
-            if state.recv_stream.rearm(&state.peer_io).await.is_err() {
-                state.eof_signal.notify(usize::MAX);
-                return Err(Error::Closed);
-            }
-            Ok(ControlFlow::Continue(()))
-        }
-        PullOutcome::StartAccumulation => {
-            let mut io = state.peer_io.lock().expect("peer_io");
-            if let Some((plen, prefix)) =
-                io.codec.begin_supplied_payload_with_prefix()
-            {
-                let mut buf = bytes::BytesMut::with_capacity(plen);
-                buf.extend_from_slice(prefix.as_slice());
-                drop(io);
-                *state.pending_acc.lock().expect("pending_acc") = Some(buf);
-                state.large_recv_pending.store(plen, Ordering::Release);
-            }
-            Ok(ControlFlow::Continue(()))
-        }
-    }
-}
+use super::inner::{PeerOut, SocketInner, WirePeerHandle};
 
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
 /// driver tasks. Close happens via the explicit [`Socket::close`] method
@@ -327,12 +48,6 @@ impl std::fmt::Debug for Socket {
 
 impl Drop for Socket {
     fn drop(&mut self) {
-        // Cancel background tasks when the last user handle drops. Dial
-        // supervisors hold Arc<SocketInner> clones independently of
-        // _user_life, so without this they keep TCP connections alive even
-        // after all user Sockets are gone. That prevents peer-side drivers
-        // from ever seeing EOF, causing them to keep their shared_msg_rx
-        // clones and steal messages meant for other peers.
         if Arc::strong_count(&self.user_life) == 1 {
             if let Ok(mut d) = self.inner.dialers.write() {
                 d.clear();
@@ -348,10 +63,6 @@ impl Drop for Socket {
 }
 
 impl Socket {
-    /// Create a new socket of the given type with the given options. Background
-    /// tasks (listener accept loops, dial supervisors, per-connection drivers)
-    /// are spawned lazily by [`bind`](Self::bind) and [`connect`](Self::connect)
-    /// on the current compio runtime.
     pub fn new(socket_type: SocketType, options: Options) -> Self {
         assert!(
             !options.conflate || crate::socket::supports_conflate(socket_type),
@@ -365,26 +76,18 @@ impl Socket {
         }
     }
 
-    /// Internal accessor used by sibling modules (send.rs, recv.rs)
-    /// that hold extension methods on `Socket`. Not part of the
-    /// public API.
     pub(super) fn inner(&self) -> &Arc<SocketInner> {
         &self.inner
     }
 
-    /// The socket type this handle was created with.
     pub fn socket_type(&self) -> SocketType {
         self.inner.socket_type
     }
 
-    /// Subscribe to connection-lifecycle events. Each call returns a
-    /// fresh stream that observes events from this point onward.
     pub fn monitor(&self) -> MonitorStream {
         self.inner.monitor.subscribe()
     }
 
-    /// The resolved endpoint of the most recent `bind`, if any.
-    /// For wildcard binds (`tcp://...:*`) this contains the actual port.
     pub fn last_bound_endpoint(&self) -> Option<Endpoint> {
         self.inner
             .listeners
@@ -394,390 +97,6 @@ impl Socket {
             .map(|l| l.endpoint.clone())
     }
 
-    /// Bind to an endpoint. Returns once the listener is active (or, for UDP
-    /// DISH, once the socket is bound and the recv loop is spawned).
-    pub async fn bind(&self, endpoint: Endpoint) -> Result<()> {
-        reject_encrypted_inproc(&endpoint, &self.inner.options.mechanism)?;
-        if endpoint.is_tcp_family() {
-            return self.bind_tcp(endpoint).await;
-        }
-        // The Lz4Tcp / ZstdTcp arms are gated on this crate's own feature;
-        // Cargo feature unification can still surface those variants, so we
-        // add a wildcard runtime fallback.
-        #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
-        match endpoint {
-            Endpoint::Inproc { name } => self.bind_inproc(name).await,
-            Endpoint::Ipc(_) => self.bind_ipc(endpoint).await,
-            Endpoint::Udp { .. } => self.bind_udp(endpoint).await,
-            _ => Err(Error::Protocol(
-                "transport variant not enabled in this omq-compio build".into(),
-            )),
-        }
-    }
-
-    #[allow(clippy::unused_async)]
-    async fn bind_inproc(&self, name: String) -> Result<()> {
-        let snapshot = self.inner.snapshot();
-        let listener = inproc::bind(
-            &name,
-            snapshot,
-            self.inner.in_tx.clone(),
-            self.inner.inproc_recv_event.clone(),
-            self.inner.inproc_parked.clone(),
-        )?;
-        let resolved = Endpoint::Inproc { name: name.clone() };
-        self.inner.monitor.publish(MonitorEvent::Listening {
-            endpoint: resolved.clone(),
-        });
-        let inner = self.inner.clone();
-        let ep_for_task = resolved.clone();
-        let name_for_ident = name;
-        let task = compio::runtime::spawn(async move {
-            while let Ok(conn) = listener.accept().await {
-                let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-                inner.monitor.publish(MonitorEvent::Accepted {
-                    endpoint: ep_for_task.clone(),
-                    peer_ident: PeerIdent::Inproc(name_for_ident.clone()),
-                    connection_id: conn_id,
-                });
-                install_inproc_peer(
-                    &inner,
-                    conn,
-                    ep_for_task.clone(),
-                    conn_id,
-                    #[cfg(feature = "priority")]
-                    omq_proto::DEFAULT_PRIORITY,
-                );
-            }
-        });
-        self.inner
-            .listeners
-            .write()
-            .expect("listeners lock")
-            .push(ListenerEntry {
-                endpoint: resolved,
-                _task: task,
-            });
-        Ok(())
-    }
-
-    async fn bind_tcp(&self, endpoint: Endpoint) -> Result<()> {
-        let wrapper = endpoint.clone();
-        let plain = endpoint.underlying_tcp();
-        let (listener, local) = tcp_transport::bind(&plain).await?;
-        let resolved = wrapper.rewrap_tcp(Endpoint::Tcp {
-            host: omq_proto::endpoint::Host::Ip(local.ip()),
-            port: local.port(),
-        });
-        self.inner.monitor.publish(MonitorEvent::Listening {
-            endpoint: resolved.clone(),
-        });
-        let inner = self.inner.clone();
-        let ep_for_task = resolved.clone();
-        let task = compio::runtime::spawn(async move {
-            use omq_proto::proto::connection::Role;
-            while let Ok((stream, addr)) = listener.accept().await {
-                let _ = stream.set_nodelay(true);
-                if let Ok(poll_fd) = stream.to_poll_fd() {
-                    let _ = inner.options.tcp_keepalive.apply(&poll_fd);
-                    let _ = inner.options.apply_socket_buffers(&poll_fd);
-                }
-                let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-                inner.monitor.publish(MonitorEvent::Accepted {
-                    endpoint: ep_for_task.clone(),
-                    peer_ident: PeerIdent::Socket(addr),
-                    connection_id: conn_id,
-                });
-                let read_clone = stream.clone();
-                let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
-                    continue;
-                };
-                let (_, writer) = stream.into_split();
-                install_accepted_wire_peer(
-                    &inner,
-                    read_fd.into(),
-                    writer.into(),
-                    Role::Server,
-                    ep_for_task.clone(),
-                    conn_id,
-                    Some(addr),
-                );
-            }
-        });
-        self.inner
-            .listeners
-            .write()
-            .expect("listeners lock")
-            .push(ListenerEntry {
-                endpoint: resolved,
-                _task: task,
-            });
-        Ok(())
-    }
-
-    async fn bind_ipc(&self, endpoint: Endpoint) -> Result<()> {
-        let listener = ipc_transport::bind(&endpoint).await?;
-        let resolved = endpoint.clone();
-        self.inner.monitor.publish(MonitorEvent::Listening {
-            endpoint: resolved.clone(),
-        });
-        let inner = self.inner.clone();
-        let ep_for_task = resolved.clone();
-        let ident_path = match &resolved {
-            Endpoint::Ipc(p) => format!("{p}"),
-            _ => String::new(),
-        };
-        let task = compio::runtime::spawn(async move {
-            use omq_proto::proto::connection::Role;
-            while let Ok((stream, _addr)) = listener.inner.accept().await {
-                if let Ok(poll_fd) = stream.to_poll_fd() {
-                    let _ = inner.options.apply_socket_buffers(&poll_fd);
-                }
-                let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-                inner.monitor.publish(MonitorEvent::Accepted {
-                    endpoint: ep_for_task.clone(),
-                    peer_ident: PeerIdent::Path(ident_path.clone()),
-                    connection_id: conn_id,
-                });
-                let read_clone = stream.clone();
-                let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
-                    continue;
-                };
-                let (_, writer) = stream.into_split();
-                install_accepted_wire_peer(
-                    &inner,
-                    read_fd.into(),
-                    writer.into(),
-                    Role::Server,
-                    ep_for_task.clone(),
-                    conn_id,
-                    None,
-                );
-            }
-        });
-        self.inner
-            .listeners
-            .write()
-            .expect("listeners lock")
-            .push(ListenerEntry {
-                endpoint: resolved,
-                _task: task,
-            });
-        Ok(())
-    }
-
-    async fn bind_udp(&self, endpoint: Endpoint) -> Result<()> {
-        if self.inner.socket_type != SocketType::Dish {
-            return Err(Error::Protocol(
-                "udp:// bind is only supported on DISH sockets".into(),
-            ));
-        }
-        let sock = crate::transport::udp::bind(&endpoint).await?;
-        let local = sock.local_addr().map_err(Error::Io)?;
-        let resolved = match &endpoint {
-            Endpoint::Udp { group, .. } => Endpoint::Udp {
-                group: group.clone(),
-                host: omq_proto::endpoint::Host::Ip(local.ip()),
-                port: local.port(),
-            },
-            _ => unreachable!("checked above"),
-        };
-        self.inner.monitor.publish(MonitorEvent::Listening {
-            endpoint: resolved.clone(),
-        });
-        let inner = self.inner.clone();
-        let task = compio::runtime::spawn(async move {
-            let mut buf = vec![0u8; crate::transport::udp::MAX_DATAGRAM_SIZE];
-            loop {
-                let compio::BufResult(res, returned) = sock.recv_from(buf).await;
-                buf = returned;
-                let Ok((n, _from)) = res else { break };
-                let Some((group, body)) = crate::transport::udp::decode_datagram(&buf[..n]) else {
-                    continue;
-                };
-                let joined_now = {
-                    let g = inner.joined_groups.read().expect("joined_groups lock");
-                    g.contains(&group)
-                };
-                if !joined_now {
-                    continue;
-                }
-                let msg = Message::multipart([group, body]);
-                let frame =
-                    InprocFrame::Message(Box::new(crate::transport::inproc::InprocFullMessage {
-                        peer_identity: None,
-                        msg,
-                    }));
-                if inner.in_tx.send_async(frame).await.is_err() {
-                    break;
-                }
-            }
-        });
-        self.inner
-            .listeners
-            .write()
-            .expect("listeners lock")
-            .push(ListenerEntry {
-                endpoint: resolved,
-                _task: task,
-            });
-        Ok(())
-    }
-
-    /// Queue a connect attempt. Returns immediately; the background dial
-    /// supervisor handles the initial connect and any retries per the
-    /// configured [`ReconnectPolicy`](omq_proto::ReconnectPolicy).
-    pub async fn connect(&self, endpoint: Endpoint) -> Result<()> {
-        self.connect_inner(
-            endpoint,
-            #[cfg(feature = "priority")]
-            omq_proto::DEFAULT_PRIORITY,
-        )
-        .await
-    }
-
-    /// Like [`connect`], but applies the per-pipe options in `opts` to
-    /// the new endpoint. Currently the only knob is `priority`
-    /// (1..=255, lower number = higher priority; default 128).
-    /// Strict semantics - see `omq_proto::ConnectOpts`.
-    #[cfg(feature = "priority")]
-    pub async fn connect_with(
-        &self,
-        endpoint: Endpoint,
-        opts: omq_proto::ConnectOpts,
-    ) -> Result<()> {
-        self.connect_inner(endpoint, opts.priority.get()).await
-    }
-
-    async fn connect_inner(
-        &self,
-        endpoint: Endpoint,
-        #[cfg(feature = "priority")] priority: u8,
-    ) -> Result<()> {
-        reject_encrypted_inproc(&endpoint, &self.inner.options.mechanism)?;
-        if endpoint.is_tcp_family() {
-            use omq_proto::proto::connection::Role;
-            connect_tcp_with_reconnect(
-                &self.inner,
-                endpoint,
-                Role::Client,
-                #[cfg(feature = "priority")]
-                priority,
-            );
-            return Ok(());
-        }
-        #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
-        match endpoint {
-            Endpoint::Inproc { name } => {
-                let snapshot = self.inner.snapshot();
-                let in_tx = self.inner.in_tx.clone();
-                let recv_event = self.inner.inproc_recv_event.clone();
-                let parked = self.inner.inproc_parked.clone();
-
-                if inproc::is_bound(&name) {
-                    let conn = inproc::connect(&name, snapshot, in_tx, recv_event, parked).await?;
-                    let conn_id = self
-                        .inner
-                        .next_connection_id
-                        .fetch_add(1, Ordering::Relaxed);
-                    let ep = Endpoint::Inproc { name: name.clone() };
-                    self.inner.monitor.publish(MonitorEvent::Connected {
-                        endpoint: ep.clone(),
-                        peer_ident: PeerIdent::Inproc(name),
-                        connection_id: conn_id,
-                    });
-                    install_inproc_peer(
-                        &self.inner,
-                        conn,
-                        ep,
-                        conn_id,
-                        #[cfg(feature = "priority")]
-                        priority,
-                    );
-                } else {
-                    let inner = self.inner.clone();
-                    let name_clone = name.clone();
-                    #[cfg(feature = "priority")]
-                    #[allow(clippy::redundant_locals)]
-                    let priority = priority;
-                    compio::runtime::spawn(async move {
-                        let Ok(conn) =
-                            inproc::connect(&name_clone, snapshot, in_tx, recv_event, parked).await
-                        else {
-                            return;
-                        };
-                        let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-                        let ep = Endpoint::Inproc {
-                            name: name_clone.clone(),
-                        };
-                        inner.monitor.publish(MonitorEvent::Connected {
-                            endpoint: ep.clone(),
-                            peer_ident: PeerIdent::Inproc(name_clone),
-                            connection_id: conn_id,
-                        });
-                        install_inproc_peer(
-                            &inner,
-                            conn,
-                            ep,
-                            conn_id,
-                            #[cfg(feature = "priority")]
-                            priority,
-                        );
-                    })
-                    .detach();
-                }
-                Ok(())
-            }
-            Endpoint::Ipc(_) => {
-                use omq_proto::proto::connection::Role;
-                connect_ipc_with_reconnect(
-                    &self.inner,
-                    endpoint,
-                    Role::Client,
-                    #[cfg(feature = "priority")]
-                    priority,
-                );
-                Ok(())
-            }
-            Endpoint::Udp { .. } => self.connect_udp(endpoint).await,
-            _ => Err(Error::Protocol(
-                "transport variant not enabled in this omq-compio build".into(),
-            )),
-        }
-    }
-
-    async fn connect_udp(&self, endpoint: Endpoint) -> Result<()> {
-        if self.inner.socket_type != SocketType::Radio {
-            return Err(Error::Protocol(
-                "udp:// connect is only supported on RADIO sockets".into(),
-            ));
-        }
-        let sock = crate::transport::udp::connect(&endpoint).await?;
-        let conn_id = self
-            .inner
-            .next_connection_id
-            .fetch_add(1, Ordering::Relaxed);
-        self.inner.monitor.publish(MonitorEvent::Connected {
-            endpoint: endpoint.clone(),
-            peer_ident: PeerIdent::Path(format!("{endpoint}")),
-            connection_id: conn_id,
-        });
-        self.inner
-            .udp_dialers
-            .write()
-            .expect("udp_dialers lock")
-            .push(UdpDialerEntry {
-                endpoint: endpoint.clone(),
-                sock: Arc::new(sock),
-            });
-        self.inner.on_peer_ready.notify(usize::MAX);
-        Ok(())
-    }
-
-    /// Tear down a previously-established bind. Cancels the listener
-    /// (or DISH UDP recv loop) by dropping its task handle; already-
-    /// accepted peers stay connected. Returns `Error::Unroutable` if
-    /// no listener at `endpoint` is registered.
     #[allow(clippy::unused_async)]
     pub async fn unbind(&self, endpoint: Endpoint) -> Result<()> {
         let mut listeners = self.inner.listeners.write().expect("listeners lock");
@@ -790,15 +109,6 @@ impl Socket {
         }
     }
 
-    /// Tear down a previously-started connect. Cancels the dial loop
-    /// (or the dial supervisor that owns the per-connection driver)
-    /// by dropping its task handle. UDP RADIO dialers are also
-    /// dropped here. Existing handshaked peers from this dialer
-    /// remain in `out_peers` for as long as the driver task they
-    /// owned was held by the supervisor - under
-    /// `ReconnectPolicy::Disabled` the driver IS the dialer task,
-    /// so disconnecting tears the peer down too. Returns
-    /// `Error::Unroutable` if no dialer matches.
     #[allow(clippy::unused_async)]
     pub async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
         let mut dialers = self.inner.dialers.write().expect("dialers lock");
@@ -813,9 +123,6 @@ impl Socket {
         }
     }
 
-    /// Snapshot the live status of one connected peer by
-    /// `connection_id`. `Ok(None)` means no peer with that id
-    /// exists (never connected, or already disconnected).
     #[allow(clippy::unused_async)]
     pub async fn connection_info(
         &self,
@@ -839,8 +146,6 @@ impl Socket {
         Ok(None)
     }
 
-    /// Snapshot every currently-connected peer. Empty vec when no
-    /// peers are live. Useful for introspection / health checks.
     #[allow(clippy::unused_async)]
     pub async fn connections(&self) -> Result<Vec<crate::monitor::ConnectionStatus>> {
         let peers = self.inner.out_peers.read().expect("peers lock");
@@ -861,10 +166,6 @@ impl Socket {
             .collect())
     }
 
-    /// Subscribe to a topic prefix. Updates the local matcher and
-    /// queues a SUBSCRIBE command to every currently-handshaked
-    /// publisher; new peers replay our subscriptions when their own
-    /// handshake completes. Must be called on a SUB / XSUB socket.
     pub async fn subscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Sub | SocketType::XSub) {
             return Err(Error::Protocol(
@@ -891,8 +192,6 @@ impl Socket {
         Ok(())
     }
 
-    /// Cancel a previously-registered subscription prefix. No-op if
-    /// the prefix wasn't subscribed.
     pub async fn unsubscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Sub | SocketType::XSub) {
             return Err(Error::Protocol(
@@ -919,9 +218,6 @@ impl Socket {
         Ok(())
     }
 
-    /// Join a group (DISH only). UDP DISH never sends JOIN over the
-    /// wire (RFC 48); the local set drives the receive-time filter in
-    /// [`bind_udp`]'s recv loop.
     pub async fn join(&self, group: impl Into<Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Dish) {
             return Err(Error::Protocol("join is only valid on DISH sockets".into()));
@@ -932,11 +228,6 @@ impl Socket {
             .write()
             .expect("joined_groups lock")
             .insert(group.clone());
-        // Propagate over the wire to every connected RADIO peer
-        // (TCP/IPC/inproc); UDP RADIO never sees JOIN per RFC 48
-        // and is filtered locally in bind_udp's recv loop. New
-        // peers replay our joined_groups on handshake (see
-        // spawn_wire_driver's snap listener).
         let cmd = omq_proto::proto::Command::Join(group);
         let peers = self.snapshot_peers_now();
         for p in peers {
@@ -945,7 +236,6 @@ impl Socket {
         Ok(())
     }
 
-    /// Leave a previously-joined group. No-op if not joined.
     pub async fn leave(&self, group: impl Into<Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Dish) {
             return Err(Error::Protocol(
@@ -966,512 +256,7 @@ impl Socket {
         Ok(())
     }
 
-    /// Receive a message. The direct path is tried first when eligible
-    /// (single wire peer, supported socket type) — reads the FD inline
-    /// so the driver's read-side hop is skipped, saving one task wake
-    /// per RTT. On non-eligible sockets, contention on `recv_claim`,
-    /// or an early bailout (e.g. pre-handshake), the `in_rx` loop runs
-    /// unchanged.
-    ///
-    /// Cancellation: dropping the returned future after `read_ready`
-    /// has fired but before the read SQE returns may forfeit a small
-    /// amount of in-flight bytes (~5 µs window). The codec stays
-    /// consistent and the connection remains usable; the next
-    /// `recv()` continues from there.
     #[allow(clippy::too_many_lines)]
-    fn drain_recv_cache(&self, st: SocketType) -> Result<Option<Message>> {
-        if post_recv_needs_type_state(st) {
-            loop {
-                let raw = self.inner.recv_cache.get().pop_front();
-                let Some(raw) = raw else { break };
-                if let Some(out) = self.post_recv_apply(raw)? {
-                    return Ok(Some(out));
-                }
-            }
-        } else if self.needs_subscription_filter() {
-            let cache = self.inner.recv_cache.get();
-            while let Some(raw) = cache.pop_front() {
-                if self.matches_subscription(&raw) {
-                    return Ok(Some(raw));
-                }
-            }
-        } else {
-            let cache = self.inner.recv_cache.get();
-            if let Some(msg) = cache.pop_front() {
-                return Ok(Some(msg));
-            }
-        }
-        Ok(None)
-    }
-
-    pub async fn recv(&self) -> Result<Message> {
-        use futures::FutureExt;
-        let st = self.inner.socket_type;
-        if direct_recv_eligible(st) {
-            if let Some(msg) = self.drain_recv_cache(st)? {
-                return Ok(msg);
-            }
-            if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
-                let cache = self.inner.recv_cache.get();
-                let dio = unsafe { &*self.inner.direct_recv_io.get() };
-                if let Some(ref state) = *dio
-                    && let Ok(mut io) = state.peer_io.try_lock()
-                    && let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache)
-                {
-                    return Ok(msg);
-                }
-            }
-            if let Some(msg) = self.try_direct_recv().await? {
-                return Ok(msg);
-            }
-        }
-        // Per-peer SPSC fair-queue + blume in_rx for wire/same-thread.
-        loop {
-            // recv_cache: leftover from wire direct-recv drain.
-            if let Some(msg) = self.inner.recv_cache.get().pop_front() {
-                return Ok(msg);
-            }
-
-            // Fair-queue: pop one Message from the next consumer.
-            let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
-            if !recv_state.consumers.is_empty() {
-                let n = recv_state.consumers.len();
-                let start = recv_state.fq_index;
-                for i in 0..n {
-                    let idx = (start + i) % n;
-                    if let Some(msg) = recv_state.consumers[idx].prefetch_and_pop() {
-                        recv_state.fq_index = idx + 1;
-                        if self
-                            .inner
-                            .options
-                            .max_message_size
-                            .is_some_and(|max| msg.byte_len() > max)
-                        {
-                            continue;
-                        }
-                        self.inner.inproc_parked.store(false, Ordering::Release);
-                        return Ok(msg);
-                    }
-                }
-            }
-
-            // Check in_rx (wire peers, same-thread inproc, ring-full overflow).
-            match self.inner.in_rx.try_recv() {
-                Ok(frame) => {
-                    if let Some(msg) = self.process_inbound_frame(frame)? {
-                        return Ok(msg);
-                    }
-                    continue;
-                }
-                Err(blume::TryRecvError::Disconnected) if recv_state.consumers.is_empty() => {
-                    return Err(Error::Closed);
-                }
-                _ => {}
-            }
-
-            // About to park: register listener, set parked flag, TOCTOU.
-            let inproc_listener = self.inner.inproc_recv_event.listen();
-            let peer_listener = self.inner.on_peer_ready.listen();
-            self.inner.inproc_parked.store(true, Ordering::Release);
-            let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
-            if recv_state.consumers.iter().any(|c| !c.is_empty()) {
-                self.inner.inproc_parked.store(false, Ordering::Release);
-                continue;
-            }
-            let in_rx_fut = self.inner.in_rx.recv_async();
-            futures::pin_mut!(inproc_listener);
-            futures::pin_mut!(in_rx_fut);
-            futures::pin_mut!(peer_listener);
-            futures::select_biased! {
-                () = inproc_listener.fuse() => {}
-                frame = in_rx_fut.fuse() => {
-                    self.inner.inproc_parked.store(false, Ordering::Release);
-                    let frame = frame.map_err(|_| Error::Closed)?;
-                    if let Some(msg) = self.process_inbound_frame(frame)? {
-                        return Ok(msg);
-                    }
-                }
-                () = peer_listener.fuse() => {}
-            }
-            self.inner.inproc_parked.store(false, Ordering::Release);
-        }
-    }
-
-    /// Process one `InprocFrame` from the inbound channel. Returns `Ok(Some(msg))`
-    /// when a user-visible message is ready, `Ok(None)` for frames that should be
-    /// silently skipped (filtered subscriptions, commands on non-XPUB sockets,
-    /// etc.), or `Err` on protocol/state errors.
-    fn process_inbound_frame(&self, frame: InprocFrame) -> Result<Option<Message>> {
-        let st = self.inner.socket_type;
-        match frame {
-            InprocFrame::Message(boxed) => {
-                let crate::transport::inproc::InprocFullMessage { peer_identity, msg } = *boxed;
-                if let Some(max) = self.inner.options.max_message_size
-                    && msg.byte_len() > max
-                {
-                    return Ok(None);
-                }
-                if !self.matches_subscription(&msg) {
-                    return Ok(None);
-                }
-                let msg = if is_identity_recv(st) {
-                    let id = peer_identity.unwrap_or_default();
-                    Message::with_prefix(id, msg)
-                } else {
-                    msg
-                };
-                if post_recv_needs_type_state(st) {
-                    self.inner
-                        .type_state
-                        .lock()
-                        .expect("type_state lock")
-                        .post_recv(st, msg)
-                } else {
-                    Ok(Some(msg))
-                }
-            }
-            InprocFrame::Command(c) => {
-                if matches!(st, SocketType::XPub) {
-                    use omq_proto::proto::Command;
-                    let body = match c {
-                        Command::Subscribe(p) => {
-                            let mut buf = bytes::BytesMut::with_capacity(1 + p.len());
-                            buf.extend_from_slice(&[0x01]);
-                            buf.extend_from_slice(&p);
-                            Some(buf.freeze())
-                        }
-                        Command::Cancel(p) => {
-                            let mut buf = bytes::BytesMut::with_capacity(1 + p.len());
-                            buf.extend_from_slice(&[0x00]);
-                            buf.extend_from_slice(&p);
-                            Some(buf.freeze())
-                        }
-                        _ => None,
-                    };
-                    if let Some(b) = body {
-                        return Ok(Some(Message::single(b)));
-                    }
-                }
-                Ok(None)
-            }
-        }
-    }
-
-    /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
-    /// currently queued. Does not perform I/O; only messages already buffered
-    /// by the background driver are visible.
-    #[inline]
-    pub fn try_recv(&self) -> Result<Message> {
-        let st = self.inner.socket_type;
-        if direct_recv_eligible(st) {
-            if let Some(msg) = self.drain_recv_cache(st)? {
-                return Ok(msg);
-            }
-            if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
-                let dio = unsafe { &*self.inner.direct_recv_io.get() };
-                if let Some(ref state) = *dio {
-                    let cache = self.inner.recv_cache.get();
-                    let mut io = state.peer_io.lock().expect("peer_io");
-                    if let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache) {
-                        return Ok(msg);
-                    }
-                }
-            }
-        }
-        let recv_state = unsafe { &mut *self.inner.inproc_recv.get() };
-        let max = self.inner.options.max_message_size;
-        for c in &mut recv_state.consumers {
-            if let Some(msg) = c.prefetch_and_pop() {
-                if max.is_some_and(|m| msg.byte_len() > m) {
-                    continue;
-                }
-                return Ok(msg);
-            }
-        }
-        loop {
-            let frame = self.inner.in_rx.try_recv().map_err(|e| match e {
-                blume::TryRecvError::Empty => Error::WouldBlock,
-                blume::TryRecvError::Disconnected => Error::Closed,
-            })?;
-            if let Some(msg) = self.process_inbound_frame(frame)? {
-                return Ok(msg);
-            }
-        }
-    }
-
-    fn snapshot_direct_io_single_peer(&self) -> Option<Arc<DirectIoState>> {
-        let peers = self.inner.out_peers.read().expect("peers lock");
-        if peers.len() != 1 {
-            return None;
-        }
-        let p = &peers[0];
-        let handle = p.direct_io.as_ref()?;
-        handle.read().expect("direct_io handle lock").clone()
-    }
-
-    /// Walk the codec's user-facing event stream once under the
-    /// [`PeerIo`] lock. Returns `Ok(Some(msg))` for the first
-    /// `Event::Message` (with transform-decode applied), `Ok(None)`
-    /// if the codec produced only commands or nothing.
-    ///
-    /// Commands like Ping / Pong / Error / Unknown are silently
-    /// consumed - the slow `in_rx` path's monitor publishing for
-    /// Error / Unknown is sacrificed on the direct path (rare;
-    /// documented in the stripped-Stage-5 plan).
-    ///
-    /// `HandshakeSucceeded` is treated defensively: we gate entry to
-    /// the direct-read loop on `handshake_done == true` while
-    /// holding the lock, so this branch shouldn't normally fire.
-    /// Flip the flag and continue if it does.
-    /// Drain events then swap the codec's message queue into the
-    /// `recv_cache` in O(1). Returns the first message (popped from
-    /// `recv_cache`). Remaining messages stay in `recv_cache` for
-    /// `try_recv()` to pop without re-acquiring `peer_io`.
-    #[allow(clippy::unused_self)]
-    fn drain_and_swap(
-        &self,
-        io: &mut PeerIo,
-        cache: &mut std::collections::VecDeque<Message>,
-    ) -> Result<Option<Message>> {
-        while let Some(ev) = io.codec.poll_event() {
-            match ev {
-                Event::Message(_) => unreachable!("messages use poll_message"),
-                Event::Command(_) => {}
-                Event::HandshakeSucceeded { .. } => {
-                    io.handshake_done = true;
-                }
-            }
-        }
-        if !cache.is_empty() {
-            return Ok(cache.pop_front());
-        }
-        if io.decoder.is_some() {
-            while let Some(m) = io.codec.poll_message() {
-                let m = if let Some(dec) = io.decoder.as_mut() {
-                    match dec.decode(m)? {
-                        Some(plain) => plain,
-                        None => continue,
-                    }
-                } else {
-                    m
-                };
-                cache.push_back(m);
-            }
-        } else {
-            io.codec.swap_messages(cache);
-        }
-        Ok(cache.pop_front())
-    }
-
-    /// Apply post-receive socket-type processing: SUB / XSUB
-    /// subscription filtering, REQ / REP type-state. Mirrors the
-    /// `in_rx` loop's handling. Returns `None` on filtered messages
-    /// (caller continues the read loop), `Some(msg)` to surface.
-    fn post_recv_apply(&self, msg: Message) -> Result<Option<Message>> {
-        if !self.matches_subscription(&msg) {
-            return Ok(None);
-        }
-        let st = self.inner.socket_type;
-        if post_recv_needs_type_state(st) {
-            Ok(self
-                .inner
-                .type_state
-                .lock()
-                .expect("type_state lock")
-                .post_recv(st, msg)?)
-        } else {
-            Ok(Some(msg))
-        }
-    }
-
-    /// Process one `InprocFrame` from `in_rx` for the direct-recv
-    /// fallback race. Command is XPub-only and not eligible for
-    /// direct recv.
-    fn process_inproc_frame_for_direct(&self, frame: InprocFrame) -> Result<Option<Message>> {
-        let max = self.inner.options.max_message_size;
-        match frame {
-            InprocFrame::Message(boxed) => {
-                let crate::transport::inproc::InprocFullMessage { msg, .. } = *boxed;
-                if max.is_some_and(|m| msg.byte_len() > m) {
-                    return Ok(None);
-                }
-                self.post_recv_apply(msg)
-            }
-            InprocFrame::Command(_) => Ok(None),
-        }
-    }
-
-    /// Direct-recv: read straight off the wire instead of going
-    /// through the driver's read arm + `in_rx` channel hop. Saves
-    /// ~12 µs (one task wake) per RTT on the inbound side.
-    ///
-    /// Bails (returns `Ok(None)` to the caller, which falls back to
-    /// the `in_rx` loop) when:
-    ///   - the socket has zero or many peers,
-    ///   - the peer has no `DirectIoState` (inproc / UDP),
-    ///   - another `recv()` already holds the claim,
-    ///   - the handshake hasn't completed yet (driver still owns
-    ///     the read path until handshake).
-    fn drain_codec_for_recv(
-        &self,
-        state: &Arc<DirectIoState>,
-    ) -> Result<ControlFlow<Option<Message>, bool>> {
-        let drained = {
-            let mut io = state.peer_io.lock().expect("peer_io");
-            if !io.handshake_done {
-                return Ok(ControlFlow::Break(None));
-            }
-            let cache = self.inner.recv_cache.get();
-            self.drain_and_swap(&mut io, cache)?
-        };
-        let Some(msg) = drained else {
-            return Ok(ControlFlow::Continue(false));
-        };
-        if let Some(out) = self.post_recv_apply(msg)? {
-            return Ok(ControlFlow::Break(Some(out)));
-        }
-        if post_recv_needs_type_state(self.inner.socket_type) {
-            loop {
-                let raw = self.inner.recv_cache.get().pop_front();
-                let Some(raw) = raw else { break };
-                if let Some(out) = self.post_recv_apply(raw)? {
-                    return Ok(ControlFlow::Break(Some(out)));
-                }
-            }
-        } else if self.needs_subscription_filter() {
-            let cache = self.inner.recv_cache.get();
-            while let Some(raw) = cache.pop_front() {
-                if self.matches_subscription(&raw) {
-                    return Ok(ControlFlow::Break(Some(raw)));
-                }
-            }
-        } else {
-            let cache = self.inner.recv_cache.get();
-            if let Some(raw) = cache.pop_front() {
-                return Ok(ControlFlow::Break(Some(raw)));
-            }
-        }
-        Ok(ControlFlow::Continue(true))
-    }
-
-    async fn try_direct_recv(&self) -> Result<Option<Message>> {
-        use futures::FutureExt;
-
-        if !self.inner.in_rx.is_empty() {
-            return Ok(None);
-        }
-        let state = {
-            let cur_gen = self.inner.peers_gen.load(Ordering::Acquire);
-            let cr = self.inner.cached_route.lock().expect("cached_route");
-            if let Some(ref r) = *cr
-                && r.generation == cur_gen
-            {
-                r.direct.clone()
-            } else {
-                None
-            }
-        }
-        .or_else(|| self.snapshot_direct_io_single_peer());
-        let Some(state) = state else {
-            return Ok(None);
-        };
-        // SAFETY: single-threaded compio runtime.
-        unsafe { *self.inner.direct_recv_io.get() = Some(state.clone()) };
-        if state
-            .recv_claim
-            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
-            .is_err()
-        {
-            return Ok(None);
-        }
-        let guard = ClaimGuard { state: &state };
-        if !self.inner.in_rx.is_empty() {
-            return Ok(None);
-        }
-
-        loop {
-            match accumulate_large_recv(&state).await? {
-                ControlFlow::Break(msg) => return Ok(msg),
-                ControlFlow::Continue(()) => {}
-            }
-
-            match self.drain_codec_for_recv(&state)? {
-                ControlFlow::Break(msg) => return Ok(msg),
-                ControlFlow::Continue(true) => continue,
-                ControlFlow::Continue(false) => {}
-            }
-
-            let pf = pull_and_feed(&state);
-            let inrx_fut = self.inner.in_rx.recv_async();
-            let codec_ready_fut = state.recv_codec_ready.listen();
-            futures::pin_mut!(pf);
-            futures::pin_mut!(inrx_fut);
-            futures::pin_mut!(codec_ready_fut);
-            let outcome = futures::select_biased! {
-                frame = inrx_fut.fuse() => {
-                    let frame = frame.map_err(|_| Error::Closed)?;
-                    drop(guard);
-                    return self.process_inproc_frame_for_direct(frame);
-                }
-                () = codec_ready_fut.fuse() => PullOutcome::Fed,
-                outcome = pf.fuse() => outcome,
-            };
-
-            match outcome {
-                PullOutcome::Fed if !self.inner.in_rx.is_empty() => {
-                    drop(guard);
-                    return Ok(None);
-                }
-                outcome => {
-                    match handle_pull_outcome(outcome, &state).await? {
-                        ControlFlow::Break(msg) => return Ok(msg),
-                        ControlFlow::Continue(()) => {}
-                    }
-                }
-            }
-            Self::flush_codec_output(&state).await?;
-        }
-    }
-
-    async fn flush_codec_output(state: &Arc<DirectIoState>) -> Result<()> {
-        loop {
-            let mut writer = state.writer.lock().await;
-            let chunks = {
-                let io = state.peer_io.lock().expect("peer_io");
-                if !io.codec.has_pending_transmit() {
-                    break;
-                }
-                let mut c = io.codec.clone_transmit_chunks();
-                if c.len() > 1024 {
-                    c.truncate(1024);
-                }
-                c
-            };
-            if chunks.is_empty() {
-                break;
-            }
-            let (res, _returned) = writer.write_vectored(chunks).await;
-            let written = res.map_err(Error::Io)?;
-            if written == 0 {
-                state.eof_signal.notify(usize::MAX);
-                return Err(Error::Closed);
-            }
-            state
-                .peer_io
-                .lock()
-                .expect("peer_io")
-                .codec
-                .advance_transmit(written);
-        }
-        Ok(())
-    }
-
-    /// Graceful close. Drains pending sends up to `Options::linger`,
-    /// then tears peers down. After return, subsequent send/recv on
-    /// this clone (or other clones still alive) returns
-    /// `Error::Closed`. `Options::linger == None` waits forever;
-    /// `Some(Duration::ZERO)` (the libzmq default) drops pending
-    /// sends immediately.
     pub async fn close(self) -> Result<()> {
         let was_closed = self.inner.closed.swap(true, Ordering::SeqCst);
         if was_closed {
@@ -1482,13 +267,6 @@ impl Socket {
             .options
             .linger
             .map(|d| std::time::Instant::now() + d);
-        // Cancel listener tasks immediately — they hold Arc<SocketInner>
-        // and keep the OS port alive. Dialer tasks are deferred until
-        // after the linger drain below: each dialer supervisor awaits its
-        // driver's JoinHandle, so canceling the supervisor early would
-        // also cancel the driver before it has flushed pending sends to
-        // the wire. Dialer supervisors check `inner.closed` after their
-        // driver exits and exit without reconnecting.
         self.inner
             .listeners
             .write()
@@ -1499,11 +277,6 @@ impl Socket {
             .write()
             .expect("udp_dialers lock")
             .clear();
-        // Round-robin shared queue: drop our last sender clone so
-        // pumps see the queue go disconnected after they've drained
-        // remaining messages. Pumps then exit and their
-        // PeerOut::send was already through the per-peer cmd_tx, so
-        // the per-driver Close handling below picks up everything.
         if let Some(tx) = self
             .inner
             .shared_send_tx
@@ -1513,13 +286,6 @@ impl Socket {
         {
             drop(tx);
         }
-        // Wire peers: send DriverCommand::Close so the driver flushes
-        // pending_cmds + any in-flight transmit before exiting. Then
-        // poll cmd_tx.is_disconnected() - flume flips that flag once
-        // the receiver (held by the driver task) drops, which only
-        // happens on driver exit. Inproc peers don't run a driver:
-        // their drain is synchronous (send awaits the peer's
-        // receiver) so emptiness of the cmd channel is sufficient.
         let wire_handles: Vec<WirePeerHandle> = {
             let peers = self.inner.out_peers.read().expect("peers lock");
             peers
@@ -1567,11 +333,6 @@ impl Socket {
             }
             compio::time::sleep(Duration::from_millis(5)).await;
         }
-        // Now that all drivers have flushed (or the linger deadline
-        // expired), cancel the dialer supervisor tasks. They check
-        // `inner.closed` and exit without reconnecting once their
-        // driver's JoinHandle resolves (which it already has, or will
-        // very shortly — the cancel lands at a yield point only).
         self.inner.dialers.write().expect("dialers lock").clear();
         {
             let mut peers = self.inner.out_peers.write().expect("peers lock");
@@ -1582,47 +343,6 @@ impl Socket {
         }
         self.inner.monitor.publish(MonitorEvent::Closed);
         Ok(())
-    }
-
-    #[inline]
-    fn needs_subscription_filter(&self) -> bool {
-        matches!(
-            self.inner.socket_type,
-            SocketType::Sub | SocketType::XSub | SocketType::Dish
-        )
-    }
-
-    fn matches_subscription(&self, msg: &Message) -> bool {
-        // Fast path: types that accept all messages skip the lock entirely.
-        if !matches!(
-            self.inner.socket_type,
-            SocketType::Sub | SocketType::XSub | SocketType::Dish
-        ) {
-            return true;
-        }
-        match self.inner.socket_type {
-            SocketType::Sub | SocketType::XSub => {
-                let topic = msg.part_bytes(0).unwrap_or_default();
-                self.inner
-                    .subscriptions
-                    .read()
-                    .expect("subscriptions lock")
-                    .matches(&topic)
-            }
-            SocketType::Dish => {
-                // RFC 48: DISH receives `[group, body]`; drop messages
-                // whose group is not in `joined_groups`. Inproc and
-                // wire RADIO peers fan out to every connection without
-                // a per-peer filter; the DISH side does the filtering.
-                let group = msg.part_bytes(0).unwrap_or_default();
-                self.inner
-                    .joined_groups
-                    .read()
-                    .expect("joined_groups lock")
-                    .contains(&group[..])
-            }
-            _ => true,
-        }
     }
 
     pub(super) fn snapshot_peers_now(&self) -> Vec<PeerOut> {

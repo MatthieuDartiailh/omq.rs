@@ -18,10 +18,13 @@ use omq_proto::subscription::SubscriptionSet;
 //   omq_proto::proto::transform::MessageEncoder::for_endpoint
 pub(crate) use omq_proto::endpoint::reject_encrypted_inproc;
 
+mod bind;
+mod connect;
 mod dial;
 mod handle;
 mod inner;
 mod install;
+mod recv;
 mod send;
 
 pub use handle::Socket;
