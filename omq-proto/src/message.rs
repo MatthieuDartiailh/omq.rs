@@ -80,6 +80,16 @@ impl Payload {
         }
     }
 
+    /// Creates a payload by copying `src`: inline if it fits, heap otherwise.
+    #[inline]
+    pub(crate) fn from_slice(src: &[u8]) -> Self {
+        if src.len() <= MAX_INLINE_PAYLOAD {
+            Self::inline(src)
+        } else {
+            Self::from_bytes(Bytes::copy_from_slice(src))
+        }
+    }
+
     /// Creates a payload from a static byte slice. Zero copy, zero alloc.
     pub fn from_static(b: &'static [u8]) -> Self {
         Self::from_bytes(Bytes::from_static(b))
@@ -406,7 +416,7 @@ impl Message {
         match body.inner {
             MessageInner::Empty => {}
             MessageInner::Inline { len, data } => {
-                parts.push(Payload::inline(&data[..len as usize]));
+                parts.push(Payload::from_slice(&data[..len as usize]));
             }
             MessageInner::Single(p) => parts.push(p),
             MessageInner::Multi(v) => parts.extend(v),
@@ -423,7 +433,7 @@ impl Message {
         self.inner = match std::mem::replace(&mut self.inner, MessageInner::Empty) {
             MessageInner::Empty => MessageInner::Single(part),
             MessageInner::Inline { len, data } => {
-                let existing = Payload::inline(&data[..len as usize]);
+                let existing = Payload::from_slice(&data[..len as usize]);
                 MessageInner::Multi(vec![existing, part])
             }
             MessageInner::Single(existing) => MessageInner::Multi(vec![existing, part]),
@@ -438,7 +448,7 @@ impl Message {
         match &self.inner {
             MessageInner::Empty => SmallVec::new(),
             MessageInner::Inline { len, data } => {
-                SmallVec::from_buf([Payload::inline(&data[..*len as usize])])
+                SmallVec::from_buf([Payload::from_slice(&data[..*len as usize])])
             }
             MessageInner::Single(p) => SmallVec::from_buf([p.clone()]),
             MessageInner::Multi(v) => v.iter().cloned().collect(),
@@ -449,7 +459,7 @@ impl Message {
         match self.inner {
             MessageInner::Empty => Vec::new(),
             MessageInner::Inline { len, data } => {
-                vec![Payload::inline(&data[..len as usize])]
+                vec![Payload::from_slice(&data[..len as usize])]
             }
             MessageInner::Single(p) => vec![p],
             MessageInner::Multi(v) => v,
@@ -894,5 +904,59 @@ mod tests {
         assert_eq!(m.part_bytes(0).unwrap(), &b"id"[..]);
         assert!(m.part_bytes(1).unwrap().is_empty());
         assert_eq!(m.part_bytes(2).unwrap(), &b"data"[..]);
+    }
+
+    #[test]
+    fn payload_from_slice_inline() {
+        let p = Payload::from_slice(b"small");
+        assert_eq!(p.len(), 5);
+        assert_eq!(p.as_slice(), b"small");
+    }
+
+    #[test]
+    fn payload_from_slice_heap() {
+        let data = [0xBB; MAX_INLINE_PAYLOAD + 1];
+        let p = Payload::from_slice(&data);
+        assert_eq!(p.len(), MAX_INLINE_PAYLOAD + 1);
+        assert_eq!(p.as_slice(), &data[..]);
+    }
+
+    #[test]
+    fn message_inline_max_roundtrips_to_payload() {
+        let data = [0xCC; MAX_INLINE_MESSAGE];
+        let m = Message::from_inline(&data);
+        let parts = m.parts_payload();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].len(), MAX_INLINE_MESSAGE);
+        assert_eq!(parts[0].as_slice(), &data[..]);
+    }
+
+    #[test]
+    fn message_inline_max_into_parts_payload() {
+        let data = [0xDD; MAX_INLINE_MESSAGE];
+        let m = Message::from_inline(&data);
+        let parts = m.into_parts_payload();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].len(), MAX_INLINE_MESSAGE);
+        assert_eq!(parts[0].as_slice(), &data[..]);
+    }
+
+    #[test]
+    fn message_inline_max_with_prefix() {
+        let data = [0xEE; MAX_INLINE_MESSAGE];
+        let body = Message::from_inline(&data);
+        let m = Message::with_prefix(Bytes::from_static(b"id"), body);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.part_bytes(1).unwrap(), &data[..]);
+    }
+
+    #[test]
+    fn message_inline_max_push_part_payload() {
+        let data = [0xFF; MAX_INLINE_MESSAGE];
+        let mut m = Message::from_inline(&data);
+        m.push_part_payload(Payload::from_bytes(Bytes::from_static(b"extra")));
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.part_bytes(0).unwrap(), &data[..]);
+        assert_eq!(m.part_bytes(1).unwrap(), &b"extra"[..]);
     }
 }

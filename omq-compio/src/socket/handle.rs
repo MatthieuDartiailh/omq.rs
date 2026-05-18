@@ -1561,7 +1561,13 @@ impl Socket {
         };
         for handle in &wire_handles {
             let tx = handle.read().expect("wire peer handle lock").clone();
-            let _ = tx.send_async(DriverCommand::Close).await;
+            if tx.try_send(DriverCommand::Close).is_err() {
+                let _ = compio::time::timeout(
+                    Duration::from_millis(100),
+                    tx.send_async(DriverCommand::Close),
+                )
+                .await;
+            }
         }
 
         loop {

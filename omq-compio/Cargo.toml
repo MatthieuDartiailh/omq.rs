@@ -28,6 +28,7 @@ priority = ["omq-proto/priority"]
 # those targets do ~1 M iterations each and dominate runtime of
 # `cargo test`. Run with `cargo test --features fuzz`.
 fuzz = []
+soak = []
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.8.1", default-features = false }

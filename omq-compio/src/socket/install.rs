@@ -281,23 +281,35 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
                 return;
             };
             let identity = snap.identity.clone();
-            let out = {
+            let (out, prev_identity) = {
                 let peers = inner.out_peers.read().expect("peers lock");
                 let slot = peers.get(slot_idx);
+                let prev = slot.and_then(|s| {
+                    s.peer
+                        .read()
+                        .expect("peer lock")
+                        .as_ref()
+                        .map(|p| p.identity.clone())
+                });
                 if let Some(s) = slot {
                     *s.peer.write().expect("peer lock") = Some(snap);
                 }
-                slot.map(|s| s.out.clone())
+                (slot.map(|s| s.out.clone()), prev)
             };
-            if !identity.is_empty()
-                && let Some(old_idx) = inner
-                    .identity_to_slot
-                    .write()
-                    .expect("identity table")
-                    .insert(identity, slot_idx)
-                && old_idx != slot_idx
-            {
-                inner.evict_peer_for_handover(old_idx);
+            if !identity.is_empty() {
+                let mut table = inner.identity_to_slot.write().expect("identity table");
+                if let Some(prev) = prev_identity
+                    && prev != identity
+                    && table.get(&prev) == Some(&slot_idx)
+                {
+                    table.remove(&prev);
+                }
+                if let Some(old_idx) = table.insert(identity, slot_idx)
+                    && old_idx != slot_idx
+                {
+                    drop(table);
+                    inner.evict_peer_for_handover(old_idx);
+                }
             }
             if matches!(inner.socket_type, SocketType::Sub | SocketType::XSub) {
                 let prefixes: Vec<Bytes> = inner.our_subs.read().expect("our_subs lock").clone();
