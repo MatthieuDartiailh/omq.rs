@@ -20,7 +20,7 @@ fn main() {
         let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
 
         let mut seq = 0usize;
-        for transport in common::transports() {
+        for transport in common::all_transports() {
             for &peers in peer_counts {
                 common::print_subheader(&transport, peers);
                 for &size in &common::sizes() {

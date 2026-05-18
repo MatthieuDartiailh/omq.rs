@@ -50,7 +50,7 @@ fn main() {
     let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
 
     let mut seq = 0usize;
-    let mut transports = common::transports();
+    let mut transports = common::all_transports();
     if let Some(pos) = transports.iter().position(|t| t == "inproc") {
         transports.insert(pos + 1, "inproc-mt".to_string());
     }

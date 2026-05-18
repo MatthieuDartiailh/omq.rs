@@ -12,19 +12,6 @@ use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
 const PATTERN: &str = "latency";
 
-fn latency_transports() -> Vec<String> {
-    if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
-        return s.split(',').map(|t| t.trim().to_string()).collect();
-    }
-    #[allow(unused_mut)]
-    let mut ts = vec!["inproc".to_string(), "ipc".to_string(), "tcp".to_string()];
-    #[cfg(feature = "lz4")]
-    ts.push("lz4+tcp".to_string());
-    #[cfg(feature = "zstd")]
-    ts.push("zstd+tcp".to_string());
-    ts
-}
-
 const WARMUP_ITERS: usize = 1_000;
 const ITERS: usize = 10_000;
 
@@ -33,7 +20,7 @@ fn main() {
     rt.block_on(async {
         common::print_header("REQ/REP Latency (serial ping-pong)");
         let mut seq = 0usize;
-        for transport in latency_transports() {
+        for transport in common::all_transports() {
             println!("--- {transport} ---");
             println!(
                 "  {:>6}  {:>10}  {:>10}  {:>10}  {:>10}",

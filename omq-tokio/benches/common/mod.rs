@@ -109,6 +109,16 @@ pub(crate) fn transports() -> Vec<String> {
     if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
         return s.split(',').map(|t| t.trim().to_string()).collect();
     }
+    DEFAULT_TRANSPORTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+pub(crate) fn all_transports() -> Vec<String> {
+    if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
+        return s.split(',').map(|t| t.trim().to_string()).collect();
+    }
     #[allow(unused_mut)]
     let mut ts: Vec<String> = DEFAULT_TRANSPORTS
         .iter()
@@ -278,7 +288,7 @@ pub(crate) fn print_header(label: &str) {
         .trim()
         .to_string();
     println!(
-        "{label} | omq-rs {} | {} | {kernel}",
+        "{label} | omq-tokio {} | {} | {kernel}",
         env!("CARGO_PKG_VERSION"),
         rustc_version_runtime(),
     );
