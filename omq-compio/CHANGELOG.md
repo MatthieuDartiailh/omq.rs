@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-05-18
+
+### Fixed
+
+- `identity_to_slot` memory leak: stale identity entries accumulated on reconnect (~88 B/cycle, 275 MiB over 2 h). Now removed when a peer gets a new generated identity on the same slot.
+- `close()` hang: replaced unbounded `send_async(Close)` with `try_send` + 100 ms timeout so close completes even when the driver's command channel is full.
+- Soak RSS threshold: added 10 MiB absolute floor so sub-10 MiB growth from allocator noise does not trip the percentage gate.
+
+### Added
+
+- `soak` Cargo feature gating 12 long-running leak-detection scenarios.
+
 ## [0.5.4] - 2026-05-17
 
 ### Fixed

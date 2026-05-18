@@ -47,5 +47,5 @@ priority = [
 ]
 
 [dependencies]
-omq-compio = { path = "../omq-compio", version = "0.5.3", default-features = false, optional = true }
-omq-tokio  = { path = "../omq-tokio",  version = "0.5.3", default-features = false, optional = true }
+omq-compio = { path = "../omq-compio", version = "0.5.5", default-features = false, optional = true }
+omq-tokio  = { path = "../omq-tokio",  version = "0.5.4", default-features = false, optional = true }

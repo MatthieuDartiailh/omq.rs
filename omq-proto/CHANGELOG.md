@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-05-18
+
+### Fixed
+
+- `Payload::from_slice`: fall back to heap allocation when an inline `Message` (39 B max) exceeds `Payload`'s inline limit (38 B). Previously panicked during compression transforms.
+
 ## [0.8.2] - 2026-05-17
 
 ### Changed
