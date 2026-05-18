@@ -79,6 +79,19 @@ OMQ_SOAK_DURATION_SECS=7200 cargo test -p omq-compio \
 Each scenario monitors RSS, FD count, and (where applicable)
 throughput stability. Failures print which metric tripped.
 
+#### pyomq (Python binding)
+
+Seven pytest scenarios under `bindings/pyomq/tests/soak/` exercise
+the PyO3 binding layer: PUSH/PULL throughput, reconnect storm,
+PUB/SUB churn, peer churn, REQ/REP cycles, context churn, and
+large messages. Same `OMQ_SOAK_DURATION_SECS` knob:
+
+```sh
+cd bindings/pyomq
+maturin develop --release
+OMQ_SOAK_DURATION_SECS=120 python3 -m pytest tests/soak/ -v --tb=short
+```
+
 ## Benchmarks
 
 ```sh

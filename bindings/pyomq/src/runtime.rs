@@ -145,16 +145,46 @@ pub fn materialize(
     })
 }
 
-/// Drop a socket from the registry on the compio thread.
+/// Remove a socket from the registry and close it on the compio
+/// thread. Waits for the close to complete so pump tasks and driver
+/// tasks are fully drained before returning.
 pub fn destroy_socket(id: u64) {
-    run(move || {
-        REG.with(|r| r.borrow_mut().remove(&id));
+    let (tx, rx) = flume::bounded::<()>(1);
+    let job: Job = Box::new(move || {
+        let sock = REG.with(|r| r.borrow_mut().remove(&id));
+        let Some(mut rc) = sock else {
+            let _ = tx.send(());
+            return;
+        };
+        compio::runtime::spawn(async move {
+            // Pump tasks hold Rc clones. Yield until they notice
+            // their channel halves are gone and exit.
+            for _ in 0..5 {
+                match Rc::try_unwrap(rc) {
+                    Ok(sock) => {
+                        let _ = sock.close().await;
+                        let _ = tx.send(());
+                        return;
+                    }
+                    Err(still_shared) => {
+                        rc = still_shared;
+                        compio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+            }
+            // Pumps still running; drop the Rc (socket closes on
+            // last Rc drop via Socket::Drop, which cancels tasks).
+            drop(rc);
+            let _ = tx.send(());
+        })
+        .detach();
     });
+    submit_chan().send(job).expect("pyomq: compio runtime gone");
+    let _ = rx.recv();
 }
 
 /// Like `destroy_socket`, but for use *from inside a future already
-/// running on the compio thread*. Removes from the local registry
-/// inline; calling the sync version on-thread deadlocks.
+/// running on the compio thread*.
 pub fn destroy_socket_local(id: u64) {
     REG.with(|r| r.borrow_mut().remove(&id));
 }
