@@ -4,6 +4,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
+use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, split};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -13,27 +14,27 @@ use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
-/// Batch-encode messages from a `try_recv` source, then flush `flat_buf` + codec.
+use super::encoded_queue::EncodedQueue;
+
+/// Batch-encode messages, then flush `EncodedQueue` + codec.
 macro_rules! batch_encode_flush {
-    ($first:expr, $try_recv:expr, $encoder:expr, $codec:expr, $flat_buf:expr, $writer:expr) => {{
-        let use_flat = $encoder.is_none() && !$codec.has_frame_transform();
-        encode_flat_or_codec(&$first, $encoder, $codec, use_flat, $flat_buf, $writer).await?;
+    ($first:expr, $try_recv:expr, $encoder:expr, $codec:expr,
+     $eq:expr, $drain_buf:expr, $writer:expr) => {{
+        let use_eq = $encoder.is_none() && !$codec.has_frame_transform();
+        encode_msg(&$first, $encoder, $codec, use_eq, $eq);
         let mut count = 1usize;
         let mut bytes = $first.byte_len();
-        while count < SHARED_MAX_BATCH_MSGS && bytes < SHARED_MAX_BATCH_BYTES {
+        while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
             match $try_recv {
                 Some(next) => {
                     bytes += next.byte_len();
-                    encode_flat_or_codec(&next, $encoder, $codec, use_flat, $flat_buf, $writer)
-                        .await?;
+                    encode_msg(&next, $encoder, $codec, use_eq, $eq);
                     count += 1;
                 }
                 None => break,
             }
         }
-        if !$flat_buf.is_empty() {
-            $writer.write_all(&$flat_buf.split()).await?;
-        }
+        flush_encoded_queue($writer, $eq, $drain_buf).await?;
         while $codec.has_pending_transmit() {
             flush_once($writer, $codec).await?;
         }
@@ -44,17 +45,21 @@ const READ_BUF_SIZE: usize = 256 * 1024;
 
 /// Max messages one shared-queue batch encodes before flushing.
 const SHARED_MAX_BATCH_MSGS: usize = 256;
+
 /// Max bytes one shared-queue batch encodes before flushing.
-const SHARED_MAX_BATCH_BYTES: usize = 512 * 1024;
-/// Messages whose total payload is below this threshold are packed
-/// contiguously into a flat `BytesMut` instead of going through
-/// `Connection::send_message` + `transmit_chunks`. This eliminates the
-/// per-flush `Vec<IoSlice>` allocation and lets the kernel receive a
-/// single contiguous buffer instead of scattered iovecs. Sweep across
-/// 32–64 KiB on TCP loopback peaked at 48 KiB: 32 KiB messages jump
-/// from ~3.4 → ~5.0 GB/s vs the codec path, while 8 / 16 KiB stay flat
-/// and 64 KiB stays in the codec path where it belongs.
-const FLAT_THRESHOLD: usize = 48 * 1024;
+/// Override at runtime via `OMQ_BATCH_BYTES`.
+fn max_batch_bytes() -> usize {
+    use std::sync::OnceLock;
+    static CAP: OnceLock<usize> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("OMQ_BATCH_BYTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024 * 1024)
+    })
+}
+
+pub(crate) const FLAT_THRESHOLD: usize = 64 * 1024;
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
@@ -256,10 +261,8 @@ where
         } = self;
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
-        // Flat accumulation buffer: small outbound messages are packed here
-        // contiguously (no Vec<IoSlice> allocation per flush). Pre-allocated
-        // at 128 KiB; BytesMut::split() drains it while retaining capacity.
-        let mut flat_buf = BytesMut::with_capacity(128 * 1024);
+        let mut eq = EncodedQueue::new();
+        let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> =
             config.handshake_timeout.map(|d| last_input + d);
@@ -315,7 +318,7 @@ where
                 }
             }
 
-            let want_write = codec.has_pending_transmit();
+            let want_write = codec.has_pending_transmit() || !eq.is_empty();
             let hb_enabled = hb_interval.is_some() && codec.is_ready();
 
             tokio::select! {
@@ -329,18 +332,13 @@ where
                     // the actor). Without this, a `rep.send(...)` whose
                     // bytes were handed to the actor but not yet picked
                     // up by the driver gets discarded on Drop.
-                    let use_flat = encoder.is_none() && !codec.has_frame_transform();
+                    let use_eq = encoder.is_none() && !codec.has_frame_transform();
                     while let Ok(cmd) = inbox.try_recv() {
                         match cmd {
                             DriverCommand::SendMessage(msg) => {
-                                let _ = encode_flat_or_codec(
-                                    &msg,
-                                    &mut encoder,
-                                    &mut codec,
-                                    use_flat,
-                                    &mut flat_buf,
-                                    &mut writer,
-                                ).await;
+                                encode_msg(
+                                    &msg, &mut encoder, &mut codec, use_eq, &mut eq,
+                                );
                             }
                             DriverCommand::SendCommand(c) => {
                                 let _ = codec.send_command(&c);
@@ -350,19 +348,14 @@ where
                     }
                     if let Some(ref rx) = shared_msg_rx {
                         while let Ok(msg) = rx.try_recv() {
-                            let _ = encode_flat_or_codec(
-                                &msg,
-                                &mut encoder,
-                                &mut codec,
-                                use_flat,
-                                &mut flat_buf,
-                                &mut writer,
-                            ).await;
+                            encode_msg(
+                                &msg, &mut encoder, &mut codec, use_eq, &mut eq,
+                            );
                         }
                     }
-                    if !flat_buf.is_empty() {
-                        let _ = writer.write_all(&flat_buf.split()).await;
-                    }
+                    let _ = flush_encoded_queue(
+                        &mut writer, &mut eq, &mut drain_buf,
+                    ).await;
                     drain_writes(&mut writer, &mut codec).await.ok();
                     return Ok(());
                 }
@@ -400,7 +393,10 @@ where
                     }
                 }
 
-                res = flush_once(&mut writer, &mut codec), if want_write => {
+                res = async {
+                    flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
+                    flush_once(&mut writer, &mut codec).await
+                }, if want_write => {
                     res?;
                 }
 
@@ -423,7 +419,8 @@ where
                             },
                             &mut encoder,
                             &mut codec,
-                            &mut flat_buf,
+                            &mut eq,
+                            &mut drain_buf,
                             &mut writer
                         );
                         if closing {
@@ -460,7 +457,8 @@ where
                                 shared_msg_rx.as_ref().and_then(|rx| rx.try_recv().ok()),
                                 &mut encoder,
                                 &mut codec,
-                                &mut flat_buf,
+                                &mut eq,
+                                &mut drain_buf,
                                 &mut writer
                             );
                         }
@@ -512,36 +510,56 @@ fn encode_one(
     Ok(())
 }
 
-/// Encode one message via the flat path (NULL mechanism, no transform)
-/// or the codec path (transform active or message too large for flat).
-///
-/// Flat path (`msg.byte_len()` < `FLAT_THRESHOLD` && `use_flat`):
-///   Copies ZMTP header + payload bytes directly into `flat_buf`. No
-///   allocation; the caller writes `flat_buf` to the wire as one chunk.
-///
-/// Codec path (transform active or large message):
-///   Flushes `flat_buf` first (to maintain wire order) then calls
-///   `encode_one` which puts chunks into `codec.out_chunks`.
-async fn encode_flat_or_codec<W>(
+/// Encode one message into `EncodedQueue` (NULL, no transform) or
+/// `codec.out_chunks` (CURVE/BLAKE3ZMQ/compression).
+fn encode_msg(
     msg: &Message,
     encoder: &mut Option<MessageEncoder>,
     codec: &mut Connection,
-    use_flat: bool,
-    flat_buf: &mut BytesMut,
+    use_eq: bool,
+    eq: &mut EncodedQueue,
+) {
+    if use_eq {
+        eq.encode(msg);
+    } else {
+        let _ = encode_one(msg, encoder, codec);
+    }
+}
+
+/// Flush the `EncodedQueue` to the writer. Drains chunks into a
+/// reusable `Vec<Bytes>`, builds `IoSlice` refs, and does one
+/// `write_vectored`. On partial write, unwritten chunks are restored
+/// to the queue front.
+async fn flush_encoded_queue<W>(
     writer: &mut W,
-) -> Result<()>
+    eq: &mut EncodedQueue,
+    drain_buf: &mut Vec<Bytes>,
+) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    if use_flat && msg.byte_len() < FLAT_THRESHOLD {
-        codec.send_message_flat(msg, flat_buf);
-    } else {
-        if !flat_buf.is_empty() {
-            writer.write_all(&flat_buf.split()).await?;
+    loop {
+        drain_buf.clear();
+        eq.drain_into_vec(drain_buf, 1024);
+        if drain_buf.is_empty() {
+            return Ok(());
         }
-        encode_one(msg, encoder, codec)?;
+        let iovecs: SmallVec<[io::IoSlice<'_>; 64]> =
+            drain_buf.iter().map(|b| io::IoSlice::new(b)).collect();
+        let n = writer.write_vectored(&iovecs).await?;
+        drop(iovecs);
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write returned 0",
+            ));
+        }
+        let total: usize = drain_buf.iter().map(Bytes::len).sum();
+        if n < total {
+            let drained = std::mem::take(drain_buf);
+            eq.put_back_unwritten(drained, n);
+        }
     }
-    Ok(())
 }
 
 /// One write attempt. Uses `write_vectored` so multi-chunk frame
@@ -552,7 +570,7 @@ async fn flush_once<W>(writer: &mut W, codec: &mut Connection) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let chunks = codec.transmit_chunks();
+    let chunks = codec.transmit_chunks_capped(128);
     if chunks.is_empty() {
         return Ok(());
     }
