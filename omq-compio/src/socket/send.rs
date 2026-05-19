@@ -269,12 +269,13 @@ impl Socket {
         if peers.is_empty() {
             return None;
         }
-        let n = peers.len();
+        let keys = inner.peer_keys.read().expect("peer_keys lock");
+        let n = keys.len();
         let mut first_alive_idx = None;
         let mut first_alive_direct = None;
         let mut first_dead_idx = None;
         for _ in 0..n {
-            let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed) % n;
+            let idx = keys[inner.rr_index.fetch_add(1, Ordering::Relaxed) % n];
             let p = &peers[idx];
             let alive = match &p.out {
                 PeerOut::Inproc { sender, .. } => !sender.is_disconnected(),
@@ -318,7 +319,6 @@ impl Socket {
     #[cfg(not(feature = "priority"))]
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
         let inner = self.inner();
-
         // Fast path: reuse cached route when the peer set hasn't changed.
         let cur_gen = inner.peers_gen.load(Ordering::Acquire);
         let cached = {
@@ -356,6 +356,16 @@ impl Socket {
             let listener = inner.on_peer_ready.listen();
             if !inner.out_peers.read().expect("peers lock").is_empty() {
                 continue;
+            }
+            if inner.peers_gen.load(Ordering::Acquire) > 0 {
+                let stx = inner
+                    .shared_send_tx
+                    .read()
+                    .expect("shared_send_tx lock")
+                    .clone();
+                if let Some(stx) = stx {
+                    return stx.send_async(msg).await.map_err(|_| Error::Closed);
+                }
             }
             listener.await;
         }
@@ -478,7 +488,7 @@ impl Socket {
         }
     }
 
-    /// Strict per-pipe priority picker. Walks `priority_view` in
+    /// Strict per-pipe priority picker. Walks `peer_keys` in
     /// ascending-priority order; within each priority tier rotates
     /// the start index by the global `rr_index` counter so equal-
     /// priority peers fair-share. `try_send` on each candidate; on
@@ -512,7 +522,7 @@ impl Socket {
     #[cfg(feature = "priority")]
     fn has_live_peer(&self) -> bool {
         let peers = self.inner().out_peers.read().expect("peers lock");
-        peers.iter().any(|p| match &p.out {
+        peers.iter().any(|(_, p)| match &p.out {
             PeerOut::Inproc { sender, .. } => !sender.is_disconnected(),
             PeerOut::Wire(handle) => !handle
                 .read()
@@ -529,11 +539,7 @@ impl Socket {
         if peers.is_empty() {
             return PriorityOutcome::NoLivePeers;
         }
-        let view = self
-            .inner()
-            .priority_view
-            .read()
-            .expect("priority_view lock");
+        let view = self.inner().peer_keys.read().expect("peer_keys lock");
         let rr = self.inner().rr_index.fetch_add(1, Ordering::Relaxed);
         let mut highest_alive: Option<PeerOut> = None;
         let mut i = 0;
@@ -633,13 +639,11 @@ impl Socket {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers
                 .iter()
-                .filter(|p| match &p.peer_groups {
-                    // Wire peer with a group filter: deliver only if joined.
+                .filter(|(_, p)| match &p.peer_groups {
                     Some(set) => set.read().expect("peer_groups lock").contains(&group[..]),
-                    // Inproc peers — no filter; DISH filters on recv.
                     None => true,
                 })
-                .map(|p| p.out.clone())
+                .map(|(_, p)| p.out.clone())
                 .collect()
         };
         for peer in stream_targets {
@@ -648,18 +652,13 @@ impl Socket {
         Ok(())
     }
 
-    /// PUB / XPUB fan-out with per-peer subscription filtering. The
-    /// topic is the first message frame; peers whose `SubscriptionSet`
-    /// doesn't match are skipped. A peer with no subscriptions yet
-    /// is treated as match-nothing (the wire peer hasn't said it
-    /// wants anything yet).
     async fn send_pub_filtered(&self, msg: Message) -> Result<()> {
         let topic = msg.part_bytes(0).unwrap_or_default();
         let targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers
                 .iter()
-                .filter_map(|slot| {
+                .filter_map(|(_, slot)| {
                     let matched = slot
                         .peer_sub
                         .as_ref()
@@ -760,9 +759,11 @@ impl Socket {
             }
             return Err(Error::WouldBlock);
         }
-        let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed) % peers.len();
+        let keys = inner.peer_keys.read().expect("peer_keys lock");
+        let n = keys.len();
+        let idx = keys[inner.rr_index.fetch_add(1, Ordering::Relaxed) % n];
         let chosen = peers[idx].out.clone();
-        let peer_count = peers.len();
+        let peer_count = n;
         drop(peers);
         self.try_slow_round_robin(&chosen, msg.clone(), peer_count)
     }
@@ -854,7 +855,7 @@ impl Socket {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers
                 .iter()
-                .filter_map(|slot| {
+                .filter_map(|(_, slot)| {
                     let matched = slot
                         .peer_sub
                         .as_ref()
@@ -879,11 +880,11 @@ impl Socket {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers
                 .iter()
-                .filter(|p| match &p.peer_groups {
+                .filter(|(_, p)| match &p.peer_groups {
                     Some(set) => set.read().expect("peer_groups lock").contains(&group[..]),
                     None => true,
                 })
-                .map(|p| p.out.clone())
+                .map(|(_, p)| p.out.clone())
                 .collect()
         };
         for peer in stream_targets {

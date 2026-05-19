@@ -15,6 +15,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
+use slab::Slab;
+
 /// A `VecDeque` wrapper that provides `&mut` access without a `Mutex`.
 ///
 /// Sound only when all access is confined to a single thread -- true for
@@ -175,7 +177,7 @@ pub(super) struct SocketInner {
     /// matches libzmq's auto-identity convention). ROUTER sockets use this to
     /// identify peers that have no explicit identity.
     pub(super) inproc_identity: Bytes,
-    pub(super) out_peers: RwLock<Vec<PeerSlot>>,
+    pub(super) out_peers: RwLock<Slab<PeerSlot>>,
     /// Bumped on every `out_peers` write. Lets send/recv skip lock
     /// acquisitions when the peer set is stable.
     pub(super) peers_gen: AtomicU64,
@@ -251,13 +253,11 @@ pub(super) struct SocketInner {
     /// keyed off this counter; wire peers funnel through the
     /// shared queue (where drivers work-steal).
     pub(super) rr_index: AtomicUsize,
-    /// Peer indices into `out_peers`, sorted ascending by
-    /// `PeerSlot.priority`. Rebuilt on peer add/remove. The send
-    /// picker walks this list in order to honor strict priority.
-    /// Empty when the `priority` feature is disabled (and the
-    /// shared-queue work-stealing path is taken instead).
-    #[cfg(feature = "priority")]
-    pub(super) priority_view: RwLock<Vec<usize>>,
+    /// Dense list of live `out_peers` slab keys. Rebuilt on peer
+    /// add/remove. With the `priority` feature, sorted ascending by
+    /// `PeerSlot.priority`; without, insertion order. The non-priority
+    /// round-robin and the priority picker both index into this.
+    pub(super) peer_keys: RwLock<Vec<usize>>,
 }
 
 /// Returns `true` for socket types that round-robin their outbound
@@ -350,7 +350,7 @@ impl SocketInner {
             socket_type,
             inproc_identity,
             options,
-            out_peers: RwLock::new(Vec::new()),
+            out_peers: RwLock::new(Slab::new()),
             peers_gen: AtomicU64::new(0),
             cached_route: Mutex::new(None),
             in_tx,
@@ -379,8 +379,7 @@ impl SocketInner {
             shared_send_tx: RwLock::new(shared_send_tx),
             shared_send_rx,
             rr_index: AtomicUsize::new(0),
-            #[cfg(feature = "priority")]
-            priority_view: RwLock::new(Vec::new()),
+            peer_keys: RwLock::new(Vec::new()),
         })
     }
 
@@ -391,17 +390,18 @@ impl SocketInner {
         }
     }
 
-    /// Rebuild `priority_view` from the current `out_peers` (caller
+    /// Rebuild `peer_keys` from the current `out_peers` (caller
     /// must hold no lock on either; this acquires both reads/writes
     /// internally). Stable sort by priority preserves install order
     /// within a level - that's the round-robin tie-breaker.
-    #[cfg(feature = "priority")]
-    pub(super) fn rebuild_priority_view(&self) {
+    pub(super) fn rebuild_peer_keys(&self) {
         let peers = self.out_peers.read().expect("peers lock");
-        let mut idx: Vec<usize> = (0..peers.len()).collect();
-        idx.sort_by_key(|&i| peers[i].priority);
+        #[allow(unused_mut)]
+        let mut keys: Vec<usize> = peers.iter().map(|(key, _)| key).collect();
+        #[cfg(feature = "priority")]
+        keys.sort_by_key(|&i| peers[i].priority);
         drop(peers);
-        *self.priority_view.write().expect("priority_view lock") = idx;
+        *self.peer_keys.write().expect("peer_keys lock") = keys;
     }
 
     pub(super) fn evict_peer_for_handover(&self, slot_idx: usize) {
@@ -429,6 +429,28 @@ impl SocketInner {
         }
         // Suppress the driver's Disconnected on exit.
         *slot.info.write().expect("info lock") = None;
+        self.peers_gen.fetch_add(1, Ordering::Release);
+    }
+
+    pub(super) fn release_slot(&self, slot_idx: usize) {
+        {
+            let mut peers = self.out_peers.write().expect("peers lock");
+            if !peers.contains(slot_idx) {
+                return;
+            }
+            peers.remove(slot_idx);
+        }
+        {
+            let pipes = unsafe { &mut *self.inproc_send_pipes.get() };
+            if let Some(entry) = pipes.get_mut(slot_idx) {
+                *entry = None;
+            }
+        }
+        {
+            let mut table = self.identity_to_slot.write().expect("identity table");
+            table.retain(|_, &mut v| v != slot_idx);
+        }
+        self.rebuild_peer_keys();
         self.peers_gen.fetch_add(1, Ordering::Release);
     }
 }

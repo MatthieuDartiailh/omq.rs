@@ -38,6 +38,7 @@ bytes = "1"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 compio = { version = "0.19.0-rc.1", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync", "async-fd"] }
+slab = "0.4"
 event-listener = "5"
 async-lock = "3"
 socket2 = "0.6"

@@ -129,7 +129,7 @@ impl Socket {
         connection_id: u64,
     ) -> Result<Option<crate::monitor::ConnectionStatus>> {
         let peers = self.inner.out_peers.read().expect("peers lock");
-        for p in peers.iter() {
+        for (_, p) in peers.iter() {
             if p.connection_id == connection_id {
                 let info = p.info.read().expect("info lock");
                 return Ok(Some(crate::monitor::ConnectionStatus {
@@ -151,7 +151,7 @@ impl Socket {
         let peers = self.inner.out_peers.read().expect("peers lock");
         Ok(peers
             .iter()
-            .map(|p| {
+            .map(|(_, p)| {
                 let info = p.info.read().expect("info lock");
                 crate::monitor::ConnectionStatus {
                     connection_id: p.connection_id,
@@ -289,7 +289,7 @@ impl Socket {
             let peers = self.inner.out_peers.read().expect("peers lock");
             peers
                 .iter()
-                .filter_map(|p| match &p.out {
+                .filter_map(|(_, p)| match &p.out {
                     PeerOut::Wire(handle) => Some(handle.clone()),
                     PeerOut::Inproc { .. } => None,
                 })
@@ -309,7 +309,7 @@ impl Socket {
         loop {
             let inproc_pending = {
                 let peers = self.inner.out_peers.read().expect("peers lock");
-                peers.iter().any(|p| match &p.out {
+                peers.iter().any(|(_, p)| match &p.out {
                     PeerOut::Inproc { sender, .. } => {
                         !sender.is_empty() && !sender.is_disconnected()
                     }
@@ -346,7 +346,7 @@ impl Socket {
 
     pub(super) fn snapshot_peers_now(&self) -> Vec<PeerOut> {
         let peers = self.inner.out_peers.read().expect("peers lock");
-        peers.iter().map(|p| p.out.clone()).collect()
+        peers.iter().map(|(_, p)| p.out.clone()).collect()
     }
 }
 

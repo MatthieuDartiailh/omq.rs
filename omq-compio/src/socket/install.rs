@@ -64,40 +64,13 @@ pub(super) fn install_inproc_peer(
     } else {
         None
     };
-    // Per-peer SPSC pipes for eligible inproc (same-thread or cross-thread).
-    {
-        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
-        let slot = inner.out_peers.read().expect("peers lock").len();
-        while pipes.len() <= slot {
-            pipes.push(None);
-        }
-        if let Some(producer) = conn.spsc_send {
-            pipes[slot] = Some(super::inner::InprocSendPipe {
-                producer,
-                notify: conn
-                    .peer_recv_event
-                    .expect("eligible must have peer_recv_event"),
-                parked: conn.peer_parked.expect("eligible must have peer_parked"),
-                cross_thread: conn.cross_thread,
-            });
-        }
-        if let Some(consumer) = conn.spsc_recv {
-            let recv = unsafe { &mut *inner.inproc_recv.get() };
-            recv.consumers.push(consumer);
-        }
-    }
-
     let out = PeerOut::Inproc {
         sender: conn.out,
         our_identity,
     };
-    // Round-robin patterns send directly to inproc peers from
-    // `Socket::send_round_robin` - no pump needed. Wire peers
-    // consume the shared queue inside their driver.
     let idx = {
         let mut peers = inner.out_peers.write().expect("peers lock");
-        let idx = peers.len();
-        peers.push(PeerSlot {
+        let idx = peers.insert(PeerSlot {
             out,
             direct_io: None,
             peer: Arc::new(RwLock::new(Some(conn.peer))),
@@ -114,8 +87,27 @@ pub(super) fn install_inproc_peer(
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         idx
     };
-    #[cfg(feature = "priority")]
-    inner.rebuild_priority_view();
+    {
+        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+        while pipes.len() <= idx {
+            pipes.push(None);
+        }
+        if let Some(producer) = conn.spsc_send {
+            pipes[idx] = Some(super::inner::InprocSendPipe {
+                producer,
+                notify: conn
+                    .peer_recv_event
+                    .expect("eligible must have peer_recv_event"),
+                parked: conn.peer_parked.expect("eligible must have peer_parked"),
+                cross_thread: conn.cross_thread,
+            });
+        }
+        if let Some(consumer) = conn.spsc_recv {
+            let recv = unsafe { &mut *inner.inproc_recv.get() };
+            recv.consumers.push(consumer);
+        }
+    }
+    inner.rebuild_peer_keys();
     if !peer_identity.is_empty()
         && let Some(old_idx) = inner
             .identity_to_slot
@@ -182,18 +174,9 @@ pub(super) fn install_accepted_wire_peer(
     );
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);
-    // Pad inproc_send_pipes for parallel indexing with out_peers.
-    {
-        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
-        let slot = inner.out_peers.read().expect("peers lock").len();
-        while pipes.len() <= slot {
-            pipes.push(None);
-        }
-    }
     let slot_idx = {
         let mut peers = inner.out_peers.write().expect("peers lock");
-        let idx = peers.len();
-        peers.push(PeerSlot {
+        let idx = peers.insert(PeerSlot {
             out,
             direct_io: Some(direct_io_handle.clone()),
             peer: Arc::new(RwLock::new(None)),
@@ -202,8 +185,6 @@ pub(super) fn install_accepted_wire_peer(
             info: info_holder.clone(),
             peer_sub: peer_sub.clone(),
             peer_groups: peer_groups.clone(),
-            // Accepted peers always get default priority. Per-accepted
-            // override would need `bind_with`, which is out of scope.
             #[cfg(feature = "priority")]
             priority: omq_proto::DEFAULT_PRIORITY,
         });
@@ -212,8 +193,13 @@ pub(super) fn install_accepted_wire_peer(
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         idx
     };
-    #[cfg(feature = "priority")]
-    inner.rebuild_priority_view();
+    {
+        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+        while pipes.len() <= slot_idx {
+            pipes.push(None);
+        }
+    }
+    inner.rebuild_peer_keys();
     inner.on_peer_ready.notify(usize::MAX);
     spawn_wire_driver(WireDriverConfig {
         inner: inner.clone(),
@@ -227,6 +213,7 @@ pub(super) fn install_accepted_wire_peer(
         peer_address: peer_addr,
         peer_sub,
         peer_groups,
+        release_on_exit: true,
     })
     .detach();
 }
@@ -243,6 +230,7 @@ pub(super) struct WireDriverConfig {
     pub(super) peer_address: Option<std::net::SocketAddr>,
     pub(super) peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
     pub(super) peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
+    pub(super) release_on_exit: bool,
 }
 
 /// Spawn the connection-driver task that runs the ZMTP codec for one
@@ -254,6 +242,7 @@ fn spawn_snap_listener(
     inner: Arc<SocketInner>,
     snap_rx: flume::Receiver<InprocPeerSnapshot>,
     slot_idx: usize,
+    connection_id: u64,
 ) {
     compio::runtime::spawn(async move {
         let Ok(snap) = snap_rx.recv_async().await else {
@@ -263,6 +252,7 @@ fn spawn_snap_listener(
         let (out, prev_identity) = {
             let peers = inner.out_peers.read().expect("peers lock");
             let slot = peers.get(slot_idx);
+            let slot = slot.filter(|s| s.connection_id == connection_id);
             let prev = slot.and_then(|s| {
                 s.peer
                     .read()
@@ -345,7 +335,7 @@ fn handle_driver_exit(
         SocketType::Req => true,
         SocketType::Rep => {
             let peers = inner.out_peers.read().expect("peers lock");
-            !peers.iter().any(|s| {
+            !peers.iter().any(|(_, s)| {
                 s.connection_id != connection_id && s.info.read().expect("info lock").is_some()
             })
         }
@@ -373,9 +363,10 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
         peer_address,
         peer_sub,
         peer_groups,
+        release_on_exit,
     } = cfg;
     let (snap_tx, snap_rx) = flume::bounded::<InprocPeerSnapshot>(1);
-    spawn_snap_listener(inner.clone(), snap_rx, slot_idx);
+    spawn_snap_listener(inner.clone(), snap_rx, slot_idx, connection_id);
 
     let socket_type = inner.socket_type;
     let options = inner.options.clone();
@@ -410,9 +401,6 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
         )
         .await;
         *direct_io_for_exit.write().expect("direct_io handle lock") = None;
-        inner
-            .peers_gen
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
         handle_driver_exit(
             &inner_for_exit,
             &res,
@@ -422,5 +410,12 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
             socket_type,
             peer_address,
         );
+        if release_on_exit {
+            inner.release_slot(slot_idx);
+        } else {
+            inner
+                .peers_gen
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
     })
 }

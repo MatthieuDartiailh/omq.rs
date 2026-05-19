@@ -465,7 +465,7 @@ impl Socket {
         if peers.len() != 1 {
             return None;
         }
-        let p = &peers[0];
+        let (_, p) = peers.iter().next()?;
         let handle = p.direct_io.as_ref()?;
         handle.read().expect("direct_io handle lock").clone()
     }

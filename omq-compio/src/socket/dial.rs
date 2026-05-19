@@ -98,11 +98,14 @@ async fn install_and_run(
         .fetch_add(1, std::sync::atomic::Ordering::Release);
 
     let idx = if let Some(idx) = *slot_idx {
+        let mut peers = inner.out_peers.write().expect("peers lock");
+        if let Some(slot) = peers.get_mut(idx) {
+            slot.connection_id = conn_id;
+        }
         idx
     } else {
         let mut peers = inner.out_peers.write().expect("peers lock");
-        let idx = peers.len();
-        peers.push(PeerSlot {
+        let idx = peers.insert(PeerSlot {
             out: PeerOut::Wire(handle.clone()),
             direct_io: Some(direct_io_handle.clone()),
             peer: Arc::new(RwLock::new(None)),
@@ -114,11 +117,16 @@ async fn install_and_run(
             #[cfg(feature = "priority")]
             priority,
         });
+        {
+            let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+            while pipes.len() <= idx {
+                pipes.push(None);
+            }
+        }
         *slot_idx = Some(idx);
         idx
     };
-    #[cfg(feature = "priority")]
-    inner.rebuild_priority_view();
+    inner.rebuild_peer_keys();
     inner.on_peer_ready.notify(usize::MAX);
 
     let driver_join = super::install::spawn_wire_driver(super::install::WireDriverConfig {
@@ -133,6 +141,7 @@ async fn install_and_run(
         peer_address: peer_addr,
         peer_sub: peer_sub.cloned(),
         peer_groups: peer_groups.cloned(),
+        release_on_exit: false,
     });
     let _ = driver_join.await;
 }
@@ -208,7 +217,7 @@ async fn dial_supervisor_tcp(
         })
         .await
         else {
-            return;
+            break;
         };
         // Apply per-socket TCP keepalive policy, if any. compio's
         // TcpStream doesn't expose AsFd directly; `to_poll_fd()` does
@@ -289,8 +298,11 @@ async fn dial_supervisor_tcp(
         .await;
 
         if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
-            return;
+            break;
         }
+    }
+    if let Some(idx) = slot_idx {
+        inner.release_slot(idx);
     }
 }
 
@@ -358,7 +370,7 @@ async fn dial_supervisor_ipc(
         })
         .await
         else {
-            return;
+            break;
         };
         if let Ok(poll_fd) = stream.to_poll_fd() {
             let _ = inner.options.apply_socket_buffers(&poll_fd);
@@ -419,7 +431,10 @@ async fn dial_supervisor_ipc(
         .await;
 
         if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
-            return;
+            break;
         }
+    }
+    if let Some(idx) = slot_idx {
+        inner.release_slot(idx);
     }
 }
