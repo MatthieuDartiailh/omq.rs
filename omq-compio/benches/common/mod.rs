@@ -21,8 +21,8 @@ pub(crate) const ALL_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131
 pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 
 pub(crate) const PRIME_ITERS: usize = 2_000;
+pub(crate) const PRIME_BUDGET: Duration = Duration::from_millis(500);
 pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
-pub(crate) const WARMUP_MIN_ITERS: usize = 1_000;
 pub(crate) const DEFAULT_ROUND_DURATION: Duration = Duration::from_millis(500);
 pub(crate) const DEFAULT_ROUNDS: usize = 3;
 
@@ -242,11 +242,17 @@ where
     F: Fn(usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    burst(PRIME_ITERS).await;
+    let prime_start = Instant::now();
+    let mut primed = 0usize;
+    while primed < PRIME_ITERS && prime_start.elapsed() < PRIME_BUDGET {
+        let chunk = (PRIME_ITERS - primed).min(align.max(1).max(10));
+        burst(chunk).await;
+        primed += chunk;
+    }
 
     let round_dur = round_duration();
     let n_rounds = rounds();
-    let mut n = WARMUP_MIN_ITERS;
+    let mut n = align.max(1).max(10);
     let final_n = loop {
         let t = Instant::now();
         burst(n).await;
@@ -254,7 +260,7 @@ where
         if elapsed >= WARMUP_DURATION {
             let rate = n as f64 / elapsed.as_secs_f64();
             let target = (rate * round_dur.as_secs_f64()) as usize;
-            let aligned = (target.max(WARMUP_MIN_ITERS) / align.max(1)) * align.max(1);
+            let aligned = (target / align.max(1)) * align.max(1);
             break aligned.max(align.max(1));
         }
         n = n.saturating_mul(4);

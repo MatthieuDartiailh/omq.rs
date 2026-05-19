@@ -195,7 +195,7 @@ OMQ_VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null \
 
 # ---------- run ----------
 
-SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152 8388608 33554432)
+SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152)
 BENCHMARKS="$REPO/COMPARISONS.md"
 
 run_comparison() {

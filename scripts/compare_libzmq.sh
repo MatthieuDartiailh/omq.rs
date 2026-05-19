@@ -178,7 +178,7 @@ ZMQ_VERSION=$(pkg-config --modversion libzmq 2>/dev/null || echo '?')
 
 # ---------- run ----------
 
-SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152 8388608 33554432)
+SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152)
 BENCHMARKS="$REPO/COMPARISONS.md"
 
 run_comparison() {
@@ -280,7 +280,8 @@ run_comparison() {
         else
             tokio_md+="| Size | libzmq msg/s | libzmq MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
             tokio_md+="|-------|-------------|------------|----------------|---------------|---------|"
-        fi$'\n'
+        fi
+        tokio_md+=$'\n'
 
         for i in "${!res_sizes[@]}"; do
             local sz omsg omb tmsg tmb zmsg zmb
