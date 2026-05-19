@@ -17,10 +17,6 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-zmq](omq-zmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
 
-> **Wire-compatible with libzmq.** omq sockets interoperate with any libzmq peer: C, Python
-> (pyzmq), Ruby, Node, on any shared transport. Same ZMTP 3.x framing, same socket types, same
-> CURVE handshake.
-
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/comparison_chart.svg" alt="PUSH/PULL throughput: native implementations" width="850">
 </p>
@@ -94,7 +90,8 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 |---------|---------|
 | **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)) | Byte-in / events-out; no async, no traits on the hot path. Mirrors `rustls::ConnectionCommon`. |
 | **Per-socket HWM** | Work-stealing send pumps on round-robin patterns; per-connection queues on fan-out and identity-routed patterns. |
-| **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly - no fallible borrow, no coalesce step. Kernel stitches outbound frames via `writev`. |
+| **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
+| **Zero-copy send and recv** | Send: `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
 | **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |
 | **Strict per-pipe priority** | nanomsg-style 1-255 tiers with `Socket::connect_with` (`priority` feature). |
 | **zstd dictionary auto-training** | Trains from first 1k messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |

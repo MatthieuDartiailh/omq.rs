@@ -58,6 +58,34 @@ copying the payload. At write time the codec flattens chunks into
 The 2-3x advantage over libzmq at >= 2 KiB comes almost entirely
 from this.
 
+## Zero-copy where it pays off
+
+libzmq copies every message through at least two internal queues
+(application -> I/O thread mailbox -> kernel). omq avoids userspace
+copies on the hot path for medium and large messages:
+
+**Send.** `Bytes` payloads are Arc-cloned (refcount bump, no data
+copy) from `Socket::send` through frame encoding to the kernel
+`writev`. `encode_message_gather` pushes the payload `Bytes`
+reference directly into the iovec list; only the 2-9 byte frame
+header is serialized. For small messages below `FLAT_THRESHOLD`
+(32 KiB), contiguous encoding into a shared `flat_buf` is faster
+than per-message gather-write.
+
+**Recv.** For frames above `large_message_threshold` (128 KiB),
+the compio backend reads the payload directly into a pre-allocated
+`BytesMut` via a one-shot `read_until`, bypassing the BUF_RING
+pool entirely. Small frames use multi-shot recv from the pool (one
+memcpy per CQE). Net copy count: 0 extra copies for large
+messages, 1 for small.
+
+**Inproc.** Same-process transfers are `Arc<Bytes>` clones with no
+serialization. Throughput is constant regardless of payload size.
+
+The result is most visible at 32 KiB-128 KiB TCP, where omq
+sustains 2x the throughput of libzmq: the saved copies keep the
+data in L3 instead of flushing it to DRAM.
+
 ## First Rust attempt: pure tokio actor
 
 Per-socket `SocketDriver` actor, per-peer `ConnectionDriver` via
