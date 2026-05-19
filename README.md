@@ -25,9 +25,13 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
 - CURVE mechanism
 - BLAKE3ZMQ mechanism
 
-> **Wire-compatible with libzmq.** omq sockets interoperate with any libzmq peer - C, Python
-> (pyzmq), Ruby, Node - on any shared transport. Same ZMTP 3.x framing, same socket types, same
+> **Wire-compatible with libzmq.** omq sockets interoperate with any libzmq peer: C, Python
+> (pyzmq), Ruby, Node, on any shared transport. Same ZMTP 3.x framing, same socket types, same
 > CURVE handshake.
+
+<p align="center">
+  <img src="doc/comparison_chart.svg" alt="PUSH/PULL throughput: native implementations" width="850">
+</p>
 
 ### vs. libzmq (TCP loopback, two processes)
 
@@ -141,6 +145,23 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
 | **Python binding** | PyO3 over `omq-compio`, sync + asyncio API. [`bindings/pyomq`](bindings/pyomq/). |
 
+## Workspace
+
+Nine crates, one repo. The facade re-exports one backend; the rest are
+independent, versioned, and published separately.
+
+| Crate | What it does |
+|-------|-------------|
+| [`omq`](omq/) | Facade: re-exports `omq-compio` or `omq-tokio` at build time |
+| [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions |
+| [`omq-compio`](omq-compio/) | Primary backend: single-thread io_uring / IOCP |
+| [`omq-tokio`](omq-tokio/) | Alternative backend: multi-thread tokio |
+| [`omq-zmq`](omq-zmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
+| [`omq-zeromq`](omq-zeromq/) | Drop-in replacement for the [`zeromq`](https://crates.io/crates/zeromq) Rust crate |
+| [`blume`](blume/) | Batching MPSC channel with swap-drain consumer |
+| [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch |
+| [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-compio, sync + asyncio) |
+
 ## C API (omq-zmq)
 
 [`omq-zmq`](omq-zmq/) is a libzmq-compatible C interface backed by omq-compio.
@@ -224,6 +245,28 @@ Drop-in pyzmq replacement. 2.3-3.1x faster over TCP:
 | 8 KiB | 331k msg/s | 105k msg/s | **3.1x** |
 
 asyncio API available via `pyomq.asyncio`. Wheels for Linux x86_64 and aarch64, Python 3.9+.
+
+## Testing
+
+Every socket type, transport, mechanism, and feature combination is
+covered by integration tests on both backends. The full suite:
+
+- **150+ integration tests** across omq-compio and omq-tokio (every
+  socket-type x transport x mechanism cell).
+- **Protocol fuzzing** (~1M iterations per suite): hand-rolled fuzz of
+  the wire parser and the socket-action state machine.
+- **12 soak test scenarios** per backend: peer churn, reconnect storms,
+  PUB/SUB churn, compression, PLAIN / CURVE / BLAKE3ZMQ auth, priority
+  routing, large-message throughput, multi-socket. Each scenario samples
+  RSS and file-descriptor counts to detect leaks.
+- **Cross-runtime interop**: omq-compio <-> omq-tokio over TCP.
+- **Wire interop** with libzmq (C), pyzmq, and
+  [Pure Ruby OMQ](https://github.com/zeromq/omq.rb).
+
+```sh
+./scripts/test-all.sh          # full sweep, both backends
+OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
+```
 
 ## Benchmarks
 

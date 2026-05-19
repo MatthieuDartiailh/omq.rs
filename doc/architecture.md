@@ -34,7 +34,7 @@ runtime backends differ. Detail lives in [`compio.md`](compio.md),
 |  ----------------------------------------                        |
 |  Connection      ZMTP 3.x codec + state machine                  |
 |  Greeting        version negotiation                             |
-|  Mechanism       NULL / CURVE / BLAKE3ZMQ                        |
+|  Mechanism       NULL / PLAIN / CURVE / BLAKE3ZMQ                |
 |  Transform       lz4 / zstd encode/decode                        |
 |  Endpoint        URI parsing                                     |
 |  Subscription    patricia-trie matcher                           |
