@@ -63,17 +63,17 @@ Enable all feature-gated scenarios with the full feature set:
 # compio backend, 10 min per scenario
 OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-compio \
   --features "soak lz4 zstd plain curve blake3zmq priority" \
-  --release -- --test-threads=1 --nocapture
+  --release -- --nocapture
 
 # tokio backend, same
 OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
   --features "soak lz4 zstd plain curve blake3zmq priority" \
-  --release -- --test-threads=1 --nocapture
+  --release -- --nocapture
 
 # overnight (2h per scenario)
 OMQ_SOAK_DURATION_SECS=7200 cargo test -p omq-compio \
   --features "soak lz4 zstd plain curve blake3zmq priority" \
-  --release -- --test-threads=1 --nocapture
+  --release -- --nocapture
 ```
 
 Each scenario monitors RSS, FD count, and (where applicable)
