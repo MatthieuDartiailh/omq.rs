@@ -33,6 +33,7 @@ use super::chunked_buf::ChunkedInputBuf;
 #[cfg(test)]
 use super::command;
 use super::command::{Command, PeerProperties};
+#[cfg(any(feature = "blake3zmq", test))]
 use super::frame;
 
 /// Parse a command-frame payload as raw `Command::Unknown { name, body }`
