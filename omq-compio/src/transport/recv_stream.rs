@@ -21,6 +21,7 @@ impl From<crate::socket::OneShotLargeRecvOutcome> for StreamArmOutcome {
     fn from(o: crate::socket::OneShotLargeRecvOutcome) -> Self {
         match o {
             crate::socket::OneShotLargeRecvOutcome::Skipped
+            | crate::socket::OneShotLargeRecvOutcome::RearmMultiShot
             | crate::socket::OneShotLargeRecvOutcome::Took
             | crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => Self::Fed,
             crate::socket::OneShotLargeRecvOutcome::IoErr(e) => Self::Err(e),

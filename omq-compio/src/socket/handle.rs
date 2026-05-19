@@ -166,6 +166,22 @@ impl Socket {
             .collect())
     }
 
+    pub fn multishot_rearms(&self) -> usize {
+        let peers = self.inner.out_peers.read().expect("peers lock");
+        peers
+            .iter()
+            .filter_map(|(_, p)| {
+                let handle = p.direct_io.as_ref()?;
+                let state = handle.read().expect("direct_io").as_ref()?.clone();
+                Some(
+                    state
+                        .multishot_rearms
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .sum()
+    }
+
     pub async fn subscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Sub | SocketType::XSub) {
             return Err(Error::Protocol(

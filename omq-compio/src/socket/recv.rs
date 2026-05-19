@@ -50,6 +50,7 @@ impl From<crate::socket::OneShotLargeRecvOutcome> for PullOutcome {
     fn from(o: crate::socket::OneShotLargeRecvOutcome) -> Self {
         match o {
             crate::socket::OneShotLargeRecvOutcome::Skipped
+            | crate::socket::OneShotLargeRecvOutcome::RearmMultiShot
             | crate::socket::OneShotLargeRecvOutcome::Took => Self::Fed,
             crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => Self::StartAccumulation,
             crate::socket::OneShotLargeRecvOutcome::IoErr(e) => Self::Err(e),
@@ -235,6 +236,7 @@ async fn handle_pull_outcome(
                 state.signal_eof();
                 return Err(Error::Closed);
             }
+            state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
             Ok(RecvAction::Proceed)
         }
         PullOutcome::StartAccumulation => {

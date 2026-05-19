@@ -607,6 +607,8 @@ pub(crate) async fn run_connection(
                                 Some(crate::socket::RecvStreamState::OneShot);
                         } else if state.recv_stream.rearm(&peer_io).await.is_err() {
                             return Ok(());
+                        } else {
+                            state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
                         }
                         ls.codec_maybe_dirty = true;
                     }

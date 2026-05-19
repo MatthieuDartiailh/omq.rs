@@ -38,6 +38,7 @@ pub(crate) struct DirectIoState {
     pub(crate) large_recv_pending: AtomicUsize,
     pub(crate) pending_acc: Mutex<Option<BytesMut>>,
     pub(crate) large_message_threshold: usize,
+    pub(crate) multishot_rearms: AtomicUsize,
 }
 
 impl std::fmt::Debug for DirectIoState {
@@ -51,6 +52,7 @@ impl std::fmt::Debug for DirectIoState {
 #[derive(Debug)]
 pub(crate) enum OneShotLargeRecvOutcome {
     Skipped,
+    RearmMultiShot,
     Took,
     AccumulatePayload,
     IoErr(std::io::Error),
@@ -64,14 +66,14 @@ pub(crate) async fn try_one_shot_large_recv(
     use bytes::BytesMut;
 
     if state.large_message_threshold == 0 {
-        return OneShotLargeRecvOutcome::Skipped;
+        return OneShotLargeRecvOutcome::RearmMultiShot;
     }
 
     let already_one_shot = matches!(sguard.as_ref(), Some(RecvStreamState::OneShot));
 
     let one_shot_acc = {
         let Ok(mut io) = state.peer_io.lock() else {
-            return OneShotLargeRecvOutcome::Skipped;
+            return OneShotLargeRecvOutcome::RearmMultiShot;
         };
         let info = match io.codec.peek_next_frame_payload_size() {
             Ok(Some(info)) => info,
@@ -79,13 +81,13 @@ pub(crate) async fn try_one_shot_large_recv(
             Err(e) => return OneShotLargeRecvOutcome::ProtoErr(e),
         };
         if info.payload_len < state.large_message_threshold {
-            return OneShotLargeRecvOutcome::Skipped;
+            return OneShotLargeRecvOutcome::RearmMultiShot;
         }
         if !already_one_shot {
             return OneShotLargeRecvOutcome::AccumulatePayload;
         }
         let Some((plen, prefix)) = io.codec.begin_supplied_payload_with_prefix() else {
-            return OneShotLargeRecvOutcome::Skipped;
+            return OneShotLargeRecvOutcome::RearmMultiShot;
         };
         let mut acc = BytesMut::with_capacity(plen);
         acc.extend_from_slice(prefix.as_slice());
@@ -161,21 +163,44 @@ pub(crate) async fn one_shot_recv_and_feed(
         }
     }
 
-    match try_one_shot_large_recv(state, sguard).await {
-        OneShotLargeRecvOutcome::Skipped => {
-            let new_stream = {
-                let Ok(io) = state.peer_io.lock() else {
-                    return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
+    loop {
+        match try_one_shot_large_recv(state, sguard).await {
+            OneShotLargeRecvOutcome::Skipped => {
+                let bytes = match fd.read_some(BytesMut::with_capacity(65536)).await {
+                    Ok(b) => b,
+                    Err(e) => break OneShotLargeRecvOutcome::IoErr(e),
                 };
-                match io.reader.build_recv_stream() {
-                    Ok(s) => s,
-                    Err(e) => return OneShotLargeRecvOutcome::IoErr(e),
+                if bytes.is_empty() {
+                    break OneShotLargeRecvOutcome::IoErr(std::io::Error::other("eof"));
                 }
-            };
-            **sguard = Some(RecvStreamState::MultiShot(new_stream));
-            OneShotLargeRecvOutcome::Took
+                state.last_input_nanos.store(
+                    state.hb_epoch.elapsed().as_nanos() as u64,
+                    Ordering::Relaxed,
+                );
+                let Ok(mut io) = state.peer_io.lock() else {
+                    break OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
+                };
+                if let Err(e) = io.codec.handle_input(bytes) {
+                    break OneShotLargeRecvOutcome::ProtoErr(e);
+                }
+                drop(io);
+            }
+            OneShotLargeRecvOutcome::RearmMultiShot => {
+                let new_stream = {
+                    let Ok(io) = state.peer_io.lock() else {
+                        break OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
+                    };
+                    match io.reader.build_recv_stream() {
+                        Ok(s) => s,
+                        Err(e) => break OneShotLargeRecvOutcome::IoErr(e),
+                    }
+                };
+                **sguard = Some(RecvStreamState::MultiShot(new_stream));
+                state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
+                break OneShotLargeRecvOutcome::Took;
+            }
+            other => break other,
         }
-        other => other,
     }
 }
 
@@ -224,6 +249,7 @@ impl DirectIoState {
             large_recv_pending: AtomicUsize::new(0),
             pending_acc: Mutex::new(None),
             large_message_threshold,
+            multishot_rearms: AtomicUsize::new(0),
         })
     }
 }
