@@ -56,24 +56,31 @@ PUB/SUB churn, large-message throughput, compression (zstd),
 compression (lz4), PLAIN auth, CURVE encryption, BLAKE3ZMQ
 encryption, priority tiers, multi-socket, inproc cross-thread.
 
-Pick the backend with `-p`, duration with `OMQ_SOAK_DURATION_SECS`.
-Enable all feature-gated scenarios with the full feature set:
+Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s).
+Enable all feature-gated scenarios with the full feature set.
+
+Each soak test is a separate binary, so `cargo test` runs them
+sequentially. Launch every scenario in parallel instead:
 
 ```sh
-# compio backend, 10 min per scenario
-OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-compio \
-  --features "soak lz4 zstd plain curve blake3zmq priority" \
-  --release -- --nocapture
+FEATURES="soak lz4 zstd plain curve blake3zmq priority"
 
-# tokio backend, same
-OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
-  --features "soak lz4 zstd plain curve blake3zmq priority" \
-  --release -- --nocapture
+# build first (avoid parallel compilation conflicts)
+cargo test -p omq-compio --features "$FEATURES" --release --no-run
+cargo test -p omq-tokio  --features "$FEATURES" --release --no-run
 
-# overnight (2h per scenario)
-OMQ_SOAK_DURATION_SECS=7200 cargo test -p omq-compio \
-  --features "soak lz4 zstd plain curve blake3zmq priority" \
-  --release -- --nocapture
+# run all scenarios in parallel, both backends, 10 min each
+for test in blake3zmq compression compression_lz4 curve \
+            inproc_cross_thread large_throughput multi_socket \
+            peer_churn plain priority pub_sub_churn reconnect_storm; do
+  OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-compio \
+    --features "$FEATURES" --release --test "soak_${test}" \
+    -- --nocapture &
+  OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
+    --features "$FEATURES" --release --test "soak_${test}" \
+    -- --nocapture &
+done
+wait
 ```
 
 Each scenario monitors RSS, FD count, and (where applicable)
