@@ -146,10 +146,7 @@ pub(super) async fn dispatch_drained_events(
                         zmtp_version: (3, peer_minor),
                     };
                     *ctx.peer_info.write().expect("peer_info lock") = Some(info.clone());
-                    ctx.monitor.publish(MonitorEvent::HandshakeSucceeded {
-                        endpoint: ctx.endpoint.clone(),
-                        peer: info,
-                    });
+                    ctx.monitor.handshake_succeeded(ctx.endpoint.clone(), info);
                 }
             }
             Drained::Msg(m) => {

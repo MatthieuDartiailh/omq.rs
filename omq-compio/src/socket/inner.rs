@@ -279,7 +279,7 @@ pub(super) fn is_round_robin_send(t: SocketType) -> bool {
 impl Drop for SocketInner {
     fn drop(&mut self) {
         if !self.closed.swap(true, Ordering::SeqCst) {
-            self.monitor.publish(MonitorEvent::Closed);
+            self.monitor.closed();
         }
     }
 }

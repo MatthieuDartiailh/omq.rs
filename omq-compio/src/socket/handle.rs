@@ -8,7 +8,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 
-use crate::monitor::{MonitorEvent, MonitorStream};
+use crate::monitor::{MonitorStream};
 use crate::transport::driver::DriverCommand;
 
 use super::inner::{PeerOut, SocketInner, WirePeerHandle};
@@ -340,7 +340,7 @@ impl Socket {
                 .peers_gen
                 .fetch_add(1, std::sync::atomic::Ordering::Release);
         }
-        self.inner.monitor.publish(MonitorEvent::Closed);
+        self.inner.monitor.closed();
         Ok(())
     }
 

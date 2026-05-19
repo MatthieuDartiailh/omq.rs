@@ -58,6 +58,74 @@ impl MonitorPublisher {
         }
     }
 
+    pub(crate) fn listening(&self, endpoint: omq_proto::endpoint::Endpoint) {
+        self.publish(MonitorEvent::Listening { endpoint });
+    }
+
+    pub(crate) fn accepted(
+        &self,
+        endpoint: omq_proto::endpoint::Endpoint,
+        peer_ident: PeerIdent,
+        connection_id: u64,
+    ) {
+        self.publish(MonitorEvent::Accepted {
+            endpoint,
+            peer_ident,
+            connection_id,
+        });
+    }
+
+    pub(crate) fn connected(
+        &self,
+        endpoint: omq_proto::endpoint::Endpoint,
+        peer_ident: PeerIdent,
+        connection_id: u64,
+    ) {
+        self.publish(MonitorEvent::Connected {
+            endpoint,
+            peer_ident,
+            connection_id,
+        });
+    }
+
+    pub(crate) fn handshake_succeeded(
+        &self,
+        endpoint: omq_proto::endpoint::Endpoint,
+        peer: PeerInfo,
+    ) {
+        self.publish(MonitorEvent::HandshakeSucceeded { endpoint, peer });
+    }
+
+    pub(crate) fn handshake_failed(
+        &self,
+        endpoint: omq_proto::endpoint::Endpoint,
+        peer_ident: PeerIdent,
+        reason: String,
+    ) {
+        self.publish(MonitorEvent::HandshakeFailed {
+            endpoint,
+            peer_ident,
+            reason,
+        });
+    }
+
+    pub(crate) fn disconnected(
+        &self,
+        endpoint: omq_proto::endpoint::Endpoint,
+        peer: PeerInfo,
+        reason: DisconnectReason,
+    ) {
+        self.publish(MonitorEvent::Disconnected {
+            endpoint,
+            peer,
+            reason,
+        });
+    }
+
+    pub(crate) fn closed(&self) {
+        self.publish(MonitorEvent::Closed);
+    }
+
     pub(crate) fn subscribe(&self) -> MonitorStream {
         let (tx, rx) = flume::bounded(MONITOR_CAPACITY);
         let lagged = Arc::new(AtomicU64::new(0));

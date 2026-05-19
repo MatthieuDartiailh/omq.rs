@@ -19,7 +19,7 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::proto::SocketType;
 use omq_proto::subscription::SubscriptionSet;
 
-use crate::monitor::{DisconnectReason, MonitorEvent, PeerIdent, PeerInfo};
+use crate::monitor::{DisconnectReason, PeerIdent, PeerInfo};
 use crate::transport::dispatch::MonitorCtx;
 use crate::transport::driver::{self, DriverCommand};
 use crate::transport::inproc::{InprocConn, InprocPeerSnapshot};
@@ -130,10 +130,7 @@ pub(super) fn install_inproc_peer(
     inner.inproc_recv_event.notify(usize::MAX);
     // Synthesise HandshakeSucceeded - inproc has no wire handshake
     // but consumers expect the same monitor signal as wire peers.
-    inner.monitor.publish(MonitorEvent::HandshakeSucceeded {
-        endpoint,
-        peer: info,
-    });
+    inner.monitor.handshake_succeeded(endpoint, info);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,19 +333,15 @@ fn handle_driver_exit(
             Ok(()) => DisconnectReason::PeerClosed,
             Err(e) => DisconnectReason::Error(format!("{e}")),
         };
-        inner.monitor.publish(MonitorEvent::Disconnected {
-            endpoint: endpoint.clone(),
-            peer,
-            reason,
-        });
+        inner
+            .monitor
+            .disconnected(endpoint.clone(), peer, reason);
     } else if let Err(e) = res {
         let peer_ident =
             peer_address.map_or_else(|| PeerIdent::Path(format!("{endpoint}")), PeerIdent::Socket);
-        inner.monitor.publish(MonitorEvent::HandshakeFailed {
-            endpoint: endpoint.clone(),
-            peer_ident,
-            reason: format!("{e}"),
-        });
+        inner
+            .monitor
+            .handshake_failed(endpoint.clone(), peer_ident, format!("{e}"));
     }
     let should_reset = match socket_type {
         SocketType::Req => true,

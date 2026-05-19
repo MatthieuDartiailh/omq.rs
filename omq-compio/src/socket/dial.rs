@@ -222,12 +222,12 @@ async fn dial_supervisor_tcp(
         let _ = inner.options.apply_socket_buffers(&poll_fd);
         let peer_addr = stream.peer_addr().ok();
         let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        inner.monitor.publish(MonitorEvent::Connected {
-            endpoint: wrapper.clone(),
-            peer_ident: peer_addr
+        inner.monitor.connected(
+            wrapper.clone(),
+            peer_addr
                 .map_or_else(|| PeerIdent::Path(format!("{wrapper}")), PeerIdent::Socket),
-            connection_id: conn_id,
-        });
+            conn_id,
+        );
 
         let (_cmd_tx, cmd_rx) =
             reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
@@ -365,11 +365,7 @@ async fn dial_supervisor_ipc(
             let _ = inner.options.apply_socket_buffers(&poll_fd);
         }
         let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        inner.monitor.publish(MonitorEvent::Connected {
-            endpoint: endpoint.clone(),
-            peer_ident: PeerIdent::Path(ep_ident.clone()),
-            connection_id: conn_id,
-        });
+        inner.monitor.connected(endpoint.clone(), PeerIdent::Path(ep_ident.clone()), conn_id);
 
         let (_cmd_tx, cmd_rx) =
             reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());

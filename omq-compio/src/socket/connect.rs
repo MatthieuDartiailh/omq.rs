@@ -4,7 +4,7 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
 use omq_proto::proto::SocketType;
 
-use crate::monitor::{MonitorEvent, PeerIdent};
+use crate::monitor::{PeerIdent};
 use crate::transport::inproc;
 
 use super::Socket;
@@ -71,11 +71,7 @@ impl Socket {
                         .next_connection_id
                         .fetch_add(1, Ordering::Relaxed);
                     let ep = Endpoint::Inproc { name: name.clone() };
-                    self.inner().monitor.publish(MonitorEvent::Connected {
-                        endpoint: ep.clone(),
-                        peer_ident: PeerIdent::Inproc(name),
-                        connection_id: conn_id,
-                    });
+                    self.inner().monitor.connected(ep.clone(), PeerIdent::Inproc(name), conn_id);
                     install_inproc_peer(
                         self.inner(),
                         conn,
@@ -100,11 +96,7 @@ impl Socket {
                         let ep = Endpoint::Inproc {
                             name: name_clone.clone(),
                         };
-                        inner.monitor.publish(MonitorEvent::Connected {
-                            endpoint: ep.clone(),
-                            peer_ident: PeerIdent::Inproc(name_clone),
-                            connection_id: conn_id,
-                        });
+                        inner.monitor.connected(ep.clone(), PeerIdent::Inproc(name_clone), conn_id);
                         install_inproc_peer(
                             &inner,
                             conn,
@@ -147,11 +139,7 @@ impl Socket {
             .inner()
             .next_connection_id
             .fetch_add(1, Ordering::Relaxed);
-        self.inner().monitor.publish(MonitorEvent::Connected {
-            endpoint: endpoint.clone(),
-            peer_ident: PeerIdent::Path(format!("{endpoint}")),
-            connection_id: conn_id,
-        });
+        self.inner().monitor.connected(endpoint.clone(), PeerIdent::Path(format!("{endpoint}")), conn_id);
         self.inner()
             .udp_dialers
             .write()
