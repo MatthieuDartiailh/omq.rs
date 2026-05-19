@@ -18,8 +18,8 @@
 //! [`Mutex`]: async_lock::Mutex
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;

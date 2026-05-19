@@ -30,10 +30,10 @@ use crate::error::{Error, Result};
 use crate::message::{FrameFlags, Message, Payload};
 
 use super::chunked_buf::ChunkedInputBuf;
-use super::frame;
 #[cfg(test)]
 use super::command;
 use super::command::{Command, PeerProperties};
+use super::frame;
 
 /// Parse a command-frame payload as raw `Command::Unknown { name, body }`
 /// without applying name-dispatched body parsing. Used during the mechanism
@@ -52,11 +52,11 @@ fn decode_command_raw(body: bytes::Bytes) -> Result<Command> {
     let rest = body.slice(1 + name_len..);
     Ok(Command::Unknown { name, body: rest })
 }
+use super::SocketType;
 use super::greeting::{self, Greeting, MechanismName};
 #[cfg(any(feature = "curve", feature = "blake3zmq"))]
 use super::mechanism::FrameTransform;
 use super::mechanism::{MechanismSetup, SecurityMechanism};
-use super::SocketType;
 
 /// Which side of the TCP pairing we are. Informational; determines the
 /// `as-server` greeting bit (bind side = server, connect side = client).
@@ -255,9 +255,6 @@ impl Connection {
         self.out_chunks.push_back(bytes);
     }
 
-
-
-
     /// Total bytes pending transmit across all queued chunks. O(1).
     pub fn is_ready(&self) -> bool {
         matches!(self.state, State::Ready)
@@ -277,7 +274,6 @@ impl Connection {
             false
         }
     }
-
 
     /// Permanently close the connection; further input is rejected.
     pub fn close(&mut self) {

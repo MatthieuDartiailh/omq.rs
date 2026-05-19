@@ -10,11 +10,11 @@ use super::super::command::{self, Command, PeerProperties};
 use super::super::greeting::{self, effective_minor};
 use super::super::mechanism::MechanismStep;
 use super::super::{frame, is_compatible};
+#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+use super::FrameTransform;
 #[cfg(feature = "blake3zmq")]
 use super::blake3zmq_aad;
 use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
-use super::FrameTransform;
 
 impl Connection {
     pub fn handle_input(&mut self, src: Bytes) -> Result<()> {

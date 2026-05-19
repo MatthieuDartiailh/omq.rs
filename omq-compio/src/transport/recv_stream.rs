@@ -1,5 +1,5 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 
@@ -137,13 +137,9 @@ pub(super) async fn pull_stream(
                     };
                     match handle_result {
                         Err(e) => StreamArmOutcome::ProtoErr(e),
-                        Ok(()) => {
-                            crate::socket::try_one_shot_large_recv(
-                                state, &mut sguard,
-                            )
+                        Ok(()) => crate::socket::try_one_shot_large_recv(state, &mut sguard)
                             .await
-                            .into()
-                        }
+                            .into(),
                     }
                 }
             }

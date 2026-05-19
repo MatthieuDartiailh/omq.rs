@@ -200,7 +200,11 @@ impl SocketDriver {
         Ok(())
     }
 
-    pub(super) async fn apply_subscription(&mut self, prefix: bytes::Bytes, subscribe: bool) -> Result<()> {
+    pub(super) async fn apply_subscription(
+        &mut self,
+        prefix: bytes::Bytes,
+        subscribe: bool,
+    ) -> Result<()> {
         if !supports_subscribe(self.socket_type) {
             return Err(Error::Protocol(
                 "socket type does not support subscribe".into(),
@@ -293,7 +297,11 @@ impl SocketDriver {
         Ok(())
     }
 
-    pub(super) fn start_dial(&mut self, endpoint: Endpoint, #[cfg(feature = "priority")] priority: u8) {
+    pub(super) fn start_dial(
+        &mut self,
+        endpoint: Endpoint,
+        #[cfg(feature = "priority")] priority: u8,
+    ) {
         let cancel = self.cancel.child_token();
         let tx = self.internal_tx.clone();
         let child_cancel = cancel.clone();

@@ -10,11 +10,11 @@ use crate::message::{Message, Payload};
 
 use super::super::command::{self, Command};
 use super::super::frame;
+#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+use super::FrameTransform;
 #[cfg(feature = "blake3zmq")]
 use super::blake3zmq_aad;
 use super::{Connection, State};
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
-use super::FrameTransform;
 
 impl Connection {
     pub(super) fn write_outbound_commands(&mut self, cmds: &[Command]) {

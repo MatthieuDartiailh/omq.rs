@@ -342,10 +342,8 @@ fn handle_driver_exit(
             reason,
         });
     } else if let Err(e) = res {
-        let peer_ident = peer_address.map_or_else(
-            || PeerIdent::Path(format!("{endpoint}")),
-            PeerIdent::Socket,
-        );
+        let peer_ident =
+            peer_address.map_or_else(|| PeerIdent::Path(format!("{endpoint}")), PeerIdent::Socket);
         inner.monitor.publish(MonitorEvent::HandshakeFailed {
             endpoint: endpoint.clone(),
             peer_ident,
@@ -357,8 +355,7 @@ fn handle_driver_exit(
         SocketType::Rep => {
             let peers = inner.out_peers.read().expect("peers lock");
             !peers.iter().any(|s| {
-                s.connection_id != connection_id
-                    && s.info.read().expect("info lock").is_some()
+                s.connection_id != connection_id && s.info.read().expect("info lock").is_some()
             })
         }
         _ => false,
