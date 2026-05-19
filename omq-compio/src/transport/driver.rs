@@ -268,8 +268,7 @@ impl DriverLoopState {
             let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
                 match cmd {
                     DriverCommand::SendMessage(m) => {
-                        self.encode_outbound_message(state, &m, cap)
-                            .await?
+                        self.encode_outbound_message(state, &m, cap).await?
                     }
                     DriverCommand::SendCommand(c) => {
                         let mut io = state.lock_io();
@@ -306,8 +305,7 @@ impl DriverLoopState {
         let mut next = Some(first);
         while let Some(m) = next.take() {
             let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
-                self.encode_outbound_message(state, &m, cap)
-                    .await?
+                self.encode_outbound_message(state, &m, cap).await?
             } else {
                 self.pending_cmds.push_back(DriverCommand::SendMessage(m));
                 false
@@ -679,10 +677,7 @@ pub(crate) async fn run_connection(
 }
 
 impl DriverLoopState {
-    async fn flush_codec_to_wire(
-        &mut self,
-        state: &DirectIoState,
-    ) -> Result<bool> {
+    async fn flush_codec_to_wire(&mut self, state: &DirectIoState) -> Result<bool> {
         let mut writer = state.writer.lock().await;
         let chunks = {
             let io = state.lock_io();

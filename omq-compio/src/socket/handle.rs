@@ -349,3 +349,51 @@ impl Socket {
         peers.iter().map(|p| p.out.clone()).collect()
     }
 }
+
+impl omq_proto::socket_api::SocketApi for Socket {
+    fn new(socket_type: SocketType, options: Options) -> Self {
+        Socket::new(socket_type, options)
+    }
+    fn socket_type(&self) -> SocketType {
+        self.socket_type()
+    }
+    async fn bind(&self, endpoint: Endpoint) -> Result<()> {
+        self.bind(endpoint).await
+    }
+    async fn connect(&self, endpoint: Endpoint) -> Result<()> {
+        self.connect(endpoint).await
+    }
+    async fn send(&self, msg: omq_proto::message::Message) -> Result<()> {
+        self.send(msg).await
+    }
+    async fn recv(&self) -> Result<omq_proto::message::Message> {
+        self.recv().await
+    }
+    fn try_send(&self, msg: omq_proto::message::Message) -> Result<()> {
+        self.try_send(msg)
+    }
+    fn try_recv(&self) -> Result<omq_proto::message::Message> {
+        self.try_recv()
+    }
+    async fn subscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
+        self.subscribe(prefix).await
+    }
+    async fn unsubscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
+        self.unsubscribe(prefix).await
+    }
+    async fn join(&self, group: impl Into<bytes::Bytes>) -> Result<()> {
+        self.join(group).await
+    }
+    async fn leave(&self, group: impl Into<bytes::Bytes>) -> Result<()> {
+        self.leave(group).await
+    }
+    async fn unbind(&self, endpoint: Endpoint) -> Result<()> {
+        self.unbind(endpoint).await
+    }
+    async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
+        self.disconnect(endpoint).await
+    }
+    async fn close(self) -> Result<()> {
+        self.close().await
+    }
+}
