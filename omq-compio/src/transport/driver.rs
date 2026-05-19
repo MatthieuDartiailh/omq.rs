@@ -160,7 +160,6 @@ impl DriverLoopState {
     async fn encode_outbound_message(
         &mut self,
         state: &DirectIoState,
-        peer_io: &SharedPeerIo,
         m: &Message,
         cap: usize,
     ) -> Result<bool> {
@@ -262,7 +261,6 @@ impl DriverLoopState {
         first: DriverCommand,
         inbox: &Receiver<DriverCommand>,
         state: &DirectIoState,
-        peer_io: &SharedPeerIo,
         cap: usize,
     ) -> Result<()> {
         let mut next = Some(first);
@@ -270,7 +268,7 @@ impl DriverLoopState {
             let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
                 match cmd {
                     DriverCommand::SendMessage(m) => {
-                        self.encode_outbound_message(state, peer_io, &m, cap)
+                        self.encode_outbound_message(state, &m, cap)
                             .await?
                     }
                     DriverCommand::SendCommand(c) => {
@@ -303,13 +301,12 @@ impl DriverLoopState {
         first: Message,
         shared: &Receiver<Message>,
         state: &DirectIoState,
-        peer_io: &SharedPeerIo,
         cap: usize,
     ) -> Result<()> {
         let mut next = Some(first);
         while let Some(m) = next.take() {
             let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
-                self.encode_outbound_message(state, peer_io, &m, cap)
+                self.encode_outbound_message(state, &m, cap)
                     .await?
             } else {
                 self.pending_cmds.push_back(DriverCommand::SendMessage(m));
@@ -461,7 +458,7 @@ pub(crate) async fn run_connection(
 
         // 3a) Flush codec buffer.
         if !state.handshake_done.load(Ordering::Relaxed) || ls.codec_maybe_dirty {
-            let flushed = ls.flush_codec_to_wire(&state, &peer_io).await?;
+            let flushed = ls.flush_codec_to_wire(&state).await?;
             if flushed {
                 continue;
             }
@@ -660,7 +657,7 @@ pub(crate) async fn run_connection(
             }
             cmd = cmd_fut.fuse() => {
                 let Ok(cmd) = cmd else { return Ok(()) };
-                ls.drain_inbox(cmd, &inbox, &state, &peer_io, cap)
+                ls.drain_inbox(cmd, &inbox, &state, cap)
                     .await?;
             }
             msg = shared_fut.fuse() => {
@@ -671,7 +668,7 @@ pub(crate) async fn run_connection(
                 let shared = shared_msg_rx
                     .as_ref()
                     .expect("shared_fut only ready when rx is Some");
-                ls.drain_shared(m, shared, &state, &peer_io, cap)
+                ls.drain_shared(m, shared, &state, cap)
                     .await?;
             }
             () = transmit_ready_fut.fuse() => {
@@ -685,7 +682,6 @@ impl DriverLoopState {
     async fn flush_codec_to_wire(
         &mut self,
         state: &DirectIoState,
-        peer_io: &SharedPeerIo,
     ) -> Result<bool> {
         let mut writer = state.writer.lock().await;
         let chunks = {
@@ -709,11 +705,7 @@ impl DriverLoopState {
         if written == 0 {
             return Ok(false);
         }
-        peer_io
-            .lock()
-            .expect("peer_io")
-            .codec
-            .advance_transmit(written);
+        state.lock_io().codec.advance_transmit(written);
         Ok(true)
     }
 
