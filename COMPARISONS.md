@@ -5,9 +5,10 @@ Hardware: Linux 6.12 (Debian 13) VM, Intel i7-8700B 3.2 GHz 6-core, Rust 1.95.0.
 
 ## libzmq vs omq — inproc
 
-Push and pull run in the same process; no kernel socket overhead.
-libzmq peer: minimal C binary, system libzmq 5.2.5.
-omq-compio peer: single-threaded (io_uring). omq-tokio peer: multi-thread runtime.
+Same process, no kernel socket overhead. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
+
+omq inproc is true zero-copy: payloads are `Arc`-cloned, not memcpy'd. libzmq copies every message through its internal queues, so its throughput drops with size. omq stays flat.
+
 Refresh: `./scripts/compare_libzmq.sh --inproc --update-benchmarks`
 
 **omq-compio:**
@@ -52,9 +53,8 @@ Refresh: `./scripts/compare_libzmq.sh --inproc --update-benchmarks`
 
 ## libzmq vs omq — IPC
 
-Push binds, pull connects. Abstract-namespace Unix-domain socket.
-libzmq peer: minimal C binary, system libzmq 5.2.5.
-omq-compio peer: single-threaded (io_uring). omq-tokio peer: multi-thread runtime.
+Abstract-namespace Unix socket. Push binds, pull connects. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
+
 Refresh: `./scripts/compare_libzmq.sh --ipc --update-benchmarks`
 
 **omq-compio:**
@@ -99,9 +99,8 @@ Refresh: `./scripts/compare_libzmq.sh --ipc --update-benchmarks`
 
 ## libzmq vs omq — TCP
 
-Push binds, pull connects. Each process pinned to one core.
-libzmq peer: minimal C binary, system libzmq 5.2.5.
-omq-compio peer: single-threaded (io_uring). omq-tokio peer: multi-thread runtime.
+TCP loopback, each process pinned to one core. Push binds, pull connects. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
+
 Refresh: `./scripts/compare_libzmq.sh --tcp --update-benchmarks`
 
 **omq-compio:**
@@ -148,9 +147,8 @@ Refresh: `./scripts/compare_libzmq.sh --tcp --update-benchmarks`
 
 ## zmq.rs vs omq — IPC
 
-Push binds, pull connects. zmq.rs peer uses a socket file; omq peers use abstract-namespace sockets.
-zmq.rs peer: `scripts/zmqrs_bench_peer/` (zeromq crate, tokio multi-thread runtime).
-omq-compio peer: single io_uring runtime on one core. omq-tokio peer: multi-thread runtime.
+Push binds, pull connects. zmq.rs uses a socket file; omq uses abstract-namespace sockets. zmq.rs peer: `scripts/zmqrs_bench_peer/` (zeromq crate, tokio multi-thread). omq-compio: single io_uring thread. omq-tokio: multi-thread.
+
 Refresh: `./scripts/compare_zmqrs.sh --ipc --update-benchmarks`
 
 **omq-compio:**
@@ -195,10 +193,8 @@ Refresh: `./scripts/compare_zmqrs.sh --ipc --update-benchmarks`
 
 ## zmq.rs vs omq — TCP
 
-Push binds, pull connects.
-zmq.rs peer: `scripts/zmqrs_bench_peer/` (zeromq crate, tokio multi-thread runtime).
-omq-compio peer: single io_uring runtime on one core. omq-tokio peer: multi-thread runtime.
-zmq.rs <-> omq-tokio is apples-to-apples; omq-compio is intentionally CPU-constrained (one core).
+TCP loopback, push binds, pull connects. zmq.rs <-> omq-tokio is apples-to-apples (both tokio multi-thread). omq-compio is intentionally CPU-constrained (single io_uring thread).
+
 Refresh: `./scripts/compare_zmqrs.sh --tcp --update-benchmarks`
 
 **omq-compio:**
