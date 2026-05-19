@@ -335,7 +335,7 @@ impl Socket {
 
     fn bind(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.bind(ep).await })
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.bind(ep).await.map(|_| ()) })
     }
 
     fn connect(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
