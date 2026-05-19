@@ -50,15 +50,22 @@ fn soak_reconnect_storm() {
             }
 
             let tag = format!("c-{cycles}");
+            let t0 = Instant::now();
             push.send(Message::single(tag.clone())).await.unwrap();
+            let send_us = t0.elapsed().as_micros();
 
             match tokio::time::timeout(Duration::from_secs(5), pull.recv()).await {
                 Ok(Ok(m)) => {
                     assert_eq!(m.part_bytes(0).unwrap(), tag.as_bytes());
                     delivered += 1;
                 }
-                _ => {
-                    eprintln!("[reconnect_storm] missed delivery at cycle {cycles}");
+                other => {
+                    let recv_ms = t0.elapsed().as_millis();
+                    eprintln!(
+                        "[reconnect_storm] MISS cycle {cycles}: \
+                         send took {send_us} µs, recv waited {recv_ms} ms, \
+                         result={other:?}",
+                    );
                 }
             }
 

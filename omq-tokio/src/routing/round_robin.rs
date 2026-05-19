@@ -206,6 +206,9 @@ impl Submitter {
                 let mut tier_has_alive = false;
                 for k in 0..tier_size {
                     let peer = &snapshot[i + (offset + k) % tier_size];
+                    if peer.handle.cancel.is_cancelled() {
+                        continue;
+                    }
                     match peer
                         .handle
                         .inbox

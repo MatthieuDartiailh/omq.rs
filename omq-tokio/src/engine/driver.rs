@@ -369,7 +369,9 @@ where
                     last_input = Instant::now();
                     let n = res?;
                     if n == 0 {
-                        return Ok(()); // peer EOF
+                        cancel.cancel();
+                        inbox.close();
+                        return Ok(());
                     }
                     codec.handle_input(Bytes::copy_from_slice(&read_buf[..n]))?;
                     if config.large_message_threshold > 0 {
