@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-19
+
+### Added
+
+- `impl SocketApi for Socket` for compile-time API parity with omq-compio.
+
+### Changed
+
+- `bind()` returns `Result<Endpoint>` instead of `Result<()>`.
+- `actor.rs` split into `actor/endpoints.rs` and `actor/peer.rs` for readability.
+
 ## [0.5.5] - 2026-05-18
 
 ### Added

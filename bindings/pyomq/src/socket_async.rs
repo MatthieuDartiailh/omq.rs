@@ -48,7 +48,7 @@ impl AsyncSocket {
 impl AsyncSocket {
     fn bind<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::async_unit(&self.inner, py, |s| async move { s.bind(ep).await })
+        dispatch::async_unit(&self.inner, py, |s| async move { s.bind(ep).await.map(|_| ()) })
     }
 
     fn connect<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {

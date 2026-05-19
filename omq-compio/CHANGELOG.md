@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-19
+
+### Added
+
+- `MonitorPublisher` convenience methods (`listening`, `accepted`, `connected`, `disconnected`, `handshake_succeeded`, `handshake_failed`, `closed`) replacing verbose `MonitorEvent` construction.
+- `DirectIoState::lock_io()` centralizing peer_io mutex acquisition.
+- `DirectIoState::signal_eof()` replacing 11 inline `eof_signal.notify` calls.
+- `RecvAction` enum replacing opaque `ControlFlow` return types in recv.rs.
+- `DriverLoopState` struct consolidating 9 mutable driver-loop locals into methods.
+- `impl SocketApi for Socket` for compile-time API parity with omq-tokio.
+
+### Changed
+
+- `bind()` returns `Result<Endpoint>` instead of `Result<()>`.
+- Large files split into focused submodules: `handle.rs` into `bind.rs`, `connect.rs`, `recv.rs`; `inner.rs` into `direct_io.rs`, `encoded_queue.rs`, `peer.rs`; `driver.rs` into `dispatch.rs`, `recv_stream.rs`.
+- `install.rs`: extracted `spawn_snap_listener` and `handle_driver_exit` from `spawn_wire_driver`.
+
 ## [0.5.5] - 2026-05-18
 
 ### Fixed

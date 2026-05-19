@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-19
+
+### Added
+
+- `SocketApi` trait formalizing the shared public API between compio and tokio backends.
+
+### Changed
+
+- `Connection` internals split into `connection/inbound.rs` and `connection/outbound.rs` for readability.
+
+### Breaking
+
+- `SocketApi::bind` returns `Result<Endpoint>` instead of `Result<()>`, providing the resolved endpoint (with actual port for wildcard binds) directly.
+
 ## [0.8.4] - 2026-05-18
 
 ### Added
