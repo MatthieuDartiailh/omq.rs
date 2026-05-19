@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "omq-compio"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-lock",
  "blume",
@@ -868,6 +868,7 @@ dependencies = [
  "futures",
  "libc",
  "omq-proto",
+ "slab",
  "smallvec",
  "socket2",
  "yring",

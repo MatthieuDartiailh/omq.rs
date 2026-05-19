@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-19
+
+### Fixed
+
+- Memory leak under peer churn: replaced `Vec<PeerSlot>` with `Slab<PeerSlot>` so dead peer entries are reclaimed rather than accumulated. Before: 100 MiB to 208 MiB in 300 s; after: stable at 8.6 MiB.
+
 ## [0.6.0] - 2026-05-19
 
 ### Added

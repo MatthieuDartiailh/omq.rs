@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-19
+
+### Fixed
+
+- Priority-mode message loss during reconnect storms: close the peer inbox and cancel the driver token on EOF so concurrent senders see the peer as dead immediately. Before: 67.9% delivery at 300 s; after: 99.6% delivery at 120 s.
+
 ## [0.6.0] - 2026-05-19
 
 ### Added
