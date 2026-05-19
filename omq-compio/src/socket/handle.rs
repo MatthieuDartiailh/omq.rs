@@ -8,7 +8,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 
-use crate::monitor::{MonitorStream};
+use crate::monitor::MonitorStream;
 use crate::transport::driver::DriverCommand;
 
 use super::inner::{PeerOut, SocketInner, WirePeerHandle};

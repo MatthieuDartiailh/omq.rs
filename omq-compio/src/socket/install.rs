@@ -333,9 +333,7 @@ fn handle_driver_exit(
             Ok(()) => DisconnectReason::PeerClosed,
             Err(e) => DisconnectReason::Error(format!("{e}")),
         };
-        inner
-            .monitor
-            .disconnected(endpoint.clone(), peer, reason);
+        inner.monitor.disconnected(endpoint.clone(), peer, reason);
     } else if let Err(e) = res {
         let peer_ident =
             peer_address.map_or_else(|| PeerIdent::Path(format!("{endpoint}")), PeerIdent::Socket);

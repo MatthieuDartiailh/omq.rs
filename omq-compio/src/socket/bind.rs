@@ -5,7 +5,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
-use crate::monitor::{PeerIdent};
+use crate::monitor::PeerIdent;
 use crate::transport::inproc::{self, InprocFrame};
 use crate::transport::ipc as ipc_transport;
 use crate::transport::tcp as tcp_transport;
@@ -55,7 +55,11 @@ impl Socket {
         let task = compio::runtime::spawn(async move {
             while let Ok(conn) = listener.accept().await {
                 let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-                inner.monitor.accepted(ep_for_task.clone(), PeerIdent::Inproc(name_for_ident.clone()), conn_id);
+                inner.monitor.accepted(
+                    ep_for_task.clone(),
+                    PeerIdent::Inproc(name_for_ident.clone()),
+                    conn_id,
+                );
                 install_inproc_peer(
                     &inner,
                     conn,
@@ -97,7 +101,9 @@ impl Socket {
                     let _ = inner.options.apply_socket_buffers(&poll_fd);
                 }
                 let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-                inner.monitor.accepted(ep_for_task.clone(), PeerIdent::Socket(addr), conn_id);
+                inner
+                    .monitor
+                    .accepted(ep_for_task.clone(), PeerIdent::Socket(addr), conn_id);
                 let read_clone = stream.clone();
                 let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
                     continue;
@@ -142,7 +148,11 @@ impl Socket {
                     let _ = inner.options.apply_socket_buffers(&poll_fd);
                 }
                 let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-                inner.monitor.accepted(ep_for_task.clone(), PeerIdent::Path(ident_path.clone()), conn_id);
+                inner.monitor.accepted(
+                    ep_for_task.clone(),
+                    PeerIdent::Path(ident_path.clone()),
+                    conn_id,
+                );
                 let read_clone = stream.clone();
                 let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
                     continue;

@@ -182,7 +182,7 @@ impl DriverLoopState {
             }
             Ok(cr)
         } else if state.uses_crypto {
-            let mut io = peer_io.lock().expect("peer_io");
+            let mut io = state.lock_io();
             io.codec.send_message(m)?;
             let cr = io.codec.pending_transmit_size() >= cap;
             drop(io);
@@ -274,7 +274,7 @@ impl DriverLoopState {
                             .await?
                     }
                     DriverCommand::SendCommand(c) => {
-                        let mut io = peer_io.lock().expect("peer_io");
+                        let mut io = state.lock_io();
                         io.codec.send_command(&c)?;
                         let cr = io.codec.pending_transmit_size() >= cap;
                         drop(io);
@@ -378,7 +378,7 @@ pub(crate) async fn run_connection(
         // the handshake (or its own timeout); a stuck peer is bounded
         // by Socket::close's wall-clock budget.
         if ls.closing {
-            let io = peer_io.lock().expect("peer_io");
+            let io = state.lock_io();
             let eq = state.encoded_queue.lock().expect("encoded_queue");
             if io.handshake_done
                 && ls.pending_cmds.is_empty()
@@ -400,7 +400,7 @@ pub(crate) async fn run_connection(
         let drained: SmallVec<[Drained; 8]> =
             if !post_handshake || (ls.codec_has_input && !recv_claimed) {
                 ls.codec_has_input = false; // consumed; re-set by stream arm
-                let mut io = peer_io.lock().expect("peer_io");
+                let mut io = state.lock_io();
                 let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
                 // Control-plane events first (handshake must precede messages).
                 while let Some(ev) = io.codec.poll_event() {
@@ -575,7 +575,7 @@ pub(crate) async fn run_connection(
                     context: Bytes::new(),
                 };
                 {
-                    let mut io = peer_io.lock().expect("peer_io");
+                    let mut io = state.lock_io();
                     let _ = io.codec.send_command(&ping);
                     ls.codec_maybe_dirty = true;
                 }
@@ -647,7 +647,7 @@ pub(crate) async fn run_connection(
                             let payload = acc_guard.take().unwrap().freeze();
                             drop(acc_guard);
                             state.large_recv_pending.store(0, Ordering::Release);
-                            let mut io = peer_io.lock().expect("peer_io");
+                            let mut io = state.lock_io();
                             io.codec.supply_payload(payload)?;
                             if let Some(extra) = extra {
                                 io.codec.handle_input(extra)?;
@@ -689,7 +689,7 @@ impl DriverLoopState {
     ) -> Result<bool> {
         let mut writer = state.writer.lock().await;
         let chunks = {
-            let io = peer_io.lock().expect("peer_io");
+            let io = state.lock_io();
             if io.codec.has_pending_transmit() {
                 let mut c = io.codec.clone_transmit_chunks();
                 if c.len() > 1024 {

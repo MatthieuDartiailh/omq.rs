@@ -9,7 +9,7 @@ use event_listener::Event;
 
 use omq_proto::proto::transform::MessageEncoder;
 
-use crate::transport::peer_io::{CancellableRecvStream, SharedPeerIo, WireWriter};
+use crate::transport::peer_io::{CancellableRecvStream, PeerIo, SharedPeerIo, WireWriter};
 
 use super::encoded_queue::EncodedQueue;
 use super::inner::{LocalStream, RecvStreamState};
@@ -183,6 +183,11 @@ impl DirectIoState {
     #[inline]
     pub(crate) fn signal_eof(&self) {
         self.eof_signal.notify(usize::MAX);
+    }
+
+    #[inline]
+    pub(crate) fn lock_io(&self) -> std::sync::MutexGuard<'_, PeerIo> {
+        self.peer_io.lock().expect("peer_io")
     }
 
     #[allow(clippy::too_many_arguments)]

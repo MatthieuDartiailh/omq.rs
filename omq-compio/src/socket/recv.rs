@@ -80,7 +80,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
 
         if is_one_shot {
             let fd = {
-                let io = state.peer_io.lock().expect("peer_io");
+                let io = state.lock_io();
                 io.reader.fd_clone()
             };
             let mut restore = crate::socket::AccRestore {
@@ -98,7 +98,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
             );
             let payload = restore.buf.take().unwrap().freeze();
             state.large_recv_pending.store(0, Ordering::Release);
-            let mut io = state.peer_io.lock().expect("peer_io");
+            let mut io = state.lock_io();
             if let Err(_e) = io.codec.supply_payload(payload) {
                 state.signal_eof();
                 return Ok(RecvAction::Return(None));
@@ -141,7 +141,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
                     let payload = acc_guard.take().unwrap().freeze();
                     drop(acc_guard);
                     state.large_recv_pending.store(0, Ordering::Release);
-                    let mut io = state.peer_io.lock().expect("peer_io");
+                    let mut io = state.lock_io();
                     if let Err(_e) = io.codec.supply_payload(payload) {
                         state.signal_eof();
                         return Ok(RecvAction::Return(None));
@@ -190,7 +190,7 @@ async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
                         return PullOutcome::Eof;
                     }
                     let handle_result = {
-                        let mut io = state.peer_io.lock().expect("peer_io");
+                        let mut io = state.lock_io();
                         let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
                         drop(buf);
                         io.codec.handle_input(bytes)
@@ -238,7 +238,7 @@ async fn handle_pull_outcome(
             Ok(RecvAction::Proceed)
         }
         PullOutcome::StartAccumulation => {
-            let mut io = state.peer_io.lock().expect("peer_io");
+            let mut io = state.lock_io();
             if let Some((plen, prefix)) = io.codec.begin_supplied_payload_with_prefix() {
                 let mut buf = bytes::BytesMut::with_capacity(plen);
                 buf.extend_from_slice(prefix.as_slice());
@@ -432,7 +432,7 @@ impl Socket {
                 let dio = unsafe { &*self.inner().direct_recv_io.get() };
                 if let Some(ref state) = *dio {
                     let cache = self.inner().recv_cache.get();
-                    let mut io = state.peer_io.lock().expect("peer_io");
+                    let mut io = state.lock_io();
                     if let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache) {
                         return Ok(msg);
                     }
@@ -539,7 +539,7 @@ impl Socket {
 
     fn drain_codec_for_recv(&self, state: &Arc<DirectIoState>) -> Result<RecvAction> {
         let drained = {
-            let mut io = state.peer_io.lock().expect("peer_io");
+            let mut io = state.lock_io();
             if !io.handshake_done {
                 return Ok(RecvAction::Return(None));
             }
@@ -657,7 +657,7 @@ impl Socket {
         loop {
             let mut writer = state.writer.lock().await;
             let chunks = {
-                let io = state.peer_io.lock().expect("peer_io");
+                let io = state.lock_io();
                 if !io.codec.has_pending_transmit() {
                     break;
                 }
