@@ -20,7 +20,8 @@ use omq_proto::proto::SocketType;
 use omq_proto::subscription::SubscriptionSet;
 
 use crate::monitor::{DisconnectReason, MonitorEvent, PeerIdent, PeerInfo};
-use crate::transport::driver::{self, DriverCommand, MonitorCtx};
+use crate::transport::dispatch::MonitorCtx;
+use crate::transport::driver::{self, DriverCommand};
 use crate::transport::inproc::{InprocConn, InprocPeerSnapshot};
 use crate::transport::peer_io::{WireReader, WireWriter};
 

@@ -19,14 +19,13 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use flume::Receiver;
 use smallvec::SmallVec;
 
-use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -34,12 +33,12 @@ use omq_proto::proto::command::PeerProperties;
 use omq_proto::proto::connection::{Connection, ConnectionConfig, Role};
 use omq_proto::proto::transform::MessageDecoder;
 use omq_proto::proto::{Command, Event, SocketType};
-use omq_proto::subscription::SubscriptionSet;
 
-use crate::monitor::{MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo};
 use crate::socket::DirectIoState;
+use crate::transport::dispatch::{Drained, MonitorCtx, dispatch_drained_events};
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
 use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader};
+use crate::transport::recv_stream::{StreamArmOutcome, pull_stream};
 
 /// Per-flush byte cap. Once a single drain has buffered this many
 /// bytes we stop pulling more from the inbox and let writev flush.
@@ -68,34 +67,6 @@ async fn maybe_sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(t) => compio::time::sleep_until(t).await,
         None => std::future::pending::<()>().await,
-    }
-}
-
-/// Outcome of the driver's multi-shot recv stream arm. Materialising
-/// the cases as an enum lets us complete the
-/// extract-buffer-and-feed-codec sequence synchronously inside the
-/// arm (no `.await` between buffer extract and `handle_input`),
-/// preserving the cancellation-safety invariant: dropping the driver
-/// future at any earlier `.await` does not lose any kernel bytes.
-enum StreamArmOutcome {
-    ClaimFlipped,
-    Fed,
-    Eof,
-    ProtoErr(Error),
-    Err(std::io::Error),
-    /// Raw CQE data for the shared accumulator in `DirectIoState`.
-    AccData(Bytes),
-}
-
-impl From<crate::socket::OneShotLargeRecvOutcome> for StreamArmOutcome {
-    fn from(o: crate::socket::OneShotLargeRecvOutcome) -> Self {
-        match o {
-            crate::socket::OneShotLargeRecvOutcome::Skipped
-            | crate::socket::OneShotLargeRecvOutcome::Took
-            | crate::socket::OneShotLargeRecvOutcome::AccumulatePayload => Self::Fed,
-            crate::socket::OneShotLargeRecvOutcome::IoErr(e) => Self::Err(e),
-            crate::socket::OneShotLargeRecvOutcome::ProtoErr(e) => Self::ProtoErr(e),
-        }
     }
 }
 
@@ -142,87 +113,6 @@ fn generated_identity(connection_id: u64) -> bytes::Bytes {
     bytes::Bytes::from(buf)
 }
 
-/// Per-connection context: monitor publisher + per-peer subscription
-/// set. Carried by the driver so it can publish `HandshakeSucceeded` /
-/// `PeerCommand` events with the correct `peer/endpoint/connection_id`,
-/// drive PUB-side fan-out filtering off the peer's
-/// SUBSCRIBE / CANCEL stream, and publish Disconnected on exit.
-#[derive(Clone, Debug)]
-pub(crate) struct MonitorCtx {
-    pub monitor: MonitorPublisher,
-    pub endpoint: Endpoint,
-    pub connection_id: u64,
-    pub peer_info: Arc<RwLock<Option<PeerInfo>>>,
-    pub peer_address: Option<std::net::SocketAddr>,
-    /// PUB-side fan-out filter for this peer. The driver applies
-    /// SUBSCRIBE / CANCEL to it as they arrive over the wire so the
-    /// socket layer's send-time filter has up-to-date state. `None`
-    /// for non-pub-side socket types.
-    pub peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    /// RADIO-side per-peer joined-group set. Updated as JOIN / LEAVE
-    /// commands arrive over the wire from the connected DISH so
-    /// `send_radio` can filter per peer. `None` for non-radio types.
-    pub peer_groups: Option<Arc<RwLock<std::collections::HashSet<bytes::Bytes>>>>,
-}
-
-/// Events drained from the codec under the [`PeerIo`] lock that need
-/// post-processing OUTSIDE the lock (because the post-processing
-/// awaits on the per-socket `peer_in_tx` blume channel, which we
-/// must not hold across).
-enum Drained {
-    Handshake {
-        peer_minor: u8,
-        peer_properties: Arc<PeerProperties>,
-    },
-    Msg(Message),
-    Cmd(Command),
-}
-
-/// Build a fresh [`Connection`] for this driver from the negotiated
-/// options + role. Factored out only so the codec construction is in
-/// one place.
-fn make_codec(role: Role, socket_type: SocketType, options: &Options) -> Connection {
-    let mut cfg = ConnectionConfig::new(role, socket_type)
-        .identity(options.identity.clone())
-        .mechanism(options.mechanism.to_setup());
-    if let Some(n) = options.max_message_size {
-        cfg = cfg.max_message_size(n);
-    }
-    Connection::new(cfg)
-}
-
-/// Apply a SUBSCRIBE/CANCEL coming from a peer: update the per-peer
-/// subscription set and, on XPUB, surface the command to the user
-/// recv stream as a `\x01<prefix>` / `\x00<prefix>` message.
-async fn handle_sub_cmd(
-    socket_type: SocketType,
-    monitor_ctx: Option<&MonitorCtx>,
-    peer_in_tx: &blume::Sender<InprocFrame>,
-    cmd: Command,
-) -> std::io::Result<()> {
-    let prefix = match &cmd {
-        Command::Subscribe(p) | Command::Cancel(p) => p.clone(),
-        _ => return Ok(()),
-    };
-    if let Some(ctx) = monitor_ctx
-        && let Some(set) = &ctx.peer_sub
-    {
-        let mut s = set.write().expect("peer_sub lock");
-        match cmd {
-            Command::Subscribe(_) => s.add(prefix.clone()),
-            Command::Cancel(_) => s.remove(&prefix),
-            _ => {}
-        }
-    }
-    if matches!(socket_type, SocketType::XPub) {
-        // Surface to the XPUB user as a 0x01/0x00-prefixed message.
-        // libzmq does the same — XPUB readers consume these to know
-        // who subscribed.
-        let _ = peer_in_tx.send_async(InprocFrame::Command(cmd)).await;
-    }
-    Ok(())
-}
-
 /// Build the [`SharedPeerIo`] handed to the driver and to the direct
 /// send/recv fast paths. Constructs the codec; the reader half arrives
 /// wrapped in a concrete [`WireReader`] enum so per-call dispatch is a
@@ -233,6 +123,16 @@ async fn handle_sub_cmd(
 ///
 /// The encoder is stored separately in [`DirectIoState::encoder`]; only
 /// the decoder lives here alongside the codec + reader.
+fn make_codec(role: Role, socket_type: SocketType, options: &Options) -> Connection {
+    let mut cfg = ConnectionConfig::new(role, socket_type)
+        .identity(options.identity.clone())
+        .mechanism(options.mechanism.to_setup());
+    if let Some(n) = options.max_message_size {
+        cfg = cfg.max_message_size(n);
+    }
+    Connection::new(cfg)
+}
+
 pub(crate) fn build_peer_io(
     role: Role,
     socket_type: SocketType,
@@ -353,247 +253,6 @@ impl DriverLoopState {
             monitor_ctx.map_or_else(Bytes::new, |ctx| generated_identity(ctx.connection_id))
         });
         self.drain_pending_commands(state, io)
-    }
-}
-
-async fn dispatch_command(
-    cmd: Command,
-    socket_type: SocketType,
-    monitor_ctx: Option<&MonitorCtx>,
-    peer_in_tx: &blume::Sender<InprocFrame>,
-) -> Result<bool> {
-    match cmd {
-        Command::Subscribe(_) | Command::Cancel(_) => {
-            handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, cmd).await?;
-        }
-        Command::Join(group) => {
-            if let Some(ctx) = monitor_ctx
-                && let Some(set) = &ctx.peer_groups
-            {
-                set.write().expect("peer_groups lock").insert(group);
-            }
-        }
-        Command::Leave(group) => {
-            if let Some(ctx) = monitor_ctx
-                && let Some(set) = &ctx.peer_groups
-            {
-                set.write().expect("peer_groups lock").remove(&group);
-            }
-        }
-        Command::Error { reason } => {
-            if let Some(ctx) = monitor_ctx
-                && let Some(info) = ctx.peer_info.read().expect("peer_info lock").clone()
-            {
-                ctx.monitor.publish(MonitorEvent::PeerCommand {
-                    endpoint: ctx.endpoint.clone(),
-                    peer: info,
-                    command: PeerCommandKind::Error { reason },
-                });
-            }
-        }
-        Command::Unknown { name, body } => {
-            if let Some(ctx) = monitor_ctx
-                && let Some(info) = ctx.peer_info.read().expect("peer_info lock").clone()
-            {
-                ctx.monitor.publish(MonitorEvent::PeerCommand {
-                    endpoint: ctx.endpoint.clone(),
-                    peer: info,
-                    command: PeerCommandKind::Unknown { name, body },
-                });
-            }
-        }
-        other => {
-            if peer_in_tx
-                .send_async(InprocFrame::Command(other))
-                .await
-                .is_err()
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-async fn dispatch_drained_events(
-    drained: SmallVec<[Drained; 8]>,
-    socket_type: SocketType,
-    peer_in_tx: &blume::Sender<InprocFrame>,
-    peer_snapshot_tx: &flume::Sender<InprocPeerSnapshot>,
-    monitor_ctx: Option<&MonitorCtx>,
-    peer_identity: &Bytes,
-) -> Result<bool> {
-    for de in drained {
-        match de {
-            Drained::Handshake {
-                peer_minor,
-                peer_properties,
-            } => {
-                let snap = InprocPeerSnapshot {
-                    socket_type: peer_properties.socket_type.unwrap_or(SocketType::Pair),
-                    identity: peer_identity.clone(),
-                };
-                let _ = peer_snapshot_tx.send(snap);
-                if let Some(ctx) = monitor_ctx {
-                    let info = PeerInfo {
-                        connection_id: ctx.connection_id,
-                        peer_address: ctx.peer_address,
-                        peer_identity: peer_properties.identity.clone(),
-                        peer_properties: peer_properties.clone(),
-                        zmtp_version: (3, peer_minor),
-                    };
-                    *ctx.peer_info.write().expect("peer_info lock") = Some(info.clone());
-                    ctx.monitor.publish(MonitorEvent::HandshakeSucceeded {
-                        endpoint: ctx.endpoint.clone(),
-                        peer: info,
-                    });
-                }
-            }
-            Drained::Msg(m) => {
-                if matches!(socket_type, SocketType::Pub | SocketType::XPub) && m.len() == 1 {
-                    let body = m.part_bytes(0).unwrap();
-                    if let Some((tag, prefix)) = body.split_first() {
-                        let cmd = match tag {
-                            0x01 => Some(Command::Subscribe(bytes::Bytes::copy_from_slice(prefix))),
-                            0x00 => Some(Command::Cancel(bytes::Bytes::copy_from_slice(prefix))),
-                            _ => None,
-                        };
-                        if let Some(c) = cmd {
-                            handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, c).await?;
-                            continue;
-                        }
-                    }
-                }
-                let frame = InprocFrame::message_from(peer_identity.clone(), m);
-                if peer_in_tx.send_async(frame).await.is_err() {
-                    return Ok(true);
-                }
-            }
-            Drained::Cmd(c) => {
-                if dispatch_command(c, socket_type, monitor_ctx, peer_in_tx).await? {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    Ok(false)
-}
-
-#[allow(clippy::too_many_lines)]
-async fn pull_stream(
-    state: &Arc<DirectIoState>,
-    peer_io: &SharedPeerIo,
-    recv_active: bool,
-    accumulating: bool,
-) -> StreamArmOutcome {
-    if recv_active {
-        state.recv_state_changed.listen().await;
-        return StreamArmOutcome::ClaimFlipped;
-    }
-    if accumulating {
-        let mut sguard = state.recv_stream.0.lock().await;
-        if state.recv_claim.load(Ordering::Acquire) == 1 {
-            drop(sguard);
-            state.recv_state_changed.listen().await;
-            return StreamArmOutcome::ClaimFlipped;
-        }
-        return match sguard.as_mut() {
-            Some(crate::socket::RecvStreamState::OneShot) => {
-                drop(sguard);
-                let payload_len = state.large_recv_pending.load(Ordering::Acquire);
-                let fd = {
-                    let io = peer_io.lock().expect("peer_io");
-                    io.reader.fd_clone()
-                };
-                let mut restore = crate::socket::AccRestore {
-                    state,
-                    buf: state.pending_acc.lock().expect("pending_acc").take(),
-                };
-                let acc = restore.buf.as_mut().expect("pending_acc");
-                if let Err(e) = fd.read_until(acc, payload_len).await {
-                    return StreamArmOutcome::Err(e);
-                }
-                state.last_input_nanos.store(
-                    state.hb_epoch.elapsed().as_nanos() as u64,
-                    Ordering::Relaxed,
-                );
-                let payload = restore.buf.take().unwrap().freeze();
-                state.large_recv_pending.store(0, Ordering::Release);
-                let mut io = peer_io.lock().expect("peer_io");
-                match io.codec.supply_payload(payload) {
-                    Ok(()) => StreamArmOutcome::Fed,
-                    Err(e) => StreamArmOutcome::ProtoErr(e),
-                }
-            }
-            Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
-                let buf = compio::runtime::FutureExt::with_cancel(
-                    futures::StreamExt::next(&mut cs.stream),
-                    cs.cancel.clone(),
-                )
-                .await;
-                match buf {
-                    None => StreamArmOutcome::Eof,
-                    Some(Err(e)) => StreamArmOutcome::Err(e),
-                    Some(Ok(buf)) if buf.is_empty() => StreamArmOutcome::Eof,
-                    Some(Ok(buf)) => {
-                        state.last_input_nanos.store(
-                            state.hb_epoch.elapsed().as_nanos() as u64,
-                            Ordering::Relaxed,
-                        );
-                        let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
-                        drop(buf);
-                        StreamArmOutcome::AccData(bytes)
-                    }
-                }
-            }
-            None => StreamArmOutcome::Eof,
-        };
-    }
-    let mut sguard = state.recv_stream.0.lock().await;
-    if state.recv_claim.load(Ordering::Acquire) == 1 {
-        drop(sguard);
-        state.recv_state_changed.listen().await;
-        return StreamArmOutcome::ClaimFlipped;
-    }
-    match sguard.as_mut() {
-        None => StreamArmOutcome::Eof,
-        Some(crate::socket::RecvStreamState::OneShot) => {
-            crate::socket::one_shot_recv_and_feed(state, &mut sguard)
-                .await
-                .into()
-        }
-        Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
-            let buf = compio::runtime::FutureExt::with_cancel(
-                futures::StreamExt::next(&mut cs.stream),
-                cs.cancel.clone(),
-            )
-            .await;
-            match buf {
-                None => StreamArmOutcome::Eof,
-                Some(Err(e)) => StreamArmOutcome::Err(e),
-                Some(Ok(buf)) => {
-                    if buf.is_empty() {
-                        return StreamArmOutcome::Eof;
-                    }
-                    state.last_input_nanos.store(
-                        state.hb_epoch.elapsed().as_nanos() as u64,
-                        Ordering::Relaxed,
-                    );
-                    let handle_result = {
-                        let mut io = peer_io.lock().expect("peer_io");
-                        let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
-                        drop(buf);
-                        io.codec.handle_input(bytes)
-                    };
-                    match handle_result {
-                        Err(e) => StreamArmOutcome::ProtoErr(e),
-                        Ok(()) => crate::socket::try_one_shot_large_recv(state, &mut sguard)
-                            .await
-                            .into(),
-                    }
-                }
-            }
-        }
     }
 }
 
