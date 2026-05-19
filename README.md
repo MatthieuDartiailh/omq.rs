@@ -30,7 +30,7 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
 > CURVE handshake.
 
 <p align="center">
-  <img src="doc/comparison_chart.svg" alt="PUSH/PULL throughput: native implementations" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/comparison_chart.svg" alt="PUSH/PULL throughput: native implementations" width="850">
 </p>
 
 ### vs. libzmq (TCP loopback, two processes)

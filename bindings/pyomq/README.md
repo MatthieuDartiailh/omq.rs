@@ -63,7 +63,7 @@ around compio's single-thread invariant.
 ## Performance
 
 <p align="center">
-  <img src="../../doc/comparison_chart_dynamic.svg" alt="PUSH/PULL throughput: dynamic languages" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/comparison_chart_dynamic.svg" alt="PUSH/PULL throughput: dynamic languages" width="850">
 </p>
 
 Loopback PUSH/PULL throughput vs pyzmq, on a Linux 6.12 (Debian 13) VM on an
