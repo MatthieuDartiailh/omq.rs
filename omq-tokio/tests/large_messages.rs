@@ -4,18 +4,11 @@
 //! that span many TCP segments. Encryption masks framing bugs in CURVE/BLAKE3
 //! suites; this file tests plain framing directly.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -26,15 +19,10 @@ fn tcp_ep(port: u16) -> Endpoint {
 
 async fn push_pull_large(size_bytes: usize) {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let port = loop {
-        let p = loopback_port();
-        if pull.bind(tcp_ep(p)).await.is_ok() {
-            break p;
-        }
-    };
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let payload: Vec<u8> = (0..size_bytes).map(|i| (i & 0xFF) as u8).collect();
@@ -75,11 +63,10 @@ async fn large_message_1mib() {
 #[tokio::test]
 async fn large_multipart_over_tcp() {
     let part_size = 256 * 1024;
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let part_a: Vec<u8> = vec![0xAA; part_size];
@@ -106,11 +93,10 @@ async fn huge_messages_xxhash() {
 
     const SIZES: [usize; 3] = [4 * 1024 * 1024, 8 * 1024 * 1024, 100 * 1024 * 1024];
 
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mut hashes = [0u128; 3];
@@ -140,12 +126,11 @@ async fn huge_messages_xxhash() {
 async fn large_message_back_to_back() {
     // Two large messages sent without waiting; verifies framing continuity.
     let size = 128 * 1024;
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let p1: Vec<u8> = vec![0x11; size];

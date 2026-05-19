@@ -7,19 +7,12 @@
 
 #![cfg(not(feature = "priority"))]
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::options::ReconnectPolicy;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -38,7 +31,11 @@ fn tcp_ep(port: u16) -> Endpoint {
 /// released so the bind later succeeds.
 #[compio::test]
 async fn push_conflate_keeps_only_latest() {
-    let port = loopback_port();
+    // Grab a free port by binding a temporary socket, then close it
+    // so PUSH connects to a port with no listener (exercising reconnect).
+    let tmp = Socket::new(SocketType::Pull, Options::default());
+    let ep = tmp.bind(tcp_ep(0)).await.unwrap();
+    tmp.close().await.unwrap();
 
     let opts = Options {
         conflate: true,
@@ -49,7 +46,7 @@ async fn push_conflate_keeps_only_latest() {
         ..Default::default()
     };
     let push = Socket::new(SocketType::Push, opts);
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
 
     // No peer yet: every send goes into the cap-1 shared queue and
     // replaces whatever was there. All 100 sends return immediately.
@@ -62,7 +59,7 @@ async fn push_conflate_keeps_only_latest() {
     // Now bind PULL. The reconnect supervisor connects PUSH → PULL;
     // the pump drains the queue (which now holds only "m-099").
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    pull.bind(ep).await.unwrap();
 
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = compio::time::timeout(Duration::from_millis(500), pull.recv()).await {

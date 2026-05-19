@@ -1,18 +1,11 @@
 //! Reconnect coverage for socket types beyond PUSH/PULL.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::options::ReconnectPolicy;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -28,28 +21,26 @@ fn fast_reconnect() -> Options {
     }
 }
 
-async fn rebind<F: Fn() -> Socket>(port: u16, make: F) -> Socket {
+async fn rebind<F: Fn() -> Socket>(ep: &Endpoint, make: F) -> Socket {
     let s = make();
     for _ in 0..40 {
-        if s.bind(tcp_ep(port)).await.is_ok() {
+        if s.bind(ep.clone()).await.is_ok() {
             return s;
         }
         compio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("could not rebind port {port} after 40 attempts");
+    panic!("could not rebind {ep:?} after 40 attempts");
 }
 
 // ── REQ / REP ────────────────────────────────────────────────────────────────
 
 #[compio::test]
 async fn req_rep_reconnect_after_server_restart() {
-    let port = loopback_port();
-
     let rep1 = Socket::new(SocketType::Rep, Options::default());
-    rep1.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep1.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, fast_reconnect());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep.clone()).await.unwrap();
 
     req.send(Message::single("ping1")).await.unwrap();
     let got = compio::time::timeout(Duration::from_secs(2), rep1.recv())
@@ -64,7 +55,7 @@ async fn req_rep_reconnect_after_server_restart() {
         .unwrap();
 
     rep1.close().await.unwrap();
-    let rep2 = rebind(port, || Socket::new(SocketType::Rep, Options::default())).await;
+    let rep2 = rebind(&ep, || Socket::new(SocketType::Rep, Options::default())).await;
 
     req.send(Message::single("ping2")).await.unwrap();
     let got2 = compio::time::timeout(Duration::from_secs(3), rep2.recv())
@@ -82,13 +73,11 @@ async fn req_rep_reconnect_after_server_restart() {
 
 #[compio::test]
 async fn req_state_machine_survives_drop_mid_cycle() {
-    let port = loopback_port();
-
     let rep1 = Socket::new(SocketType::Rep, Options::default());
-    rep1.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep1.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, fast_reconnect());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep.clone()).await.unwrap();
 
     req.send(Message::single("a")).await.unwrap();
     compio::time::timeout(Duration::from_secs(2), rep1.recv())
@@ -105,7 +94,7 @@ async fn req_state_machine_survives_drop_mid_cycle() {
     compio::time::sleep(Duration::from_millis(50)).await;
     rep1.close().await.unwrap();
 
-    let rep2 = rebind(port, || Socket::new(SocketType::Rep, Options::default())).await;
+    let rep2 = rebind(&ep, || Socket::new(SocketType::Rep, Options::default())).await;
 
     req.send(Message::single("c")).await.unwrap();
     let got = compio::time::timeout(Duration::from_secs(3), rep2.recv())
@@ -125,13 +114,11 @@ async fn req_state_machine_survives_drop_mid_cycle() {
 
 #[compio::test]
 async fn pub_sub_reconnect_replays_subscriptions() {
-    let port = loopback_port();
-
     let pub1 = Socket::new(SocketType::Pub, Options::default());
-    pub1.bind(tcp_ep(port)).await.unwrap();
+    let ep = pub1.bind(tcp_ep(0)).await.unwrap();
 
     let sub = Socket::new(SocketType::Sub, fast_reconnect());
-    sub.connect(tcp_ep(port)).await.unwrap();
+    sub.connect(ep.clone()).await.unwrap();
     sub.subscribe("x.").await.unwrap();
     compio::time::sleep(Duration::from_millis(100)).await;
 
@@ -143,7 +130,7 @@ async fn pub_sub_reconnect_replays_subscriptions() {
     assert_eq!(m1.part_bytes(0).unwrap().as_ref(), b"x.hello");
 
     pub1.close().await.unwrap();
-    let pub2 = rebind(port, || Socket::new(SocketType::Pub, Options::default())).await;
+    let pub2 = rebind(&ep, || Socket::new(SocketType::Pub, Options::default())).await;
 
     compio::time::sleep(Duration::from_millis(150)).await;
 
@@ -167,10 +154,8 @@ async fn pub_sub_reconnect_replays_subscriptions() {
 
 #[compio::test]
 async fn dealer_router_reconnect_after_router_restart() {
-    let port = loopback_port();
-
     let router1 = Socket::new(SocketType::Router, Options::default());
-    router1.bind(tcp_ep(port)).await.unwrap();
+    let ep = router1.bind(tcp_ep(0)).await.unwrap();
 
     let dealer = Socket::new(
         SocketType::Dealer,
@@ -179,7 +164,7 @@ async fn dealer_router_reconnect_after_router_restart() {
             ..Options::default().identity(bytes::Bytes::from_static(b"d1"))
         },
     );
-    dealer.connect(tcp_ep(port)).await.unwrap();
+    dealer.connect(ep.clone()).await.unwrap();
     compio::time::sleep(Duration::from_millis(100)).await;
 
     dealer.send(Message::single("hello")).await.unwrap();
@@ -191,7 +176,7 @@ async fn dealer_router_reconnect_after_router_restart() {
     assert_eq!(got1.part_bytes(1).unwrap().as_ref(), b"hello");
 
     router1.close().await.unwrap();
-    let router2 = rebind(port, || Socket::new(SocketType::Router, Options::default())).await;
+    let router2 = rebind(&ep, || Socket::new(SocketType::Router, Options::default())).await;
 
     dealer.send(Message::single("after")).await.unwrap();
     let got2 = compio::time::timeout(Duration::from_secs(3), router2.recv())

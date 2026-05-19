@@ -21,13 +21,10 @@ fn soak_curve_sustained() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let port = soak_common::loopback_port();
-    let ep = soak_common::tcp_ep(port);
-
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
         let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
-        pull.bind(ep.clone()).await.unwrap();
+        let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
 
         let push = Socket::new(
             SocketType::Push,

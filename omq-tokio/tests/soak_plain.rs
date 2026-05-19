@@ -17,9 +17,6 @@ fn soak_plain_sustained() {
     let recvd = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let port = soak_common::loopback_port();
-    let ep = soak_common::tcp_ep(port);
-
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
         let pull = Socket::new(
@@ -29,7 +26,7 @@ fn soak_plain_sustained() {
                     && peer.password.as_deref() == Some("secret")
             }),
         );
-        pull.bind(ep.clone()).await.unwrap();
+        let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
 
         let push = Socket::new(
             SocketType::Push,

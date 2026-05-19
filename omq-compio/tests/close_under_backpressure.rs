@@ -3,18 +3,11 @@
 //! channel full). Previously `close()` could hang indefinitely because
 //! `send_async(Close)` blocked on a full command channel.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -25,11 +18,8 @@ fn tcp_ep(port: u16) -> Endpoint {
 
 #[compio::test]
 async fn close_push_pull_under_backpressure() {
-    let port = loopback_port();
-    let ep = tcp_ep(port);
-
     let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(4));
-    pull.bind(ep.clone()).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default().send_hwm(4));
     push.connect(ep).await.unwrap();
@@ -57,10 +47,8 @@ async fn close_push_pull_under_backpressure() {
 async fn close_many_pairs_no_hang() {
     let mut pairs = Vec::new();
     for _ in 0..10 {
-        let port = loopback_port();
-        let ep = tcp_ep(port);
         let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(4));
-        pull.bind(ep.clone()).await.unwrap();
+        let ep = pull.bind(tcp_ep(0)).await.unwrap();
         let push = Socket::new(SocketType::Push, Options::default().send_hwm(4));
         push.connect(ep).await.unwrap();
         pairs.push((push, pull));

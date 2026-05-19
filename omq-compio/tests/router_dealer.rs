@@ -6,7 +6,7 @@
 //!   identity tracking on its end.
 //! - `router_mandatory`: send to unknown identity returns Unroutable.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -15,13 +15,6 @@ use omq_compio::{
     DisconnectReason, Endpoint, Error, Message, MonitorEvent, Options, ReconnectPolicy, Socket,
     SocketType,
 };
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -47,12 +40,11 @@ fn opts_no_reconnect(id: &str) -> Options {
 
 #[compio::test]
 async fn router_addresses_dealer_by_identity() {
-    let port = loopback_port();
     let router = Socket::new(SocketType::Router, Options::default());
-    router.bind(tcp_ep(port)).await.unwrap();
+    let ep = router.bind(tcp_ep(0)).await.unwrap();
 
     let dealer = Socket::new(SocketType::Dealer, opts_with_identity("dealer-1"));
-    dealer.connect(tcp_ep(port)).await.unwrap();
+    dealer.connect(ep).await.unwrap();
 
     // DEALER sends a one-frame body. ROUTER receives [identity, body].
     dealer.send(Message::single("hello")).await.unwrap();
@@ -80,16 +72,15 @@ async fn router_addresses_dealer_by_identity() {
 
 #[compio::test]
 async fn router_mandatory_errors_on_unknown_identity() {
-    let port = loopback_port();
     let opts = Options {
         router_mandatory: true,
         ..Default::default()
     };
     let router = Socket::new(SocketType::Router, opts);
-    router.bind(tcp_ep(port)).await.unwrap();
+    let ep = router.bind(tcp_ep(0)).await.unwrap();
 
     let dealer = Socket::new(SocketType::Dealer, opts_with_identity("dealer-known"));
-    dealer.connect(tcp_ep(port)).await.unwrap();
+    dealer.connect(ep).await.unwrap();
 
     // Round-trip a message so the router learns dealer-known's slot
     // and we know the connection is up.
@@ -107,12 +98,11 @@ async fn router_mandatory_errors_on_unknown_identity() {
 
 #[compio::test]
 async fn router_drops_unknown_identity_by_default() {
-    let port = loopback_port();
     let router = Socket::new(SocketType::Router, Options::default());
-    router.bind(tcp_ep(port)).await.unwrap();
+    let ep = router.bind(tcp_ep(0)).await.unwrap();
 
     let dealer = Socket::new(SocketType::Dealer, opts_with_identity("d"));
-    dealer.connect(tcp_ep(port)).await.unwrap();
+    dealer.connect(ep).await.unwrap();
 
     dealer.send(Message::single("ping")).await.unwrap();
     let _ = compio::time::timeout(Duration::from_secs(2), router.recv())
@@ -127,12 +117,11 @@ async fn router_drops_unknown_identity_by_default() {
 
 #[compio::test]
 async fn router_assigns_identity_for_peers_without_one() {
-    let port = loopback_port();
     let router = Socket::new(SocketType::Router, Options::default());
-    router.bind(tcp_ep(port)).await.unwrap();
+    let ep = router.bind(tcp_ep(0)).await.unwrap();
 
     let dealer = Socket::new(SocketType::Dealer, Options::default());
-    dealer.connect(tcp_ep(port)).await.unwrap();
+    dealer.connect(ep).await.unwrap();
 
     compio::time::sleep(Duration::from_millis(50)).await;
 
@@ -165,12 +154,11 @@ async fn router_assigns_identity_for_peers_without_one() {
 
 #[compio::test]
 async fn router_handover_evicts_old_peer() {
-    let port = loopback_port();
     let router = Socket::new(SocketType::Router, Options::default());
-    router.bind(tcp_ep(port)).await.unwrap();
+    let ep = router.bind(tcp_ep(0)).await.unwrap();
 
     let dealer_a = Socket::new(SocketType::Dealer, opts_no_reconnect("alpha"));
-    dealer_a.connect(tcp_ep(port)).await.unwrap();
+    dealer_a.connect(ep.clone()).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     dealer_a.send(Message::single("hello")).await.unwrap();
@@ -195,7 +183,7 @@ async fn router_handover_evicts_old_peer() {
     assert_eq!(r.part_bytes(0).unwrap(), &b"reply-1"[..]);
 
     let dealer_b = Socket::new(SocketType::Dealer, opts_no_reconnect("alpha"));
-    dealer_b.connect(tcp_ep(port)).await.unwrap();
+    dealer_b.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     dealer_b.send(Message::single("world")).await.unwrap();
@@ -267,16 +255,15 @@ async fn router_handover_monitor_event() {
 
 #[compio::test]
 async fn router_handover_auto_identity_no_collision() {
-    let port = loopback_port();
     let router = Socket::new(SocketType::Router, Options::default());
     let mut mon = router.monitor();
-    router.bind(tcp_ep(port)).await.unwrap();
+    let ep = router.bind(tcp_ep(0)).await.unwrap();
 
     let d1 = Socket::new(SocketType::Dealer, Options::default());
-    d1.connect(tcp_ep(port)).await.unwrap();
+    d1.connect(ep.clone()).await.unwrap();
 
     let d2 = Socket::new(SocketType::Dealer, Options::default());
-    d2.connect(tcp_ep(port)).await.unwrap();
+    d2.connect(ep).await.unwrap();
 
     compio::time::sleep(Duration::from_millis(100)).await;
 

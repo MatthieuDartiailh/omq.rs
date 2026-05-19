@@ -16,16 +16,14 @@ use super::install::{install_accepted_wire_peer, install_inproc_peer};
 use super::reject_encrypted_inproc;
 
 impl Socket {
-    /// Bind to an endpoint. Returns once the listener is active (or, for UDP
-    /// DISH, once the socket is bound and the recv loop is spawned).
-    pub async fn bind(&self, endpoint: Endpoint) -> Result<()> {
+    /// Bind to an endpoint. Returns the resolved endpoint once the
+    /// listener is active. For wildcard binds (`tcp://...:0`) the
+    /// returned endpoint contains the actual port.
+    pub async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
         reject_encrypted_inproc(&endpoint, &self.inner().options.mechanism)?;
         if endpoint.is_tcp_family() {
             return self.bind_tcp(endpoint).await;
         }
-        // The Lz4Tcp / ZstdTcp arms are gated on this crate's own feature;
-        // Cargo feature unification can still surface those variants, so we
-        // add a wildcard runtime fallback.
         #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
         match endpoint {
             Endpoint::Inproc { name } => self.bind_inproc(name).await,
@@ -38,7 +36,7 @@ impl Socket {
     }
 
     #[allow(clippy::unused_async)]
-    async fn bind_inproc(&self, name: String) -> Result<()> {
+    async fn bind_inproc(&self, name: String) -> Result<Endpoint> {
         let snapshot = self.inner().snapshot();
         let listener = inproc::bind(
             &name,
@@ -70,6 +68,7 @@ impl Socket {
                 );
             }
         });
+        let ret = resolved.clone();
         self.inner()
             .listeners
             .write()
@@ -78,10 +77,10 @@ impl Socket {
                 endpoint: resolved,
                 _task: task,
             });
-        Ok(())
+        Ok(ret)
     }
 
-    async fn bind_tcp(&self, endpoint: Endpoint) -> Result<()> {
+    async fn bind_tcp(&self, endpoint: Endpoint) -> Result<Endpoint> {
         let wrapper = endpoint.clone();
         let plain = endpoint.underlying_tcp();
         let (listener, local) = tcp_transport::bind(&plain).await?;
@@ -120,6 +119,7 @@ impl Socket {
                 );
             }
         });
+        let ret = resolved.clone();
         self.inner()
             .listeners
             .write()
@@ -128,10 +128,10 @@ impl Socket {
                 endpoint: resolved,
                 _task: task,
             });
-        Ok(())
+        Ok(ret)
     }
 
-    async fn bind_ipc(&self, endpoint: Endpoint) -> Result<()> {
+    async fn bind_ipc(&self, endpoint: Endpoint) -> Result<Endpoint> {
         let listener = ipc_transport::bind(&endpoint).await?;
         let resolved = endpoint.clone();
         self.inner().monitor.listening(resolved.clone());
@@ -169,6 +169,7 @@ impl Socket {
                 );
             }
         });
+        let ret = resolved.clone();
         self.inner()
             .listeners
             .write()
@@ -177,10 +178,10 @@ impl Socket {
                 endpoint: resolved,
                 _task: task,
             });
-        Ok(())
+        Ok(ret)
     }
 
-    async fn bind_udp(&self, endpoint: Endpoint) -> Result<()> {
+    async fn bind_udp(&self, endpoint: Endpoint) -> Result<Endpoint> {
         if self.inner().socket_type != SocketType::Dish {
             return Err(Error::Protocol(
                 "udp:// bind is only supported on DISH sockets".into(),
@@ -225,6 +226,7 @@ impl Socket {
                 }
             }
         });
+        let ret = resolved.clone();
         self.inner()
             .listeners
             .write()
@@ -233,6 +235,6 @@ impl Socket {
                 endpoint: resolved,
                 _task: task,
             });
-        Ok(())
+        Ok(ret)
     }
 }

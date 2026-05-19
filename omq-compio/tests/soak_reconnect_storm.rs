@@ -20,8 +20,11 @@ fn soak_reconnect_storm() {
 
     let rt = compio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let port = soak_common::loopback_port();
-        let ep = soak_common::tcp_ep(port);
+        // Grab a free port by binding a temporary socket, then close it.
+        // The PUSH dialer reconnects to this fixed endpoint across PULL restarts.
+        let tmp = Socket::new(SocketType::Pull, Options::default());
+        let ep = tmp.bind(soak_common::tcp_ep(0)).await.unwrap();
+        tmp.close().await.unwrap();
 
         let push = Socket::new(
             SocketType::Push,

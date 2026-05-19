@@ -8,18 +8,11 @@
 //!   REP server.
 //! - REP survives a client disconnect mid-cycle and serves the next client.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Error, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -148,15 +141,13 @@ async fn rep_survives_client_disconnect_mid_cycle() {
     // REP receives a request; the client drops before REP sends the
     // reply.  REP must clear its stale envelope and serve the next
     // client correctly.
-    let port = loopback_port();
-
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     // First client: sends a request then drops immediately.
     {
         let req1 = Socket::new(SocketType::Req, Options::default());
-        req1.connect(tcp_ep(port)).await.unwrap();
+        req1.connect(ep.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         req1.send(Message::single("drop-me")).await.unwrap();
 
@@ -170,7 +161,7 @@ async fn rep_survives_client_disconnect_mid_cycle() {
 
     // Second client: full roundtrip must succeed.
     let req2 = Socket::new(SocketType::Req, Options::default());
-    req2.connect(tcp_ep(port)).await.unwrap();
+    req2.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     req2.send(Message::single("real")).await.unwrap();
@@ -194,13 +185,12 @@ async fn req_rep_1000_cycles_tcp() {
     // Scales beyond inproc to reveal framing races, backpressure issues,
     // and timer/wake latency at real socket throughput.
     const CYCLES: usize = 1_000;
-    let port = loopback_port();
 
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let rep_task = tokio::spawn(async move {

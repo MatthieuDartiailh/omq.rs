@@ -1,6 +1,6 @@
 //! Multi-peer PUSH / PULL integration tests and work-stealing demo.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -10,13 +10,6 @@ use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
-}
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
 }
 
 fn tcp_ep(port: u16) -> Endpoint {
@@ -255,14 +248,13 @@ async fn push_delivers_to_alive_peer_after_dead_slot() {
     // dead in out_peers), then PULL2 connects (slot 1). PUSH sends —
     // the message must reach PULL2 via the shared queue even though
     // peer_count == 2 (dead slot + alive slot).
-    let port = loopback_port();
     let push = Socket::new(SocketType::Push, Options::default());
-    push.bind(tcp_ep(port)).await.unwrap();
+    let ep = push.bind(tcp_ep(0)).await.unwrap();
 
     // Slot 0: connect, send one message, then drop.
     {
         let pull1 = Socket::new(SocketType::Pull, Options::default());
-        pull1.connect(tcp_ep(port)).await.unwrap();
+        pull1.connect(ep.clone()).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
         push.send(Message::single("first")).await.unwrap();
         let _ = compio::time::timeout(Duration::from_millis(200), pull1.recv()).await;
@@ -272,7 +264,7 @@ async fn push_delivers_to_alive_peer_after_dead_slot() {
 
     // Slot 1: alive peer.
     let pull2 = Socket::new(SocketType::Pull, Options::default());
-    pull2.connect(tcp_ep(port)).await.unwrap();
+    pull2.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     push.send(Message::single("second")).await.unwrap();

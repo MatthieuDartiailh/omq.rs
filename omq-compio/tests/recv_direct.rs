@@ -5,18 +5,11 @@
 //! cancellation, concurrency, heartbeat-coexistence, and reconnect
 //! edges where the implementation is most likely to misbehave.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType, build_default_runtime};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -31,12 +24,11 @@ fn tcp_ep(port: u16) -> Endpoint {
 /// the recv claim and wakes the driver.
 #[compio::test]
 async fn cancel_recv_mid_wait_then_recv_succeeds() {
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
 
     // Wait for the connection to handshake before kicking off the
     // cancellation race - direct recv only engages post-handshake.
@@ -73,11 +65,10 @@ async fn heartbeat_keeps_connection_alive_under_direct_recv() {
         ..Default::default()
     };
 
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, o.clone());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
     let push = Socket::new(SocketType::Push, o);
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
 
     // Warm-up to confirm direct recv is engaging.
     push.send(Message::single("warm-up")).await.unwrap();
@@ -123,11 +114,10 @@ fn recv_drop_during_select_does_not_desync() {
 
     let rt = build_default_runtime().expect("build runtime");
     rt.block_on(async {
-        let port = loopback_port();
         let pull = Socket::new(SocketType::Pull, Options::default());
-        pull.bind(tcp_ep(port)).await.unwrap();
+        let ep = pull.bind(tcp_ep(0)).await.unwrap();
         let push = Socket::new(SocketType::Push, Options::default());
-        push.connect(tcp_ep(port)).await.unwrap();
+        push.connect(ep).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
 
         let send_fut = async {

@@ -10,14 +10,6 @@ use std::time::Duration;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 use omq_proto::endpoint::Host;
 
-fn loopback_port() -> u16 {
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
-
 fn tcp_loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
@@ -202,9 +194,12 @@ fn read_zmtp_frame(stream: &mut std::net::TcpStream) -> Vec<u8> {
 async fn pub_accepts_zmtp30_message_form_subscribe() {
     use std::io::Write;
 
-    let port = loopback_port();
     let pub_ = Socket::new(SocketType::Pub, Options::default());
-    pub_.bind(tcp_loopback(port)).await.unwrap();
+    let ep = pub_.bind(tcp_loopback(0)).await.unwrap();
+    let port = match &ep {
+        Endpoint::Tcp { port, .. } => *port,
+        _ => unreachable!(),
+    };
     compio::time::sleep(Duration::from_millis(30)).await;
 
     let (sub_sent_tx, sub_sent_rx) = flume::bounded::<()>(1);

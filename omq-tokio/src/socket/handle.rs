@@ -202,8 +202,10 @@ impl Socket {
         self.inner.socket_type
     }
 
-    /// Bind to an endpoint. Returns once the listener is active.
-    pub async fn bind(&self, endpoint: Endpoint) -> Result<()> {
+    /// Bind to an endpoint. Returns the resolved endpoint once the
+    /// listener is active. For wildcard binds (`tcp://...:0`) the
+    /// returned endpoint contains the actual port.
+    pub async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
@@ -462,7 +464,7 @@ impl omq_proto::socket_api::SocketApi for Socket {
     fn socket_type(&self) -> SocketType {
         self.socket_type()
     }
-    async fn bind(&self, endpoint: Endpoint) -> Result<()> {
+    async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
         self.bind(endpoint).await
     }
     async fn connect(&self, endpoint: Endpoint) -> Result<()> {

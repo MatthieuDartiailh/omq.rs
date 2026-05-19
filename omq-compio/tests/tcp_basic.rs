@@ -2,18 +2,11 @@
 //! driver runs the ZMTP codec correctly: greeting, READY exchange,
 //! per-frame parsing.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -24,12 +17,11 @@ fn tcp_ep(port: u16) -> Endpoint {
 
 #[compio::test]
 async fn tcp_push_pull_single_message() {
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
 
     push.send(Message::single("over-tcp")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
@@ -42,12 +34,11 @@ async fn tcp_push_pull_single_message() {
 #[compio::test]
 async fn tcp_push_pull_burst() {
     const N: u32 = 200;
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
 
     for i in 0..N {
         push.send(Message::single(format!("m-{i:04}")))

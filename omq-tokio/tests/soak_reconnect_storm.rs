@@ -14,8 +14,11 @@ fn soak_reconnect_storm() {
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let port = soak_common::loopback_port();
-        let ep = soak_common::tcp_ep(port);
+        // Bind port 0 to discover a free port, then use that endpoint for
+        // repeated bind/close cycles so the dialer reconnects to the same address.
+        let probe = Socket::new(SocketType::Pull, Options::default());
+        let ep = probe.bind(soak_common::tcp_ep(0)).await.unwrap();
+        probe.close().await.unwrap();
 
         let push = Socket::new(
             SocketType::Push,

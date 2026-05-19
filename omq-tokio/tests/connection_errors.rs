@@ -2,18 +2,11 @@
 //! client disconnects (pre-handshake and mid-session) and continue to
 //! accept and serve new connections normally.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -29,9 +22,12 @@ async fn server_survives_pre_handshake_drop() {
     // subsequent legitimate connections.
     use tokio::net::TcpStream;
 
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let port = match &ep {
+        Endpoint::Tcp { port, .. } => *port,
+        _ => unreachable!(),
+    };
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
 
@@ -44,7 +40,7 @@ async fn server_survives_pre_handshake_drop() {
 
     // Legitimate client: full ZMTP session must work.
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     push.send(Message::single("alive")).await.unwrap();
@@ -60,15 +56,13 @@ async fn server_survives_mid_session_abrupt_drop() {
     // Client drops the TCP connection abruptly (tokio socket dropped
     // without close) while the server is live. Server must survive and
     // accept the next connection.
-    let port = loopback_port();
-
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     // First client: sends one message then drops.
     {
         let push1 = Socket::new(SocketType::Push, Options::default());
-        push1.connect(tcp_ep(port)).await.unwrap();
+        push1.connect(ep.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         push1.send(Message::single("first")).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_millis(300), pull.recv()).await;
@@ -78,7 +72,7 @@ async fn server_survives_mid_session_abrupt_drop() {
 
     // Second client: server must still be healthy.
     let push2 = Socket::new(SocketType::Push, Options::default());
-    push2.connect(tcp_ep(port)).await.unwrap();
+    push2.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     push2.send(Message::single("second")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())

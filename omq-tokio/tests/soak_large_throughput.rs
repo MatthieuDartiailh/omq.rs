@@ -21,11 +21,8 @@ fn soak_large_message_throughput() {
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let port = soak_common::loopback_port();
-        let ep = soak_common::tcp_ep(port);
-
         let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(4));
-        pull.bind(ep.clone()).await.unwrap();
+        let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
 
         let push = Socket::new(SocketType::Push, Options::default().send_hwm(4));
         push.connect(ep).await.unwrap();

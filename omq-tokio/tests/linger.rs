@@ -2,18 +2,11 @@
 //! returning. Exercises the send-queue drain path that linger=0 (the
 //! default) never touches.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -70,15 +63,14 @@ async fn linger_nonzero_drains_queued_messages_inproc() {
 async fn linger_nonzero_drains_queued_messages_tcp() {
     const N: u32 = 50;
 
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(
         SocketType::Push,
         Options::default().linger(Duration::from_secs(2)),
     );
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     for i in 0..N {
         push.send(Message::single(i.to_be_bytes().to_vec()))
@@ -183,12 +175,10 @@ async fn linger_completes_within_timeout_after_peer_disconnect() {
     // rather than hanging indefinitely waiting for a peer that is gone.
     const LINGER: Duration = Duration::from_millis(300);
 
-    let port = loopback_port();
-
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
     let push = Socket::new(SocketType::Push, Options::default().linger(LINGER));
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Queue up messages; let the peer receive a few then disconnect.

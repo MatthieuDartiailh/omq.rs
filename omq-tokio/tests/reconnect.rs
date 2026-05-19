@@ -8,13 +8,6 @@ use omq_tokio::endpoint::Host;
 use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
-fn loopback_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    19_000 + (n % 500)
-}
-
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
@@ -24,15 +17,17 @@ fn tcp_ep(port: u16) -> Endpoint {
 
 #[tokio::test]
 async fn connect_retries_until_listener_appears() {
-    let port = loopback_port();
+    let (ep_tx, ep_rx) = tokio::sync::oneshot::channel();
 
-    let pull_ep = tcp_ep(port);
     let bind_handle = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(150)).await;
         let pull = Socket::new(SocketType::Pull, Options::default());
-        pull.bind(pull_ep).await.unwrap();
+        let ep = pull.bind(tcp_ep(0)).await.unwrap();
+        ep_tx.send(ep).unwrap();
         pull
     });
+
+    let ep = ep_rx.await.unwrap();
 
     let opts = Options {
         reconnect: ReconnectPolicy::Exponential {
@@ -42,7 +37,7 @@ async fn connect_retries_until_listener_appears() {
         ..Default::default()
     };
     let push = Socket::new(SocketType::Push, opts);
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
 
     push.send(Message::single("eventually")).await.unwrap();
     let pull = bind_handle.await.unwrap();
@@ -57,10 +52,8 @@ async fn connect_retries_until_listener_appears() {
 async fn reconnect_after_peer_restart() {
     // Peer (listener side) shuts down mid-session; dialer reconnects to the
     // same endpoint when a fresh listener appears.
-    let port = loopback_port();
-
     let pull1 = Socket::new(SocketType::Pull, Options::default());
-    pull1.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull1.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(
         SocketType::Push,
@@ -69,7 +62,7 @@ async fn reconnect_after_peer_restart() {
             ..Default::default()
         },
     );
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
 
     // Confirm the session is live before simulating the peer restart.
     push.send(Message::single("before")).await.unwrap();
@@ -86,7 +79,7 @@ async fn reconnect_after_peer_restart() {
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     let mut bound = false;
     for _ in 0..20 {
-        if pull2.bind(tcp_ep(port)).await.is_ok() {
+        if pull2.bind(ep.clone()).await.is_ok() {
             bound = true;
             break;
         }
@@ -106,10 +99,8 @@ async fn reconnect_after_peer_restart() {
 async fn peer_drop_mid_send_is_handled_cleanly() {
     // Peer is dropped while the push engine has in-flight sends. The socket
     // must not panic or deadlock; it reconnects and resumes delivery.
-    let port = loopback_port();
-
     let pull1 = Socket::new(SocketType::Pull, Options::default());
-    pull1.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull1.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(
         SocketType::Push,
@@ -119,7 +110,7 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
         },
     );
     let mut mon = push.monitor();
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
 
     // Confirm handshake before flooding.
     push.send(Message::single("sync")).await.unwrap();
@@ -148,7 +139,7 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     let mut bound = false;
     for _ in 0..20 {
-        if pull2.bind(tcp_ep(port)).await.is_ok() {
+        if pull2.bind(ep.clone()).await.is_ok() {
             bound = true;
             break;
         }
@@ -193,8 +184,15 @@ async fn exponential_backoff_retry_in_grows() {
     // non-decreasing and at least as large as `min`.
     use omq_tokio::MonitorEvent;
 
-    let port = loopback_port();
     // Nothing is listening; every dial attempt will fail immediately.
+    // Bind+close to discover a free port that has no listener.
+    let free_port = {
+        use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+        let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
 
     let push = Socket::new(
         SocketType::Push,
@@ -207,7 +205,7 @@ async fn exponential_backoff_retry_in_grows() {
         },
     );
     let mut mon = push.monitor();
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(tcp_ep(free_port)).await.unwrap();
 
     // Collect the first 4 ConnectDelayed events.
     let mut delays: Vec<Duration> = Vec::new();

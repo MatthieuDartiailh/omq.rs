@@ -17,14 +17,6 @@ fn temp_ipc(name: &str) -> Endpoint {
     Endpoint::Ipc(IpcPath::Filesystem(dir))
 }
 
-fn loopback_port() -> u16 {
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
-
 fn tcp_ep(port: u16) -> Endpoint {
     use std::net::{IpAddr, Ipv4Addr};
     Endpoint::Tcp {
@@ -336,13 +328,11 @@ async fn curve_reconnects_after_server_restart() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let port = loopback_port();
-
     let server1 = Socket::new(
         SocketType::Pull,
         Options::default().curve_server(server_kp.clone()),
     );
-    server1.bind(tcp_ep(port)).await.unwrap();
+    let ep = server1.bind(tcp_ep(0)).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -351,7 +341,7 @@ async fn curve_reconnects_after_server_restart() {
             ..Options::default().curve_client(client_kp, server_pub)
         },
     );
-    client.connect(tcp_ep(port)).await.unwrap();
+    client.connect(ep.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     client.send(Message::single("before")).await.unwrap();
@@ -367,7 +357,7 @@ async fn curve_reconnects_after_server_restart() {
     let server2 = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     let mut bound = false;
     for _ in 0..20 {
-        if server2.bind(tcp_ep(port)).await.is_ok() {
+        if server2.bind(ep.clone()).await.is_ok() {
             bound = true;
             break;
         }

@@ -11,13 +11,6 @@ use omq_tokio::endpoint::Host;
 use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
-fn loopback_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    19_000 + (n % 500)
-}
-
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
@@ -32,28 +25,26 @@ fn fast_reconnect() -> Options {
     }
 }
 
-async fn rebind<F: Fn() -> Socket>(port: u16, make: F) -> Socket {
+async fn rebind<F: Fn() -> Socket>(ep: &Endpoint, make: F) -> Socket {
     let s = make();
     for _ in 0..40 {
-        if s.bind(tcp_ep(port)).await.is_ok() {
+        if s.bind(ep.clone()).await.is_ok() {
             return s;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("could not rebind port {port} after 40 attempts");
+    panic!("could not rebind {ep:?} after 40 attempts");
 }
 
 // ── REQ / REP ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn req_rep_reconnect_after_server_restart() {
-    let port = loopback_port();
-
     let rep1 = Socket::new(SocketType::Rep, Options::default());
-    rep1.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep1.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, fast_reconnect());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep.clone()).await.unwrap();
 
     req.send(Message::single("ping1")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), rep1.recv())
@@ -68,7 +59,7 @@ async fn req_rep_reconnect_after_server_restart() {
         .unwrap();
 
     rep1.close().await.unwrap();
-    let rep2 = rebind(port, || Socket::new(SocketType::Rep, Options::default())).await;
+    let rep2 = rebind(&ep, || Socket::new(SocketType::Rep, Options::default())).await;
 
     req.send(Message::single("ping2")).await.unwrap();
     let got2 = tokio::time::timeout(Duration::from_secs(3), rep2.recv())
@@ -86,13 +77,11 @@ async fn req_rep_reconnect_after_server_restart() {
 
 #[tokio::test]
 async fn req_state_machine_survives_drop_mid_cycle() {
-    let port = loopback_port();
-
     let rep1 = Socket::new(SocketType::Rep, Options::default());
-    rep1.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep1.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, fast_reconnect());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep.clone()).await.unwrap();
 
     req.send(Message::single("a")).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), rep1.recv())
@@ -109,7 +98,7 @@ async fn req_state_machine_survives_drop_mid_cycle() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     rep1.close().await.unwrap();
 
-    let rep2 = rebind(port, || Socket::new(SocketType::Rep, Options::default())).await;
+    let rep2 = rebind(&ep, || Socket::new(SocketType::Rep, Options::default())).await;
 
     req.send(Message::single("c")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_secs(3), rep2.recv())
@@ -129,13 +118,11 @@ async fn req_state_machine_survives_drop_mid_cycle() {
 
 #[tokio::test]
 async fn pub_sub_reconnect_replays_subscriptions() {
-    let port = loopback_port();
-
     let pub1 = Socket::new(SocketType::Pub, Options::default());
-    pub1.bind(tcp_ep(port)).await.unwrap();
+    let ep = pub1.bind(tcp_ep(0)).await.unwrap();
 
     let sub = Socket::new(SocketType::Sub, fast_reconnect());
-    sub.connect(tcp_ep(port)).await.unwrap();
+    sub.connect(ep.clone()).await.unwrap();
     sub.subscribe("x.").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -147,7 +134,7 @@ async fn pub_sub_reconnect_replays_subscriptions() {
     assert_eq!(m1.part_bytes(0).unwrap().as_ref(), b"x.hello");
 
     pub1.close().await.unwrap();
-    let pub2 = rebind(port, || Socket::new(SocketType::Pub, Options::default())).await;
+    let pub2 = rebind(&ep, || Socket::new(SocketType::Pub, Options::default())).await;
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -171,10 +158,8 @@ async fn pub_sub_reconnect_replays_subscriptions() {
 
 #[tokio::test]
 async fn dealer_router_reconnect_after_router_restart() {
-    let port = loopback_port();
-
     let router1 = Socket::new(SocketType::Router, Options::default());
-    router1.bind(tcp_ep(port)).await.unwrap();
+    let ep = router1.bind(tcp_ep(0)).await.unwrap();
 
     let dealer = Socket::new(
         SocketType::Dealer,
@@ -183,7 +168,7 @@ async fn dealer_router_reconnect_after_router_restart() {
             ..Options::default().identity(bytes::Bytes::from_static(b"d1"))
         },
     );
-    dealer.connect(tcp_ep(port)).await.unwrap();
+    dealer.connect(ep.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     dealer.send(Message::single("hello")).await.unwrap();
@@ -195,7 +180,7 @@ async fn dealer_router_reconnect_after_router_restart() {
     assert_eq!(got1.part_bytes(1).unwrap().as_ref(), b"hello");
 
     router1.close().await.unwrap();
-    let router2 = rebind(port, || Socket::new(SocketType::Router, Options::default())).await;
+    let router2 = rebind(&ep, || Socket::new(SocketType::Router, Options::default())).await;
 
     dealer.send(Message::single("after")).await.unwrap();
     let got2 = tokio::time::timeout(Duration::from_secs(3), router2.recv())
@@ -210,13 +195,11 @@ async fn dealer_router_reconnect_after_router_restart() {
 
 #[tokio::test]
 async fn pair_reconnect_after_bind_side_restart() {
-    let port = loopback_port();
-
     let pair_a1 = Socket::new(SocketType::Pair, Options::default());
-    pair_a1.bind(tcp_ep(port)).await.unwrap();
+    let ep = pair_a1.bind(tcp_ep(0)).await.unwrap();
 
     let pair_b = Socket::new(SocketType::Pair, fast_reconnect());
-    pair_b.connect(tcp_ep(port)).await.unwrap();
+    pair_b.connect(ep.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     pair_b.send(Message::single("hi")).await.unwrap();
@@ -232,7 +215,7 @@ async fn pair_reconnect_after_bind_side_restart() {
         .unwrap();
 
     pair_a1.close().await.unwrap();
-    let pair_a2 = rebind(port, || Socket::new(SocketType::Pair, Options::default())).await;
+    let pair_a2 = rebind(&ep, || Socket::new(SocketType::Pair, Options::default())).await;
 
     pair_b.send(Message::single("again")).await.unwrap();
     let got2 = tokio::time::timeout(Duration::from_secs(3), pair_a2.recv())

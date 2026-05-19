@@ -48,7 +48,7 @@ use crate::engine::{ConnectionDriver, DriverConfig, DriverHandle};
 pub(crate) enum SocketCommand {
     Bind {
         endpoint: Endpoint,
-        ack: oneshot::Sender<Result<()>>,
+        ack: oneshot::Sender<Result<Endpoint>>,
     },
     Connect {
         endpoint: Endpoint,

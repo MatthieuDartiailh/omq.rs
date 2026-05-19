@@ -9,7 +9,7 @@ pub trait SocketApi: Clone {
     fn new(socket_type: SocketType, options: Options) -> Self;
     fn socket_type(&self) -> SocketType;
 
-    async fn bind(&self, endpoint: Endpoint) -> Result<()>;
+    async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint>;
     async fn connect(&self, endpoint: Endpoint) -> Result<()>;
     async fn send(&self, msg: Message) -> Result<()>;
     async fn recv(&self) -> Result<Message>;

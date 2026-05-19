@@ -1,17 +1,10 @@
 //! REQ/REP envelope handling.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -22,12 +15,11 @@ fn tcp_ep(port: u16) -> Endpoint {
 
 #[compio::test]
 async fn req_rep_roundtrip_over_tcp() {
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
 
     let rep_clone = rep.clone();
     let rep_handle = compio::runtime::spawn(async move {
@@ -55,12 +47,11 @@ async fn req_rep_roundtrip_over_tcp() {
 
 #[compio::test]
 async fn req_double_send_errors() {
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
 
     req.send(Message::single("first")).await.unwrap();
     let err = req.send(Message::single("second")).await.err().unwrap();
@@ -73,9 +64,8 @@ async fn req_double_send_errors() {
 
 #[compio::test]
 async fn rep_send_without_recv_errors() {
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    rep.bind(tcp_ep(0)).await.unwrap();
 
     let err = rep.send(Message::single("oops")).await.err().unwrap();
     let msg = format!("{err:?}");
@@ -90,15 +80,13 @@ async fn rep_survives_client_disconnect_mid_cycle() {
     // REP receives a request; the client drops before REP sends the
     // reply.  REP must clear its stale envelope and serve the next
     // client correctly.
-    let port = loopback_port();
-
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     // First client: sends a request then drops immediately.
     {
         let req1 = Socket::new(SocketType::Req, Options::default());
-        req1.connect(tcp_ep(port)).await.unwrap();
+        req1.connect(ep.clone()).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
         req1.send(Message::single("drop-me")).await.unwrap();
 
@@ -112,7 +100,7 @@ async fn rep_survives_client_disconnect_mid_cycle() {
 
     // Second client: full roundtrip must succeed.
     let req2 = Socket::new(SocketType::Req, Options::default());
-    req2.connect(tcp_ep(port)).await.unwrap();
+    req2.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     req2.send(Message::single("real")).await.unwrap();
@@ -133,13 +121,12 @@ async fn rep_survives_client_disconnect_mid_cycle() {
 #[compio::test]
 async fn req_rep_1000_cycles_tcp() {
     const CYCLES: usize = 1_000;
-    let port = loopback_port();
 
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     let rep_task = compio::runtime::spawn(async move {
@@ -165,12 +152,11 @@ async fn req_rep_1000_cycles_tcp() {
 #[compio::test]
 async fn req_rep_roundtrip_sequential_ipv4() {
     // Same as ipv6_req_rep but with IPv4 - tests the sequential (non-spawned) pattern.
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
@@ -191,12 +177,11 @@ async fn req_rep_roundtrip_sequential_ipv4() {
 #[compio::test]
 async fn req_rep_roundtrip_sequential_with_yield() {
     // Test if yielding between rep.send and req.recv fixes the deadlock.
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
@@ -218,12 +203,11 @@ async fn req_rep_roundtrip_sequential_with_yield() {
 
 #[compio::test]
 async fn req_rep_roundtrip_sequential_with_long_yield() {
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
@@ -245,12 +229,11 @@ async fn req_rep_roundtrip_sequential_with_long_yield() {
 #[compio::test]
 async fn req_rep_roundtrip_sequential_spawned_recv() {
     // Pattern: sequential but req.recv() in a spawned task
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
@@ -275,12 +258,11 @@ async fn req_rep_roundtrip_sequential_spawned_recv() {
 
 #[compio::test]
 async fn req_rep_sequential_longer_timeout() {
-    let port = loopback_port();
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(tcp_ep(port)).await.unwrap();
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(tcp_ep(port)).await.unwrap();
+    req.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();

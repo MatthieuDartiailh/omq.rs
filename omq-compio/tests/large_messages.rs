@@ -8,18 +8,11 @@
 //! 8 x 8 KiB defaults, which exhausts the ring on the first ~64 KiB of
 //! sustained delivery and terminates the multi-shot recv SQE.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType, build_default_runtime};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -29,12 +22,11 @@ fn tcp_ep(port: u16) -> Endpoint {
 }
 
 async fn push_pull_large(size_bytes: usize) {
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     let payload: Vec<u8> = (0..size_bytes).map(|i| (i & 0xFF) as u8).collect();
@@ -80,11 +72,10 @@ fn large_multipart_over_tcp() {
     let rt = build_default_runtime().expect("build runtime");
     rt.block_on(async {
         let part_size = 256 * 1024;
-        let port = loopback_port();
         let rep = Socket::new(SocketType::Rep, Options::default());
-        rep.bind(tcp_ep(port)).await.unwrap();
+        let ep = rep.bind(tcp_ep(0)).await.unwrap();
         let req = Socket::new(SocketType::Req, Options::default());
-        req.connect(tcp_ep(port)).await.unwrap();
+        req.connect(ep).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
 
         let part_a: Vec<u8> = vec![0xAA; part_size];
@@ -117,11 +108,10 @@ fn huge_messages_xxhash() {
     rt.block_on(async {
         const SIZES: [usize; 3] = [4 * 1024 * 1024, 8 * 1024 * 1024, 100 * 1024 * 1024];
 
-        let port = loopback_port();
         let pull = Socket::new(SocketType::Pull, Options::default());
-        pull.bind(tcp_ep(port)).await.unwrap();
+        let ep = pull.bind(tcp_ep(0)).await.unwrap();
         let push = Socket::new(SocketType::Push, Options::default());
-        push.connect(tcp_ep(port)).await.unwrap();
+        push.connect(ep).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
 
         // Pre-generate all payloads and hashes up front, then run send and recv
@@ -169,12 +159,11 @@ fn huge_messages_xxhash() {
 fn large_message_with_threshold_disabled() {
     let rt = build_default_runtime().expect("build runtime");
     rt.block_on(async {
-        let port = loopback_port();
         let opts = Options::default().disable_large_message_path();
         let pull = Socket::new(SocketType::Pull, opts.clone());
-        pull.bind(tcp_ep(port)).await.unwrap();
+        let ep = pull.bind(tcp_ep(0)).await.unwrap();
         let push = Socket::new(SocketType::Push, opts);
-        push.connect(tcp_ep(port)).await.unwrap();
+        push.connect(ep).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
 
         let size = 1024 * 1024;
@@ -196,11 +185,10 @@ fn large_message_with_threshold_disabled() {
 fn small_then_large_then_small() {
     let rt = build_default_runtime().expect("build runtime");
     rt.block_on(async {
-        let port = loopback_port();
         let pull = Socket::new(SocketType::Pull, Options::default());
-        pull.bind(tcp_ep(port)).await.unwrap();
+        let ep = pull.bind(tcp_ep(0)).await.unwrap();
         let push = Socket::new(SocketType::Push, Options::default());
-        push.connect(tcp_ep(port)).await.unwrap();
+        push.connect(ep).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
 
         let small_a: Vec<u8> = (0..128).map(|i| (i & 0xFF) as u8).collect();
@@ -233,12 +221,11 @@ fn large_message_back_to_back() {
     let rt = build_default_runtime().expect("build runtime");
     rt.block_on(async {
         let size = 128 * 1024;
-        let port = loopback_port();
         let pull = Socket::new(SocketType::Pull, Options::default());
-        pull.bind(tcp_ep(port)).await.unwrap();
+        let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
         let push = Socket::new(SocketType::Push, Options::default());
-        push.connect(tcp_ep(port)).await.unwrap();
+        push.connect(ep).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
 
         let p1: Vec<u8> = vec![0x11; size];

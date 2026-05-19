@@ -4,18 +4,11 @@
 //! an idle period, and with a short timeout a silently unresponsive
 //! peer is evicted.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -129,7 +122,6 @@ async fn heartbeat_detects_silent_peer() {
     // heartbeat_timeout PUSH must evict the peer and emit Disconnected.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let port = loopback_port();
     let push = Socket::new(
         SocketType::Push,
         Options::default()
@@ -137,7 +129,11 @@ async fn heartbeat_detects_silent_peer() {
             .heartbeat_timeout(Duration::from_millis(150)),
     );
     let mut mon = push.monitor();
-    push.bind(tcp_ep(port)).await.unwrap();
+    let ep = push.bind(tcp_ep(0)).await.unwrap();
+    let port = match &ep {
+        Endpoint::Tcp { port, .. } => *port,
+        _ => unreachable!(),
+    };
 
     // Wait for the Listening event so the port is open before we connect.
     loop {

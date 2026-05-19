@@ -1,6 +1,6 @@
 #![allow(dead_code, unreachable_pub)]
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -23,13 +23,6 @@ pub fn soak_duration() -> Duration {
 // ---------------------------------------------------------------------------
 // Endpoint helpers
 // ---------------------------------------------------------------------------
-
-pub fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 pub fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {

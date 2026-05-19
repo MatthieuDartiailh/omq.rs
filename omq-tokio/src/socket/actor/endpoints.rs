@@ -73,7 +73,7 @@ impl SocketDriver {
     /// socket, registers the listener task, publishes
     /// [`MonitorEvent::Listening`]. UDP listeners do not register a
     /// peer entry - datagrams are pushed straight onto `recv_tx`.
-    pub(super) async fn bind_udp(&mut self, endpoint: Endpoint) -> Result<()> {
+    pub(super) async fn bind_udp(&mut self, endpoint: Endpoint) -> Result<Endpoint> {
         if self.socket_type != SocketType::Dish {
             return Err(Error::Protocol(
                 "udp:// bind is only supported on DISH sockets".into(),
@@ -99,12 +99,13 @@ impl SocketDriver {
             self.joined_groups.clone(),
             cancel.clone(),
         );
+        let ret = resolved.clone();
         self.udp_listeners.push(UdpListenerEntry {
             endpoint: resolved,
             cancel,
             _task: task,
         });
-        Ok(())
+        Ok(ret)
     }
 
     /// Establish a UDP RADIO outbound. Validates socket type, opens
@@ -242,7 +243,7 @@ impl SocketDriver {
         Ok(())
     }
 
-    pub(super) async fn bind(&mut self, endpoint: Endpoint) -> Result<()> {
+    pub(super) async fn bind(&mut self, endpoint: Endpoint) -> Result<Endpoint> {
         if matches!(endpoint, Endpoint::Udp { .. }) {
             return self.bind_udp(endpoint).await;
         }
@@ -289,12 +290,13 @@ impl SocketDriver {
                 }
             }
         });
+        let ret = resolved.clone();
         self.listeners.push(ListenerEntry {
             endpoint: resolved,
             cancel,
             _task: task,
         });
-        Ok(())
+        Ok(ret)
     }
 
     pub(super) fn start_dial(

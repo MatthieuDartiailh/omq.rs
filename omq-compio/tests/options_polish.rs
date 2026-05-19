@@ -1,18 +1,11 @@
 //! Options polish: end-to-end tests that exercise individual options for
 //! correctness across the public API. Feature-by-feature smoke tests.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -266,12 +259,11 @@ async fn max_message_size_exactly_at_limit_is_accepted() {
 
 #[compio::test]
 async fn max_message_size_one_byte_over_drops_connection() {
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
     push.send(Message::single("123456789")).await.unwrap();

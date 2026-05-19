@@ -357,7 +357,7 @@ impl omq_proto::socket_api::SocketApi for Socket {
     fn socket_type(&self) -> SocketType {
         self.socket_type()
     }
-    async fn bind(&self, endpoint: Endpoint) -> Result<()> {
+    async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
         self.bind(endpoint).await
     }
     async fn connect(&self, endpoint: Endpoint) -> Result<()> {

@@ -15,11 +15,8 @@ fn soak_peer_churn() {
     let monitor = soak_common::ResourceMonitor::start();
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let port = soak_common::loopback_port();
-        let ep = soak_common::tcp_ep(port);
-
         let push = Socket::new(SocketType::Push, Options::default().send_hwm(1024));
-        push.bind(ep.clone()).await.unwrap();
+        let ep = push.bind(soak_common::tcp_ep(0)).await.unwrap();
 
         let initial_pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(64));
         initial_pull.connect(ep.clone()).await.unwrap();

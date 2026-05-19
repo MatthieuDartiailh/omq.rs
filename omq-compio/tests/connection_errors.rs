@@ -3,18 +3,11 @@
 //! accept and serve new connections normally.
 
 use std::io::Write;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn loopback_port() -> u16 {
-    let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -28,9 +21,12 @@ async fn server_survives_pre_handshake_drop() {
     // A raw TCP client connects but drops the connection before sending
     // any ZMTP greeting. The server must not crash, panic, or reject
     // subsequent legitimate connections.
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let port = match &ep {
+        Endpoint::Tcp { port, .. } => *port,
+        _ => unreachable!(),
+    };
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
 
@@ -46,7 +42,7 @@ async fn server_survives_pre_handshake_drop() {
 
     // Legitimate client: full ZMTP session must work.
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(100)).await;
 
     push.send(Message::single("alive")).await.unwrap();
@@ -61,15 +57,13 @@ async fn server_survives_pre_handshake_drop() {
 async fn server_survives_mid_session_abrupt_drop() {
     // Client drops the TCP connection abruptly while the server is live.
     // Server must survive and accept the next connection.
-    let port = loopback_port();
-
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     // First client: sends one message then drops.
     {
         let push1 = Socket::new(SocketType::Push, Options::default());
-        push1.connect(tcp_ep(port)).await.unwrap();
+        push1.connect(ep.clone()).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
         push1.send(Message::single("first")).await.unwrap();
         let _ = compio::time::timeout(Duration::from_millis(300), pull.recv()).await;
@@ -79,7 +73,7 @@ async fn server_survives_mid_session_abrupt_drop() {
 
     // Second client: server must still be healthy.
     let push2 = Socket::new(SocketType::Push, Options::default());
-    push2.connect(tcp_ep(port)).await.unwrap();
+    push2.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
     push2.send(Message::single("second")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
@@ -93,9 +87,12 @@ async fn server_survives_mid_session_abrupt_drop() {
 async fn abrupt_reset_mid_greeting_does_not_wedge_server() {
     // A peer that sends a partial greeting then drops must not stall the
     // server's accept loop. The server must still serve the next good client.
-    let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(port)).await.unwrap();
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let port = match &ep {
+        Endpoint::Tcp { port, .. } => *port,
+        _ => unreachable!(),
+    };
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let h = std::thread::spawn(move || {
@@ -108,7 +105,7 @@ async fn abrupt_reset_mid_greeting_does_not_wedge_server() {
     compio::time::sleep(Duration::from_millis(50)).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(tcp_ep(port)).await.unwrap();
+    push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(100)).await;
 
     push.send(Message::single("ok")).await.unwrap();
