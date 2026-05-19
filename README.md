@@ -12,18 +12,10 @@
 Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all message sizes.
 
 - Two async backends: **compio** (io_uring, default) and **tokio**
-- 11 standard socket types
-- 8 draft socket types
-- inproc transport
-- IPC transport (including Linux abstract namespace)
-- TCP transport
-- UDP transport (RADIO/DISH only)
-- `lz4+tcp://` transport with blazing-fast LZ4 compression
-- `zstd+tcp://` transport with Zstandard compression
-- NULL mechanism
-- PLAIN mechanism
-- CURVE mechanism
-- BLAKE3ZMQ mechanism
+- 19 socket types (11 standard + 8 draft), 6 transports (TCP, IPC, inproc, UDP, `lz4+tcp://`, `zstd+tcp://`)
+- 4 security mechanisms: NULL, PLAIN, CURVE, BLAKE3ZMQ
+- No C compiler, no vendored C, no libzmq, no libsodium
+- Python binding ([pyomq](bindings/pyomq/)), C API ([omq-zmq](omq-zmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
 
 > **Wire-compatible with libzmq.** omq sockets interoperate with any libzmq peer: C, Python
 > (pyzmq), Ruby, Node, on any shared transport. Same ZMTP 3.x framing, same socket types, same
@@ -64,42 +56,6 @@ pull.bind("tcp://127.0.0.1:5555".parse()?).await?;
 let msg = pull.recv().await?;
 assert_eq!(&msg[0], b"hello");
 ```
-
-### Accessing message frames
-
-A ZMQ message is one or more frames delivered atomically. Frame payloads
-are always contiguous - zero-copy `&[u8]` access with no fallback needed:
-
-```rust
-let msg = pull.recv().await?;
-
-// Borrow frame bytes (zero-copy)
-let first: &[u8] = &msg[0];           // panics on OOB
-let maybe: Option<&[u8]> = msg.get(1); // None on OOB
-
-// Owned Bytes (refcount bump, no copy)
-let frame: Bytes = msg.part_bytes(0).unwrap();
-
-// Iterate all frames
-for frame in msg.iter() {
-    println!("{} bytes", frame.len());
-}
-
-// Part count and total byte length
-msg.len();       // number of frames
-msg.byte_len();  // total bytes across all frames
-```
-
-### Multi-part send
-
-```rust
-use omq::Message;
-
-let msg = Message::single("hello");
-let msg = Message::multipart(["identity", "payload"]);
-```
-
-Pub/sub with `lz4+tcp://` compression: [`omq/examples/pub_sub_lz4.rs`](omq/examples/pub_sub_lz4.rs)
 
 `omq` is a thin facade; pick one backend at build time:
 
@@ -143,7 +99,6 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | **Strict per-pipe priority** | nanomsg-style 1-255 tiers with `Socket::connect_with` (`priority` feature). |
 | **zstd dictionary auto-training** | Trains from first 1k messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |
 | **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
-| **Python binding** | PyO3 over `omq-compio`, sync + asyncio API. [`bindings/pyomq`](bindings/pyomq/). |
 
 ## Workspace
 
@@ -161,90 +116,6 @@ independent, versioned, and published separately.
 | [`blume`](blume/) | Batching MPSC channel with swap-drain consumer |
 | [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch |
 | [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-compio, sync + asyncio) |
-
-## C API (omq-zmq)
-
-[`omq-zmq`](omq-zmq/) is a libzmq-compatible C interface backed by omq-compio.
-Link against `libomq_zmq.so` instead of `libzmq.so` and existing C/C++
-code works without source changes. No dependency on libzmq, libsodium,
-or any C libraries.
-
-## zmq.rs compatibility (omq-zeromq)
-
-[`omq-zeromq`](omq-zeromq/) is a drop-in replacement for the
-[`zeromq`](https://crates.io/crates/zeromq) Rust crate, backed by
-omq-tokio. Rename the dependency and existing zmq.rs code compiles
-against omq.
-
-## Switching from rust-zmq
-
-**No C compiler required.** rust-zmq depends on libzmq (a C++ library) and optionally libsodium. Building omq requires nothing beyond `rustc`. No vendored C, no CMake, no vcpkg, no cross-compile headaches.
-
-**Native async.** rust-zmq is blocking. Async wrappers over it (`tmq`, `async-zmq`) work around `EAGAIN` with thread pools and impose backpressure by polling. omq is async from the socket level up; `send`/`recv` are `async fn`.
-
-**Wire-compatible.** omq speaks ZMTP 3.x. Existing libzmq peers — C, Python, Ruby, Node — interoperate without changes.
-
-### API mapping
-
-```rust
-// rust-zmq
-let ctx = zmq::Context::new();
-let socket = ctx.socket(zmq::PUSH)?;
-socket.connect("tcp://127.0.0.1:5555")?;
-socket.send("hello", 0)?;
-let msg = socket.recv_msg(0)?;
-
-// omq
-let socket = Socket::new(SocketType::Push, Options::default());
-socket.connect("tcp://127.0.0.1:5555".parse()?).await?;
-socket.send(Message::single("hello")).await?;
-let msg = socket.recv().await?;
-```
-
-No `Context`. No send/recv flags. Endpoints are parsed and typed. Multi-part messages are a `Message` value, not repeated `SNDMORE` calls.
-
-### Feature mapping
-
-| rust-zmq | omq |
-|----------|-----|
-| `socket(zmq::PUSH)` | `Socket::new(SocketType::Push, ...)` |
-| `socket(zmq::SUB)` + `set_subscribe` | `Socket::new(SocketType::Sub, ...)` + `subscribe` |
-| `socket(zmq::ROUTER)` | `Socket::new(SocketType::Router, ...)` |
-| `send_multipart` / `recv_multipart` | `Message::multipart(...)` / `msg[i]` |
-| feature `"curve"` + `set_curve_*` | feature `curve` + `Options { mechanism: Curve(...) }` |
-| feature `"plain"` | feature `plain` |
-| feature `"vendored"` | not needed — no C dependency |
-
-All 11 standard socket types are supported. PLAIN and CURVE mechanisms work the same way at the protocol level.
-
-## Python binding (pyomq)
-
-```sh
-pip install pyomq
-```
-
-```python
-import pyomq
-
-ctx = pyomq.Context()
-push = ctx.socket(pyomq.PUSH)
-push.connect("tcp://127.0.0.1:5555")
-push.send(b"hello")
-
-pull = ctx.socket(pyomq.PULL)
-pull.bind("tcp://127.0.0.1:5555")
-data = pull.recv()
-```
-
-Drop-in pyzmq replacement. 2.3-3.1x faster over TCP:
-
-| Size | pyomq | pyzmq | x |
-|------|-------|-------|---|
-| 512 B | 1.28M msg/s | 460k msg/s | **2.8x** |
-| 2 KiB | 902k msg/s | 347k msg/s | **2.6x** |
-| 8 KiB | 331k msg/s | 105k msg/s | **3.1x** |
-
-asyncio API available via `pyomq.asyncio`. Wheels for Linux x86_64 and aarch64, Python 3.9+.
 
 ## Testing
 
@@ -268,30 +139,24 @@ covered by integration tests on both backends. The full suite:
 OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 ```
 
-## Benchmarks
+## Further reading
 
 - [BENCHMARKS.md](BENCHMARKS.md): throughput / latency / compression tables
-  across transports, message sizes, and backends (omq-compio vs omq-tokio).
-- [COMPARISONS.md](COMPARISONS.md): two-process TCP and IPC benchmarks against
+  across transports, message sizes, and backends.
+- [COMPARISONS.md](COMPARISONS.md): two-process benchmarks against
   libzmq and zmq.rs.
-
-## Documentation
-
-- [doc/architecture.md](doc/architecture.md): high-level tour of the
-  three-layer split, the two-queue socket model, and how the two
-  backends compare.
-- [doc/compio.md](doc/compio.md): compio backend internals (default).
+- [doc/architecture.md](doc/architecture.md): three-layer split, two-queue
+  socket model, backend comparison.
+- [doc/compio.md](doc/compio.md): compio backend internals.
 - [doc/tokio.md](doc/tokio.md): tokio backend internals.
-- [doc/performance.md](doc/performance.md): how omq beat libzmq -- a
-  technical article on the design choices and dead ends behind the
-  benchmark numbers.
+- [doc/performance.md](doc/performance.md): how omq beat libzmq.
+- [doc/migration_from_rust_zmq.md](doc/migration_from_rust_zmq.md):
+  API mapping and feature mapping for rust-zmq users.
 
-## Platform support
+## Platform and requirements
 
 Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
 `omq-tokio` uses mio / epoll / kqueue.
-
-## Requirements
 
 - Rust 1.93 or newer (edition 2024).
 - `omq-compio`: Linux 6.0 or newer (io_uring multi-shot recv with
