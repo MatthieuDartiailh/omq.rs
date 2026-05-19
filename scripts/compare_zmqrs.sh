@@ -264,9 +264,11 @@ run_comparison() {
     echo ""
 
     if [ "$UPDATE_BENCHMARKS" = true ]; then
-        local md=$'\n'
-        md+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × | omq-zeromq msg/s | omq-zeromq MB/s | zeromq × |"$'\n'
-        md+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|-----------------|----------------|---------|"$'\n'
+        local compio_md=$'\n' tokio_md=$'\n'
+        compio_md+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-compio msg/s | omq-compio MB/s | compio × |"$'\n'
+        compio_md+="|-------|-------------|------------|-----------------|----------------|---------|"$'\n'
+        tokio_md+="| Size | zmq.rs msg/s | zmq.rs MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × | omq-zeromq msg/s | omq-zeromq MB/s | zeromq × |"$'\n'
+        tokio_md+="|-------|-------------|------------|----------------|---------------|---------|-----------------|----------------|---------|"$'\n'
 
         for i in "${!res_sizes[@]}"; do
             local sz zmsg zmb tmsg tmb cmsg cmb qmsg qmb
@@ -286,11 +288,14 @@ run_comparison() {
             compio_r=$(speedup_str "$cmsg" "$zmsg")
             zeromq_r=$(speedup_str "$qmsg" "$zmsg")
 
-            md+="| $label | $zmqrs_fmt | $zmqrs_bw | $compio_fmt | $compio_bw | $compio_r | $tokio_fmt | $tokio_bw | $tokio_r | $zeromq_fmt | $zeromq_bw | $zeromq_r |"$'\n'
+            compio_md+="| $label | $zmqrs_fmt | $zmqrs_bw | $compio_fmt | $compio_bw | $compio_r |"$'\n'
+            tokio_md+="| $label | $zmqrs_fmt | $zmqrs_bw | $tokio_fmt | $tokio_bw | $tokio_r | $zeromq_fmt | $zeromq_bw | $zeromq_r |"$'\n'
         done
-        md+=$'\n'
+        compio_md+=$'\n'
+        tokio_md+=$'\n'
 
-        update_section "$BENCHMARKS" "$marker" "$md"
+        update_section "$BENCHMARKS" "${marker}_compio" "$compio_md"
+        update_section "$BENCHMARKS" "${marker}_tokio" "$tokio_md"
     fi
 }
 

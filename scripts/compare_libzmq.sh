@@ -266,14 +266,21 @@ run_comparison() {
     echo ""
 
     if [ "$UPDATE_BENCHMARKS" = true ]; then
-        local md=$'\n'
+        local compio_md=$'\n' tokio_md=$'\n'
         if [ "$transport" = "inproc" ]; then
-            md+="| Size | libzmq msg/s | libzmq MB/s | compio-mt msg/s | compio-mt MB/s | mt × | compio-st msg/s | compio-st MB/s | st × | tokio msg/s | tokio MB/s | tokio × |"$'\n'
-            md+="|-------|-------------|------------|----------------|---------------|------|----------------|---------------|------|------------|-----------|---------|"$'\n'
+            compio_md+="| Size | libzmq msg/s | libzmq MB/s | compio-mt msg/s | compio-mt MB/s | mt × | compio-st msg/s | compio-st MB/s | st × |"$'\n'
+            compio_md+="|-------|-------------|------------|----------------|---------------|------|----------------|---------------|------|"$'\n'
         else
-            md+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
-            md+="|-------|-------------|------------|-----------------|----------------|---------|----------------|---------------|---------|"$'\n'
+            compio_md+="| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × |"$'\n'
+            compio_md+="|-------|-------------|------------|-----------------|----------------|---------|"$'\n'
         fi
+        if [ "$transport" = "inproc" ]; then
+            tokio_md+="| Size | libzmq msg/s | libzmq MB/s | tokio msg/s | tokio MB/s | tokio × |"$'\n'
+            tokio_md+="|-------|-------------|------------|------------|-----------|---------|"
+        else
+            tokio_md+="| Size | libzmq msg/s | libzmq MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × |"$'\n'
+            tokio_md+="|-------|-------------|------------|----------------|---------------|---------|"
+        fi$'\n'
 
         for i in "${!res_sizes[@]}"; do
             local sz omsg omb tmsg tmb zmsg zmb
@@ -295,14 +302,17 @@ run_comparison() {
                 omq_st_fmt=$(fmt_msgs "${res_omq_st_msgs[$i]}")
                 omq_st_bw=$(fmt_bw "${res_omq_st_mb[$i]}")
                 omq_st_r=$(ratio_str "${res_omq_st_msgs[$i]}" "$zmsg")
-                md+="| $label | $zmq_fmt | $zmq_bw | $omq_fmt | $omq_bw | $omq_r | $omq_st_fmt | $omq_st_bw | $omq_st_r | $tokio_fmt | $tokio_bw | $tokio_r |"$'\n'
+                compio_md+="| $label | $zmq_fmt | $zmq_bw | $omq_fmt | $omq_bw | $omq_r | $omq_st_fmt | $omq_st_bw | $omq_st_r |"$'\n'
             else
-                md+="| $label | $zmq_fmt | $zmq_bw | $omq_fmt | $omq_bw | $omq_r | $tokio_fmt | $tokio_bw | $tokio_r |"$'\n'
+                compio_md+="| $label | $zmq_fmt | $zmq_bw | $omq_fmt | $omq_bw | $omq_r |"$'\n'
             fi
+            tokio_md+="| $label | $zmq_fmt | $zmq_bw | $tokio_fmt | $tokio_bw | $tokio_r |"$'\n'
         done
-        md+=$'\n'
+        compio_md+=$'\n'
+        tokio_md+=$'\n'
 
-        update_section "$BENCHMARKS" "$marker" "$md"
+        update_section "$BENCHMARKS" "${marker}_compio" "$compio_md"
+        update_section "$BENCHMARKS" "${marker}_tokio" "$tokio_md"
     fi
 }
 
