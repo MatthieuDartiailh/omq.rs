@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use bytes::Bytes;
 use omq_compio::{
     Message, MonitorEvent, MonitorStream, Options, ProactorBuilderExt, Socket, SocketType,
 };
@@ -145,7 +144,7 @@ fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usize) -> 
                 push.connect(ep).await.expect("connect PUSH");
                 wait_handshake(&mut mon).await;
 
-                let payload = Bytes::from(vec![b'x'; size]);
+                let payload = common::payload(size);
                 #[allow(clippy::arc_with_non_send_sync)]
                 let push = Arc::new(push);
 

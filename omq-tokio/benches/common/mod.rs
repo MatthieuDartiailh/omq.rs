@@ -13,6 +13,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use omq_tokio::{Endpoint, IpcPath};
 
 /// Default size sweep: three points that cover the small/medium/large
@@ -116,16 +117,10 @@ pub(crate) fn all_transports() -> Vec<String> {
     if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
         return s.split(',').map(|t| t.trim().to_string()).collect();
     }
-    #[allow(unused_mut)]
-    let mut ts: Vec<String> = DEFAULT_TRANSPORTS
+    DEFAULT_TRANSPORTS
         .iter()
         .map(|s| (*s).to_string())
-        .collect();
-    #[cfg(feature = "lz4")]
-    ts.push("lz4+tcp".to_string());
-    #[cfg(feature = "zstd")]
-    ts.push("zstd+tcp".to_string());
-    ts
+        .collect()
 }
 
 pub(crate) fn peers_override() -> Option<Vec<usize>> {
@@ -340,6 +335,32 @@ pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_siz
 }
 
 /// Best-effort rustc version. Cheap, only printed at startup.
+pub(crate) async fn seed_zstd_train(push: &omq_tokio::Socket, pull: &omq_tokio::Socket) {
+    let sample = payload(512);
+    for _ in 0..250 {
+        push.send(omq_tokio::Message::single(sample.clone()))
+            .await
+            .unwrap();
+        pull.recv().await.unwrap();
+    }
+}
+
+pub(crate) fn payload(target_bytes: usize) -> Bytes {
+    const TEMPLATE: &str = r#"{"ts":"2026-04-27T12:34:56.{ID}Z","level":"INFO","service":"api-gateway","trace_id":"{ID}","span_id":"{ID}","user_id":"u-{ID}","method":"POST","path":"/v1/widgets/{ID}","status":200,"latency_ms":42,"region":"us-east-1","host":"api-{ID}.svc.cluster.local","msg":"request handled successfully"}
+"#;
+    let mut out = String::with_capacity(target_bytes + TEMPLATE.len());
+    let mut counter: u32 = 0;
+    while out.len() < target_bytes {
+        let mut rec = TEMPLATE.to_string();
+        let id = format!("{:08x}", counter.wrapping_mul(0x9E37_79B1));
+        rec = rec.replace("{ID}", &id);
+        out.push_str(&rec);
+        counter = counter.wrapping_add(1);
+    }
+    out.truncate(target_bytes);
+    Bytes::from(out)
+}
+
 fn rustc_version_runtime() -> String {
     std::process::Command::new("rustc")
         .arg("--version")

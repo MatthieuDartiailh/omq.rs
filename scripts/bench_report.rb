@@ -320,12 +320,6 @@ if options[:update_benchmarks]
     out
   end
 
-  compression_transports = %w[tcp lz4+tcp zstd+tcp]
-
-  build_compression_push_pull = ->(b) { build_throughput_table.call('push_pull', 1, compression_transports, b, "no compression push_pull #{b} data") }
-  build_compression_req_rep   = ->(b) { build_throughput_table.call('req_rep',   1, compression_transports, b, "no compression req_rep #{b} data") }
-
-
   # mechanism_frame — end-to-end mechanism cost over TCP from omq-compio bench
   build_mechanism_frame = lambda do
     mechanisms = %w[NULL CURVE BLAKE3ZMQ].select do |m|
@@ -358,8 +352,6 @@ if options[:update_benchmarks]
     bm = replace_block.call(bm, "pub_sub_#{b}",                build_pub_sub.call(b))
     bm = replace_block.call(bm, "router_dealer_#{b}",          build_router_dealer.call(b))
     bm = replace_block.call(bm, "pair_#{b}",                   build_pair.call(b))
-    bm = replace_block.call(bm, "compression_push_pull_#{b}",  build_compression_push_pull.call(b))
-    bm = replace_block.call(bm, "compression_req_rep_#{b}",    build_compression_req_rep.call(b))
     bm = replace_block.call(bm, "push_pull_priority_#{b}",     build_push_pull_priority.call(b))
   end
   bm = replace_block.call(bm, 'latency_percentiles',           build_latency_percentiles.call)

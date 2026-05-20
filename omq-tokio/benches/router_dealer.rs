@@ -51,7 +51,7 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         common::wait_connected(&refs).await;
     }
 
-    let payload = Bytes::from(vec![b'x'; size]);
+    let payload = common::payload(size);
     let router = std::sync::Arc::new(router);
     let dealers = std::sync::Arc::new(dealers);
 

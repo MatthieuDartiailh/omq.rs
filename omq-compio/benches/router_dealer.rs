@@ -62,7 +62,7 @@ fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> co
             dealers.push(d);
         }
 
-        let payload = Bytes::from(vec![b'x'; size]);
+        let payload = common::payload(size);
         let router = Arc::new(router);
         let dealers = Arc::new(dealers);
 
@@ -150,7 +150,7 @@ fn run_cell_threaded(
                 common::wait_connected(&refs).await;
                 let dealers = Arc::new(dealers);
 
-                let payload = Bytes::from(vec![b'x'; size]);
+                let payload = common::payload(size);
 
                 let burst = |k: usize| {
                     let dealers = dealers.clone();

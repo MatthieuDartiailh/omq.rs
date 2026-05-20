@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use omq_compio::options::ReconnectPolicy;
 use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
@@ -91,7 +90,7 @@ fn run_cell(
             let start = Arc::clone(&start);
             let count_out = Arc::clone(&push_counts[i]);
             let nanos_out = Arc::clone(&push_nanos[i]);
-            let payload = Bytes::from(vec![b'x'; size]);
+            let payload = common::payload(size);
 
             std::thread::spawn(move || {
                 let rt = build_default_runtime().expect("push runtime");

@@ -7,7 +7,6 @@ mod common;
 use std::io::Write as _;
 use std::time::Instant;
 
-use bytes::Bytes;
 use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
 const PATTERN: &str = "latency";
@@ -103,7 +102,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> LatencyCell {
 
     let rep = std::sync::Arc::new(rep);
     let req = std::sync::Arc::new(req);
-    let payload = Bytes::from(vec![b'x'; size]);
+    let payload = common::payload(size);
 
     // Responder: drop the handle after the cell to cancel the task.
     let responder = {

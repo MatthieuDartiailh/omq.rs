@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use bytes::Bytes;
 use omq_compio::{
     Message, MonitorEvent, MonitorStream, Options, ProactorBuilderExt, Socket, SocketType,
 };
@@ -96,7 +95,7 @@ fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> co
         let refs: Vec<&Socket> = pushes.iter().collect();
         common::wait_connected(&refs).await;
 
-        let payload = Bytes::from(vec![b'x'; size]);
+        let payload = common::payload(size);
         let pull = Arc::new(pull);
         let pushes = Arc::new(pushes);
 
@@ -142,6 +141,8 @@ fn run_cell_threaded(
     let pull_count = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(Barrier::new(2));
+
+    let seed_train = transport == "zstd+tcp";
 
     let pull_thread = {
         let ep = ep.clone();
@@ -190,9 +191,24 @@ fn run_cell_threaded(
                 }
                 let refs: Vec<&Socket> = pushes.iter().collect();
                 wait_connected_with_monitors(&refs, &mut monitors).await;
+
+                if seed_train {
+                    let sample = common::payload(512);
+                    for _ in 0..250 {
+                        pushes[0]
+                            .send(Message::single(sample.clone()))
+                            .await
+                            .unwrap();
+                    }
+                    while pull_count.load(Ordering::Relaxed) < 250 {
+                        compio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    pull_count.store(0, Ordering::Relaxed);
+                }
+
                 let pushes = Arc::new(pushes);
 
-                let payload = Bytes::from(vec![b'x'; size]);
+                let payload = common::payload(size);
 
                 let burst = |k: usize| {
                     let pushes = pushes.clone();

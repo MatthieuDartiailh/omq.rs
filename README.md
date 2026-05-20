@@ -23,7 +23,7 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/comparison_chart.svg" alt="PUSH/PULL throughput: TCP loopback" width="850">
 </p>
 
-[Full comparison tables](COMPARISONS.md) | [All benchmarks](BENCHMARKS.md)
+[Full comparison tables](COMPARISONS.md) | [All benchmarks](BENCHMARKS.md) | [Compression benchmarks](BENCHMARKS_COMPRESSION.md)
 
 ## Install
 
@@ -132,8 +132,10 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 
 ## Further reading
 
-- [BENCHMARKS.md](BENCHMARKS.md): throughput / latency / compression tables
-  across transports, message sizes, and backends.
+- [BENCHMARKS.md](BENCHMARKS.md): throughput / latency tables across
+  transports, message sizes, and backends.
+- [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp / zstd+tcp
+  throughput on bandwidth-limited links with structured JSON payloads.
 - [COMPARISONS.md](COMPARISONS.md): two-process benchmarks against
   libzmq and zmq.rs.
 - [doc/architecture.md](doc/architecture.md): three-layer split, two-queue

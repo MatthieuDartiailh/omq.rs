@@ -7,7 +7,6 @@ mod common;
 use std::io::Write as _;
 use std::time::Instant;
 
-use bytes::Bytes;
 use omq_tokio::{Message, Options, Socket, SocketType};
 
 const PATTERN: &str = "latency";
@@ -102,7 +101,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> LatencyCell {
 
     let rep = std::sync::Arc::new(rep);
     let req = std::sync::Arc::new(req);
-    let payload = Bytes::from(vec![b'x'; size]);
+    let payload = common::payload(size);
 
     let responder = {
         let rep = rep.clone();

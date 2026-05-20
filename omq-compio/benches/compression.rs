@@ -40,15 +40,13 @@ mod inner {
     }
 
     fn active_transports() -> Vec<String> {
-        let all = common::all_transports();
-        let filtered: Vec<String> = all
-            .into_iter()
-            .filter(|t| SUPPORTED_TRANSPORTS.contains(&t.as_str()))
-            .collect();
-        if filtered.is_empty() {
-            return Vec::new();
+        if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
+            return s.split(',').map(|t| t.trim().to_string()).collect();
         }
-        filtered
+        SUPPORTED_TRANSPORTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
     }
 
     pub(super) fn compio_main() {

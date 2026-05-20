@@ -3,7 +3,6 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use bytes::Bytes;
 use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
 const PATTERN: &str = "req_rep";
@@ -47,7 +46,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
 
     let rep = std::sync::Arc::new(rep);
     let req = std::sync::Arc::new(req);
-    let payload = Bytes::from(vec![b'x'; size]);
+    let payload = common::payload(size);
 
     // Long-lived responder. Drop the JoinHandle after the cell to
     // cancel it (compio JoinHandle::drop cancels the task).

@@ -5,7 +5,6 @@ mod common;
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use omq_tokio::{Message, Options, Socket, SocketType};
 
 const PATTERN: &str = "req_rep";
@@ -48,7 +47,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
 
     let rep = std::sync::Arc::new(rep);
     let req = std::sync::Arc::new(req);
-    let payload = Bytes::from(vec![b'x'; size]);
+    let payload = common::payload(size);
 
     // The responder is a long-lived task that bounces every request
     // back unchanged. We stop it explicitly after each cell so it

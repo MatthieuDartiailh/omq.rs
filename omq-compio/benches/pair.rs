@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use bytes::Bytes;
 use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
 
 const PATTERN: &str = "pair";
@@ -58,7 +57,7 @@ fn run_cell_single(transport: &str, size: usize, seq: usize) -> common::Cell {
         sender.connect(ep).await.expect("connect PAIR");
         common::wait_connected(&[&sender]).await;
 
-        let payload = Bytes::from(vec![b'x'; size]);
+        let payload = common::payload(size);
         let receiver = Arc::new(receiver);
         let sender = Arc::new(sender);
 
@@ -134,7 +133,7 @@ fn run_cell_threaded(
                 sender.connect(ep).await.expect("connect PAIR");
                 common::wait_connected(&[&sender]).await;
 
-                let payload = Bytes::from(vec![b'x'; size]);
+                let payload = common::payload(size);
                 let sender = Arc::new(sender);
 
                 let burst = |k: usize| {

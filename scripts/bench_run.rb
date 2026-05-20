@@ -57,18 +57,8 @@ puts "=== bench run #{run_id} ==="
 transport_groups = if ENV['OMQ_BENCH_TRANSPORTS']
                      [nil] # user already picked; pass through as-is
                    else
-                     base = %w[inproc ipc tcp]
-                     feats = options[:features] || ''
-                     base << 'lz4+tcp'  if feats.include?('lz4')
-                     base << 'zstd+tcp' if feats.include?('zstd')
-                     base
+                     %w[inproc ipc tcp]
                    end
-
-COMPRESSION_TRANSPORTS = %w[lz4+tcp zstd+tcp].freeze
-COMPRESSION_BENCHES = {
-  'compio' => %w[push_pull req_rep compression],
-  'tokio'  => %w[push_pull req_rep],
-}.freeze
 
 unless options[:skip_main]
   options[:backends].each do |backend|
@@ -76,14 +66,7 @@ unless options[:skip_main]
     transport_groups.each do |transport|
       cmd = %w[cargo bench -p] + [crate]
       cmd += ['--features', options[:features]] if options[:features]
-
-      if options[:bench]
-        cmd += ['--bench', options[:bench]]
-      elsif transport && COMPRESSION_TRANSPORTS.include?(transport)
-        COMPRESSION_BENCHES.fetch(backend, %w[push_pull req_rep]).each do |b|
-          cmd += ['--bench', b]
-        end
-      end
+      cmd += ['--bench', options[:bench]] if options[:bench]
 
       env = {}
       env['OMQ_BENCH_TRANSPORTS'] = transport if transport

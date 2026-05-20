@@ -111,6 +111,9 @@ Full size sweep: `-- --all-sizes`.
 Results append to `<crate>/benches/results.jsonl` unless
 `OMQ_BENCH_NO_WRITE=1`.
 
+Compression benchmarks run separately with bandwidth limiting.
+See [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md) for commands and results.
+
 ## Constraints
 
 **interop_compio dep constraint:** `omq-tokio/Cargo.toml`'s compio

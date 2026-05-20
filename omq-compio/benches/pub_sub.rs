@@ -65,7 +65,7 @@ fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> co
             common::wait_subscribed(&pub_, &refs).await;
         }
 
-        let payload = Bytes::from(vec![b'x'; size]);
+        let payload = common::payload(size);
         let pub_ = Arc::new(pub_);
         let subs = Arc::new(subs);
 
@@ -178,7 +178,7 @@ fn run_cell_threaded(
                 pub_.bind(ep).await.expect("bind PUB");
                 bind_barrier.wait();
 
-                let payload = Bytes::from(vec![b'x'; size]);
+                let payload = common::payload(size);
 
                 loop {
                     let _ = pub_.send(Message::single(payload.clone())).await;

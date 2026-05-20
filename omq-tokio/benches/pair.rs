@@ -3,7 +3,6 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use bytes::Bytes;
 use omq_tokio::{Message, Options, Socket, SocketType};
 
 const PATTERN: &str = "pair";
@@ -46,7 +45,7 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
 
     let receiver = std::sync::Arc::new(receiver);
     let sender = std::sync::Arc::new(sender);
-    let payload = Bytes::from(vec![b'x'; size]);
+    let payload = common::payload(size);
 
     let burst = |k: usize| {
         let receiver = receiver.clone();
