@@ -62,6 +62,8 @@ around compio's single-thread invariant.
 
 ## Performance
 
+See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md) for full tables.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/comparison_chart_bindings.svg" alt="PUSH/PULL throughput: Python bindings" width="850">
 </p>
@@ -134,7 +136,7 @@ Virtual throughput on bandwidth-limited links (JSON payloads, compio backend):
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/compression_chart_100m.svg" alt="Compression throughput at 100 Mbps" width="850">
 </p>
 
-See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md#compression-on-realistic-json-payloads-omq-compio-1-peer) for full tables including dict-trained ratios.
+See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for full tables including dict-trained ratios.
 
 ## Develop
 
