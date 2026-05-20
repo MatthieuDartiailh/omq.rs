@@ -32,6 +32,13 @@ mod inner {
     const PEER_COUNTS: &[usize] = &[1];
     const SUPPORTED_TRANSPORTS: &[&str] = &["tcp", "lz4+tcp", "zstd+tcp"];
 
+    fn zstd_level() -> i32 {
+        std::env::var("OMQ_BENCH_ZSTD_LEVEL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(-3)
+    }
+
     fn active_transports() -> Vec<String> {
         let all = common::all_transports();
         let filtered: Vec<String> = all
@@ -207,7 +214,8 @@ mod inner {
                 let mut t = match dict {
                     Some(d) => ZstdEncoder::with_send_dict(d.clone()).unwrap(),
                     None => ZstdEncoder::new(),
-                };
+                }
+                .with_level(zstd_level());
                 encoded_len(t.encode(&m).unwrap())
             }
             // "tcp" or anything else: plain bytes pass through.
@@ -253,21 +261,45 @@ mod inner {
         seq: usize,
         dict: Option<Bytes>,
     ) -> common::Cell {
-        let ep = common::endpoint(transport, seq);
-        let pull_opts = match &dict {
-            Some(d) => Options::default().compression_dict(d.clone()),
-            None => Options::default(),
-        };
-        let pull = Socket::new(SocketType::Pull, pull_opts);
-        pull.bind(ep.clone()).await.expect("bind PULL");
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
+        let ep = common::endpoint(transport, seq);
+        let level = zstd_level();
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // Receiver: own thread + compio runtime so decompression
+        // runs in parallel with the sender's compression.
+        let recv_counter = counter.clone();
+        let recv_ep = ep.clone();
+        let recv_dict = dict.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        std::thread::spawn(move || {
+            let rt = build_default_runtime().expect("receiver runtime");
+            rt.block_on(async {
+                let opts = match recv_dict {
+                    Some(d) => Options::default().compression_dict(d),
+                    None => Options::default(),
+                }
+                .compression_level(level);
+                let pull = Socket::new(SocketType::Pull, opts);
+                pull.bind(recv_ep).await.expect("bind PULL");
+                let _ = ready_tx.send(());
+                while pull.recv().await.is_ok() {
+                    recv_counter.fetch_add(1, Ordering::Release);
+                }
+            });
+        });
+        ready_rx.recv().expect("receiver ready");
+
+        // Sender: current thread.
         let mut pushes: Vec<Socket> = Vec::with_capacity(peers);
         for _ in 0..peers {
-            let push_opts = match &dict {
+            let opts = match &dict {
                 Some(d) => Options::default().compression_dict(d.clone()),
                 None => Options::default(),
-            };
-            let p = Socket::new(SocketType::Push, push_opts);
+            }
+            .compression_level(level);
+            let p = Socket::new(SocketType::Push, opts);
             p.connect(ep.clone()).await.expect("connect PUSH");
             pushes.push(p);
         }
@@ -275,16 +307,16 @@ mod inner {
         common::wait_connected(&refs).await;
 
         #[allow(clippy::arc_with_non_send_sync)]
-        let pull = std::sync::Arc::new(pull);
-        #[allow(clippy::arc_with_non_send_sync)]
         let pushes = std::sync::Arc::new(pushes);
 
         let burst = |k: usize| {
-            let pull = pull.clone();
             let pushes = pushes.clone();
             let payload = payload.clone();
+            let counter = counter.clone();
             async move {
+                let base = counter.load(Ordering::Acquire);
                 let per = (k / pushes.len()).max(1);
+                let total = per * pushes.len();
                 let mut handles = Vec::with_capacity(pushes.len());
                 for i in 0..pushes.len() {
                     let p = pushes.clone();
@@ -295,11 +327,11 @@ mod inner {
                         }
                     }));
                 }
-                for _ in 0..(per * pushes.len()) {
-                    pull.recv().await.unwrap();
-                }
                 for h in handles {
                     let _ = h.await;
+                }
+                while counter.load(Ordering::Acquire) < base + total {
+                    compio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
             }
         };
