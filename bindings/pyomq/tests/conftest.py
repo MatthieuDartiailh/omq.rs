@@ -1,24 +1,19 @@
 """Shared fixtures."""
 
-import socket
 import time
 
 import pytest
 
 
-def _free_tcp_port() -> int:
-    """Allocate a free TCP port. Race-free enough for tests."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-    finally:
-        s.close()
+import random as _random
+
+_rng = _random.Random()
 
 
 @pytest.fixture
 def tcp_endpoint() -> str:
-    return f"tcp://127.0.0.1:{_free_tcp_port()}"
+    port = _rng.randint(49152, 65535)
+    return f"tcp://127.0.0.1:{port}"
 
 
 @pytest.fixture
