@@ -104,6 +104,12 @@ pub struct Options {
     ///   deterministic wire shape).
     pub compression_auto_train: bool,
 
+    /// Zstd compression level. Negative values select the "fast" strategy
+    /// (lower ratio, higher speed); 0 maps to zstd's default (level 3);
+    /// positive values trade speed for ratio. Ignored by `lz4+tcp://`.
+    /// Default: -3.
+    pub compression_level: i32,
+
     /// Switch the recv path to a sized one-shot read for any inbound
     /// frame whose wire payload is at least this many bytes.
     ///
@@ -300,6 +306,7 @@ impl Default for Options {
             mechanism: MechanismConfig::Null,
             compression_dict: None,
             compression_auto_train: true,
+            compression_level: -3,
             large_message_threshold: Some(128 * 1024),
         }
     }
@@ -596,6 +603,15 @@ impl Options {
     #[must_use]
     pub fn compression_auto_train(mut self, enabled: bool) -> Self {
         self.compression_auto_train = enabled;
+        self
+    }
+
+    /// Set the zstd compression level (default -3). Negative = fast
+    /// strategy, 0 = zstd default (3), positive = higher ratio.
+    /// Ignored by `lz4+tcp://`.
+    #[must_use]
+    pub fn compression_level(mut self, level: i32) -> Self {
+        self.compression_level = level;
         self
     }
 }

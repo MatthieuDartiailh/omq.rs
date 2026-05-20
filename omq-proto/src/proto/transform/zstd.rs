@@ -61,7 +61,7 @@ const MIN_COMPRESS_WITH_DICT: usize = 64;
 pub const MAX_DICT_BYTES: usize = 64 * 1024 - 4;
 
 /// RFC §5.2: default compression level. Negative = Zstd "fast" strategy.
-const DEFAULT_LEVEL: i32 = -3;
+pub const DEFAULT_LEVEL: i32 = -3;
 
 /// Auto-train: trained dictionary capacity (RFC §6.5).
 const DICT_CAPACITY: usize = 8 * 1024;

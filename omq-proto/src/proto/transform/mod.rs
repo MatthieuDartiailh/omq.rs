@@ -114,7 +114,8 @@ impl MessageEncoder {
                         .expect("compression_dict validated at Options::compression_dict"),
                     None => ZstdEncoder::new(),
                 }
-                .with_max_message_size(options.max_message_size);
+                .with_max_message_size(options.max_message_size)
+                .with_level(options.compression_level);
                 if options.compression_auto_train && options.compression_dict.is_none() {
                     enc = enc.with_auto_train();
                 }
