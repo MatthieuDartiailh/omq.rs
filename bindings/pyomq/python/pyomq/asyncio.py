@@ -29,6 +29,7 @@ class Socket:
         self._sock = _sock
         self._context = _context
         self._closed = False
+        self._last_endpoint = None
 
     @property
     def closed(self):
@@ -39,6 +40,10 @@ class Socket:
         return self._context
 
     @property
+    def last_endpoint(self):
+        return self._last_endpoint
+
+    @property
     def socket_type(self):
         return self._sock.getsockopt(_native.TYPE)
 
@@ -46,13 +51,18 @@ class Socket:
 
     async def bind(self, endpoint):
         try:
-            return await self._sock.bind(endpoint)
+            ep = await self._sock.bind(endpoint)
+            self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
+            return ep
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     async def connect(self, endpoint):
         try:
-            return await self._sock.connect(endpoint)
+            await self._sock.connect(endpoint)
+            self._last_endpoint = (
+                endpoint.encode() if isinstance(endpoint, str) else endpoint
+            )
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 

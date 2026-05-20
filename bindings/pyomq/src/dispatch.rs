@@ -29,8 +29,23 @@ where
         .and_then(|r| r.map_err(map_err))
 }
 
-/// Async version: drive the same shape of op via an asyncio.Future
-/// bridged on the compio runtime.
+/// Like `sync_unit` but returns a `String`.
+pub(crate) fn sync_string<F, Fut>(
+    inner: &Arc<SocketInner>,
+    py: Python<'_>,
+    op: F,
+) -> PyResult<String>
+where
+    F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<String, PError>> + 'static,
+{
+    let id = inner.ensure_id()?;
+    py.allow_threads(|| runtime::with_socket(id, op))
+        .map_err(|_: MissingSocket| map_err(PError::Closed))
+        .and_then(|r| r.map_err(map_err))
+}
+
+/// Async version: drive a `Result<()>`-returning op via an asyncio.Future.
 pub(crate) fn async_unit<'py, F, Fut>(
     inner: &Arc<SocketInner>,
     py: Python<'py>,
@@ -44,6 +59,26 @@ where
     runtime::compio_future_into_py(py, move || async move {
         match runtime::with_socket_async(id, op).await {
             Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
+            Ok(Err(e)) => Err(map_err(e)),
+            Err(_) => Err(map_err(PError::Closed)),
+        }
+    })
+}
+
+/// Async version: drive a `Result<String>`-returning op via an asyncio.Future.
+pub(crate) fn async_string<'py, F, Fut>(
+    inner: &Arc<SocketInner>,
+    py: Python<'py>,
+    op: F,
+) -> PyResult<Bound<'py, PyAny>>
+where
+    F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<String, PError>> + 'static,
+{
+    let id = inner.ensure_id()?;
+    runtime::compio_future_into_py(py, move || async move {
+        match runtime::with_socket_async(id, op).await {
+            Ok(Ok(s)) => Python::with_gil(|py| Ok(s.to_object(py))),
             Ok(Err(e)) => Err(map_err(e)),
             Err(_) => Err(map_err(PError::Closed)),
         }

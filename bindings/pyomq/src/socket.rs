@@ -333,9 +333,11 @@ impl Socket {
         self.inner.ensure_id()
     }
 
-    fn bind(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
+    fn bind(&self, py: Python<'_>, endpoint: &str) -> PyResult<String> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.bind(ep).await.map(|_| ()) })
+        dispatch::sync_string(&self.inner, py, |s| async move {
+            s.bind(ep).await.map(|bound| bound.to_string())
+        })
     }
 
     fn connect(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
