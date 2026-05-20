@@ -18,7 +18,7 @@ pub use endpoint::{Endpoint, TryIntoEndpoint};
 pub use error::{ZmqError, ZmqResult};
 pub use message::ZmqMessage;
 pub use monitor::{MonitorStream, SocketEvent};
-pub use options::{DEFAULT_CONNECT_TIMEOUT, PeerIdentity, SocketOptions};
+pub use options::{DEFAULT_CONNECT_TIMEOUT, KeepAlive, PeerIdentity, SocketOptions};
 pub use proxy::proxy;
 pub use socket::{
     CaptureSocket, ChannelSocket, ClientSocket, DealerRecvHalf, DealerSendHalf, DealerSocket,

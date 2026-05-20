@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use omq_proto::Options;
+pub use omq_proto::options::KeepAlive;
 
 /// Socket identity for routing-aware patterns (ROUTER, DEALER).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,6 +41,7 @@ impl From<&str> for PeerIdentity {
 pub struct SocketOptions {
     pub(crate) identity: Option<PeerIdentity>,
     pub(crate) connect_timeout: Option<Duration>,
+    pub(crate) tcp_keepalive: Option<KeepAlive>,
 }
 
 impl SocketOptions {
@@ -65,6 +67,12 @@ impl SocketOptions {
         self
     }
 
+    #[must_use]
+    pub fn tcp_keepalive(mut self, keepalive: KeepAlive) -> Self {
+        self.tcp_keepalive = Some(keepalive);
+        self
+    }
+
     pub(crate) fn to_omq_options(&self) -> Options {
         let mut opts = Options::default();
         if let Some(ref id) = self.identity {
@@ -72,6 +80,9 @@ impl SocketOptions {
         }
         if let Some(timeout) = self.connect_timeout {
             opts = opts.handshake_timeout(timeout);
+        }
+        if let Some(keepalive) = self.tcp_keepalive {
+            opts = opts.tcp_keepalive(keepalive);
         }
         opts
     }
@@ -89,6 +100,7 @@ mod tests {
         let opts = SocketOptions::new();
         assert!(opts.identity.is_none());
         assert!(opts.connect_timeout.is_none());
+        assert!(opts.tcp_keepalive.is_none());
     }
 
     #[test]
@@ -123,5 +135,23 @@ mod tests {
         let opts = SocketOptions::new();
         let omq = opts.to_omq_options();
         assert!(omq.identity.is_empty());
+    }
+
+    #[test]
+    fn builder_tcp_keepalive() {
+        let opts = SocketOptions::new().tcp_keepalive(KeepAlive::Enabled {
+            idle: Duration::from_mins(1),
+            intvl: Duration::from_secs(10),
+            cnt: 5,
+        });
+        let omq = opts.to_omq_options();
+        assert_eq!(
+            omq.tcp_keepalive,
+            KeepAlive::Enabled {
+                idle: Duration::from_mins(1),
+                intvl: Duration::from_secs(10),
+                cnt: 5,
+            }
+        );
     }
 }
