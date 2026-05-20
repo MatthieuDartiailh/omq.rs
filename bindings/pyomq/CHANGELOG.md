@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-21
+
+### Added
+
+- CURVE encrypted sockets: `curve_server`, `curve_publickey`, `curve_secretkey`, `curve_serverkey` options wired through to the backend.
+- PLAIN/CURVE socket tests and CURVE interop tests against pyzmq.
+- CI smoke tests on built wheels before publishing.
+
+### Removed
+
+- `blake3zmq` feature from the published wheel (not yet wired up).
+
 ## [0.6.1] - 2026-05-21
 
 ### Fixed
