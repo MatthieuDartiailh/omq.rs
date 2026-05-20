@@ -10,7 +10,7 @@ uv pip install pyomq
 uv pip install 'pyomq[test]'   # adds pytest, pyzmq for the interop suite
 ```
 
-The published wheel includes all optional features (curve, blake3zmq, lz4, zstd).
+The published wheel includes optional features: plain, curve, lz4, zstd.
 Use `pyomq.has("curve")` at runtime to check availability.
 
 ## Usage
@@ -47,7 +47,7 @@ Sync and `asyncio` APIs both ship in this release. All 19 ZMTP socket types are 
 - **Draft**: SERVER, CLIENT (RFC 41), RADIO, DISH (RFC 48), GATHER, SCATTER (RFC 49), PEER, CHANNEL (RFC 51).
 
 Transports: `tcp://`, `ipc://`, `inproc://`, and `udp://` (RADIO/DISH only).
-Optional features built into the wheel: `curve`, `blake3zmq`, `lz4`, `zstd`.
+Optional features built into the wheel: `plain`, `curve`, `lz4`, `zstd`.
 
 DISH groups: use `socket.join(b"group")` / `socket.leave(b"group")` to manage
 subscriptions; messages are sent as multipart `[group, body]`.

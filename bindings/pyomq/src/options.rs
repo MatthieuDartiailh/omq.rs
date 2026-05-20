@@ -50,6 +50,10 @@ pub struct Overlay {
     pub plain_server: bool,
     pub plain_username: Option<String>,
     pub plain_password: Option<String>,
+    pub curve_server: bool,
+    pub curve_publickey: Option<Vec<u8>>,
+    pub curve_secretkey: Option<Vec<u8>>,
+    pub curve_serverkey: Option<Vec<u8>>,
 }
 
 impl Overlay {
@@ -94,6 +98,42 @@ impl Overlay {
                     password: p.clone(),
                 };
         }
+        #[cfg(feature = "curve")]
+        if self.curve_server {
+            if let (Some(pk), Some(sk)) = (&self.curve_publickey, &self.curve_secretkey) {
+                let pk_str = std::str::from_utf8(pk).unwrap_or("");
+                let sk_str = std::str::from_utf8(sk).unwrap_or("");
+                let public = backend::CurvePublicKey::from_z85(pk_str)
+                    .expect("bad CURVE_PUBLICKEY Z85");
+                let secret = backend::CurveSecretKey::from_z85(sk_str)
+                    .expect("bad CURVE_SECRETKEY Z85");
+                let keypair = backend::CurveKeypair { public, secret };
+                opts.mechanism = omq_proto::options::MechanismConfig::CurveServer {
+                    our_keypair: keypair,
+                    cookie_keyring: std::sync::Arc::new(
+                        backend::CurveCookieKeyring::new(),
+                    ),
+                    authenticator: None,
+                };
+            }
+        } else if let (Some(pk), Some(sk), Some(svk)) =
+            (&self.curve_publickey, &self.curve_secretkey, &self.curve_serverkey)
+        {
+            let pk_str = std::str::from_utf8(pk).unwrap_or("");
+            let sk_str = std::str::from_utf8(sk).unwrap_or("");
+            let svk_str = std::str::from_utf8(svk).unwrap_or("");
+            let public = backend::CurvePublicKey::from_z85(pk_str)
+                .expect("bad CURVE_PUBLICKEY Z85");
+            let secret = backend::CurveSecretKey::from_z85(sk_str)
+                .expect("bad CURVE_SECRETKEY Z85");
+            let server_public = backend::CurvePublicKey::from_z85(svk_str)
+                .expect("bad CURVE_SERVERKEY Z85");
+            let keypair = backend::CurveKeypair { public, secret };
+            opts.mechanism = omq_proto::options::MechanismConfig::CurveClient {
+                our_keypair: keypair,
+                server_public,
+            };
+        }
         opts
     }
 
@@ -130,6 +170,10 @@ impl Overlay {
             plain_server: false,
             plain_username: None,
             plain_password: None,
+            curve_server: false,
+            curve_publickey: None,
+            curve_secretkey: None,
+            curve_serverkey: None,
         }
     }
 }
@@ -292,6 +336,21 @@ pub fn setsockopt(
         constants::PLAIN_PASSWORD => {
             let v: &[u8] = value.extract()?;
             ov.plain_password = Some(String::from_utf8_lossy(v).into_owned());
+        }
+        constants::CURVE_SERVER => {
+            ov.curve_server = value.extract::<i64>()? != 0;
+        }
+        constants::CURVE_PUBLICKEY => {
+            let v: &[u8] = value.extract()?;
+            ov.curve_publickey = Some(v.to_vec());
+        }
+        constants::CURVE_SECRETKEY => {
+            let v: &[u8] = value.extract()?;
+            ov.curve_secretkey = Some(v.to_vec());
+        }
+        constants::CURVE_SERVERKEY => {
+            let v: &[u8] = value.extract()?;
+            ov.curve_serverkey = Some(v.to_vec());
         }
         // No-ops accepted for source-compat with pyzmq:
         constants::IMMEDIATE
@@ -497,6 +556,40 @@ pub fn getsockopt<'py>(
                 .clone()
                 .unwrap_or_default();
             Ok(PyBytes::new_bound(py, v.as_bytes()).into_any())
+        }
+        constants::CURVE_SERVER => {
+            let v = sock.overlay.lock().unwrap().curve_server as i64;
+            Ok(int_to_bound(py, v))
+        }
+        constants::CURVE_PUBLICKEY => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .curve_publickey
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, &v).into_any())
+        }
+        constants::CURVE_SECRETKEY => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .curve_secretkey
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, &v).into_any())
+        }
+        constants::CURVE_SERVERKEY => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .curve_serverkey
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, &v).into_any())
         }
         // Compat no-ops: return sensible defaults.
         constants::MECHANISM => Ok(int_to_bound(py, 0_i64)),
