@@ -377,6 +377,13 @@ Ratios on same JSON template (zstd: 1.6 KiB dict from 200 samples; lz4: 4 KiB bu
 | 1 KiB | 2.60x         | **11.25x**      | 2.84x          | **35.31x**       |
 | 2 KiB | 3.76x         | **8.50x**       | 4.47x          | **16.93x**       |
 
+### Virtual throughput on bandwidth-limited links
+
+Structured JSON payloads over TCP loopback rate-limited with `tc tbf`.
+Virtual throughput = msg/s × uncompressed message size; this is the
+effective application data rate the compression ratio buys on a
+constrained link.
+
 <p align="center">
   <img src="doc/compression_chart_1g.svg" alt="Compression throughput at 1 Gbps" width="850">
 </p>
