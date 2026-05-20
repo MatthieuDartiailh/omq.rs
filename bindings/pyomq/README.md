@@ -98,6 +98,44 @@ REQ/REP is latency-bound (4 TCP hops per round-trip) so both are similar.
 
 Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure and update the tables above.
 
+## Compression transports
+
+ØMQ adds two transparent compression transports on top of TCP: `lz4+tcp://`
+(fast, low-latency) and `zstd+tcp://` (higher ratio, better for large or
+structured payloads). Swap the scheme in your endpoint string and everything
+else stays the same:
+
+```python
+push = ctx.socket(zmq.PUSH)
+push.bind("lz4+tcp://127.0.0.1:5555")   # or zstd+tcp://
+
+pull = ctx.socket(zmq.PULL)
+pull.connect("lz4+tcp://127.0.0.1:5555")
+```
+
+Both peers must use a matching compression endpoint. Payloads below ~512 B are
+sent as-is (the codec detects that compression would expand them). For
+realistic JSON payloads at 2 KiB, lz4 yields ~3.8× and zstd ~4.5× on a
+bandwidth-limited link.
+
+`zstd+tcp://` also auto-trains a dictionary: it samples the first 1000
+outbound messages (or 100 KiB of plaintext, whichever comes first), builds an
+8 KiB dict, and ships it to the peer once. After that the compression threshold
+drops from 512 B to 64 B, so small structured messages start compressing too.
+`lz4+tcp://` does not auto-train (LZ4 has no standard dict trainer).
+
+Virtual throughput on bandwidth-limited links (JSON payloads, compio backend):
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/compression_chart_1g.svg" alt="Compression throughput at 1 Gbps" width="850">
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/compression_chart_100m.svg" alt="Compression throughput at 100 Mbps" width="850">
+</p>
+
+See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md#compression-on-realistic-json-payloads-omq-compio-1-peer) for full tables including dict-trained ratios.
+
 ## Develop
 
 ```sh
