@@ -6,6 +6,16 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### omq-libzmq 0.2.0 (was omq-zmq)
+
+- Package renamed from `omq-zmq` to `omq-libzmq`. Library name (`omq_zmq`) unchanged.
+- 7 formerly-ENOTSUP socket options now store and round-trip values. 13 rarely-used options explicitly accepted as no-ops.
+- `zmq_msg_get`/`zmq_msg_gets` improved for libzmq compatibility. Context options expanded.
+
+### omq-zeromq 0.4.0
+
+- `Socket::disconnect()` method.
+
 ## [0.2.10] - 2026-05-20
 
 ### omq-tokio 0.8.1

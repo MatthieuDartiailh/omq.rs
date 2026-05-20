@@ -22,6 +22,9 @@ pub trait Socket: Sized + Send {
     async fn connect(&mut self, endpoint: &str) -> ZmqResult<()>;
 
     #[allow(async_fn_in_trait)]
+    async fn disconnect(&mut self, endpoint: &str) -> ZmqResult<()>;
+
+    #[allow(async_fn_in_trait)]
     async fn close(self) -> Vec<ZmqError>;
 
     fn monitor(&mut self) -> MonitorStream;
@@ -77,6 +80,11 @@ impl Inner {
     async fn connect(&mut self, endpoint: &str) -> ZmqResult<()> {
         let ep = parse_endpoint(endpoint)?;
         self.socket.connect(ep).await.map_err(ZmqError::from)
+    }
+
+    async fn disconnect(&mut self, endpoint: &str) -> ZmqResult<()> {
+        let ep = parse_endpoint(endpoint)?;
+        self.socket.disconnect(ep).await.map_err(ZmqError::from)
     }
 
     async fn close(self) -> Vec<ZmqError> {
@@ -174,6 +182,10 @@ macro_rules! define_socket {
 
             async fn connect(&mut self, endpoint: &str) -> ZmqResult<()> {
                 self.inner.connect(endpoint).await
+            }
+
+            async fn disconnect(&mut self, endpoint: &str) -> ZmqResult<()> {
+                self.inner.disconnect(endpoint).await
             }
 
             async fn close(self) -> Vec<ZmqError> {

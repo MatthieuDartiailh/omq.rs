@@ -1,4 +1,4 @@
-# omq-zmq
+# omq-libzmq
 
 libzmq-compatible C interface backed by [omq-compio](https://crates.io/crates/omq-compio).
 
@@ -11,7 +11,7 @@ in other languages) to link against omq instead of libzmq.
 Produces `libomq_zmq.so` / `libomq_zmq.a` / `libomq_zmq.dylib`.
 
 ```sh
-cargo build -p omq-zmq --release
+cargo build -p omq-libzmq --release
 ```
 
 ## License

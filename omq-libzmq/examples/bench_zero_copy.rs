@@ -5,7 +5,7 @@
 //!   - zero-copy: `zmq_msg_recv` → `zmq_msg_send`  (`KIND_BYTES` arc stolen, 0 copies in fwd)
 //!   - copy:      `zmq_msg_recv` → `zmq_send(ptr)`  (1 copy in fwd-send via `zmq_send`)
 //!
-//! Run: `cargo run --example bench_zero_copy --release -p omq-zmq`
+//! Run: `cargo run --example bench_zero_copy --release -p omq-libzmq`
 
 use std::ffi::CString;
 use std::time::Instant;

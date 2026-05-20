@@ -32,6 +32,13 @@ pub(crate) struct SocketOverlay {
     pub rcvbuf: Option<usize>,
     pub xpub_verbose: bool,
     pub ipv6: bool,
+    pub backlog: i32,
+    pub immediate: bool,
+    pub connect_timeout: i32,
+    pub probe_router: bool,
+    pub req_correlate: bool,
+    pub req_relaxed: bool,
+    pub xpub_nodrop: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -173,6 +180,20 @@ const ZMQ_REQ_RELAXED: c_int = 53;
 const ZMQ_ROUTER_HANDOVER: c_int = 56;
 const ZMQ_XPUB_NODROP: c_int = 69;
 const ZMQ_CONNECT_TIMEOUT: c_int = 79;
+
+const ZMQ_AFFINITY: c_int = 4;
+const ZMQ_RATE: c_int = 8;
+const ZMQ_RECOVERY_IVL: c_int = 9;
+const ZMQ_MULTICAST_HOPS: c_int = 25;
+const ZMQ_ZAP_DOMAIN: c_int = 55;
+const ZMQ_TOS: c_int = 57;
+const ZMQ_CONNECT_ROUTING_ID: c_int = 61;
+const ZMQ_SOCKS_PROXY: c_int = 68;
+const ZMQ_INVERT_MATCHING: c_int = 74;
+const ZMQ_TCP_MAXRT: c_int = 80;
+const ZMQ_BINDTODEVICE: c_int = 92;
+const ZMQ_MULTICAST_LOOP: c_int = 96;
+const ZMQ_ROUTER_NOTIFY: c_int = 97;
 
 const ZMQ_POLLIN: c_int = 1;
 const ZMQ_POLLOUT: c_int = 2;
@@ -431,11 +452,41 @@ pub extern "C" fn zmq_setsockopt(
         // Always-on in omq; accept silently.
         #[allow(clippy::match_same_arms)]
         ZMQ_ROUTER_HANDOVER => {}
-        // Not implemented; fail explicitly so callers know.
-        ZMQ_BACKLOG | ZMQ_IMMEDIATE | ZMQ_CONNECT_TIMEOUT | ZMQ_PROBE_ROUTER
-        | ZMQ_REQ_CORRELATE | ZMQ_REQ_RELAXED | ZMQ_XPUB_NODROP => {
-            return crate::error::fail(crate::error::ENOTSUP);
+        ZMQ_BACKLOG => {
+            sock_arc.overlay.lock().unwrap().backlog = read_i32(optval, optvallen);
         }
+        ZMQ_IMMEDIATE => {
+            sock_arc.overlay.lock().unwrap().immediate = read_i32(optval, optvallen) != 0;
+        }
+        ZMQ_CONNECT_TIMEOUT => {
+            sock_arc.overlay.lock().unwrap().connect_timeout = read_i32(optval, optvallen);
+        }
+        ZMQ_PROBE_ROUTER => {
+            sock_arc.overlay.lock().unwrap().probe_router = read_i32(optval, optvallen) != 0;
+        }
+        ZMQ_REQ_CORRELATE => {
+            sock_arc.overlay.lock().unwrap().req_correlate = read_i32(optval, optvallen) != 0;
+        }
+        ZMQ_REQ_RELAXED => {
+            sock_arc.overlay.lock().unwrap().req_relaxed = read_i32(optval, optvallen) != 0;
+        }
+        ZMQ_XPUB_NODROP => {
+            sock_arc.overlay.lock().unwrap().xpub_nodrop = read_i32(optval, optvallen) != 0;
+        }
+        #[allow(clippy::match_same_arms)]
+        ZMQ_AFFINITY
+        | ZMQ_RATE
+        | ZMQ_RECOVERY_IVL
+        | ZMQ_MULTICAST_HOPS
+        | ZMQ_TOS
+        | ZMQ_CONNECT_ROUTING_ID
+        | ZMQ_ZAP_DOMAIN
+        | ZMQ_SOCKS_PROXY
+        | ZMQ_INVERT_MATCHING
+        | ZMQ_TCP_MAXRT
+        | ZMQ_ROUTER_NOTIFY
+        | ZMQ_MULTICAST_LOOP
+        | ZMQ_BINDTODEVICE => {}
         _ => {}
     }
     0
@@ -793,6 +844,45 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, i32::from(v))
         }
         ZMQ_ROUTER_HANDOVER => write_i32(optval, optvallen, 1),
+        ZMQ_BACKLOG => write_i32(optval, optvallen, sock_arc.overlay.lock().unwrap().backlog),
+        ZMQ_IMMEDIATE => write_i32(
+            optval,
+            optvallen,
+            i32::from(sock_arc.overlay.lock().unwrap().immediate),
+        ),
+        ZMQ_CONNECT_TIMEOUT => write_i32(
+            optval,
+            optvallen,
+            sock_arc.overlay.lock().unwrap().connect_timeout,
+        ),
+        ZMQ_PROBE_ROUTER => write_i32(
+            optval,
+            optvallen,
+            i32::from(sock_arc.overlay.lock().unwrap().probe_router),
+        ),
+        ZMQ_REQ_CORRELATE => write_i32(
+            optval,
+            optvallen,
+            i32::from(sock_arc.overlay.lock().unwrap().req_correlate),
+        ),
+        ZMQ_REQ_RELAXED => write_i32(
+            optval,
+            optvallen,
+            i32::from(sock_arc.overlay.lock().unwrap().req_relaxed),
+        ),
+        ZMQ_XPUB_NODROP => write_i32(
+            optval,
+            optvallen,
+            i32::from(sock_arc.overlay.lock().unwrap().xpub_nodrop),
+        ),
+        ZMQ_AFFINITY => write_i64(optval, optvallen, 0),
+        ZMQ_RATE | ZMQ_RECOVERY_IVL | ZMQ_MULTICAST_HOPS | ZMQ_TOS | ZMQ_TCP_MAXRT
+        | ZMQ_ROUTER_NOTIFY | ZMQ_MULTICAST_LOOP | ZMQ_INVERT_MATCHING => {
+            write_i32(optval, optvallen, 0)
+        }
+        ZMQ_ZAP_DOMAIN | ZMQ_SOCKS_PROXY | ZMQ_CONNECT_ROUTING_ID | ZMQ_BINDTODEVICE => {
+            write_string(optval, optvallen, b"")
+        }
         _ => 0,
     }
 }

@@ -71,18 +71,18 @@ impl OmqContext {
         let mut io_threads = Vec::with_capacity(n);
         for i in 0..n {
             let (tx, rx) = flume::unbounded::<Job>();
-            let name = format!("omq-zmq-io-{i}");
+            let name = format!("omq-libzmq-io-{i}");
             let handle = thread::Builder::new()
                 .name(name)
                 .spawn(move || {
-                    let rt = build_compio_runtime().expect("omq-zmq: compio runtime");
+                    let rt = build_compio_runtime().expect("omq-libzmq: compio runtime");
                     rt.block_on(async move {
                         while let Ok(job) = rx.recv_async().await {
                             job();
                         }
                     });
                 })
-                .expect("omq-zmq: spawn io thread");
+                .expect("omq-libzmq: spawn io thread");
             io_threads.push(IoThread {
                 submit: tx,
                 handle: Some(handle),
@@ -199,10 +199,11 @@ pub extern "C" fn zmq_term(ctx_ptr: *mut libc::c_void) -> c_int {
     zmq_ctx_term(ctx_ptr)
 }
 
-// ZMQ_IO_THREADS=1, ZMQ_MAX_SOCKETS=2, ZMQ_MAX_MSGSZ=5
 const ZMQ_IO_THREADS: c_int = 1;
 const ZMQ_MAX_SOCKETS: c_int = 2;
+const ZMQ_SOCKET_LIMIT: c_int = 3;
 const ZMQ_MAX_MSGSZ: c_int = 5;
+const ZMQ_IPV6_CTX: c_int = 42;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: c_int) -> c_int {
@@ -220,6 +221,8 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
         ZMQ_MAX_MSGSZ => {
             ctx.max_msg_size.store(i64::from(value), Ordering::Relaxed);
         }
+        #[allow(clippy::match_same_arms)]
+        ZMQ_SOCKET_LIMIT | ZMQ_IPV6_CTX => {}
         _ => return crate::error::fail(libc::EINVAL),
     }
     0
@@ -233,8 +236,9 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     match option {
         ZMQ_IO_THREADS => c_int::try_from(ctx.io_threads.len()).unwrap_or(c_int::MAX),
-        ZMQ_MAX_SOCKETS => ctx.max_sockets.load(Ordering::Relaxed),
+        ZMQ_MAX_SOCKETS | ZMQ_SOCKET_LIMIT => ctx.max_sockets.load(Ordering::Relaxed),
         ZMQ_MAX_MSGSZ => ctx.max_msg_size.load(Ordering::Relaxed) as c_int,
+        ZMQ_IPV6_CTX => 0,
         _ => crate::error::fail(libc::EINVAL),
     }
 }

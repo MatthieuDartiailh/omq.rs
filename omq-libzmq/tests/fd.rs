@@ -1,6 +1,6 @@
 //! `ZMQ_FD` level-triggered behavior tests.
 //!
-//! omq-zmq provides an accurate, level-triggered fd (eventfd on Linux,
+//! omq-libzmq provides an accurate, level-triggered fd (eventfd on Linux,
 //! pipe on macOS). It is readable iff `zmq_recv()` would succeed without
 //! blocking. No spurious wakeups.
 #![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]

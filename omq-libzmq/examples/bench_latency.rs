@@ -5,7 +5,7 @@
 //! New path:
 //!   C → `run_on`/`with_socket` → `Socket::send` directly on io thread
 //!
-//! Run: `cargo run --example bench_latency --release -p omq-zmq`
+//! Run: `cargo run --example bench_latency --release -p omq-libzmq`
 
 use std::ffi::CString;
 use std::time::Instant;

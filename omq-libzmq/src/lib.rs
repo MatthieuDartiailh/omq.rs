@@ -1,4 +1,4 @@
-//! omq-zmq -- libzmq-compatible C interface backed by omq-compio.
+//! omq-libzmq -- libzmq-compatible C interface backed by omq-compio.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod context;

@@ -1,4 +1,4 @@
-/*  libzmq-compatible header for omq-zmq.                                    */
+/*  libzmq-compatible header for omq-libzmq.                                 */
 /*  Matches libzmq 4.3.6 signatures and macro constants.                      */
 /*  Drop-in: #include <zmq.h> and link -lomq_zmq (or rename to -lomq).       */
 
@@ -231,7 +231,7 @@ extern "C" {
 /*  Types -------------------------------------------------------------------- */
 
 /*  Handle to a message. Opaque 64-byte struct matching the layout used      */
-/*  by omq-zmq internally.                                                   */
+/*  by omq-libzmq internally.                                                */
 typedef struct zmq_msg_t { unsigned char _[64]; } zmq_msg_t;
 
 /*  Free function for zmq_msg_init_data.                                     */

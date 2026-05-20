@@ -43,7 +43,7 @@ fn ipc_push_pull() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    let path = format!("/tmp/omq-zmq-test-{}", std::process::id());
+    let path = format!("/tmp/omq-libzmq-test-{}", std::process::id());
     let addr = CString::new(format!("ipc://{path}")).unwrap();
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
@@ -74,7 +74,7 @@ fn ipc_abstract_namespace() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    let addr = CString::new(format!("ipc://@omq-zmq-abstract-{}", std::process::id())).unwrap();
+    let addr = CString::new(format!("ipc://@omq-libzmq-abstract-{}", std::process::id())).unwrap();
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
@@ -101,7 +101,11 @@ fn ipc_abstract_pub_sub() {
     let pub_ = zmq_socket(ctx, ZMQ_PUB);
     let sub = zmq_socket(ctx, ZMQ_SUB);
 
-    let addr = CString::new(format!("ipc://@omq-zmq-abstract-ps-{}", std::process::id())).unwrap();
+    let addr = CString::new(format!(
+        "ipc://@omq-libzmq-abstract-ps-{}",
+        std::process::id()
+    ))
+    .unwrap();
     zmq_bind(pub_, addr.as_ptr());
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub, addr.as_ptr());

@@ -15,7 +15,7 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
 - 19 socket types (11 standard + 8 draft), 6 transports (TCP, IPC, inproc, UDP, `lz4+tcp://`, `zstd+tcp://`)
 - 4 security mechanisms: NULL, PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
-- Python binding ([pyomq](bindings/pyomq/)), C API ([omq-zmq](omq-zmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
+- Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
 
 ### vs. libzmq (TCP loopback, two processes)
 
@@ -102,7 +102,7 @@ independent, versioned, and published separately.
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions |
 | [`omq-compio`](omq-compio/) | Primary backend: single-thread io_uring / IOCP |
 | [`omq-tokio`](omq-tokio/) | Alternative backend: multi-thread tokio |
-| [`omq-zmq`](omq-zmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
+| [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
 | [`omq-zeromq`](omq-zeromq/) | Drop-in replacement for the [`zeromq`](https://crates.io/crates/zeromq) Rust crate |
 | [`blume`](blume/) | Batching MPSC channel with swap-drain consumer |
 | [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch |

@@ -195,7 +195,7 @@ where
             let _ = otx.send(f());
         }),
     );
-    orx.recv().expect("omq-zmq: io thread gone")
+    orx.recv().expect("omq-libzmq: io thread gone")
 }
 
 /// Run an async op on the socket from within the io thread.
@@ -229,7 +229,7 @@ where
             }
         }),
     );
-    orx.recv().expect("omq-zmq: io thread gone").ok_or(())
+    orx.recv().expect("omq-libzmq: io thread gone").ok_or(())
 }
 
 fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {

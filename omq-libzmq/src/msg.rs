@@ -263,11 +263,15 @@ pub extern "C" fn zmq_msg_get(msg: *const OmqMsgRepr, property: c_int) -> c_int 
     if msg.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    // ZMQ_MORE = 1
-    if property == 1 {
-        return zmq_msg_more(msg);
+    match property {
+        1 => zmq_msg_more(msg),
+        3 => 0, // ZMQ_SHARED
+        5 => zmq_msg_routing_id(msg).cast_signed(),
+        _ => {
+            crate::error::set_errno(libc::EINVAL);
+            -1
+        }
     }
-    0
 }
 
 #[unsafe(no_mangle)]
@@ -277,11 +281,21 @@ pub extern "C" fn zmq_msg_set(_msg: *mut OmqMsgRepr, _property: c_int, _val: c_i
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_gets(
-    _msg: *const OmqMsgRepr,
-    _property: *const libc::c_char,
+    msg: *const OmqMsgRepr,
+    property: *const libc::c_char,
 ) -> *const libc::c_char {
-    crate::error::set_errno(libc::EINVAL);
-    std::ptr::null()
+    if msg.is_null() || property.is_null() {
+        crate::error::set_errno(libc::EINVAL);
+        return std::ptr::null();
+    }
+    let prop = unsafe { std::ffi::CStr::from_ptr(property) };
+    match prop.to_bytes() {
+        b"Socket-Type" | b"Identity" | b"Routing-Id" | b"Peer-Address" => c"".as_ptr(),
+        _ => {
+            crate::error::set_errno(libc::EINVAL);
+            std::ptr::null()
+        }
+    }
 }
 
 /// Routing ID lives in reserved bytes 0..4 as little-endian u32.

@@ -1,6 +1,6 @@
-//! Push/pull throughput and req/rep latency bench for omq-zmq.
+//! Push/pull throughput and req/rep latency bench for omq-libzmq.
 //!
-//! Run: `cargo run --example bench_recv --release -p omq-zmq`
+//! Run: `cargo run --example bench_recv --release -p omq-libzmq`
 
 use std::ffi::CString;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -209,7 +209,7 @@ fn main() {
     let ipc_addr = format!("ipc:///tmp/omq-bench-{}.sock", std::process::id());
     let sizes = [8, 64, 256, 1024, 16384];
 
-    println!("=== omq-zmq push/pull throughput ({batch} msgs/round) ===");
+    println!("=== omq-libzmq push/pull throughput ({batch} msgs/round) ===");
     println!("--- inproc ---");
     for &sz in &sizes {
         bench_push_pull("inproc://x", sz, batch);
@@ -223,7 +223,7 @@ fn main() {
         bench_push_pull("tcp://127.0.0.1:*", sz, batch);
     }
 
-    println!("\n=== omq-zmq req/rep latency ({rt_iters} round-trips/round) ===");
+    println!("\n=== omq-libzmq req/rep latency ({rt_iters} round-trips/round) ===");
     println!("--- inproc ---");
     for &sz in &sizes {
         bench_req_rep("inproc://x", sz, rt_iters);

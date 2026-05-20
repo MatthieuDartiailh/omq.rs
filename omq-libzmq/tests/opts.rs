@@ -453,23 +453,42 @@ fn ipv6_roundtrip() {
 }
 
 #[test]
-fn unimplemented_options_return_enotsup() {
+fn compat_noop_options_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);
-    let enotsup = 156_384_713i32;
 
-    for opt in [
-        ZMQ_BACKLOG,
-        ZMQ_IMMEDIATE,
-        ZMQ_CONNECT_TIMEOUT,
-        ZMQ_PROBE_ROUTER,
-        ZMQ_REQ_CORRELATE,
-        ZMQ_REQ_RELAXED,
-        ZMQ_XPUB_NODROP,
-    ] {
-        let rc = set_i32(s, opt, 1);
-        assert_eq!(rc, -1, "option {opt} should fail");
-        assert_eq!(omq_zmq::zmq_errno(), enotsup, "option {opt} errno");
+    assert_eq!(set_i32(s, ZMQ_BACKLOG, 128), 0);
+    assert_eq!(get_i32(s, ZMQ_BACKLOG), 128);
+
+    assert_eq!(set_i32(s, ZMQ_IMMEDIATE, 1), 0);
+    assert_eq!(get_i32(s, ZMQ_IMMEDIATE), 1);
+
+    assert_eq!(set_i32(s, ZMQ_CONNECT_TIMEOUT, 5000), 0);
+    assert_eq!(get_i32(s, ZMQ_CONNECT_TIMEOUT), 5000);
+
+    assert_eq!(set_i32(s, ZMQ_PROBE_ROUTER, 1), 0);
+    assert_eq!(get_i32(s, ZMQ_PROBE_ROUTER), 1);
+
+    assert_eq!(set_i32(s, ZMQ_REQ_CORRELATE, 1), 0);
+    assert_eq!(get_i32(s, ZMQ_REQ_CORRELATE), 1);
+
+    assert_eq!(set_i32(s, ZMQ_REQ_RELAXED, 1), 0);
+    assert_eq!(get_i32(s, ZMQ_REQ_RELAXED), 1);
+
+    assert_eq!(set_i32(s, ZMQ_XPUB_NODROP, 1), 0);
+    assert_eq!(get_i32(s, ZMQ_XPUB_NODROP), 1);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn silent_noop_options_accepted() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    for opt in [4, 8, 9, 25, 55, 57, 61, 68, 74, 80, 92, 96, 97] {
+        assert_eq!(set_i32(s, opt, 1), 0, "option {opt} should be accepted");
     }
 
     zmq_close(s);
