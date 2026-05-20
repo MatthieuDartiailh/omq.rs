@@ -5,7 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-omq = { version = "0.8.0", path = "../../../omq" }
+omq = { version = "0.8.1", path = "../../../omq" }
 compio = { git = "https://github.com/compio-rs/compio.git", rev = "453ed63", features = ["macros", "runtime", "time"] }
 bytes = "1"
 
