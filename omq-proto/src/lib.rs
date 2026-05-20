@@ -35,5 +35,5 @@ pub use proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]
 pub use proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 #[cfg(feature = "curve")]
-pub use proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey};
+pub use proto::mechanism::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
 pub use proto::{SocketType, is_compatible};

@@ -221,6 +221,7 @@ fn curve_handshake_and_message_roundtrip() {
         ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
             MechanismSetup::CurveServer {
                 keypair: server_kp,
+                cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
                 authenticator: None,
             },
         ),
@@ -455,6 +456,7 @@ fn supply_payload_through_curve() {
         ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
             MechanismSetup::CurveServer {
                 keypair: server_kp,
+                cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
                 authenticator: None,
             },
         ),

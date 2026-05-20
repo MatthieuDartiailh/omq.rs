@@ -1,6 +1,7 @@
 //! CURVE Curve25519 keypair: long-term keys + Z85 helpers.
 
 use rand::rngs::OsRng;
+use subtle::ConstantTimeEq;
 use zeroize::ZeroizeOnDrop;
 
 use crate::error::{Error, Result};
@@ -100,8 +101,7 @@ impl std::fmt::Debug for CurveSecretKey {
 
 impl PartialEq for CurveSecretKey {
     fn eq(&self, other: &Self) -> bool {
-        // Constant-time equality.
-        self.0 == other.0
+        self.0.ct_eq(&other.0).into()
     }
 }
 

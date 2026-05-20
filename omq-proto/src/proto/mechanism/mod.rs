@@ -9,9 +9,13 @@
 #[cfg(feature = "curve")]
 pub mod curve;
 #[cfg(feature = "curve")]
+pub mod curve_cookie;
+#[cfg(feature = "curve")]
 pub mod curve_keys;
 #[cfg(feature = "curve")]
 pub(crate) use curve::{CurveMechanism, CurveTransform};
+#[cfg(feature = "curve")]
+pub use curve_cookie::CurveCookieKeyring;
 #[cfg(feature = "curve")]
 pub use curve_keys::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 
@@ -37,6 +41,10 @@ pub enum MechanismSetup {
     #[cfg(feature = "curve")]
     CurveServer {
         keypair: CurveKeypair,
+        /// Shared cookie keyring for periodic rotation. Concurrent
+        /// server-side handshakes share the rotation timeline; the
+        /// server is stateless between WELCOME and INITIATE.
+        cookie_keyring: std::sync::Arc<CurveCookieKeyring>,
         /// Optional callback invoked after vouch verification with the
         /// peer's long-term public key. `None` accepts every
         /// cryptographically-valid client.
@@ -91,8 +99,13 @@ impl MechanismSetup {
             #[cfg(feature = "curve")]
             Self::CurveServer {
                 keypair,
+                cookie_keyring,
                 authenticator,
-            } => SecurityMechanism::Curve(CurveMechanism::new_server(keypair, authenticator)),
+            } => SecurityMechanism::Curve(CurveMechanism::new_server(
+                keypair,
+                cookie_keyring,
+                authenticator,
+            )),
             #[cfg(feature = "curve")]
             Self::CurveClient {
                 keypair,

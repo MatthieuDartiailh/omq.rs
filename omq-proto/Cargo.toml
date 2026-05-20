@@ -20,7 +20,7 @@ workspace = true
 #   zstd      zstd+tcp:// transport (bundles libzstd; needs cc)
 #   priority  strict per-pipe priority on connect_with
 default = []
-curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:zeroize"]
+curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:subtle", "dep:x25519-dalek", "dep:zeroize"]
 blake3zmq = [
     "dep:blake3",
     "dep:chacha20-blake3",
@@ -42,6 +42,7 @@ bytes = "1"
 chacha20-blake3 = { version = "0.9.12", optional = true }
 crypto_box = { version = "0.9", features = ["std"], optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
+subtle = { version = "2", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 lz4-sys = { version = "1", optional = true }
 rand = "0.8"

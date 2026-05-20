@@ -4,16 +4,19 @@
 //! The actual crypto is done by `crypto_box::SalsaBox` (Curve25519
 //! XSalsa20-Poly1305). This module is just protocol layout + state
 //! machine.
+//!
+//! The server is stateless between WELCOME and INITIATE: ephemeral keys
+//! are sealed in the cookie the client echoes back, then dropped. A
+//! shared [`CurveCookieKeyring`] rotates the cookie key so in-flight
+//! INITIATE commands survive a rotation.
+
+use std::sync::Arc;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use crypto_box::{
-    PublicKey, SalsaBox, SecretKey,
-    aead::{Aead, KeyInit},
-};
-use crypto_secretbox::XSalsa20Poly1305;
+use crypto_box::{PublicKey, SalsaBox, SecretKey, aead::Aead};
 use rand::{RngCore, rngs::OsRng};
-use zeroize::Zeroizing;
 
+use super::curve_cookie::CurveCookieKeyring;
 use super::{CurveKeypair, CurvePublicKey, MechanismStep};
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
@@ -24,7 +27,6 @@ const NONCE_READY: &[u8; 16] = b"CurveZMQREADY---";
 const NONCE_MESSAGE_C: &[u8; 16] = b"CurveZMQMESSAGEC";
 const NONCE_MESSAGE_S: &[u8; 16] = b"CurveZMQMESSAGES";
 const NONCE_WELCOME_PREFIX: &[u8; 8] = b"WELCOME-";
-const NONCE_COOKIE_PREFIX: &[u8; 8] = b"COOKIE--";
 const NONCE_VOUCH_PREFIX: &[u8; 8] = b"VOUCH---";
 
 /// Construct a 24-byte nonce as `prefix(16) || counter_be(8)`.
@@ -42,6 +44,19 @@ fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
     n[..8].copy_from_slice(prefix);
     n[8..].copy_from_slice(suffix);
     n
+}
+
+/// Reject low-order Curve25519 public keys that force the X25519 shared
+/// secret to all-zeros, making session encryption predictable.
+fn validate_dh_not_zero(our_secret: &SecretKey, peer_public: &[u8; 32]) -> Result<()> {
+    let sec = x25519_dalek::StaticSecret::from(our_secret.to_bytes());
+    let pub_ = x25519_dalek::PublicKey::from(*peer_public);
+    if sec.diffie_hellman(&pub_).to_bytes().iter().all(|&b| b == 0) {
+        return Err(Error::HandshakeFailed(
+            "X25519 produced all-zero shared secret (low-order public key)".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +153,10 @@ impl CurveTransform {
 /// CURVE handshake state machine. Holds long-term and ephemeral keys, plus
 /// the peer-side keys learned during the handshake. Produces a
 /// [`CurveTransform`] on success.
+///
+/// The server is stateless between WELCOME and INITIATE: after sending
+/// WELCOME the ephemeral fields are cleared; `parse_initiate` recovers
+/// them from the cookie the client echoes back.
 #[derive(Debug)]
 pub(crate) struct CurveMechanism {
     is_server: bool,
@@ -150,15 +169,16 @@ pub(crate) struct CurveMechanism {
     /// from INITIATE.
     peer_lt_public: Option<PublicKey>,
 
-    /// Our transient keypair (fresh per connection).
-    our_eph_secret: SecretKey,
-    our_eph_public: PublicKey,
+    /// Our transient keypair (fresh per connection). `None` on the server
+    /// before HELLO and between WELCOME and INITIATE (stateless window).
+    our_eph_secret: Option<SecretKey>,
+    our_eph_public: Option<PublicKey>,
     /// Peer transient public. Server learns from HELLO; client learns from
-    /// WELCOME.
+    /// WELCOME. `None` on the server in the stateless window.
     peer_eph_public: Option<PublicKey>,
 
-    /// Server-only: random key encrypting the cookie inside WELCOME.
-    cookie_key: Zeroizing<[u8; 32]>,
+    /// Server-only: shared cookie keyring with periodic rotation.
+    cookie_keyring: Option<Arc<CurveCookieKeyring>>,
     /// Client-only: cookie blob (96 bytes) received in WELCOME, echoed back
     /// in INITIATE.
     received_cookie: Vec<u8>,
@@ -188,10 +208,10 @@ impl CurveMechanism {
             our_lt_secret,
             our_lt_public,
             peer_lt_public: Some(peer_lt_public),
-            our_eph_secret,
-            our_eph_public,
+            our_eph_secret: Some(our_eph_secret),
+            our_eph_public: Some(our_eph_public),
             peer_eph_public: None,
-            cookie_key: Zeroizing::new([0u8; 32]),
+            cookie_keyring: None,
             received_cookie: Vec::new(),
             out_counter: 0,
             our_props: PeerProperties::default(),
@@ -202,29 +222,38 @@ impl CurveMechanism {
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_server(
         our_keypair: CurveKeypair,
+        cookie_keyring: Arc<CurveCookieKeyring>,
         authenticator: Option<super::Authenticator>,
     ) -> Self {
         let our_lt_secret = SecretKey::from_bytes(*our_keypair.secret.as_bytes());
         let our_lt_public = PublicKey::from_bytes(*our_keypair.public.as_bytes());
-        let our_eph_secret = SecretKey::generate(&mut OsRng);
-        let our_eph_public = our_eph_secret.public_key();
-        let mut cookie_key = Zeroizing::new([0u8; 32]);
-        OsRng.fill_bytes(cookie_key.as_mut());
         Self {
             is_server: true,
             state: CurveState::Init,
             our_lt_secret,
             our_lt_public,
             peer_lt_public: None,
-            our_eph_secret,
-            our_eph_public,
+            our_eph_secret: None,
+            our_eph_public: None,
             peer_eph_public: None,
-            cookie_key,
+            cookie_keyring: Some(cookie_keyring),
             received_cookie: Vec::new(),
             out_counter: 0,
             our_props: PeerProperties::default(),
             authenticator,
         }
+    }
+
+    fn eph_secret(&self) -> &SecretKey {
+        self.our_eph_secret
+            .as_ref()
+            .expect("ephemeral secret not available")
+    }
+
+    fn eph_public(&self) -> &PublicKey {
+        self.our_eph_public
+            .as_ref()
+            .expect("ephemeral public not available")
     }
 
     /// Kick off the handshake.
@@ -235,10 +264,8 @@ impl CurveMechanism {
     ) -> Result<()> {
         self.our_props = our_props;
         if self.is_server {
-            // Server waits for HELLO.
             self.state = CurveState::Init;
         } else {
-            // Client sends HELLO immediately.
             let hello_body = self.build_hello()?;
             out.push(Command::Unknown {
                 name: Bytes::from_static(b"HELLO"),
@@ -321,7 +348,7 @@ impl CurveMechanism {
         let peer_eph = self.peer_eph_public.as_ref().ok_or_else(|| {
             Error::HandshakeFailed("transform requested before peer eph key is known".into())
         })?;
-        let salsa = SalsaBox::new(peer_eph, &self.our_eph_secret);
+        let salsa = SalsaBox::new(peer_eph, self.eph_secret());
         let (out_prefix, in_prefix) = if self.is_server {
             (*NONCE_MESSAGE_S, *NONCE_MESSAGE_C)
         } else {
@@ -350,7 +377,7 @@ impl CurveMechanism {
         let server_pub = self.peer_lt_public.clone().expect("client has server pub");
         let counter = self.next_out_counter();
         let nonce = nonce_short(NONCE_HELLO, counter);
-        let signature_box = SalsaBox::new(&server_pub, &self.our_eph_secret)
+        let signature_box = SalsaBox::new(&server_pub, self.eph_secret())
             .encrypt(&nonce.into(), &[0u8; 64][..])
             .map_err(|_| Error::Protocol("CURVE HELLO encrypt failed".into()))?;
         // Body layout: version(2) + padding(72) + Cp(32) + nonce(8) + sig(80) = 194
@@ -358,7 +385,7 @@ impl CurveMechanism {
         body.put_u8(0x01);
         body.put_u8(0x00);
         body.put_bytes(0, 72);
-        body.put_slice(self.our_eph_public.as_bytes());
+        body.put_slice(self.eph_public().as_bytes());
         body.put_slice(&counter.to_be_bytes());
         body.put_slice(&signature_box);
         Ok(body.freeze())
@@ -383,6 +410,8 @@ impl CurveMechanism {
         let counter = u64::from_be_bytes(body[106..114].try_into().unwrap());
         let signature_box = &body[114..194];
 
+        validate_dh_not_zero(&self.our_lt_secret, &cp_bytes)?;
+
         let cp = PublicKey::from_bytes(cp_bytes);
         let nonce = nonce_short(NONCE_HELLO, counter);
         let pt = SalsaBox::new(&cp, &self.our_lt_secret)
@@ -394,6 +423,11 @@ impl CurveMechanism {
             ));
         }
         self.peer_eph_public = Some(cp);
+
+        // Generate ephemeral keypair now (not at construction).
+        let eph_secret = SecretKey::generate(&mut OsRng);
+        self.our_eph_public = Some(eph_secret.public_key());
+        self.our_eph_secret = Some(eph_secret);
         Ok(())
     }
 
@@ -404,25 +438,18 @@ impl CurveMechanism {
         OsRng.fill_bytes(&mut welcome_suffix);
         let welcome_nonce = nonce_long(NONCE_WELCOME_PREFIX, &welcome_suffix);
 
-        // Cookie: encrypts (Cp, our_eph_secret) with cookie_key.
-        let mut cookie_suffix = [0u8; 16];
-        OsRng.fill_bytes(&mut cookie_suffix);
-        let cookie_nonce = nonce_long(NONCE_COOKIE_PREFIX, &cookie_suffix);
-        let mut cookie_pt = [0u8; 64];
-        cookie_pt[..32].copy_from_slice(cp.as_bytes());
-        cookie_pt[32..].copy_from_slice(&self.our_eph_secret.to_bytes());
-        let cookie_box = XSalsa20Poly1305::new(&(*self.cookie_key).into())
-            .encrypt(&cookie_nonce.into(), &cookie_pt[..])
-            .map_err(|_| Error::Protocol("CURVE cookie encrypt failed".into()))?;
-        // Cookie wire = 16-byte cookie nonce suffix + 80-byte cookie ciphertext = 96 bytes.
-        let mut cookie = Vec::with_capacity(96);
-        cookie.extend_from_slice(&cookie_suffix);
-        cookie.extend_from_slice(&cookie_box);
+        // Cookie: sealed by the shared keyring so the server can be
+        // stateless between WELCOME and INITIATE.
+        let keyring = self
+            .cookie_keyring
+            .as_ref()
+            .expect("server has cookie keyring");
+        let cookie = keyring.encrypt_cookie(cp.as_bytes(), &self.eph_secret().to_bytes());
         debug_assert_eq!(cookie.len(), 96);
 
         // Welcome plaintext = Sp(32) + cookie(96) = 128 bytes.
         let mut welcome_pt = Vec::with_capacity(128);
-        welcome_pt.extend_from_slice(self.our_eph_public.as_bytes());
+        welcome_pt.extend_from_slice(self.eph_public().as_bytes());
         welcome_pt.extend_from_slice(&cookie);
         let welcome_box = SalsaBox::new(cp, &self.our_lt_secret)
             .encrypt(&welcome_nonce.into(), welcome_pt.as_slice())
@@ -431,6 +458,13 @@ impl CurveMechanism {
         let mut body = BytesMut::with_capacity(160);
         body.put_slice(&welcome_suffix);
         body.put_slice(&welcome_box);
+
+        // Drop per-connection ephemeral state: the cookie holds
+        // everything parse_initiate needs to recover.
+        self.our_eph_secret = None;
+        self.our_eph_public = None;
+        self.peer_eph_public = None;
+
         Ok(body.freeze())
     }
 
@@ -445,7 +479,7 @@ impl CurveMechanism {
         let welcome_box = &body[16..];
         let nonce = nonce_long(NONCE_WELCOME_PREFIX, &welcome_suffix);
         let server_pub = self.peer_lt_public.as_ref().expect("client has server pub");
-        let pt = SalsaBox::new(server_pub, &self.our_eph_secret)
+        let pt = SalsaBox::new(server_pub, self.eph_secret())
             .decrypt(&nonce.into(), welcome_box)
             .map_err(|_| Error::HandshakeFailed("CURVE WELCOME decrypt failed".into()))?;
         if pt.len() != 128 {
@@ -457,6 +491,9 @@ impl CurveMechanism {
         let sp_bytes: [u8; 32] = pt[..32].try_into().unwrap();
         let cookie = pt[32..].to_vec();
         debug_assert_eq!(cookie.len(), 96);
+
+        validate_dh_not_zero(self.eph_secret(), &sp_bytes)?;
+
         self.peer_eph_public = Some(PublicKey::from_bytes(sp_bytes));
         self.received_cookie = cookie;
         Ok(())
@@ -467,9 +504,9 @@ impl CurveMechanism {
         let server_pub = self.peer_lt_public.clone().expect("client has server pub");
         let server_eph = self.peer_eph_public.clone().expect("client got Sp");
         let our_lt_secret = self.our_lt_secret.clone();
-        let our_eph_secret = self.our_eph_secret.clone();
+        let our_eph_secret = self.eph_secret().clone();
         let our_lt_public_bytes = *self.our_lt_public.as_bytes();
-        let our_eph_public_bytes = *self.our_eph_public.as_bytes();
+        let our_eph_public_bytes = *self.eph_public().as_bytes();
 
         // Vouch box: Box[Cp(32) + S_long(32)](C_long_secret -> Sp,
         // "VOUCH---" + 16-byte vouch-nonce suffix).
@@ -509,31 +546,6 @@ impl CurveMechanism {
         Ok(body.freeze())
     }
 
-    fn decrypt_cookie(&self, cookie: &[u8]) -> Result<()> {
-        let cookie_suffix: [u8; 16] = cookie[..16].try_into().unwrap();
-        let cookie_box = &cookie[16..];
-        let cookie_nonce = nonce_long(NONCE_COOKIE_PREFIX, &cookie_suffix);
-        let cookie_pt = XSalsa20Poly1305::new(&(*self.cookie_key).into())
-            .decrypt(&cookie_nonce.into(), cookie_box)
-            .map_err(|_| Error::HandshakeFailed("CURVE cookie invalid".into()))?;
-        if cookie_pt.len() != 64 {
-            return Err(Error::HandshakeFailed(
-                "CURVE cookie plaintext bad len".into(),
-            ));
-        }
-        let cookie_cp_bytes: [u8; 32] = cookie_pt[..32].try_into().unwrap();
-        let expected_cp = self
-            .peer_eph_public
-            .as_ref()
-            .ok_or_else(|| Error::HandshakeFailed("server lost peer_eph_public".into()))?;
-        if &cookie_cp_bytes != expected_cp.as_bytes() {
-            return Err(Error::HandshakeFailed(
-                "CURVE cookie does not match HELLO Cp".into(),
-            ));
-        }
-        Ok(())
-    }
-
     fn verify_vouch(
         &self,
         vouch_suffix: &[u8; 16],
@@ -542,7 +554,7 @@ impl CurveMechanism {
         expected_cp: &PublicKey,
     ) -> Result<()> {
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, vouch_suffix);
-        let vouch_pt = SalsaBox::new(cl, &self.our_eph_secret)
+        let vouch_pt = SalsaBox::new(cl, self.eph_secret())
             .decrypt(&vouch_nonce.into(), vouch_box)
             .map_err(|_| Error::HandshakeFailed("CURVE VOUCH invalid".into()))?;
         if vouch_pt.len() != 64
@@ -560,15 +572,25 @@ impl CurveMechanism {
         if body.len() < 96 + 8 + 16 {
             return Err(Error::HandshakeFailed("CURVE INITIATE too short".into()));
         }
-        let cookie = &body[..96];
+        let cookie_bytes = &body[..96];
         let counter = u64::from_be_bytes(body[96..104].try_into().unwrap());
         let init_box = &body[104..];
 
-        self.decrypt_cookie(cookie)?;
+        // Recover ephemeral state from the cookie (stateless-server).
+        let keyring = self
+            .cookie_keyring
+            .as_ref()
+            .expect("server has cookie keyring");
+        let (cp_bytes, sn_secret_bytes) = keyring.decrypt_cookie(cookie_bytes)?;
+        let sn_secret = SecretKey::from_bytes(sn_secret_bytes);
+        let sn_public = sn_secret.public_key();
+        let cp = PublicKey::from_bytes(cp_bytes);
+        self.our_eph_secret = Some(sn_secret);
+        self.our_eph_public = Some(sn_public);
+        self.peer_eph_public = Some(cp.clone());
 
-        let expected_cp = self.peer_eph_public.as_ref().unwrap();
         let nonce = nonce_short(NONCE_INITIATE, counter);
-        let init_pt = SalsaBox::new(expected_cp, &self.our_eph_secret)
+        let init_pt = SalsaBox::new(&cp, self.eph_secret())
             .decrypt(&nonce.into(), init_box)
             .map_err(|_| Error::HandshakeFailed("CURVE INITIATE decrypt failed".into()))?;
         if init_pt.len() < 32 + 16 + 80 {
@@ -576,13 +598,15 @@ impl CurveMechanism {
                 "CURVE INITIATE plaintext too short".into(),
             ));
         }
-        let cl_bytes: [u8; 32] = init_pt[..32].try_into().unwrap();
+        let client_lt_bytes: [u8; 32] = init_pt[..32].try_into().unwrap();
         let vouch_suffix: [u8; 16] = init_pt[32..48].try_into().unwrap();
         let vouch_box = &init_pt[48..128];
         let metadata = &init_pt[128..];
 
-        let cl = PublicKey::from_bytes(cl_bytes);
-        self.verify_vouch(&vouch_suffix, vouch_box, &cl, expected_cp)?;
+        validate_dh_not_zero(self.eph_secret(), &client_lt_bytes)?;
+
+        let cl = PublicKey::from_bytes(client_lt_bytes);
+        self.verify_vouch(&vouch_suffix, vouch_box, &cl, &cp)?;
 
         if let Some(auth) = &self.authenticator {
             let peer = super::MechanismPeerInfo {
@@ -607,7 +631,7 @@ impl CurveMechanism {
         let counter = self.next_out_counter();
         let nonce = nonce_short(NONCE_READY, counter);
         let metadata = encode_metadata(&self.our_props)?;
-        let ready_box = SalsaBox::new(&cp, &self.our_eph_secret)
+        let ready_box = SalsaBox::new(&cp, self.eph_secret())
             .encrypt(&nonce.into(), metadata.as_slice())
             .map_err(|_| Error::Protocol("CURVE READY encrypt failed".into()))?;
         let mut body = BytesMut::with_capacity(8 + ready_box.len());
@@ -624,10 +648,21 @@ impl CurveMechanism {
         let ready_box = &body[8..];
         let server_eph = self.peer_eph_public.as_ref().expect("client got Sp");
         let nonce = nonce_short(NONCE_READY, counter);
-        let pt = SalsaBox::new(server_eph, &self.our_eph_secret)
+        let pt = SalsaBox::new(server_eph, self.eph_secret())
             .decrypt(&nonce.into(), ready_box)
             .map_err(|_| Error::HandshakeFailed("CURVE READY decrypt failed".into()))?;
         decode_metadata(&pt)
+    }
+
+    /// Whether the server has cleared ephemeral state after WELCOME
+    /// (stateless-server invariant).
+    #[cfg(test)]
+    fn is_stateless(&self) -> bool {
+        self.is_server
+            && matches!(self.state, CurveState::AwaitingInitiate)
+            && self.our_eph_secret.is_none()
+            && self.our_eph_public.is_none()
+            && self.peer_eph_public.is_none()
     }
 }
 
@@ -655,6 +690,10 @@ mod tests {
         PeerProperties::default().with_socket_type(t)
     }
 
+    fn test_keyring() -> Arc<CurveCookieKeyring> {
+        Arc::new(CurveCookieKeyring::new())
+    }
+
     /// End-to-end CURVE handshake between client and server, verifying both
     /// reach Done and produce matching transforms (each side encrypts what
     /// the other decrypts).
@@ -662,8 +701,9 @@ mod tests {
     fn full_handshake_and_transform_roundtrip() {
         let server_kp = CurveKeypair::generate();
         let client_kp = CurveKeypair::generate();
+        let keyring = test_keyring();
 
-        let mut server = CurveMechanism::new_server(server_kp.clone(), None);
+        let mut server = CurveMechanism::new_server(server_kp.clone(), keyring, None);
         let mut client = CurveMechanism::new_client(client_kp.clone(), server_kp.public);
 
         let mut s_out = Vec::new();
@@ -746,13 +786,10 @@ mod tests {
 
     #[test]
     fn server_rejects_wrong_client_long_term() {
-        // Client signs vouch with its own long-term key. Server has no
-        // pinned client key (in our impl), but verifies the vouch's
-        // internal consistency. We simulate a tampered HELLO instead:
-        // a bad signature box should fail.
         let server_kp = CurveKeypair::generate();
         let client_kp = CurveKeypair::generate();
-        let mut server = CurveMechanism::new_server(server_kp.clone(), None);
+        let keyring = test_keyring();
+        let mut server = CurveMechanism::new_server(server_kp.clone(), keyring, None);
         let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
 
         let mut c_out = Vec::new();
@@ -775,5 +812,127 @@ mod tests {
         } else {
             panic!("expected Unknown HELLO");
         }
+    }
+
+    #[test]
+    fn server_ephemeral_cleared_after_welcome() {
+        let server_kp = CurveKeypair::generate();
+        let client_kp = CurveKeypair::generate();
+        let keyring = test_keyring();
+
+        let mut server = CurveMechanism::new_server(server_kp.clone(), keyring, None);
+        let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
+
+        let mut s_out = Vec::new();
+        let mut c_out = Vec::new();
+        server
+            .start(&mut s_out, dummy_props(SocketType::Pull))
+            .unwrap();
+        client
+            .start(&mut c_out, dummy_props(SocketType::Push))
+            .unwrap();
+
+        // Feed HELLO to server -> server sends WELCOME.
+        for cmd in c_out.drain(..) {
+            server.on_command(cmd, &mut s_out).unwrap();
+        }
+        assert!(server.is_stateless());
+    }
+
+    #[test]
+    fn server_handles_cookie_rotation() {
+        let server_kp = CurveKeypair::generate();
+        let client_kp = CurveKeypair::generate();
+        let keyring = test_keyring();
+
+        let mut server = CurveMechanism::new_server(server_kp.clone(), keyring.clone(), None);
+        let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
+
+        let mut s_out = Vec::new();
+        let mut c_out = Vec::new();
+        server
+            .start(&mut s_out, dummy_props(SocketType::Pull))
+            .unwrap();
+        client
+            .start(&mut c_out, dummy_props(SocketType::Push))
+            .unwrap();
+
+        // HELLO -> WELCOME
+        for cmd in c_out.drain(..) {
+            server.on_command(cmd, &mut s_out).unwrap();
+        }
+        // Rotate the keyring before INITIATE arrives.
+        keyring.rotate_now();
+
+        // WELCOME -> INITIATE -> READY
+        for cmd in s_out.drain(..) {
+            client.on_command(cmd, &mut c_out).unwrap();
+        }
+        for cmd in c_out.drain(..) {
+            let r = server.on_command(cmd, &mut s_out).unwrap();
+            assert!(matches!(r, MechanismStep::Complete { .. }));
+        }
+    }
+
+    #[test]
+    fn server_rejects_after_two_cookie_rotations() {
+        let server_kp = CurveKeypair::generate();
+        let client_kp = CurveKeypair::generate();
+        let keyring = test_keyring();
+
+        let mut server = CurveMechanism::new_server(server_kp.clone(), keyring.clone(), None);
+        let mut client = CurveMechanism::new_client(client_kp, server_kp.public);
+
+        let mut s_out = Vec::new();
+        let mut c_out = Vec::new();
+        server
+            .start(&mut s_out, dummy_props(SocketType::Pull))
+            .unwrap();
+        client
+            .start(&mut c_out, dummy_props(SocketType::Push))
+            .unwrap();
+
+        // HELLO -> WELCOME
+        for cmd in c_out.drain(..) {
+            server.on_command(cmd, &mut s_out).unwrap();
+        }
+        // Rotate twice: the original key is evicted.
+        keyring.rotate_now();
+        keyring.rotate_now();
+
+        // WELCOME -> INITIATE
+        for cmd in s_out.drain(..) {
+            client.on_command(cmd, &mut c_out).unwrap();
+        }
+        for cmd in c_out.drain(..) {
+            let r = server.on_command(cmd, &mut s_out);
+            assert!(matches!(r, Err(Error::HandshakeFailed(_))));
+        }
+    }
+
+    #[test]
+    fn rejects_low_order_client_ephemeral() {
+        let server_kp = CurveKeypair::generate();
+        let keyring = test_keyring();
+        let mut server = CurveMechanism::new_server(server_kp, keyring, None);
+        let mut s_out = Vec::new();
+        server
+            .start(&mut s_out, dummy_props(SocketType::Pull))
+            .unwrap();
+
+        // Construct a HELLO with C' = [0; 32] (the identity point).
+        let mut body = BytesMut::with_capacity(194);
+        body.put_u8(0x01);
+        body.put_u8(0x00);
+        body.put_bytes(0, 72);
+        body.put_slice(&[0u8; 32]); // C' = identity
+        body.put_slice(&1u64.to_be_bytes());
+        body.put_slice(&[0u8; 80]); // dummy sig box
+        let cmd = Command::Unknown {
+            name: Bytes::from_static(b"HELLO"),
+            body: body.freeze(),
+        };
+        let r = server.on_command(cmd, &mut s_out);
+        assert!(matches!(r, Err(Error::HandshakeFailed(_))));
     }
 }

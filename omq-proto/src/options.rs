@@ -144,10 +144,12 @@ pub enum MechanismConfig {
     /// CURVE server side: this socket accepts incoming CURVE clients
     /// authenticated against `our_keypair.public`. `authenticator`
     /// (if set) is invoked after vouch verification with the peer's
-    /// long-term public key.
+    /// long-term public key. The cookie keyring is shared across all
+    /// server-side connections so its rotation timeline stays global.
     #[cfg(feature = "curve")]
     CurveServer {
         our_keypair: CurveKeypair,
+        cookie_keyring: std::sync::Arc<crate::proto::mechanism::CurveCookieKeyring>,
         authenticator: Option<Authenticator>,
     },
     /// CURVE client side: this socket connects to a server identified by
@@ -232,6 +234,19 @@ impl MechanismConfig {
         }
     }
 
+    /// Access the CURVE server's cookie keyring so callers can
+    /// configure its rotation interval or share it across multiple
+    /// Sockets. `None` for non-CURVE-server configs.
+    #[cfg(feature = "curve")]
+    pub fn curve_cookie_keyring(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::proto::mechanism::CurveCookieKeyring>> {
+        match self {
+            Self::CurveServer { cookie_keyring, .. } => Some(cookie_keyring),
+            _ => None,
+        }
+    }
+
     /// Translate to the codec-layer [`MechanismSetup`] consumed by
     /// `Connection::new`.
     pub fn to_setup(&self) -> MechanismSetup {
@@ -240,9 +255,11 @@ impl MechanismConfig {
             #[cfg(feature = "curve")]
             Self::CurveServer {
                 our_keypair,
+                cookie_keyring,
                 authenticator,
             } => MechanismSetup::CurveServer {
                 keypair: our_keypair.clone(),
+                cookie_keyring: cookie_keyring.clone(),
                 authenticator: authenticator.clone(),
             },
             #[cfg(feature = "curve")]
@@ -454,13 +471,17 @@ impl Options {
 
     /// Configure this socket as a CURVE server with the given long-term
     /// keypair. Incoming clients must present the matching server public
-    /// key during their handshake. Use [`Self::curve_authenticator`] to
-    /// add a per-client admission callback.
+    /// key during their handshake. A fresh cookie keyring with the
+    /// default rotation interval (~30 s) is created. Reach in via
+    /// [`MechanismConfig::curve_cookie_keyring`] to configure or share
+    /// it. Use [`Self::authenticator`] to add a per-client admission
+    /// callback.
     #[cfg(feature = "curve")]
     #[must_use]
     pub fn curve_server(mut self, our_keypair: CurveKeypair) -> Self {
         self.mechanism = MechanismConfig::CurveServer {
             our_keypair,
+            cookie_keyring: std::sync::Arc::new(crate::proto::mechanism::CurveCookieKeyring::new()),
             authenticator: None,
         };
         self

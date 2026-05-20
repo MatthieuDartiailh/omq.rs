@@ -24,7 +24,7 @@ pub use omq_proto::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]
 pub use omq_proto::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 #[cfg(feature = "curve")]
-pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey};
+pub use omq_proto::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, IpcPath, KeepAlive,
     MechanismConfig, Message, MessageIter, OnMute, Options, ReconnectPolicy, Result, SocketType,

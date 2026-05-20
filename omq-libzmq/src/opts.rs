@@ -95,6 +95,7 @@ impl SocketOverlay {
                         secret: sec,
                         public: pubk,
                     },
+                    cookie_keyring: std::sync::Arc::new(omq_compio::CurveCookieKeyring::new()),
                     authenticator: None,
                 }
             }
