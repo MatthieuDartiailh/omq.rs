@@ -5,14 +5,16 @@ import time
 import pytest
 
 
-import random as _random
-
-_rng = _random.Random()
+import socket as _socket
 
 
 @pytest.fixture
 def tcp_endpoint() -> str:
-    port = _rng.randint(49152, 65535)
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
     return f"tcp://127.0.0.1:{port}"
 
 
