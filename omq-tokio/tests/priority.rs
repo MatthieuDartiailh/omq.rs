@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::num::NonZeroU8;
 use std::time::Duration;
 
-use omq_tokio::{ConnectOpts, Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_tokio::{ConnectOpts, Endpoint, Message, Options, Socket, SocketType};
 
 fn inproc(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
@@ -44,7 +44,6 @@ async fn inproc_strict_precedence() {
     pull_c.bind(inproc("prio-strict-c")).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    let mut mon = push.monitor();
     push.connect_with(inproc("prio-strict-a"), opts(1))
         .await
         .unwrap();
@@ -55,12 +54,7 @@ async fn inproc_strict_precedence() {
         .await
         .unwrap();
 
-    // Wait for all 3 peers to register in the routing strategy.
-    // connect_with returns after the peer is queued, but the priority
-    // table is only populated on HandshakeSucceeded. Sending before all
-    // 3 are registered would let early msgs leak to a lower-priority
-    // peer that happened to handshake first.
-    wait_for_handshakes(&mut mon, 3).await;
+    wait_peers_ready(&push, 3).await;
 
     for _ in 0..1000u32 {
         push.send(Message::single("x")).await.unwrap();
@@ -96,7 +90,6 @@ async fn inproc_equal_priorities_round_robin() {
     pull_c.bind(inproc("prio-eq-c")).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    let mut mon = push.monitor();
     push.connect_with(inproc("prio-eq-a"), opts(8))
         .await
         .unwrap();
@@ -107,7 +100,7 @@ async fn inproc_equal_priorities_round_robin() {
         .await
         .unwrap();
 
-    wait_for_handshakes(&mut mon, 3).await;
+    wait_peers_ready(&push, 3).await;
 
     for _ in 0..N {
         push.send(Message::single("x")).await.unwrap();
@@ -198,16 +191,19 @@ async fn dead_high_priority_skipped() {
     assert_eq!(n, 100, "all sends must land at the alive priority-8 peer");
 }
 
-async fn wait_for_handshakes(mon: &mut omq_tokio::MonitorStream, n: usize) {
-    let mut got = 0;
-    while got < n {
-        let ev = tokio::time::timeout(Duration::from_secs(2), mon.recv())
-            .await
-            .expect("monitor timeout waiting for handshake")
-            .expect("monitor closed");
-        if matches!(ev, MonitorEvent::HandshakeSucceeded { .. }) {
-            got += 1;
+async fn wait_peers_ready(sock: &Socket, n: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let conns = sock.connections().await.unwrap_or_default();
+        let ready = conns.iter().filter(|c| c.peer_info.is_some()).count();
+        if ready >= n {
+            return;
         }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "only {ready}/{n} peers ready after 5s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
