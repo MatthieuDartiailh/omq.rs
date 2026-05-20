@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-20
+
+### Changed
+
+- Route compression encoder output through `EncodedQueue` for batched vectored writes. lz4+tcp 32B: 142k -> 2.3M msg/s; lz4+tcp 512B: 140k -> 1.5M msg/s.
+- Sub-threshold messages on compression transports take a sentinel-prefix fast path that bypasses the encoder entirely.
+
 ## [0.8.0] - 2026-05-20
 
 ### Changed

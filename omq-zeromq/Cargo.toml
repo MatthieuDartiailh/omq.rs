@@ -1,6 +1,6 @@
 [package]
 name = "omq-zeromq"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ name = "zeromq"
 workspace = true
 
 [dependencies]
-omq-tokio = { path = "../omq-tokio", version = "0.8.0", default-features = false }
+omq-tokio = { path = "../omq-tokio", version = "0.8.1", default-features = false }
 omq-proto = { path = "../omq-proto", version = "0.10.0", default-features = false }
 bytes = "1"
 libc = "0.2"

@@ -6,6 +6,16 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-05-20
+
+### omq-tokio 0.8.1
+
+- Route compression encoder output through `EncodedQueue` for batched writes. Up to 15x faster on compression transports.
+
+### omq 0.8.1, omq-zeromq 0.3.3
+
+- Dependency version bumps.
+
 ## [0.2.9] - 2026-05-20
 
 ### omq-proto 0.10.0
