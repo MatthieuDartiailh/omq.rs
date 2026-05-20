@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-20
+
+### Fixed
+
+- Flaky `inproc_strict_precedence` priority test: replaced monitor-event polling with `connections()` polling to ensure the routing table is populated before sending.
+
+### Changed
+
+- Bench warmup: time-bound prime phase (500 ms cap) and start calibration at small iteration counts. Large-message cells no longer spend 30+ seconds in warmup.
+
 ## [0.6.1] - 2026-05-19
 
 ### Fixed

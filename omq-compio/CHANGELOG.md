@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-20
+
+### Added
+
+- `Socket::multishot_rearms()` counter for diagnosing recv path transitions.
+
+### Changed
+
+- Recv: avoid multi-shot re-arm between consecutive large messages. After the first `MultiShot` → `OneShot` transition, subsequent large frames stay in one-shot mode instead of cycling through the BUF_RING pool each time.
+- Bench warmup: time-bound prime phase (500 ms cap) and start calibration at small iteration counts. Large-message cells no longer spend 30+ seconds in warmup.
+
 ## [0.6.1] - 2026-05-19
 
 ### Fixed
