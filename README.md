@@ -17,19 +17,13 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-zmq](omq-zmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/comparison_chart.svg" alt="PUSH/PULL throughput: native implementations" width="850">
-</p>
-
 ### vs. libzmq (TCP loopback, two processes)
 
-| Size | libzmq | omq-compio | × | omq-tokio | × |
-|------|--------|------------|---|-----------|---|
-| 512 B | 1.99M msg/s | 3.55M msg/s | **1.8×** | 3.85M msg/s | **1.9×** |
-| 8 KiB | 188k msg/s | 607k msg/s | **3.2×** | 461k msg/s | **2.5×** |
-| 2 MiB | 2.7k msg/s | 3.8k msg/s | **1.4×** | 3.0k msg/s | **1.1×** |
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/comparison_chart.svg" alt="PUSH/PULL throughput: TCP loopback" width="850">
+</p>
 
-[Full tables across all sizes and transports](COMPARISONS.md)
+[Full comparison tables](COMPARISONS.md) | [All benchmarks](BENCHMARKS.md)
 
 ## Install
 
