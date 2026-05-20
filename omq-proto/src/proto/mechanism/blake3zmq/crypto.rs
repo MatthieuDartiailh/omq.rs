@@ -78,6 +78,11 @@ pub fn kdf(context: &str, ikm: &[u8]) -> Hash {
 
 /// `KDF24(ctx, ikm)` - `BLAKE3-derive-key(ctx, ikm)` truncated to 24
 /// bytes. RFC §5 nonce-deriving KDF.
+///
+/// The output is the first 24 bytes of the same XOF stream that `kdf`
+/// returns 32 bytes from. Callers MUST use a distinct context string
+/// for key vs. nonce derivation (e.g. `"VOUCH key"` / `"VOUCH nonce"`)
+/// to avoid leaking a key prefix as the nonce.
 pub fn kdf24(context: &str, ikm: &[u8]) -> Nonce24 {
     let mut out = [0u8; 24];
     let mut h = blake3::Hasher::new_derive_key(context);

@@ -17,7 +17,7 @@
 //! bridge) is the next slice; data-phase AEAD is the slice after.
 
 use bytes::{BufMut, BytesMut};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::error::{Error, Result};
 use crate::proto::frame::{FLAG_COMMAND, FLAG_LONG, MAX_SHORT_FRAME_SIZE};
@@ -71,7 +71,7 @@ impl std::fmt::Debug for Keypair {
 /// Post-handshake symmetric session state. Each direction is
 /// independent: client→server and server→client get their own
 /// `(key, nonce)` pair from `derive_sessions`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct SessionKeys {
     pub c2s_key: Hash,
     pub c2s_nonce: Nonce24,
