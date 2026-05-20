@@ -102,7 +102,7 @@ Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure a
 
 ## Compression transports
 
-ØMQ adds two transparent compression transports on top of TCP: `lz4+tcp://`
+OMQ.rs adds two transparent compression transports on top of TCP: `lz4+tcp://`
 (fast, low-latency) and `zstd+tcp://` (higher ratio, better for large or
 structured payloads). Swap the scheme in your endpoint string and everything
 else stays the same:
