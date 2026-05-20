@@ -1,12 +1,12 @@
 [package]
 name = "omq"
-version = "0.7.0"
+version = "0.7.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pure Rust OMQ/ZeroMQ. Facade over omq-compio (default) or omq-tokio. Wire-compatible with libzmq."
+description = "Pure Rust ØMQ/ZeroMQ. Facade over omq-compio (default) or omq-tokio. Wire-compatible with libzmq."
 
 [lints]
 workspace = true
