@@ -65,6 +65,21 @@ impl EncodedQueue {
         }
     }
 
+    pub(crate) fn encode_prefixed_flat(&mut self, prefix: &Bytes, msg: &Message) {
+        let before = self.flat_buf.len();
+        frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);
+        self.total_bytes += self.flat_buf.len() - before;
+    }
+
+    pub(crate) fn encode_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
+        self.flush_flat_to_chunks();
+        let before = self.chunks.len();
+        frame::encode_message_prefixed_gather(prefix, msg, &mut self.chunks, &mut self.scratch);
+        for chunk in self.chunks.iter().skip(before) {
+            self.total_bytes += chunk.len();
+        }
+    }
+
     pub(crate) fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         let take = max_chunks.min(self.chunks.len());
         let chunk_bytes: usize = self.chunks.iter().take(take).map(Bytes::len).sum();

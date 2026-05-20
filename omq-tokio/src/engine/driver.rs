@@ -19,16 +19,15 @@ use super::encoded_queue::EncodedQueue;
 /// Batch-encode messages, then flush `EncodedQueue` + codec.
 macro_rules! batch_encode_flush {
     ($first:expr, $try_recv:expr, $encoder:expr, $codec:expr,
-     $eq:expr, $drain_buf:expr, $writer:expr) => {{
-        let use_eq = $encoder.is_none() && !$codec.has_frame_transform();
-        encode_msg(&$first, $encoder, $codec, use_eq, $eq);
+     $eq:expr, $drain_buf:expr, $writer:expr, $passthrough:expr) => {{
+        encode_msg(&$first, $encoder, $codec, $eq, $passthrough);
         let mut count = 1usize;
         let mut bytes = $first.byte_len();
         while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
             match $try_recv {
                 Some(next) => {
                     bytes += next.byte_len();
-                    encode_msg(&next, $encoder, $codec, use_eq, $eq);
+                    encode_msg(&next, $encoder, $codec, $eq, $passthrough);
                     count += 1;
                 }
                 None => break,
@@ -259,6 +258,7 @@ where
             shared_msg_rx,
             recv_direct,
         } = self;
+        let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
         let mut eq = EncodedQueue::new();
@@ -332,12 +332,12 @@ where
                     // the actor). Without this, a `rep.send(...)` whose
                     // bytes were handed to the actor but not yet picked
                     // up by the driver gets discarded on Drop.
-                    let use_eq = encoder.is_none() && !codec.has_frame_transform();
                     while let Ok(cmd) = inbox.try_recv() {
                         match cmd {
                             DriverCommand::SendMessage(msg) => {
                                 encode_msg(
-                                    &msg, &mut encoder, &mut codec, use_eq, &mut eq,
+                                    &msg, &mut encoder, &mut codec, &mut eq,
+                                    passthrough.as_ref(),
                                 );
                             }
                             DriverCommand::SendCommand(c) => {
@@ -349,7 +349,8 @@ where
                     if let Some(ref rx) = shared_msg_rx {
                         while let Ok(msg) = rx.try_recv() {
                             encode_msg(
-                                &msg, &mut encoder, &mut codec, use_eq, &mut eq,
+                                &msg, &mut encoder, &mut codec, &mut eq,
+                                passthrough.as_ref(),
                             );
                         }
                     }
@@ -423,7 +424,8 @@ where
                             &mut codec,
                             &mut eq,
                             &mut drain_buf,
-                            &mut writer
+                            &mut writer,
+                            passthrough.as_ref()
                         );
                         if closing {
                             drain_writes(&mut writer, &mut codec).await.ok();
@@ -461,7 +463,8 @@ where
                                 &mut codec,
                                 &mut eq,
                                 &mut drain_buf,
-                                &mut writer
+                                &mut writer,
+                                passthrough.as_ref()
                             );
                         }
                     }
@@ -495,36 +498,48 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-/// Encode one application message through the optional transform, then into
-/// the codec's outbound queue.
-fn encode_one(
-    msg: &Message,
-    encoder: &mut Option<MessageEncoder>,
-    codec: &mut Connection,
-) -> Result<()> {
-    if let Some(enc) = encoder.as_mut() {
-        for wire in enc.encode(msg)? {
-            codec.send_message(&wire)?;
-        }
-    } else {
-        codec.send_message(msg)?;
-    }
-    Ok(())
-}
-
-/// Encode one message into `EncodedQueue` (NULL, no transform) or
-/// `codec.out_chunks` (CURVE/BLAKE3ZMQ/compression).
+/// Encode one message into `EncodedQueue`. When a compression encoder
+/// is active, the message is transformed first; the resulting wire
+/// message(s) are then framed into EQ. When no encoder is present the
+/// message is framed directly. Sub-threshold messages on compression
+/// transports take a sentinel-prefix fast path that avoids the encoder
+/// entirely.
+///
+/// The only path that still goes through `codec.send_message` is when a
+/// frame-level transform (CURVE/BLAKE3ZMQ) is active, since those
+/// encrypt at the ZMTP frame layer and need the codec's internal state.
 fn encode_msg(
     msg: &Message,
     encoder: &mut Option<MessageEncoder>,
     codec: &mut Connection,
-    use_eq: bool,
     eq: &mut EncodedQueue,
+    passthrough: Option<&(Bytes, usize)>,
 ) {
-    if use_eq {
-        eq.encode(msg);
+    if codec.has_frame_transform() {
+        if let Some(enc) = encoder.as_mut() {
+            for wire in enc.encode(msg).unwrap_or_default() {
+                let _ = codec.send_message(&wire);
+            }
+        } else {
+            let _ = codec.send_message(msg);
+        }
+        return;
+    }
+    if let Some((sentinel, threshold)) = passthrough
+        && msg.iter().all(|b| b.len() < *threshold)
+    {
+        let prefix_len = sentinel.len();
+        if msg.byte_len() + prefix_len * msg.len() < FLAT_THRESHOLD {
+            eq.encode_prefixed_flat(sentinel, msg);
+        } else {
+            eq.encode_prefixed_gather(sentinel, msg);
+        }
+    } else if let Some(enc) = encoder.as_mut() {
+        for wire in enc.encode(msg).unwrap_or_default() {
+            eq.encode(&wire);
+        }
     } else {
-        let _ = encode_one(msg, encoder, codec);
+        eq.encode(msg);
     }
 }
 
