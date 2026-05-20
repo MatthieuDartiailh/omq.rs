@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-20
+
+### Added
+
+- `Options::compression_level(i32)` to configure zstd compression level (default -3).
+- `pub` visibility on `transform::zstd::DEFAULT_LEVEL`.
+
 ## [0.9.0] - 2026-05-19
 
 ### Added

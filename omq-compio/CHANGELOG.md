@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-20
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.10.0.
+- Compression benchmark: sender and receiver now run on separate threads so compression and decompression overlap. Add `OMQ_BENCH_ZSTD_LEVEL` env var.
+
 ## [0.7.0] - 2026-05-20
 
 ### Added

@@ -6,6 +6,16 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-05-20
+
+### omq-proto 0.10.0
+
+- `Options::compression_level(i32)` to configure zstd compression level.
+
+### omq-compio 0.8.0, omq-tokio 0.8.0, omq 0.8.0, omq-zmq 0.1.4, omq-zeromq 0.3.2, pyomq 0.5.0
+
+- Dependency version bumps.
+
 ## [0.2.8] - 2026-05-17
 
 ### omq-proto 0.8.1, blume 0.2.1, omq-zeromq 0.2.2
