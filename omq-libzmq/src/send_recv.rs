@@ -24,6 +24,14 @@ const ZMQ_SNDMORE: c_int = 2;
 pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c_int {
     let len = bytes.len();
 
+    let max = sock
+        .ctx
+        .max_msg_size
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if max > 0 && len > max as usize {
+        return fail(libc::EMSGSIZE);
+    }
+
     // XSUB: intercept subscription frames (\x01topic / \x00topic) and
     // route to subscribe/unsubscribe instead of the send path.
     if sock.socket_type == omq_compio::SocketType::XSub && !bytes.is_empty() {

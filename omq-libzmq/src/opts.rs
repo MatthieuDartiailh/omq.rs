@@ -120,7 +120,11 @@ impl SocketOverlay {
             heartbeat_interval: self.heartbeat_ivl,
             heartbeat_ttl: self.heartbeat_ttl,
             heartbeat_timeout: self.heartbeat_timeout,
-            handshake_timeout: self.handshake_ivl,
+            handshake_timeout: match (self.handshake_ivl, self.connect_timeout) {
+                (Some(h), t) if t > 0 => Some(h.min(Duration::from_millis(t as u64))),
+                (None, t) if t > 0 => Some(Duration::from_millis(t as u64)),
+                (h, _) => h,
+            },
             conflate: self.conflate,
             tcp_keepalive: keepalive,
             reconnect,

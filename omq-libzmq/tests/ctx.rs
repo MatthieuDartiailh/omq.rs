@@ -110,3 +110,60 @@ fn ctx_multiple_sockets_closed_before_term() {
     zmq_close(s2);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
+
+#[test]
+fn ctx_max_sockets_enforced() {
+    let ctx = zmq_ctx_new();
+    zmq_ctx_set(ctx, ZMQ_MAX_SOCKETS, 2);
+
+    let s1 = zmq_socket(ctx, ZMQ_PUSH);
+    let s2 = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!s1.is_null());
+    assert!(!s2.is_null());
+
+    let s3 = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(s3.is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EMFILE);
+
+    zmq_close(s1);
+    let s4 = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!s4.is_null());
+
+    zmq_close(s2);
+    zmq_close(s4);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_max_msgsz_enforced() {
+    let ctx = zmq_ctx_new();
+    zmq_ctx_set(ctx, ZMQ_MAX_MSGSZ, 100);
+
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+
+    let port = {
+        let addr = std::ffi::CString::new("tcp://127.0.0.1:*").unwrap();
+        omq_zmq::zmq_bind(pull, addr.as_ptr());
+        let mut buf = [0u8; 256];
+        let mut sz = buf.len();
+        omq_zmq::zmq_getsockopt(pull, 32, buf.as_mut_ptr().cast(), &raw mut sz);
+        String::from_utf8_lossy(&buf[..sz - 1]).to_string()
+    };
+    let addr = std::ffi::CString::new(port).unwrap();
+    omq_zmq::zmq_connect(push, addr.as_ptr());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let small = [0u8; 50];
+    let rc = omq_zmq::zmq_send(push, small.as_ptr().cast(), small.len(), 0);
+    assert_eq!(rc, 50);
+
+    let big = [0u8; 200];
+    let rc = omq_zmq::zmq_send(push, big.as_ptr().cast(), big.len(), 0);
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EMSGSIZE);
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}

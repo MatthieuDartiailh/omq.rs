@@ -334,6 +334,10 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         set_errno(libc::EINVAL);
         return std::ptr::null_mut();
     };
+    if ctx.socket_count.load(Ordering::Relaxed) >= ctx.max_sockets.load(Ordering::Relaxed) {
+        set_errno(libc::EMFILE);
+        return std::ptr::null_mut();
+    }
 
     let notify = NotifyFd::new();
     let thread_idx = ctx.assign_thread();
