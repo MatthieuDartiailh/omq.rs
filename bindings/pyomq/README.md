@@ -7,11 +7,11 @@ port. Drop-in pyzmq replacement on the common path.
 
 ```sh
 uv pip install pyomq
-# Optional extras (built into the wheel via cargo features):
-uv pip install 'pyomq[curve]'
-uv pip install 'pyomq[blake3zmq,lz4,zstd]'
 uv pip install 'pyomq[test]'   # adds pytest, pyzmq for the interop suite
 ```
+
+The published wheel includes all optional features (curve, blake3zmq, lz4, zstd).
+Use `pyomq.has("curve")` at runtime to check availability.
 
 ## Usage
 

@@ -13,11 +13,16 @@ Use::
     await sock.close()
 """
 
+import asyncio
 import json
 import pickle
 
 from . import _native  # type: ignore[attr-defined]
 from . import error
+from . import (
+    POLLIN, POLLOUT, SNDHWM, RCVHWM, LINGER, TYPE, LAST_ENDPOINT,
+    _TYPE_NAMES, _SOCKOPT_NAMES,
+)
 
 
 class Socket:
@@ -30,6 +35,30 @@ class Socket:
         self._context = _context
         self._closed = False
         self._last_endpoint = None
+
+    def __getattr__(self, name):
+        opt = _SOCKOPT_NAMES.get(name)
+        if opt is not None:
+            if opt == LAST_ENDPOINT:
+                return self._last_endpoint
+            return self.getsockopt(opt)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        opt = _SOCKOPT_NAMES.get(name)
+        if opt is not None:
+            self.setsockopt(opt, value)
+            return
+        object.__setattr__(self, name, value)
+
+    def __repr__(self):
+        st = _TYPE_NAMES.get(self.socket_type, str(self.socket_type))
+        return f"<pyomq.asyncio.Socket(pyomq.{st}) at {id(self):#x}>"
 
     @property
     def closed(self):
@@ -46,6 +75,10 @@ class Socket:
     @property
     def socket_type(self):
         return self._sock.getsockopt(_native.TYPE)
+
+    @property
+    def underlying(self):
+        return self
 
     # ── I/O ──────────────────────────────────────────────────────────
 
@@ -124,7 +157,17 @@ class Socket:
     async def recv_pyobj(self, flags=0):
         return pickle.loads(await self.recv(flags))
 
-    # ── Options (sync — matches pyzmq) ───────────────────────────────
+    async def send_serialized(self, msg, serialize, flags=0, copy=True,
+                              **kwargs):
+        frames = serialize(msg)
+        return await self.send_multipart(frames, flags=flags, copy=copy,
+                                         **kwargs)
+
+    async def recv_serialized(self, deserialize, flags=0, copy=True):
+        frames = await self.recv_multipart(flags=flags, copy=copy)
+        return deserialize(frames)
+
+    # ── Options (sync -- matches pyzmq) ──────────────────────────────
 
     def setsockopt(self, option, value):
         try:
@@ -143,6 +186,27 @@ class Socket:
 
     def get(self, option):
         return self.getsockopt(option)
+
+    def setsockopt_string(self, option, value, encoding="utf-8"):
+        return self.setsockopt(option, value.encode(encoding))
+
+    def getsockopt_string(self, option, encoding="utf-8"):
+        v = self.getsockopt(option)
+        if isinstance(v, bytes):
+            return v.decode(encoding)
+        return str(v)
+
+    set_string = setsockopt_string
+    get_string = getsockopt_string
+
+    def set_hwm(self, value):
+        self.setsockopt(SNDHWM, value)
+        self.setsockopt(RCVHWM, value)
+
+    def get_hwm(self):
+        return self.getsockopt(SNDHWM)
+
+    hwm = property(get_hwm, set_hwm)
 
     # ── Subscriptions ────────────────────────────────────────────────
 
@@ -177,6 +241,15 @@ class Socket:
             self._closed = True
             await self._sock.close(linger)
 
+    async def poll(self, timeout=None, flags=POLLIN):
+        p = Poller()
+        p.register(self, flags)
+        evts = await p.poll(timeout)
+        for sock, mask in evts:
+            if sock is self:
+                return mask
+        return 0
+
     async def __aenter__(self):
         return self
 
@@ -185,10 +258,56 @@ class Socket:
         return False
 
 
+class Poller:
+    def __init__(self):
+        self._sockets = {}
+
+    def register(self, socket, flags=POLLIN):
+        self._sockets[socket._sock.socket_id()] = (socket, flags)
+
+    def unregister(self, socket):
+        self._sockets.pop(socket._sock.socket_id(), None)
+
+    def modify(self, socket, flags):
+        k = socket._sock.socket_id()
+        if k in self._sockets:
+            self._sockets[k] = (socket, flags)
+
+    @property
+    def sockets(self):
+        return [(s, f) for s, f in self._sockets.values()]
+
+    async def poll(self, timeout=None):
+        if not self._sockets:
+            return []
+        pollin_socks = [
+            s._sock
+            for k, (s, f) in self._sockets.items()
+            if f & POLLIN
+        ]
+        if not pollin_socks:
+            return []
+        t = None if (timeout is None or timeout < 0) else int(timeout)
+        loop = asyncio.get_running_loop()
+        ready_ids = await loop.run_in_executor(
+            None, _native.wait_any, pollin_socks, t
+        )
+        return [
+            (self._sockets[rid][0], POLLIN)
+            for rid in ready_ids
+            if rid in self._sockets
+        ]
+
+
 class Context:
     def __init__(self, io_threads=1):
         self._ctx = _native.AsyncContext(io_threads)
         self._closed = False
+        self._sockets = set()
+
+    @property
+    def closed(self):
+        return self._closed
 
     def socket(self, socket_type, socket_class=None, **kwargs):
         native = self._ctx.socket(socket_type)
@@ -197,12 +316,19 @@ class Context:
         s._sock = native
         s._context = self
         s._closed = False
+        s._last_endpoint = None
+        self._sockets.add(s)
         return s
 
     def term(self):
         self._closed = True
 
-    def destroy(self):
+    def destroy(self, linger=None):
+        for s in list(self._sockets):
+            if not s.closed:
+                if linger is not None:
+                    s.setsockopt(LINGER, linger)
+        self._sockets.clear()
         self.term()
 
     def __enter__(self):
@@ -213,4 +339,4 @@ class Context:
         return False
 
 
-__all__ = ["Context", "Socket"]
+__all__ = ["Context", "Socket", "Poller"]

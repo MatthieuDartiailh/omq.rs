@@ -90,6 +90,7 @@ from .error import (  # noqa: F401  re-exports
     Again,
     ContextTerminated,
     ZMQBindError,
+    ZMQVersionError,
     InterruptedSystemCall,
     NotImplementedError as ZMQNotImplementedError,
 )
@@ -103,6 +104,39 @@ POLLPRI = 32
 STREAM = 11
 HWM = 1
 
+ROUTING_ID = 5
+LAST_ENDPOINT = 32
+FD = 14
+EVENTS = 15
+MECHANISM = 43
+SNDBUF = 11
+RCVBUF = 12
+RATE = 8
+CONNECT_TIMEOUT = 79
+XPUB_VERBOSE = 40
+PROBE_ROUTER = 51
+REQ_CORRELATE = 52
+REQ_RELAXED = 53
+ROUTER_HANDOVER = 56
+IPV4ONLY = 31
+TCP_ACCEPT_FILTER = 38
+TCP_MAXRT = 80
+MULTICAST_HOPS = 25
+RECOVERY_IVL = 9
+RECONNECT_STOP = 109
+PLAIN_SERVER = 44
+PLAIN_USERNAME = 45
+PLAIN_PASSWORD = 46
+ZAP_DOMAIN = 55
+
+FORWARDER = 2
+QUEUE = 3
+STREAMER = 1
+
+NULL = 0
+PLAIN = 1
+CURVE = 2
+
 __version__ = version()
 zmq_version_info = (4, 3, 4)
 
@@ -113,8 +147,91 @@ def strerror(errnum):
     return os.strerror(errnum)
 
 
+def zmq_version():
+    return "%d.%d.%d" % zmq_version_info
+
+
+def pyomq_version():
+    return __version__
+
+
+def pyomq_version_info():
+    parts = __version__.split(".")
+    return tuple(int(p) for p in parts[:3])
+
+
 def has(capability):
-    return capability in ("ipc", "inproc")
+    cap = capability.lower()
+    if cap in ("ipc", "inproc"):
+        return True
+    if hasattr(_native, "has_feature"):
+        return _native.has_feature(cap)
+    return False
+
+
+def curve_keypair():
+    if not hasattr(_native, "curve_keypair"):
+        raise ZMQNotImplementedError("curve feature not compiled")
+    return _native.curve_keypair()
+
+
+def curve_public(secret):
+    if not hasattr(_native, "curve_public"):
+        raise ZMQNotImplementedError("curve feature not compiled")
+    if isinstance(secret, str):
+        secret = secret.encode("ascii")
+    return _native.curve_public(secret)
+
+
+# ── Socket option attribute map ──────────────────────────────────────
+
+_TYPE_NAMES = {
+    PAIR: "PAIR", PUB: "PUB", SUB: "SUB", REQ: "REQ", REP: "REP",
+    DEALER: "DEALER", ROUTER: "ROUTER", PULL: "PULL", PUSH: "PUSH",
+    XPUB: "XPUB", XSUB: "XSUB", SERVER: "SERVER", CLIENT: "CLIENT",
+    RADIO: "RADIO", DISH: "DISH", GATHER: "GATHER", SCATTER: "SCATTER",
+    PEER: "PEER", CHANNEL: "CHANNEL", STREAM: "STREAM",
+}
+
+_SOCKOPT_NAMES = {
+    "affinity": AFFINITY,
+    "identity": IDENTITY,
+    "routing_id": ROUTING_ID,
+    "subscribe": SUBSCRIBE,
+    "unsubscribe": UNSUBSCRIBE,
+    "rcvmore": RCVMORE,
+    "sndhwm": SNDHWM,
+    "rcvhwm": RCVHWM,
+    "linger": LINGER,
+    "reconnect_ivl": RECONNECT_IVL,
+    "reconnect_ivl_max": RECONNECT_IVL_MAX,
+    "backlog": BACKLOG,
+    "maxmsgsize": MAXMSGSIZE,
+    "rcvtimeo": RCVTIMEO,
+    "sndtimeo": SNDTIMEO,
+    "ipv6": IPV6,
+    "immediate": IMMEDIATE,
+    "router_mandatory": ROUTER_MANDATORY,
+    "tcp_keepalive": TCP_KEEPALIVE,
+    "tcp_keepalive_idle": TCP_KEEPALIVE_IDLE,
+    "tcp_keepalive_cnt": TCP_KEEPALIVE_CNT,
+    "tcp_keepalive_intvl": TCP_KEEPALIVE_INTVL,
+    "heartbeat_ivl": HEARTBEAT_IVL,
+    "heartbeat_ttl": HEARTBEAT_TTL,
+    "heartbeat_timeout": HEARTBEAT_TIMEOUT,
+    "handshake_ivl": HANDSHAKE_IVL,
+    "conflate": CONFLATE,
+    "curve_server": CURVE_SERVER,
+    "curve_publickey": CURVE_PUBLICKEY,
+    "curve_secretkey": CURVE_SECRETKEY,
+    "curve_serverkey": CURVE_SERVERKEY,
+    "sndbuf": SNDBUF,
+    "rcvbuf": RCVBUF,
+    "mechanism": MECHANISM,
+    "plain_server": PLAIN_SERVER,
+    "plain_username": PLAIN_USERNAME,
+    "plain_password": PLAIN_PASSWORD,
+}
 
 
 # ── Socket wrapper ───────────────────────────────────────────────────
@@ -130,6 +247,30 @@ class Socket:
         self._closed = False
         self._last_endpoint = None
 
+    def __getattr__(self, name):
+        opt = _SOCKOPT_NAMES.get(name)
+        if opt is not None:
+            if opt == LAST_ENDPOINT:
+                return self._last_endpoint
+            return self.getsockopt(opt)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        opt = _SOCKOPT_NAMES.get(name)
+        if opt is not None:
+            self.setsockopt(opt, value)
+            return
+        object.__setattr__(self, name, value)
+
+    def __repr__(self):
+        st = _TYPE_NAMES.get(self.socket_type, str(self.socket_type))
+        return f"<pyomq.Socket(pyomq.{st}) at {id(self):#x}>"
+
     @property
     def closed(self):
         return self._closed
@@ -141,6 +282,10 @@ class Socket:
     @property
     def socket_type(self):
         return self._sock.getsockopt(TYPE)
+
+    @property
+    def underlying(self):
+        return self
 
     # ── I/O ──────────────────────────────────────────────────────────
 
@@ -233,6 +378,14 @@ class Socket:
     def recv_pyobj(self, flags=0):
         return pickle.loads(self.recv(flags))
 
+    def send_serialized(self, msg, serialize, flags=0, copy=True, **kwargs):
+        frames = serialize(msg)
+        return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
+
+    def recv_serialized(self, deserialize, flags=0, copy=True):
+        frames = self.recv_multipart(flags=flags, copy=copy)
+        return deserialize(frames)
+
     # ── Options ──────────────────────────────────────────────────────
 
     def setsockopt(self, option, value):
@@ -261,6 +414,18 @@ class Socket:
         if isinstance(v, bytes):
             return v.decode(encoding)
         return str(v)
+
+    set_string = setsockopt_string
+    get_string = getsockopt_string
+
+    def set_hwm(self, value):
+        self.setsockopt(SNDHWM, value)
+        self.setsockopt(RCVHWM, value)
+
+    def get_hwm(self):
+        return self.getsockopt(SNDHWM)
+
+    hwm = property(get_hwm, set_hwm)
 
     # ── Subscriptions ────────────────────────────────────────────────
 
@@ -320,6 +485,15 @@ class Socket:
             f"(tried {max_tries} ports in [{min_port}, {max_port}))"
         )
 
+    def poll(self, timeout=None, flags=POLLIN):
+        p = Poller()
+        p.register(self, flags)
+        evts = p.poll(timeout)
+        for sock, mask in evts:
+            if sock is self:
+                return mask
+        return 0
+
     def __enter__(self):
         return self
 
@@ -337,6 +511,11 @@ class Context:
     def __init__(self, io_threads=1):
         self._ctx = _native.Context(io_threads)
         self._closed = False
+        self._sockets = set()
+
+    @property
+    def closed(self):
+        return self._closed
 
     def socket(self, socket_type, socket_class=None, **kwargs):
         native = self._ctx.socket(socket_type)
@@ -345,6 +524,8 @@ class Context:
         s._sock = native
         s._context = self
         s._closed = False
+        s._last_endpoint = None
+        self._sockets.add(s)
         return s
 
     @classmethod
@@ -358,7 +539,13 @@ class Context:
         self._closed = True
         self._ctx.term()
 
-    def destroy(self):
+    def destroy(self, linger=None):
+        for s in list(self._sockets):
+            if not s.closed:
+                if linger is not None:
+                    s.setsockopt(LINGER, linger)
+                s.close()
+        self._sockets.clear()
         self.term()
 
     def __enter__(self):
@@ -386,6 +573,10 @@ class Poller:
         if k in self._sockets:
             self._sockets[k] = (socket, flags)
 
+    @property
+    def sockets(self):
+        return [(s, f) for s, f in self._sockets.values()]
+
     def poll(self, timeout=None):
         if not self._sockets:
             return []
@@ -403,6 +594,28 @@ class Poller:
             for rid in ready_ids
             if rid in self._sockets
         ]
+
+
+# ── select ──────────────────────────────────────────────────────────
+
+def select(rlist, wlist, xlist, timeout=None):
+    if timeout is not None:
+        timeout_ms = int(timeout * 1000)
+    else:
+        timeout_ms = None
+    p = Poller()
+    for s in rlist:
+        p.register(s, POLLIN)
+    for s in wlist:
+        p.register(s, POLLOUT)
+    evts = p.poll(timeout_ms)
+    rready, wready, xready = [], [], []
+    for sock, mask in evts:
+        if mask & POLLIN:
+            rready.append(sock)
+        if mask & POLLOUT:
+            wready.append(sock)
+    return rready, wready, xready
 
 
 # ── proxy ────────────────────────────────────────────────────────────
@@ -429,6 +642,7 @@ __all__ = [
     "ZMQBaseError",
     "ZMQError",
     "ZMQBindError",
+    "ZMQVersionError",
     "Again",
     "ContextTerminated",
     "InterruptedSystemCall",
@@ -438,6 +652,7 @@ __all__ = [
     "device",
     "strerror",
     "has",
+    "select",
     "error",
     # socket types
     "PAIR", "PUB", "SUB", "REQ", "REP", "DEALER", "ROUTER",
@@ -446,9 +661,9 @@ __all__ = [
     "SERVER", "CLIENT", "RADIO", "DISH", "GATHER", "SCATTER",
     "PEER", "CHANNEL",
     # options
-    "AFFINITY", "IDENTITY", "SUBSCRIBE", "UNSUBSCRIBE", "RCVMORE",
-    "TYPE", "LINGER", "RECONNECT_IVL", "RECONNECT_IVL_MAX", "BACKLOG",
-    "MAXMSGSIZE", "SNDHWM", "RCVHWM", "RCVTIMEO", "SNDTIMEO",
+    "AFFINITY", "IDENTITY", "ROUTING_ID", "SUBSCRIBE", "UNSUBSCRIBE",
+    "RCVMORE", "TYPE", "LINGER", "RECONNECT_IVL", "RECONNECT_IVL_MAX",
+    "BACKLOG", "MAXMSGSIZE", "SNDHWM", "RCVHWM", "RCVTIMEO", "SNDTIMEO",
     "ROUTER_MANDATORY", "IMMEDIATE", "IPV6",
     "HEARTBEAT_IVL", "HEARTBEAT_TTL", "HEARTBEAT_TIMEOUT",
     "HANDSHAKE_IVL", "CONFLATE",
@@ -458,6 +673,20 @@ __all__ = [
     "CURVE_SERVER", "CURVE_PUBLICKEY", "CURVE_SECRETKEY", "CURVE_SERVERKEY",
     # poll / compat constants
     "POLLIN", "POLLOUT", "POLLERR", "POLLPRI", "STREAM", "HWM",
+    # additional compat constants
+    "LAST_ENDPOINT", "FD", "EVENTS", "MECHANISM", "SNDBUF", "RCVBUF",
+    "RATE", "CONNECT_TIMEOUT", "XPUB_VERBOSE", "PROBE_ROUTER",
+    "REQ_CORRELATE", "REQ_RELAXED", "ROUTER_HANDOVER", "IPV4ONLY",
+    "TCP_ACCEPT_FILTER", "TCP_MAXRT", "MULTICAST_HOPS", "RECOVERY_IVL",
+    "RECONNECT_STOP", "PLAIN_SERVER", "PLAIN_USERNAME", "PLAIN_PASSWORD",
+    "ZAP_DOMAIN",
+    # device types
+    "FORWARDER", "QUEUE", "STREAMER",
+    # security mechanism constants
+    "NULL", "PLAIN", "CURVE",
     # version
-    "__version__", "zmq_version_info",
+    "__version__", "zmq_version_info", "zmq_version",
+    "pyomq_version", "pyomq_version_info",
+    # curve
+    "curve_keypair", "curve_public",
 ]

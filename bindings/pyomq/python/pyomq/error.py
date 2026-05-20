@@ -5,6 +5,7 @@ pyzmq's hierarchy. ``ZMQBindError`` is a sibling of ``ZMQError`` under
 ``ZMQBaseError``, not a subclass of ``ZMQError``.
 """
 
+import builtins
 import errno as _errno
 
 from ._native import ZMQBaseError as ZMQBaseError  # type: ignore[attr-defined]
@@ -29,6 +30,10 @@ class ZMQBindError(ZMQBaseError):
 
 class InterruptedSystemCall(ZMQError):
     """Interrupted system call (``EINTR``). Never raised by pyomq (io_uring handles EINTR internally)."""
+
+
+class ZMQVersionError(builtins.NotImplementedError, ZMQBaseError):
+    """Feature requires a newer libzmq than the emulated version."""
 
 
 _BY_ERRNO = {

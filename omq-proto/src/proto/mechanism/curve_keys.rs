@@ -83,6 +83,12 @@ impl CurveSecretKey {
     pub fn to_z85(&self) -> String {
         z85::encode(&self.0).expect("32 bytes is a multiple of 4")
     }
+
+    /// Derive the corresponding public key from this secret key.
+    pub fn derive_public(&self) -> CurvePublicKey {
+        let sk = crypto_box::SecretKey::from(self.0);
+        CurvePublicKey::from_bytes(*sk.public_key().as_bytes())
+    }
 }
 
 impl std::fmt::Debug for CurveSecretKey {

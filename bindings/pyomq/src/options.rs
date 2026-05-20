@@ -45,13 +45,19 @@ pub struct Overlay {
     pub conflate: bool,
     pub reconnect_ivl: Option<Duration>,
     pub reconnect_ivl_max: Option<Duration>,
+    pub send_buffer_size: Option<usize>,
+    pub recv_buffer_size: Option<usize>,
+    pub plain_server: bool,
+    pub plain_username: Option<String>,
+    pub plain_password: Option<String>,
 }
 
 impl Overlay {
     /// Materialise an `omq_compio::Options` from the overlay. Used
     /// when the underlying Socket is first built.
     pub fn to_options(&self) -> backend::Options {
-        backend::Options {
+        #[allow(unused_mut)]
+        let mut opts = backend::Options {
             send_hwm: self.send_hwm,
             recv_hwm: self.recv_hwm,
             linger: self.linger,
@@ -64,13 +70,31 @@ impl Overlay {
             handshake_timeout: self.handshake_ivl,
             conflate: self.conflate,
             tcp_keepalive: self.keepalive,
+            send_buffer_size: self.send_buffer_size,
+            recv_buffer_size: self.recv_buffer_size,
             reconnect: match (self.reconnect_ivl, self.reconnect_ivl_max) {
                 (None, _) => ReconnectPolicy::Disabled,
                 (Some(min), None) => ReconnectPolicy::Fixed(min),
                 (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
             },
             ..Default::default()
+        };
+        #[cfg(feature = "plain")]
+        if self.plain_server {
+            opts.mechanism =
+                omq_proto::options::MechanismConfig::PlainServer {
+                    authenticator: omq_proto::proto::mechanism::Authenticator::new(|_| true),
+                };
+        } else if let (Some(u), Some(p)) =
+            (&self.plain_username, &self.plain_password)
+        {
+            opts.mechanism =
+                omq_proto::options::MechanismConfig::PlainClient {
+                    username: u.clone(),
+                    password: p.clone(),
+                };
         }
+        opts
     }
 
     pub fn from_options(o: &backend::Options) -> Self {
@@ -101,6 +125,11 @@ impl Overlay {
                 ReconnectPolicy::Exponential { max, .. } => Some(max),
                 _ => None,
             },
+            send_buffer_size: o.send_buffer_size,
+            recv_buffer_size: o.recv_buffer_size,
+            plain_server: false,
+            plain_username: None,
+            plain_password: None,
         }
     }
 }
@@ -245,9 +274,42 @@ pub fn setsockopt(
             };
             promote_keepalive(&mut ov);
         }
-        // Group B no-ops accepted for source-compat with pyzmq:
-        constants::IMMEDIATE | constants::IPV6 => {}
-        // Group C "not implemented in v0.1".
+        constants::SNDBUF => {
+            let v = value.extract::<i64>()?;
+            ov.send_buffer_size = if v <= 0 { None } else { Some(v as usize) };
+        }
+        constants::RCVBUF => {
+            let v = value.extract::<i64>()?;
+            ov.recv_buffer_size = if v <= 0 { None } else { Some(v as usize) };
+        }
+        constants::PLAIN_SERVER => {
+            ov.plain_server = value.extract::<i64>()? != 0;
+        }
+        constants::PLAIN_USERNAME => {
+            let v: &[u8] = value.extract()?;
+            ov.plain_username = Some(String::from_utf8_lossy(v).into_owned());
+        }
+        constants::PLAIN_PASSWORD => {
+            let v: &[u8] = value.extract()?;
+            ov.plain_password = Some(String::from_utf8_lossy(v).into_owned());
+        }
+        // No-ops accepted for source-compat with pyzmq:
+        constants::IMMEDIATE
+        | constants::IPV6
+        | constants::IPV4ONLY
+        | constants::RATE
+        | constants::CONNECT_TIMEOUT
+        | constants::XPUB_VERBOSE
+        | constants::PROBE_ROUTER
+        | constants::REQ_CORRELATE
+        | constants::REQ_RELAXED
+        | constants::ROUTER_HANDOVER
+        | constants::TCP_ACCEPT_FILTER
+        | constants::TCP_MAXRT
+        | constants::MULTICAST_HOPS
+        | constants::RECOVERY_IVL
+        | constants::RECONNECT_STOP
+        | constants::ZAP_DOMAIN => {}
         constants::AFFINITY => return Err(not_implemented("AFFINITY")),
         constants::BACKLOG => return Err(not_implemented("BACKLOG")),
         constants::TYPE | constants::RCVMORE => return Err(not_implemented("read-only option")),
@@ -365,6 +427,96 @@ pub fn getsockopt<'py>(
                 _ => -1,
             };
             Ok(int_to_bound(py, v))
+        }
+        constants::RECONNECT_IVL => {
+            let v = as_ms(sock.overlay.lock().unwrap().reconnect_ivl);
+            Ok(int_to_bound(py, v))
+        }
+        constants::RECONNECT_IVL_MAX => {
+            let v = as_ms(sock.overlay.lock().unwrap().reconnect_ivl_max);
+            Ok(int_to_bound(py, v))
+        }
+        constants::HEARTBEAT_IVL => {
+            let v = as_ms(sock.overlay.lock().unwrap().heartbeat_ivl);
+            Ok(int_to_bound(py, v))
+        }
+        constants::HEARTBEAT_TTL => {
+            let v = as_ms(sock.overlay.lock().unwrap().heartbeat_ttl);
+            Ok(int_to_bound(py, v))
+        }
+        constants::HEARTBEAT_TIMEOUT => {
+            let v = as_ms(sock.overlay.lock().unwrap().heartbeat_timeout);
+            Ok(int_to_bound(py, v))
+        }
+        constants::HANDSHAKE_IVL => {
+            let v = as_ms(sock.overlay.lock().unwrap().handshake_ivl);
+            Ok(int_to_bound(py, v))
+        }
+        constants::CONFLATE => {
+            let v = sock.overlay.lock().unwrap().conflate as i64;
+            Ok(int_to_bound(py, v))
+        }
+        constants::SNDBUF => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .send_buffer_size
+                .unwrap_or(0) as i64;
+            Ok(int_to_bound(py, v))
+        }
+        constants::RCVBUF => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .recv_buffer_size
+                .unwrap_or(0) as i64;
+            Ok(int_to_bound(py, v))
+        }
+        constants::PLAIN_SERVER => {
+            let v = sock.overlay.lock().unwrap().plain_server as i64;
+            Ok(int_to_bound(py, v))
+        }
+        constants::PLAIN_USERNAME => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .plain_username
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, v.as_bytes()).into_any())
+        }
+        constants::PLAIN_PASSWORD => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .plain_password
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, v.as_bytes()).into_any())
+        }
+        // Compat no-ops: return sensible defaults.
+        constants::MECHANISM => Ok(int_to_bound(py, 0_i64)),
+        constants::RATE
+        | constants::CONNECT_TIMEOUT
+        | constants::XPUB_VERBOSE
+        | constants::PROBE_ROUTER
+        | constants::REQ_CORRELATE
+        | constants::REQ_RELAXED
+        | constants::ROUTER_HANDOVER
+        | constants::TCP_MAXRT
+        | constants::MULTICAST_HOPS
+        | constants::RECOVERY_IVL
+        | constants::RECONNECT_STOP
+        | constants::FD
+        | constants::EVENTS => Ok(int_to_bound(py, 0_i64)),
+        constants::ZAP_DOMAIN
+        | constants::TCP_ACCEPT_FILTER
+        | constants::LAST_ENDPOINT => {
+            Ok(PyBytes::new_bound(py, b"").into_any())
         }
         other => Err(not_implemented(&format!(
             "getsockopt for option id {other}"

@@ -40,6 +40,12 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(wait_any, m)?)?;
     m.add_function(wrap_pyfunction!(native_proxy, m)?)?;
+    m.add_function(wrap_pyfunction!(has_feature, m)?)?;
+    #[cfg(feature = "curve")]
+    {
+        m.add_function(wrap_pyfunction!(curve_keypair, m)?)?;
+        m.add_function(wrap_pyfunction!(curve_public, m)?)?;
+    }
     Ok(())
 }
 
@@ -80,6 +86,43 @@ fn native_proxy(
     };
     py.allow_threads(|| runtime::proxy(fe_recv, be_send, be_recv, fe_send, cap_send));
     Ok(())
+}
+
+#[cfg(feature = "curve")]
+#[pyfunction]
+fn curve_keypair(py: Python<'_>) -> PyResult<(PyObject, PyObject)> {
+    let kp = omq_proto::CurveKeypair::generate();
+    let pub_z85 = kp.public.to_z85();
+    let sec_z85 = kp.secret.to_z85();
+    let pub_bytes = pyo3::types::PyBytes::new_bound(py, pub_z85.as_bytes());
+    let sec_bytes = pyo3::types::PyBytes::new_bound(py, sec_z85.as_bytes());
+    Ok((pub_bytes.into(), sec_bytes.into()))
+}
+
+#[cfg(feature = "curve")]
+#[pyfunction]
+fn curve_public(py: Python<'_>, secret_z85: &[u8]) -> PyResult<PyObject> {
+    let secret_str = std::str::from_utf8(secret_z85).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("secret key must be valid UTF-8 Z85")
+    })?;
+    let sk = omq_proto::CurveSecretKey::from_z85(secret_str)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let pk = sk.derive_public();
+    let pub_z85 = pk.to_z85();
+    Ok(pyo3::types::PyBytes::new_bound(py, pub_z85.as_bytes()).into())
+}
+
+#[pyfunction]
+fn has_feature(name: &str) -> bool {
+    match name {
+        "ipc" | "inproc" => true,
+        "curve" => cfg!(feature = "curve"),
+        "plain" => cfg!(feature = "plain"),
+        "blake3zmq" => cfg!(feature = "blake3zmq"),
+        "lz4" => cfg!(feature = "lz4"),
+        "zstd" => cfg!(feature = "zstd"),
+        _ => false,
+    }
 }
 
 #[pyfunction]

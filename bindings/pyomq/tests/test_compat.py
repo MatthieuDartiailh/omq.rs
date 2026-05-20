@@ -259,6 +259,212 @@ def test_context_instance_survives_close():
         zmq.Context._instance = None
 
 
+# ── send_serialized / recv_serialized ───────────────────────────────
+
+def test_send_recv_serialized(tcp_endpoint):
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        pull.bind(tcp_endpoint)
+        push.connect(tcp_endpoint)
+
+        def my_serialize(msg):
+            return [b"header", msg.encode("utf-8")]
+
+        def my_deserialize(frames):
+            assert frames[0] == b"header"
+            return frames[1].decode("utf-8")
+
+        push.send_serialized("hello", my_serialize)
+        assert pull.recv_serialized(my_deserialize) == "hello"
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+# ── set_hwm / get_hwm ──────────────────────────────────────────────
+
+def test_set_hwm_get_hwm():
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.PUSH)
+    try:
+        sock.set_hwm(500)
+        assert sock.get_hwm() == 500
+        assert sock.getsockopt(zmq.SNDHWM) == 500
+        assert sock.getsockopt(zmq.RCVHWM) == 500
+    finally:
+        sock.close()
+        ctx.term()
+
+
+def test_hwm_property():
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.PUSH)
+    try:
+        sock.hwm = 200
+        assert sock.hwm == 200
+    finally:
+        sock.close()
+        ctx.term()
+
+
+# ── set_string / get_string aliases ────────────────────────────────
+
+def test_set_string_get_string():
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.DEALER)
+    try:
+        sock.set_string(zmq.IDENTITY, "myid")
+        assert sock.get_string(zmq.IDENTITY) == "myid"
+    finally:
+        sock.close()
+        ctx.term()
+
+
+# ── Socket.poll() ──────────────────────────────────────────────────
+
+def test_socket_poll_timeout():
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.PULL)
+    try:
+        sock.bind("tcp://127.0.0.1:*")
+        result = sock.poll(timeout=10)
+        assert result == 0
+    finally:
+        sock.close()
+        ctx.term()
+
+
+def test_socket_poll_ready(tcp_endpoint):
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        pull.bind(tcp_endpoint)
+        push.connect(tcp_endpoint)
+        push.send(b"data")
+        import time
+        time.sleep(0.05)
+        result = pull.poll(timeout=1000)
+        assert result & zmq.POLLIN
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+# ── Socket.__repr__() ──────────────────────────────────────────────
+
+def test_socket_repr():
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.PUSH)
+    try:
+        r = repr(sock)
+        assert "pyomq.Socket" in r
+        assert "PUSH" in r
+    finally:
+        sock.close()
+        ctx.term()
+
+
+# ── Socket.underlying ──────────────────────────────────────────────
+
+def test_socket_underlying():
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.PUSH)
+    try:
+        assert sock.underlying is sock
+    finally:
+        sock.close()
+        ctx.term()
+
+
+# ── Context.closed ─────────────────────────────────────────────────
+
+def test_context_closed_property():
+    ctx = zmq.Context()
+    assert ctx.closed is False
+    ctx.term()
+    assert ctx.closed is True
+
+
+# ── Context.destroy(linger) ────────────────────────────────────────
+
+def test_context_destroy_closes_sockets():
+    ctx = zmq.Context()
+    s1 = ctx.socket(zmq.PUSH)
+    s2 = ctx.socket(zmq.PULL)
+    assert not s1.closed
+    assert not s2.closed
+    ctx.destroy(linger=0)
+    assert s1.closed
+    assert s2.closed
+    assert ctx.closed
+
+
+def test_context_destroy_no_linger():
+    ctx = zmq.Context()
+    s = ctx.socket(zmq.PUSH)
+    assert not s.closed
+    ctx.destroy()
+    assert s.closed
+    assert ctx.closed
+
+
+# ── Poller.sockets property ────────────────────────────────────────
+
+def test_poller_sockets_property():
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.PULL)
+    try:
+        sock.bind("tcp://127.0.0.1:*")
+        p = zmq.Poller()
+        p.register(sock, zmq.POLLIN)
+        socks = p.sockets
+        assert len(socks) == 1
+        assert socks[0][0] is sock
+        assert socks[0][1] == zmq.POLLIN
+    finally:
+        sock.close()
+        ctx.term()
+
+
+# ── select() ───────────────────────────────────────────────────────
+
+def test_select_timeout():
+    ctx = zmq.Context()
+    sock = ctx.socket(zmq.PULL)
+    try:
+        sock.bind("tcp://127.0.0.1:*")
+        rready, wready, xready = zmq.select([sock], [], [], timeout=0.01)
+        assert rready == []
+        assert wready == []
+        assert xready == []
+    finally:
+        sock.close()
+        ctx.term()
+
+
+def test_select_ready(tcp_endpoint):
+    import time
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        pull.bind(tcp_endpoint)
+        push.connect(tcp_endpoint)
+        push.send(b"sel")
+        time.sleep(0.05)
+        rready, wready, xready = zmq.select([pull], [], [], timeout=1.0)
+        assert pull in rready
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
 # ── Constants ────────────────────────────────────────────────────────
 
 def test_dontwait_constant():
@@ -289,6 +495,29 @@ def test_hwm_constant():
     assert zmq.HWM == 1
 
 
+def test_routing_id_is_identity():
+    assert zmq.ROUTING_ID == zmq.IDENTITY
+
+
+def test_new_constants_match_pyzmq():
+    assert zmq.LAST_ENDPOINT == 32
+    assert zmq.FD == 14
+    assert zmq.EVENTS == 15
+    assert zmq.MECHANISM == 43
+    assert zmq.SNDBUF == 11
+    assert zmq.RCVBUF == 12
+    assert zmq.PLAIN_SERVER == 44
+    assert zmq.PLAIN_USERNAME == 45
+    assert zmq.PLAIN_PASSWORD == 46
+    assert zmq.ZAP_DOMAIN == 55
+    assert zmq.FORWARDER == 2
+    assert zmq.QUEUE == 3
+    assert zmq.STREAMER == 1
+    assert zmq.NULL == 0
+    assert zmq.PLAIN == 1
+    assert zmq.CURVE == 2
+
+
 # ── Version & module attributes ─────────────────────────────────────
 
 def test_version_string():
@@ -300,6 +529,27 @@ def test_zmq_version_info():
     assert isinstance(zmq.zmq_version_info, tuple)
     assert len(zmq.zmq_version_info) == 3
     assert all(isinstance(x, int) for x in zmq.zmq_version_info)
+
+
+def test_zmq_version_function():
+    assert zmq.zmq_version() == "4.3.4"
+
+
+def test_pyomq_version():
+    assert isinstance(zmq.pyomq_version(), str)
+    assert zmq.pyomq_version() == zmq.__version__
+
+
+def test_pyomq_version_info():
+    info = zmq.pyomq_version_info()
+    assert isinstance(info, tuple)
+    assert len(info) == 3
+    assert all(isinstance(x, int) for x in info)
+
+
+def test_no_pyzmq_version():
+    assert not hasattr(zmq, "pyzmq_version")
+    assert not hasattr(zmq, "pyzmq_version_info")
 
 
 def test_has_ipc():
@@ -318,6 +568,13 @@ def test_strerror():
     result = zmq.strerror(11)
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+# ── Exceptions ─────────────────────────────────────────────────────
+
+def test_zmq_version_error():
+    assert issubclass(zmq.ZMQVersionError, zmq.ZMQBaseError)
+    assert issubclass(zmq.ZMQVersionError, NotImplementedError)
 
 
 # ── proxy ────────────────────────────────────────────────────────────

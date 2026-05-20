@@ -143,3 +143,113 @@ def test_unsupported_options_raise():
     finally:
         s.close()
         ctx.term()
+
+
+# Group D: newly readable options (Phase 4).
+
+def test_reconnect_ivl_round_trip():
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.RECONNECT_IVL, 500)
+        assert s.getsockopt(zmq.RECONNECT_IVL) == 500
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_heartbeat_round_trip():
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.HEARTBEAT_IVL, 1000)
+        s.setsockopt(zmq.HEARTBEAT_TTL, 3000)
+        s.setsockopt(zmq.HEARTBEAT_TIMEOUT, 5000)
+        assert s.getsockopt(zmq.HEARTBEAT_IVL) == 1000
+        assert s.getsockopt(zmq.HEARTBEAT_TTL) == 3000
+        assert s.getsockopt(zmq.HEARTBEAT_TIMEOUT) == 5000
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_conflate_round_trip():
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.CONFLATE, 1)
+        assert s.getsockopt(zmq.CONFLATE) == 1
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_handshake_ivl_round_trip():
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.HANDSHAKE_IVL, 2000)
+        assert s.getsockopt(zmq.HANDSHAKE_IVL) == 2000
+    finally:
+        s.close()
+        ctx.term()
+
+
+# Group E: SNDBUF / RCVBUF round-trip.
+
+def test_sndbuf_round_trip():
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.SNDBUF, 65536)
+        assert s.getsockopt(zmq.SNDBUF) == 65536
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_rcvbuf_round_trip():
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.RCVBUF, 32768)
+        assert s.getsockopt(zmq.RCVBUF) == 32768
+    finally:
+        s.close()
+        ctx.term()
+
+
+# Group F: PLAIN auth option round-trip.
+
+def test_plain_options_round_trip():
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.PLAIN_SERVER, 1)
+        assert s.getsockopt(zmq.PLAIN_SERVER) == 1
+        s.setsockopt(zmq.PLAIN_USERNAME, b"admin")
+        assert s.getsockopt(zmq.PLAIN_USERNAME) == b"admin"
+        s.setsockopt(zmq.PLAIN_PASSWORD, b"secret")
+        assert s.getsockopt(zmq.PLAIN_PASSWORD) == b"secret"
+    finally:
+        s.close()
+        ctx.term()
+
+
+# Group G: no-op options don't raise.
+
+def test_noop_options_accepted():
+    ctx, s = _push()
+    try:
+        for opt in (zmq.XPUB_VERBOSE, zmq.PROBE_ROUTER, zmq.REQ_CORRELATE,
+                     zmq.REQ_RELAXED, zmq.ROUTER_HANDOVER, zmq.ZAP_DOMAIN,
+                     zmq.RATE, zmq.CONNECT_TIMEOUT, zmq.RECOVERY_IVL):
+            s.setsockopt(opt, 0)
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_has_feature():
+    assert zmq.has("ipc") is True
+    assert zmq.has("inproc") is True
+    assert zmq.has("pgm") is False
+    assert isinstance(zmq.has("curve"), bool)
+    assert isinstance(zmq.has("lz4"), bool)
+    assert isinstance(zmq.has("zstd"), bool)
+    assert isinstance(zmq.has("plain"), bool)
+    assert zmq.has("gssapi") is False
+    assert zmq.has("INPROC") is True

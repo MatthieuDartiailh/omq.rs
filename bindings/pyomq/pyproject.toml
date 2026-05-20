@@ -25,16 +25,6 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-# Crypto / compression: each maps to a maturin feature on the native module.
-# (Wheels in CI will be built per combination; for development a single
-# maturin develop --features ... covers it.)
-curve = []
-blake3zmq = []
-lz4 = []
-zstd = []
-all = []
-
-# Test dependencies; pip install pyomq[test] in a dev venv.
 test = [
     "pytest>=7",
     "pytest-asyncio>=0.21",

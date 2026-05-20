@@ -61,6 +61,31 @@ pub const CURVE_PUBLICKEY: i32 = 48;
 pub const CURVE_SECRETKEY: i32 = 49;
 pub const CURVE_SERVERKEY: i32 = 50;
 
+// Additional compat constants (used in options.rs match arms):
+pub const RATE: i32 = 8;
+pub const SNDBUF: i32 = 11;
+pub const RCVBUF: i32 = 12;
+pub const FD: i32 = 14;
+pub const EVENTS: i32 = 15;
+pub const IPV4ONLY: i32 = 31;
+pub const LAST_ENDPOINT: i32 = 32;
+pub const TCP_ACCEPT_FILTER: i32 = 38;
+pub const XPUB_VERBOSE: i32 = 40;
+pub const MECHANISM: i32 = 43;
+pub const PLAIN_SERVER: i32 = 44;
+pub const PLAIN_USERNAME: i32 = 45;
+pub const PLAIN_PASSWORD: i32 = 46;
+pub const PROBE_ROUTER: i32 = 51;
+pub const REQ_CORRELATE: i32 = 52;
+pub const REQ_RELAXED: i32 = 53;
+pub const ZAP_DOMAIN: i32 = 55;
+pub const ROUTER_HANDOVER: i32 = 56;
+pub const CONNECT_TIMEOUT: i32 = 79;
+pub const TCP_MAXRT: i32 = 80;
+pub const MULTICAST_HOPS: i32 = 25;
+pub const RECOVERY_IVL: i32 = 9;
+pub const RECONNECT_STOP: i32 = 109;
+
 // send / recv flags:
 pub const SNDMORE: i32 = 2;
 pub const NOBLOCK: i32 = 1;

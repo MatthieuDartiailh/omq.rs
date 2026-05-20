@@ -17,6 +17,7 @@ crate-type = ["cdylib"]
 # v0.1 ships the compio backend only; an alternative `tokio-backend` is
 # planned but not in scope yet.
 default = []
+plain = ["omq-compio/plain"]
 curve = ["omq-compio/curve"]
 blake3zmq = ["omq-compio/blake3zmq"]
 lz4 = ["omq-compio/lz4"]
