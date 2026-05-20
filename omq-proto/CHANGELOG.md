@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-21
+
+### Changed
+
+- CURVE mechanism hardened: server handshake is now stateless until the client cookie is verified, low-order public keys are rejected, and all key comparisons use constant-time equality.
+- BLAKE3ZMQ: `SessionKeys` are zeroized on drop.
+- *(deps)* `CurveSecretKey::derive_public()` added for pyomq `curve_public()`.
+
 ## [0.10.0] - 2026-05-20
 
 ### Added

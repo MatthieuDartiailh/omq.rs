@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-21
+
 ### Changed
 
 - *(breaking)* Package renamed from `omq-zmq` to `omq-libzmq`. Library name
@@ -24,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zmq_socket` enforces `ZMQ_MAX_SOCKETS`; returns `EMFILE` when exceeded.
 - `zmq_send` enforces `ZMQ_MAX_MSGSZ`; returns `EMSGSIZE` for oversized frames.
 - `ZMQ_CONNECT_TIMEOUT` wired to backend handshake timeout.
+- *(deps)* Bump `omq-compio` to 0.9.0.
 
 ## [0.1.4] - 2026-05-20
 

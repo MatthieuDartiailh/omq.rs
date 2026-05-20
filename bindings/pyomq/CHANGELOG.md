@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-21
+
+### Fixed
+
+- Fix example in README.
+- Fix flaky CI port allocation with OS-assigned wildcard ports.
+
 ## [0.6.0] - 2026-05-20
 
 ### Added
