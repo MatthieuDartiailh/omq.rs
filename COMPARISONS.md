@@ -3,6 +3,10 @@
 Two-process benchmarks (inproc: single-process). 3 s timed window after 500 ms warmup.
 Hardware: Linux 6.12 (Debian 13) VM, Intel i7-8700B 3.2 GHz 6-core, Rust 1.95.0.
 
+<p align="center">
+  <img src="doc/comparison_chart.svg" alt="PUSH/PULL throughput: TCP loopback" width="850">
+</p>
+
 ## libzmq vs omq — inproc
 
 Same process, no kernel socket overhead. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
