@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-20
+
+### Added
+
+- Socket attribute-style option access (`socket.linger = 0`, `socket.identity`, etc.).
+- `Socket.poll(timeout, flags)` per-socket polling method.
+- `Socket.set_hwm()` / `Socket.get_hwm()` / `hwm` property.
+- `Socket.set_string()` / `Socket.get_string()` aliases.
+- `Socket.send_serialized()` / `Socket.recv_serialized()` for custom serialization.
+- `Socket.__repr__()` showing socket type.
+- `Socket.underlying` property (returns self, pyzmq compat).
+- `Context.closed` property.
+- `Context.destroy(linger=None)` with socket tracking.
+- `Poller.sockets` property.
+- `zmq.select(rlist, wlist, xlist, timeout)` function.
+- `zmq.zmq_version()`, `zmq.pyomq_version()`, `zmq.pyomq_version_info()`.
+- `zmq.curve_keypair()` and `zmq.curve_public(secret)` (when curve feature compiled).
+- `zmq.has()` now checks compiled features (curve, plain, lz4, zstd, blake3zmq).
+- `ZMQVersionError` exception.
+- 30+ missing pyzmq constants (ROUTING_ID, MECHANISM, PLAIN_*, SNDBUF, RCVBUF, device types, security mechanism IDs).
+- `getsockopt` support for RECONNECT_IVL, RECONNECT_IVL_MAX, HEARTBEAT_IVL/TTL/TIMEOUT, HANDSHAKE_IVL, CONFLATE.
+- No-op `setsockopt`/`getsockopt` for 15+ pyzmq compat constants.
+- SNDBUF/RCVBUF wired through to socket options.
+- PLAIN_SERVER/USERNAME/PASSWORD stored in overlay, wired to `MechanismConfig` when plain feature enabled.
+- `socket_id()` on AsyncSocket (enables async Poller).
+- Async parity: `asyncio.Poller`, all new Socket convenience methods, attribute access, `Context.closed`/`destroy()`.
+- `CurveSecretKey::derive_public()` in omq-proto.
+- `plain` Cargo feature forwarding to omq-compio.
+
+### Removed
+
+- Dead pyproject.toml extras (curve, blake3zmq, lz4, zstd, all). The published wheel includes all features.
+
+### Fixed
+
+- README install section: document that all features are built into the wheel.
+
 ## [0.5.0] - 2026-05-20
 
 ### Changed
