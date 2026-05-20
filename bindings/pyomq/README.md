@@ -29,6 +29,7 @@ ctx.term()
 For asynchronous code:
 
 ```python
+import pyomq
 import pyomq.asyncio as zmq_async
 
 ctx = zmq_async.Context()
