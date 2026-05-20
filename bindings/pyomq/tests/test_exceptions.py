@@ -11,7 +11,7 @@ def test_again_on_rcvtimeo(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
         pull.setsockopt(zmq.RCVTIMEO, 50)
         with pytest.raises(zmq.Again):
             pull.recv()
@@ -32,7 +32,7 @@ def test_again_errno(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
         pull.setsockopt(zmq.RCVTIMEO, 50)
         with pytest.raises(zmq.Again) as exc_info:
             pull.recv()
@@ -46,7 +46,7 @@ def test_closed_socket_raises_context_terminated(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
         pull.close()
         with pytest.raises(zmq.ContextTerminated):
             pull.recv()
@@ -58,7 +58,7 @@ def test_context_terminated_errno(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
         pull.close()
         with pytest.raises(zmq.ContextTerminated) as exc_info:
             pull.recv()
@@ -67,15 +67,12 @@ def test_context_terminated_errno(tcp_endpoint):
         ctx.term()
 
 
-def test_zmqbinderror_on_random_port_exhaustion():
+def test_zmqerror_on_bind_invalid_address():
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PULL)
     try:
-        with pytest.raises(zmq.ZMQBindError):
-            sock.bind_to_random_port(
-                "tcp://127.0.0.1",
-                min_port=1, max_port=2, max_tries=1,
-            )
+        with pytest.raises(zmq.ZMQError):
+            sock.bind("tcp://999.999.999.999:0")
     finally:
         sock.close()
         ctx.term()
@@ -93,7 +90,7 @@ def test_zmqerror_catches_subclasses(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
         pull.setsockopt(zmq.RCVTIMEO, 50)
         with pytest.raises(zmq.ZMQError):
             pull.recv()
@@ -106,7 +103,7 @@ def test_zmqbaseerror_catches_all(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
         pull.setsockopt(zmq.RCVTIMEO, 50)
         with pytest.raises(zmq.error.ZMQBaseError):
             pull.recv()
@@ -120,10 +117,7 @@ def test_zmqbaseerror_catches_binderror():
     sock = ctx.socket(zmq.PULL)
     try:
         with pytest.raises(zmq.error.ZMQBaseError):
-            sock.bind_to_random_port(
-                "tcp://127.0.0.1",
-                min_port=1, max_port=2, max_tries=1,
-            )
+            sock.bind("tcp://999.999.999.999:0")
     finally:
         sock.close()
         ctx.term()

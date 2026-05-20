@@ -41,10 +41,11 @@ def test_pyomq_push_pyzmq_pull(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     pull = py_ctx.socket(zmq_pyzmq.PULL)
     pull.bind(endpoint)
+    ep = pull.last_endpoint.decode() if isinstance(pull.last_endpoint, bytes) else pull.last_endpoint
     try:
         ctx = pyomq.Context()
         push = ctx.socket(pyomq.PUSH)
-        push.connect(endpoint)
+        push.connect(ep)
         push.send(b"from-pyomq")
         assert pull.recv() == b"from-pyomq"
         push.close()
@@ -57,11 +58,11 @@ def test_pyomq_push_pyzmq_pull(endpoint):
 def test_pyzmq_push_pyomq_pull(endpoint):
     ctx = pyomq.Context()
     pull = ctx.socket(pyomq.PULL)
-    pull.bind(endpoint)
+    ep = pull.bind(endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         push = py_ctx.socket(zmq_pyzmq.PUSH)
-        push.connect(endpoint)
+        push.connect(ep)
         push.send(b"from-pyzmq")
         assert pull.recv() == b"from-pyzmq"
         push.close()
@@ -74,14 +75,14 @@ def test_pyzmq_push_pyomq_pull(endpoint):
 
 @_TRANSPORTS
 def test_pyomq_pub_pyzmq_sub(endpoint):
-    py_ctx = zmq_pyzmq.Context.instance()
-    sub = py_ctx.socket(zmq_pyzmq.SUB)
-    sub.setsockopt(zmq_pyzmq.SUBSCRIBE, b"hot/")
-    sub.connect(endpoint)
+    ctx = pyomq.Context()
+    pub = ctx.socket(pyomq.PUB)
+    ep = pub.bind(endpoint)
     try:
-        ctx = pyomq.Context()
-        pub = ctx.socket(pyomq.PUB)
-        pub.bind(endpoint)
+        py_ctx = zmq_pyzmq.Context.instance()
+        sub = py_ctx.socket(zmq_pyzmq.SUB)
+        sub.setsockopt(zmq_pyzmq.SUBSCRIBE, b"hot/")
+        sub.connect(ep)
         _settle()
         pub.send(b"cold/skip")
         pub.send(b"hot/take")
@@ -95,14 +96,15 @@ def test_pyomq_pub_pyzmq_sub(endpoint):
 
 @_TRANSPORTS
 def test_pyzmq_pub_pyomq_sub(endpoint):
-    ctx = pyomq.Context()
-    sub = ctx.socket(pyomq.SUB)
-    sub.setsockopt(pyomq.SUBSCRIBE, b"hot/")
-    sub.connect(endpoint)
+    py_ctx = zmq_pyzmq.Context.instance()
+    pub = py_ctx.socket(zmq_pyzmq.PUB)
+    pub.bind(endpoint)
+    ep = pub.last_endpoint.decode() if isinstance(pub.last_endpoint, bytes) else pub.last_endpoint
     try:
-        py_ctx = zmq_pyzmq.Context.instance()
-        pub = py_ctx.socket(zmq_pyzmq.PUB)
-        pub.bind(endpoint)
+        ctx = pyomq.Context()
+        sub = ctx.socket(pyomq.SUB)
+        sub.setsockopt(pyomq.SUBSCRIBE, b"hot/")
+        sub.connect(ep)
         _settle()
         pub.send(b"cold/skip")
         pub.send(b"hot/take")
@@ -121,10 +123,11 @@ def test_pyomq_req_pyzmq_rep(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     rep = py_ctx.socket(zmq_pyzmq.REP)
     rep.bind(endpoint)
+    ep = rep.last_endpoint.decode() if isinstance(rep.last_endpoint, bytes) else rep.last_endpoint
     try:
         ctx = pyomq.Context()
         req = ctx.socket(pyomq.REQ)
-        req.connect(endpoint)
+        req.connect(ep)
         req.send(b"ping")
         assert rep.recv() == b"ping"
         rep.send(b"pong")
@@ -139,11 +142,11 @@ def test_pyomq_req_pyzmq_rep(endpoint):
 def test_pyzmq_req_pyomq_rep(endpoint):
     ctx = pyomq.Context()
     rep = ctx.socket(pyomq.REP)
-    rep.bind(endpoint)
+    ep = rep.bind(endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         req = py_ctx.socket(zmq_pyzmq.REQ)
-        req.connect(endpoint)
+        req.connect(ep)
         req.send(b"ping")
         assert rep.recv() == b"ping"
         rep.send(b"pong")
@@ -161,11 +164,12 @@ def test_pyomq_dealer_pyzmq_router(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     router = py_ctx.socket(zmq_pyzmq.ROUTER)
     router.bind(endpoint)
+    ep = router.last_endpoint.decode() if isinstance(router.last_endpoint, bytes) else router.last_endpoint
     try:
         ctx = pyomq.Context()
         dealer = ctx.socket(pyomq.DEALER)
         dealer.setsockopt(pyomq.IDENTITY, b"D")
-        dealer.connect(endpoint)
+        dealer.connect(ep)
         dealer.send(b"hi")
         parts = router.recv_multipart()
         assert parts[0] == b"D"
@@ -182,12 +186,12 @@ def test_pyomq_dealer_pyzmq_router(endpoint):
 def test_pyzmq_dealer_pyomq_router(endpoint):
     ctx = pyomq.Context()
     router = ctx.socket(pyomq.ROUTER)
-    router.bind(endpoint)
+    ep = router.bind(endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         dealer = py_ctx.socket(zmq_pyzmq.DEALER)
         dealer.setsockopt(zmq_pyzmq.IDENTITY, b"D")
-        dealer.connect(endpoint)
+        dealer.connect(ep)
         dealer.send(b"hi")
         parts = router.recv_multipart()
         assert parts[0] == b"D"
@@ -207,10 +211,11 @@ def test_pair_both_directions(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     a = py_ctx.socket(zmq_pyzmq.PAIR)
     a.bind(endpoint)
+    ep = a.last_endpoint.decode() if isinstance(a.last_endpoint, bytes) else a.last_endpoint
     try:
         ctx = pyomq.Context()
         b = ctx.socket(pyomq.PAIR)
-        b.connect(endpoint)
+        b.connect(ep)
         a.send(b"hi-from-pyzmq")
         assert b.recv() == b"hi-from-pyzmq"
         b.send(b"hi-from-pyomq")
@@ -230,11 +235,11 @@ def test_pyomq_xpub_pyzmq_xsub(endpoint):
     legacy 3.0 0x01-prefix message form pyzmq XSUB emits."""
     ctx = pyomq.Context()
     xpub = ctx.socket(pyomq.XPUB)
-    xpub.bind(endpoint)
+    ep = xpub.bind(endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         xsub = py_ctx.socket(zmq_pyzmq.XSUB)
-        xsub.connect(endpoint)
+        xsub.connect(ep)
         xsub.send(b"\x01hot/")  # legacy ZMTP 3.0 subscribe
         # XPUB surfaces the subscribe as a 0x01-prefixed message.
         xpub.setsockopt(pyomq.RCVTIMEO, 1000)

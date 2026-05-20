@@ -11,7 +11,7 @@ async def test_async_again_exception(tcp_endpoint):
     ctx = zmq_async.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        await pull.bind(tcp_endpoint)
+        ep = await pull.bind(tcp_endpoint)
         await pull.close()
         with pytest.raises(zmq.ContextTerminated):
             await pull.recv()
@@ -24,8 +24,8 @@ async def test_async_send_recv_string(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        await pull.bind(tcp_endpoint)
-        await push.connect(tcp_endpoint)
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
         await push.send_string("hello")
         assert await pull.recv_string() == "hello"
     finally:
@@ -38,8 +38,8 @@ async def test_async_send_recv_json(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        await pull.bind(tcp_endpoint)
-        await push.connect(tcp_endpoint)
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
         await push.send_json({"k": 1})
         assert await pull.recv_json() == {"k": 1}
     finally:
@@ -52,8 +52,8 @@ async def test_async_send_recv_pyobj(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        await pull.bind(tcp_endpoint)
-        await push.connect(tcp_endpoint)
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
         await push.send_pyobj([1, 2, 3])
         assert await pull.recv_pyobj() == [1, 2, 3]
     finally:
@@ -133,8 +133,8 @@ async def test_async_send_recv_serialized(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        await pull.bind(tcp_endpoint)
-        await push.connect(tcp_endpoint)
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
 
         def ser(msg):
             return [b"hdr", msg.encode("utf-8")]

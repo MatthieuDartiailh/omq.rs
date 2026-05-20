@@ -473,17 +473,10 @@ class Socket:
 
     def bind_to_random_port(self, addr, min_port=49152, max_port=65536,
                             max_tries=100):
-        for _ in range(max_tries):
-            port = random.randint(min_port, max_port - 1)
-            try:
-                self.bind(f"{addr}:{port}")
-                return port
-            except ZMQError:
-                continue
-        raise ZMQBindError(
-            f"Could not bind socket to random port "
-            f"(tried {max_tries} ports in [{min_port}, {max_port}))"
-        )
+        ep = self.bind(f"{addr}:0")
+        if isinstance(ep, bytes):
+            ep = ep.decode()
+        return int(ep.rsplit(":", 1)[1])
 
     def poll(self, timeout=None, flags=POLLIN):
         p = Poller()

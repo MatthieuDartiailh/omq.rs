@@ -8,8 +8,8 @@ def _push_pull(endpoint: str) -> None:
     pull = ctx.socket(zmq.PULL)
     push = ctx.socket(zmq.PUSH)
     try:
-        pull.bind(endpoint)
-        push.connect(endpoint)
+        ep = pull.bind(endpoint)
+        push.connect(ep)
         push.send(b"hello")
         assert pull.recv() == b"hello"
     finally:
@@ -31,8 +31,8 @@ def test_push_pull_multipart(tcp_endpoint):
     pull = ctx.socket(zmq.PULL)
     push = ctx.socket(zmq.PUSH)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_multipart([b"meta", b"trailer"])
         assert pull.recv_multipart() == [b"meta", b"trailer"]
     finally:
@@ -46,8 +46,8 @@ def test_sndmore_flag_aggregates(tcp_endpoint):
     pull = ctx.socket(zmq.PULL)
     push = ctx.socket(zmq.PUSH)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send(b"a", flags=zmq.SNDMORE)
         push.send(b"b", flags=zmq.SNDMORE)
         push.send(b"c")
@@ -63,8 +63,8 @@ def test_rcvmore_iterates_frames(tcp_endpoint):
     pull = ctx.socket(zmq.PULL)
     push = ctx.socket(zmq.PUSH)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_multipart([b"x", b"y", b"z"])
         assert pull.recv() == b"x"
         assert pull.getsockopt(zmq.RCVMORE) == 1
@@ -80,8 +80,8 @@ def test_rcvmore_iterates_frames(tcp_endpoint):
 
 def test_context_manager_protocol(tcp_endpoint):
     with zmq.Context() as ctx, ctx.socket(zmq.PAIR) as a, ctx.socket(zmq.PAIR) as b:
-        a.bind(tcp_endpoint)
-        b.connect(tcp_endpoint)
+        ep = a.bind(tcp_endpoint)
+        b.connect(ep)
         a.send(b"ping")
         assert b.recv() == b"ping"
         b.send(b"pong")

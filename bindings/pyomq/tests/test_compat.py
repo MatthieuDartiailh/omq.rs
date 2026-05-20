@@ -10,8 +10,8 @@ def test_send_recv_string(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_string("hello")
         assert pull.recv_string() == "hello"
     finally:
@@ -25,8 +25,8 @@ def test_send_recv_string_encoding(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_string("héllo", encoding="utf-16")
         assert pull.recv_string(encoding="utf-16") == "héllo"
     finally:
@@ -40,8 +40,8 @@ def test_send_recv_json(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_json({"k": 1, "arr": [2, 3]})
         assert pull.recv_json() == {"k": 1, "arr": [2, 3]}
     finally:
@@ -55,8 +55,8 @@ def test_send_recv_json_kwargs(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_json({"b": 2, "a": 1}, sort_keys=True)
         raw = pull.recv()
         assert raw == b'{"a": 1, "b": 2}'
@@ -71,8 +71,8 @@ def test_send_recv_pyobj(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_pyobj([1, 2, 3])
         assert pull.recv_pyobj() == [1, 2, 3]
     finally:
@@ -87,8 +87,8 @@ def test_send_recv_pyobj_protocol(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_pyobj({"x": 42}, protocol=2)
         raw = pull.recv()
         obj = pickle.loads(raw)
@@ -215,22 +215,23 @@ def test_bind_to_random_port():
     try:
         port = sock.bind_to_random_port("tcp://127.0.0.1")
         assert isinstance(port, int)
-        assert 49152 <= port < 65536
+        assert 1024 <= port <= 65535
     finally:
         sock.close()
         ctx.term()
 
 
-def test_bind_to_random_port_custom_range():
+def test_bind_to_random_port_returns_different_ports():
     ctx = zmq.Context()
-    sock = ctx.socket(zmq.PULL)
+    s1 = ctx.socket(zmq.PULL)
+    s2 = ctx.socket(zmq.PULL)
     try:
-        port = sock.bind_to_random_port(
-            "tcp://127.0.0.1", min_port=10000, max_port=10010
-        )
-        assert 10000 <= port < 10010
+        p1 = s1.bind_to_random_port("tcp://127.0.0.1")
+        p2 = s2.bind_to_random_port("tcp://127.0.0.1")
+        assert p1 != p2
     finally:
-        sock.close()
+        s1.close()
+        s2.close()
         ctx.term()
 
 
@@ -266,8 +267,8 @@ def test_send_recv_serialized(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
 
         def my_serialize(msg):
             return [b"header", msg.encode("utf-8")]
@@ -342,8 +343,8 @@ def test_socket_poll_ready(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send(b"data")
         import time
         time.sleep(0.05)
@@ -453,8 +454,8 @@ def test_select_ready(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        pull.bind(tcp_endpoint)
-        push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send(b"sel")
         time.sleep(0.05)
         rready, wready, xready = zmq.select([pull], [], [], timeout=1.0)

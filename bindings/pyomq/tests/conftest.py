@@ -5,15 +5,9 @@ import time
 import pytest
 
 
-import random as _random
-
-_rng = _random.Random()
-
-
 @pytest.fixture
 def tcp_endpoint() -> str:
-    port = _rng.randint(49152, 65535)
-    return f"tcp://127.0.0.1:{port}"
+    return "tcp://127.0.0.1:0"
 
 
 @pytest.fixture

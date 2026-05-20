@@ -8,8 +8,8 @@ def test_req_rep_roundtrip(tcp_endpoint):
     rep = ctx.socket(zmq.REP)
     req = ctx.socket(zmq.REQ)
     try:
-        rep.bind(tcp_endpoint)
-        req.connect(tcp_endpoint)
+        ep = rep.bind(tcp_endpoint)
+        req.connect(ep)
         req.send(b"ping")
         assert rep.recv() == b"ping"
         rep.send(b"pong")
@@ -26,8 +26,8 @@ def test_dealer_router_identity_routes_back(tcp_endpoint):
     dealer = ctx.socket(zmq.DEALER)
     try:
         dealer.setsockopt(zmq.IDENTITY, b"client-A")
-        router.bind(tcp_endpoint)
-        dealer.connect(tcp_endpoint)
+        ep = router.bind(tcp_endpoint)
+        dealer.connect(ep)
         # DEALER sends; ROUTER recv exposes the identity as the first frame.
         dealer.send(b"hello")
         parts = router.recv_multipart()

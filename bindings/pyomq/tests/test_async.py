@@ -29,8 +29,8 @@ async def test_async_push_pull_tcp(tcp_endpoint):
     pull = ctx.socket(pyomq.PULL)
     push = ctx.socket(pyomq.PUSH)
     try:
-        await pull.bind(tcp_endpoint)
-        await push.connect(tcp_endpoint)
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
         await push.send(b"tcp-hello")
         assert await pull.recv() == b"tcp-hello"
     finally:
@@ -44,8 +44,8 @@ async def test_async_send_multipart(tcp_endpoint):
     pull = ctx.socket(pyomq.PULL)
     push = ctx.socket(pyomq.PUSH)
     try:
-        await pull.bind(tcp_endpoint)
-        await push.connect(tcp_endpoint)
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
         await push.send_multipart([b"a", b"b", b"c"])
         assert await pull.recv_multipart() == [b"a", b"b", b"c"]
     finally:
@@ -59,8 +59,8 @@ async def test_async_pubsub(tcp_endpoint):
     pub = ctx.socket(pyomq.PUB)
     sub = ctx.socket(pyomq.SUB)
     try:
-        await pub.bind(tcp_endpoint)
-        await sub.connect(tcp_endpoint)
+        ep = await pub.bind(tcp_endpoint)
+        await sub.connect(ep)
         sub.setsockopt(pyomq.SUBSCRIBE, b"hot/")
         await asyncio.sleep(0.2)  # let SUBSCRIBE propagate
         await pub.send(b"cold/skip")
@@ -79,8 +79,8 @@ async def test_async_concurrent_recvs(tcp_endpoint):
     pull = ctx.socket(pyomq.PULL)
     push = ctx.socket(pyomq.PUSH)
     try:
-        await pull.bind(tcp_endpoint)
-        await push.connect(tcp_endpoint)
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
 
         # Fire off N concurrent recvs. AsyncSocket.recv returns an
         # asyncio.Future directly (not a coroutine), so wrap in
@@ -105,8 +105,8 @@ async def test_async_mixed_with_sync(tcp_endpoint):
     pull = ctx_sync.socket(pyomq.PULL)
     push = ctx_async.socket(pyomq.PUSH)
     try:
-        pull.bind(tcp_endpoint)
-        await push.connect(tcp_endpoint)
+        ep = pull.bind(tcp_endpoint)
+        await push.connect(ep)
         await push.send(b"mixed")
         assert pull.recv() == b"mixed"
     finally:

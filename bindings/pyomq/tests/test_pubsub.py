@@ -10,8 +10,8 @@ def test_pub_sub_prefix_filter(tcp_endpoint):
     pub = ctx.socket(zmq.PUB)
     sub = ctx.socket(zmq.SUB)
     try:
-        pub.bind(tcp_endpoint)
-        sub.connect(tcp_endpoint)
+        ep = pub.bind(tcp_endpoint)
+        sub.connect(ep)
         sub.setsockopt(zmq.SUBSCRIBE, b"weather/")
         # PUB/SUB has no built-in handshake; give the SUBSCRIBE a moment
         # to propagate.
@@ -33,8 +33,8 @@ def test_unsubscribe_drops_topic(tcp_endpoint):
     pub = ctx.socket(zmq.PUB)
     sub = ctx.socket(zmq.SUB)
     try:
-        pub.bind(tcp_endpoint)
-        sub.connect(tcp_endpoint)
+        ep = pub.bind(tcp_endpoint)
+        sub.connect(ep)
         sub.setsockopt(zmq.SUBSCRIBE, b"a")
         sub.setsockopt(zmq.SUBSCRIBE, b"b")
         time.sleep(0.1)

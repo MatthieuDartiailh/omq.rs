@@ -16,11 +16,12 @@ import pyomq.asyncio as zmq_async
 async def test_async_pyomq_push_to_pyzmq_pull(tcp_endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     pull = py_ctx.socket(zmq_pyzmq.PULL)
-    pull.bind(tcp_endpoint)
+    port = pull.bind_to_random_port("tcp://127.0.0.1")
+    ep = f"tcp://127.0.0.1:{port}"
     try:
         ctx = zmq_async.Context()
         push = ctx.socket(pyomq.PUSH)
-        await push.connect(tcp_endpoint)
+        await push.connect(ep)
         await push.send(b"async-pyomq-to-pyzmq")
         # Drop GIL so the in-flight send actually flushes.
         pull.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
@@ -34,11 +35,11 @@ async def test_async_pyomq_push_to_pyzmq_pull(tcp_endpoint):
 async def test_async_pyzmq_push_to_pyomq_pull(tcp_endpoint):
     ctx = zmq_async.Context()
     pull = ctx.socket(pyomq.PULL)
-    await pull.bind(tcp_endpoint)
+    ep = await pull.bind(tcp_endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         push = py_ctx.socket(zmq_pyzmq.PUSH)
-        push.connect(tcp_endpoint)
+        push.connect(ep)
         push.send(b"pyzmq-to-async-pyomq")
         pull.setsockopt(pyomq.RCVTIMEO, 1000)
         assert await pull.recv() == b"pyzmq-to-async-pyomq"
@@ -49,14 +50,14 @@ async def test_async_pyzmq_push_to_pyomq_pull(tcp_endpoint):
 
 @pytest.mark.asyncio
 async def test_async_pyomq_pub_to_pyzmq_sub(tcp_endpoint):
-    py_ctx = zmq_pyzmq.Context.instance()
-    sub = py_ctx.socket(zmq_pyzmq.SUB)
-    sub.setsockopt(zmq_pyzmq.SUBSCRIBE, b"hot/")
-    sub.connect(tcp_endpoint)
+    ctx = zmq_async.Context()
+    pub = ctx.socket(pyomq.PUB)
+    ep = await pub.bind(tcp_endpoint)
     try:
-        ctx = zmq_async.Context()
-        pub = ctx.socket(pyomq.PUB)
-        await pub.bind(tcp_endpoint)
+        py_ctx = zmq_pyzmq.Context.instance()
+        sub = py_ctx.socket(zmq_pyzmq.SUB)
+        sub.setsockopt(zmq_pyzmq.SUBSCRIBE, b"hot/")
+        sub.connect(ep)
         await asyncio.sleep(0.2)
         await pub.send(b"cold/skip")
         await pub.send(b"hot/take")
@@ -71,12 +72,13 @@ async def test_async_pyomq_pub_to_pyzmq_sub(tcp_endpoint):
 async def test_async_dealer_router_identity(tcp_endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     router = py_ctx.socket(zmq_pyzmq.ROUTER)
-    router.bind(tcp_endpoint)
+    port = router.bind_to_random_port("tcp://127.0.0.1")
+    ep = f"tcp://127.0.0.1:{port}"
     try:
         ctx = zmq_async.Context()
         dealer = ctx.socket(pyomq.DEALER)
         dealer.setsockopt(pyomq.IDENTITY, b"D-async")
-        await dealer.connect(tcp_endpoint)
+        await dealer.connect(ep)
         await dealer.send(b"hi")
         parts = router.recv_multipart()
         assert parts[0] == b"D-async"
