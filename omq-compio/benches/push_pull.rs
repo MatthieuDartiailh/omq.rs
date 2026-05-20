@@ -130,7 +130,7 @@ fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> co
 
 // ── multi-runtime (wire transports) ──────────────────────────────────
 
-#[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
+#[allow(clippy::arc_with_non_send_sync, clippy::too_many_lines)]
 fn run_cell_threaded(
     transport: &str,
     peers: usize,
