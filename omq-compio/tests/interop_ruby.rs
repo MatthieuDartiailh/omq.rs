@@ -108,6 +108,21 @@ fn tcp_transport() -> Transport {
     }
 }
 
+fn tcp_endpoint_port_zero() -> Endpoint {
+    Endpoint::Tcp {
+        host: Host::Ip("127.0.0.1".parse().unwrap()),
+        port: 0,
+    }
+}
+
+fn cli_addr(sock: &Socket) -> String {
+    match sock.last_bound_endpoint().expect("no bound endpoint") {
+        Endpoint::Tcp { host, port } => format!("tcp://{host}:{port}"),
+        Endpoint::Ipc(IpcPath::Filesystem(p)) => format!("ipc://{}", p.display()),
+        other => panic!("unexpected endpoint: {other:?}"),
+    }
+}
+
 fn ipc_transport(name: &str) -> Transport {
     let path = std::env::temp_dir().join(format!(
         "omq-compio-interop-{name}-{}-{}.sock",
@@ -145,13 +160,14 @@ async fn wait_for_handshake(sock: &Socket) {
 // PUSH / PULL
 // =====================================================================
 
-async fn rust_push_to_ruby_pull(t: Transport) {
+async fn rust_push_to_ruby_pull(ep: Endpoint) {
     let push = Socket::new(SocketType::Push, Options::default());
-    push.bind(t.rust.clone()).await.unwrap();
+    push.bind(ep).await.unwrap();
+    let cli = cli_addr(&push);
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["pull", "-c", &t.cli, "-A", "-n", "5"])
+            .args(["pull", "-c", &cli, "-A", "-n", "5"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -180,7 +196,7 @@ async fn rust_push_to_ruby_pull_tcp() {
     if skip_if_no_omq() {
         return;
     }
-    rust_push_to_ruby_pull(tcp_transport()).await;
+    rust_push_to_ruby_pull(tcp_endpoint_port_zero()).await;
 }
 
 #[compio::test]
@@ -188,16 +204,17 @@ async fn rust_push_to_ruby_pull_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_push_to_ruby_pull(ipc_transport("push-pull")).await;
+    rust_push_to_ruby_pull(ipc_transport("push-pull").rust).await;
 }
 
-async fn ruby_push_to_rust_pull(t: Transport) {
+async fn ruby_push_to_rust_pull(ep: Endpoint) {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(t.rust.clone()).await.unwrap();
+    pull.bind(ep).await.unwrap();
+    let cli = cli_addr(&pull);
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["push", "-c", &t.cli, "-A"])
+            .args(["push", "-c", &cli, "-A"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -231,7 +248,7 @@ async fn ruby_push_to_rust_pull_tcp() {
     if skip_if_no_omq() {
         return;
     }
-    ruby_push_to_rust_pull(tcp_transport()).await;
+    ruby_push_to_rust_pull(tcp_endpoint_port_zero()).await;
 }
 
 #[compio::test]
@@ -239,7 +256,7 @@ async fn ruby_push_to_rust_pull_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    ruby_push_to_rust_pull(ipc_transport("push-pull-rev")).await;
+    ruby_push_to_rust_pull(ipc_transport("push-pull-rev").rust).await;
 }
 
 // =====================================================================
@@ -257,7 +274,7 @@ async fn rust_req_to_ruby_rep(t: Transport) {
     );
 
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(t.rust.clone()).await.unwrap();
+    req.connect(t.rust).await.unwrap();
     wait_for_handshake(&req).await;
 
     for i in 0..3 {
@@ -294,13 +311,14 @@ async fn rust_req_to_ruby_rep_ipc() {
 // PUB / SUB
 // =====================================================================
 
-async fn rust_pub_to_ruby_sub(t: Transport) {
+async fn rust_pub_to_ruby_sub(ep: Endpoint) {
     let pubs = Socket::new(SocketType::Pub, Options::default());
-    pubs.bind(t.rust.clone()).await.unwrap();
+    pubs.bind(ep).await.unwrap();
+    let cli = cli_addr(&pubs);
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["sub", "-c", &t.cli, "-s", "weather.", "-A", "-n", "2"])
+            .args(["sub", "-c", &cli, "-s", "weather.", "-A", "-n", "2"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -335,7 +353,7 @@ async fn rust_pub_to_ruby_sub_tcp() {
     if skip_if_no_omq() {
         return;
     }
-    rust_pub_to_ruby_sub(tcp_transport()).await;
+    rust_pub_to_ruby_sub(tcp_endpoint_port_zero()).await;
 }
 
 #[compio::test]
@@ -343,23 +361,24 @@ async fn rust_pub_to_ruby_sub_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_pub_to_ruby_sub(ipc_transport("pub-sub")).await;
+    rust_pub_to_ruby_sub(ipc_transport("pub-sub").rust).await;
 }
 
 // =====================================================================
 // ROUTER / DEALER
 // =====================================================================
 
-async fn rust_router_sees_ruby_dealer_identity(t: Transport) {
+async fn rust_router_sees_ruby_dealer_identity(ep: Endpoint) {
     let router = Socket::new(SocketType::Router, Options::default());
-    router.bind(t.rust.clone()).await.unwrap();
+    router.bind(ep).await.unwrap();
+    let cli = cli_addr(&router);
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
             .args([
                 "dealer",
                 "-c",
-                &t.cli,
+                &cli,
                 "--identity",
                 "worker-7",
                 "-A",
@@ -390,7 +409,7 @@ async fn rust_router_sees_ruby_dealer_identity_tcp() {
     if skip_if_no_omq() {
         return;
     }
-    rust_router_sees_ruby_dealer_identity(tcp_transport()).await;
+    rust_router_sees_ruby_dealer_identity(tcp_endpoint_port_zero()).await;
 }
 
 #[compio::test]
@@ -398,20 +417,21 @@ async fn rust_router_sees_ruby_dealer_identity_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_router_sees_ruby_dealer_identity(ipc_transport("router-dealer")).await;
+    rust_router_sees_ruby_dealer_identity(ipc_transport("router-dealer").rust).await;
 }
 
 // =====================================================================
 // RADIO / DISH
 // =====================================================================
 
-async fn rust_radio_to_ruby_dish(t: Transport) {
+async fn rust_radio_to_ruby_dish(ep: Endpoint) {
     let radio = Socket::new(SocketType::Radio, Options::default());
-    radio.bind(t.rust.clone()).await.unwrap();
+    radio.bind(ep).await.unwrap();
+    let cli = cli_addr(&radio);
 
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["dish", "-c", &t.cli, "-j", "weather", "-A", "-n", "2"])
+            .args(["dish", "-c", &cli, "-j", "weather", "-A", "-n", "2"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -449,7 +469,7 @@ async fn rust_radio_to_ruby_dish_tcp() {
     if skip_if_no_omq() {
         return;
     }
-    rust_radio_to_ruby_dish(tcp_transport()).await;
+    rust_radio_to_ruby_dish(tcp_endpoint_port_zero()).await;
 }
 
 #[compio::test]
@@ -457,5 +477,5 @@ async fn rust_radio_to_ruby_dish_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_radio_to_ruby_dish(ipc_transport("radio-dish")).await;
+    rust_radio_to_ruby_dish(ipc_transport("radio-dish").rust).await;
 }
