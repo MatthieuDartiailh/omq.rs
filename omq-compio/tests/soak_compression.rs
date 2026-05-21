@@ -6,6 +6,9 @@
 //! encoder/decoder state leak after dict training fires and all messages
 //! decode correctly.
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::sync::Arc;

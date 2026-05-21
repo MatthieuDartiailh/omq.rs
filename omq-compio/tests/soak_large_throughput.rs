@@ -6,6 +6,9 @@
 //! to avoid kernel buffer deadlock). Asserts throughput does not degrade
 //! over time and RSS stays proportional to HWM.
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::sync::Arc;

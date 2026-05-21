@@ -5,6 +5,9 @@
 //! ChaCha20 encryption. Sends small messages continuously.
 //! Asserts no memory or FD leaks from crypto state.
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::sync::Arc;

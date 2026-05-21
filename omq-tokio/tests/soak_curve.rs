@@ -1,5 +1,8 @@
 #![cfg(all(feature = "soak", feature = "curve"))]
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::sync::Arc;

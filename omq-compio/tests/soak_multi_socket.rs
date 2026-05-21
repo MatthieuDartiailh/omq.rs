@@ -6,6 +6,9 @@
 //! Asserts RSS scales with socket count (not time), no cross-socket
 //! interference, and `close()` frees all resources.
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::time::{Duration, Instant};

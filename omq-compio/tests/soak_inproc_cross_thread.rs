@@ -5,6 +5,9 @@
 //! Exercises the yring SPSC fast path with 10M+ messages. Asserts no
 //! message loss, no yring producer/consumer desync, and RSS stability.
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

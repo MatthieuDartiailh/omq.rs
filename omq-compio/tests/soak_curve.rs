@@ -5,6 +5,9 @@
 //! continuously for the full soak duration. Asserts no memory or FD
 //! leaks from repeated encrypted frame encode/decode.
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::sync::Arc;

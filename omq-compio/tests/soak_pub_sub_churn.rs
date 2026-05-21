@@ -6,6 +6,9 @@
 //! disconnect. Mix of slow and fast subscribers. Asserts no per-subscriber
 //! state accumulates after disconnect and PUB send never blocks.
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::time::{Duration, Instant};

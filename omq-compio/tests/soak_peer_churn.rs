@@ -5,6 +5,9 @@
 //! 1-5 s, disconnect, repeat. Varies 0-20 concurrent peers with random
 //! timing. Asserts RSS stays bounded and send never deadlocks.
 
+#[global_allocator]
+static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
+
 mod soak_common;
 
 use std::time::{Duration, Instant};

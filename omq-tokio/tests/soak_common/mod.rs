@@ -9,6 +9,47 @@ use omq_tokio::Endpoint;
 use omq_tokio::endpoint::Host;
 
 // ---------------------------------------------------------------------------
+// Tracking allocator
+// ---------------------------------------------------------------------------
+
+pub mod alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    pub static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    pub struct TrackingAllocator;
+
+    unsafe impl GlobalAlloc for TrackingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = unsafe { System.alloc(layout) };
+            if !ptr.is_null() {
+                LIVE_BYTES.fetch_add(layout.size(), Relaxed);
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            LIVE_BYTES.fetch_sub(layout.size(), Relaxed);
+            unsafe { System.dealloc(ptr, layout) };
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let old_size = layout.size();
+            let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+            if !new_ptr.is_null() {
+                if new_size >= old_size {
+                    LIVE_BYTES.fetch_add(new_size - old_size, Relaxed);
+                } else {
+                    LIVE_BYTES.fetch_sub(old_size - new_size, Relaxed);
+                }
+            }
+            new_ptr
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Duration
 // ---------------------------------------------------------------------------
 
@@ -39,10 +80,15 @@ pub fn inproc_ep(name: &str) -> Endpoint {
 // Resource monitor (background std::thread)
 // ---------------------------------------------------------------------------
 
+type Samples = (
+    Vec<(Instant, usize)>,
+    Vec<(Instant, usize)>,
+    Vec<(Instant, usize)>,
+);
+
 pub struct ResourceMonitor {
     stop: Arc<AtomicBool>,
-    #[allow(clippy::type_complexity)]
-    handle: Option<std::thread::JoinHandle<(Vec<(Instant, usize)>, Vec<(Instant, usize)>)>>,
+    handle: Option<std::thread::JoinHandle<Samples>>,
 }
 
 impl ResourceMonitor {
@@ -52,6 +98,7 @@ impl ResourceMonitor {
         let handle = std::thread::spawn(move || {
             let mut rss_samples = Vec::new();
             let mut fd_samples = Vec::new();
+            let mut heap_samples = Vec::new();
             while !stop2.load(Ordering::Relaxed) {
                 let now = Instant::now();
                 if let Some(rss) = read_rss_bytes() {
@@ -60,9 +107,10 @@ impl ResourceMonitor {
                 if let Some(fds) = read_fd_count() {
                     fd_samples.push((now, fds));
                 }
+                heap_samples.push((now, alloc::LIVE_BYTES.load(Ordering::Relaxed)));
                 std::thread::sleep(Duration::from_secs(1));
             }
-            (rss_samples, fd_samples)
+            (rss_samples, fd_samples, heap_samples)
         });
         Self {
             stop,
@@ -72,10 +120,11 @@ impl ResourceMonitor {
 
     pub fn stop(mut self) -> ResourceReport {
         self.stop.store(true, Ordering::Relaxed);
-        let (rss_samples, fd_samples) = self.handle.take().unwrap().join().unwrap();
+        let (rss_samples, fd_samples, heap_samples) = self.handle.take().unwrap().join().unwrap();
         ResourceReport {
             rss_samples,
             fd_samples,
+            heap_samples,
         }
     }
 }
@@ -106,61 +155,94 @@ fn read_fd_count() -> Option<usize> {
 pub struct ResourceReport {
     pub rss_samples: Vec<(Instant, usize)>,
     pub fd_samples: Vec<(Instant, usize)>,
+    pub heap_samples: Vec<(Instant, usize)>,
 }
 
 impl ResourceReport {
     pub fn assert_no_leak(&self, label: &str) {
-        self.assert_rss_stable(label);
+        self.report_rss(label);
+        self.assert_heap_stable(label);
         self.assert_fd_stable(label);
     }
 
-    fn assert_rss_stable(&self, label: &str) {
+    fn report_rss(&self, label: &str) {
         let n = self.rss_samples.len();
         if n < 10 {
-            eprintln!("[{label}] too few RSS samples ({n}) to check for leaks");
+            return;
+        }
+        let peak_rss = self.rss_samples.iter().map(|(_, v)| *v).max().unwrap_or(0);
+        eprintln!(
+            "[{label}] RSS peak {:.1} MiB (informational, not gated)",
+            peak_rss as f64 / 1_048_576.0,
+        );
+    }
+
+    fn assert_heap_stable(&self, label: &str) {
+        let n = self.heap_samples.len();
+        if n < 10 {
+            eprintln!("[{label}] too few heap samples ({n}) to check for leaks");
             return;
         }
 
         let warmup = n / 5;
-        let post_warmup = &self.rss_samples[warmup..];
+        let post_warmup = &self.heap_samples[warmup..];
+        if post_warmup.len() < 2 {
+            return;
+        }
 
-        let baseline_end = post_warmup.len() / 10;
-        let baseline_end = baseline_end.max(1);
-        let baseline: usize = post_warmup[..baseline_end]
+        let first_t = post_warmup.first().unwrap().0;
+        let elapsed_secs = post_warmup
+            .last()
+            .unwrap()
+            .0
+            .duration_since(first_t)
+            .as_secs_f64();
+        if elapsed_secs < 1.0 {
+            return;
+        }
+
+        let n_f = post_warmup.len() as f64;
+        let sum_x: f64 = post_warmup
             .iter()
-            .map(|(_, v)| v)
-            .sum::<usize>()
-            / baseline_end;
+            .map(|(t, _)| t.duration_since(first_t).as_secs_f64())
+            .sum();
+        let sum_y: f64 = post_warmup.iter().map(|(_, v)| *v as f64).sum();
+        let dot_xy: f64 = post_warmup
+            .iter()
+            .map(|(t, v)| t.duration_since(first_t).as_secs_f64() * *v as f64)
+            .sum();
+        let sum_xx: f64 = post_warmup
+            .iter()
+            .map(|(t, _)| {
+                let x = t.duration_since(first_t).as_secs_f64();
+                x * x
+            })
+            .sum();
 
-        let tail_start = post_warmup.len() * 4 / 5;
-        let tail = &post_warmup[tail_start..];
-        let tail_max = tail.iter().map(|(_, v)| *v).max().unwrap_or(0);
+        let slope_bytes_per_sec = (n_f * dot_xy - sum_x * sum_y) / (n_f * sum_xx - sum_x * sum_x);
+        let slope_kib_s = slope_bytes_per_sec / 1024.0;
 
-        let growth_pct = if baseline > 0 {
-            ((tail_max as f64 - baseline as f64) / baseline as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let peak_rss = self.rss_samples.iter().map(|(_, v)| *v).max().unwrap_or(0);
+        let avg: f64 = sum_y / n_f;
 
         eprintln!(
-            "[{label}] RSS: baseline {:.1} MiB, tail max {:.1} MiB, peak {:.1} MiB, growth {growth_pct:.1}%",
-            baseline as f64 / 1_048_576.0,
-            tail_max as f64 / 1_048_576.0,
-            peak_rss as f64 / 1_048_576.0,
+            "[{label}] heap: avg {:.1} MiB, slope {slope_kib_s:.1} KiB/s",
+            avg / 1_048_576.0,
         );
 
-        let threshold = if n >= 120 { 25.0 } else { 100.0 };
-
-        let growth_mib = (tail_max as f64 - baseline as f64) / 1_048_576.0;
-
+        // 50 KiB/s sustained = 30 MiB over 10 min; anything below is
+        // noise from in-flight message buffers and allocator jitter.
+        // Short runs are noisier; only enforce tight bounds with enough
+        // samples for the regression to be meaningful.
+        let threshold_kib_s = if post_warmup.len() >= 120 {
+            50.0
+        } else {
+            500.0
+        };
         assert!(
-            growth_pct < threshold || growth_mib < 10.0,
-            "[{label}] RSS leak detected: grew {growth_pct:.1}% / {growth_mib:.1} MiB \
-             from baseline ({:.1} MiB -> {:.1} MiB)",
-            baseline as f64 / 1_048_576.0,
-            tail_max as f64 / 1_048_576.0,
+            slope_kib_s < threshold_kib_s,
+            "[{label}] heap leak detected: slope {slope_kib_s:.1} KiB/s \
+             (avg {:.1} MiB over {elapsed_secs:.0}s)",
+            avg / 1_048_576.0,
         );
     }
 

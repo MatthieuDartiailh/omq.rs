@@ -42,7 +42,7 @@ macro_rules! batch_encode_flush {
     }};
 }
 
-const READ_BUF_SIZE: usize = 256 * 1024;
+const READ_BUF_SIZE: usize = 128 * 1024;
 
 /// Max messages one shared-queue batch encodes before flushing.
 const SHARED_MAX_BATCH_MSGS: usize = 256;
