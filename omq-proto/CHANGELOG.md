@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-21
+
+### Added
+
+- `Message::iter_parts` for allocation-free iteration over message parts.
+
+### Changed
+
+- `encode_message_flat` and `encode_message_prefixed_flat` use `iter_parts` instead of allocating a `Vec` via `parts_payload()`.
+
 ## [0.11.0] - 2026-05-21
 
 ### Changed

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-21
+
+### Changed
+
+- Replace `flume` send queue with `concurrent-queue` + `tokio::sync::Notify`.
+- Batch semaphore permit release in `DropQueue`: one `add_permits(N)` per batch instead of N individual calls. 128B 1-PUSH/8-PULL TCP: 559 -> 940 MB/s (+68%).
+- Remove unused `blume` dependency.
+- *(deps)* Bump `omq-proto` to 0.12.0.
+
+### Fixed
+
+- Dead-code errors when building with `feature = "priority"`.
+
 ## [0.9.0] - 2026-05-21
 
 ### Changed

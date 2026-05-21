@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-05-21
+
+### Fixed
+
+- Poller busy-wait fix from omq-compio 0.9.1.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.12.0, `omq-compio` to 0.9.1.
+
 ## [0.7.0] - 2026-05-21
 
 ### Added

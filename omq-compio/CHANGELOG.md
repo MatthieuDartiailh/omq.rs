@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-05-21
+
+### Fixed
+
+- `Poller.poll()` busy-wait: call `signal_close()` on destroy, use `Selector`-based `wait_any`.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.12.0.
+
 ## [0.9.0] - 2026-05-21
 
 ### Changed
