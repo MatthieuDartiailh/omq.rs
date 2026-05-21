@@ -87,8 +87,18 @@ traversal.
 
 ## PUSH/PULL fan-out throughput, 8 peers
 
-1 PUSH -> 8 PULL. Exercises the shared send queue with multiple drivers
-contending on the consumer side. Cells show `msgs/s / MB/s`.
+1 PUSH -> 8 PULL. Cells show `msgs/s / MB/s`.
+
+**omq-compio:**
+
+<!-- BEGIN push_pull_fanout_8peer_compio -->
+| Size | ipc | tcp |
+|---|---|---|
+| 128 B | 3.43M / 439 MB/s | 3.36M / 431 MB/s |
+| 2 KiB | 1.64M / 3.36 GB/s | 1.47M / 3.00 GB/s |
+| 8 KiB | 384k / 3.15 GB/s | 341k / 2.80 GB/s |
+
+<!-- END push_pull_fanout_8peer_compio -->
 
 **omq-tokio:**
 

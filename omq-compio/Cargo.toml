@@ -77,6 +77,10 @@ name = "compression"
 harness = false
 
 [[bench]]
+name = "push_pull_fanout"
+harness = false
+
+[[bench]]
 name = "multithread_push_pull"
 harness = false
 

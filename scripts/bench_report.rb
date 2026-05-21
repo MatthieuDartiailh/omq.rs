@@ -358,6 +358,7 @@ if options[:update_benchmarks]
     bm = replace_block.call(bm, "pair_#{b}",                   build_pair.call(b))
     bm = replace_block.call(bm, "push_pull_priority_#{b}",     build_push_pull_priority.call(b))
   end
+  bm = replace_block.call(bm, 'push_pull_fanout_8peer_compio', build_push_pull_fanout_8peer.call('compio'))
   bm = replace_block.call(bm, 'push_pull_fanout_8peer_tokio', build_push_pull_fanout_8peer.call('tokio'))
   bm = replace_block.call(bm, 'latency_percentiles',           build_latency_percentiles.call)
   bm = replace_block.call(bm, 'mechanism_frame',               build_mechanism_frame.call)
