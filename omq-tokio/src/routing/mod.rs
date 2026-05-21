@@ -200,7 +200,7 @@ impl SendStrategy {
     /// and no-send strategies. The connection driver polls this directly
     /// after handshake instead of going through a pump task.
     #[cfg(not(feature = "priority"))]
-    pub(crate) fn shared_rx(&self) -> Option<flume::Receiver<omq_proto::message::Message>> {
+    pub(crate) fn shared_rx(&self) -> Option<drop_queue::QueueReceiver> {
         match self {
             Self::RoundRobin(s) => Some(s.shared_rx()),
             _ => None,

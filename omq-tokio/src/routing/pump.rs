@@ -1,12 +1,11 @@
 //! Shared per-peer pump used by `RoundRobinSend` (N pumps, shared queue)
-//! and `FanOutSend` (one pump per peer, per-peer queue). The batch-and-
-//! yield shape is identical; only the queue ownership differs.
+//! and `FanOutSend` (one pump per peer, per-peer queue).
 
 use tokio::task::yield_now;
 use tokio_util::sync::CancellationToken;
 
+use super::drop_queue::QueueReceiver;
 use crate::engine::{DriverCommand, DriverHandle};
-use omq_proto::message::Message;
 
 /// Max messages one pump forwards before yielding.
 pub(crate) const MAX_BATCH_MSGS: usize = 256;
@@ -14,19 +13,35 @@ pub(crate) const MAX_BATCH_MSGS: usize = 256;
 /// Max bytes one pump forwards before yielding.
 pub(crate) const MAX_BATCH_BYTES: usize = 512 * 1024;
 
-/// Drive messages from `rx` to `peer.inbox` with per-batch fairness caps.
-/// Returns when the channel is closed, the peer is gone, or `cancel` fires.
-pub(crate) async fn drain(
-    rx: flume::Receiver<Message>,
-    peer: DriverHandle,
-    cancel: CancellationToken,
-) {
+/// Drive messages from `rx` to `peer.inbox` one at a time, yielding after each.
+/// Use when multiple pumps share the same `rx` (inproc round-robin): yielding
+/// after every message lets the other pumps compete for the next one.
+pub(crate) async fn drain_one(rx: QueueReceiver, peer: DriverHandle, cancel: CancellationToken) {
     loop {
         tokio::select! {
             biased;
             () = cancel.cancelled() => return,
-            res = rx.recv_async() => {
-                let Ok(mut msg) = res else { return; };
+            msg = rx.recv() => {
+                let Some(msg) = msg else { return; };
+                if peer.inbox.send(DriverCommand::SendMessage(msg)).await.is_err() {
+                    return;
+                }
+                yield_now().await;
+            }
+        }
+    }
+}
+
+/// Drive messages from `rx` to `peer.inbox` with per-batch fairness caps.
+/// Use when this pump has exclusive ownership of `rx` (fan-out, identity
+/// routing). Batching amortizes the per-message overhead of inbox sends.
+pub(crate) async fn drain(rx: QueueReceiver, peer: DriverHandle, cancel: CancellationToken) {
+    loop {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            msg = rx.recv() => {
+                let Some(mut msg) = msg else { return; };
                 let mut count = 0usize;
                 let mut bytes = 0usize;
                 loop {
@@ -39,9 +54,9 @@ pub(crate) async fn drain(
                     if count >= MAX_BATCH_MSGS || bytes >= MAX_BATCH_BYTES {
                         break;
                     }
-                    match rx.try_recv() {
-                        Ok(next) => msg = next,
-                        Err(_) => break,
+                    match rx.try_pop() {
+                        Some(next) => msg = next,
+                        None => break,
                     }
                 }
                 yield_now().await;

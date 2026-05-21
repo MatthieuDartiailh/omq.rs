@@ -50,7 +50,7 @@ use omq_proto::message::Message;
 use omq_proto::options::Options;
 
 #[cfg(not(feature = "priority"))]
-use super::drop_queue::DropQueue;
+use super::drop_queue::{DropQueue, QueueReceiver};
 
 /// Cloneable handle for submitting messages into a [`RoundRobinSend`].
 #[cfg(not(feature = "priority"))]
@@ -68,7 +68,7 @@ impl Submitter {
 
 /// Round-robin send strategy.
 ///
-/// A single shared flume queue feeds all connection drivers directly.
+/// A single shared queue feeds all connection drivers directly.
 /// Each driver polls `shared_rx` inside its own select! loop after the
 /// ZMTP handshake completes, eliminating the pump-task intermediary and
 /// the per-message inbox hop that it implied.
@@ -76,7 +76,7 @@ impl Submitter {
 #[derive(Debug)]
 pub(crate) struct RoundRobinSend {
     queue: DropQueue,
-    shared_rx: flume::Receiver<Message>,
+    shared_rx: QueueReceiver,
     root_cancel: CancellationToken,
 }
 
@@ -94,7 +94,7 @@ impl RoundRobinSend {
 
     /// Returns a clone of the shared receive end. Each connection driver
     /// calls this once and holds the clone for the lifetime of the connection.
-    pub(crate) fn shared_rx(&self) -> flume::Receiver<Message> {
+    pub(crate) fn shared_rx(&self) -> QueueReceiver {
         self.shared_rx.clone()
     }
 
@@ -105,12 +105,12 @@ impl RoundRobinSend {
         is_inproc: bool,
     ) {
         if is_inproc {
-            // inproc_peer_driver reads from inbox (mpsc), not from shared_rx
-            // (flume). Spawn a forwarding pump. The pump self-cancels when the
-            // peer's inbox closes (driver exits) or root_cancel fires (shutdown).
+            // inproc_peer_driver reads from inbox (mpsc), not from shared_rx.
+            // Spawn a forwarding pump. The pump self-cancels when the peer's
+            // inbox closes (driver exits) or root_cancel fires (shutdown).
             let rx = self.shared_rx.clone();
             let cancel = self.root_cancel.child_token();
-            tokio::spawn(super::pump::drain(rx, handle, cancel));
+            tokio::spawn(super::pump::drain_one(rx, handle, cancel));
         }
         // Byte-stream: driver reads from shared_rx directly; no pump needed.
     }

@@ -15,6 +15,7 @@ use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
 use super::encoded_queue::EncodedQueue;
+use crate::routing::drop_queue::QueueReceiver;
 
 /// Batch-encode messages, then flush `EncodedQueue` + codec.
 macro_rules! batch_encode_flush {
@@ -133,10 +134,10 @@ where
     /// Receive-side message decoder. Symmetric to `encoder`.
     decoder: Option<MessageDecoder>,
     /// Shared round-robin send queue. When set, the driver reads outbound
-    /// messages directly from this flume channel (bypassing the pump task
+    /// messages directly from this queue (bypassing the pump task
     /// hop through `inbox`). `None` for non-round-robin socket types and
     /// for the `priority` feature path.
-    shared_msg_rx: Option<flume::Receiver<Message>>,
+    shared_msg_rx: Option<QueueReceiver>,
     /// Direct recv channel. When set, inbound `Event::Message` frames are
     /// pushed straight into the user-facing recv channel without going through
     /// the `SocketDriver` actor's event loop. Only set for socket types where
@@ -209,7 +210,7 @@ where
     /// Provide the shared round-robin send queue. The driver polls this
     /// directly after handshake, eliminating the pump-task intermediary.
     #[must_use]
-    pub fn with_shared_rx(mut self, rx: flume::Receiver<Message>) -> Self {
+    pub(crate) fn with_shared_rx(mut self, rx: QueueReceiver) -> Self {
         self.shared_msg_rx = Some(rx);
         self
     }
@@ -347,7 +348,7 @@ where
                         }
                     }
                     if let Some(ref rx) = shared_msg_rx {
-                        while let Ok(msg) = rx.try_recv() {
+                        while let Some(msg) = rx.try_pop() {
                             encode_msg(
                                 &msg, &mut encoder, &mut codec, &mut eq,
                                 passthrough.as_ref(),
@@ -445,7 +446,7 @@ where
                 // them all in one or a few write_vectored calls.
                 msg = async {
                     if let Some(ref rx) = shared_msg_rx {
-                        rx.recv_async().await.ok()
+                        rx.recv().await
                     } else {
                         std::future::pending().await
                     }
@@ -458,7 +459,7 @@ where
                         Some(first) => {
                             batch_encode_flush!(
                                 first,
-                                shared_msg_rx.as_ref().and_then(|rx| rx.try_recv().ok()),
+                                shared_msg_rx.as_ref().and_then(QueueReceiver::try_pop),
                                 &mut encoder,
                                 &mut codec,
                                 &mut eq,

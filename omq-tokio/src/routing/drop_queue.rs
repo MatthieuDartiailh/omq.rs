@@ -1,59 +1,119 @@
-//! Drop-policy wrapper around a bounded flume channel.
+//! Lock-free bounded send queue with configurable drop policy.
 //!
-//! The three `OnMute` strategies: `Block` (back-pressure), `DropNewest`
-//! (silently discard incoming), `DropOldest` (discard the queue head to
-//! make room for the new message).
+//! Backed by `concurrent_queue::ConcurrentQueue` (lock-free ring) and
+//! `tokio::sync::Notify` for receiver wakeup. The `Block` policy additionally
+//! uses a `tokio::sync::Semaphore` to track available write slots so blocked
+//! senders are woken without spinning when a receiver pops.
+
+use std::sync::Arc;
+
+use concurrent_queue::{ConcurrentQueue, PushError};
+use tokio::sync::{Notify, Semaphore};
 
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::OnMute;
 
-/// Bounded, multi-consumer send queue with a configurable drop policy.
-#[derive(Debug, Clone)]
+struct Inner {
+    queue: ConcurrentQueue<Message>,
+    /// Notified on every successful push; wakes receivers waiting in `recv`.
+    recv_notify: Notify,
+    /// Tracks available write slots for `Block` policy. `None` for the other
+    /// two policies (they never block on full).
+    slots: Option<Semaphore>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("len", &self.queue.len())
+            .field("capacity", &self.queue.capacity())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bounded, multi-producer multi-consumer send queue with a configurable
+/// drop policy. Clone-able; all clones share the same underlying queue.
+#[derive(Clone, Debug)]
 pub(crate) struct DropQueue {
-    tx: flume::Sender<Message>,
-    rx: flume::Receiver<Message>,
+    inner: Arc<Inner>,
     policy: OnMute,
 }
 
+/// Cloneable receive handle for a [`DropQueue`]. Each clone shares the same
+/// underlying queue; any clone can pop the next available message.
+#[derive(Clone, Debug)]
+pub(crate) struct QueueReceiver {
+    inner: Arc<Inner>,
+}
+
 impl DropQueue {
-    /// Create a new queue with the given capacity and policy. The returned
-    /// [`flume::Receiver`] is cloned per pump. Pass `usize::MAX` for
-    /// unbounded (uses `flume::unbounded` to avoid internal overflow).
-    pub(crate) fn new(capacity: usize, policy: OnMute) -> (Self, flume::Receiver<Message>) {
-        let (tx, rx) = if capacity == usize::MAX {
-            flume::unbounded()
+    /// Create a new queue. Returns `(sender_handle, receiver_handle)`.
+    ///
+    /// `capacity == usize::MAX` creates an unbounded queue (no `Semaphore`).
+    /// Otherwise the queue is bounded to `capacity.max(1)`.
+    pub(crate) fn new(capacity: usize, policy: OnMute) -> (Self, QueueReceiver) {
+        let (queue, slots) = if capacity == usize::MAX {
+            (ConcurrentQueue::unbounded(), None)
         } else {
-            flume::bounded(capacity.max(1))
+            let cap = capacity.max(1);
+            (ConcurrentQueue::bounded(cap), Some(Semaphore::new(cap)))
         };
-        let rx2 = rx.clone();
-        (Self { tx, rx, policy }, rx2)
+        let inner = Arc::new(Inner {
+            queue,
+            recv_notify: Notify::new(),
+            slots,
+        });
+        let receiver = QueueReceiver {
+            inner: inner.clone(),
+        };
+        (Self { inner, policy }, receiver)
     }
 
     /// Submit a message. Behaviour depends on policy:
-    /// - `Block`: await until room is available. Returns `Err(Closed)` if
-    ///   the channel is disconnected.
-    /// - `DropNewest`: if the queue is full, discard `msg` silently and
-    ///   return `Ok`.
-    /// - `DropOldest`: on full, pop one from the head and retry. Returns
-    ///   `Ok` once accepted.
+    /// - `Block`: await until a slot is available, then push.
+    /// - `DropNewest`: if full, discard `msg` silently and return `Ok`.
+    /// - `DropOldest`: if full, pop the head to make room, then push.
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         match self.policy {
-            OnMute::Block => self.tx.send_async(msg).await.map_err(|_| Error::Closed),
-            OnMute::DropNewest => match self.tx.try_send(msg) {
-                Ok(()) | Err(flume::TrySendError::Full(_)) => Ok(()),
-                Err(flume::TrySendError::Disconnected(_)) => Err(Error::Closed),
-            },
+            OnMute::Block => {
+                if let Some(ref slots) = self.inner.slots {
+                    // Bounded queue: wait for a free slot before pushing.
+                    // Consume the permit without returning it on drop; the
+                    // corresponding `add_permits(1)` call happens in `try_pop`.
+                    let permit = slots.acquire().await.map_err(|_| Error::Closed)?;
+                    permit.forget();
+                }
+                match self.inner.queue.push(msg) {
+                    Ok(()) => {
+                        self.inner.recv_notify.notify_one();
+                        Ok(())
+                    }
+                    Err(PushError::Closed(_)) => Err(Error::Closed),
+                    Err(PushError::Full(_)) => unreachable!("permit guarantees a free slot"),
+                }
+            }
+            OnMute::DropNewest => {
+                match self.inner.queue.push(msg) {
+                    Ok(()) => self.inner.recv_notify.notify_one(),
+                    Err(PushError::Full(_)) => {}
+                    Err(PushError::Closed(_)) => return Err(Error::Closed),
+                }
+                Ok(())
+            }
             OnMute::DropOldest => {
                 let mut item = msg;
                 loop {
-                    match self.tx.try_send(item) {
-                        Ok(()) => return Ok(()),
-                        Err(flume::TrySendError::Full(back)) => {
-                            let _ = self.rx.try_recv();
+                    match self.inner.queue.push(item) {
+                        Ok(()) => {
+                            self.inner.recv_notify.notify_one();
+                            return Ok(());
+                        }
+                        Err(PushError::Full(back)) => {
+                            let _ = self.inner.queue.pop();
                             item = back;
                         }
-                        Err(flume::TrySendError::Disconnected(_)) => return Err(Error::Closed),
+                        Err(PushError::Closed(_)) => return Err(Error::Closed),
                     }
                 }
             }
@@ -61,7 +121,49 @@ impl DropQueue {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.tx.len()
+        self.inner.queue.len()
+    }
+
+    /// Close the queue and wake all waiting receivers so they can observe
+    /// the closed state and return.
+    #[allow(dead_code)]
+    pub(crate) fn close(&self) {
+        self.inner.queue.close();
+        self.inner.recv_notify.notify_waiters();
+    }
+}
+
+impl QueueReceiver {
+    /// Non-blocking pop. Returns the next message, or `None` if empty.
+    ///
+    /// For `Block`-policy queues, also releases one write slot so any sender
+    /// waiting in `DropQueue::send` can proceed.
+    pub(crate) fn try_pop(&self) -> Option<Message> {
+        let msg = self.inner.queue.pop().ok()?;
+        if let Some(ref slots) = self.inner.slots {
+            slots.add_permits(1);
+        }
+        Some(msg)
+    }
+
+    /// Async pop. Waits until a message is available or the queue is closed.
+    ///
+    /// Uses a double-check pattern around `recv_notify.notified()` to avoid
+    /// missing a push that arrives between an empty `try_pop` and the future
+    /// being polled.
+    pub(crate) async fn recv(&self) -> Option<Message> {
+        loop {
+            // Create the Notified future first so any push that arrives
+            // between the second try_pop and the await is not lost.
+            let notified = self.inner.recv_notify.notified();
+            if let Some(msg) = self.try_pop() {
+                return Some(msg);
+            }
+            if self.inner.queue.is_closed() && self.inner.queue.is_empty() {
+                return None;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -72,15 +174,17 @@ mod tests {
 
     #[tokio::test]
     async fn block_policy_backpressures() {
-        let (q, _rx) = DropQueue::new(1, OnMute::Block);
+        let (q, rx) = DropQueue::new(1, OnMute::Block);
         q.send(Message::single("a")).await.unwrap();
-        // Second send would block; use a short timeout to confirm.
+        // Second send should block; confirm via short timeout.
         let r = tokio::time::timeout(
             std::time::Duration::from_millis(20),
             q.send(Message::single("b")),
         )
         .await;
         assert!(r.is_err(), "second send should block on full queue");
+        // Pop unblocks a waiting sender.
+        let _ = rx.try_pop().unwrap();
     }
 
     #[tokio::test]
@@ -89,10 +193,9 @@ mod tests {
         q.send(Message::single("a")).await.unwrap();
         q.send(Message::single("b")).await.unwrap();
         q.send(Message::single("c")).await.unwrap();
-        // Only the first made it.
-        let got = rx.recv_async().await.unwrap();
+        let got = rx.try_pop().unwrap();
         assert_eq!(got.part_bytes(0).unwrap(), &b"a"[..]);
-        assert!(rx.is_empty());
+        assert!(rx.try_pop().is_none());
     }
 
     #[tokio::test]
@@ -102,20 +205,29 @@ mod tests {
         q.send(Message::single("b")).await.unwrap();
         q.send(Message::single("c")).await.unwrap(); // drops "a"
         q.send(Message::single("d")).await.unwrap(); // drops "b"
-        let got_c = rx.recv_async().await.unwrap();
-        let got_d = rx.recv_async().await.unwrap();
+        let got_c = rx.try_pop().unwrap();
+        let got_d = rx.try_pop().unwrap();
         assert_eq!(got_c.part_bytes(0).unwrap(), &b"c"[..]);
         assert_eq!(got_d.part_bytes(0).unwrap(), &b"d"[..]);
     }
 
     #[tokio::test]
-    async fn send_on_disconnected_errors() {
-        let (q, rx) = DropQueue::new(1, OnMute::Block);
-        drop(rx);
-        // We still hold the internal rx clone, so the channel isn't fully
-        // disconnected. Drop the queue itself to confirm the semantics
-        // match expectations: here we instead verify a send still succeeds
-        // because our internal rx keeps the channel alive.
-        q.send(Message::single("a")).await.unwrap();
+    async fn recv_wakes_on_push() {
+        let (q, rx) = DropQueue::new(4, OnMute::Block);
+        let recv_task = tokio::spawn(async move { rx.recv().await });
+        tokio::task::yield_now().await;
+        q.send(Message::single("hello")).await.unwrap();
+        let msg = recv_task.await.unwrap().unwrap();
+        assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
+    }
+
+    #[tokio::test]
+    async fn close_unblocks_recv() {
+        let (q, rx) = DropQueue::new(4, OnMute::Block);
+        let recv_task = tokio::spawn(async move { rx.recv().await });
+        tokio::task::yield_now().await;
+        q.close();
+        let result = recv_task.await.unwrap();
+        assert!(result.is_none(), "closed queue should return None");
     }
 }
