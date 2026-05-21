@@ -174,10 +174,19 @@ transport cell on each backend) and `omq-tokio/tests/interop_compio.rs`
 | `udp://host:port` | UDP datagram (`RADIO` / `DISH` only) | both |
 | `lz4+tcp://host:port` | TCP + LZ4 transform | both, feature `lz4` |
 | `zstd+tcp://host:port` | TCP + zstd transform with optional dict training | both, feature `zstd` |
+| `ws://host:port/path` | ZeroMQ over WebSocket (ZWS/2.0, RFC 45) | both, feature `ws` |
+| `wss://host:port/path` | ZeroMQ over WebSocket with TLS | both, feature `ws` |
 
 Compression-style schemes are runtime layers stacked on top of the TCP
 transport, not separate transports. The encoder/decoder live in
 `omq-proto` and are wired in by the backend after the ZMTP handshake.
+
+WebSocket (`ws://`, `wss://`) is a separate transport with its own
+driver loop (`ws_driver`). ZWS replaces ZMTP's byte-stream framing
+with WebSocket binary messages: each message is one ZMTP frame
+prefixed by a 1-byte flag (`0x00` final, `0x01` more, `0x02`
+command). The 64-byte ZMTP greeting is skipped; mechanism negotiation
+happens via `Sec-WebSocket-Protocol` header during the HTTP upgrade.
 
 ## Transport type dispatch
 
@@ -250,7 +259,8 @@ behind).
 | `src/proto/chunked_buf.rs` | `ChunkedInputBuf` -- zero-copy multi-chunk input buffer |
 | `src/proto/mechanism/` | Mechanism dispatch + handshakes (NULL / PLAIN / CURVE / BLAKE3ZMQ) |
 | `src/proto/transform/` | LZ4 and Zstd per-part encoder/decoder |
-| `src/endpoint.rs` | URI parsing (`tcp://`, `ipc://`, `lz4+tcp://`, etc.) |
+| `src/proto/zws.rs` | ZWS/2.0 frame codec (feature `ws`) |
+| `src/endpoint.rs` | URI parsing (`tcp://`, `ipc://`, `lz4+tcp://`, `ws://`, etc.) |
 | `src/options.rs` | `Options` builder (HWM, identity, keepalive, mechanism) |
 | `src/subscription.rs` | Patricia-trie prefix matcher for SUB/XSUB |
 
@@ -268,6 +278,8 @@ behind).
 | `src/transport/tcp.rs` | TCP bind/connect/accept |
 | `src/transport/ipc.rs` | IPC bind/connect |
 | `src/transport/inproc.rs` | In-process transport (no ZMTP; blume MPSC for fan-in, yring SPSC for eligible cross-thread pairs) |
+| `src/transport/ws.rs` | WS bind/connect/accept (feature `ws`) |
+| `src/transport/ws_driver.rs` | WS connection driver (feature `ws`) |
 | `src/monitor.rs` | `MonitorPublisher` + `MonitorStream` |
 
 ### omq-tokio
@@ -284,6 +296,7 @@ behind).
 | `src/routing/identity.rs` | ROUTER/REP/SERVER identity routing |
 | `src/routing/fair_queue.rs` | PULL/SUB fair-queue recv |
 | `src/transport/tcp.rs` | TCP bind/connect with reconnect |
+| `src/transport/ws.rs` | WS bind/connect/accept + WS connection driver (feature `ws`) |
 
 ## Adding a new socket type / transport / mechanism
 

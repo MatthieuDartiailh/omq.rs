@@ -41,6 +41,10 @@ zstd = [
   "omq-compio?/zstd",
   "omq-tokio?/zstd",
 ]
+ws = [
+  "omq-compio?/ws",
+  "omq-tokio?/ws",
+]
 priority = [
   "omq-compio?/priority",
   "omq-tokio?/priority",

@@ -37,6 +37,14 @@ pub enum Endpoint {
     /// `zstd` feature.
     #[cfg(feature = "zstd")]
     ZstdTcp { host: Host, port: u16 },
+    /// `ws://host:port/path` ZeroMQ over WebSocket (RFC 45). Requires the
+    /// `ws` feature.
+    #[cfg(feature = "ws")]
+    Ws { host: Host, port: u16, path: String },
+    /// `wss://host:port/path` ZeroMQ over WebSocket with TLS. Requires the
+    /// `ws` feature.
+    #[cfg(feature = "ws")]
+    Wss { host: Host, port: u16, path: String },
 }
 
 /// TCP / UDP host specification: either an IP address or a DNS name.
@@ -106,6 +114,10 @@ impl FromStr for Endpoint {
             "zstd+tcp" => {
                 parse_host_port(rest).map(|(host, port)| Endpoint::ZstdTcp { host, port })
             }
+            #[cfg(feature = "ws")]
+            "ws" => parse_ws(rest, false),
+            #[cfg(feature = "ws")]
+            "wss" => parse_ws(rest, true),
             _ => Err(Error::UnsupportedScheme(scheme.to_string())),
         }
     }
@@ -125,6 +137,10 @@ impl fmt::Display for Endpoint {
             Self::Lz4Tcp { host, port } => write!(f, "lz4+tcp://{host}:{port}"),
             #[cfg(feature = "zstd")]
             Self::ZstdTcp { host, port } => write!(f, "zstd+tcp://{host}:{port}"),
+            #[cfg(feature = "ws")]
+            Self::Ws { host, port, path } => write!(f, "ws://{host}:{port}{path}"),
+            #[cfg(feature = "ws")]
+            Self::Wss { host, port, path } => write!(f, "wss://{host}:{port}{path}"),
         }
     }
 }
@@ -183,6 +199,12 @@ impl Endpoint {
         }
     }
 
+    /// Whether this endpoint uses the WebSocket transport.
+    #[cfg(feature = "ws")]
+    pub fn is_ws_family(&self) -> bool {
+        matches!(self, Endpoint::Ws { .. } | Endpoint::Wss { .. })
+    }
+
     /// Short scheme tag suitable for monitor / log output.
     pub fn scheme(&self) -> &'static str {
         match self {
@@ -194,6 +216,10 @@ impl Endpoint {
             Endpoint::Lz4Tcp { .. } => "lz4+tcp",
             #[cfg(feature = "zstd")]
             Endpoint::ZstdTcp { .. } => "zstd+tcp",
+            #[cfg(feature = "ws")]
+            Endpoint::Ws { .. } => "ws",
+            #[cfg(feature = "ws")]
+            Endpoint::Wss { .. } => "wss",
         }
     }
 }
@@ -331,6 +357,21 @@ fn parse_ipc(rest: &str) -> Result<IpcPath> {
         return Ok(IpcPath::Abstract(name.to_string()));
     }
     Ok(IpcPath::Filesystem(PathBuf::from(rest)))
+}
+
+#[cfg(feature = "ws")]
+fn parse_ws(rest: &str, tls: bool) -> Result<Endpoint> {
+    let (hp, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = parse_host_port(hp)?;
+    let path = path.to_string();
+    if tls {
+        Ok(Endpoint::Wss { host, port, path })
+    } else {
+        Ok(Endpoint::Ws { host, port, path })
+    }
 }
 
 fn parse_udp(rest: &str) -> Result<Endpoint> {

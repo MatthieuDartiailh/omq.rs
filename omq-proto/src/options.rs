@@ -131,6 +131,23 @@ pub struct Options {
     /// path that reads large payloads into a single pre-sized buffer
     /// instead of accumulating fixed-size reads through the codec.
     pub large_message_threshold: Option<usize>,
+
+    /// TLS configuration for `wss://` endpoints. Ignored for non-WSS
+    /// transports. Requires the `ws` feature.
+    #[cfg(feature = "ws")]
+    pub wss_tls: WssTls,
+}
+
+/// TLS configuration for WSS endpoints.
+#[cfg(feature = "ws")]
+#[derive(Clone, Debug, Default)]
+pub struct WssTls {
+    /// PEM-encoded server certificate chain for WSS bind.
+    pub server_cert_pem: Option<Vec<u8>>,
+    /// PEM-encoded server private key for WSS bind.
+    pub server_key_pem: Option<Vec<u8>>,
+    /// Accept invalid server certificates on connect (for testing).
+    pub accept_invalid_certs: bool,
 }
 
 /// Security-mechanism configuration. NULL is the default; CURVE is
@@ -325,6 +342,8 @@ impl Default for Options {
             compression_auto_train: true,
             compression_level: -3,
             large_message_threshold: Some(128 * 1024),
+            #[cfg(feature = "ws")]
+            wss_tls: WssTls::default(),
         }
     }
 }

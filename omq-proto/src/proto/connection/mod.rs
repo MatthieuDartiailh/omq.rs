@@ -67,6 +67,21 @@ pub enum Role {
     Client,
 }
 
+/// Transport framing mode. Determines whether the connection uses standard
+/// ZMTP byte-stream framing (with 64-byte greeting + length-prefixed frames)
+/// or ZWS message-oriented framing (RFC 45).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransportMode {
+    /// Standard ZMTP byte-stream framing with 64-byte greeting.
+    #[default]
+    Zmtp,
+    /// ZWS/2.0 (RFC 45): no greeting, 1-byte flag prefix per WebSocket
+    /// binary message. Mechanism is negotiated via `Sec-WebSocket-Protocol`
+    /// header during the HTTP upgrade.
+    #[cfg(feature = "ws")]
+    WebSocket,
+}
+
 /// Configuration for a new [`Connection`].
 #[derive(Clone, Debug)]
 pub struct ConnectionConfig {
@@ -80,6 +95,8 @@ pub struct ConnectionConfig {
     pub max_message_size: Option<usize>,
     /// Security mechanism to negotiate during the handshake.
     pub mechanism: MechanismSetup,
+    /// Transport framing mode.
+    pub transport_mode: TransportMode,
 }
 
 impl ConnectionConfig {
@@ -91,6 +108,7 @@ impl ConnectionConfig {
             identity: bytes::Bytes::new(),
             max_message_size: None,
             mechanism: MechanismSetup::Null,
+            transport_mode: TransportMode::default(),
         }
     }
 
@@ -109,6 +127,12 @@ impl ConnectionConfig {
     #[must_use]
     pub fn mechanism(mut self, m: MechanismSetup) -> Self {
         self.mechanism = m;
+        self
+    }
+
+    #[must_use]
+    pub fn transport_mode(mut self, mode: TransportMode) -> Self {
+        self.transport_mode = mode;
         self
     }
 
@@ -213,6 +237,11 @@ pub struct Connection {
     messages: VecDeque<Message>,
     pending_parts: Vec<Payload>,
     pending_size: usize,
+    /// ZWS outbound queue: each entry is one complete ZWS binary message
+    /// (flag byte + payload). Used only when `transport_mode == WebSocket`;
+    /// the byte-stream `out_chunks` queue is unused in WS mode.
+    #[cfg(feature = "ws")]
+    ws_out_frames: VecDeque<Bytes>,
 }
 
 impl Connection {
@@ -220,6 +249,8 @@ impl Connection {
     /// Supports the NULL, CURVE, and BLAKE3ZMQ mechanisms.
     pub fn new(config: ConnectionConfig) -> Self {
         let mechanism = config.mechanism.clone().build();
+        #[cfg(feature = "ws")]
+        let ws_mode = config.transport_mode == TransportMode::WebSocket;
         let mut conn = Self {
             state: State::AwaitingGreeting,
             peer_minor: greeting::ZMTP_MINOR,
@@ -237,10 +268,40 @@ impl Connection {
             messages: VecDeque::new(),
             pending_parts: Vec::new(),
             pending_size: 0,
+            #[cfg(feature = "ws")]
+            ws_out_frames: VecDeque::new(),
             config,
         };
+        #[cfg(feature = "ws")]
+        if ws_mode {
+            conn.init_ws_mode();
+            return conn;
+        }
         conn.queue_greeting();
         conn
+    }
+
+    /// Initialize the connection in ZWS mode: skip the greeting,
+    /// start mechanism handshake immediately, and queue outbound
+    /// mechanism commands as ZWS frames.
+    #[cfg(feature = "ws")]
+    fn init_ws_mode(&mut self) {
+        use super::command::PeerProperties;
+        self.state = State::MechanismHandshake;
+        let mut our_props = PeerProperties::default().with_socket_type(self.config.socket_type);
+        if !self.config.identity.is_empty() {
+            our_props = our_props.with_identity(self.config.identity.clone());
+        }
+        let mut cmds = Vec::new();
+        self.mechanism
+            .start(
+                &mut cmds,
+                our_props,
+                &self.our_greeting,
+                &self.peer_greeting,
+            )
+            .expect("mechanism start failed");
+        self.write_outbound_commands(&cmds);
     }
 
     fn queue_greeting(&mut self) {

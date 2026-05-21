@@ -1,3 +1,5 @@
+#[cfg(feature = "ws")]
+use super::AnyListener;
 use super::{
     Canceled, ConnectionStatus, DialerEntry, Duration, Endpoint, Error, InternalEvent,
     ListenerEntry, MonitorEvent, PeerIdent, Result, SocketDriver, SocketType, UdpDialerEntry,
@@ -259,8 +261,33 @@ impl SocketDriver {
             &snapshot,
             &self.recv_notify,
             self.options.max_message_size,
+            #[cfg(feature = "ws")]
+            &self.options.wss_tls,
         )
         .await?;
+        #[cfg(feature = "ws")]
+        let resolved = if endpoint.is_ws_family() {
+            let local = match &listener {
+                AnyListener::Ws(l) => l.local_addr,
+                _ => unreachable!(),
+            };
+            match &endpoint {
+                Endpoint::Ws { path, .. } => Endpoint::Ws {
+                    host: omq_proto::endpoint::Host::Ip(local.ip()),
+                    port: local.port(),
+                    path: path.clone(),
+                },
+                Endpoint::Wss { path, .. } => Endpoint::Wss {
+                    host: omq_proto::endpoint::Host::Ip(local.ip()),
+                    port: local.port(),
+                    path: path.clone(),
+                },
+                _ => unreachable!(),
+            }
+        } else {
+            endpoint.rewrap_tcp(listener.local_endpoint().clone())
+        };
+        #[cfg(not(feature = "ws"))]
         let resolved = endpoint.rewrap_tcp(listener.local_endpoint().clone());
         self.monitor.publish(MonitorEvent::Listening {
             endpoint: resolved.clone(),
@@ -318,10 +345,20 @@ impl SocketDriver {
         let tx_for_delay = tx.clone();
         let snapshot = self.inproc_snapshot();
         let recv_notify = self.recv_notify.clone();
+        #[cfg(feature = "ws")]
+        let accept_invalid_certs = self.options.wss_tls.accept_invalid_certs;
         let task = tokio::spawn(async move {
             let ep_for_dial = dialer_ep.clone();
             let result = dial_with_backoff(
-                || connect_any(&ep_for_dial, &snapshot, &recv_notify),
+                || {
+                    connect_any(
+                        &ep_for_dial,
+                        &snapshot,
+                        &recv_notify,
+                        #[cfg(feature = "ws")]
+                        accept_invalid_certs,
+                    )
+                },
                 policy,
                 &child_cancel,
                 |delay, attempt| {

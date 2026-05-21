@@ -474,4 +474,59 @@ impl Connection {
         // pushed before deciding to switch back to direct-recv.
         self.drive()
     }
+
+    /// Feed one complete ZWS binary message (flag byte + body) received
+    /// from a WebSocket. Each WS binary message is one ZMTP frame.
+    #[cfg(feature = "ws")]
+    pub fn handle_ws_message(&mut self, msg: Bytes) -> Result<()> {
+        let decoded = super::super::zws::decode_frame(msg)?;
+        match self.state {
+            State::Closed => return Err(Error::Closed),
+            State::AwaitingGreeting => {
+                return Err(Error::Protocol(
+                    "WS message in AwaitingGreeting state".into(),
+                ));
+            }
+            State::AwaitingSuppliedPayload { .. } => {
+                return Err(Error::Protocol(
+                    "WS message while awaiting supplied payload".into(),
+                ));
+            }
+            State::MechanismHandshake => {
+                if !decoded.flags.command {
+                    return Err(Error::HandshakeFailed(
+                        "peer sent data frame during handshake".into(),
+                    ));
+                }
+                let cmd = decode_command_raw(decoded.payload.as_bytes())?;
+                let mut cmds = Vec::new();
+                let step = self.mechanism.on_command(cmd, &mut cmds)?;
+                self.write_outbound_commands(&cmds);
+                if let MechanismStep::Complete { peer_properties } = step {
+                    let peer_type = peer_properties.socket_type.ok_or_else(|| {
+                        Error::HandshakeFailed("peer did not declare socket type".into())
+                    })?;
+                    if !is_compatible(self.config.socket_type, peer_type) {
+                        return Err(Error::HandshakeFailed(format!(
+                            "incompatible socket types: ours={:?} peer={:?}",
+                            self.config.socket_type, peer_type
+                        )));
+                    }
+                    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+                    {
+                        self.transform = self.mechanism.build_transform()?;
+                    }
+                    self.state = State::Ready;
+                    self.events.push_back(Event::HandshakeSucceeded {
+                        peer_minor: self.peer_minor,
+                        peer_properties: Arc::new(peer_properties),
+                    });
+                }
+            }
+            State::Ready => {
+                self.decode_assembled_frame(decoded.flags, decoded.payload)?;
+            }
+        }
+        Ok(())
+    }
 }
