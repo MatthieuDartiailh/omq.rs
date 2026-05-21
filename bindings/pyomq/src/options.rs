@@ -54,6 +54,8 @@ pub struct Overlay {
     pub curve_publickey: Option<Vec<u8>>,
     pub curve_secretkey: Option<Vec<u8>>,
     pub curve_serverkey: Option<Vec<u8>>,
+    #[cfg(feature = "curve")]
+    pub curve_authenticator: Option<crate::auth::CurveAuthenticator>,
 }
 
 impl Overlay {
@@ -113,7 +115,10 @@ impl Overlay {
                     cookie_keyring: std::sync::Arc::new(
                         backend::CurveCookieKeyring::new(),
                     ),
-                    authenticator: None,
+                    authenticator: self
+                        .curve_authenticator
+                        .as_ref()
+                        .map(crate::auth::build_authenticator),
                 };
             }
         } else if let (Some(pk), Some(sk), Some(svk)) =
@@ -174,6 +179,8 @@ impl Overlay {
             curve_publickey: None,
             curve_secretkey: None,
             curve_serverkey: None,
+            #[cfg(feature = "curve")]
+            curve_authenticator: None,
         }
     }
 }

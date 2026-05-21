@@ -199,6 +199,15 @@ class Socket:
     set_string = setsockopt_string
     get_string = getsockopt_string
 
+    def set_curve_auth(self, auth):
+        try:
+            return self._sock.set_curve_auth(auth)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+        except AttributeError:
+            from . import ZMQNotImplementedError
+            raise ZMQNotImplementedError("curve feature not compiled")
+
     def set_hwm(self, value):
         self.setsockopt(SNDHWM, value)
         self.setsockopt(RCVHWM, value)

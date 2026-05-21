@@ -271,6 +271,11 @@ impl AsyncSocket {
         crate::options::getsockopt(self.inner.as_ref(), py, option)
     }
 
+    #[cfg(feature = "curve")]
+    fn set_curve_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::auth::set_curve_auth_impl(&self.inner, auth)
+    }
+
     #[pyo3(signature = (_linger=None))]
     fn close<'py>(&self, py: Python<'py>, _linger: Option<i64>) -> PyResult<Bound<'py, PyAny>> {
         let m = self.inner.take_materialized();

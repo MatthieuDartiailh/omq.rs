@@ -483,6 +483,11 @@ impl Socket {
         options::getsockopt(self.inner.as_ref(), py, option)
     }
 
+    #[cfg(feature = "curve")]
+    fn set_curve_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::auth::set_curve_auth_impl(&self.inner, auth)
+    }
+
     #[pyo3(signature = (_linger=None))]
     fn close(&self, py: Python<'_>, _linger: Option<i64>) -> PyResult<()> {
         let m = self.inner.take_materialized();

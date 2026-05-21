@@ -15,6 +15,8 @@
 // already the right type. 45 instances, all macro-generated.
 #![allow(clippy::useless_conversion)]
 
+#[cfg(feature = "curve")]
+mod auth;
 mod constants;
 mod context;
 mod conversions;
@@ -43,6 +45,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(has_feature, m)?)?;
     #[cfg(feature = "curve")]
     {
+        m.add_class::<auth::PeerInfo>()?;
         m.add_function(wrap_pyfunction!(curve_keypair, m)?)?;
         m.add_function(wrap_pyfunction!(curve_public, m)?)?;
     }
