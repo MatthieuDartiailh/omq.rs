@@ -210,6 +210,7 @@ where
 
     /// Provide the shared round-robin send queue. The driver polls this
     /// directly after handshake, eliminating the pump-task intermediary.
+    #[cfg(not(feature = "priority"))]
     #[must_use]
     pub(crate) fn with_shared_rx(mut self, rx: QueueReceiver) -> Self {
         self.shared_msg_rx = Some(rx);

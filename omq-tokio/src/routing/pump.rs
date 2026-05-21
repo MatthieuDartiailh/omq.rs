@@ -16,6 +16,7 @@ pub(crate) const MAX_BATCH_BYTES: usize = 512 * 1024;
 /// Drive messages from `rx` to `peer.inbox` one at a time, yielding after each.
 /// Use when multiple pumps share the same `rx` (inproc round-robin): yielding
 /// after every message lets the other pumps compete for the next one.
+#[cfg(not(feature = "priority"))]
 pub(crate) async fn drain_one(rx: QueueReceiver, peer: DriverHandle, cancel: CancellationToken) {
     loop {
         tokio::select! {
