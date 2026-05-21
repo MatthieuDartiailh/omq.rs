@@ -72,6 +72,12 @@ impl Connection {
 
     pub(super) fn emit_frame(&mut self, flags: crate::message::FrameFlags, payload: Payload) {
         let f = crate::message::Frame { flags, payload };
+        #[cfg(feature = "ws")]
+        if self.config.transport_mode == super::TransportMode::WebSocket {
+            self.ws_out_frames
+                .push_back(super::super::zws::encode_frame(&f));
+            return;
+        }
         let plen = f.payload.len();
         self.out_bytes_total += frame::header_len_for(plen) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
@@ -131,6 +137,20 @@ impl Connection {
         }
         self.write_outbound_commands(std::slice::from_ref(cmd));
         Ok(())
+    }
+
+    /// Pop one outbound ZWS frame. Each frame is a complete WebSocket
+    /// binary message (flag byte + payload). Returns `None` when the
+    /// queue is empty.
+    #[cfg(feature = "ws")]
+    pub fn poll_ws_frame(&mut self) -> Option<Bytes> {
+        self.ws_out_frames.pop_front()
+    }
+
+    /// Whether any ZWS frames are pending transmit.
+    #[cfg(feature = "ws")]
+    pub fn has_pending_ws_frames(&self) -> bool {
+        !self.ws_out_frames.is_empty()
     }
 
     /// CURVE-encrypted part: wrap the plaintext per RFC 26 (`"\x07"

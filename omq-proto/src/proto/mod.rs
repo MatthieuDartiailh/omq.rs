@@ -22,6 +22,8 @@ pub mod greeting;
 pub mod mechanism;
 pub mod transform;
 pub mod z85;
+#[cfg(feature = "ws")]
+pub mod zws;
 
 pub use command::{Command, CommandKind, PeerProperties};
 pub use connection::{Connection, ConnectionConfig, Event, Role};

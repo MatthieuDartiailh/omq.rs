@@ -146,7 +146,7 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
             let _ = std::fs::remove_file(&dir);
             Endpoint::Ipc(IpcPath::Filesystem(dir))
         }
-        "tcp" | "lz4+tcp" | "zstd+tcp" => {
+        "tcp" | "lz4+tcp" | "zstd+tcp" | "ws" => {
             let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
                 .expect("bench: failed to allocate a tcp port");
             let port = l.local_addr().unwrap().port();
@@ -158,9 +158,15 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
                 "lz4+tcp" => Endpoint::Lz4Tcp { host, port },
                 #[cfg(feature = "zstd")]
                 "zstd+tcp" => Endpoint::ZstdTcp { host, port },
+                #[cfg(feature = "ws")]
+                "ws" => Endpoint::Ws {
+                    host,
+                    port,
+                    path: "/".into(),
+                },
                 _ => panic!(
                     "bench: transport '{transport}' requires its feature; \
-                            rebuild with `--features lz4` and/or `--features zstd`"
+                            rebuild with the required feature flag"
                 ),
             }
         }

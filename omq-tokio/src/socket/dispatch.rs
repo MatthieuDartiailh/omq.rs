@@ -100,6 +100,11 @@ pub(crate) enum AnyConn {
         conn: InprocConn,
         peer_ident: PeerIdent,
     },
+    #[cfg(feature = "ws")]
+    WebSocket {
+        ws: crate::transport::ws::WsStream,
+        peer_ident: PeerIdent,
+    },
 }
 
 impl std::fmt::Debug for AnyConn {
@@ -113,6 +118,11 @@ impl std::fmt::Debug for AnyConn {
                 .debug_struct("AnyConn::Inproc")
                 .field("peer_ident", peer_ident)
                 .finish(),
+            #[cfg(feature = "ws")]
+            Self::WebSocket { peer_ident, .. } => f
+                .debug_struct("AnyConn::WebSocket")
+                .field("peer_ident", peer_ident)
+                .finish(),
         }
     }
 }
@@ -121,6 +131,8 @@ impl AnyConn {
     pub(crate) fn peer_ident(&self) -> &PeerIdent {
         match self {
             Self::ByteStream { peer_ident, .. } | Self::Inproc { peer_ident, .. } => peer_ident,
+            #[cfg(feature = "ws")]
+            Self::WebSocket { peer_ident, .. } => peer_ident,
         }
     }
 }
@@ -129,6 +141,8 @@ pub(super) enum AnyListener {
     Tcp(crate::transport::tcp::TcpListener),
     Inproc(crate::transport::InprocListener),
     Ipc(crate::transport::ipc::IpcListener),
+    #[cfg(feature = "ws")]
+    Ws(crate::transport::ws::WsListener),
 }
 
 impl AnyListener {
@@ -137,6 +151,14 @@ impl AnyListener {
             Self::Tcp(l) => l.local_endpoint(),
             Self::Inproc(l) => l.local_endpoint(),
             Self::Ipc(l) => l.local_endpoint(),
+            #[cfg(feature = "ws")]
+            Self::Ws(_) => {
+                static DUMMY: Endpoint = Endpoint::Tcp {
+                    host: omq_proto::endpoint::Host::Wildcard,
+                    port: 0,
+                };
+                &DUMMY
+            }
         }
     }
 
@@ -155,6 +177,15 @@ impl AnyListener {
                 stream: AnyStream::Ipc(s),
                 peer_ident,
             }),
+            #[cfg(feature = "ws")]
+            Self::Ws(l) => {
+                let (stream, addr) = l.inner.accept().await.map_err(Error::Io)?;
+                let ws = crate::transport::ws::accept(stream, l.tls_acceptor.as_ref()).await?;
+                Ok(AnyConn::WebSocket {
+                    ws,
+                    peer_ident: PeerIdent::Socket(addr),
+                })
+            }
         }
     }
 }
@@ -168,11 +199,32 @@ pub(super) async fn bind_any(
     snapshot: &InprocPeerSnapshot,
     recv_notify: &std::sync::Arc<tokio::sync::Notify>,
     max_message_size: Option<usize>,
+    #[cfg(feature = "ws")] wss_tls: &omq_proto::options::WssTls,
 ) -> Result<AnyListener> {
     if endpoint.is_tcp_family() {
         return Ok(AnyListener::Tcp(
             TcpTransport::bind(&endpoint.underlying_tcp()).await?,
         ));
+    }
+    #[cfg(feature = "ws")]
+    if endpoint.is_ws_family() {
+        let (host, port) = match endpoint {
+            Endpoint::Ws { host, port, .. } | Endpoint::Wss { host, port, .. } => (host, *port),
+            _ => unreachable!(),
+        };
+        let tls_acc = if matches!(endpoint, Endpoint::Wss { .. }) {
+            let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
+                Error::Protocol("wss:// bind requires server_cert_pem in WssTls options".into())
+            })?;
+            let key = wss_tls.server_key_pem.as_deref().ok_or_else(|| {
+                Error::Protocol("wss:// bind requires server_key_pem in WssTls options".into())
+            })?;
+            Some(crate::transport::ws::build_tls_acceptor(cert, key)?)
+        } else {
+            None
+        };
+        let l = crate::transport::ws::bind(host, port, tls_acc).await?;
+        return Ok(AnyListener::Ws(l));
     }
     match endpoint {
         Endpoint::Inproc { name } => Ok(AnyListener::Inproc(inproc_transport::bind(
@@ -191,6 +243,7 @@ pub(super) async fn connect_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv_notify: &std::sync::Arc<tokio::sync::Notify>,
+    #[cfg(feature = "ws")] accept_invalid_certs: bool,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
         let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
@@ -199,6 +252,28 @@ pub(super) async fn connect_any(
             stream: AnyStream::Tcp(s),
             peer_ident,
         });
+    }
+    #[cfg(feature = "ws")]
+    if endpoint.is_ws_family() {
+        let (host, port, path) = match endpoint {
+            Endpoint::Ws {
+                host, port, path, ..
+            }
+            | Endpoint::Wss {
+                host, port, path, ..
+            } => (host, *port, path.as_str()),
+            _ => unreachable!(),
+        };
+        let ws = crate::transport::ws::connect(
+            host,
+            port,
+            path,
+            matches!(endpoint, Endpoint::Wss { .. }),
+            accept_invalid_certs,
+        )
+        .await?;
+        let peer_ident = peer_ident_for_endpoint(endpoint);
+        return Ok(AnyConn::WebSocket { ws, peer_ident });
     }
     match endpoint {
         Endpoint::Inproc { name } => {

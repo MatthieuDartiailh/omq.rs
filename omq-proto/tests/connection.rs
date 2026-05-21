@@ -551,3 +551,122 @@ fn bad_signature_rejected() {
         Err(Error::Protocol(_))
     ));
 }
+
+// ---- ZWS (WebSocket mode) tests ----
+
+#[cfg(feature = "ws")]
+mod ws {
+    use super::*;
+    use omq_proto::proto::connection::TransportMode;
+
+    fn ws_push_pull_pair() -> (Connection, Connection) {
+        let push = Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push)
+                .identity(Bytes::from_static(b"p"))
+                .transport_mode(TransportMode::WebSocket),
+        );
+        let pull = Connection::new(
+            ConnectionConfig::new(Role::Server, SocketType::Pull)
+                .transport_mode(TransportMode::WebSocket),
+        );
+        (push, pull)
+    }
+
+    fn pump_ws(a: &mut Connection, b: &mut Connection) {
+        loop {
+            let mut progress = false;
+            while let Some(frame) = a.poll_ws_frame() {
+                b.handle_ws_message(frame).expect("b accepts");
+                progress = true;
+            }
+            while let Some(frame) = b.poll_ws_frame() {
+                a.handle_ws_message(frame).expect("a accepts");
+                progress = true;
+            }
+            if !progress {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn ws_null_handshake() {
+        let (mut push, mut pull) = ws_push_pull_pair();
+        assert!(push.has_pending_ws_frames(), "mechanism start queues READY");
+        pump_ws(&mut push, &mut pull);
+        assert!(push.is_ready());
+        assert!(pull.is_ready());
+        let pev = push.poll_event().unwrap();
+        let lev = pull.poll_event().unwrap();
+        match (pev, lev) {
+            (
+                Event::HandshakeSucceeded {
+                    peer_properties: p, ..
+                },
+                Event::HandshakeSucceeded {
+                    peer_properties: l, ..
+                },
+            ) => {
+                assert_eq!(p.socket_type, Some(SocketType::Pull));
+                assert_eq!(l.socket_type, Some(SocketType::Push));
+                assert_eq!(l.identity, Some(Bytes::from_static(b"p")));
+            }
+            other => panic!("expected HandshakeSucceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ws_message_roundtrip() {
+        let (mut push, mut pull) = ws_push_pull_pair();
+        pump_ws(&mut push, &mut pull);
+        assert!(push.is_ready());
+
+        push.send_message(&Message::from(Bytes::from_static(b"hello")))
+            .unwrap();
+        pump_ws(&mut push, &mut pull);
+        let msg = pull.poll_message().unwrap();
+        assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
+    }
+
+    #[test]
+    fn ws_multipart_roundtrip() {
+        let (mut push, mut pull) = ws_push_pull_pair();
+        pump_ws(&mut push, &mut pull);
+
+        let msg = Message::multipart([
+            Bytes::from_static(b"frame1"),
+            Bytes::from_static(b"frame2"),
+            Bytes::from_static(b"frame3"),
+        ]);
+        push.send_message(&msg).unwrap();
+        pump_ws(&mut push, &mut pull);
+        let received = pull.poll_message().unwrap();
+        assert_eq!(received.len(), 3);
+        assert_eq!(received.part_bytes(0).unwrap(), &b"frame1"[..]);
+        assert_eq!(received.part_bytes(1).unwrap(), &b"frame2"[..]);
+        assert_eq!(received.part_bytes(2).unwrap(), &b"frame3"[..]);
+    }
+
+    #[test]
+    fn ws_incompatible_types_rejected() {
+        let mut a = Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push)
+                .transport_mode(TransportMode::WebSocket),
+        );
+        let mut b = Connection::new(
+            ConnectionConfig::new(Role::Server, SocketType::Push)
+                .transport_mode(TransportMode::WebSocket),
+        );
+        while let Some(frame) = a.poll_ws_frame() {
+            let _ = b.handle_ws_message(frame);
+        }
+        while let Some(frame) = b.poll_ws_frame() {
+            let result = a.handle_ws_message(frame);
+            if let Err(Error::HandshakeFailed(msg)) = result {
+                assert!(msg.contains("incompatible"));
+                return;
+            }
+        }
+        panic!("expected incompatible socket type rejection");
+    }
+}

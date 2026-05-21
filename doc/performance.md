@@ -630,3 +630,34 @@ patterns without deadlock or ordering violations. Same-thread
 throughput is bounded by blume's Mutex + VecDeque path and compio's
 per-task-poll overhead (~39% of cycles).
 
+## WebSocket transport (ZWS/2.0)
+
+PUSH/PULL over `ws://127.0.0.1`, 1 peer, 2 s rounds, same machine.
+libzmq 4.3.5 built with `ENABLE_DRAFTS=ON`.
+
+```
+                    128 B              2 KiB              8 KiB
+                msg/s    MB/s     msg/s    MB/s     msg/s    MB/s
+libzmq 4.3.5   1,911K    245      289K     592       69K     569
+omq-tokio        955K    122      666K   1,364      193K   1,581
+omq-compio       112K     14       93K     190       85K     693
+```
+
+At small messages libzmq leads 2x over omq-tokio: it uses a custom
+WS codec with no tungstenite overhead and batches frames into fewer
+syscalls. At 8 KiB omq-tokio is 2.8x faster because the batched
+feed-then-flush path amortizes per-frame WS overhead across the
+batch, and tokio's multi-threaded runtime overlaps send and recv.
+
+omq-compio is single-threaded (one io_uring thread per socket).
+The sender and receiver take turns on the same thread, so there is
+no batching window: each message is one feed + flush round-trip
+through tungstenite, which is ~8 µs. That per-message latency
+dominates at every size.
+
+**What WS costs vs TCP.** On the same box, omq-tokio over
+`tcp://` does 5.9M msg/s at 128 B and 4.5 GB/s at 8 KiB. The WS
+overhead comes from: (1) per-frame WS header + client-side XOR
+masking, (2) no gather I/O (each WS message is an independent
+tungstenite write), (3) the HTTP upgrade handshake at connect time.
+

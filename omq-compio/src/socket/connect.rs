@@ -42,6 +42,7 @@ impl Socket {
         self.connect_inner(endpoint, opts.priority.get()).await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn connect_inner(
         &self,
         endpoint: Endpoint,
@@ -65,6 +66,34 @@ impl Socket {
                 #[cfg(feature = "priority")]
                 priority,
             );
+            return Ok(());
+        }
+        #[cfg(feature = "ws")]
+        if endpoint.is_ws_family() {
+            let inner = self.inner().clone();
+            let ep = endpoint.clone();
+            compio::runtime::spawn(async move {
+                let Ok(ws) = crate::transport::ws::connect(&ep).await else {
+                    return;
+                };
+                let conn_id = inner
+                    .next_connection_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                inner.monitor.connected(
+                    ep.clone(),
+                    crate::monitor::PeerIdent::Path(ep.to_string()),
+                    conn_id,
+                );
+                crate::socket::install::install_ws_peer(
+                    &inner,
+                    ws,
+                    omq_proto::proto::connection::Role::Client,
+                    ep,
+                    conn_id,
+                    None,
+                );
+            })
+            .detach();
             return Ok(());
         }
         #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]

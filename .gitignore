@@ -19,3 +19,4 @@ __pycache__/
 *.so
 *.html
 /*.log
+omq-tokio/tests/helpers/zmq_ws_peer

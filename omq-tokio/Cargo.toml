@@ -21,6 +21,7 @@ blake3zmq = ["omq-proto/blake3zmq"]
 plain = ["omq-proto/plain"]
 lz4 = ["omq-proto/lz4"]
 zstd = ["omq-proto/zstd"]
+ws = ["omq-proto/ws", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfile", "dep:rustls-pki-types", "dep:tokio-rustls"]
 priority = ["omq-proto/priority"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
@@ -42,13 +43,20 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", 
 tokio-util = { version = "0.7", features = ["rt"] }
 socket2 = "0.6"
 libc = "0.2"
+tokio-tungstenite = { version = "0.29", optional = true, features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+rustls-native-certs = { version = "0.8", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rustls-pki-types = { version = "1", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+rcgen = "0.14"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Cross-runtime interop tests drive a compio backend on a dedicated
 # thread while the tokio backend runs in the test's own runtime.
-omq-compio = { path = "../omq-compio", default-features = false }
+omq-compio = { path = "../omq-compio", default-features = false, features = ["ws"] }
 compio = { version = "0.19.0-rc.1", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync"] }
 
 [[bin]]

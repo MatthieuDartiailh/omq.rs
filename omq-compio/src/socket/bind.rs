@@ -35,6 +35,10 @@ impl Socket {
         if endpoint.is_tcp_family() {
             return self.bind_tcp(endpoint).await;
         }
+        #[cfg(feature = "ws")]
+        if endpoint.is_ws_family() {
+            return self.bind_ws(endpoint).await;
+        }
         #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
         match endpoint {
             Endpoint::Inproc { name } => self.bind_inproc(name).await,
@@ -319,6 +323,68 @@ impl Socket {
                 if inner.in_tx.send_async(frame).await.is_err() {
                     break;
                 }
+            }
+        });
+        let ret = resolved.clone();
+        self.inner()
+            .listeners
+            .write()
+            .expect("listeners lock")
+            .push(ListenerEntry {
+                endpoint: resolved,
+                _task: task,
+            });
+        Ok(ret)
+    }
+
+    #[cfg(feature = "ws")]
+    async fn bind_ws(&self, endpoint: Endpoint) -> Result<Endpoint> {
+        use crate::transport::ws as ws_transport;
+
+        let ws_listener = ws_transport::bind(&endpoint).await?;
+        let local = ws_listener.local_addr;
+        let resolved = match &endpoint {
+            Endpoint::Ws { path, .. } => Endpoint::Ws {
+                host: omq_proto::endpoint::Host::Ip(local.ip()),
+                port: local.port(),
+                path: path.clone(),
+            },
+            Endpoint::Wss { path, .. } => Endpoint::Wss {
+                host: omq_proto::endpoint::Host::Ip(local.ip()),
+                port: local.port(),
+                path: path.clone(),
+            },
+            _ => unreachable!("checked above"),
+        };
+        self.inner().monitor.listening(resolved.clone());
+        let inner = self.inner().clone();
+        let ep_for_task = resolved.clone();
+        let task = compio::runtime::spawn(async move {
+            while let Ok((stream, addr)) = ws_listener.inner.accept().await {
+                let inner = inner.clone();
+                let ep = ep_for_task.clone();
+                compio::runtime::spawn(async move {
+                    let Ok(ws) = ws_transport::accept(stream).await else {
+                        return;
+                    };
+                    let conn_id = inner
+                        .next_connection_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    inner.monitor.accepted(
+                        ep.clone(),
+                        crate::monitor::PeerIdent::Socket(addr),
+                        conn_id,
+                    );
+                    crate::socket::install::install_ws_peer(
+                        &inner,
+                        ws,
+                        omq_proto::proto::connection::Role::Server,
+                        ep,
+                        conn_id,
+                        Some(addr),
+                    );
+                })
+                .detach();
             }
         });
         let ret = resolved.clone();

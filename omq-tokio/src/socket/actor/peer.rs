@@ -188,6 +188,17 @@ impl SocketDriver {
                     priority,
                 );
             }
+            #[cfg(feature = "ws")]
+            AnyConn::WebSocket { ws, peer_ident } => {
+                self.spawn_ws_connection(
+                    ws,
+                    peer_ident,
+                    endpoint,
+                    is_server,
+                    #[cfg(feature = "priority")]
+                    priority,
+                );
+            }
         }
     }
 
@@ -349,6 +360,95 @@ impl SocketDriver {
         self.send_strategy
             .connection_added(peer_id, handle, identity.clone(), false);
         self.recv_strategy.connection_added(peer_id, identity);
+    }
+
+    #[cfg(feature = "ws")]
+    fn spawn_ws_connection(
+        &mut self,
+        ws: crate::transport::ws::WsStream,
+        peer_ident: PeerIdent,
+        endpoint: Endpoint,
+        is_server: bool,
+        #[cfg(feature = "priority")] priority: u8,
+    ) {
+        if let Some(max) = max_peer_count(self.socket_type)
+            && self.peers.len() >= max
+        {
+            return;
+        }
+        let peer_id = self.next_peer_id;
+        self.next_peer_id += 1;
+
+        let role = if is_server {
+            Role::Server
+        } else {
+            Role::Client
+        };
+
+        let inbox_cap = 64usize;
+        let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
+        let child_cancel = self.cancel.child_token();
+
+        let driver_cfg = DriverConfig {
+            handshake_timeout: self.options.handshake_timeout,
+            heartbeat_interval: self.options.heartbeat_interval,
+            heartbeat_timeout: self.options.heartbeat_timeout,
+            heartbeat_ttl: self.options.heartbeat_ttl,
+            large_message_threshold: 0,
+        };
+
+        let peer_out_tx = self.peer_out_tx.clone();
+        let options = self.options.clone();
+        let socket_type = self.socket_type;
+        let cancel_clone = child_cancel.clone();
+        #[cfg(not(feature = "priority"))]
+        let shared_rx = self.send_strategy.shared_rx();
+        let recv_direct = if can_bypass_actor_recv(socket_type) {
+            Some(self.recv_tx.clone())
+        } else {
+            None
+        };
+
+        self.peers.insert(
+            peer_id,
+            PeerEntry {
+                ident: peer_ident,
+                handle: DriverHandle {
+                    inbox: inbox_tx,
+                    cancel: child_cancel,
+                },
+                identity: bytes::Bytes::new(),
+                info: None,
+                endpoint,
+                is_client: !is_server,
+                #[cfg(feature = "priority")]
+                priority,
+            },
+        );
+
+        if self.peers.len() > 1 {
+            *self.send_ring.write().unwrap() = None;
+        }
+
+        tokio::spawn(async move {
+            crate::transport::ws::run_ws_driver(
+                ws,
+                role,
+                socket_type,
+                &options,
+                inbox_rx,
+                peer_out_tx,
+                peer_id,
+                cancel_clone,
+                driver_cfg,
+                #[cfg(not(feature = "priority"))]
+                shared_rx,
+                #[cfg(feature = "priority")]
+                None,
+                recv_direct,
+            )
+            .await;
+        });
     }
 
     /// Inproc fast path: skip the ZMTP codec entirely. The peer's

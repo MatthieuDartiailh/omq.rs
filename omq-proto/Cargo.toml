@@ -30,6 +30,7 @@ blake3zmq = [
 plain = []
 lz4 = ["dep:lz4-sys"]
 zstd = ["dep:zstd-safe"]
+ws = []
 priority = []
 
 [dependencies]

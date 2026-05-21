@@ -127,8 +127,8 @@ fn zstd_tcp() {
 #[test]
 fn unsupported_scheme() {
     assert!(matches!(
-        "ws://host:80".parse::<Endpoint>().unwrap_err(),
-        Error::UnsupportedScheme(s) if s == "ws"
+        "quic://host:80".parse::<Endpoint>().unwrap_err(),
+        Error::UnsupportedScheme(s) if s == "quic"
     ));
 }
 
@@ -217,4 +217,77 @@ fn spec_connect_prefix() {
 fn spec_no_prefix_is_default() {
     let s: EndpointSpec = "tcp://host:5555".parse().unwrap();
     assert_eq!(s.role, EndpointRole::Default);
+}
+
+// ---- WebSocket endpoint tests (ws feature) ----
+
+#[test]
+#[cfg(feature = "ws")]
+fn ws_basic() {
+    let ep = parse("ws://host:8080/zeromq");
+    assert!(matches!(
+        &ep,
+        Endpoint::Ws { host: Host::Name(h), port: 8080, path }
+            if h == "host" && path == "/zeromq"
+    ));
+    assert_eq!(ep.to_string(), "ws://host:8080/zeromq");
+    assert_eq!(ep.scheme(), "ws");
+    assert!(ep.is_ws_family());
+    assert!(!ep.is_tcp_family());
+}
+
+#[test]
+#[cfg(feature = "ws")]
+fn wss_basic() {
+    let ep = parse("wss://example.com:443/ws");
+    assert!(matches!(
+        &ep,
+        Endpoint::Wss { host: Host::Name(h), port: 443, path }
+            if h == "example.com" && path == "/ws"
+    ));
+    assert_eq!(ep.to_string(), "wss://example.com:443/ws");
+    assert_eq!(ep.scheme(), "wss");
+    assert!(ep.is_ws_family());
+}
+
+#[test]
+#[cfg(feature = "ws")]
+fn ws_default_path() {
+    let ep = parse("ws://127.0.0.1:9000");
+    assert!(matches!(
+        &ep,
+        Endpoint::Ws { host: Host::Ip(_), port: 9000, path }
+            if path == "/"
+    ));
+    assert_eq!(ep.to_string(), "ws://127.0.0.1:9000/");
+}
+
+#[test]
+#[cfg(feature = "ws")]
+fn ws_wildcard_port() {
+    let ep = parse("ws://*:*");
+    assert!(matches!(
+        &ep,
+        Endpoint::Ws { host: Host::Wildcard, port: 0, path }
+            if path == "/"
+    ));
+}
+
+#[test]
+#[cfg(feature = "ws")]
+fn ws_ipv6() {
+    let ep = parse("ws://[::1]:8080/zmq");
+    assert!(matches!(
+        &ep,
+        Endpoint::Ws { host: Host::Ip(_), port: 8080, path }
+            if path == "/zmq"
+    ));
+}
+
+#[test]
+#[cfg(feature = "ws")]
+fn ws_roundtrip() {
+    let original = "ws://myhost:5555/path/to/endpoint";
+    let ep = parse(original);
+    assert_eq!(ep.to_string(), original);
 }
