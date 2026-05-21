@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, RwLock};
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
@@ -6,12 +7,14 @@ use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
 use crate::monitor::PeerIdent;
+use crate::transport::driver::DriverCommand;
 use crate::transport::inproc::{self, InprocFrame};
 use crate::transport::ipc as ipc_transport;
+use crate::transport::stream_raw;
 use crate::transport::tcp as tcp_transport;
 
 use super::Socket;
-use super::inner::ListenerEntry;
+use super::inner::{ListenerEntry, PeerOut, PeerSlot, WirePeerHandle};
 use super::install::{install_accepted_wire_peer, install_inproc_peer};
 use super::reject_encrypted_inproc;
 
@@ -21,6 +24,14 @@ impl Socket {
     /// returned endpoint contains the actual port.
     pub async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
         reject_encrypted_inproc(&endpoint, &self.inner().options.mechanism)?;
+        if self.inner().socket_type == SocketType::Stream {
+            if !endpoint.is_tcp_family() {
+                return Err(Error::Protocol(
+                    "STREAM sockets only support tcp:// endpoints".into(),
+                ));
+            }
+            return self.bind_stream_tcp(endpoint).await;
+        }
         if endpoint.is_tcp_family() {
             return self.bind_tcp(endpoint).await;
         }
@@ -167,6 +178,90 @@ impl Socket {
                     conn_id,
                     None,
                 );
+            }
+        });
+        let ret = resolved.clone();
+        self.inner()
+            .listeners
+            .write()
+            .expect("listeners lock")
+            .push(ListenerEntry {
+                endpoint: resolved,
+                _task: task,
+            });
+        Ok(ret)
+    }
+
+    async fn bind_stream_tcp(&self, endpoint: Endpoint) -> Result<Endpoint> {
+        let plain = endpoint.underlying_tcp();
+        let (listener, local) = tcp_transport::bind(&plain).await?;
+        let resolved = endpoint.rewrap_tcp(Endpoint::Tcp {
+            host: omq_proto::endpoint::Host::Ip(local.ip()),
+            port: local.port(),
+        });
+        self.inner().monitor.listening(resolved.clone());
+        let inner = self.inner().clone();
+        let ep = resolved.clone();
+        let task = compio::runtime::spawn(async move {
+            while let Ok((stream, addr)) = listener.accept().await {
+                let _ = stream.set_nodelay(true);
+                if let Ok(poll_fd) = stream.to_poll_fd() {
+                    let _ = inner.options.tcp_keepalive.apply(&poll_fd);
+                    let _ = inner.options.apply_socket_buffers(&poll_fd);
+                }
+                let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+                inner
+                    .monitor
+                    .accepted(ep.clone(), PeerIdent::Socket(addr), conn_id);
+                let identity = stream_raw::generated_identity(conn_id);
+                let cap = super::cmd_channel_capacity(&inner.options);
+                let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
+                let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
+                let (_, writer) = stream.clone().into_split();
+                let slot_idx = {
+                    let mut peers = inner.out_peers.write().expect("peers lock");
+                    let idx = peers.insert(PeerSlot {
+                        out: PeerOut::Wire(handle),
+                        direct_io: None,
+                        peer: Arc::new(RwLock::new(None)),
+                        connection_id: conn_id,
+                        endpoint: ep.clone(),
+                        info: Arc::new(RwLock::new(None)),
+                        peer_sub: None,
+                        peer_groups: None,
+                        #[cfg(feature = "priority")]
+                        priority: omq_proto::DEFAULT_PRIORITY,
+                    });
+                    inner
+                        .peers_gen
+                        .fetch_add(1, std::sync::atomic::Ordering::Release);
+                    idx
+                };
+                {
+                    let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+                    while pipes.len() <= slot_idx {
+                        pipes.push(None);
+                    }
+                }
+                if !identity.is_empty()
+                    && let Some(old_idx) = inner
+                        .identity_to_slot
+                        .write()
+                        .expect("identity table")
+                        .insert(identity.clone(), slot_idx)
+                    && old_idx != slot_idx
+                {
+                    inner.evict_peer_for_handover(old_idx);
+                }
+                inner.rebuild_peer_keys();
+                inner.on_peer_ready.notify(usize::MAX);
+                let inner2 = inner.clone();
+                let in_tx = inner.in_tx.clone();
+                compio::runtime::spawn(async move {
+                    stream_raw::run(stream, writer.into(), identity, in_tx, cmd_rx).await;
+                    inner2.release_slot(slot_idx);
+                })
+                .detach();
             }
         });
         let ret = resolved.clone();

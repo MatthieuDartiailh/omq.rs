@@ -160,6 +160,7 @@ pub(super) fn pre_send_needs_type_state(t: SocketType) -> bool {
             | SocketType::Gather
             | SocketType::Channel
             | SocketType::Server
+            | SocketType::Stream
     )
 }
 
@@ -235,9 +236,11 @@ impl Socket {
             | SocketType::Channel => self.send_round_robin(msg).await,
             // REP: pre_send added the peer identity as the first frame; route
             // back to that specific peer (same as ROUTER identity routing).
-            SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Rep => {
-                self.send_identity_routed(msg).await
-            }
+            SocketType::Router
+            | SocketType::Server
+            | SocketType::Peer
+            | SocketType::Rep
+            | SocketType::Stream => self.send_identity_routed(msg).await,
             SocketType::Pub | SocketType::XPub => self.send_pub_filtered(msg).await,
             SocketType::Radio => self.send_radio(msg).await,
             SocketType::Pull
@@ -730,9 +733,11 @@ impl Socket {
             | SocketType::Client
             | SocketType::Scatter
             | SocketType::Channel => self.try_send_round_robin(msg),
-            SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Rep => {
-                self.try_send_identity_routed(msg)
-            }
+            SocketType::Router
+            | SocketType::Server
+            | SocketType::Peer
+            | SocketType::Rep
+            | SocketType::Stream => self.try_send_identity_routed(msg),
             SocketType::Pub | SocketType::XPub => {
                 self.try_send_pub_filtered(msg);
                 Ok(())

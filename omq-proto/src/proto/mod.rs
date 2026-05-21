@@ -28,7 +28,7 @@ pub use connection::{Connection, ConnectionConfig, Event, Role};
 pub use frame::{MAX_FRAME_HEADER_LEN, MAX_SHORT_FRAME_SIZE};
 pub use greeting::{Greeting, MechanismName, VERSION_SNIFF_LEN, ZMTP_MAJOR, ZMTP_MINOR};
 
-/// All 18 ZMTP socket types (11 standard + 7 draft).
+/// All 19 ZMTP socket types (11 standard + 8 draft).
 ///
 /// The value carries the wire-level ASCII name returned by [`Self::as_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -54,6 +54,7 @@ pub enum SocketType {
     Gather,
     Channel,
     Peer,
+    Stream,
 }
 
 impl SocketType {
@@ -79,6 +80,7 @@ impl SocketType {
             Self::Gather => "GATHER",
             Self::Channel => "CHANNEL",
             Self::Peer => "PEER",
+            Self::Stream => "STREAM",
         }
     }
 
@@ -94,6 +96,7 @@ impl SocketType {
                 | Self::Gather
                 | Self::Channel
                 | Self::Peer
+                | Self::Stream
         )
     }
 
@@ -119,6 +122,7 @@ impl SocketType {
             b"GATHER" => Self::Gather,
             b"CHANNEL" => Self::Channel,
             b"PEER" => Self::Peer,
+            b"STREAM" => Self::Stream,
             _ => return None,
         })
     }
@@ -181,6 +185,7 @@ mod tests {
             SocketType::Gather,
             SocketType::Channel,
             SocketType::Peer,
+            SocketType::Stream,
         ];
         for t in all {
             assert_eq!(SocketType::from_wire(t.as_str().as_bytes()), Some(t));
@@ -209,6 +214,8 @@ mod tests {
         assert!(!is_compatible(Pair, Dealer));
         assert!(!is_compatible(Radio, Sub));
         assert!(!is_compatible(Client, Peer));
+        assert!(!is_compatible(Stream, Stream));
+        assert!(!is_compatible(Stream, Router));
     }
 
     #[test]
@@ -227,6 +234,7 @@ mod tests {
         assert!(!SocketType::Pair.is_draft());
         assert!(SocketType::Radio.is_draft());
         assert!(SocketType::Peer.is_draft());
+        assert!(SocketType::Stream.is_draft());
     }
 
     #[test]

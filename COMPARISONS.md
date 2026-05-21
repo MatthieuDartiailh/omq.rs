@@ -220,3 +220,39 @@ Refresh: `./scripts/compare_zmqrs.sh --tcp --update-benchmarks`
 | 2 MiB | 1.5k | 3.1 GB/s | 3.1k | 6.5 GB/s | **2.1×** | 2.4k | 5.1 GB/s | **1.6×** |
 
 <!-- END zmqrs_comparison_tcp_tokio -->
+
+## ZMQ_STREAM: omq-compio vs libzmq 4.3.5
+
+Ping-pong throughput: one raw TCP client connected to a STREAM socket.
+Each iteration sends one message and waits for the response before
+sending the next (latency-bound, not pipelined). Single-threaded, TCP
+loopback, release builds. 200K iterations at 8/128 B, 100K at 1K/8K B,
+preceded by a 2K-iteration warmup.
+
+The omq side uses omq-compio with io_uring and the default buffer pool.
+The libzmq side uses its internal I/O thread. Both have `TCP_NODELAY`
+on the raw client socket.
+
+Measured 2026-05-21 on Linux 6.12, Rust 1.93 nightly, `gcc -O2` for the
+libzmq harness. Two consecutive runs showed <5% variance.
+
+### recv (raw TCP client writes, STREAM socket reads)
+
+| Size | libzmq (msg/s) | omq (msg/s) | Ratio |
+|------|---------------|------------|-------|
+| 8 B | 42,000 | 134,000 | 3.2x |
+| 128 B | 42,000 | 136,000 | 3.2x |
+| 1,024 B | 43,000 | 135,000 | 3.1x |
+| 8,192 B | 40,000 | 119,000 | 3.0x |
+
+### send (STREAM socket writes, raw TCP client reads)
+
+| Size | libzmq (msg/s) | omq (msg/s) | Ratio |
+|------|---------------|------------|-------|
+| 8 B | 42,000 | 151,000 | 3.6x |
+| 128 B | 41,000 | 148,000 | 3.6x |
+| 1,024 B | 39,000 | 149,000 | 3.8x |
+| 8,192 B | 39,000 | 132,000 | 3.4x |
+
+omq send at 8 KiB: 1.08 GB/s vs libzmq's 316 MB/s. Ping-pong
+latency ~7 µs (omq) vs ~24 µs (libzmq)

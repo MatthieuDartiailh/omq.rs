@@ -26,7 +26,11 @@ fn post_recv_needs_type_state(t: SocketType) -> bool {
 fn is_identity_recv(t: SocketType) -> bool {
     matches!(
         t,
-        SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Rep
+        SocketType::Router
+            | SocketType::Server
+            | SocketType::Peer
+            | SocketType::Rep
+            | SocketType::Stream
     )
 }
 
