@@ -60,7 +60,8 @@ Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s).
 Enable all feature-gated scenarios with the full feature set.
 
 Each soak test is a separate binary, so `cargo test` runs them
-sequentially. Launch every scenario in parallel instead:
+sequentially. Launch scenarios in batches of 4 (8 processes) to
+keep peak RSS bounded while still running in parallel:
 
 ```sh
 FEATURES="soak lz4 zstd plain curve blake3zmq priority"
@@ -69,16 +70,24 @@ FEATURES="soak lz4 zstd plain curve blake3zmq priority"
 cargo test -p omq-compio --features "$FEATURES" --release --no-run
 cargo test -p omq-tokio  --features "$FEATURES" --release --no-run
 
-# run all scenarios in parallel, both backends, 10 min each
-for test in blake3zmq compression compression_lz4 curve \
-            inproc_cross_thread large_throughput multi_socket \
-            peer_churn plain priority pub_sub_churn reconnect_storm; do
+# run in batches of 4 scenarios (8 processes), 10 min each
+TESTS=(blake3zmq compression compression_lz4 curve
+       inproc_cross_thread large_throughput multi_socket peer_churn
+       plain priority pub_sub_churn reconnect_storm)
+
+batch=()
+for test in "${TESTS[@]}"; do
   OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-compio \
     --features "$FEATURES" --release --test "soak_${test}" \
     -- --nocapture &
   OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
     --features "$FEATURES" --release --test "soak_${test}" \
     -- --nocapture &
+  batch+=("$test")
+  if [[ ${#batch[@]} -eq 4 ]]; then
+    wait
+    batch=()
+  fi
 done
 wait
 ```
