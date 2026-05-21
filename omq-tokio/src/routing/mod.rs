@@ -81,9 +81,11 @@ impl SendStrategy {
             // Fan-out send (group-based, RADIO).
             SocketType::Radio => Self::FanOut(FanOutSend::new(options, FanOutMode::Group)),
             // Identity-routed send.
-            SocketType::Router | SocketType::Rep | SocketType::Server | SocketType::Peer => {
-                Self::Identity(IdentitySend::new(options))
-            }
+            SocketType::Router
+            | SocketType::Rep
+            | SocketType::Server
+            | SocketType::Peer
+            | SocketType::Stream => Self::Identity(IdentitySend::new(options)),
             // Round-robin send.
             SocketType::Req
             | SocketType::Dealer
@@ -242,9 +244,11 @@ impl RecvStrategy {
                 Self::None
             }
             // Identity-prefix recv.
-            SocketType::Router | SocketType::Rep | SocketType::Server | SocketType::Peer => {
-                Self::Identity(IdentityRecv::new(recv_tx))
-            }
+            SocketType::Router
+            | SocketType::Rep
+            | SocketType::Server
+            | SocketType::Peer
+            | SocketType::Stream => Self::Identity(IdentityRecv::new(recv_tx)),
             // Everything else -- fair-queue.
             _ => Self::FairQueue(FairQueueRecv::new(recv_tx)),
         }

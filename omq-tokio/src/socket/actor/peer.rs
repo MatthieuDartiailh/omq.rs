@@ -158,19 +158,26 @@ impl SocketDriver {
     ) {
         match conn {
             AnyConn::ByteStream { stream, peer_ident } => {
-                // TCP-only knobs (currently just keepalive). Failures are
-                // logged via the connection's normal error path - any
-                // keepalive failure manifests as a missed peer-disappear
-                // detection, not a hard error worth aborting connect.
                 let _ = stream.apply_tcp_options(&self.options);
-                self.spawn_byte_stream_connection(
-                    stream,
-                    peer_ident,
-                    endpoint,
-                    is_server,
-                    #[cfg(feature = "priority")]
-                    priority,
-                );
+                if self.socket_type == SocketType::Stream {
+                    self.spawn_stream_connection(
+                        stream,
+                        peer_ident,
+                        endpoint,
+                        is_server,
+                        #[cfg(feature = "priority")]
+                        priority,
+                    );
+                } else {
+                    self.spawn_byte_stream_connection(
+                        stream,
+                        peer_ident,
+                        endpoint,
+                        is_server,
+                        #[cfg(feature = "priority")]
+                        priority,
+                    );
+                }
             }
             AnyConn::Inproc { conn, peer_ident } => {
                 self.spawn_inproc_peer(
@@ -293,6 +300,56 @@ impl SocketDriver {
         tokio::spawn(async move {
             let _ = driver.run().await;
         });
+    }
+
+    fn spawn_stream_connection(
+        &mut self,
+        stream: AnyStream,
+        peer_ident: PeerIdent,
+        endpoint: Endpoint,
+        is_server: bool,
+        #[cfg(feature = "priority")] priority: u8,
+    ) {
+        let peer_id = self.next_peer_id;
+        self.next_peer_id += 1;
+        let identity = generated_identity(peer_id);
+
+        let handle = crate::transport::stream_raw::spawn(
+            stream,
+            peer_id,
+            self.peer_out_tx.clone(),
+            &self.cancel,
+        );
+
+        self.peers.insert(
+            peer_id,
+            PeerEntry {
+                ident: peer_ident,
+                handle: handle.clone(),
+                identity: identity.clone(),
+                info: None,
+                endpoint,
+                is_client: !is_server,
+                #[cfg(feature = "priority")]
+                priority,
+            },
+        );
+
+        if self.peers.len() > 1 {
+            *self.send_ring.write().unwrap() = None;
+        }
+
+        #[cfg(feature = "priority")]
+        self.send_strategy.connection_added_with_priority(
+            peer_id,
+            handle,
+            identity.clone(),
+            priority,
+        );
+        #[cfg(not(feature = "priority"))]
+        self.send_strategy
+            .connection_added(peer_id, handle, identity.clone(), false);
+        self.recv_strategy.connection_added(peer_id, identity);
     }
 
     /// Inproc fast path: skip the ZMTP codec entirely. The peer's

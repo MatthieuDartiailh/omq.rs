@@ -244,6 +244,11 @@ impl SocketDriver {
     }
 
     pub(super) async fn bind(&mut self, endpoint: Endpoint) -> Result<Endpoint> {
+        if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
+            return Err(Error::Protocol(
+                "STREAM sockets only support tcp:// endpoints".into(),
+            ));
+        }
         if matches!(endpoint, Endpoint::Udp { .. }) {
             return self.bind_udp(endpoint).await;
         }

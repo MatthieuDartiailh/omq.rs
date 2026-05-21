@@ -1,15 +1,18 @@
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{Arc, RwLock, atomic::Ordering};
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
 use omq_proto::proto::SocketType;
 
 use crate::monitor::PeerIdent;
+use crate::transport::driver::DriverCommand;
 use crate::transport::inproc;
+use crate::transport::stream_raw;
+use crate::transport::tcp as tcp_transport;
 
 use super::Socket;
 use super::dial::{connect_ipc_with_reconnect, connect_tcp_with_reconnect};
-use super::inner::UdpDialerEntry;
+use super::inner::{PeerOut, PeerSlot, UdpDialerEntry, WirePeerHandle};
 use super::install::install_inproc_peer;
 use super::reject_encrypted_inproc;
 
@@ -45,6 +48,14 @@ impl Socket {
         #[cfg(feature = "priority")] priority: u8,
     ) -> Result<()> {
         reject_encrypted_inproc(&endpoint, &self.inner().options.mechanism)?;
+        if self.inner().socket_type == SocketType::Stream {
+            if !endpoint.is_tcp_family() {
+                return Err(Error::Protocol(
+                    "STREAM sockets only support tcp:// endpoints".into(),
+                ));
+            }
+            return self.connect_stream_tcp(endpoint).await;
+        }
         if endpoint.is_tcp_family() {
             use omq_proto::proto::connection::Role;
             connect_tcp_with_reconnect(
@@ -130,6 +141,74 @@ impl Socket {
                 "transport variant not enabled in this omq-compio build".into(),
             )),
         }
+    }
+
+    async fn connect_stream_tcp(&self, endpoint: Endpoint) -> Result<()> {
+        let plain = endpoint.underlying_tcp();
+        let stream = tcp_transport::connect(&plain).await?;
+        if let Ok(poll_fd) = stream.to_poll_fd() {
+            let _ = self.inner().options.tcp_keepalive.apply(&poll_fd);
+            let _ = self.inner().options.apply_socket_buffers(&poll_fd);
+        }
+        let conn_id = self
+            .inner()
+            .next_connection_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner().monitor.connected(
+            endpoint.clone(),
+            PeerIdent::Path(format!("{endpoint}")),
+            conn_id,
+        );
+        let identity = stream_raw::generated_identity(conn_id);
+        let cap = super::cmd_channel_capacity(&self.inner().options);
+        let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
+        let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
+        let inner = self.inner().clone();
+        let (_, writer) = stream.clone().into_split();
+        let slot_idx = {
+            let mut peers = inner.out_peers.write().expect("peers lock");
+            let idx = peers.insert(PeerSlot {
+                out: PeerOut::Wire(handle),
+                direct_io: None,
+                peer: Arc::new(RwLock::new(None)),
+                connection_id: conn_id,
+                endpoint: endpoint.clone(),
+                info: Arc::new(RwLock::new(None)),
+                peer_sub: None,
+                peer_groups: None,
+                #[cfg(feature = "priority")]
+                priority: omq_proto::DEFAULT_PRIORITY,
+            });
+            inner
+                .peers_gen
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            idx
+        };
+        {
+            let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+            while pipes.len() <= slot_idx {
+                pipes.push(None);
+            }
+        }
+        if !identity.is_empty()
+            && let Some(old_idx) = inner
+                .identity_to_slot
+                .write()
+                .expect("identity table")
+                .insert(identity.clone(), slot_idx)
+            && old_idx != slot_idx
+        {
+            inner.evict_peer_for_handover(old_idx);
+        }
+        inner.rebuild_peer_keys();
+        inner.on_peer_ready.notify(usize::MAX);
+        let in_tx = inner.in_tx.clone();
+        compio::runtime::spawn(async move {
+            stream_raw::run(stream, writer.into(), identity, in_tx, cmd_rx).await;
+            inner.release_slot(slot_idx);
+        })
+        .detach();
+        Ok(())
     }
 
     async fn connect_udp(&self, endpoint: Endpoint) -> Result<()> {

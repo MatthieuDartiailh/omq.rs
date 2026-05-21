@@ -626,6 +626,7 @@ pub extern "C" fn zmq_getsockopt(
                 SocketType::Scatter => 17,
                 SocketType::Peer => 19,
                 SocketType::Channel => 20,
+                SocketType::Stream => 11,
             };
             write_i32(optval, optvallen, v)
         }

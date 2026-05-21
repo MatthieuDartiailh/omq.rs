@@ -170,6 +170,7 @@ fn map_socket_type(t: c_int) -> Option<SocketType> {
         8 => Some(SocketType::Push),
         9 => Some(SocketType::XPub),
         10 => Some(SocketType::XSub),
+        11 => Some(SocketType::Stream),
         12 => Some(SocketType::Server),
         13 => Some(SocketType::Client),
         14 => Some(SocketType::Radio),

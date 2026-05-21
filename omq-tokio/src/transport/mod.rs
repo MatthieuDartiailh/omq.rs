@@ -20,6 +20,7 @@ pub use omq_proto::monitor::PeerIdent;
 pub mod backoff;
 pub mod inproc;
 pub mod ipc;
+pub(crate) mod stream_raw;
 pub mod tcp;
 pub mod udp;
 

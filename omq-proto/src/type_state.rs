@@ -61,10 +61,10 @@ impl TypeState {
                     msg.len()
                 )));
             }
-            SocketType::Server if msg.len() != 2 => {
-                return Err(Error::Protocol(
-                    "SERVER socket requires [routing_id, body] (2 parts)".into(),
-                ));
+            SocketType::Server | SocketType::Stream if msg.len() != 2 => {
+                return Err(Error::Protocol(format!(
+                    "{t:?} socket requires [routing_id, body] (2 parts)",
+                )));
             }
             _ => {}
         }

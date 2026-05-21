@@ -328,7 +328,11 @@ impl SocketDriver {
                 #[cfg(feature = "priority")]
                 priority,
             } => {
-                if matches!(endpoint, Endpoint::Udp { .. }) {
+                if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
+                    let _ = ack.send(Err(Error::Protocol(
+                        "STREAM sockets only support tcp:// endpoints".into(),
+                    )));
+                } else if matches!(endpoint, Endpoint::Udp { .. }) {
                     let res = self.start_dial_udp(endpoint).await;
                     let _ = ack.send(res);
                 } else if let Err(e) = reject_encrypted_inproc(&endpoint, &self.options.mechanism) {
