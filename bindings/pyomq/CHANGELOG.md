@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CURVE client authentication via `socket.set_curve_auth()`: pass a list of
+  allowed Z85 public keys (pure Rust check) or a Python callable receiving
+  `PeerInfo` and returning bool. No ZAP protocol.
+- `PeerInfo` class exposed to authenticator callbacks with a `public_key`
+  property (40-byte Z85 bytes).
+
 ## [0.7.1] - 2026-05-21
 
 ### Fixed

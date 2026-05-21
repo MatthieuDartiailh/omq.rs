@@ -139,6 +139,34 @@ Virtual throughput on bandwidth-limited links (JSON payloads, compio backend):
 
 See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for full tables including dict-trained ratios.
 
+## CURVE authentication
+
+CURVE encrypts traffic and authenticates the server to the client. To also
+authenticate clients to the server, call `set_curve_auth()` before
+`bind()`/`connect()`:
+
+```python
+server_pub, server_sec = zmq.curve_keypair()
+client_pub, client_sec = zmq.curve_keypair()
+
+pull = ctx.socket(zmq.PULL)
+pull.curve_server = 1
+pull.curve_publickey = server_pub
+pull.curve_secretkey = server_sec
+
+# Option 1: allow specific client keys (checked in Rust, no GIL overhead)
+pull.set_curve_auth([client_pub])
+
+# Option 2: custom callback receiving a PeerInfo with a .public_key (Z85 bytes)
+pull.set_curve_auth(lambda peer: peer.public_key in allowed_keys)
+
+# Option 3: accept any valid CURVE client (the default)
+pull.set_curve_auth(None)
+```
+
+No ZAP, no filesystem key management. The callback runs during the CURVE
+handshake; returning a falsy value rejects the client.
+
 ## Develop
 
 ```sh

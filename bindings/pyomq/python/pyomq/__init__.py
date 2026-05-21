@@ -693,5 +693,5 @@ __all__ = [
     "__version__", "zmq_version_info", "zmq_version",
     "pyomq_version", "pyomq_version_info",
     # curve
-    "curve_keypair", "curve_public",
+    "curve_keypair", "curve_public", "PeerInfo",
 ]
