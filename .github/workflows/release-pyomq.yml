@@ -10,11 +10,12 @@ permissions:
 
 jobs:
   linux:
-    name: Linux wheels (${{ matrix.target }})
+    name: Linux wheels (${{ matrix.target }}, ${{ matrix.manylinux }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target: [x86_64, aarch64]
+        manylinux: [auto, musllinux_1_2]
     steps:
       - uses: actions/checkout@v4
       - uses: PyO3/maturin-action@v1
@@ -23,10 +24,10 @@ jobs:
           command: build
           args: --release --out dist
           working-directory: bindings/pyomq
-          manylinux: auto
+          manylinux: ${{ matrix.manylinux }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-${{ matrix.target }}
+          name: wheels-linux-${{ matrix.target }}-${{ matrix.manylinux }}
           path: bindings/pyomq/dist
 
   sdist:
@@ -55,7 +56,7 @@ jobs:
           python-version: "3.13"
       - uses: actions/download-artifact@v4
         with:
-          name: wheels-linux-x86_64
+          name: wheels-linux-x86_64-auto
           path: dist
       - run: pip install dist/*.whl pytest
       - run: pytest bindings/pyomq/tests/test_basic.py bindings/pyomq/tests/test_curve.py bindings/pyomq/tests/test_plain.py -v -p no:asyncio
