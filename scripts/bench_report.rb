@@ -285,6 +285,10 @@ if options[:update_benchmarks]
 
   core_transports = %w[inproc ipc tcp]
 
+  build_push_pull_fanout_8peer = lambda do |backend|
+    build_throughput_table.call('push_pull_fanout', 8, core_transports, backend, "no push_pull_fanout 8-peer #{backend} data")
+  end
+
   build_req_rep       = ->(b) { build_throughput_table.call('req_rep',        1, core_transports, b, "no req_rep #{b} data") }
   build_pub_sub       = ->(b) { build_throughput_table.call('pub_sub',        3, core_transports, b, "no pub_sub #{b} data") }
   build_router_dealer = ->(b) { build_throughput_table.call('router_dealer',  3, core_transports, b, "no router_dealer #{b} data") }
@@ -354,6 +358,7 @@ if options[:update_benchmarks]
     bm = replace_block.call(bm, "pair_#{b}",                   build_pair.call(b))
     bm = replace_block.call(bm, "push_pull_priority_#{b}",     build_push_pull_priority.call(b))
   end
+  bm = replace_block.call(bm, 'push_pull_fanout_8peer_tokio', build_push_pull_fanout_8peer.call('tokio'))
   bm = replace_block.call(bm, 'latency_percentiles',           build_latency_percentiles.call)
   bm = replace_block.call(bm, 'mechanism_frame',               build_mechanism_frame.call)
   File.write(BENCHMARKS_PATH, bm)
