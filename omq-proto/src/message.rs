@@ -455,6 +455,22 @@ impl Message {
         }
     }
 
+    pub(crate) fn iter_parts(&self, mut f: impl FnMut(&Payload)) {
+        match &self.inner {
+            MessageInner::Empty => {}
+            MessageInner::Inline { len, data } => {
+                let p = Payload::from_slice(&data[..*len as usize]);
+                f(&p);
+            }
+            MessageInner::Single(p) => f(p),
+            MessageInner::Multi(v) => {
+                for p in v {
+                    f(p);
+                }
+            }
+        }
+    }
+
     pub(crate) fn into_parts_payload(self) -> Vec<Payload> {
         match self.inner {
             MessageInner::Empty => Vec::new(),

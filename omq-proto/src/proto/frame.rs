@@ -117,23 +117,25 @@ fn write_payload_flat(buf: &mut BytesMut, part: &Payload) {
 /// Encode all frames of `msg` into a flat contiguous buffer (header + payload
 /// concatenated). Used by the compio fast send path for small messages.
 pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {
-    let parts = msg.parts_payload();
-    let n = parts.len();
-    for (i, part) in parts.iter().enumerate() {
+    let n = msg.len();
+    let mut i = 0;
+    msg.iter_parts(|part| {
         write_frame_header(buf, i + 1 < n, part.len());
         write_payload_flat(buf, part);
-    }
+        i += 1;
+    });
 }
 
 /// Like [`encode_message_flat`] but prepends `prefix` to each part payload.
 pub fn encode_message_prefixed_flat(prefix: &[u8], msg: &Message, buf: &mut BytesMut) {
-    let parts = msg.parts_payload();
-    let n = parts.len();
-    for (i, part) in parts.iter().enumerate() {
+    let n = msg.len();
+    let mut i = 0;
+    msg.iter_parts(|part| {
         write_frame_header(buf, i + 1 < n, prefix.len() + part.len());
         buf.extend_from_slice(prefix);
         write_payload_flat(buf, part);
-    }
+        i += 1;
+    });
 }
 
 /// Encode all frames of `msg` as separate header + payload `Bytes` chunks
