@@ -332,8 +332,7 @@ fn handle_driver_exit(
             .handshake_failed(endpoint.clone(), peer_ident, format!("{e}"));
     }
     let should_reset = match socket_type {
-        SocketType::Req => true,
-        SocketType::Rep => {
+        SocketType::Req | SocketType::Rep => {
             let peers = inner.out_peers.read().expect("peers lock");
             !peers.iter().any(|(_, s)| {
                 s.connection_id != connection_id && s.info.read().expect("info lock").is_some()

@@ -83,8 +83,7 @@ impl SocketDriver {
             });
         }
         match self.socket_type {
-            SocketType::Req => self.type_state.on_peer_disconnected(),
-            SocketType::Rep if self.peers.is_empty() => {
+            SocketType::Req | SocketType::Rep if self.peers.is_empty() => {
                 self.type_state.on_peer_disconnected();
             }
             _ => {}
