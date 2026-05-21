@@ -172,8 +172,10 @@ pub fn destroy_socket(id: u64) {
                     }
                 }
             }
-            // Pumps still running; drop the Rc (socket closes on
-            // last Rc drop via Socket::Drop, which cancels tasks).
+            // Pumps still running; signal close so dial supervisors
+            // see `closed == true` and break out of their reconnect
+            // loop, then drop the Rc.
+            rc.signal_close();
             drop(rc);
             let _ = tx.send(());
         })
@@ -307,67 +309,52 @@ pub fn wait_any(
     if receivers.is_empty() {
         return vec![];
     }
-    let (otx, orx) = flume::bounded::<Vec<u64>>(1);
-    let job: Job = Box::new(move || {
-        compio::runtime::spawn(async move {
-            let ids: Vec<u64> = receivers.iter().map(|(id, _, _)| *id).collect();
-            let futs: Vec<_> = receivers
-                .iter()
-                .map(|(id, rx, _)| {
-                    let id = *id;
-                    let rx = rx.clone();
-                    Box::pin(async move { (rx.recv_async().await, id) })
-                })
-                .collect();
-            let (recv_result, first_id) = match timeout_ms {
-                None => {
-                    let ((result, id), _, _) = futures::future::select_all(futs).await;
-                    (result, id)
-                }
-                Some(ms) => {
-                    use futures::FutureExt;
-                    let deadline = compio::time::sleep(std::time::Duration::from_millis(ms));
-                    futures::select! {
-                        ((result, id), ..) = futures::future::select_all(futs).fuse() => {
-                            (result, id)
-                        }
-                        _ = deadline.fuse() => {
-                            let _ = otx.send(vec![]);
-                            return;
-                        }
-                    }
-                }
-            };
-            // Stash the consumed message into the socket's rxbuf.
-            if let Ok(msg) = recv_result {
-                let frames: Vec<bytes::Bytes> = msg.iter().collect();
-                if let Some((_, _, inner)) = receivers.iter().find(|(id, _, _)| *id == first_id) {
-                    let mut buf = inner.rxbuf.lock().unwrap();
-                    // Prepend: rxbuf may have leftover RCVMORE frames.
-                    buf.splice(0..0, frames);
-                }
-            }
-            // Scan all sockets for readiness (non-destructive).
-            let mut ready: Vec<u64> =
-                ids.iter()
-                    .copied()
-                    .filter(|id| {
-                        receivers.iter().find(|(rid, _, _)| rid == id).is_some_and(
-                            |(_, rx, inner)| {
-                                !rx.is_empty() || !inner.rxbuf.lock().unwrap().is_empty()
-                            },
-                        )
-                    })
-                    .collect();
-            if !ready.contains(&first_id) {
-                ready.push(first_id);
-            }
-            let _ = otx.send(ready);
-        })
-        .detach();
-    });
-    submit_chan().send(job).expect("pyomq: compio runtime gone");
-    orx.recv().unwrap_or_default()
+
+    // Check for already-ready sockets (rxbuf or channel has data).
+    let mut ready: Vec<u64> = receivers
+        .iter()
+        .filter(|(_, rx, inner)| !rx.is_empty() || !inner.rxbuf.lock().unwrap().is_empty())
+        .map(|(id, _, _)| *id)
+        .collect();
+    if !ready.is_empty() {
+        return ready;
+    }
+
+    // Block the calling thread using flume::Selector (OS-level wait,
+    // no busy-loop). The GIL is already released by the caller.
+    let mut sel = flume::Selector::new();
+    for (id, rx, _) in &receivers {
+        let id = *id;
+        sel = sel.recv(rx, move |res| (id, res));
+    }
+
+    let (first_id, recv_result) = match timeout_ms {
+        None => sel.wait(),
+        Some(ms) => match sel.wait_timeout(std::time::Duration::from_millis(ms)) {
+            Ok(v) => v,
+            Err(_) => return vec![],
+        },
+    };
+
+    // Stash the consumed message into the socket's rxbuf.
+    if let Ok(msg) = recv_result {
+        let frames: Vec<bytes::Bytes> = msg.iter().collect();
+        if let Some((_, _, inner)) = receivers.iter().find(|(id, _, _)| *id == first_id) {
+            let mut buf = inner.rxbuf.lock().unwrap();
+            buf.splice(0..0, frames);
+        }
+    }
+
+    // Scan all sockets for readiness (non-destructive).
+    ready = receivers
+        .iter()
+        .filter(|(_, rx, inner)| !rx.is_empty() || !inner.rxbuf.lock().unwrap().is_empty())
+        .map(|(id, _, _)| *id)
+        .collect();
+    if !ready.contains(&first_id) {
+        ready.push(first_id);
+    }
+    ready
 }
 
 #[derive(Debug)]

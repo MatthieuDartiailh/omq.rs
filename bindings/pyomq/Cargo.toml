@@ -32,7 +32,7 @@ compio = { version = "0.19.0-rc.1", features = ["macros", "runtime", "io-uring",
 
 bytes = "1"
 libc = "0.2"
-flume = { version = "0.12", default-features = false, features = ["async"] }
+flume = { version = "0.12", default-features = false, features = ["async", "select"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 # PyO3 stable ABI: one wheel covers Python 3.9+.
