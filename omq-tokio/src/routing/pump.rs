@@ -24,8 +24,10 @@ pub(crate) async fn drain_one(rx: QueueReceiver, peer: DriverHandle, cancel: Can
             msg = rx.recv() => {
                 let Some(msg) = msg else { return; };
                 if peer.inbox.send(DriverCommand::SendMessage(msg)).await.is_err() {
+                    rx.release_permits(1);
                     return;
                 }
+                rx.release_permits(1);
                 yield_now().await;
             }
         }
@@ -47,6 +49,7 @@ pub(crate) async fn drain(rx: QueueReceiver, peer: DriverHandle, cancel: Cancell
                 loop {
                     let m_bytes = msg.byte_len();
                     if peer.inbox.send(DriverCommand::SendMessage(msg)).await.is_err() {
+                        rx.release_permits(count + 1);
                         return;
                     }
                     count += 1;
@@ -59,6 +62,7 @@ pub(crate) async fn drain(rx: QueueReceiver, peer: DriverHandle, cancel: Cancell
                         None => break,
                     }
                 }
+                rx.release_permits(count);
                 yield_now().await;
             }
         }

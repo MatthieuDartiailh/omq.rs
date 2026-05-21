@@ -38,6 +38,7 @@ macro_rules! batch_encode_flush {
         while $codec.has_pending_transmit() {
             flush_once($writer, $codec).await?;
         }
+        count
     }};
 }
 
@@ -348,12 +349,15 @@ where
                         }
                     }
                     if let Some(ref rx) = shared_msg_rx {
+                        let mut drained = 0usize;
                         while let Some(msg) = rx.try_pop() {
                             encode_msg(
                                 &msg, &mut encoder, &mut codec, &mut eq,
                                 passthrough.as_ref(),
                             );
+                            drained += 1;
                         }
+                        rx.release_permits(drained);
                     }
                     let _ = flush_encoded_queue(
                         &mut writer, &mut eq, &mut drain_buf,
@@ -407,7 +411,7 @@ where
                 cmd = inbox.recv() => match cmd {
                     Some(DriverCommand::SendMessage(first)) => {
                         let mut closing = false;
-                        batch_encode_flush!(
+                        let _ = batch_encode_flush!(
                             first,
                             match inbox.try_recv() {
                                 Ok(DriverCommand::SendMessage(m)) => Some(m),
@@ -457,7 +461,7 @@ where
                             return Ok(());
                         }
                         Some(first) => {
-                            batch_encode_flush!(
+                            let count = batch_encode_flush!(
                                 first,
                                 shared_msg_rx.as_ref().and_then(QueueReceiver::try_pop),
                                 &mut encoder,
@@ -467,6 +471,9 @@ where
                                 &mut writer,
                                 passthrough.as_ref()
                             );
+                            if let Some(ref rx) = shared_msg_rx {
+                                rx.release_permits(count);
+                            }
                         }
                     }
                 },

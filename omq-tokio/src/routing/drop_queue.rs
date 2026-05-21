@@ -139,11 +139,13 @@ impl QueueReceiver {
     /// For `Block`-policy queues, also releases one write slot so any sender
     /// waiting in `DropQueue::send` can proceed.
     pub(crate) fn try_pop(&self) -> Option<Message> {
-        let msg = self.inner.queue.pop().ok()?;
+        self.inner.queue.pop().ok()
+    }
+
+    pub(crate) fn release_permits(&self, n: usize) {
         if let Some(ref slots) = self.inner.slots {
-            slots.add_permits(1);
+            slots.add_permits(n);
         }
-        Some(msg)
     }
 
     /// Async pop. Waits until a message is available or the queue is closed.
@@ -183,8 +185,9 @@ mod tests {
         )
         .await;
         assert!(r.is_err(), "second send should block on full queue");
-        // Pop unblocks a waiting sender.
+        // Pop + release unblocks a waiting sender.
         let _ = rx.try_pop().unwrap();
+        rx.release_permits(1);
     }
 
     #[tokio::test]
