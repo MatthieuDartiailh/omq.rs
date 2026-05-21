@@ -14,8 +14,8 @@
 #   ruby scripts/bench_report.rb --exclude-run ID     # drop a noisy run (repeatable)
 #   ruby scripts/bench_report.rb --update-benchmarks  # regenerate BENCHMARKS.md tables
 
-require 'json'
 require 'optparse'
+require_relative 'lib/bench_helpers'
 
 ROOT            = File.expand_path('..', __dir__)
 BENCHMARKS_PATH = File.join(ROOT, 'BENCHMARKS.md')
@@ -29,78 +29,14 @@ JSONL_PRIORITY_PATH = {
   'tokio'  => File.join(ROOT, 'omq-tokio',  'benches', 'results_priority.jsonl'),
 }.freeze
 
-SIZE_LABELS = {
-  32      => '32 B',
-  64      => '64 B',
-  128     => '128 B',
-  256     => '256 B',
-  512     => '512 B',
-  1_024   => '1 KiB',
-  2_048   => '2 KiB',
-  4_096   => '4 KiB',
-  8_192   => '8 KiB',
-  32_768  => '32 KiB',
-  131_072 => '128 KiB',
-}.freeze
-
-# ── formatting helpers ─────────────────────────────────────────────────────────
-
-def size_label(n)
-  SIZE_LABELS[n] || "#{n} B"
-end
-
-def format_si(v)
-  return nil unless v && v > 0
-  if    v >= 1e6   then '%.2fM' % (v / 1e6)
-  elsif v >= 100e3 then '%.0fk' % (v / 1e3)
-  elsif v >= 1e3   then '%.1fk' % (v / 1e3)
-  else                  '%.0f'  % v
-  end
-end
-
-def format_mbps_short(v)
-  return nil unless v && v > 0
-  if    v >= 10_000 then '%.1f GB/s' % (v / 1_000.0)
-  elsif v >= 1_000  then '%.2f GB/s' % (v / 1_000.0)
-  elsif v >= 100    then '%.0f MB/s' % v
-  elsif v >= 10     then '%.1f MB/s' % v
-  else                   '%.2f MB/s' % v
-  end
-end
-
-def throughput_cell(row)
-  return '—' unless row
-  [format_si(row[:msgs_s]), format_mbps_short(row[:mbps])].compact.join(' / ')
-end
-
-def latency_cell(row)
-  return '—' unless row && row[:msgs_s] && row[:msgs_s] > 0
-  us = 1_000_000.0 / row[:msgs_s]
-  us_s = if us >= 100 then '%.0f µs' % us
-           elsif us >= 10 then '%.1f µs' % us
-           else '%.1f µs' % us
-           end
-  "#{us_s} (#{format_si(row[:msgs_s])})"
-end
-
-def format_us(v)
-  return '—' unless v
-  fv = v.to_f
-  return '—' unless fv > 0
-  if    fv >= 10_000 then '%.0f ms'  % (fv / 1_000.0)
-  elsif fv >= 1_000  then '%.1f ms'  % (fv / 1_000.0)
-  elsif fv >= 100    then '%.0f µs'  % fv
-  elsif fv >= 10     then '%.1f µs'  % fv
-  else                    '%.2f µs'  % fv
-  end
-end
+# ── formatting helpers (local, not shared) ────────────────────────────────────
 
 def format_mbps_report(v)
   return '--' unless v && v > 0
   v >= 1_000 ? '%.1f GB/s' % (v / 1_000.0) : '%.1f MB/s' % v
 end
 
-# ── options ────────────────────────────────────────────────────────────────────
+# ── options ───────────────────────────────────────────────────────────────────
 
 options = {
   backends:           %w[compio tokio],
@@ -123,253 +59,128 @@ OptionParser.new do |o|
   o.on('--update-benchmarks',    'Regenerate tables in BENCHMARKS.md')  { options[:update_benchmarks]     = true }
 end.parse!
 
-# ── load results ──────────────────────────────────────────────────────────────
+# ── load results ─────────────────────────────────────────────────────────────
 
-rows_by_backend = {}
-JSONL_PATH.each do |backend, path|
-  next unless options[:backends].include?(backend)
-  unless File.exist?(path)
-    rows_by_backend[backend] = []
-    next
-  end
-  rows_by_backend[backend] = File.readlines(path, chomp: true).filter_map do |line|
-    next if line.strip.empty?
-    JSON.parse(line, symbolize_names: true) rescue nil
-  end
-  unless options[:exclude_runs].empty?
-    rows_by_backend[backend].reject! { |r| options[:exclude_runs].include?(r[:run_id]) }
-  end
-end
+rows_by_backend = JSONL_PATH.filter_map { |b, p|
+  next unless options[:backends].include?(b)
+  [b, BenchHelpers.load_jsonl(p, exclude_runs: options[:exclude_runs])]
+}.to_h
 
-priority_rows_by_backend = {}
-JSONL_PRIORITY_PATH.each do |backend, path|
-  next unless options[:backends].include?(backend)
-  unless File.exist?(path)
-    priority_rows_by_backend[backend] = []
-    next
-  end
-  priority_rows_by_backend[backend] = File.readlines(path, chomp: true).filter_map do |line|
-    next if line.strip.empty?
-    JSON.parse(line, symbolize_names: true) rescue nil
-  end
-  unless options[:exclude_runs].empty?
-    priority_rows_by_backend[backend].reject! { |r| options[:exclude_runs].include?(r[:run_id]) }
-  end
-end
+priority_rows_by_backend = JSONL_PRIORITY_PATH.filter_map { |b, p|
+  next unless options[:backends].include?(b)
+  [b, BenchHelpers.load_jsonl(p, exclude_runs: options[:exclude_runs])]
+}.to_h
 
-# ── --update-benchmarks ───────────────────────────────────────────────────────
+# ── --update-benchmarks ─────────────────────────────────────────────────────
 
 if options[:update_benchmarks]
-  # For each cell, scan backwards and return the most recent matching row.
-  latest = lambda do |backend, pattern, transport, peers, msg_size|
-    (rows_by_backend[backend] || []).reverse_each.find do |r|
-      r[:pattern]   == pattern   &&
-        r[:transport] == transport &&
-        r[:peers]     == peers     &&
-        r[:msg_size]  == msg_size
-    end
-  end
+  THROUGHPUT_CELL = ->(row) {
+    next '—' unless row
+    [BenchHelpers.format_si(row[:msgs_s]), BenchHelpers.format_mbps(row[:mbps])].compact.join(' / ')
+  }
+  PRIORITY_CELL = ->(row) { BenchHelpers.format_si(row&.dig(:msgs_s)) || '—' }
+  MBPS_CELL     = ->(row) { row ? (BenchHelpers.format_mbps(row[:mbps]) || '—') : '—' }
 
-  replace_block = lambda do |text, marker, new_content|
-    b = "<!-- BEGIN #{marker} -->"
-    e = "<!-- END #{marker} -->"
-    re = /#{Regexp.escape(b)}.*?#{Regexp.escape(e)}/m
-    abort "Marker <!-- BEGIN #{marker} --> not found in BENCHMARKS.md" unless text.match?(re)
-    text.sub(re, "#{b}#{new_content}#{e}")
-  end
+  CORE = %w[inproc ipc tcp]
 
-  # push_pull_1peer — per backend, push_pull, peers=1, core transports
-  build_push_pull_1peer_compio = lambda do
-    transports = %w[inproc inproc-mt ipc tcp]
-      .select { |t| SIZE_LABELS.keys.any? { |s| latest.call('compio', 'push_pull', t, 1, s) } }
-    sizes = SIZE_LABELS.keys.select { |s| transports.any? { |t| latest.call('compio', 'push_pull', t, 1, s) } }
-    return "\n(no push_pull compio data)\n" if transports.empty?
-
-    out = +"\n"
-    out << "| Size | #{transports.join(' | ')} |\n"
-    out << "|---|#{transports.map { '---' }.join('|')}|\n"
-    sizes.each do |sz|
-      cells = transports.map { |t| throughput_cell(latest.call('compio', 'push_pull', t, 1, sz)) }
-      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
-    end
-    out << "\n"
-    out
-  end
-
-  build_push_pull_1peer_tokio = lambda do
-    transports = %w[inproc ipc tcp]
-      .select { |t| SIZE_LABELS.keys.any? { |s| latest.call('tokio', 'push_pull', t, 1, s) } }
-    sizes = SIZE_LABELS.keys.select { |s| transports.any? { |t| latest.call('tokio', 'push_pull', t, 1, s) } }
-    return "\n(no push_pull tokio data)\n" if transports.empty?
-
-    out = +"\n"
-    out << "| Size | #{transports.join(' | ')} |\n"
-    out << "|---|#{transports.map { '---' }.join('|')}|\n"
-    sizes.each do |sz|
-      cells = transports.map { |t| throughput_cell(latest.call('tokio', 'push_pull', t, 1, sz)) }
-      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
-    end
-    out << "\n"
-    out
-  end
-
-  # latency_percentiles — both backends, latency bench, peers=1, core transports
-  build_latency_percentiles = lambda do
-    transports = %w[inproc ipc tcp].select do |t|
-      SIZE_LABELS.keys.any? do |s|
-        latest.call('compio', 'latency', t, 1, s) || latest.call('tokio', 'latency', t, 1, s)
-      end
-    end
-    sizes = SIZE_LABELS.keys.select do |s|
-      transports.any? do |t|
-        latest.call('compio', 'latency', t, 1, s) || latest.call('tokio', 'latency', t, 1, s)
-      end
-    end
-    return "\n(no latency data)\n" if transports.empty?
-
-    out = +"\n"
-    out << "| transport | size | compio p50 | compio p99 | tokio p50 | tokio p99 |\n"
-    out << "|---|---|---|---|---|---|\n"
-    transports.each do |t|
-      sizes.each do |sz|
-        c  = latest.call('compio', 'latency', t, 1, sz)
-        tk = latest.call('tokio',  'latency', t, 1, sz)
-        next if c.nil? && tk.nil?
-        out << "| #{t} | #{size_label(sz)} |"
-        out << " #{format_us(c&.fetch(:p50_us, nil))} |"
-        out << " #{format_us(c&.fetch(:p99_us, nil))} |"
-        out << " #{format_us(tk&.fetch(:p50_us, nil))} |"
-        out << " #{format_us(tk&.fetch(:p99_us, nil))} |\n"
-      end
-    end
-    out << "\n"
-    out
-  end
-
-  # push_pull_8peer — per backend, push_pull, peers=8, core transports
-  # (no inproc-mt for 8-peer)
-  build_push_pull_8peer = lambda do |backend|
-    transports = %w[inproc ipc tcp]
-      .select { |t| SIZE_LABELS.keys.any? { |s| latest.call(backend, 'push_pull', t, 8, s) } }
-    sizes = SIZE_LABELS.keys.select { |s| transports.any? { |t| latest.call(backend, 'push_pull', t, 8, s) } }
-    return "\n(no push_pull 8-peer #{backend} data)\n" if transports.empty?
-
-    out = +"\n"
-    out << "| Size | #{transports.join(' | ')} |\n"
-    out << "|---|#{transports.map { '---' }.join('|')}|\n"
-    sizes.each do |sz|
-      cells = transports.map { |t| throughput_cell(latest.call(backend, 'push_pull', t, 8, sz)) }
-      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
-    end
-    out << "\n"
-    out
-  end
-
-  # Generic per-backend throughput table builder.
-  build_throughput_table = lambda do |pattern, peers, transports, backend, empty_msg|
-    ts = transports
-      .select { |t| SIZE_LABELS.keys.any? { |s| latest.call(backend, pattern, t, peers, s) } }
-    sizes = SIZE_LABELS.keys.select { |s| ts.any? { |t| latest.call(backend, pattern, t, peers, s) } }
-    return "\n(#{empty_msg})\n" if ts.empty?
-
-    out = +"\n"
-    out << "| Size | #{ts.join(' | ')} |\n"
-    out << "|---|#{ts.map { '---' }.join('|')}|\n"
-    sizes.each do |sz|
-      cells = ts.map { |t| throughput_cell(latest.call(backend, pattern, t, peers, sz)) }
-      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
-    end
-    out << "\n"
-    out
-  end
-
-  core_transports = %w[inproc ipc tcp]
-
-  build_push_pull_fanout_8peer = lambda do |backend|
-    build_throughput_table.call('push_pull_fanout', 8, core_transports, backend, "no push_pull_fanout 8-peer #{backend} data")
-  end
-
-  build_req_rep       = ->(b) { build_throughput_table.call('req_rep',        1, core_transports, b, "no req_rep #{b} data") }
-  build_pub_sub       = ->(b) { build_throughput_table.call('pub_sub',        3, core_transports, b, "no pub_sub #{b} data") }
-  build_router_dealer = ->(b) { build_throughput_table.call('router_dealer',  3, core_transports, b, "no router_dealer #{b} data") }
-  build_pair          = ->(b) { build_throughput_table.call('pair',           1, core_transports, b, "no pair #{b} data") }
-
-  # push_pull_priority — both backends, push_pull, peers=1, priority feature
-  latest_priority = lambda do |backend, pattern, transport, peers, msg_size|
-    (priority_rows_by_backend[backend] || []).reverse_each.find do |r|
-      r[:pattern]   == pattern   &&
-        r[:transport] == transport &&
-        r[:peers]     == peers     &&
-        r[:msg_size]  == msg_size
-    end
-  end
-
-  build_push_pull_priority = lambda do |backend|
-    transports = %w[inproc ipc tcp]
-    sizes = SIZE_LABELS.keys.select do |s|
-      transports.any? { |t| latest_priority.call(backend, 'push_pull', t, 1, s) }
-    end
-    return "\n(no push_pull priority #{backend} data — run: bench_run.rb --with-priority)\n" if sizes.empty?
-
-    out = +"\n"
-    out << "| Size | #{transports.join(' | ')} |\n"
-    out << "|---|#{transports.map { '---' }.join('|')}|\n"
-    sizes.each do |sz|
-      cells = transports.map do |t|
-        format_si(latest_priority.call(backend, 'push_pull', t, 1, sz)&.fetch(:msgs_s, nil)) || '—'
-      end
-      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
-    end
-    out << "\n"
-    out
-  end
-
-  # mechanism_frame — end-to-end mechanism cost over TCP from omq-compio bench
-  build_mechanism_frame = lambda do
-    mechanisms = %w[NULL CURVE BLAKE3ZMQ].select do |m|
-      SIZE_LABELS.keys.any? { |s| latest.call('compio', 'mechanism', m, 1, s) }
-    end
-    sizes = SIZE_LABELS.keys.select do |s|
-      mechanisms.any? { |m| latest.call('compio', 'mechanism', m, 1, s) }
-    end
-    return "\n(no mechanism data — run: cargo bench -p omq-compio --bench mechanism --features 'curve blake3zmq')\n" if mechanisms.empty?
-
-    out = +"\n"
-    out << "| Size | #{mechanisms.join(' | ')} |\n"
-    out << "|---|#{mechanisms.map { '---:' }.join('|')}|\n"
-    sizes.each do |sz|
-      cells = mechanisms.map do |m|
-        row = latest.call('compio', 'mechanism', m, 1, sz)
-        row ? format_mbps_short(row[:mbps]) : '—'
-      end
-      out << "| #{size_label(sz)} | #{cells.join(' | ')} |\n"
-    end
-    out << "\n"
-    out
-  end
+  TABLE_DEFS = [
+    { stem: 'push_pull_1peer',        pattern: 'push_pull',        peers: 1,
+      transports: { 'compio' => %w[inproc inproc-mt ipc tcp], 'tokio' => CORE } },
+    { stem: 'push_pull_8peer',        pattern: 'push_pull',        peers: 8 },
+    { stem: 'push_pull_fanout_8peer', pattern: 'push_pull_fanout', peers: 8 },
+    { stem: 'req_rep',                pattern: 'req_rep',           peers: 1 },
+    { stem: 'pub_sub',                pattern: 'pub_sub',           peers: 3 },
+    { stem: 'router_dealer',          pattern: 'router_dealer',     peers: 3 },
+    { stem: 'pair',                   pattern: 'pair',              peers: 1 },
+    { stem: 'push_pull_priority',     pattern: 'push_pull',        peers: 1,
+      cell_fmt: PRIORITY_CELL, source: :priority },
+  ].freeze
 
   bm = File.read(BENCHMARKS_PATH)
-  %w[compio tokio].each do |b|
-    bm = replace_block.call(bm, "push_pull_1peer_#{b}",        b == 'compio' ? build_push_pull_1peer_compio.call : build_push_pull_1peer_tokio.call)
-    bm = replace_block.call(bm, "push_pull_8peer_#{b}",        build_push_pull_8peer.call(b))
-    bm = replace_block.call(bm, "req_rep_#{b}",                build_req_rep.call(b))
-    bm = replace_block.call(bm, "pub_sub_#{b}",                build_pub_sub.call(b))
-    bm = replace_block.call(bm, "router_dealer_#{b}",          build_router_dealer.call(b))
-    bm = replace_block.call(bm, "pair_#{b}",                   build_pair.call(b))
-    bm = replace_block.call(bm, "push_pull_priority_#{b}",     build_push_pull_priority.call(b))
-  end
-  bm = replace_block.call(bm, 'push_pull_fanout_8peer_compio', build_push_pull_fanout_8peer.call('compio'))
-  bm = replace_block.call(bm, 'push_pull_fanout_8peer_tokio', build_push_pull_fanout_8peer.call('tokio'))
-  bm = replace_block.call(bm, 'latency_percentiles',           build_latency_percentiles.call)
-  bm = replace_block.call(bm, 'mechanism_frame',               build_mechanism_frame.call)
-  File.write(BENCHMARKS_PATH, bm)
 
+  TABLE_DEFS.each do |d|
+    %w[compio tokio].each do |backend|
+      ts = d.fetch(:transports, CORE)
+      ts = ts[backend] if ts.is_a?(Hash)
+      src = d[:source] == :priority ? priority_rows_by_backend : rows_by_backend
+      rows = src[backend] || []
+
+      lookup = ->(transport, sz) {
+        BenchHelpers.latest_row(rows, pattern: d[:pattern], transport: transport,
+                                      peers: d[:peers], msg_size: sz)
+      }
+
+      empty = "no #{d[:pattern]} #{backend} data"
+      empty += ' — run: bench_run.rb --with-priority' if d[:source] == :priority
+
+      content = BenchHelpers.build_size_table(
+        columns: ts, cell_fmt: d.fetch(:cell_fmt, THROUGHPUT_CELL),
+        lookup: lookup, empty_msg: empty,
+      )
+      bm = BenchHelpers.replace_block(bm, "#{d[:stem]}_#{backend}", content)
+    end
+  end
+
+  # latency_percentiles — both backends, transport x size rows, percentile columns
+  begin
+    transports = CORE.select do |t|
+      BenchHelpers::SIZE_LABELS.keys.any? do |s|
+        BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: s) ||
+          BenchHelpers.latest_row(rows_by_backend['tokio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: s)
+      end
+    end
+    sizes = BenchHelpers::SIZE_LABELS.keys.select do |s|
+      transports.any? do |t|
+        BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: s) ||
+          BenchHelpers.latest_row(rows_by_backend['tokio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: s)
+      end
+    end
+
+    if transports.empty?
+      latency_content = "(no latency data)\n"
+    else
+      latency_content = +""
+      latency_content << "| transport | size | compio p50 | compio p99 | tokio p50 | tokio p99 |\n"
+      latency_content << "|---|---|---|---|---|---|\n"
+      transports.each do |t|
+        sizes.each do |sz|
+          c  = BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: sz)
+          tk = BenchHelpers.latest_row(rows_by_backend['tokio']  || [], pattern: 'latency', transport: t, peers: 1, msg_size: sz)
+          next if c.nil? && tk.nil?
+          latency_content << "| #{t} | #{BenchHelpers.size_label(sz)} |"
+          latency_content << " #{BenchHelpers.format_us(c&.fetch(:p50_us, nil))} |"
+          latency_content << " #{BenchHelpers.format_us(c&.fetch(:p99_us, nil))} |"
+          latency_content << " #{BenchHelpers.format_us(tk&.fetch(:p50_us, nil))} |"
+          latency_content << " #{BenchHelpers.format_us(tk&.fetch(:p99_us, nil))} |\n"
+        end
+      end
+      latency_content << "\n"
+    end
+    bm = BenchHelpers.replace_block(bm, 'latency_percentiles', latency_content)
+  end
+
+  # mechanism_frame — end-to-end mechanism cost over TCP (compio only)
+  begin
+    mechanisms = %w[NULL CURVE BLAKE3ZMQ]
+    mech_rows = rows_by_backend['compio'] || []
+    lookup = ->(mech, sz) {
+      BenchHelpers.latest_row(mech_rows, pattern: 'mechanism', transport: mech, peers: 1, msg_size: sz)
+    }
+    content = BenchHelpers.build_size_table(
+      columns: mechanisms, cell_fmt: MBPS_CELL, lookup: lookup,
+      empty_msg: "no mechanism data — run: cargo bench -p omq-compio --bench mechanism --features 'curve blake3zmq'",
+      col_align: '---:',
+    )
+    bm = BenchHelpers.replace_block(bm, 'mechanism_frame', content)
+  end
+
+  File.write(BENCHMARKS_PATH, bm)
   run_counts = rows_by_backend.transform_values { |rows| rows.map { |r| r[:run_id] }.uniq.size }
   puts "Updated #{BENCHMARKS_PATH} (#{run_counts.map { |b, n| "#{b}: #{n} runs" }.join(', ')})"
   exit 0
 end
 
-# ── regression report ─────────────────────────────────────────────────────────
+# ── regression report ────────────────────────────────────────────────────────
 
 RED    = "\e[31m"
 GREEN  = "\e[32m"
@@ -421,10 +232,10 @@ options[:backends].each do |backend|
       new_val = latest[metric]
       next unless old_val && old_val != 0
 
-      fmt   = metric == :msgs_s ? method(:format_si) : method(:format_mbps_report)
+      fmt   = metric == :msgs_s ? BenchHelpers.method(:format_si) : method(:format_mbps_report)
       delta = ((new_val - old_val) / old_val.to_f * 100).round(1)
       row   = { pattern: pattern, transport: transport, peers: peer_label,
-                size: size_label(msg_size), metric: metric,
+                size: BenchHelpers.size_label(msg_size), metric: metric,
                 old: fmt.(old_val), new: fmt.(new_val), delta: delta }
 
       if delta <= -threshold
@@ -499,9 +310,9 @@ options[:backends].each do |backend|
   by_key.sort.each do |key, runs|
     pattern, transport, peers, msg_size = key
     peer_label = "#{peers} peer#{'s' if peers > 1}"
-    printf "\n  %-15s %-8s %-9s %-7s", pattern, transport, peer_label, size_label(msg_size)
+    printf "\n  %-15s %-8s %-9s %-7s", pattern, transport, peer_label, BenchHelpers.size_label(msg_size)
     [:msgs_s, :mbps].each do |metric|
-      fmt    = metric == :msgs_s ? method(:format_si) : method(:format_mbps_report)
+      fmt    = metric == :msgs_s ? BenchHelpers.method(:format_si) : method(:format_mbps_report)
       values = run_ids.map { |id| runs[id]&.fetch(metric, nil) }
       printf '  %-6s', metric
       values.each { |v| printf '  %10s', v ? fmt.(v) : '--' }

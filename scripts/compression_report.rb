@@ -16,38 +16,12 @@
 #   ruby scripts/compression_report.rb --link 1g
 #   sudo tc qdisc del dev lo root
 
-require 'json'
 require 'optparse'
+require_relative 'lib/bench_helpers'
 
 ROOT = File.expand_path('..', __dir__)
 COMPRESSION_PATH = File.join(ROOT, 'BENCHMARKS_COMPRESSION.md')
 JSONL_PATH = File.join(ROOT, 'omq-compio', 'benches', 'results.jsonl')
-
-SIZE_LABELS = {
-  32 => '32 B', 64 => '64 B', 128 => '128 B', 256 => '256 B',
-  512 => '512 B', 1_024 => '1 KiB', 2_048 => '2 KiB', 4_096 => '4 KiB',
-  8_192 => '8 KiB', 32_768 => '32 KiB', 131_072 => '128 KiB',
-}.freeze
-
-def size_label(n) = SIZE_LABELS[n] || "#{n} B"
-
-def format_tput(mbps)
-  return '---' unless mbps && mbps > 0
-  if    mbps >= 1_000 then '%.1f GB/s' % (mbps / 1_000.0)
-  elsif mbps >= 100   then '%.0f MB/s' % mbps
-  elsif mbps >= 10    then '%.1f MB/s' % mbps
-  else                     '%.2f MB/s' % mbps
-  end
-end
-
-def format_si(v)
-  return '---' unless v && v > 0
-  if    v >= 1e6   then '%.2fM' % (v / 1e6)
-  elsif v >= 100e3 then '%.0fk' % (v / 1e3)
-  elsif v >= 1e3   then '%.1fk' % (v / 1e3)
-  else                  '%.0f'  % v
-  end
-end
 
 options = { link: nil, prefix: nil }
 OptionParser.new do |o|
@@ -59,12 +33,8 @@ end.parse!
 abort 'Error: --link is required (100m or 1g)' unless options[:link]
 abort 'Error: --link must be 100m or 1g' unless %w[100m 1g].include?(options[:link])
 
-rows = File.readlines(JSONL_PATH).filter_map do |line|
-  line = line.strip
-  next if line.empty?
-  r = JSON.parse(line, symbolize_names: true)
-  next unless %i[compression_json compression_json_dict].include?(r[:pattern].to_sym)
-  r
+rows = BenchHelpers.load_jsonl(JSONL_PATH).select do |r|
+  %i[compression_json compression_json_dict].include?(r[:pattern].to_sym)
 end
 
 abort 'No compression_json rows in results.jsonl' if rows.empty?
@@ -107,27 +77,21 @@ def build_table(data, pattern)
   sizes.each do |sz|
     msgs_cells = transports.map do |t|
       r = data[[pattern, t, sz]]
-      r ? format_si(r[:msgs_s]) : '---'
+      r ? BenchHelpers.format_si(r[:msgs_s], nil_str: '---') : '---'
     end
     tput_cells = transports.map do |t|
       r = data[[pattern, t, sz]]
-      r ? format_tput(r[:mbps]) : '---'
+      r ? BenchHelpers.format_mbps(r[:mbps], nil_str: '---') : '---'
     end
-    out << "| #{size_label(sz)} | #{msgs_cells.join(' | ')} | #{tput_cells.join(' | ')} |\n"
+    out << "| #{BenchHelpers.size_label(sz)} | #{msgs_cells.join(' | ')} | #{tput_cells.join(' | ')} |\n"
   end
   out << "\n"
   out
 end
 
-def replace_block(text, marker, content)
-  re = /<!-- BEGIN #{Regexp.escape(marker)} -->\n.*?<!-- END #{Regexp.escape(marker)} -->/m
-  replacement = "<!-- BEGIN #{marker} -->\n#{content}<!-- END #{marker} -->"
-  text.sub(re, replacement)
-end
-
 link = options[:link]
 md = File.read(COMPRESSION_PATH)
-md = replace_block(md, "compression_#{link}",      build_table(data, :compression_json))
-md = replace_block(md, "compression_#{link}_dict",  build_table(data, :compression_json_dict))
+md = BenchHelpers.replace_block(md, "compression_#{link}",      build_table(data, :compression_json))
+md = BenchHelpers.replace_block(md, "compression_#{link}_dict", build_table(data, :compression_json_dict))
 File.write(COMPRESSION_PATH, md)
 warn "Updated #{COMPRESSION_PATH} (#{link} sections)"
