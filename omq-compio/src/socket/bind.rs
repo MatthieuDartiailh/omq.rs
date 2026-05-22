@@ -222,9 +222,8 @@ impl Socket {
                 let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
                 let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
                 let (_, writer) = stream.clone().into_split();
-                let slot_idx = {
-                    let mut peers = inner.out_peers.write().expect("peers lock");
-                    let idx = peers.insert(PeerSlot {
+                let slot_idx = inner.insert_peer_slot(
+                    PeerSlot {
                         out: PeerOut::Wire(handle),
                         direct_io: None,
                         peer: Arc::new(RwLock::new(None)),
@@ -235,30 +234,9 @@ impl Socket {
                         peer_groups: None,
                         #[cfg(feature = "priority")]
                         priority: omq_proto::DEFAULT_PRIORITY,
-                    });
-                    inner
-                        .peers_gen
-                        .fetch_add(1, std::sync::atomic::Ordering::Release);
-                    idx
-                };
-                {
-                    let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
-                    while pipes.len() <= slot_idx {
-                        pipes.push(None);
-                    }
-                }
-                if !identity.is_empty()
-                    && let Some(old_idx) = inner
-                        .identity_to_slot
-                        .write()
-                        .expect("identity table")
-                        .insert(identity.clone(), slot_idx)
-                    && old_idx != slot_idx
-                {
-                    inner.evict_peer_for_handover(old_idx);
-                }
-                inner.rebuild_peer_keys();
-                inner.on_peer_ready.notify(usize::MAX);
+                    },
+                    Some(&identity),
+                );
                 let inner2 = inner.clone();
                 let in_tx = inner.in_tx.clone();
                 compio::runtime::spawn(async move {

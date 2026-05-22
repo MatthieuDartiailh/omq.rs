@@ -416,55 +416,7 @@ pub(crate) async fn run_connection(
         //    claim, try_direct_recv is consuming events from the codec
         //    inline; draining here would surface events out of FIFO
         //    order.
-        let post_handshake = state.handshake_done.load(Ordering::Relaxed);
-        let recv_claimed = state.recv_claim.load(Ordering::Acquire) == 1;
-        let drained: SmallVec<[Drained; 8]> =
-            if !post_handshake || (ls.codec_has_input && !recv_claimed) {
-                ls.codec_has_input = false; // consumed; re-set by stream arm
-                let mut io = state.lock_io();
-                let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
-                // Control-plane events first (handshake must precede messages).
-                while let Some(ev) = io.codec.poll_event() {
-                    match ev {
-                        Event::HandshakeSucceeded {
-                            peer_minor,
-                            peer_properties,
-                        } => {
-                            if !io.handshake_done {
-                                ls.process_handshake_succeeded(
-                                    &state,
-                                    &mut io,
-                                    &peer_properties,
-                                    monitor_ctx.as_ref(),
-                                    hb_interval,
-                                )?;
-                                ls.codec_maybe_dirty = true;
-                                out.push(Drained::Handshake {
-                                    peer_minor,
-                                    peer_properties,
-                                });
-                            }
-                        }
-                        Event::Message(_) => unreachable!("messages use poll_message"),
-                        Event::Command(c) => out.push(Drained::Cmd(c)),
-                    }
-                }
-                // Data-plane messages (separate queue since message-queue split).
-                while let Some(m) = io.codec.poll_message() {
-                    let m = if let Some(dec) = io.decoder.as_mut() {
-                        match dec.decode(m)? {
-                            Some(plain) => plain,
-                            None => continue,
-                        }
-                    } else {
-                        m
-                    };
-                    out.push(Drained::Msg(m));
-                }
-                out
-            } else {
-                SmallVec::new()
-            };
+        let drained = ls.drain_codec_events(&state, monitor_ctx.as_ref(), hb_interval)?;
 
         // 2) Dispatch drained events outside the lock.
         if dispatch_drained_events(
@@ -583,102 +535,15 @@ pub(crate) async fn run_connection(
                 return Err(Error::HandshakeFailed("handshake timeout".into()));
             }
             () = hb_fut.fuse() => {
-                let now_nanos = state.hb_epoch.elapsed().as_nanos() as u64;
-                let last_nanos = state
-                    .last_input_nanos
-                    .load(Ordering::Relaxed);
-                let elapsed = Duration::from_nanos(now_nanos.saturating_sub(last_nanos));
-                if elapsed > hb_timeout {
-                    return Err(Error::Timeout);
-                }
-                let ping = Command::Ping {
-                    ttl_deciseconds: hb_ttl_deciseconds,
-                    context: Bytes::new(),
-                };
-                {
-                    let mut io = state.lock_io();
-                    let _ = io.codec.send_command(&ping);
-                    ls.codec_maybe_dirty = true;
-                }
-                if let Some(iv) = hb_interval {
-                    ls.hb_next = Some(Instant::now() + iv);
-                }
+                ls.handle_heartbeat(
+                    &state, hb_interval, hb_ttl_deciseconds, hb_timeout,
+                )?;
             }
             outcome = stream_arm.fuse() => {
-                match outcome {
-                    StreamArmOutcome::ClaimFlipped => {
-                        // A sender may have encoded directly into the
-                        // codec (via try_direct_encode) between the
-                        // previous select and now; that transmit_ready
-                        // notification may have been consumed by the
-                        // now-dropped listener. Force step 3a to check
-                        // the codec.
-                        ls.codec_maybe_dirty = true;
-                    }
-                    StreamArmOutcome::Eof => return Ok(()),
-                    StreamArmOutcome::ProtoErr(e) => return Err(e),
-                    StreamArmOutcome::Err(e) => {
-                        // Linux ENOBUFS = 105. Multi-shot recv is
-                        // terminated by the kernel when the BUF_RING is
-                        // exhausted.
-                        if e.raw_os_error() != Some(105) {
-                            return Ok(());
-                        }
-                        if accumulating {
-                            // Kernel killed the SQE for us. Transition
-                            // to OneShot; next iteration's stream_arm
-                            // does read_until for the remainder.
-                            let mut sguard = state.recv_stream.0.lock().await;
-                            *sguard =
-                                Some(crate::socket::RecvStreamState::OneShot);
-                        } else if state.recv_stream.rearm(&peer_io).await.is_err() {
-                            return Ok(());
-                        } else {
-                            state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
-                        }
-                        ls.codec_maybe_dirty = true;
-                    }
-                    StreamArmOutcome::Fed => {
-                        ls.codec_has_input = true;
-                        // If the user set the claim while we were
-                        // parked on stream.next, notify so its
-                        // pull_and_feed select can break out and drain
-                        // the codec we just populated.
-                        if state.recv_claim.load(Ordering::Acquire) == 1 {
-                            state.recv_codec_ready.notify(usize::MAX);
-                        }
-                        // handle_input may auto-generate output (e.g. PONG
-                        // in response to PING) — mark codec dirty so step 3a
-                        // flushes it before try_direct_recv can race it.
-                        ls.codec_maybe_dirty = true;
-                    }
-                    StreamArmOutcome::AccData(bytes) => {
-                        let payload_len =
-                            state.large_recv_pending.load(Ordering::Acquire);
-                        let mut acc_guard =
-                            state.pending_acc.lock().expect("pending_acc");
-                        let acc = acc_guard.as_mut().expect("AccData without buffer");
-                        let needed = payload_len - acc.len();
-                        let extra = if bytes.len() <= needed {
-                            acc.extend_from_slice(&bytes);
-                            None
-                        } else {
-                            acc.extend_from_slice(&bytes[..needed]);
-                            Some(bytes.slice(needed..))
-                        };
-                        if acc.len() >= payload_len {
-                            let payload = acc_guard.take().unwrap().freeze();
-                            drop(acc_guard);
-                            state.large_recv_pending.store(0, Ordering::Release);
-                            let mut io = state.lock_io();
-                            io.codec.supply_payload(payload)?;
-                            if let Some(extra) = extra {
-                                io.codec.handle_input(extra)?;
-                            }
-                            ls.codec_has_input = true;
-                            ls.codec_maybe_dirty = true;
-                        }
-                    }
+                if ls.handle_stream_outcome(
+                    outcome, accumulating, &state, &peer_io,
+                ).await? {
+                    return Ok(());
                 }
             }
             cmd = cmd_fut.fuse() => {
@@ -705,6 +570,152 @@ pub(crate) async fn run_connection(
 }
 
 impl DriverLoopState {
+    fn drain_codec_events(
+        &mut self,
+        state: &DirectIoState,
+        monitor_ctx: Option<&MonitorCtx>,
+        hb_interval: Option<Duration>,
+    ) -> Result<SmallVec<[Drained; 8]>> {
+        let post_handshake = state.handshake_done.load(Ordering::Relaxed);
+        let recv_claimed = state.recv_claim.load(Ordering::Acquire) == 1;
+        if post_handshake && (!self.codec_has_input || recv_claimed) {
+            return Ok(SmallVec::new());
+        }
+        self.codec_has_input = false;
+        let mut io = state.lock_io();
+        let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
+        while let Some(ev) = io.codec.poll_event() {
+            match ev {
+                Event::HandshakeSucceeded {
+                    peer_minor,
+                    peer_properties,
+                } => {
+                    if !io.handshake_done {
+                        self.process_handshake_succeeded(
+                            state,
+                            &mut io,
+                            &peer_properties,
+                            monitor_ctx,
+                            hb_interval,
+                        )?;
+                        self.codec_maybe_dirty = true;
+                        out.push(Drained::Handshake {
+                            peer_minor,
+                            peer_properties,
+                        });
+                    }
+                }
+                Event::Message(_) => unreachable!("messages use poll_message"),
+                Event::Command(c) => out.push(Drained::Cmd(c)),
+            }
+        }
+        while let Some(m) = io.codec.poll_message() {
+            let m = if let Some(dec) = io.decoder.as_mut() {
+                match dec.decode(m)? {
+                    Some(plain) => plain,
+                    None => continue,
+                }
+            } else {
+                m
+            };
+            out.push(Drained::Msg(m));
+        }
+        Ok(out)
+    }
+
+    /// Handle the outcome of the stream/read arm. Returns `Ok(true)` to
+    /// exit `run_connection`, `Ok(false)` to continue the loop.
+    async fn handle_stream_outcome(
+        &mut self,
+        outcome: StreamArmOutcome,
+        accumulating: bool,
+        state: &DirectIoState,
+        peer_io: &SharedPeerIo,
+    ) -> Result<bool> {
+        match outcome {
+            StreamArmOutcome::ClaimFlipped => {
+                self.codec_maybe_dirty = true;
+            }
+            StreamArmOutcome::Eof => return Ok(true),
+            StreamArmOutcome::ProtoErr(e) => return Err(e),
+            StreamArmOutcome::Err(e) => {
+                if e.raw_os_error() != Some(105) {
+                    return Ok(true);
+                }
+                if accumulating {
+                    let mut sguard = state.recv_stream.0.lock().await;
+                    *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                } else if state.recv_stream.rearm(peer_io).await.is_err() {
+                    return Ok(true);
+                } else {
+                    state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
+                }
+                self.codec_maybe_dirty = true;
+            }
+            StreamArmOutcome::Fed => {
+                self.codec_has_input = true;
+                if state.recv_claim.load(Ordering::Acquire) == 1 {
+                    state.recv_codec_ready.notify(usize::MAX);
+                }
+                self.codec_maybe_dirty = true;
+            }
+            StreamArmOutcome::AccData(bytes) => {
+                let payload_len = state.large_recv_pending.load(Ordering::Acquire);
+                let mut acc_guard = state.pending_acc.lock().expect("pending_acc");
+                let acc = acc_guard.as_mut().expect("AccData without buffer");
+                let needed = payload_len - acc.len();
+                let extra = if bytes.len() <= needed {
+                    acc.extend_from_slice(&bytes);
+                    None
+                } else {
+                    acc.extend_from_slice(&bytes[..needed]);
+                    Some(bytes.slice(needed..))
+                };
+                if acc.len() >= payload_len {
+                    let payload = acc_guard.take().unwrap().freeze();
+                    drop(acc_guard);
+                    state.large_recv_pending.store(0, Ordering::Release);
+                    let mut io = state.lock_io();
+                    io.codec.supply_payload(payload)?;
+                    if let Some(extra) = extra {
+                        io.codec.handle_input(extra)?;
+                    }
+                    self.codec_has_input = true;
+                    self.codec_maybe_dirty = true;
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn handle_heartbeat(
+        &mut self,
+        state: &DirectIoState,
+        hb_interval: Option<Duration>,
+        hb_ttl_deciseconds: u16,
+        hb_timeout: Duration,
+    ) -> Result<()> {
+        let now_nanos = state.hb_epoch.elapsed().as_nanos() as u64;
+        let last_nanos = state.last_input_nanos.load(Ordering::Relaxed);
+        let elapsed = Duration::from_nanos(now_nanos.saturating_sub(last_nanos));
+        if elapsed > hb_timeout {
+            return Err(Error::Timeout);
+        }
+        let ping = Command::Ping {
+            ttl_deciseconds: hb_ttl_deciseconds,
+            context: Bytes::new(),
+        };
+        {
+            let mut io = state.lock_io();
+            let _ = io.codec.send_command(&ping);
+            self.codec_maybe_dirty = true;
+        }
+        if let Some(iv) = hb_interval {
+            self.hb_next = Some(Instant::now() + iv);
+        }
+        Ok(())
+    }
+
     async fn flush_codec_to_wire(&mut self, state: &DirectIoState) -> Result<bool> {
         let mut writer = state.writer.lock().await;
         let chunks = {

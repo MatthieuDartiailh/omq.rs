@@ -68,9 +68,8 @@ pub(super) fn install_inproc_peer(
         sender: conn.out,
         our_identity,
     };
-    let idx = {
-        let mut peers = inner.out_peers.write().expect("peers lock");
-        let idx = peers.insert(PeerSlot {
+    let idx = inner.insert_peer_slot(
+        PeerSlot {
             out,
             direct_io: None,
             peer: Arc::new(RwLock::new(Some(conn.peer))),
@@ -81,17 +80,11 @@ pub(super) fn install_inproc_peer(
             peer_groups: None,
             #[cfg(feature = "priority")]
             priority,
-        });
-        inner
-            .peers_gen
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
-        idx
-    };
+        },
+        Some(&peer_identity),
+    );
     {
         let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
-        while pipes.len() <= idx {
-            pipes.push(None);
-        }
         if let Some(producer) = conn.spsc_send {
             pipes[idx] = Some(super::inner::InprocSendPipe {
                 producer,
@@ -107,18 +100,6 @@ pub(super) fn install_inproc_peer(
             recv.consumers.push(consumer);
         }
     }
-    inner.rebuild_peer_keys();
-    if !peer_identity.is_empty()
-        && let Some(old_idx) = inner
-            .identity_to_slot
-            .write()
-            .expect("identity table")
-            .insert(peer_identity, idx)
-        && old_idx != idx
-    {
-        inner.evict_peer_for_handover(old_idx);
-    }
-    inner.on_peer_ready.notify(usize::MAX);
     inner.inproc_recv_event.notify(usize::MAX);
     // Synthesise HandshakeSucceeded - inproc has no wire handshake
     // but consumers expect the same monitor signal as wire peers.
@@ -309,8 +290,41 @@ pub(super) fn install_ws_peer(
     );
 }
 
+struct TransportConfig {
+    uses_crypto: bool,
+    #[cfg(feature = "ws")]
+    ws_role: Option<omq_proto::proto::connection::WsRole>,
+}
+
+fn transport_crypto_config(
+    endpoint: &Endpoint,
+    mechanism: &omq_proto::options::MechanismConfig,
+    role: omq_proto::proto::connection::Role,
+) -> TransportConfig {
+    #[cfg(feature = "ws")]
+    if endpoint.is_ws_family() {
+        let ws_role = match role {
+            omq_proto::proto::connection::Role::Server => {
+                omq_proto::proto::connection::WsRole::Server
+            }
+            omq_proto::proto::connection::Role::Client => {
+                omq_proto::proto::connection::WsRole::Client
+            }
+        };
+        return TransportConfig {
+            uses_crypto: true,
+            ws_role: Some(ws_role),
+        };
+    }
+    let _ = (endpoint, role);
+    TransportConfig {
+        uses_crypto: !matches!(mechanism, omq_proto::options::MechanismConfig::Null),
+        #[cfg(feature = "ws")]
+        ws_role: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
 fn install_accepted_wire_peer_with_leftover(
     inner: &Arc<SocketInner>,
     reader: WireReader,
@@ -335,36 +349,10 @@ fn install_accepted_wire_peer_with_leftover(
             }
             None => (None, None, false, None),
         };
-    let uses_crypto;
+    let tc = transport_crypto_config(&endpoint, &inner.options.mechanism, role);
+    let uses_crypto = tc.uses_crypto;
     #[cfg(feature = "ws")]
-    let ws_role;
-    #[cfg(feature = "ws")]
-    {
-        ws_role = if endpoint.is_ws_family() {
-            uses_crypto = true;
-            Some(match role {
-                omq_proto::proto::connection::Role::Server => {
-                    omq_proto::proto::connection::WsRole::Server
-                }
-                omq_proto::proto::connection::Role::Client => {
-                    omq_proto::proto::connection::WsRole::Client
-                }
-            })
-        } else {
-            uses_crypto = !matches!(
-                inner.options.mechanism,
-                omq_proto::options::MechanismConfig::Null
-            );
-            None
-        };
-    }
-    #[cfg(not(feature = "ws"))]
-    {
-        uses_crypto = !matches!(
-            inner.options.mechanism,
-            omq_proto::options::MechanismConfig::Null
-        );
-    }
+    let ws_role = tc.ws_role;
     let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
@@ -389,11 +377,9 @@ fn install_accepted_wire_peer_with_leftover(
         inner.options.large_message_threshold.unwrap_or(0),
     );
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
-    let out = PeerOut::Wire(handle);
-    let slot_idx = {
-        let mut peers = inner.out_peers.write().expect("peers lock");
-        let idx = peers.insert(PeerSlot {
-            out,
+    let slot_idx = inner.insert_peer_slot(
+        PeerSlot {
+            out: PeerOut::Wire(handle),
             direct_io: Some(direct_io_handle.clone()),
             peer: Arc::new(RwLock::new(None)),
             connection_id,
@@ -403,20 +389,9 @@ fn install_accepted_wire_peer_with_leftover(
             peer_groups: peer_groups.clone(),
             #[cfg(feature = "priority")]
             priority: omq_proto::DEFAULT_PRIORITY,
-        });
-        inner
-            .peers_gen
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
-        idx
-    };
-    {
-        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
-        while pipes.len() <= slot_idx {
-            pipes.push(None);
-        }
-    }
-    inner.rebuild_peer_keys();
-    inner.on_peer_ready.notify(usize::MAX);
+        },
+        None,
+    );
     spawn_wire_driver(WireDriverConfig {
         inner: inner.clone(),
         state,

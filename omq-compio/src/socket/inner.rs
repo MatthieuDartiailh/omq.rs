@@ -390,6 +390,38 @@ impl SocketInner {
         }
     }
 
+    /// Insert a [`PeerSlot`], resize `inproc_send_pipes`, optionally
+    /// register identity (with handover), rebuild peer keys, and
+    /// notify waiters. Returns the slab index.
+    pub(super) fn insert_peer_slot(&self, slot: PeerSlot, identity: Option<&Bytes>) -> usize {
+        let idx = {
+            let mut peers = self.out_peers.write().expect("peers lock");
+            let idx = peers.insert(slot);
+            self.peers_gen.fetch_add(1, Ordering::Release);
+            idx
+        };
+        {
+            let pipes = unsafe { &mut *self.inproc_send_pipes.get() };
+            while pipes.len() <= idx {
+                pipes.push(None);
+            }
+        }
+        if let Some(id) = identity
+            && !id.is_empty()
+            && let Some(old_idx) = self
+                .identity_to_slot
+                .write()
+                .expect("identity table")
+                .insert(id.clone(), idx)
+            && old_idx != idx
+        {
+            self.evict_peer_for_handover(old_idx);
+        }
+        self.rebuild_peer_keys();
+        self.on_peer_ready.notify(usize::MAX);
+        idx
+    }
+
     /// Rebuild `peer_keys` from the current `out_peers` (caller
     /// must hold no lock on either; this acquires both reads/writes
     /// internally). Stable sort by priority preserves install order

@@ -531,7 +531,7 @@ impl Connection {
 
     #[cfg(feature = "ws")]
     fn drive_ws(&mut self) -> Result<()> {
-        use super::super::{ws_codec, zws};
+        use super::super::ws_codec;
 
         let peer_role = match self.ws_role.unwrap() {
             ws_codec::WsRole::Client => ws_codec::WsRole::Server,
@@ -557,53 +557,14 @@ impl Connection {
 
             match ws_hdr.opcode {
                 ws_codec::OP_BINARY_CODE => {
-                    if payload_len == 0 {
-                        return Err(Error::Protocol("empty WS binary frame".into()));
-                    }
-                    let payload = self.in_buf.split_to(payload_len);
-                    let mut raw = bytes::BytesMut::from(payload.as_bytes().as_ref());
-                    if ws_hdr.masked {
-                        ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
-                    }
-                    let flags = zws::zws_to_flags(raw[0])?;
-                    let zmtp_payload = if raw.len() > 1 {
-                        Payload::from_bytes(raw.split_off(1).freeze())
-                    } else {
-                        Payload::new()
-                    };
-                    self.dispatch_ws_binary(flags, zmtp_payload)?;
+                    self.handle_ws_binary(payload_len, &ws_hdr)?;
                 }
                 ws_codec::OP_CLOSE_CODE => {
-                    let mut code = 1005u16;
-                    if payload_len >= 2 {
-                        let raw = self.in_buf.split_to(payload_len);
-                        let b = raw.as_bytes();
-                        let mut code_bytes = [b[0], b[1]];
-                        if ws_hdr.masked {
-                            ws_codec::apply_mask(&mut code_bytes, ws_hdr.mask_key);
-                        }
-                        code = u16::from_be_bytes(code_bytes);
-                    } else if payload_len > 0 {
-                        self.in_buf.advance(payload_len);
-                    }
-                    if !self.ws_close_sent {
-                        self.send_ws_close(code);
-                    }
-                    self.state = State::Closed;
+                    self.handle_ws_close(payload_len, &ws_hdr);
                     return Ok(());
                 }
                 ws_codec::OP_PING_CODE => {
-                    let ping_data = if payload_len > 0 {
-                        let p = self.in_buf.split_to(payload_len);
-                        let mut raw = p.as_bytes().to_vec();
-                        if ws_hdr.masked {
-                            ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
-                        }
-                        raw
-                    } else {
-                        vec![]
-                    };
-                    self.queue_ws_pong(&ping_data);
+                    self.handle_ws_ping(payload_len, &ws_hdr);
                 }
                 ws_codec::OP_PONG_CODE => {
                     self.in_buf.advance(payload_len);
@@ -611,5 +572,72 @@ impl Connection {
                 _ => unreachable!("peek_ws_header rejects unknown opcodes"),
             }
         }
+    }
+
+    #[cfg(feature = "ws")]
+    fn handle_ws_binary(
+        &mut self,
+        payload_len: usize,
+        ws_hdr: &super::super::ws_codec::WsFrameHeader,
+    ) -> Result<()> {
+        use super::super::zws;
+        if payload_len == 0 {
+            return Err(Error::Protocol("empty WS binary frame".into()));
+        }
+        let payload = self.in_buf.split_to(payload_len);
+        let mut raw = bytes::BytesMut::from(payload.as_bytes().as_ref());
+        if ws_hdr.masked {
+            super::super::ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
+        }
+        let flags = zws::zws_to_flags(raw[0])?;
+        let zmtp_payload = if raw.len() > 1 {
+            Payload::from_bytes(raw.split_off(1).freeze())
+        } else {
+            Payload::new()
+        };
+        self.dispatch_ws_binary(flags, zmtp_payload)
+    }
+
+    #[cfg(feature = "ws")]
+    fn handle_ws_close(
+        &mut self,
+        payload_len: usize,
+        ws_hdr: &super::super::ws_codec::WsFrameHeader,
+    ) {
+        let mut code = 1005u16;
+        if payload_len >= 2 {
+            let raw = self.in_buf.split_to(payload_len);
+            let b = raw.as_bytes();
+            let mut code_bytes = [b[0], b[1]];
+            if ws_hdr.masked {
+                super::super::ws_codec::apply_mask(&mut code_bytes, ws_hdr.mask_key);
+            }
+            code = u16::from_be_bytes(code_bytes);
+        } else if payload_len > 0 {
+            self.in_buf.advance(payload_len);
+        }
+        if !self.ws_close_sent {
+            self.send_ws_close(code);
+        }
+        self.state = State::Closed;
+    }
+
+    #[cfg(feature = "ws")]
+    fn handle_ws_ping(
+        &mut self,
+        payload_len: usize,
+        ws_hdr: &super::super::ws_codec::WsFrameHeader,
+    ) {
+        let ping_data = if payload_len > 0 {
+            let p = self.in_buf.split_to(payload_len);
+            let mut raw = p.as_bytes().to_vec();
+            if ws_hdr.masked {
+                super::super::ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
+            }
+            raw
+        } else {
+            vec![]
+        };
+        self.queue_ws_pong(&ping_data);
     }
 }

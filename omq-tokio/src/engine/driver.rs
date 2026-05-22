@@ -327,43 +327,11 @@ where
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
-                    // Mirror DriverCommand::Close: drain whatever is
-                    // already enqueued (inbox + shared queue) and flush
-                    // to the wire so the last sent message reaches the
-                    // peer even when the user-side Drop took the
-                    // cancel-only fast path (no linger round-trip via
-                    // the actor). Without this, a `rep.send(...)` whose
-                    // bytes were handed to the actor but not yet picked
-                    // up by the driver gets discarded on Drop.
-                    while let Ok(cmd) = inbox.try_recv() {
-                        match cmd {
-                            DriverCommand::SendMessage(msg) => {
-                                encode_msg(
-                                    &msg, &mut encoder, &mut codec, &mut eq,
-                                    passthrough.as_ref(),
-                                );
-                            }
-                            DriverCommand::SendCommand(c) => {
-                                let _ = codec.send_command(&c);
-                            }
-                            DriverCommand::Close => break,
-                        }
-                    }
-                    if let Some(ref rx) = shared_msg_rx {
-                        let mut drained = 0usize;
-                        while let Some(msg) = rx.try_pop() {
-                            encode_msg(
-                                &msg, &mut encoder, &mut codec, &mut eq,
-                                passthrough.as_ref(),
-                            );
-                            drained += 1;
-                        }
-                        rx.release_permits(drained);
-                    }
-                    let _ = flush_encoded_queue(
-                        &mut writer, &mut eq, &mut drain_buf,
+                    drain_on_cancel(
+                        &mut inbox, shared_msg_rx.as_ref(),
+                        &mut encoder, &mut codec, &mut eq,
+                        &mut drain_buf, &mut writer, passthrough.as_ref(),
                     ).await;
-                    drain_writes(&mut writer, &mut codec).await.ok();
                     return Ok(());
                 }
 
@@ -381,32 +349,9 @@ where
                         return Ok(());
                     }
                     codec.handle_input(Bytes::copy_from_slice(&read_buf[..n]))?;
-                    #[cfg(feature = "ws")]
-                    let skip_large = codec.is_ws();
-                    #[cfg(not(feature = "ws"))]
-                    let skip_large = false;
-                    if config.large_message_threshold > 0
-                        && !codec.has_frame_transform()
-                        && !skip_large
-                    {
-                        while let Some(info) = codec.peek_next_frame_payload_size()? {
-                            if info.payload_len < config.large_message_threshold {
-                                break;
-                            }
-                            let Some((plen, prefix)) =
-                                codec.begin_supplied_payload_with_prefix()
-                            else {
-                                break;
-                            };
-                            let mut buf = BytesMut::zeroed(plen);
-                            buf[..prefix.len()].copy_from_slice(prefix.as_slice());
-                            if prefix.len() < plen {
-                                reader.read_exact(&mut buf[prefix.len()..]).await?;
-                            }
-                            last_input = Instant::now();
-                            codec.supply_payload(buf.freeze())?;
-                        }
-                    }
+                    handle_large_messages(
+                        &mut codec, &mut reader, &config, &mut last_input,
+                    ).await?;
                 }
 
                 res = async {
@@ -512,6 +457,74 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
         Some(t) => tokio::time::sleep_until(t.into()).await,
         None => std::future::pending::<()>().await,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drain_on_cancel<W: AsyncWrite + Unpin>(
+    inbox: &mut mpsc::Receiver<DriverCommand>,
+    shared_msg_rx: Option<&QueueReceiver>,
+    encoder: &mut Option<MessageEncoder>,
+    codec: &mut Connection,
+    eq: &mut EncodedQueue,
+    drain_buf: &mut Vec<Bytes>,
+    writer: &mut W,
+    passthrough: Option<&(Bytes, usize)>,
+) {
+    while let Ok(cmd) = inbox.try_recv() {
+        match cmd {
+            DriverCommand::SendMessage(msg) => {
+                encode_msg(&msg, encoder, codec, eq, passthrough);
+            }
+            DriverCommand::SendCommand(c) => {
+                let _ = codec.send_command(&c);
+            }
+            DriverCommand::Close => break,
+        }
+    }
+    if let Some(rx) = shared_msg_rx {
+        let mut drained = 0usize;
+        while let Some(msg) = rx.try_pop() {
+            encode_msg(&msg, encoder, codec, eq, passthrough);
+            drained += 1;
+        }
+        rx.release_permits(drained);
+    }
+    let _ = flush_encoded_queue(writer, eq, drain_buf).await;
+    drain_writes(writer, codec).await.ok();
+}
+
+/// After reading bytes from the wire, check for large frames whose
+/// payload exceeds the threshold and read them directly into a
+/// pre-sized buffer (bypasses the fixed `read_buf` -> codec copy path).
+async fn handle_large_messages<R: AsyncRead + Unpin>(
+    codec: &mut Connection,
+    reader: &mut R,
+    config: &DriverConfig,
+    last_input: &mut Instant,
+) -> Result<()> {
+    #[cfg(feature = "ws")]
+    let skip_large = codec.is_ws();
+    #[cfg(not(feature = "ws"))]
+    let skip_large = false;
+    if config.large_message_threshold == 0 || codec.has_frame_transform() || skip_large {
+        return Ok(());
+    }
+    while let Some(info) = codec.peek_next_frame_payload_size()? {
+        if info.payload_len < config.large_message_threshold {
+            break;
+        }
+        let Some((plen, prefix)) = codec.begin_supplied_payload_with_prefix() else {
+            break;
+        };
+        let mut buf = BytesMut::zeroed(plen);
+        buf[..prefix.len()].copy_from_slice(prefix.as_slice());
+        if prefix.len() < plen {
+            reader.read_exact(&mut buf[prefix.len()..]).await?;
+        }
+        *last_input = Instant::now();
+        codec.supply_payload(buf.freeze())?;
+    }
+    Ok(())
 }
 
 /// Encode one message into `EncodedQueue`. When a compression encoder

@@ -42,7 +42,85 @@ async fn maybe_sleep_until(deadline: Option<Instant>) {
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+struct WsLoopState {
+    closing: bool,
+    deadline: Option<Instant>,
+    hb_next: Option<Instant>,
+    hb_last_input: Instant,
+    peer_identity: Bytes,
+    handshake_done: bool,
+    pending_cmds: VecDeque<DriverCommand>,
+    shared_closed: bool,
+}
+
+impl WsLoopState {
+    fn drain_events(
+        &mut self,
+        codec: &mut Connection,
+        hb_interval: Option<Duration>,
+        monitor_ctx: Option<&MonitorCtx>,
+    ) -> SmallVec<[Drained; 8]> {
+        let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
+        while let Some(ev) = codec.poll_event() {
+            match ev {
+                Event::HandshakeSucceeded {
+                    peer_minor,
+                    peer_properties,
+                } => {
+                    if !self.handshake_done {
+                        self.handshake_done = true;
+                        self.deadline = None;
+                        if let Some(iv) = hb_interval {
+                            self.hb_next = Some(Instant::now() + iv);
+                        }
+                        self.peer_identity =
+                            peer_properties.identity.clone().unwrap_or_else(|| {
+                                monitor_ctx.map_or_else(Bytes::new, |ctx| {
+                                    generated_identity(ctx.connection_id)
+                                })
+                            });
+                        while let Some(cmd) = self.pending_cmds.pop_front() {
+                            let _ = handle_outbound_cmd(codec, cmd, &mut false);
+                        }
+                        out.push(Drained::Handshake {
+                            peer_minor,
+                            peer_properties,
+                        });
+                    }
+                }
+                Event::Message(_) => unreachable!("messages use poll_message"),
+                Event::Command(c) => out.push(Drained::Cmd(c)),
+            }
+        }
+        while let Some(m) = codec.poll_message() {
+            out.push(Drained::Msg(m));
+        }
+        out
+    }
+
+    fn handle_heartbeat(
+        &mut self,
+        codec: &mut Connection,
+        hb_interval: Option<Duration>,
+        hb_ttl_deciseconds: u16,
+        hb_timeout: Duration,
+    ) -> Result<()> {
+        if self.hb_last_input.elapsed() > hb_timeout {
+            return Err(Error::Timeout);
+        }
+        let ping = Command::Ping {
+            ttl_deciseconds: hb_ttl_deciseconds,
+            context: Bytes::new(),
+        };
+        codec.send_command(&ping)?;
+        if let Some(iv) = hb_interval {
+            self.hb_next = Some(Instant::now() + iv);
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_ws_connection(
     mut ws: WsStream,
     role: Role,
@@ -73,53 +151,48 @@ pub(crate) async fn run_ws_connection(
         .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
         .unwrap_or(0);
 
-    let mut closing = false;
-    let mut deadline: Option<Instant> = options.handshake_timeout.map(|t| Instant::now() + t);
-    let mut hb_next: Option<Instant> = None;
-    let mut hb_last_input = Instant::now();
-    let mut peer_identity = Bytes::new();
-    let mut handshake_done = false;
-    let mut pending_cmds: VecDeque<DriverCommand> = VecDeque::new();
-    let mut shared_closed = false;
+    let mut ls = WsLoopState {
+        closing: false,
+        deadline: options.handshake_timeout.map(|t| Instant::now() + t),
+        hb_next: None,
+        hb_last_input: Instant::now(),
+        peer_identity: Bytes::new(),
+        handshake_done: false,
+        pending_cmds: VecDeque::new(),
+        shared_closed: false,
+    };
 
     flush_ws_frames(&mut codec, &mut ws).await?;
 
     loop {
-        if closing && handshake_done && pending_cmds.is_empty() && !codec.has_pending_ws_frames() {
+        if ls.closing
+            && ls.handshake_done
+            && ls.pending_cmds.is_empty()
+            && !codec.has_pending_ws_frames()
+        {
             return Ok(());
         }
 
+        let drained = ls.drain_events(&mut codec, hb_interval, monitor_ctx.as_ref());
+        if dispatch_drained_events(
+            drained,
+            socket_type,
+            &peer_in_tx,
+            &peer_snapshot_tx,
+            monitor_ctx.as_ref(),
+            &ls.peer_identity,
+        )
+        .await?
         {
-            let drained = drain_events(
-                &mut codec,
-                &mut handshake_done,
-                &mut deadline,
-                &mut hb_next,
-                hb_interval,
-                &mut peer_identity,
-                monitor_ctx.as_ref(),
-                &mut pending_cmds,
-            );
-            if dispatch_drained_events(
-                drained,
-                socket_type,
-                &peer_in_tx,
-                &peer_snapshot_tx,
-                monitor_ctx.as_ref(),
-                &peer_identity,
-            )
-            .await?
-            {
-                return Ok(());
-            }
+            return Ok(());
         }
 
         flush_ws_frames(&mut codec, &mut ws).await?;
 
-        let timeout_fut = maybe_sleep_until(deadline);
-        let hb_fut = maybe_sleep_until(hb_next);
+        let timeout_fut = maybe_sleep_until(ls.deadline);
+        let hb_fut = maybe_sleep_until(ls.hb_next);
         let cmd_fut = inbox.recv_async();
-        let shared_active = shared_msg_rx.as_ref().filter(|_| !shared_closed);
+        let shared_active = shared_msg_rx.as_ref().filter(|_| !ls.shared_closed);
         let shared_fut = async {
             match shared_active {
                 Some(rx) => rx.recv_async().await.ok(),
@@ -138,25 +211,16 @@ pub(crate) async fn run_ws_connection(
                 return Err(Error::HandshakeFailed("handshake timeout".into()));
             }
             () = hb_fut.fuse() => {
-                let elapsed = hb_last_input.elapsed();
-                if elapsed > hb_timeout {
-                    return Err(Error::Timeout);
-                }
-                let ping = Command::Ping {
-                    ttl_deciseconds: hb_ttl_deciseconds,
-                    context: Bytes::new(),
-                };
-                codec.send_command(&ping)?;
-                if let Some(iv) = hb_interval {
-                    hb_next = Some(Instant::now() + iv);
-                }
+                ls.handle_heartbeat(
+                    &mut codec, hb_interval, hb_ttl_deciseconds, hb_timeout,
+                )?;
             }
             msg = ws_next.fuse() => {
                 let Some(msg) = msg else { return Ok(()); };
                 let msg = msg.map_err(ws_io_err)?;
                 match msg {
                     compio_ws::tungstenite::Message::Binary(data) => {
-                        hb_last_input = Instant::now();
+                        ls.hb_last_input = Instant::now();
                         codec.handle_ws_message(data)?;
                     }
                     compio_ws::tungstenite::Message::Close(_) => return Ok(()),
@@ -165,18 +229,18 @@ pub(crate) async fn run_ws_connection(
             }
             cmd = cmd_fut.fuse() => {
                 let Ok(cmd) = cmd else { return Ok(()); };
-                if handshake_done {
-                    handle_outbound_cmd(&mut codec, cmd, &mut closing)?;
+                if ls.handshake_done {
+                    handle_outbound_cmd(&mut codec, cmd, &mut ls.closing)?;
                 } else {
-                    pending_cmds.push_back(cmd);
+                    ls.pending_cmds.push_back(cmd);
                 }
             }
             msg = shared_fut.fuse() => {
                 let Some(m) = msg else {
-                    shared_closed = true;
+                    ls.shared_closed = true;
                     continue;
                 };
-                if handshake_done {
+                if ls.handshake_done {
                     codec.send_message(&m)?;
                     if let Some(rx) = shared_msg_rx.as_ref() {
                         while let Ok(extra) = rx.try_recv() {
@@ -185,7 +249,7 @@ pub(crate) async fn run_ws_connection(
                     }
                     flush_ws_frames(&mut codec, &mut ws).await?;
                 } else {
-                    pending_cmds.push_back(DriverCommand::SendMessage(m));
+                    ls.pending_cmds.push_back(DriverCommand::SendMessage(m));
                 }
             }
         }
@@ -203,54 +267,6 @@ fn handle_outbound_cmd(
         DriverCommand::Close => *closing = true,
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn drain_events(
-    codec: &mut Connection,
-    handshake_done: &mut bool,
-    deadline: &mut Option<Instant>,
-    hb_next: &mut Option<Instant>,
-    hb_interval: Option<Duration>,
-    peer_identity: &mut Bytes,
-    monitor_ctx: Option<&MonitorCtx>,
-    pending_cmds: &mut VecDeque<DriverCommand>,
-) -> SmallVec<[Drained; 8]> {
-    let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
-    while let Some(ev) = codec.poll_event() {
-        match ev {
-            Event::HandshakeSucceeded {
-                peer_minor,
-                peer_properties,
-            } => {
-                if !*handshake_done {
-                    *handshake_done = true;
-                    *deadline = None;
-                    if let Some(iv) = hb_interval {
-                        *hb_next = Some(Instant::now() + iv);
-                    }
-                    *peer_identity = peer_properties.identity.clone().unwrap_or_else(|| {
-                        monitor_ctx
-                            .as_ref()
-                            .map_or_else(Bytes::new, |ctx| generated_identity(ctx.connection_id))
-                    });
-                    while let Some(cmd) = pending_cmds.pop_front() {
-                        let _ = handle_outbound_cmd(codec, cmd, &mut false);
-                    }
-                    out.push(Drained::Handshake {
-                        peer_minor,
-                        peer_properties,
-                    });
-                }
-            }
-            Event::Message(_) => unreachable!("messages use poll_message"),
-            Event::Command(c) => out.push(Drained::Cmd(c)),
-        }
-    }
-    while let Some(m) = codec.poll_message() {
-        out.push(Drained::Msg(m));
-    }
-    out
 }
 
 async fn flush_ws_frames(codec: &mut Connection, ws: &mut WsStream) -> Result<()> {

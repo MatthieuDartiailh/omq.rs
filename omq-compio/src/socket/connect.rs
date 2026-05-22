@@ -12,6 +12,7 @@ use crate::transport::tcp as tcp_transport;
 
 use super::Socket;
 use super::dial::{connect_ipc_with_reconnect, connect_tcp_with_reconnect};
+use super::inner::SocketInner;
 use super::inner::{PeerOut, PeerSlot, UdpDialerEntry, WirePeerHandle};
 use super::install::install_inproc_peer;
 use super::reject_encrypted_inproc;
@@ -129,46 +130,28 @@ impl Socket {
 
                 if inproc::is_bound(&name) {
                     let conn = inproc::connect(&name, snapshot, in_tx, recv_event, parked).await?;
-                    let conn_id = self
-                        .inner()
-                        .next_connection_id
-                        .fetch_add(1, Ordering::Relaxed);
-                    let ep = Endpoint::Inproc { name: name.clone() };
-                    self.inner()
-                        .monitor
-                        .connected(ep.clone(), PeerIdent::Inproc(name), conn_id);
-                    install_inproc_peer(
+                    finish_inproc_connect(
                         self.inner(),
+                        name,
                         conn,
-                        ep,
-                        conn_id,
                         #[cfg(feature = "priority")]
                         priority,
                     );
                 } else {
                     let inner = self.inner().clone();
-                    let name_clone = name.clone();
                     #[cfg(feature = "priority")]
                     #[allow(clippy::redundant_locals)]
                     let priority = priority;
                     compio::runtime::spawn(async move {
                         let Ok(conn) =
-                            inproc::connect(&name_clone, snapshot, in_tx, recv_event, parked).await
+                            inproc::connect(&name, snapshot, in_tx, recv_event, parked).await
                         else {
                             return;
                         };
-                        let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-                        let ep = Endpoint::Inproc {
-                            name: name_clone.clone(),
-                        };
-                        inner
-                            .monitor
-                            .connected(ep.clone(), PeerIdent::Inproc(name_clone), conn_id);
-                        install_inproc_peer(
+                        finish_inproc_connect(
                             &inner,
+                            name,
                             conn,
-                            ep,
-                            conn_id,
                             #[cfg(feature = "priority")]
                             priority,
                         );
@@ -217,9 +200,8 @@ impl Socket {
         let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
         let inner = self.inner().clone();
         let (_, writer) = stream.clone().into_split();
-        let slot_idx = {
-            let mut peers = inner.out_peers.write().expect("peers lock");
-            let idx = peers.insert(PeerSlot {
+        let slot_idx = inner.insert_peer_slot(
+            PeerSlot {
                 out: PeerOut::Wire(handle),
                 direct_io: None,
                 peer: Arc::new(RwLock::new(None)),
@@ -230,30 +212,9 @@ impl Socket {
                 peer_groups: None,
                 #[cfg(feature = "priority")]
                 priority: omq_proto::DEFAULT_PRIORITY,
-            });
-            inner
-                .peers_gen
-                .fetch_add(1, std::sync::atomic::Ordering::Release);
-            idx
-        };
-        {
-            let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
-            while pipes.len() <= slot_idx {
-                pipes.push(None);
-            }
-        }
-        if !identity.is_empty()
-            && let Some(old_idx) = inner
-                .identity_to_slot
-                .write()
-                .expect("identity table")
-                .insert(identity.clone(), slot_idx)
-            && old_idx != slot_idx
-        {
-            inner.evict_peer_for_handover(old_idx);
-        }
-        inner.rebuild_peer_keys();
-        inner.on_peer_ready.notify(usize::MAX);
+            },
+            Some(&identity),
+        );
         let in_tx = inner.in_tx.clone();
         compio::runtime::spawn(async move {
             stream_raw::run(stream, writer.into(), identity, in_tx, cmd_rx).await;
@@ -290,4 +251,25 @@ impl Socket {
         self.inner().on_peer_ready.notify(usize::MAX);
         Ok(())
     }
+}
+
+fn finish_inproc_connect(
+    inner: &Arc<SocketInner>,
+    name: String,
+    conn: inproc::InprocConn,
+    #[cfg(feature = "priority")] priority: u8,
+) {
+    let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+    let ep = Endpoint::Inproc { name: name.clone() };
+    inner
+        .monitor
+        .connected(ep.clone(), PeerIdent::Inproc(name), conn_id);
+    install_inproc_peer(
+        inner,
+        conn,
+        ep,
+        conn_id,
+        #[cfg(feature = "priority")]
+        priority,
+    );
 }
