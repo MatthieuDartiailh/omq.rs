@@ -56,6 +56,12 @@ pub struct Overlay {
     pub curve_serverkey: Option<Vec<u8>>,
     #[cfg(feature = "curve")]
     pub curve_authenticator: Option<crate::auth::CurveAuthenticator>,
+    pub blake3zmq_server: bool,
+    pub blake3zmq_publickey: Option<Vec<u8>>,
+    pub blake3zmq_secretkey: Option<Vec<u8>>,
+    pub blake3zmq_serverkey: Option<Vec<u8>>,
+    #[cfg(feature = "blake3zmq")]
+    pub blake3zmq_authenticator: Option<crate::blake3zmq_auth::Blake3ZmqAuthenticator>,
 }
 
 impl Overlay {
@@ -139,6 +145,47 @@ impl Overlay {
                 server_public,
             };
         }
+        #[cfg(feature = "blake3zmq")]
+        if self.blake3zmq_server {
+            if let (Some(pk), Some(sk)) =
+                (&self.blake3zmq_publickey, &self.blake3zmq_secretkey)
+            {
+                let public = omq_compio::Blake3ZmqPublicKey(
+                    <[u8; 32]>::try_from(pk.as_slice()).expect("bad BLAKE3ZMQ_PUBLICKEY"),
+                );
+                let secret = omq_compio::Blake3ZmqSecretKey(
+                    <[u8; 32]>::try_from(sk.as_slice()).expect("bad BLAKE3ZMQ_SECRETKEY"),
+                );
+                let keypair = omq_compio::Blake3ZmqKeypair { public, secret };
+                opts.mechanism = omq_proto::options::MechanismConfig::Blake3ZmqServer {
+                    our_keypair: keypair,
+                    cookie_keyring: std::sync::Arc::new(
+                        omq_proto::proto::mechanism::blake3zmq::CookieKeyring::new(),
+                    ),
+                    authenticator: self
+                        .blake3zmq_authenticator
+                        .as_ref()
+                        .map(crate::blake3zmq_auth::build_authenticator),
+                };
+            }
+        } else if let (Some(pk), Some(sk), Some(svk)) =
+            (&self.blake3zmq_publickey, &self.blake3zmq_secretkey, &self.blake3zmq_serverkey)
+        {
+            let public = omq_compio::Blake3ZmqPublicKey(
+                <[u8; 32]>::try_from(pk.as_slice()).expect("bad BLAKE3ZMQ_PUBLICKEY"),
+            );
+            let secret = omq_compio::Blake3ZmqSecretKey(
+                <[u8; 32]>::try_from(sk.as_slice()).expect("bad BLAKE3ZMQ_SECRETKEY"),
+            );
+            let server_public = omq_compio::Blake3ZmqPublicKey(
+                <[u8; 32]>::try_from(svk.as_slice()).expect("bad BLAKE3ZMQ_SERVERKEY"),
+            );
+            let keypair = omq_compio::Blake3ZmqKeypair { public, secret };
+            opts.mechanism = omq_proto::options::MechanismConfig::Blake3ZmqClient {
+                our_keypair: keypair,
+                server_public,
+            };
+        }
         opts
     }
 
@@ -181,6 +228,12 @@ impl Overlay {
             curve_serverkey: None,
             #[cfg(feature = "curve")]
             curve_authenticator: None,
+            blake3zmq_server: false,
+            blake3zmq_publickey: None,
+            blake3zmq_secretkey: None,
+            blake3zmq_serverkey: None,
+            #[cfg(feature = "blake3zmq")]
+            blake3zmq_authenticator: None,
         }
     }
 }
@@ -358,6 +411,21 @@ pub fn setsockopt(
         constants::CURVE_SERVERKEY => {
             let v: &[u8] = value.extract()?;
             ov.curve_serverkey = Some(v.to_vec());
+        }
+        constants::BLAKE3ZMQ_SERVER => {
+            ov.blake3zmq_server = value.extract::<i64>()? != 0;
+        }
+        constants::BLAKE3ZMQ_PUBLICKEY => {
+            let v: &[u8] = value.extract()?;
+            ov.blake3zmq_publickey = Some(v.to_vec());
+        }
+        constants::BLAKE3ZMQ_SECRETKEY => {
+            let v: &[u8] = value.extract()?;
+            ov.blake3zmq_secretkey = Some(v.to_vec());
+        }
+        constants::BLAKE3ZMQ_SERVERKEY => {
+            let v: &[u8] = value.extract()?;
+            ov.blake3zmq_serverkey = Some(v.to_vec());
         }
         // No-ops accepted for source-compat with pyzmq:
         constants::IMMEDIATE
@@ -594,6 +662,40 @@ pub fn getsockopt<'py>(
                 .lock()
                 .unwrap()
                 .curve_serverkey
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, &v).into_any())
+        }
+        constants::BLAKE3ZMQ_SERVER => {
+            let v = sock.overlay.lock().unwrap().blake3zmq_server as i64;
+            Ok(int_to_bound(py, v))
+        }
+        constants::BLAKE3ZMQ_PUBLICKEY => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .blake3zmq_publickey
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, &v).into_any())
+        }
+        constants::BLAKE3ZMQ_SECRETKEY => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .blake3zmq_secretkey
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, &v).into_any())
+        }
+        constants::BLAKE3ZMQ_SERVERKEY => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .blake3zmq_serverkey
                 .clone()
                 .unwrap_or_default();
             Ok(PyBytes::new_bound(py, &v).into_any())

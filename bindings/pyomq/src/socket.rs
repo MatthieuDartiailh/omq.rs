@@ -488,6 +488,11 @@ impl Socket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
+    #[cfg(feature = "blake3zmq")]
+    fn set_blake3zmq_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::blake3zmq_auth::set_blake3zmq_auth_impl(&self.inner, auth)
+    }
+
     #[pyo3(signature = (_linger=None))]
     fn close(&self, py: Python<'_>, _linger: Option<i64>) -> PyResult<()> {
         let m = self.inner.take_materialized();

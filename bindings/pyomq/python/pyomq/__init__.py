@@ -82,6 +82,11 @@ from ._native import (  # type: ignore[attr-defined]
     CURVE_PUBLICKEY,
     CURVE_SECRETKEY,
     CURVE_SERVERKEY,
+    # BLAKE3ZMQ option ids
+    BLAKE3ZMQ_SERVER,
+    BLAKE3ZMQ_PUBLICKEY,
+    BLAKE3ZMQ_SECRETKEY,
+    BLAKE3ZMQ_SERVERKEY,
 )
 
 from .error import (  # noqa: F401  re-exports
@@ -136,6 +141,7 @@ STREAMER = 1
 NULL = 0
 PLAIN = 1
 CURVE = 2
+BLAKE3ZMQ = 3
 
 __version__ = version()
 zmq_version_info = (4, 3, 4)
@@ -181,6 +187,12 @@ def curve_public(secret):
     if isinstance(secret, str):
         secret = secret.encode("ascii")
     return _native.curve_public(secret)
+
+
+def blake3zmq_keypair():
+    if not hasattr(_native, "blake3zmq_keypair"):
+        raise ZMQNotImplementedError("blake3zmq feature not compiled")
+    return _native.blake3zmq_keypair()
 
 
 if hasattr(_native, "PeerInfo"):
@@ -229,6 +241,10 @@ _SOCKOPT_NAMES = {
     "curve_publickey": CURVE_PUBLICKEY,
     "curve_secretkey": CURVE_SECRETKEY,
     "curve_serverkey": CURVE_SERVERKEY,
+    "blake3zmq_server": BLAKE3ZMQ_SERVER,
+    "blake3zmq_publickey": BLAKE3ZMQ_PUBLICKEY,
+    "blake3zmq_secretkey": BLAKE3ZMQ_SECRETKEY,
+    "blake3zmq_serverkey": BLAKE3ZMQ_SERVERKEY,
     "sndbuf": SNDBUF,
     "rcvbuf": RCVBUF,
     "mechanism": MECHANISM,
@@ -429,6 +445,14 @@ class Socket:
             raise error.from_native(e) from None
         except AttributeError:
             raise ZMQNotImplementedError("curve feature not compiled")
+
+    def set_blake3zmq_auth(self, auth):
+        try:
+            return self._sock.set_blake3zmq_auth(auth)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+        except AttributeError:
+            raise ZMQNotImplementedError("blake3zmq feature not compiled")
 
     def set_hwm(self, value):
         self.setsockopt(SNDHWM, value)
@@ -676,6 +700,7 @@ __all__ = [
     "TCP_KEEPALIVE_INTVL",
     "SNDMORE", "NOBLOCK", "DONTWAIT",
     "CURVE_SERVER", "CURVE_PUBLICKEY", "CURVE_SECRETKEY", "CURVE_SERVERKEY",
+    "BLAKE3ZMQ_SERVER", "BLAKE3ZMQ_PUBLICKEY", "BLAKE3ZMQ_SECRETKEY", "BLAKE3ZMQ_SERVERKEY",
     # poll / compat constants
     "POLLIN", "POLLOUT", "POLLERR", "POLLPRI", "STREAM", "HWM",
     # additional compat constants
@@ -688,10 +713,10 @@ __all__ = [
     # device types
     "FORWARDER", "QUEUE", "STREAMER",
     # security mechanism constants
-    "NULL", "PLAIN", "CURVE",
+    "NULL", "PLAIN", "CURVE", "BLAKE3ZMQ",
     # version
     "__version__", "zmq_version_info", "zmq_version",
     "pyomq_version", "pyomq_version_info",
     # curve
-    "curve_keypair", "curve_public", "PeerInfo",
+    "curve_keypair", "curve_public", "blake3zmq_keypair", "PeerInfo",
 ]

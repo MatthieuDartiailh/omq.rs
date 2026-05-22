@@ -276,6 +276,11 @@ impl AsyncSocket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
+    #[cfg(feature = "blake3zmq")]
+    fn set_blake3zmq_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::blake3zmq_auth::set_blake3zmq_auth_impl(&self.inner, auth)
+    }
+
     #[pyo3(signature = (_linger=None))]
     fn close<'py>(&self, py: Python<'py>, _linger: Option<i64>) -> PyResult<Bound<'py, PyAny>> {
         let m = self.inner.take_materialized();

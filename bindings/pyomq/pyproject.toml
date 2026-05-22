@@ -42,7 +42,7 @@ addopts = "--ignore=tests/soak"
 
 [tool.maturin]
 # Stable ABI - one wheel covers all supported Python versions.
-features = ["pyo3/abi3-py39", "plain", "curve", "lz4", "zstd"]
+features = ["pyo3/abi3-py39", "plain", "curve", "blake3zmq", "lz4", "zstd"]
 # The native module lives at pyomq._native; pyomq itself is a pure
 # Python package re-exporting from it.
 module-name = "pyomq._native"

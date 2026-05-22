@@ -31,6 +31,12 @@ impl PeerInfo {
             public_key: PyBytes::new_bound(py, z85.as_bytes()).unbind(),
         }
     }
+
+    pub(crate) fn from_raw_bytes(py: Python<'_>, raw: &[u8; 32]) -> Self {
+        Self {
+            public_key: PyBytes::new_bound(py, raw).unbind(),
+        }
+    }
 }
 
 /// Two modes of CURVE client authentication stored in the Overlay

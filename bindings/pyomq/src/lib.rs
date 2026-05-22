@@ -17,6 +17,8 @@
 
 #[cfg(feature = "curve")]
 mod auth;
+#[cfg(feature = "blake3zmq")]
+mod blake3zmq_auth;
 mod constants;
 mod context;
 mod conversions;
@@ -48,6 +50,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<auth::PeerInfo>()?;
         m.add_function(wrap_pyfunction!(curve_keypair, m)?)?;
         m.add_function(wrap_pyfunction!(curve_public, m)?)?;
+    }
+    #[cfg(feature = "blake3zmq")]
+    {
+        m.add_function(wrap_pyfunction!(blake3zmq_keypair, m)?)?;
     }
     Ok(())
 }
@@ -115,15 +121,29 @@ fn curve_public(py: Python<'_>, secret_z85: &[u8]) -> PyResult<PyObject> {
     Ok(pyo3::types::PyBytes::new_bound(py, pub_z85.as_bytes()).into())
 }
 
+#[cfg(feature = "blake3zmq")]
+#[pyfunction]
+fn blake3zmq_keypair(py: Python<'_>) -> PyResult<(PyObject, PyObject)> {
+    let kp = omq_proto::Blake3ZmqKeypair::generate();
+    let pub_bytes = pyo3::types::PyBytes::new_bound(py, &kp.public.0);
+    let sec_bytes = pyo3::types::PyBytes::new_bound(py, &kp.secret.0);
+    Ok((pub_bytes.into(), sec_bytes.into()))
+}
+
 #[pyfunction]
 fn has_feature(name: &str) -> bool {
     match name {
         "ipc" | "inproc" => true,
-        "curve" => cfg!(feature = "curve"),
-        "plain" => cfg!(feature = "plain"),
-        "blake3zmq" => cfg!(feature = "blake3zmq"),
-        "lz4" => cfg!(feature = "lz4"),
-        "zstd" => cfg!(feature = "zstd"),
+        #[cfg(feature = "curve")]
+        "curve" => true,
+        #[cfg(feature = "plain")]
+        "plain" => true,
+        #[cfg(feature = "blake3zmq")]
+        "blake3zmq" => true,
+        #[cfg(feature = "lz4")]
+        "lz4" => true,
+        #[cfg(feature = "zstd")]
+        "zstd" => true,
         _ => false,
     }
 }
