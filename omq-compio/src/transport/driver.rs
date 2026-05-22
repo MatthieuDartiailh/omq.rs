@@ -175,6 +175,7 @@ pub(crate) fn build_peer_io(
         let _ = codec.handle_input(leftover);
         let _ = wr; // suppress unused
     }
+    #[allow(clippy::arc_with_non_send_sync)]
     let peer_io = Arc::new(std::sync::Mutex::new(PeerIo {
         codec,
         decoder,

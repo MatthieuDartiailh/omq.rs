@@ -5,8 +5,8 @@
 //!   `OMQ_PROFILE_SECS`   wall-clock seconds (default 5)
 //!
 //! Build & profile:
-//!   cargo build --release --features ws --example profile_ws -p omq-compio
-//!   samply record target/release/examples/profile_ws
+//!   `cargo build --release --features ws --example profile_ws -p omq-compio`
+//!   `samply record target/release/examples/profile_ws`
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::time::{Duration, Instant};

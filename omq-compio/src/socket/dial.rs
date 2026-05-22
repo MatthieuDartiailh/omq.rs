@@ -167,7 +167,9 @@ pub(super) fn connect_tcp_with_reconnect(
     // that races a send before the dialer installs a real sender
     // hits the buffered slot then errors. In practice send()
     // blocks on on_peer_ready until the peer slot lands.
+    #[allow(clippy::arc_with_non_send_sync)]
     let handle: WirePeerHandle = Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
+    #[allow(clippy::arc_with_non_send_sync)]
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
     let dialer_endpoint = wrapper.clone();
 
@@ -326,7 +328,9 @@ pub(super) fn connect_ipc_with_reconnect(
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
     let peer_groups = radio_side_peer_groups(inner.socket_type);
+    #[allow(clippy::arc_with_non_send_sync)]
     let handle: WirePeerHandle = Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
+    #[allow(clippy::arc_with_non_send_sync)]
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
     let dialer_endpoint = endpoint.clone();
 

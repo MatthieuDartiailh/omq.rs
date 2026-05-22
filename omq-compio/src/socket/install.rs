@@ -294,8 +294,9 @@ pub(super) fn install_ws_peer(
             );
         }
         WsTransport::Tls(tls) => {
+            #[allow(clippy::arc_with_non_send_sync)]
             let shared: crate::transport::ws::SharedTls =
-                std::sync::Arc::new(async_lock::Mutex::new(tls));
+                std::sync::Arc::new(async_lock::Mutex::new(*tls));
             install_accepted_wire_peer_with_leftover(
                 inner,
                 WireReader::Wss(shared.clone()),
@@ -405,6 +406,7 @@ fn install_accepted_wire_peer_with_leftover(
         #[cfg(feature = "ws")]
         ws_masked,
     );
+    #[allow(clippy::arc_with_non_send_sync)]
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let slot_idx = inner.insert_peer_slot(
         PeerSlot {

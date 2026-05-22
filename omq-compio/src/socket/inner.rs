@@ -120,6 +120,7 @@ impl LocalStream {
     /// `ENOBUFS` under sustained delivery on a small `BUF_RING` pool.
     /// The previous stream's lingering op is cancelled when its slot
     /// drops.
+    #[allow(clippy::await_holding_lock)]
     pub(crate) async fn rearm(&self, peer_io: &SharedPeerIo) -> std::io::Result<()> {
         let io = peer_io.lock().expect("peer_io");
         if !io.reader.supports_multishot() {

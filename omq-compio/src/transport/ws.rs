@@ -55,6 +55,7 @@ fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
 pub(crate) type TlsStream = compio_tls::TlsStream<TcpStream>;
 pub(crate) type SharedTls = std::sync::Arc<async_lock::Mutex<TlsStream>>;
 
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn build_tls_connector(accept_invalid_certs: bool) -> Result<compio_tls::TlsConnector> {
     use std::sync::Arc;
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -145,7 +146,7 @@ pub(crate) struct WsListener {
 
 pub(crate) enum WsTransport {
     Plain(TcpStream),
-    Tls(TlsStream),
+    Tls(Box<TlsStream>),
 }
 
 pub(crate) struct WsUpgraded {
@@ -268,7 +269,7 @@ pub(crate) async fn accept(
             .map_err(Error::Io)?;
         let leftover = extract_leftover(&http);
         return Ok(WsUpgraded {
-            transport: WsTransport::Tls(tls),
+            transport: WsTransport::Tls(Box::new(tls)),
             leftover,
         });
     }
@@ -337,7 +338,7 @@ pub(crate) async fn connect(
         ws_handshake::parse_server_upgrade(&http.buf[..http.header_end], &key)?;
         let leftover = extract_leftover(&http);
         return Ok(WsUpgraded {
-            transport: WsTransport::Tls(tls),
+            transport: WsTransport::Tls(Box::new(tls)),
             leftover,
         });
     }
@@ -380,7 +381,7 @@ async fn connect_tls_ip(
     ws_handshake::parse_server_upgrade(&http.buf[..http.header_end], &key)?;
     let leftover = extract_leftover(&http);
     Ok(WsUpgraded {
-        transport: WsTransport::Tls(tls),
+        transport: WsTransport::Tls(Box::new(tls)),
         leftover,
     })
 }
