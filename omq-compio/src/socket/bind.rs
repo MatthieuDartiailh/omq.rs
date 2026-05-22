@@ -319,7 +319,34 @@ impl Socket {
     async fn bind_ws(&self, endpoint: Endpoint) -> Result<Endpoint> {
         use crate::transport::ws as ws_transport;
 
-        let ws_listener = ws_transport::bind(&endpoint).await?;
+        let tls_acc = if matches!(endpoint, Endpoint::Wss { .. }) {
+            let cert = self
+                .inner()
+                .options
+                .wss_tls
+                .server_cert_pem
+                .as_deref()
+                .ok_or_else(|| {
+                    omq_proto::error::Error::Protocol(
+                        "wss:// bind requires server_cert_pem in WssTls options".into(),
+                    )
+                })?;
+            let key = self
+                .inner()
+                .options
+                .wss_tls
+                .server_key_pem
+                .as_deref()
+                .ok_or_else(|| {
+                    omq_proto::error::Error::Protocol(
+                        "wss:// bind requires server_key_pem in WssTls options".into(),
+                    )
+                })?;
+            Some(ws_transport::build_tls_acceptor(cert, key)?)
+        } else {
+            None
+        };
+        let ws_listener = ws_transport::bind(&endpoint, tls_acc).await?;
         let local = ws_listener.local_addr;
         let resolved = match &endpoint {
             Endpoint::Ws { path, .. } => Endpoint::Ws {
@@ -337,12 +364,14 @@ impl Socket {
         self.inner().monitor.listening(resolved.clone());
         let inner = self.inner().clone();
         let ep_for_task = resolved.clone();
+        let tls_acc = ws_listener.tls_acceptor.clone();
         let task = compio::runtime::spawn(async move {
             while let Ok((stream, addr)) = ws_listener.inner.accept().await {
                 let inner = inner.clone();
                 let ep = ep_for_task.clone();
+                let tls_acc = tls_acc.clone();
                 compio::runtime::spawn(async move {
-                    let Ok(upgraded) = ws_transport::accept(stream).await else {
+                    let Ok(upgraded) = ws_transport::accept(stream, tls_acc.as_ref()).await else {
                         return;
                     };
                     let conn_id = inner

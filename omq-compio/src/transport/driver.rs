@@ -152,9 +152,13 @@ pub(crate) fn build_peer_io(
     #[cfg(feature = "ws")] leftover: Option<bytes::Bytes>,
 ) -> std::io::Result<(
     SharedPeerIo,
-    crate::transport::peer_io::CancellableRecvStream,
+    Option<crate::transport::peer_io::CancellableRecvStream>,
 )> {
-    let recv_stream = reader.build_recv_stream()?;
+    let recv_stream = if reader.supports_multishot() {
+        Some(reader.build_recv_stream()?)
+    } else {
+        None
+    };
     #[cfg_attr(not(feature = "ws"), allow(unused_mut))]
     let mut codec = make_codec(
         role,

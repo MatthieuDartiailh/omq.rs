@@ -121,10 +121,14 @@ impl LocalStream {
     /// The previous stream's lingering op is cancelled when its slot
     /// drops.
     pub(crate) async fn rearm(&self, peer_io: &SharedPeerIo) -> std::io::Result<()> {
-        let new_stream = {
-            let io = peer_io.lock().expect("peer_io");
-            io.reader.build_recv_stream()?
-        };
+        let io = peer_io.lock().expect("peer_io");
+        if !io.reader.supports_multishot() {
+            drop(io);
+            *self.0.lock().await = Some(RecvStreamState::OneShot);
+            return Ok(());
+        }
+        let new_stream = io.reader.build_recv_stream()?;
+        drop(io);
         *self.0.lock().await = Some(RecvStreamState::MultiShot(new_stream));
         Ok(())
     }

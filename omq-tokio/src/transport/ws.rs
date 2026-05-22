@@ -78,7 +78,27 @@ impl tokio::io::AsyncWrite for WsTransport {
     }
 }
 
-const SUBPROTOCOL_NULL: &str = "ZWS2.0/NULL";
+#[allow(clippy::match_wildcard_for_single_variants)]
+fn mechanism_subprotocol(
+    #[cfg_attr(not(feature = "plain"), allow(unused_variables))]
+    mechanism: &omq_proto::options::MechanismConfig,
+) -> &'static str {
+    #[cfg(feature = "plain")]
+    {
+        use omq_proto::options::MechanismConfig;
+        match mechanism {
+            MechanismConfig::PlainClient { .. } | MechanismConfig::PlainServer { .. } => {
+                return "ZWS2.0/PLAIN";
+            }
+            _ => {}
+        }
+    }
+    "ZWS2.0/NULL"
+}
+
+fn is_known_subprotocol(s: &str) -> bool {
+    matches!(s, "ZWS2.0" | "ZWS2.0/NULL" | "ZWS2.0/PLAIN")
+}
 
 fn ws_err(e: impl std::fmt::Display) -> Error {
     Error::Io(std::io::Error::other(e.to_string()))
@@ -166,9 +186,9 @@ pub(crate) async fn accept(
     let chosen = upgrade
         .subprotocols
         .iter()
-        .find(|p| p.as_str() == SUBPROTOCOL_NULL || p.as_str() == "ZWS2.0")
+        .find(|p| is_known_subprotocol(p))
         .cloned()
-        .unwrap_or_else(|| SUBPROTOCOL_NULL.to_string());
+        .unwrap_or_else(|| "ZWS2.0/NULL".to_string());
 
     let accept_value = ws_handshake::compute_ws_accept(&upgrade.key);
     let response = ws_handshake::format_server_upgrade(&accept_value, &chosen);
@@ -199,6 +219,7 @@ pub(crate) async fn connect(
     path: &str,
     tls: bool,
     accept_invalid_certs: bool,
+    mechanism: &omq_proto::options::MechanismConfig,
 ) -> Result<WsConnected> {
     let addr = match host {
         omq_proto::endpoint::Host::Wildcard => {
@@ -232,7 +253,8 @@ pub(crate) async fn connect(
 
     let host_header = format!("{host}:{port}");
     let key = ws_handshake::generate_ws_key();
-    let request = ws_handshake::format_client_upgrade(&host_header, path, &key, SUBPROTOCOL_NULL);
+    let subprotocol = mechanism_subprotocol(mechanism);
+    let request = ws_handshake::format_client_upgrade(&host_header, path, &key, subprotocol);
     transport.write_all(&request).await.map_err(Error::Io)?;
 
     let mut buf = vec![0u8; 4096];

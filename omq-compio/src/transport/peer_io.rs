@@ -77,6 +77,8 @@ impl std::fmt::Debug for CancellableRecvStream {
 pub(crate) enum WireReader {
     Tcp(AsyncFd<TcpStream>),
     Ipc(AsyncFd<UnixStream>),
+    #[cfg(feature = "ws")]
+    Wss(super::ws::SharedTls),
 }
 
 impl std::fmt::Debug for WireReader {
@@ -86,6 +88,10 @@ impl std::fmt::Debug for WireReader {
 }
 
 impl WireReader {
+    pub(crate) fn supports_multishot(&self) -> bool {
+        matches!(self, Self::Tcp(_) | Self::Ipc(_))
+    }
+
     /// Build a multi-shot recv stream backed by compio's `BUF_RING` pool.
     ///
     /// The returned stream owns its own [`SharedFd`] clone, so it does
@@ -109,6 +115,8 @@ impl WireReader {
                 let op = RecvMulti::new(fd.to_shared_fd(), &pool, 0, RecvFlags::empty())?;
                 Box::pin(submit_multi(op).into_managed(pool))
             }
+            #[cfg(feature = "ws")]
+            Self::Wss(_) => unreachable!("TLS streams use one-shot reads"),
         };
         Ok(CancellableRecvStream { stream, cancel })
     }
@@ -122,6 +130,8 @@ impl WireReader {
         match self {
             Self::Tcp(fd) => WireRecvFd::Tcp(fd.clone()),
             Self::Ipc(fd) => WireRecvFd::Ipc(fd.clone()),
+            #[cfg(feature = "ws")]
+            Self::Wss(shared) => WireRecvFd::Wss(shared.clone()),
         }
     }
 }
@@ -134,6 +144,8 @@ impl WireReader {
 pub(crate) enum WireRecvFd {
     Tcp(AsyncFd<TcpStream>),
     Ipc(AsyncFd<UnixStream>),
+    #[cfg(feature = "ws")]
+    Wss(super::ws::SharedTls),
 }
 
 impl std::fmt::Debug for WireRecvFd {
@@ -171,6 +183,11 @@ impl WireRecvFd {
                     let mut r: &AsyncFd<UnixStream> = fd;
                     AsyncRead::read(&mut r, tail).await
                 }
+                #[cfg(feature = "ws")]
+                Self::Wss(shared) => {
+                    let mut tls = shared.lock().await;
+                    AsyncRead::read(&mut *tls, tail).await
+                }
             };
             let n = res?;
             if n == 0 {
@@ -192,6 +209,11 @@ impl WireRecvFd {
             Self::Ipc(fd) => {
                 let mut r: &AsyncFd<UnixStream> = fd;
                 AsyncRead::read(&mut r, buf).await
+            }
+            #[cfg(feature = "ws")]
+            Self::Wss(shared) => {
+                let mut tls = shared.lock().await;
+                AsyncRead::read(&mut *tls, buf).await
             }
         };
         let n = res?;
@@ -218,6 +240,8 @@ impl From<AsyncFd<UnixStream>> for WireReader {
 pub(crate) enum WireWriter {
     Tcp(OwnedWriteHalf<TcpStream>),
     Ipc(OwnedWriteHalf<UnixStream>),
+    #[cfg(feature = "ws")]
+    Wss(super::ws::SharedTls),
 }
 
 impl std::fmt::Debug for WireWriter {
@@ -245,6 +269,15 @@ impl WireWriter {
             }
             Self::Ipc(w) => {
                 let BufResult(res, bufs) = w.write_vectored(bufs).await;
+                (res, bufs)
+            }
+            #[cfg(feature = "ws")]
+            Self::Wss(shared) => {
+                let mut tls = shared.lock().await;
+                let BufResult(res, bufs) = AsyncWrite::write_vectored(&mut *tls, bufs).await;
+                if res.is_ok() {
+                    let _ = AsyncWrite::flush(&mut *tls).await;
+                }
                 (res, bufs)
             }
         }

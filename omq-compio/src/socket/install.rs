@@ -268,26 +268,46 @@ pub(super) fn install_ws_peer(
     connection_id: u64,
     peer_addr: Option<std::net::SocketAddr>,
 ) {
-    let read_clone = upgraded.stream.clone();
-    let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
-        return;
-    };
-    let (_, writer) = upgraded.stream.into_split();
+    use crate::transport::ws::WsTransport;
+
     let leftover = if upgraded.leftover.is_empty() {
         None
     } else {
         Some(upgraded.leftover)
     };
-    install_accepted_wire_peer_with_leftover(
-        inner,
-        read_fd.into(),
-        writer.into(),
-        role,
-        endpoint,
-        connection_id,
-        peer_addr,
-        leftover,
-    );
+    match upgraded.transport {
+        WsTransport::Plain(stream) => {
+            let read_clone = stream.clone();
+            let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
+                return;
+            };
+            let (_, writer) = stream.into_split();
+            install_accepted_wire_peer_with_leftover(
+                inner,
+                read_fd.into(),
+                writer.into(),
+                role,
+                endpoint,
+                connection_id,
+                peer_addr,
+                leftover,
+            );
+        }
+        WsTransport::Tls(tls) => {
+            let shared: crate::transport::ws::SharedTls =
+                std::sync::Arc::new(async_lock::Mutex::new(tls));
+            install_accepted_wire_peer_with_leftover(
+                inner,
+                WireReader::Wss(shared.clone()),
+                WireWriter::Wss(shared),
+                role,
+                endpoint,
+                connection_id,
+                peer_addr,
+                leftover,
+            );
+        }
+    }
 }
 
 struct TransportConfig {

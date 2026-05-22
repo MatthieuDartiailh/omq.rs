@@ -96,8 +96,12 @@ impl Socket {
             }
             let inner = self.inner().clone();
             let ep = endpoint.clone();
+            let mechanism = self.inner().options.mechanism.clone();
+            let accept_invalid_certs = self.inner().options.wss_tls.accept_invalid_certs;
             compio::runtime::spawn(async move {
-                let Ok(upgraded) = crate::transport::ws::connect(&ep).await else {
+                let Ok(upgraded) =
+                    crate::transport::ws::connect(&ep, &mechanism, accept_invalid_certs).await
+                else {
                     return;
                 };
                 let conn_id = inner

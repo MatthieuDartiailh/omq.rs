@@ -347,6 +347,8 @@ impl SocketDriver {
         let recv_notify = self.recv_notify.clone();
         #[cfg(feature = "ws")]
         let accept_invalid_certs = self.options.wss_tls.accept_invalid_certs;
+        #[cfg(feature = "ws")]
+        let mechanism = self.options.mechanism.clone();
         let task = tokio::spawn(async move {
             let ep_for_dial = dialer_ep.clone();
             let result = dial_with_backoff(
@@ -357,6 +359,8 @@ impl SocketDriver {
                         &recv_notify,
                         #[cfg(feature = "ws")]
                         accept_invalid_certs,
+                        #[cfg(feature = "ws")]
+                        &mechanism,
                     )
                 },
                 policy,

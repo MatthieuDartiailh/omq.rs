@@ -72,6 +72,10 @@ pub(crate) async fn try_one_shot_large_recv(
     if state.large_message_threshold == 0 {
         return OneShotLargeRecvOutcome::RearmMultiShot;
     }
+    #[cfg(feature = "ws")]
+    if state.is_ws {
+        return OneShotLargeRecvOutcome::RearmMultiShot;
+    }
 
     let already_one_shot = matches!(sguard.as_ref(), Some(RecvStreamState::OneShot));
 
@@ -145,7 +149,6 @@ pub(crate) async fn one_shot_recv_and_feed(
     sguard: &mut async_lock::MutexGuard<'_, Option<RecvStreamState>>,
 ) -> OneShotLargeRecvOutcome {
     use bytes::BytesMut;
-
     let fd = {
         let Ok(io) = state.peer_io.lock() else {
             return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
@@ -193,15 +196,18 @@ pub(crate) async fn one_shot_recv_and_feed(
                 drop(io);
             }
             OneShotLargeRecvOutcome::RearmMultiShot => {
-                let new_stream = {
-                    let Ok(io) = state.peer_io.lock() else {
-                        break OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
-                    };
-                    match io.reader.build_recv_stream() {
-                        Ok(s) => s,
-                        Err(e) => break OneShotLargeRecvOutcome::IoErr(e),
-                    }
+                let Ok(io) = state.peer_io.lock() else {
+                    break OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
                 };
+                if !io.reader.supports_multishot() {
+                    drop(io);
+                    break OneShotLargeRecvOutcome::Took;
+                }
+                let new_stream = match io.reader.build_recv_stream() {
+                    Ok(s) => s,
+                    Err(e) => break OneShotLargeRecvOutcome::IoErr(e),
+                };
+                drop(io);
                 **sguard = Some(RecvStreamState::MultiShot(new_stream));
                 state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
                 break OneShotLargeRecvOutcome::Took;
@@ -226,7 +232,7 @@ impl DirectIoState {
     pub(crate) fn new(
         peer_io: SharedPeerIo,
         writer: WireWriter,
-        recv_stream: CancellableRecvStream,
+        recv_stream: Option<CancellableRecvStream>,
         has_transform: bool,
         transform_passthrough: Option<(Bytes, usize)>,
         encoder: Option<MessageEncoder>,
@@ -235,13 +241,15 @@ impl DirectIoState {
         #[cfg(feature = "ws")] is_ws: bool,
         #[cfg(feature = "ws")] ws_masked: bool,
     ) -> Arc<Self> {
+        let initial_recv_state = match recv_stream {
+            Some(s) => Some(RecvStreamState::MultiShot(s)),
+            None => Some(RecvStreamState::OneShot),
+        };
         Arc::new(Self {
             peer_io,
             writer: async_lock::Mutex::new(writer),
             transmit_ready: Event::new(),
-            recv_stream: LocalStream(async_lock::Mutex::new(Some(RecvStreamState::MultiShot(
-                recv_stream,
-            )))),
+            recv_stream: LocalStream(async_lock::Mutex::new(initial_recv_state)),
             recv_claim: AtomicU8::new(0),
             recv_state_changed: Event::new(),
             recv_codec_ready: Event::new(),
