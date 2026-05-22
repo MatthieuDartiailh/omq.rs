@@ -50,11 +50,6 @@ mod inner {
     }
 
     pub(super) fn compio_main() {
-        let rt = build_default_runtime().expect("compio runtime");
-        rt.block_on(async_main());
-    }
-
-    async fn async_main() {
         let transports = active_transports();
         if transports.is_empty() {
             return;
@@ -76,12 +71,7 @@ mod inner {
                     let payload = json_payload(approx_size);
                     let actual = payload.len();
                     let wire_bytes_per_msg = wire_size(transport, &payload, None);
-                    let label = format!("{transport}/{peers}peer/~{approx_size}B");
-                    let cell = common::with_timeout(
-                        &label,
-                        run_cell(transport, peers, payload.clone(), seq, None),
-                    )
-                    .await;
+                    let cell = run_cell(transport, peers, payload.clone(), seq, None);
                     let wire_mbps = (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
                     // Three rates per cell: msgs/s, wire MB/s (what
                     // the network actually carries), virtual MB/s
@@ -125,12 +115,7 @@ mod inner {
                     let payload = json_payload(approx_size);
                     let actual = payload.len();
                     let wire_bytes_per_msg = wire_size(transport, &payload, Some(&dict));
-                    let label = format!("{transport}/{peers}peer/~{approx_size}B/dict");
-                    let cell = common::with_timeout(
-                        &label,
-                        run_cell(transport, peers, payload.clone(), seq, Some(dict.clone())),
-                    )
-                    .await;
+                    let cell = run_cell(transport, peers, payload.clone(), seq, Some(dict.clone()));
                     let wire_mbps = (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
                     println!(
                         "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, n={})",
@@ -252,89 +237,121 @@ mod inner {
         Bytes::from(buf)
     }
 
-    async fn run_cell(
+    fn run_cell(
         transport: &str,
         peers: usize,
         payload: Bytes,
         seq: usize,
         dict: Option<Bytes>,
     ) -> common::Cell {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         let ep = common::endpoint(transport, seq);
         let level = zstd_level();
-        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let pull_count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(std::sync::Barrier::new(2));
 
-        // Receiver: own thread + compio runtime so decompression
-        // runs in parallel with the sender's compression.
-        let recv_counter = counter.clone();
-        let recv_ep = ep.clone();
-        let recv_dict = dict.clone();
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(0);
-        std::thread::spawn(move || {
-            let rt = build_default_runtime().expect("receiver runtime");
-            rt.block_on(async {
-                let opts = match recv_dict {
-                    Some(d) => Options::default().compression_dict(d),
-                    None => Options::default(),
-                }
-                .compression_level(level);
-                let pull = Socket::new(SocketType::Pull, opts);
-                pull.bind(recv_ep).await.expect("bind PULL");
-                let _ = ready_tx.send(());
-                while pull.recv().await.is_ok() {
-                    recv_counter.fetch_add(1, Ordering::Release);
-                }
-            });
-        });
-        ready_rx.recv().expect("receiver ready");
-
-        // Sender: current thread.
-        let mut pushes: Vec<Socket> = Vec::with_capacity(peers);
-        for _ in 0..peers {
-            let opts = match &dict {
-                Some(d) => Options::default().compression_dict(d.clone()),
-                None => Options::default(),
-            }
-            .compression_level(level);
-            let p = Socket::new(SocketType::Push, opts);
-            p.connect(ep.clone()).await.expect("connect PUSH");
-            pushes.push(p);
-        }
-        let refs: Vec<&Socket> = pushes.iter().collect();
-        common::wait_connected(&refs).await;
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let pushes = std::sync::Arc::new(pushes);
-
-        let burst = |k: usize| {
-            let pushes = pushes.clone();
-            let payload = payload.clone();
-            let counter = counter.clone();
-            async move {
-                let base = counter.load(Ordering::Acquire);
-                let per = (k / pushes.len()).max(1);
-                let total = per * pushes.len();
-                let mut handles = Vec::with_capacity(pushes.len());
-                for i in 0..pushes.len() {
-                    let p = pushes.clone();
-                    let payload = payload.clone();
-                    handles.push(compio::runtime::spawn(async move {
-                        for _ in 0..per {
-                            p[i].send(Message::single(payload.clone())).await.unwrap();
+        let pull_thread = {
+            let ep = ep.clone();
+            let pull_count = pull_count.clone();
+            let stop = stop.clone();
+            let ready = ready.clone();
+            let dict = dict.clone();
+            std::thread::spawn(move || {
+                let rt = build_default_runtime().expect("pull runtime");
+                common::block_on_and_drain(rt, async move {
+                    let opts = match dict {
+                        Some(d) => Options::default().compression_dict(d),
+                        None => Options::default(),
+                    }
+                    .compression_level(level);
+                    let pull = Socket::new(SocketType::Pull, opts);
+                    pull.bind(ep).await.expect("bind PULL");
+                    ready.wait();
+                    while !stop.load(Ordering::Relaxed) {
+                        if let Ok(Ok(_)) =
+                            compio::time::timeout(std::time::Duration::from_millis(20), pull.recv())
+                                .await
+                        {
+                            pull_count.fetch_add(1, Ordering::Relaxed);
+                            let mut drained = 0u64;
+                            while pull.try_recv().is_ok() {
+                                drained += 1;
+                            }
+                            pull_count.fetch_add(drained as usize, Ordering::Relaxed);
                         }
-                    }));
-                }
-                for h in handles {
-                    let _ = h.await;
-                }
-                while counter.load(Ordering::Acquire) < base + total {
-                    compio::time::sleep(std::time::Duration::from_millis(1)).await;
-                }
-            }
+                    }
+                    drop(pull);
+                });
+            })
         };
 
-        common::measure_min_of(payload.len(), pushes.len(), burst).await
+        let push_thread = {
+            let ep = ep.clone();
+            let pull_count = pull_count.clone();
+            let stop = stop.clone();
+            let ready = ready.clone();
+            std::thread::spawn(move || {
+                let rt = build_default_runtime().expect("push runtime");
+                common::block_on_and_drain(rt, async move {
+                    ready.wait();
+                    let mut pushes: Vec<Socket> = Vec::with_capacity(peers);
+                    for _ in 0..peers {
+                        let opts = match &dict {
+                            Some(d) => Options::default().compression_dict(d.clone()),
+                            None => Options::default(),
+                        }
+                        .compression_level(level);
+                        let p = Socket::new(SocketType::Push, opts);
+                        p.connect(ep.clone()).await.expect("connect PUSH");
+                        pushes.push(p);
+                    }
+                    let refs: Vec<&Socket> = pushes.iter().collect();
+                    common::wait_connected(&refs).await;
+
+                    let pushes = Arc::new(pushes);
+
+                    let burst = |k: usize| {
+                        let pushes = pushes.clone();
+                        let payload = payload.clone();
+                        let pull_count = pull_count.clone();
+                        async move {
+                            let per = (k / pushes.len()).max(1);
+                            let target = pull_count.load(Ordering::Relaxed) + per * pushes.len();
+                            let mut handles = Vec::with_capacity(pushes.len());
+                            for i in 0..pushes.len() {
+                                let p = pushes.clone();
+                                let payload = payload.clone();
+                                handles.push(compio::runtime::spawn(async move {
+                                    for _ in 0..per {
+                                        p[i].send(Message::single(payload.clone())).await.unwrap();
+                                    }
+                                }));
+                            }
+                            for h in handles {
+                                let _ = h.await;
+                            }
+                            while pull_count.load(Ordering::Relaxed) < target {
+                                compio::time::sleep(std::time::Duration::from_micros(50)).await;
+                            }
+                        }
+                    };
+
+                    let cell = common::measure_min_of(payload.len(), pushes.len(), burst).await;
+                    stop.store(true, Ordering::Relaxed);
+                    if let Ok(pushes) = Arc::try_unwrap(pushes) {
+                        drop(pushes);
+                    }
+                    cell
+                })
+            })
+        };
+
+        let cell = push_thread.join().expect("push thread panicked");
+        let _ = pull_thread.join();
+        cell
     }
 
     /// Build a JSON-ish payload of approximately `target_bytes`. Repeats

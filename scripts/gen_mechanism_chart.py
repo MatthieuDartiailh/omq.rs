@@ -1,36 +1,10 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/mechanism.svg from BENCHMARKS.md data."""
+"""Generate doc/charts/mechanism.svg from omq-compio bench JSONL data."""
 
+import json
 import math
-import re
 import sys
 from pathlib import Path
-
-
-def parse_size_bytes(s: str) -> int:
-    s = s.strip()
-    m = re.match(r"([\d.]+)\s*(B|KiB|MiB)", s)
-    if not m:
-        raise ValueError(f"Cannot parse size: {s!r}")
-    n = float(m.group(1))
-    unit = m.group(2)
-    if unit == "KiB":
-        n *= 1024
-    elif unit == "MiB":
-        n *= 1024 * 1024
-    return int(n)
-
-
-def parse_throughput(s: str) -> float:
-    """Parse '68 MB/s', '1.8 GB/s' etc. into GB/s."""
-    s = s.strip()
-    m = re.match(r"([\d.]+)\s*(MB/s|GB/s)", s)
-    if not m:
-        raise ValueError(f"Cannot parse throughput: {s!r}")
-    val = float(m.group(1))
-    if m.group(2) == "MB/s":
-        val /= 1024
-    return val
 
 
 def fmt_size(b: int) -> str:
@@ -41,29 +15,35 @@ def fmt_size(b: int) -> str:
     return f"{b} B"
 
 
-def load_data(benchmarks_md: Path) -> dict:
-    text = benchmarks_md.read_text()
-    begin = "<!-- BEGIN mechanism_frame -->"
-    end = "<!-- END mechanism_frame -->"
-    section = text.split(begin)[1].split(end)[0]
-
-    sizes = []
-    series = {"NULL": [], "CURVE": [], "BLAKE3ZMQ": []}
-
-    for line in section.strip().splitlines():
+def load_data(jsonl: Path) -> dict:
+    rows = []
+    for line in jsonl.read_text().splitlines():
         line = line.strip()
-        if not line.startswith("|") or "---" in line:
+        if not line:
             continue
-        cells = [c.strip() for c in line.split("|")[1:-1]]
-        if cells[0] in ("Size", ""):
-            continue
+        r = json.loads(line)
+        if r.get("pattern") == "mechanism":
+            rows.append(r)
 
-        size = parse_size_bytes(cells[0])
-        sizes.append(size)
-        for i, key in enumerate(["NULL", "CURVE", "BLAKE3ZMQ"]):
-            tput_gbs = parse_throughput(cells[i + 1])
-            msgs = tput_gbs * 1024 * 1024 * 1024 / size
-            series[key].append((msgs, tput_gbs))
+    if not rows:
+        return {"sizes": [], "series": {}}
+
+    latest: dict[tuple[str, int], dict] = {}
+    for r in rows:
+        key = (r["transport"], r["msg_size"])
+        latest[key] = r
+
+    mechanisms = ["NULL", "CURVE", "BLAKE3ZMQ"]
+    all_sizes = sorted({k[1] for k in latest})
+    sizes = [s for s in all_sizes if all((m, s) in latest for m in mechanisms)]
+
+    series: dict[str, list[tuple[float, float]]] = {m: [] for m in mechanisms}
+    for s in sizes:
+        for m in mechanisms:
+            r = latest[(m, s)]
+            mbps = r["mbps"]
+            msgs = r["msgs_s"]
+            series[m].append((msgs, mbps / 1024))
 
     return {"sizes": sizes, "series": series}
 
@@ -262,13 +242,18 @@ def generate_svg(data: dict) -> str:
 
 def main():
     repo = Path(__file__).resolve().parent.parent
-    benchmarks_md = repo / "BENCHMARKS.md"
+    jsonl = repo / "omq-compio" / "benches" / "results.jsonl"
 
-    if not benchmarks_md.exists():
-        print(f"ERROR: {benchmarks_md} not found", file=sys.stderr)
+    if not jsonl.exists():
+        print(f"ERROR: {jsonl} not found", file=sys.stderr)
         sys.exit(1)
 
-    data = load_data(benchmarks_md)
+    data = load_data(jsonl)
+    if not data["sizes"]:
+        print("No mechanism data in JSONL. Run: cargo bench -p omq-compio "
+              "--bench mechanism --features 'curve blake3zmq'", file=sys.stderr)
+        sys.exit(1)
+
     svg = generate_svg(data)
 
     output = repo / "doc" / "charts" / "mechanism.svg"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate doc/charts/latency_bindings.svg from pyomq README latency table.
 
-Grouped bar chart: x = message sizes, bars = pyomq vs pyzmq, y = p50 latency (log).
+Line chart: x = message sizes, y = p50 latency (log).
 """
 
 import math
@@ -81,84 +81,117 @@ def generate_svg(data: dict[int, dict[str, float]]) -> str:
         return "<svg xmlns='http://www.w3.org/2000/svg' width='850' height='440'></svg>"
 
     sizes = sorted(data.keys())
-    w, h = 850, 440
-    left, right, top, bottom = 80, 30, 45, 70
-    plot_w = w - left - right
-    plot_h = h - top - bottom
+    n = len(sizes)
+
+    x_left, x_right = 90, 760
+    y_top, y_bot = 45, 350
+    svg_h = 440
+    plot_w = x_right - x_left
+    plot_h = y_bot - y_top
+
+    xs = [x_left + i * plot_w / (n - 1) for i in range(n)] if n > 1 else [
+        (x_left + x_right) / 2]
 
     all_vals = [v for sz in sizes for v in data[sz].values() if v > 0]
     if not all_vals:
         return "<svg xmlns='http://www.w3.org/2000/svg' width='850' height='440'></svg>"
 
-    y_min = 10 ** math.floor(math.log10(min(all_vals)))
-    y_max = 10 ** math.ceil(math.log10(max(all_vals)))
-    log_range = math.log10(y_max) - math.log10(y_min)
+    y_max_val = max(all_vals) * 1.1
 
     def y_pos(val):
         if val <= 0:
-            return top + plot_h
-        return top + plot_h - (math.log10(val) - math.log10(y_min)) / log_range * plot_h
+            return y_bot
+        return y_bot - (val / y_max_val) * plot_h
 
-    n_groups = len(sizes)
-    n_bars = len(SERIES)
-    group_w = plot_w / n_groups
-    bar_w = group_w * 0.5 / n_bars
-    gap = group_w * 0.5
+    def fmt_us(v):
+        if v >= 1000:
+            return f"{v / 1000:.0f} ms" if v % 1000 == 0 else f"{v / 1000:.1f} ms"
+        return f"{v:.0f} µs" if v == int(v) else f"{v:.1f} µs"
 
-    lines = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" '
-        f'font-family="system-ui,-apple-system,sans-serif" font-size="11">',
-        f'<rect width="{w}" height="{h}" fill="#fff"/>',
-        f'<text x="{w//2}" y="22" text-anchor="middle" font-size="14" font-weight="bold">'
-        f'REQ/REP latency: pyomq vs pyzmq, TCP loopback (p50)</text>',
+    def nice_ticks(vmax, target_count=8):
+        raw = vmax / target_count
+        mag = 10 ** math.floor(math.log10(raw))
+        for step in [1, 2, 5, 10, 20, 50, 100]:
+            s = step * mag
+            if vmax / s <= target_count + 2:
+                return s
+        return mag * 10
+
+    tick_step = nice_ticks(y_max_val)
+
+    L = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 {svg_h}"'
+        f' font-family="system-ui, -apple-system, sans-serif">',
+        f'  <rect width="850" height="{svg_h}" fill="white"/>',
     ]
 
-    decade = y_min
-    while decade <= y_max:
-        y = y_pos(decade)
-        lines.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left+plot_w}" y2="{y:.1f}" '
-                     f'stroke="#e5e7eb" stroke-width="0.5"/>')
-        label = f"{decade:.0f} µs" if decade < 1000 else f"{decade/1000:.0f} ms"
-        lines.append(f'<text x="{left-8}" y="{y:.1f}" text-anchor="end" '
-                     f'dominant-baseline="middle" font-size="10" fill="#6b7280">{label}</text>')
-        decade *= 10
+    # Y-axis gridlines (linear, evenly spaced)
+    v = 0
+    while v <= y_max_val:
+        yy = y_pos(v)
+        L.append(f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
+                 f' stroke="#e5e7eb" stroke-width="1"/>')
+        if v > 0:
+            L.append(f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
+                     f' dominant-baseline="middle" fill="#374151" font-size="10">'
+                     f'{fmt_us(v)}</text>')
+        v += tick_step
 
-    for gi, size in enumerate(sizes):
-        gx = left + gi * group_w + gap / 2
-        for bi, name in enumerate(SERIES):
-            val = data[size].get(name)
-            if val is None or val <= 0:
-                continue
-            bx = gx + bi * bar_w
-            by = y_pos(val)
-            bh = top + plot_h - by
-            color = COLORS[name]
-            lines.append(f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_w:.1f}" '
-                         f'height="{bh:.1f}" fill="{color}" opacity="0.85"/>')
-            label = f"{val:.0f}" if val >= 10 else f"{val:.1f}"
-            lines.append(f'<text x="{bx + bar_w/2:.1f}" y="{by - 3:.1f}" '
-                         f'text-anchor="middle" font-size="9" fill="#374151">{label}</text>')
+    # Vertical gridlines
+    for x in xs:
+        L.append(f'  <line x1="{x:.1f}" y1="{y_top}" x2="{x:.1f}" y2="{y_bot}"'
+                 f' stroke="#e5e7eb" stroke-width="1"/>')
 
-        cx = gx + n_bars * bar_w / 2
-        lines.append(f'<text x="{cx:.1f}" y="{top + plot_h + 16}" text-anchor="middle" '
-                     f'font-size="10" fill="#374151">{fmt_size(size)}</text>')
+    # Axes
+    L.append(f'  <line x1="{x_left}" y1="{y_top}" x2="{x_left}" y2="{y_bot}"'
+             f' stroke="#9ca3af" stroke-width="1.5"/>')
+    L.append(f'  <line x1="{x_left}" y1="{y_bot}" x2="{x_right}" y2="{y_bot}"'
+             f' stroke="#9ca3af" stroke-width="1.5"/>')
 
-    lines.append(f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top+plot_h}" '
-                 f'stroke="#374151" stroke-width="1"/>')
-    lines.append(f'<line x1="{left}" y1="{top+plot_h}" x2="{left+plot_w}" y2="{top+plot_h}" '
-                 f'stroke="#374151" stroke-width="1"/>')
-    lines.append(f'<text x="14" y="{top + plot_h//2}" text-anchor="middle" '
-                 f'font-size="11" fill="#374151" '
-                 f'transform="rotate(-90 14 {top + plot_h//2})">p50 latency (µs, log)</text>')
+    # X-axis labels
+    for i, s in enumerate(sizes):
+        L.append(f'  <text x="{xs[i]:.1f}" y="{y_bot + 16}" text-anchor="middle"'
+                 f' fill="#374151" font-size="9.5">{fmt_size(s)}</text>')
 
-    lx = left + 10
-    ly = top + 10
+    # Axis titles
+    mid_y = (y_top + y_bot) / 2
+    mid_x = (x_left + x_right) / 2
+    L.append(f'  <text x="40" y="{mid_y:.1f}" text-anchor="middle"'
+             f' dominant-baseline="middle" fill="#374151" font-size="11" font-weight="600"'
+             f' transform="rotate(-90,40,{mid_y:.1f})">p50 latency (log)</text>')
+    L.append(f'  <text x="{mid_x:.1f}" y="22" text-anchor="middle" fill="#111827"'
+             f' font-size="14" font-weight="700">'
+             f'REQ/REP latency: pyomq vs pyzmq, TCP loopback (p50)</text>')
+
+    # Lines with dots (pyzmq drawn first = behind)
+    for name in reversed(SERIES):
+        color = COLORS[name]
+        points = []
+        for i, sz in enumerate(sizes):
+            val = data[sz].get(name)
+            if val and val > 0:
+                points.append((xs[i], y_pos(val)))
+        if not points:
+            continue
+        pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+        L.append(f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+                 f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>')
+        for x, y in points:
+            L.append(f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="3"'
+                     f' fill="{color}" stroke="white" stroke-width="1"/>')
+
+    # Legend
+    leg_y = y_bot + 38
+    leg_spacing = plot_w / len(SERIES)
     for i, name in enumerate(SERIES):
-        lines.append(f'<rect x="{lx}" y="{ly + i*18}" width="12" height="12" fill="{COLORS[name]}"/>')
-        lines.append(f'<text x="{lx+16}" y="{ly + i*18 + 10}" font-size="10" fill="#374151">{name}</text>')
+        lx = x_left + int(i * leg_spacing + leg_spacing * 0.3)
+        L.append(f'  <line x1="{lx}" y1="{leg_y}" x2="{lx + 14}" y2="{leg_y}"'
+                 f' stroke="{COLORS[name]}" stroke-width="2.5"/>')
+        L.append(f'  <text x="{lx + 18}" y="{leg_y + 4}" fill="#374151" font-size="10"'
+                 f' font-weight="500">{name}</text>')
 
-    lines.append("</svg>")
-    return "\n".join(lines)
+    L.append("</svg>")
+    return "\n".join(L) + "\n"
 
 
 def main():

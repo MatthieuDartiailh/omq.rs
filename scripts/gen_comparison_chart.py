@@ -141,7 +141,8 @@ def generate_svg(data: dict) -> str:
         "tokio": "omq-tokio",
         "zmqrs": "zmq.rs",
     }
-    order = ["libzmq", "compio", "tokio", "zmqrs"]
+    draw_order = ["zmqrs", "libzmq", "compio", "tokio"]
+    legend_order = ["libzmq", "compio", "tokio", "zmqrs"]
 
     L = []
     L.append(
@@ -188,7 +189,7 @@ def generate_svg(data: dict) -> str:
                 )
 
     # Right-axis gridlines: throughput linear (dashed)
-    for v in [2, 4, 6, 8]:
+    for v in [2, 4, 6, 8, 10]:
         yy = y_tput(v)
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
@@ -247,7 +248,7 @@ def generate_svg(data: dict) -> str:
     )
 
     # Dashed throughput lines
-    for name in order:
+    for name in draw_order:
         pts = " ".join(
             f"{xs[i]:.1f},{y_tput(series[name][i][1]):.1f}" for i in range(n)
         )
@@ -257,7 +258,7 @@ def generate_svg(data: dict) -> str:
         )
 
     # Solid msg/s lines with dots
-    for name in order:
+    for name in draw_order:
         pts = " ".join(
             f"{xs[i]:.1f},{y_msg(series[name][i][0]):.1f}" for i in range(n)
         )
@@ -276,7 +277,7 @@ def generate_svg(data: dict) -> str:
     leg_y1 = y_bot + 38
     leg_y2 = leg_y1 + 12
     legend_xs = [167, 327, 487, 647]
-    for i, name in enumerate(order):
+    for i, name in enumerate(legend_order):
         lx = legend_xs[i]
         c = colors[name]
         L.append(

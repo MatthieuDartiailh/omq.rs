@@ -33,13 +33,14 @@ COMPARISONS_PATH = File.join(BenchCompare::ROOT, 'COMPARISONS.md')
 
 # ---------- options ----------
 
-options = { transports: nil, update_benchmarks: false, latency: false }
+options = { transports: nil, update_benchmarks: false, latency: false, chart_sizes: false }
 base_port = DEFAULT_BASE_PORT
 
 OptionParser.new do |o|
   o.banner = 'Usage: ruby scripts/compare_zmqrs.rb [options] [port]'
   o.on('--ipc', 'IPC only') { options[:transports] = %w[ipc] }
   o.on('--tcp', 'TCP only') { options[:transports] = %w[tcp] }
+  o.on('--chart-sizes', 'Dense ×2 step sweep (8 B – 256 KiB)') { options[:chart_sizes] = true }
   o.on('--latency', 'Also run latency comparison') { options[:latency] = true }
   o.on('--update-benchmarks', 'Update COMPARISONS.md') { options[:update_benchmarks] = true }
 end.parse!
@@ -48,6 +49,7 @@ end.parse!
 base_port = ARGV.shift.to_i if ARGV.first&.match?(/\A\d+\z/)
 
 transports = options[:transports] || %w[ipc tcp]
+SIZES = options[:chart_sizes] ? BenchCompare::CHART_COMPARISON_SIZES : BenchCompare::COMPARISON_SIZES
 
 # ---------- cleanup ----------
 
@@ -129,7 +131,7 @@ def run_throughput_comparison(transport, base_port, zmqrs_peer, compio_peer,
 
   results = []
 
-  BenchCompare::COMPARISON_SIZES.each_with_index do |size, idx|
+  SIZES.each_with_index do |size, idx|
     addr_z = addr_for(transport, 'z', idx, base_port)
     addr_c = addr_for(transport, 'c', idx, base_port)
     addr_t = addr_for(transport, 't', idx, base_port)

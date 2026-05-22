@@ -28,13 +28,12 @@ require_relative 'lib/bench_compare'
 require_relative 'lib/bench_helpers'
 
 DURATION = 3
-SIZES = BenchCompare::COMPARISON_SIZES
-LATENCY_SIZES = BenchCompare::LATENCY_SIZES
 COMPARISONS_PATH = File.join(BenchCompare::ROOT, 'COMPARISONS.md')
 
 base_port = 15_555
 update_benchmarks = false
 run_latency = false
+chart_sizes = false
 transport_filter = nil
 
 OptionParser.new do |opts|
@@ -43,9 +42,13 @@ OptionParser.new do |opts|
   opts.on('--ipc',               'IPC only')              { transport_filter = 'ipc' }
   opts.on('--tcp',               'TCP only')              { transport_filter = 'tcp' }
   opts.on('--ws',                'WebSocket only')        { transport_filter = 'ws' }
+  opts.on('--chart-sizes',       'dense ×2 step sweep (8 B – 256 KiB)') { chart_sizes = true }
   opts.on('--latency',           'also run latency comparison') { run_latency = true }
   opts.on('--update-benchmarks', 'update COMPARISONS.md') { update_benchmarks = true }
 end.parse!
+
+SIZES = chart_sizes ? BenchCompare::CHART_COMPARISON_SIZES : BenchCompare::COMPARISON_SIZES
+LATENCY_SIZES = BenchCompare::LATENCY_SIZES
 
 # Remaining positional arg is base port.
 base_port = ARGV.shift.to_i if ARGV.first&.match?(/\A\d+\z/)

@@ -79,8 +79,11 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
 
     xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
 
-    msg_log_min = 3.0   # log10(1k)
-    msg_log_max = 6.0   # log10(1M)
+    all_msgs = [d["msgs_s"] for s in series.values() for d in s.values() if d["msgs_s"] > 0]
+    msg_log_min = float(math.floor(math.log10(min(all_msgs))))
+    msg_log_max = float(math.ceil(math.log10(max(all_msgs))))
+    if msg_log_max - msg_log_min < 2:
+        msg_log_max = msg_log_min + 2
 
     if tput_max_mb is None:
         max_virt = max(
@@ -96,7 +99,8 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
             return y_bot
         log_v = math.log10(v)
         frac = (log_v - msg_log_min) / (msg_log_max - msg_log_min)
-        return y_bot - max(0, frac) * plot_h
+        frac = max(0.0, min(1.0, frac))
+        return y_bot - frac * plot_h
 
     def y_tput(v):
         return y_bot - (v / tput_max) * plot_h
@@ -124,25 +128,26 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
     )
     L.append(f'  <rect width="850" height="{svg_h}" fill="white"/>')
 
-    # Left-axis: msg/s log scale (major)
-    for exp, label in [(3, "1k"), (4, "10k"), (5, "100k"), (6, "1M")]:
+    # Left-axis: msg/s log scale (major decade labels)
+    decade_labels = {
+        1: "1", 2: "100", 3: "1k", 4: "10k", 5: "100k", 6: "1M", 7: "10M",
+    }
+    for exp in range(int(msg_log_min), int(msg_log_max) + 1):
         yy = y_bot - (exp - msg_log_min) / (msg_log_max - msg_log_min) * plot_h
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
             f' stroke="#e5e7eb" stroke-width="1"/>'
         )
+        label = decade_labels.get(exp, f"1e{exp}")
         L.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
             f' dominant-baseline="middle" fill="#374151" font-size="10">{label}</text>'
         )
 
     # Left-axis: minor gridlines
-    minor_labels = {
-        (3, 2): "2k", (3, 3): "3k", (3, 5): "5k",
-        (4, 2): "20k", (4, 3): "30k", (4, 5): "50k",
-        (5, 2): "200k", (5, 3): "300k", (5, 5): "500k",
-        (6, 2): "2M", (6, 3): "3M", (6, 5): "5M",
-    }
+    minor_prefixes = {2: "2", 3: "3", 5: "5"}
+    minor_suffixes = {1: "", 2: "", 3: "k", 4: "k", 5: "k", 6: "M", 7: "M"}
+    minor_divisors = {1: 1, 2: 1, 3: 1000, 4: 1000, 5: 1000, 6: 1e6, 7: 1e6}
     for base_exp in range(int(msg_log_min), int(msg_log_max)):
         for mult in [2, 3, 5]:
             log_v = base_exp + math.log10(mult)
@@ -153,7 +158,10 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
                 f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
                 f' y2="{yy:.1f}" stroke="#f0f0f0" stroke-width="0.5"/>'
             )
-            label = minor_labels.get((base_exp, mult), "")
+            val = mult * (10 ** base_exp)
+            suffix = minor_suffixes.get(base_exp, "")
+            divisor = minor_divisors.get(base_exp, 1)
+            label = f"{int(val / divisor)}{suffix}" if divisor else ""
             if label:
                 L.append(
                     f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
@@ -166,7 +174,7 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
     for mb in range(step, tput_max_mb + 1, step):
         v = mb / 1024  # GB/s
         yy = y_tput(v)
-        label = f"{mb} MB/s"
+        label = f"{mb / 1024:.1f} GB/s" if mb >= 1024 else f"{mb} MB/s"
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
             f' stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>'
