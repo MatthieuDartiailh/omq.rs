@@ -427,30 +427,45 @@ fn install_accepted_wire_peer_with_leftover(
             }
             None => (None, None, false, None),
         };
-    let mut uses_crypto = !matches!(
-        inner.options.mechanism,
-        omq_proto::options::MechanismConfig::Null
-    );
-    let ws_role = if endpoint.is_ws_family() {
-        uses_crypto = true;
-        Some(match role {
-            omq_proto::proto::connection::Role::Server => {
-                omq_proto::proto::connection::WsRole::Server
-            }
-            omq_proto::proto::connection::Role::Client => {
-                omq_proto::proto::connection::WsRole::Client
-            }
-        })
-    } else {
-        None
-    };
+    let uses_crypto;
+    #[cfg(feature = "ws")]
+    let ws_role;
+    #[cfg(feature = "ws")]
+    {
+        ws_role = if endpoint.is_ws_family() {
+            uses_crypto = true;
+            Some(match role {
+                omq_proto::proto::connection::Role::Server => {
+                    omq_proto::proto::connection::WsRole::Server
+                }
+                omq_proto::proto::connection::Role::Client => {
+                    omq_proto::proto::connection::WsRole::Client
+                }
+            })
+        } else {
+            uses_crypto = !matches!(
+                inner.options.mechanism,
+                omq_proto::options::MechanismConfig::Null
+            );
+            None
+        };
+    }
+    #[cfg(not(feature = "ws"))]
+    {
+        uses_crypto = !matches!(
+            inner.options.mechanism,
+            omq_proto::options::MechanismConfig::Null
+        );
+    }
     let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
         &inner.options,
         reader,
         decoder,
+        #[cfg(feature = "ws")]
         ws_role,
+        #[cfg(feature = "ws")]
         leftover,
     ) else {
         return;
