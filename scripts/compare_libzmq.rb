@@ -48,7 +48,7 @@ OptionParser.new do |opts|
 end.parse!
 
 SIZES = chart_sizes ? BenchCompare::CHART_COMPARISON_SIZES : BenchCompare::COMPARISON_SIZES
-LATENCY_SIZES = BenchCompare::LATENCY_SIZES
+LATENCY_SIZES = chart_sizes ? BenchCompare::CHART_LATENCY_SIZES : BenchCompare::LATENCY_SIZES
 
 # Remaining positional arg is base port.
 base_port = ARGV.shift.to_i if ARGV.first&.match?(/\A\d+\z/)

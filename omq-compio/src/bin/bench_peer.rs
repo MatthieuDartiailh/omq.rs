@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_compio::endpoint::Host;
-use omq_compio::{Endpoint, Message, Options, Socket, SocketType, build_default_runtime};
+use omq_compio::runtime::ProactorBuilderExt as _;
+use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 use std::net::Ipv4Addr;
 
 fn parse_ep(s: &str) -> Endpoint {
@@ -51,9 +52,16 @@ fn main() {
             exit_on_signal as *const () as libc::sighandler_t,
         );
     }
-    let rt = build_default_runtime().expect("compio runtime");
+    let args: Vec<String> = std::env::args().collect();
+    let msg_size: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let buf_len = (msg_size + 64).next_power_of_two().max(64 * 1024);
+    let mut proactor = compio::driver::ProactorBuilder::new();
+    proactor.with_omq_buffer_pool_sized(std::num::NonZero::new(64).unwrap(), buf_len);
+    let rt = compio::runtime::RuntimeBuilder::new()
+        .with_proactor(proactor)
+        .build()
+        .expect("compio runtime");
     rt.block_on(async {
-        let args: Vec<String> = std::env::args().collect();
         match args.get(1).map(String::as_str) {
             Some("push") => {
                 let ep = parse_ep(&args[2]);
@@ -138,7 +146,13 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
     let push_stop = stop.clone();
     let push_ready = ready.clone();
     std::thread::spawn(move || {
-        let rt = build_default_runtime().expect("push runtime");
+        let buf_len = (size + 64).next_power_of_two().max(64 * 1024);
+        let mut proactor = compio::driver::ProactorBuilder::new();
+        proactor.with_omq_buffer_pool_sized(std::num::NonZero::new(64).unwrap(), buf_len);
+        let rt = compio::runtime::RuntimeBuilder::new()
+            .with_proactor(proactor)
+            .build()
+            .expect("push runtime");
         rt.block_on(async move {
             let push = Socket::new(SocketType::Push, bench_options(size));
             push.bind(push_ep).await.expect("push bind");

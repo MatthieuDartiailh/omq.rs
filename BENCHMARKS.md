@@ -395,6 +395,7 @@ cargo bench -p omq-compio --bench req_rep
 
 # Convenience:
 ./scripts/bench_run.rb [--all-features] [--all-sizes]    # adds results to JSONL
+./scripts/bench_run.rb --chart-sizes                     # dense ×2 sweep for charts
 ./scripts/bench_run.rb --with-priority [--all-sizes]     # priority feature only
 ./scripts/bench_report.rb [--update-benchmarks]          # regenerates tables
 
@@ -418,7 +419,7 @@ python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism.svg (fr
 
 # Compression charts require a bench run first (writes JSONL):
 #   1. Rate-limit loopback:
-#      sudo tc qdisc replace dev lo root tbf rate 1gbit burst 128kb latency 1ms
+#      sudo tc qdisc replace dev lo root tbf rate 1gbit burst 512kb latency 50ms
 #   2. Run bench:
 #      cargo bench -p omq-compio --features lz4,zstd --bench compression
 #   3. Generate chart:

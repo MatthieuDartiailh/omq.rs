@@ -50,6 +50,7 @@ base_port = ARGV.shift.to_i if ARGV.first&.match?(/\A\d+\z/)
 
 transports = options[:transports] || %w[ipc tcp]
 SIZES = options[:chart_sizes] ? BenchCompare::CHART_COMPARISON_SIZES : BenchCompare::COMPARISON_SIZES
+LATENCY_SIZES = options[:chart_sizes] ? BenchCompare::CHART_LATENCY_SIZES : BenchCompare::LATENCY_SIZES
 
 # ---------- cleanup ----------
 
@@ -256,7 +257,7 @@ def run_latency_comparison(transport, base_port, zmqrs_peer, compio_peer,
 
   results = []
 
-  BenchCompare::LATENCY_SIZES.each_with_index do |size, idx|
+  LATENCY_SIZES.each_with_index do |size, idx|
     addr_z = addr_for(transport, 'z', idx, base_port)
     addr_c = addr_for(transport, 'c', idx, base_port)
     addr_t = addr_for(transport, 't', idx, base_port)

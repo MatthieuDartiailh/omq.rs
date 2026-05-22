@@ -26,11 +26,15 @@ fn main() {
 mod inner {
     use super::common;
     use bytes::Bytes;
-    use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
+    use omq_compio::{Message, Options, Socket, SocketType};
 
     const PATTERN: &str = "compression_json";
     const PEER_COUNTS: &[usize] = &[1];
     const SUPPORTED_TRANSPORTS: &[&str] = &["tcp", "lz4+tcp", "zstd+tcp"];
+
+    fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
+        common::build_bench_runtime()
+    }
 
     fn zstd_level() -> i32 {
         std::env::var("OMQ_BENCH_ZSTD_LEVEL")
@@ -260,7 +264,7 @@ mod inner {
             let ready = ready.clone();
             let dict = dict.clone();
             std::thread::spawn(move || {
-                let rt = build_default_runtime().expect("pull runtime");
+                let rt = build_runtime().expect("pull runtime");
                 common::block_on_and_drain(rt, async move {
                     let opts = match dict {
                         Some(d) => Options::default().compression_dict(d),
@@ -294,7 +298,7 @@ mod inner {
             let stop = stop.clone();
             let ready = ready.clone();
             std::thread::spawn(move || {
-                let rt = build_default_runtime().expect("push runtime");
+                let rt = build_runtime().expect("push runtime");
                 common::block_on_and_drain(rt, async move {
                     ready.wait();
                     let mut pushes: Vec<Socket> = Vec::with_capacity(peers);

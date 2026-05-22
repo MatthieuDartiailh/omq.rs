@@ -6,12 +6,12 @@
 # Each invocation updates one link-speed section. Run the bench at each
 # speed, then update the corresponding section:
 #
-#   sudo tc qdisc replace dev lo root tbf rate 100mbit burst 128kb latency 1ms
+#   sudo tc qdisc replace dev lo root tbf rate 100mbit burst 128kb latency 50ms
 #   cargo bench -p omq-compio --features lz4,zstd --bench compression
 #   ruby scripts/compression_report.rb --link 100m
 #   sudo tc qdisc del dev lo root
 #
-#   sudo tc qdisc replace dev lo root tbf rate 1gbit burst 128kb latency 1ms
+#   sudo tc qdisc replace dev lo root tbf rate 1gbit burst 512kb latency 50ms
 #   cargo bench -p omq-compio --features lz4,zstd --bench compression
 #   ruby scripts/compression_report.rb --link 1g
 #   sudo tc qdisc del dev lo root

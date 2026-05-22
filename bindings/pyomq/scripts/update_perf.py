@@ -134,7 +134,8 @@ def build_throughput_table(results):
 
 # ── REQ/REP latency ─────────────────────────────────────────────────
 
-LATENCY_SIZES = [8, 32, 128, 512, 2048, 8192, 32768, 131072]
+LATENCY_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+                 16384, 32768, 65536, 131072]
 LATENCY_WARMUP = 1000
 LATENCY_ITERS = 10000
 

@@ -95,16 +95,16 @@ tables, then remove the limit:
 
 ```sh
 # 100 Mbps
-sudo tc qdisc replace dev lo root tbf rate 100mbit burst 128kb latency 1ms
+sudo tc qdisc replace dev lo root tbf rate 100mbit burst 128kb latency 50ms
 OMQ_BENCH_SIZES=128,512,2048,8192,32768,131072 cargo bench -p omq-compio --features lz4,zstd --bench compression
 python3 scripts/gen_compression_chart.py --link 100m --tput-max 300
 ruby scripts/compression_report.rb --link 100m
 sudo tc qdisc del dev lo root
 
 # 1 Gbps
-sudo tc qdisc replace dev lo root tbf rate 1gbit burst 128kb latency 1ms
+sudo tc qdisc replace dev lo root tbf rate 1gbit burst 512kb latency 50ms
 OMQ_BENCH_SIZES=128,512,2048,8192,32768,131072 cargo bench -p omq-compio --features lz4,zstd --bench compression
-python3 scripts/gen_compression_chart.py --link 1g --tput-max 1000
+python3 scripts/gen_compression_chart.py --link 1g --tput-max 1024
 ruby scripts/compression_report.rb --link 1g
 sudo tc qdisc del dev lo root
 ```

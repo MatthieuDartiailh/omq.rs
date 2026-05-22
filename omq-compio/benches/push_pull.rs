@@ -33,10 +33,14 @@ fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
             let l: usize = it.next()?.parse().ok()?;
             Some((c, l))
         })
-        .unwrap_or((64, 64 * 1024));
+        .unwrap_or((64, bench_buffer_len()));
     let mut p = ProactorBuilder::new();
     p.with_omq_buffer_pool_sized(std::num::NonZero::new(count).expect("nonzero"), len);
     RuntimeBuilder::new().with_proactor(p).build()
+}
+
+fn bench_buffer_len() -> usize {
+    common::bench_buffer_len()
 }
 
 const PATTERN: &str = "push_pull";

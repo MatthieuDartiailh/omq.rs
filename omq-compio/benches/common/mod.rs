@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use omq_compio::{Endpoint, IpcPath};
+use omq_compio::Endpoint;
+use omq_compio::IpcPath;
 
 pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 8_192];
 pub(crate) const ALL_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
@@ -57,6 +58,21 @@ pub(crate) fn run_timeout() -> Duration {
     let r = rounds() as u32;
     let per = round_duration();
     per.saturating_mul(r * 2) + Duration::from_secs(30)
+}
+
+pub(crate) fn bench_buffer_len() -> usize {
+    let max_size = sizes().into_iter().max().unwrap_or(64 * 1024);
+    (max_size + 64).next_power_of_two().max(64 * 1024)
+}
+
+pub(crate) fn build_bench_runtime() -> std::io::Result<compio::runtime::Runtime> {
+    use omq_compio::runtime::ProactorBuilderExt as _;
+    let len = bench_buffer_len();
+    let mut p = compio::driver::ProactorBuilder::new();
+    p.with_omq_buffer_pool_sized(std::num::NonZero::new(64).unwrap(), len);
+    compio::runtime::RuntimeBuilder::new()
+        .with_proactor(p)
+        .build()
 }
 
 pub(crate) fn results_path() -> PathBuf {

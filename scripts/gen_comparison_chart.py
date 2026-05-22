@@ -113,8 +113,8 @@ def generate_svg(data: dict) -> str:
 
     import math
 
-    # Log scale for msg/s: 1k .. 10M (4 decades)
-    msg_log_min = 3.0   # log10(1k)
+    # Log scale for msg/s: 10k .. 10M (3 decades)
+    msg_log_min = 4.0   # log10(10k)
     msg_log_max = 7.0   # log10(10M)
 
     tput_max = 10.0  # GB/s, linear
