@@ -151,8 +151,8 @@ pub struct WssTls {
 }
 
 /// Security-mechanism configuration. NULL is the default; CURVE is
-/// available behind the default-on `curve` feature; BLAKE3ZMQ behind
-/// the default-off `blake3zmq` feature.
+/// available behind the opt-in `curve` feature; BLAKE3ZMQ behind
+/// the opt-in `blake3zmq` feature.
 #[derive(Clone, Debug, Default)]
 pub enum MechanismConfig {
     /// NULL: no encryption, no peer authentication.

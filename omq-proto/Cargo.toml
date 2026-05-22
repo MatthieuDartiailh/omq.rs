@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Sans-I/O ZMTP codec, message types, and routing logic. Backend-agnostic core for omq-tokio / omq-compio."
+readme = "README.md"
+keywords = ["zeromq", "zmq", "protocol", "codec", "sans-io"]
+categories = ["network-programming", "parser-implementations"]
 
 [lints]
 workspace = true
@@ -58,3 +61,6 @@ zeroize = { version = "1", features = ["zeroize_derive"], optional = true }
 name = "mechanism_frame"
 harness = false
 required-features = ["curve", "blake3zmq"]
+
+[package.metadata.docs.rs]
+all-features = true

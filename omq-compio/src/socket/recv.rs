@@ -283,6 +283,7 @@ impl Socket {
         Ok(None)
     }
 
+    /// Receive the next message, blocking until one is available or the socket is closed.
     pub async fn recv(&self) -> Result<Message> {
         use futures::FutureExt;
         let st = self.inner().socket_type;
@@ -427,6 +428,7 @@ impl Socket {
         }
     }
 
+    /// Non-blocking receive; returns `Err(WouldBlock)` if no message is queued.
     #[inline]
     pub fn try_recv(&self) -> Result<Message> {
         let st = self.inner().socket_type;

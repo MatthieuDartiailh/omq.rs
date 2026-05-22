@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "compio backend for omq: thread-per-core io_uring/IOCP socket driver. Built on omq-proto."
+readme = "README.md"
+keywords = ["zeromq", "zmq", "io-uring", "compio", "async"]
+categories = ["network-programming", "asynchronous"]
 
 [lib]
 name = "omq_compio"
@@ -110,4 +113,7 @@ required-features = ["curve", "blake3zmq"]
 [[example]]
 name = "profile_ws"
 required-features = ["ws"]
+
+[package.metadata.docs.rs]
+all-features = true
 

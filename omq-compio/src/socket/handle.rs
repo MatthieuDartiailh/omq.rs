@@ -63,6 +63,7 @@ impl Drop for Socket {
 }
 
 impl Socket {
+    /// Create a new socket of the given type with the given options.
     pub fn new(socket_type: SocketType, options: Options) -> Self {
         assert!(
             !options.conflate || crate::socket::supports_conflate(socket_type),
@@ -80,14 +81,17 @@ impl Socket {
         &self.inner
     }
 
+    /// The socket type.
     pub fn socket_type(&self) -> SocketType {
         self.inner.socket_type
     }
 
+    /// Subscribe to connection-lifecycle events.
     pub fn monitor(&self) -> MonitorStream {
         self.inner.monitor.subscribe()
     }
 
+    /// Return the most recently bound endpoint, if any.
     pub fn last_bound_endpoint(&self) -> Option<Endpoint> {
         self.inner
             .listeners
@@ -97,6 +101,7 @@ impl Socket {
             .map(|l| l.endpoint.clone())
     }
 
+    /// Remove a previously-established bind.
     #[allow(clippy::unused_async)]
     pub async fn unbind(&self, endpoint: Endpoint) -> Result<()> {
         let mut listeners = self.inner.listeners.write().expect("listeners lock");
@@ -109,6 +114,7 @@ impl Socket {
         }
     }
 
+    /// Remove a previously-started connect.
     #[allow(clippy::unused_async)]
     pub async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
         let mut dialers = self.inner.dialers.write().expect("dialers lock");
@@ -123,6 +129,7 @@ impl Socket {
         }
     }
 
+    /// Snapshot the live status of one connected peer by `connection_id`.
     #[allow(clippy::unused_async)]
     pub async fn connection_info(
         &self,
@@ -146,6 +153,7 @@ impl Socket {
         Ok(None)
     }
 
+    /// Snapshot every currently-connected peer.
     #[allow(clippy::unused_async)]
     pub async fn connections(&self) -> Result<Vec<crate::monitor::ConnectionStatus>> {
         let peers = self.inner.out_peers.read().expect("peers lock");
@@ -166,6 +174,7 @@ impl Socket {
             .collect())
     }
 
+    /// Total number of multishot recv rearms across all peers (diagnostic counter).
     pub fn multishot_rearms(&self) -> usize {
         let peers = self.inner.out_peers.read().expect("peers lock");
         peers
@@ -182,6 +191,7 @@ impl Socket {
             .sum()
     }
 
+    /// Subscribe to a topic prefix (SUB / XSUB only).
     pub async fn subscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Sub | SocketType::XSub) {
             return Err(Error::Protocol(
@@ -208,6 +218,7 @@ impl Socket {
         Ok(())
     }
 
+    /// Cancel a previously-registered subscription prefix.
     pub async fn unsubscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Sub | SocketType::XSub) {
             return Err(Error::Protocol(
@@ -234,6 +245,7 @@ impl Socket {
         Ok(())
     }
 
+    /// Join a group (DISH only).
     pub async fn join(&self, group: impl Into<Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Dish) {
             return Err(Error::Protocol("join is only valid on DISH sockets".into()));
@@ -252,6 +264,7 @@ impl Socket {
         Ok(())
     }
 
+    /// Leave a previously-joined group (DISH only).
     pub async fn leave(&self, group: impl Into<Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Dish) {
             return Err(Error::Protocol(
@@ -272,10 +285,12 @@ impl Socket {
         Ok(())
     }
 
+    /// Set the closed flag without draining or awaiting linger.
     pub fn signal_close(&self) {
         self.inner.closed.store(true, Ordering::SeqCst);
     }
 
+    /// Graceful close: stop accepting, drain pending sends up to linger, then shut down.
     pub async fn close(self) -> Result<()> {
         let was_closed = self.inner.closed.swap(true, Ordering::SeqCst);
         if was_closed {

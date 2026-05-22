@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Tokio backend for omq: TCP / IPC / inproc / UDP transports + tokio-runtime socket driver. Built on omq-proto."
+readme = "README.md"
+keywords = ["zeromq", "zmq", "tokio", "async", "networking"]
+categories = ["network-programming", "asynchronous"]
 
 [lints]
 workspace = true
@@ -97,3 +100,6 @@ harness = false
 [[bench]]
 name = "client_server_latency"
 harness = false
+
+[package.metadata.docs.rs]
+all-features = true

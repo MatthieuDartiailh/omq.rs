@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Drop-in zeromq crate replacement backed by omq-tokio"
+readme = "README.md"
+keywords = ["zeromq", "zmq", "drop-in", "async"]
+categories = ["network-programming", "asynchronous"]
 
 [lib]
 name = "zeromq"
@@ -33,3 +36,6 @@ path = "src/bin/bench_peer_zeromq.rs"
 [features]
 default = []
 ipc-transport = []
+
+[package.metadata.docs.rs]
+all-features = true

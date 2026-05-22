@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Pure Rust ØMQ/ZeroMQ. Facade over omq-compio (default) or omq-tokio. Wire-compatible with libzmq."
+readme = "README.md"
+keywords = ["zeromq", "zmq", "messaging", "networking", "async"]
+categories = ["network-programming", "asynchronous"]
 
 [lints]
 workspace = true
@@ -53,3 +56,6 @@ priority = [
 [dependencies]
 omq-compio = { path = "../omq-compio", version = "0.9.1", default-features = false, optional = true }
 omq-tokio  = { path = "../omq-tokio",  version = "0.10.0", default-features = false, optional = true }
+
+[package.metadata.docs.rs]
+all-features = true

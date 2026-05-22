@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "libzmq-compatible C interface backed by omq (omq-compio)."
+readme = "README.md"
+keywords = ["zeromq", "zmq", "ffi", "libzmq", "c-api"]
+categories = ["network-programming", "api-bindings"]
 
 [lib]
 name = "omq_zmq"

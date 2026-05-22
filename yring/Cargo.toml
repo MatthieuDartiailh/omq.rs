@@ -26,5 +26,8 @@ futures-lite = "2"
 name = "throughput"
 harness = false
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true

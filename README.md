@@ -12,7 +12,7 @@
 Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all message sizes.
 
 - Two async backends: **compio** (io_uring, default) and **tokio**
-- 19 socket types (11 standard + 8 draft), 6 transports (TCP, IPC, inproc, UDP, `lz4+tcp://`, `zstd+tcp://`)
+- 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `zstd+tcp://`)
 - 4 security mechanisms: NULL, PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
@@ -68,6 +68,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
 | `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4-sys` |
 | `zstd`            | `zstd+tcp://` compression transport ([RFC](https://github.com/paddor/omq-zstd/blob/main/RFC.md)) | `zstd-safe` (vends `libzstd`; needs `cc`) |
+| `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
 | `priority`        | Strict per-pipe priority on `Socket::connect_with`| -                                |
 
 > [!WARNING]

@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Batching MPSC channel for cross-core message passing"
+readme = "README.md"
+keywords = ["mpsc", "channel", "batching", "async"]
+categories = ["concurrency", "data-structures"]
 
 [lints]
 workspace = true
