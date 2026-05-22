@@ -555,6 +555,17 @@ impl Connection {
                 return Ok(());
             }
 
+            if matches!(self.state, State::Ready)
+                && !self.has_frame_transform()
+                && self.pending_parts.is_empty()
+            {
+                match self.try_advance_ready_ws(peer_role)? {
+                    Some(true) => continue,
+                    Some(false) => return Ok(()),
+                    None => {}
+                }
+            }
+
             let Some(ws_hdr) = ws_codec::peek_ws_header(&self.in_buf, peer_role)? else {
                 return Ok(());
             };
@@ -584,6 +595,129 @@ impl Connection {
                 _ => unreachable!("peek_ws_header rejects unknown opcodes"),
             }
         }
+    }
+
+    /// WS fast path for small single-part data frames. Reads WS header +
+    /// ZWS flag + payload directly into `Message::Inline`, zero allocs.
+    /// Returns `Some(true)` on progress, `Some(false)` when not enough
+    /// data is buffered, `None` to fall through to the full parse.
+    #[cfg(feature = "ws")]
+    #[inline]
+    fn try_advance_ready_ws(
+        &mut self,
+        peer_role: super::super::ws_codec::WsRole,
+    ) -> Result<Option<bool>> {
+        use super::super::ws_codec::{self, WsRole};
+        use super::super::zws;
+
+        const FIN_BINARY: u8 = 0x80 | 0x02;
+
+        let Some(first_two) = self.in_buf.peek_array::<2>() else {
+            return Ok(Some(false));
+        };
+
+        if first_two[0] != FIN_BINARY {
+            return Ok(None);
+        }
+
+        let masked = peer_role == WsRole::Client;
+        let b1 = first_two[1];
+        if masked != (b1 & 0x80 != 0) {
+            return Ok(None);
+        }
+
+        let ws_payload_len = (b1 & 0x7F) as usize;
+        if ws_payload_len >= 126 {
+            return Ok(None);
+        }
+        // ws_payload = ZWS flag (1) + ZMTP payload
+        if ws_payload_len == 0 || ws_payload_len - 1 > crate::message::MAX_INLINE_MESSAGE {
+            return Ok(None);
+        }
+
+        let header_len = if masked { 6 } else { 2 };
+        let total_frame = header_len + ws_payload_len;
+        if self.in_buf.len() < total_frame {
+            return Ok(Some(false));
+        }
+
+        let mask_key = if masked {
+            let Some(hdr) = self.in_buf.peek_array::<6>() else {
+                return Ok(Some(false));
+            };
+            [hdr[2], hdr[3], hdr[4], hdr[5]]
+        } else {
+            [0; 4]
+        };
+
+        self.in_buf.advance(header_len);
+
+        let zmtp_payload_len = ws_payload_len - 1;
+
+        // SAFETY: same pattern as try_advance_ready — MaybeUninit<u8> array
+        // has no validity invariant.
+        let mut data: [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE] =
+            unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+
+        // Read ZWS flag + payload together, then split.
+        // We use a small stack buffer for the ZWS flag byte.
+        let mut zws_flag_buf: [std::mem::MaybeUninit<u8>; 1] = [std::mem::MaybeUninit::uninit()];
+        self.in_buf.read_into_uninit(1, &mut zws_flag_buf);
+        // SAFETY: read_into_uninit initialized zws_flag_buf[0].
+        let mut zws_flag = unsafe { zws_flag_buf[0].assume_init() };
+
+        if masked {
+            zws_flag ^= mask_key[0];
+        }
+
+        // Only handle single-part data frames on the fast path.
+        if zws_flag != zws::FLAG_FINAL {
+            // Already consumed the ZWS flag byte — need to fall back.
+            // Re-parse via the slow path by reading the remaining payload
+            // and dispatching.
+            let flags = zws::zws_to_flags(zws_flag)?;
+            if zmtp_payload_len > 0 {
+                let payload = self.in_buf.split_to(zmtp_payload_len);
+                if masked {
+                    let mut raw = bytes::BytesMut::from(payload.as_bytes().as_ref());
+                    ws_codec::apply_mask_offset(&mut raw, mask_key, 1);
+                    let zmtp_payload = Payload::from_bytes(raw.freeze());
+                    return self
+                        .dispatch_ws_binary(flags, zmtp_payload)
+                        .map(|()| Some(true));
+                }
+                return self.dispatch_ws_binary(flags, payload).map(|()| Some(true));
+            }
+            return self
+                .dispatch_ws_binary(flags, Payload::new())
+                .map(|()| Some(true));
+        }
+
+        if zmtp_payload_len > 0 {
+            self.in_buf.read_into_uninit(zmtp_payload_len, &mut data);
+        }
+
+        if masked && zmtp_payload_len > 0 {
+            // SAFETY: data[..zmtp_payload_len] was initialized by read_into_uninit.
+            let slice = unsafe {
+                std::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u8>(), zmtp_payload_len)
+            };
+            ws_codec::apply_mask_offset(slice, mask_key, 1);
+        }
+
+        let msg = Message {
+            inner: crate::message::MessageInner::Inline {
+                len: zmtp_payload_len as u8,
+                data: unsafe {
+                    std::mem::transmute::<
+                        [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE],
+                        [u8; crate::message::MAX_INLINE_MESSAGE],
+                    >(data)
+                },
+            },
+        };
+        self.messages.push_back(msg);
+        Ok(Some(true))
     }
 
     #[cfg(feature = "ws")]

@@ -39,6 +39,10 @@ pub(crate) struct DirectIoState {
     pub(crate) pending_acc: Mutex<Option<BytesMut>>,
     pub(crate) large_message_threshold: usize,
     pub(crate) multishot_rearms: AtomicUsize,
+    #[cfg(feature = "ws")]
+    pub(crate) is_ws: bool,
+    #[cfg(feature = "ws")]
+    pub(crate) ws_masked: bool,
 }
 
 impl std::fmt::Debug for DirectIoState {
@@ -228,6 +232,8 @@ impl DirectIoState {
         encoder: Option<MessageEncoder>,
         uses_crypto: bool,
         large_message_threshold: usize,
+        #[cfg(feature = "ws")] is_ws: bool,
+        #[cfg(feature = "ws")] ws_masked: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             peer_io,
@@ -253,6 +259,10 @@ impl DirectIoState {
             pending_acc: Mutex::new(None),
             large_message_threshold,
             multishot_rearms: AtomicUsize::new(0),
+            #[cfg(feature = "ws")]
+            is_ws,
+            #[cfg(feature = "ws")]
+            ws_masked,
         })
     }
 }

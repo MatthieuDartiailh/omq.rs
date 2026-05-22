@@ -68,6 +68,15 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             return Ok(false);
         }
         let msg_total = msg.byte_len();
+        #[cfg(feature = "ws")]
+        if state.is_ws {
+            eq.encode_and_push_flat_ws(msg, state.ws_masked);
+            drop(eq);
+            if state.driver_in_select.load(Ordering::Relaxed) {
+                state.transmit_ready.notify(1);
+            }
+            return Ok(true);
+        }
         if msg_total < FLAT_THRESHOLD {
             eq.encode_and_push_flat(msg);
         } else {

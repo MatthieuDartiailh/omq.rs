@@ -50,6 +50,21 @@ impl EncodedQueue {
         self.total_bytes += self.flat_buf.len() - before;
     }
 
+    #[cfg(feature = "ws")]
+    pub(crate) fn encode_and_push_flat_ws(
+        &mut self,
+        msg: &omq_proto::message::Message,
+        masked: bool,
+    ) {
+        let before = self.flat_buf.len();
+        if masked {
+            omq_proto::proto::frame::encode_message_flat_ws_masked(msg, &mut self.flat_buf);
+        } else {
+            omq_proto::proto::frame::encode_message_flat_ws(msg, &mut self.flat_buf);
+        }
+        self.total_bytes += self.flat_buf.len() - before;
+    }
+
     pub(crate) fn encode_and_push(&mut self, msg: &omq_proto::message::Message) {
         self.flush_flat_to_chunks();
         let chunk_count_before = self.chunks.len();

@@ -311,8 +311,9 @@ fn transport_crypto_config(
                 omq_proto::proto::connection::WsRole::Client
             }
         };
+        let actual_crypto = !matches!(mechanism, omq_proto::options::MechanismConfig::Null);
         return TransportConfig {
-            uses_crypto: true,
+            uses_crypto: actual_crypto,
             ws_role: Some(ws_role),
         };
     }
@@ -366,6 +367,10 @@ fn install_accepted_wire_peer_with_leftover(
     ) else {
         return;
     };
+    #[cfg(feature = "ws")]
+    let is_ws = ws_role.is_some();
+    #[cfg(feature = "ws")]
+    let ws_masked = matches!(ws_role, Some(omq_proto::proto::connection::WsRole::Client));
     let state = DirectIoState::new(
         peer_io,
         writer,
@@ -375,6 +380,10 @@ fn install_accepted_wire_peer_with_leftover(
         encoder,
         uses_crypto,
         inner.options.large_message_threshold.unwrap_or(0),
+        #[cfg(feature = "ws")]
+        is_ws,
+        #[cfg(feature = "ws")]
+        ws_masked,
     );
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let slot_idx = inner.insert_peer_slot(

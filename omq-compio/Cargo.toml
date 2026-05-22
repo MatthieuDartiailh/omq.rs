@@ -101,3 +101,7 @@ name = "mechanism"
 harness = false
 required-features = ["curve", "blake3zmq"]
 
+[[example]]
+name = "profile_ws"
+required-features = ["ws"]
+

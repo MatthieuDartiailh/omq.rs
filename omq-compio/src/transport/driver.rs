@@ -216,6 +216,11 @@ impl DriverLoopState {
         } else {
             let mut eq = state.encoded_queue.lock().expect("encoded_queue");
             let cr = eq.total_bytes() >= cap;
+            #[cfg(feature = "ws")]
+            if state.is_ws {
+                eq.encode_and_push_flat_ws(m, state.ws_masked);
+                return Ok(cr);
+            }
             if m.byte_len() < crate::socket::FLAT_THRESHOLD {
                 eq.encode_and_push_flat(m);
             } else {
