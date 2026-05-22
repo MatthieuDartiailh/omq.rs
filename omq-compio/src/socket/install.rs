@@ -126,7 +126,6 @@ pub(super) fn install_inproc_peer(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
 pub(super) fn install_accepted_wire_peer(
     inner: &Arc<SocketInner>,
     reader: WireReader,
@@ -136,108 +135,16 @@ pub(super) fn install_accepted_wire_peer(
     connection_id: u64,
     peer_addr: Option<std::net::SocketAddr>,
 ) {
-    let cap = cmd_channel_capacity(&inner.options);
-    let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
-    let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
-    let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
-    let peer_sub = pub_side_peer_sub(inner.socket_type);
-    let peer_groups = radio_side_peer_groups(inner.socket_type);
-    let (encoder, decoder, has_transform, transform_passthrough) =
-        match omq_proto::proto::transform::MessageEncoder::for_endpoint(&endpoint, &inner.options) {
-            Some((enc, dec)) => {
-                let pt = enc.passthrough_info();
-                (Some(enc), Some(dec), true, pt)
-            }
-            None => (None, None, false, None),
-        };
-    let mut uses_crypto = !matches!(
-        inner.options.mechanism,
-        omq_proto::options::MechanismConfig::Null
-    );
-    #[cfg(feature = "ws")]
-    if endpoint.is_ws_family() {
-        uses_crypto = true;
-    }
-    #[cfg(feature = "ws")]
-    let ws_role = if endpoint.is_ws_family() {
-        Some(match role {
-            omq_proto::proto::connection::Role::Server => {
-                omq_proto::proto::connection::WsRole::Server
-            }
-            omq_proto::proto::connection::Role::Client => {
-                omq_proto::proto::connection::WsRole::Client
-            }
-        })
-    } else {
-        None
-    };
-    let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
-        role,
-        inner.socket_type,
-        &inner.options,
+    install_accepted_wire_peer_with_leftover(
+        inner,
         reader,
-        decoder,
-        #[cfg(feature = "ws")]
-        ws_role,
-        #[cfg(feature = "ws")]
-        None,
-    ) else {
-        return;
-    };
-    let state = DirectIoState::new(
-        peer_io,
         writer,
-        recv_stream,
-        has_transform,
-        transform_passthrough,
-        encoder,
-        uses_crypto,
-        inner.options.large_message_threshold.unwrap_or(0),
-    );
-    let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
-    let out = PeerOut::Wire(handle);
-    let slot_idx = {
-        let mut peers = inner.out_peers.write().expect("peers lock");
-        let idx = peers.insert(PeerSlot {
-            out,
-            direct_io: Some(direct_io_handle.clone()),
-            peer: Arc::new(RwLock::new(None)),
-            connection_id,
-            endpoint: endpoint.clone(),
-            info: info_holder.clone(),
-            peer_sub: peer_sub.clone(),
-            peer_groups: peer_groups.clone(),
-            #[cfg(feature = "priority")]
-            priority: omq_proto::DEFAULT_PRIORITY,
-        });
-        inner
-            .peers_gen
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
-        idx
-    };
-    {
-        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
-        while pipes.len() <= slot_idx {
-            pipes.push(None);
-        }
-    }
-    inner.rebuild_peer_keys();
-    inner.on_peer_ready.notify(usize::MAX);
-    spawn_wire_driver(WireDriverConfig {
-        inner: inner.clone(),
-        state,
-        direct_io_handle,
-        cmd_rx,
-        slot_idx,
+        role,
         endpoint,
         connection_id,
-        info_holder,
-        peer_address: peer_addr,
-        peer_sub,
-        peer_groups,
-        release_on_exit: true,
-    })
-    .detach();
+        peer_addr,
+        None,
+    );
 }
 
 pub(super) struct WireDriverConfig {
@@ -403,6 +310,7 @@ pub(super) fn install_ws_peer(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn install_accepted_wire_peer_with_leftover(
     inner: &Arc<SocketInner>,
     reader: WireReader,
