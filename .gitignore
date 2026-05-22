@@ -21,3 +21,4 @@ __pycache__/
 *.html
 /*.log
 omq-tokio/tests/helpers/zmq_ws_peer
+perf.data*

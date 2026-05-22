@@ -532,14 +532,12 @@ fn encode_msg(
     passthrough: Option<&(Bytes, usize)>,
 ) {
     #[cfg(feature = "ws")]
-    if codec.is_ws() {
-        if !codec.has_frame_transform()
-            && codec.ws_role() == Some(omq_proto::proto::connection::WsRole::Server)
-        {
-            eq.encode_ws(msg);
-            return;
+    if codec.is_ws() && !codec.has_frame_transform() {
+        match codec.ws_role() {
+            Some(omq_proto::proto::connection::WsRole::Server) => eq.encode_ws(msg),
+            Some(omq_proto::proto::connection::WsRole::Client) => eq.encode_ws_masked(msg),
+            None => unreachable!(),
         }
-        let _ = codec.send_message(msg);
         return;
     }
     if codec.has_frame_transform() {

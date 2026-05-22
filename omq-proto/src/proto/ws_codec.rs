@@ -262,6 +262,10 @@ pub(crate) fn apply_mask_offset(data: &mut [u8], mask: [u8; 4], offset: usize) {
     }
 }
 
+pub(crate) fn generate_mask_key_pub() -> [u8; 4] {
+    generate_mask_key()
+}
+
 fn generate_mask_key() -> [u8; 4] {
     use rand::{RngCore, SeedableRng};
     thread_local! {

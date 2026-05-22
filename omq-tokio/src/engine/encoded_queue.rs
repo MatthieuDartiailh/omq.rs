@@ -72,6 +72,13 @@ impl EncodedQueue {
         self.total_bytes += self.flat_buf.len() - before;
     }
 
+    #[cfg(feature = "ws")]
+    pub(crate) fn encode_ws_masked(&mut self, msg: &Message) {
+        let before = self.flat_buf.len();
+        frame::encode_message_flat_ws_masked(msg, &mut self.flat_buf);
+        self.total_bytes += self.flat_buf.len() - before;
+    }
+
     pub(crate) fn encode_prefixed_flat(&mut self, prefix: &Bytes, msg: &Message) {
         let before = self.flat_buf.len();
         frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);

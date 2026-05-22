@@ -147,6 +147,41 @@ pub fn encode_message_flat_ws(msg: &Message, buf: &mut BytesMut) {
     });
 }
 
+/// Like [`encode_message_flat_ws`] but with client-side masking.
+#[cfg(feature = "ws")]
+pub fn encode_message_flat_ws_masked(msg: &Message, buf: &mut BytesMut) {
+    let n = msg.len();
+    let mut i = 0;
+    msg.iter_parts(|part| {
+        let more = i + 1 < n;
+        let ws_payload_len = 1 + part.len();
+        let mask = super::ws_codec::generate_mask_key_pub();
+        buf.put_u8(0x82); // FIN | BINARY
+        if ws_payload_len <= 125 {
+            buf.put_u8(0x80 | ws_payload_len as u8); // MASK bit set
+        } else if ws_payload_len <= 65535 {
+            buf.put_u8(0x80 | 0x7E);
+            buf.put_u16(ws_payload_len as u16);
+        } else {
+            buf.put_u8(0x80 | 0x7F);
+            buf.put_u64(ws_payload_len as u64);
+        }
+        buf.put_slice(&mask);
+        // ZWS flag byte, masked
+        let zws_flag = if more {
+            super::zws::FLAG_MORE
+        } else {
+            super::zws::FLAG_FINAL
+        };
+        buf.put_u8(zws_flag ^ mask[0]);
+        // Payload, masked
+        let start = buf.len();
+        write_payload_flat(buf, part);
+        super::ws_codec::apply_mask_offset(&mut buf[start..], mask, 1);
+        i += 1;
+    });
+}
+
 /// Encode all frames of `msg` into a flat contiguous buffer (header + payload
 /// concatenated). Used by the compio fast send path for small messages.
 pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {
