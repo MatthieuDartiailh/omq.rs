@@ -126,6 +126,7 @@ pub(super) fn install_inproc_peer(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub(super) fn install_accepted_wire_peer(
     inner: &Arc<SocketInner>,
     reader: WireReader,
@@ -149,10 +150,14 @@ pub(super) fn install_accepted_wire_peer(
             }
             None => (None, None, false, None),
         };
-    let uses_crypto = !matches!(
+    let mut uses_crypto = !matches!(
         inner.options.mechanism,
         omq_proto::options::MechanismConfig::Null
     );
+    #[cfg(feature = "ws")]
+    if endpoint.is_ws_family() {
+        uses_crypto = true;
+    }
     #[cfg(feature = "ws")]
     let ws_role = if endpoint.is_ws_family() {
         Some(match role {
@@ -174,6 +179,8 @@ pub(super) fn install_accepted_wire_peer(
         decoder,
         #[cfg(feature = "ws")]
         ws_role,
+        #[cfg(feature = "ws")]
+        None,
     ) else {
         return;
     };
@@ -367,18 +374,23 @@ fn handle_driver_exit(
 #[cfg(feature = "ws")]
 pub(super) fn install_ws_peer(
     inner: &std::sync::Arc<SocketInner>,
-    stream: compio::net::TcpStream,
+    upgraded: crate::transport::ws::WsUpgraded,
     role: omq_proto::proto::connection::Role,
     endpoint: Endpoint,
     connection_id: u64,
     peer_addr: Option<std::net::SocketAddr>,
 ) {
-    let read_clone = stream.clone();
+    let read_clone = upgraded.stream.clone();
     let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
         return;
     };
-    let (_, writer) = stream.into_split();
-    install_accepted_wire_peer(
+    let (_, writer) = upgraded.stream.into_split();
+    let leftover = if upgraded.leftover.is_empty() {
+        None
+    } else {
+        Some(upgraded.leftover)
+    };
+    install_accepted_wire_peer_with_leftover(
         inner,
         read_fd.into(),
         writer.into(),
@@ -386,7 +398,117 @@ pub(super) fn install_ws_peer(
         endpoint,
         connection_id,
         peer_addr,
+        leftover,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_accepted_wire_peer_with_leftover(
+    inner: &Arc<SocketInner>,
+    reader: WireReader,
+    writer: WireWriter,
+    role: omq_proto::proto::connection::Role,
+    endpoint: Endpoint,
+    connection_id: u64,
+    peer_addr: Option<std::net::SocketAddr>,
+    leftover: Option<bytes::Bytes>,
+) {
+    let cap = cmd_channel_capacity(&inner.options);
+    let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
+    let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
+    let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
+    let peer_sub = pub_side_peer_sub(inner.socket_type);
+    let peer_groups = radio_side_peer_groups(inner.socket_type);
+    let (encoder, decoder, has_transform, transform_passthrough) =
+        match omq_proto::proto::transform::MessageEncoder::for_endpoint(&endpoint, &inner.options) {
+            Some((enc, dec)) => {
+                let pt = enc.passthrough_info();
+                (Some(enc), Some(dec), true, pt)
+            }
+            None => (None, None, false, None),
+        };
+    let mut uses_crypto = !matches!(
+        inner.options.mechanism,
+        omq_proto::options::MechanismConfig::Null
+    );
+    let ws_role = if endpoint.is_ws_family() {
+        uses_crypto = true;
+        Some(match role {
+            omq_proto::proto::connection::Role::Server => {
+                omq_proto::proto::connection::WsRole::Server
+            }
+            omq_proto::proto::connection::Role::Client => {
+                omq_proto::proto::connection::WsRole::Client
+            }
+        })
+    } else {
+        None
+    };
+    let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
+        role,
+        inner.socket_type,
+        &inner.options,
+        reader,
+        decoder,
+        ws_role,
+        leftover,
+    ) else {
+        return;
+    };
+    let state = DirectIoState::new(
+        peer_io,
+        writer,
+        recv_stream,
+        has_transform,
+        transform_passthrough,
+        encoder,
+        uses_crypto,
+        inner.options.large_message_threshold.unwrap_or(0),
+    );
+    let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
+    let out = PeerOut::Wire(handle);
+    let slot_idx = {
+        let mut peers = inner.out_peers.write().expect("peers lock");
+        let idx = peers.insert(PeerSlot {
+            out,
+            direct_io: Some(direct_io_handle.clone()),
+            peer: Arc::new(RwLock::new(None)),
+            connection_id,
+            endpoint: endpoint.clone(),
+            info: info_holder.clone(),
+            peer_sub: peer_sub.clone(),
+            peer_groups: peer_groups.clone(),
+            #[cfg(feature = "priority")]
+            priority: omq_proto::DEFAULT_PRIORITY,
+        });
+        inner
+            .peers_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        idx
+    };
+    {
+        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+        while pipes.len() <= slot_idx {
+            pipes.push(None);
+        }
+    }
+    inner.rebuild_peer_keys();
+    inner.on_peer_ready.notify(usize::MAX);
+    spawn_wire_driver(WireDriverConfig {
+        inner: inner.clone(),
+        state,
+        direct_io_handle,
+        cmd_rx,
+        slot_idx,
+        endpoint,
+        connection_id,
+        info_holder,
+        peer_address: peer_addr,
+        peer_sub,
+        peer_groups,
+        release_on_exit: true,
+    })
+    .detach();
 }
 
 pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinHandle<()> {

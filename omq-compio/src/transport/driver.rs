@@ -149,18 +149,27 @@ pub(crate) fn build_peer_io(
     reader: WireReader,
     decoder: Option<MessageDecoder>,
     #[cfg(feature = "ws")] ws_role: Option<omq_proto::proto::connection::WsRole>,
+    #[cfg(feature = "ws")] leftover: Option<bytes::Bytes>,
 ) -> std::io::Result<(
     SharedPeerIo,
     crate::transport::peer_io::CancellableRecvStream,
 )> {
     let recv_stream = reader.build_recv_stream()?;
-    let codec = make_codec(
+    let mut codec = make_codec(
         role,
         socket_type,
         options,
         #[cfg(feature = "ws")]
         ws_role,
     );
+    #[cfg(feature = "ws")]
+    if let Some(ref wr) = ws_role
+        && let Some(leftover) = leftover
+        && !leftover.is_empty()
+    {
+        let _ = codec.handle_input(leftover);
+        let _ = wr; // suppress unused
+    }
     let peer_io = Arc::new(std::sync::Mutex::new(PeerIo {
         codec,
         decoder,

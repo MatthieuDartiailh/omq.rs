@@ -75,6 +75,9 @@ pub(crate) async fn try_one_shot_large_recv(
         let Ok(mut io) = state.peer_io.lock() else {
             return OneShotLargeRecvOutcome::RearmMultiShot;
         };
+        if io.codec.has_frame_transform() {
+            return OneShotLargeRecvOutcome::RearmMultiShot;
+        }
         let info = match io.codec.peek_next_frame_payload_size() {
             Ok(Some(info)) => info,
             Ok(None) => return OneShotLargeRecvOutcome::Skipped,

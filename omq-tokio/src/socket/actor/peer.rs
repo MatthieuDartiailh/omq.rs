@@ -238,10 +238,8 @@ impl SocketDriver {
             cfg = cfg.ws_role(ws_role);
         }
         let mut codec = ZmtpConnection::new(cfg);
-        if !leftover.is_empty() {
-            if codec.handle_input(leftover).is_err() {
-                return;
-            }
+        if !leftover.is_empty() && codec.handle_input(leftover).is_err() {
+            return;
         }
 
         // Per-connection driver inbox: bounded so a stuck TCP write

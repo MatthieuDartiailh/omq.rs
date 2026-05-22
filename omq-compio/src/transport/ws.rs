@@ -42,6 +42,11 @@ pub(crate) struct WsListener {
     pub(crate) local_addr: SocketAddr,
 }
 
+pub(crate) struct WsUpgraded {
+    pub stream: TcpStream,
+    pub leftover: bytes::Bytes,
+}
+
 pub(crate) async fn bind(endpoint: &Endpoint) -> Result<WsListener> {
     let (host, port) = match endpoint {
         Endpoint::Ws { host, port, .. } | Endpoint::Wss { host, port, .. } => (host, *port),
@@ -60,19 +65,47 @@ pub(crate) async fn bind(endpoint: &Endpoint) -> Result<WsListener> {
     })
 }
 
-#[allow(clippy::result_large_err)]
-pub(crate) async fn accept(stream: TcpStream) -> Result<TcpStream> {
-    let _ = stream.set_nodelay(true);
+struct HttpRead {
+    buf: Vec<u8>,
+    header_end: usize,
+    total: usize,
+}
 
-    let buf = vec![0u8; 4096];
-    let mut stream = stream;
-    let compio::buf::BufResult(n, buf) = stream.read(buf).await;
-    let n = n.map_err(Error::Io)?;
-    if n == 0 {
-        return Err(Error::HandshakeFailed("empty HTTP upgrade request".into()));
+async fn read_until_header_end(stream: &mut TcpStream) -> Result<HttpRead> {
+    let mut buf = vec![0u8; 4096];
+    let mut total = 0;
+    loop {
+        let slice = buf[total..].to_vec();
+        let compio::buf::BufResult(n, returned) = stream.read(slice).await;
+        let n = n.map_err(Error::Io)?;
+        if n == 0 {
+            return Err(Error::HandshakeFailed(
+                "connection closed during HTTP upgrade".into(),
+            ));
+        }
+        buf[total..total + n].copy_from_slice(&returned[..n]);
+        total += n;
+        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+            return Ok(HttpRead {
+                buf,
+                header_end: pos + 4,
+                total,
+            });
+        }
+        if total >= buf.len() {
+            return Err(Error::HandshakeFailed("HTTP headers too large".into()));
+        }
     }
+}
 
-    let upgrade = ws_handshake::parse_client_upgrade(&buf[..n])?;
+#[allow(clippy::result_large_err)]
+pub(crate) async fn accept(stream: TcpStream) -> Result<WsUpgraded> {
+    let _ = stream.set_nodelay(true);
+    let mut stream = stream;
+
+    let http = read_until_header_end(&mut stream).await?;
+
+    let upgrade = ws_handshake::parse_client_upgrade(&http.buf[..http.header_end])?;
     let chosen = upgrade
         .subprotocols
         .iter()
@@ -84,10 +117,16 @@ pub(crate) async fn accept(stream: TcpStream) -> Result<TcpStream> {
     let response = ws_handshake::format_server_upgrade(&accept_value, &chosen);
     stream.write_all(response).await.0.map_err(Error::Io)?;
 
-    Ok(stream)
+    let leftover = if http.header_end < http.total {
+        bytes::Bytes::copy_from_slice(&http.buf[http.header_end..http.total])
+    } else {
+        bytes::Bytes::new()
+    };
+
+    Ok(WsUpgraded { stream, leftover })
 }
 
-pub(crate) async fn connect(endpoint: &Endpoint) -> Result<TcpStream> {
+pub(crate) async fn connect(endpoint: &Endpoint) -> Result<WsUpgraded> {
     let (host, port, path) = match endpoint {
         Endpoint::Ws {
             host, port, path, ..
@@ -110,14 +149,15 @@ pub(crate) async fn connect(endpoint: &Endpoint) -> Result<TcpStream> {
     let request = ws_handshake::format_client_upgrade(&host_header, path, &key, SUBPROTOCOL_NULL);
     stream.write_all(request).await.0.map_err(Error::Io)?;
 
-    let buf = vec![0u8; 4096];
-    let compio::buf::BufResult(n, buf) = stream.read(buf).await;
-    let n = n.map_err(Error::Io)?;
-    if n == 0 {
-        return Err(Error::HandshakeFailed("empty HTTP upgrade response".into()));
-    }
+    let http = read_until_header_end(&mut stream).await?;
 
-    ws_handshake::parse_server_upgrade(&buf[..n], &key)?;
+    ws_handshake::parse_server_upgrade(&http.buf[..http.header_end], &key)?;
 
-    Ok(stream)
+    let leftover = if http.header_end < http.total {
+        bytes::Bytes::copy_from_slice(&http.buf[http.header_end..http.total])
+    } else {
+        bytes::Bytes::new()
+    };
+
+    Ok(WsUpgraded { stream, leftover })
 }

@@ -381,7 +381,9 @@ where
                         return Ok(());
                     }
                     codec.handle_input(Bytes::copy_from_slice(&read_buf[..n]))?;
-                    if config.large_message_threshold > 0 {
+                    if config.large_message_threshold > 0
+                        && !codec.has_frame_transform()
+                    {
                         while let Some(info) = codec.peek_next_frame_payload_size()? {
                             if info.payload_len < config.large_message_threshold {
                                 break;

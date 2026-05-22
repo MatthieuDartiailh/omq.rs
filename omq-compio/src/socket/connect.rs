@@ -73,7 +73,7 @@ impl Socket {
             let inner = self.inner().clone();
             let ep = endpoint.clone();
             compio::runtime::spawn(async move {
-                let Ok(ws) = crate::transport::ws::connect(&ep).await else {
+                let Ok(upgraded) = crate::transport::ws::connect(&ep).await else {
                     return;
                 };
                 let conn_id = inner
@@ -86,7 +86,7 @@ impl Socket {
                 );
                 crate::socket::install::install_ws_peer(
                     &inner,
-                    ws,
+                    upgraded,
                     omq_proto::proto::connection::Role::Client,
                     ep,
                     conn_id,

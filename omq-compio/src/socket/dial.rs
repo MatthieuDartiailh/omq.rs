@@ -268,6 +268,8 @@ async fn dial_supervisor_tcp(
             decoder,
             #[cfg(feature = "ws")]
             None,
+            #[cfg(feature = "ws")]
+            None,
         ) else {
             continue;
         };
@@ -399,6 +401,8 @@ async fn dial_supervisor_ipc(
             inner.socket_type,
             &inner.options,
             read_fd.into(),
+            None,
+            #[cfg(feature = "ws")]
             None,
             #[cfg(feature = "ws")]
             None,
