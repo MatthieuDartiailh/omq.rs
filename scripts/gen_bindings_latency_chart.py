@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/comparison_latency_chart_bindings.svg from pyomq README latency table.
+"""Generate doc/charts/latency_bindings.svg from pyomq README latency table.
 
 Grouped bar chart: x = message sizes, bars = pyomq vs pyzmq, y = p50 latency (log).
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 README = REPO / "bindings" / "pyomq" / "README.md"
-OUTPUT = REPO / "doc" / "charts" / "comparison_latency_chart_bindings.svg"
+OUTPUT = REPO / "doc" / "charts" / "latency_bindings.svg"
 
 COLORS = {"pyomq": "#dc2626", "pyzmq": "#2563eb"}
 SERIES = ["pyomq", "pyzmq"]

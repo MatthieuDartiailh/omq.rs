@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/comparison_latency_chart.svg from COMPARISONS.md latency tables.
+"""Generate doc/charts/latency.svg from COMPARISONS.md latency tables.
 
 Grouped bar chart: x = message sizes, bars = implementations, y = p50 latency (log).
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 COMPARISONS = REPO / "COMPARISONS.md"
-OUTPUT = REPO / "doc" / "charts" / "comparison_latency_chart.svg"
+OUTPUT = REPO / "doc" / "charts" / "latency.svg"
 
 COLORS = {
     "libzmq": "#eab308",

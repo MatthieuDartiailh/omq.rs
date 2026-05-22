@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/mechanism_chart.svg from BENCHMARKS.md data."""
+"""Generate doc/charts/mechanism.svg from BENCHMARKS.md data."""
 
 import math
 import re
@@ -271,7 +271,7 @@ def main():
     data = load_data(benchmarks_md)
     svg = generate_svg(data)
 
-    output = repo / "doc" / "charts" / "mechanism_chart.svg"
+    output = repo / "doc" / "charts" / "mechanism.svg"
     output.write_text(svg)
     print(f"Written: {output}", file=sys.stderr)
 

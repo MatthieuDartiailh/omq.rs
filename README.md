@@ -20,7 +20,7 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
 ### vs. libzmq (TCP loopback, two processes)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/comparison_chart.svg" alt="PUSH/PULL throughput: TCP loopback" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/throughput.svg" alt="PUSH/PULL throughput: TCP loopback" width="850">
 </p>
 
 [Full comparison tables](COMPARISONS.md) | [All benchmarks](BENCHMARKS.md) | [Compression benchmarks](BENCHMARKS_COMPRESSION.md)

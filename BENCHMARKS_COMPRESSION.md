@@ -21,13 +21,13 @@ At 1 Gbps, LZ4 wins on raw speed; zstd catches up only at larger payloads where
 its higher ratio compensates for slower compression.
 
 <p align="center">
-  <img src="doc/charts/compression_chart_1g.svg" alt="Compression throughput at 1 Gbps" width="850">
+  <img src="doc/charts/compression_1g.svg" alt="Compression throughput at 1 Gbps" width="850">
 </p>
 
 At 100 Mbps, the wire is the bottleneck and zstd's superior ratio dominates: zstd outperforms LZ4 at every payload size.
 
 <p align="center">
-  <img src="doc/charts/compression_chart_100m.svg" alt="Compression throughput at 100 Mbps" width="850">
+  <img src="doc/charts/compression_100m.svg" alt="Compression throughput at 100 Mbps" width="850">
 </p>
 
 ## Throughput tables
