@@ -155,6 +155,7 @@ pub(crate) fn build_peer_io(
     crate::transport::peer_io::CancellableRecvStream,
 )> {
     let recv_stream = reader.build_recv_stream()?;
+    #[cfg_attr(not(feature = "ws"), allow(unused_mut))]
     let mut codec = make_codec(
         role,
         socket_type,

@@ -319,7 +319,7 @@ fn install_accepted_wire_peer_with_leftover(
     endpoint: Endpoint,
     connection_id: u64,
     peer_addr: Option<std::net::SocketAddr>,
-    leftover: Option<bytes::Bytes>,
+    #[cfg_attr(not(feature = "ws"), allow(unused_variables))] leftover: Option<bytes::Bytes>,
 ) {
     let cap = cmd_channel_capacity(&inner.options);
     let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
