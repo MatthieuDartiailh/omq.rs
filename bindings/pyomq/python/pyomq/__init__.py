@@ -656,6 +656,14 @@ def proxy(frontend, backend, capture=None):
     )
 
 
+def proxy_steerable(frontend, backend, capture=None, control=None):
+    _native.native_proxy(
+        frontend._sock, backend._sock,
+        capture._sock if capture is not None else None,
+        control._sock if control is not None else None,
+    )
+
+
 def device(device_type, frontend, backend):
     proxy(frontend, backend)
 
@@ -678,6 +686,7 @@ __all__ = [
     "backend_name",
     "version",
     "proxy",
+    "proxy_steerable",
     "device",
     "strerror",
     "has",

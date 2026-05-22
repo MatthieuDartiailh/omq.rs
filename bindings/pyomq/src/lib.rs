@@ -75,12 +75,13 @@ fn wait_any(
 }
 
 #[pyfunction]
-#[pyo3(signature = (frontend, backend, capture=None))]
+#[pyo3(signature = (frontend, backend, capture=None, control=None))]
 fn native_proxy(
     py: Python<'_>,
     frontend: &Bound<'_, socket::Socket>,
     backend: &Bound<'_, socket::Socket>,
     capture: Option<&Bound<'_, socket::Socket>>,
+    control: Option<&Bound<'_, socket::Socket>>,
 ) -> PyResult<()> {
     let fe = frontend.borrow().inner.clone();
     let be = backend.borrow().inner.clone();
@@ -94,7 +95,15 @@ fn native_proxy(
         }
         None => None,
     };
-    py.allow_threads(|| runtime::proxy(fe, be, cap));
+    let ctrl = match control {
+        Some(c) => {
+            let inner = c.borrow().inner.clone();
+            inner.ensure_id()?;
+            Some(inner)
+        }
+        None => None,
+    };
+    py.allow_threads(|| runtime::proxy(fe, be, cap, ctrl));
     Ok(())
 }
 

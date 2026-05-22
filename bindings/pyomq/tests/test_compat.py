@@ -683,3 +683,80 @@ def test_proxy_with_capture(tcp_endpoint):
         frontend.close()
         backend.close()
         ctx.term()
+
+
+def test_proxy_steerable(tcp_endpoint):
+    import socket
+    import threading
+    import time
+
+    def _free_tcp_port():
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+        finally:
+            s.close()
+
+    ctx = zmq.Context()
+    frontend = ctx.socket(zmq.PULL)
+    backend = ctx.socket(zmq.PUSH)
+    control = ctx.socket(zmq.PULL)
+    sender = ctx.socket(zmq.PUSH)
+    receiver = ctx.socket(zmq.PULL)
+    controller = ctx.socket(zmq.PUSH)
+
+    fe_port = _free_tcp_port()
+    be_port = _free_tcp_port()
+    ctrl_port = _free_tcp_port()
+
+    try:
+        frontend.bind(f"tcp://127.0.0.1:{fe_port}")
+        backend.bind(f"tcp://127.0.0.1:{be_port}")
+        control.bind(f"tcp://127.0.0.1:{ctrl_port}")
+        sender.connect(f"tcp://127.0.0.1:{fe_port}")
+        receiver.connect(f"tcp://127.0.0.1:{be_port}")
+        controller.connect(f"tcp://127.0.0.1:{ctrl_port}")
+
+        proxy_thread = threading.Thread(
+            target=zmq.proxy_steerable,
+            args=(frontend, backend, None, control),
+            daemon=True,
+        )
+        proxy_thread.start()
+        time.sleep(0.05)
+
+        # Basic forwarding
+        sender.send(b"hello")
+        receiver.rcvtimeo = 2000
+        assert receiver.recv() == b"hello"
+
+        # PAUSE: messages should not be forwarded
+        controller.send(b"PAUSE")
+        time.sleep(0.05)
+        sender.send(b"paused_msg")
+        receiver.rcvtimeo = 200
+        got_message = True
+        try:
+            receiver.recv()
+        except zmq.Again:
+            got_message = False
+        assert not got_message, "should not receive while paused"
+
+        # RESUME: buffered message should arrive
+        controller.send(b"RESUME")
+        receiver.rcvtimeo = 2000
+        assert receiver.recv() == b"paused_msg"
+
+        # TERMINATE: proxy thread should exit
+        controller.send(b"TERMINATE")
+        proxy_thread.join(timeout=2)
+        assert not proxy_thread.is_alive()
+    finally:
+        sender.close()
+        receiver.close()
+        controller.close()
+        frontend.close()
+        backend.close()
+        control.close()
+        ctx.term()

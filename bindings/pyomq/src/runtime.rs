@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use futures::FutureExt;
 use omq_compio::Socket as InnerSocket;
 
 /// Job: a closure that runs on the compio thread. We can't carry the
@@ -295,19 +296,22 @@ fn push_to_capture(
 
 /// Run a forwarding proxy between two sockets on the compio thread.
 ///
-/// Stops the send/recv pumps on both sockets, then runs two direct
-/// async loops: fe.recv → be.send and be.recv → fe.send. No rings,
-/// no mutexes, no polling on the forwarding hot path.
+/// Stops the send/recv pumps on fe/be (and control, if any), then
+/// runs direct async forwarding loops. Capture stays ring-based.
 ///
-/// Capture socket (if any) stays ring-based: messages are cloned and
-/// pushed to its send ring, drained by its normal send pump.
+/// Control socket commands (PAUSE, RESUME, TERMINATE) are handled
+/// inline between forwarded messages via `select!`.
 pub fn proxy(
     fe_inner: std::sync::Arc<crate::socket::SocketInner>,
     be_inner: std::sync::Arc<crate::socket::SocketInner>,
     cap_inner: Option<std::sync::Arc<crate::socket::SocketInner>>,
+    ctrl_inner: Option<std::sync::Arc<crate::socket::SocketInner>>,
 ) {
     let fe_id = fe_inner.materialized.lock().unwrap().as_ref().unwrap().id;
     let be_id = be_inner.materialized.lock().unwrap().as_ref().unwrap().id;
+    let ctrl_id = ctrl_inner.as_ref().map(|c| {
+        c.materialized.lock().unwrap().as_ref().unwrap().id
+    });
 
     let (done_tx, done_rx) = flume::bounded::<()>(1);
 
@@ -315,12 +319,18 @@ pub fn proxy(
         compio::runtime::spawn(async move {
             stop_pumps_async(fe_id).await;
             stop_pumps_async(be_id).await;
+            if let Some(id) = ctrl_id {
+                stop_pumps_async(id).await;
+            }
 
             let fe_drained = drain_recv_ring(&fe_inner);
             let be_drained = drain_recv_ring(&be_inner);
 
             let fe_sock = REG.with(|r| r.borrow().get(&fe_id).cloned());
             let be_sock = REG.with(|r| r.borrow().get(&be_id).cloned());
+            let ctrl_sock = ctrl_id.and_then(|id| {
+                REG.with(|r| r.borrow().get(&id).cloned())
+            });
             let (Some(fe_sock), Some(be_sock)) = (fe_sock, be_sock) else {
                 let _ = done_tx.send(());
                 return;
@@ -345,41 +355,7 @@ pub fn proxy(
                 }
             }
 
-            let fe2 = fe_sock.clone();
-            let be2 = be_sock.clone();
-            let cap2 = cap_inner.clone();
-
-            let fwd_fe_to_be = async {
-                loop {
-                    let msg = fe_sock.recv().await?;
-                    if let Some(ref cap) = cap_inner {
-                        push_to_capture(cap, &msg);
-                    }
-                    be_sock.send(msg).await?;
-                }
-                #[allow(unreachable_code)]
-                Ok::<(), omq_proto::error::Error>(())
-            };
-
-            let fwd_be_to_fe = async {
-                loop {
-                    let msg = be2.recv().await?;
-                    if let Some(ref cap) = cap2 {
-                        push_to_capture(cap, &msg);
-                    }
-                    fe2.send(msg).await?;
-                }
-                #[allow(unreachable_code)]
-                Ok::<(), omq_proto::error::Error>(())
-            };
-
-            futures::pin_mut!(fwd_fe_to_be);
-            futures::pin_mut!(fwd_be_to_fe);
-            let _ = futures::future::select(
-                fwd_fe_to_be,
-                fwd_be_to_fe,
-            )
-            .await;
+            proxy_loop(&fe_sock, &be_sock, &cap_inner, &ctrl_sock).await;
 
             let _ = done_tx.send(());
         })
@@ -388,6 +364,83 @@ pub fn proxy(
 
     submit_chan().send(job).expect("pyomq: compio runtime gone");
     let _ = done_rx.recv();
+}
+
+async fn proxy_loop(
+    fe: &Rc<InnerSocket>,
+    be: &Rc<InnerSocket>,
+    cap: &Option<std::sync::Arc<crate::socket::SocketInner>>,
+    ctrl: &Option<Rc<InnerSocket>>,
+) {
+    loop {
+        enum Action {
+            FeToBe(omq_compio::Message),
+            BeToFe(omq_compio::Message),
+            Control(omq_compio::Message),
+            Done,
+        }
+
+        let action = if let Some(ctrl_sock) = ctrl {
+            futures::select! {
+                msg = fe.recv().fuse() => match msg {
+                    Ok(m) => Action::FeToBe(m),
+                    Err(_) => Action::Done,
+                },
+                msg = be.recv().fuse() => match msg {
+                    Ok(m) => Action::BeToFe(m),
+                    Err(_) => Action::Done,
+                },
+                msg = ctrl_sock.recv().fuse() => match msg {
+                    Ok(m) => Action::Control(m),
+                    Err(_) => Action::Done,
+                },
+            }
+        } else {
+            futures::select! {
+                msg = fe.recv().fuse() => match msg {
+                    Ok(m) => Action::FeToBe(m),
+                    Err(_) => Action::Done,
+                },
+                msg = be.recv().fuse() => match msg {
+                    Ok(m) => Action::BeToFe(m),
+                    Err(_) => Action::Done,
+                },
+            }
+        };
+
+        match action {
+            Action::FeToBe(msg) => {
+                if let Some(c) = cap { push_to_capture(c, &msg); }
+                if be.send(msg).await.is_err() { return; }
+            }
+            Action::BeToFe(msg) => {
+                if let Some(c) = cap { push_to_capture(c, &msg); }
+                if fe.send(msg).await.is_err() { return; }
+            }
+            Action::Control(msg) => {
+                let cmd: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
+                match cmd.as_slice() {
+                    b"TERMINATE" | b"KILL" => return,
+                    b"PAUSE" => {
+                        if let Some(ctrl_sock) = ctrl {
+                            loop {
+                                let Ok(m) = ctrl_sock.recv().await else { return };
+                                let c: Vec<u8> = m.iter().next()
+                                    .unwrap_or_default().to_vec();
+                                match c.as_slice() {
+                                    b"RESUME" => break,
+                                    b"TERMINATE" | b"KILL" => return,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Action::Done => return,
+        }
+    }
 }
 
 /// Block the calling thread until at least one of the given sockets has
