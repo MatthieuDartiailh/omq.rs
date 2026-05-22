@@ -19,9 +19,7 @@ fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
     match host {
         Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(_) => Err(Error::InvalidEndpoint(
-            "DNS resolution not yet supported on omq-compio WS".into(),
-        )),
+        Host::Name(name) => super::tcp::resolve_name(name, port),
     }
 }
 
@@ -31,9 +29,7 @@ fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
             "cannot connect to wildcard host".into(),
         )),
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(_) => Err(Error::InvalidEndpoint(
-            "DNS resolution not yet supported on omq-compio WS".into(),
-        )),
+        Host::Name(name) => super::tcp::resolve_name(name, port),
     }
 }
 

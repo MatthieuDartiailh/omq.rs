@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock, atomic::Ordering};
 
-use omq_proto::endpoint::Endpoint;
+use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::error::{Error, Result};
 use omq_proto::proto::SocketType;
 
@@ -59,6 +59,14 @@ impl Socket {
         }
         if endpoint.is_tcp_family() {
             use omq_proto::proto::connection::Role;
+            let plain = endpoint.underlying_tcp();
+            if let Endpoint::Tcp {
+                host: Host::Name(name),
+                port,
+            } = &plain
+            {
+                tcp_transport::resolve_name(name, *port)?;
+            }
             connect_tcp_with_reconnect(
                 self.inner(),
                 endpoint,
@@ -70,6 +78,21 @@ impl Socket {
         }
         #[cfg(feature = "ws")]
         if endpoint.is_ws_family() {
+            match &endpoint {
+                Endpoint::Ws {
+                    host: Host::Name(name),
+                    port,
+                    ..
+                }
+                | Endpoint::Wss {
+                    host: Host::Name(name),
+                    port,
+                    ..
+                } => {
+                    tcp_transport::resolve_name(name, *port)?;
+                }
+                _ => {}
+            }
             let inner = self.inner().clone();
             let ep = endpoint.clone();
             compio::runtime::spawn(async move {
