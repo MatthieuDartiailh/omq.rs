@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate doc/comparison_chart_bindings.svg from pyomq README throughput table.
+"""Generate doc/charts/comparison_chart_bindings.svg from pyomq README throughput table.
 
 Dual-axis line chart: x = message sizes, solid = msg/s (log, left),
 dashed = throughput in GB/s (linear, right).
@@ -12,7 +12,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 README = REPO / "bindings" / "pyomq" / "README.md"
-OUTPUT = REPO / "doc" / "comparison_chart_bindings.svg"
+OUTPUT = REPO / "doc" / "charts" / "comparison_chart_bindings.svg"
 
 COLORS = {"pyomq": "#dc2626", "pyzmq": "#eab308"}
 SERIES = ["pyomq", "pyzmq"]

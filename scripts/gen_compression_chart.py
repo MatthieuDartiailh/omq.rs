@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate doc/compression_chart.svg from compression bench JSONL data."""
+"""Generate doc/charts/compression_chart.svg from compression bench JSONL data."""
 
 import json
 import math
@@ -306,7 +306,7 @@ def main():
     data = load_data(jsonl, run_prefix=args.run_prefix)
     svg = generate_svg(data, link_label=link_label, tput_max_mb=args.tput_max)
 
-    output = repo / "doc" / f"compression_chart_{args.link}.svg"
+    output = repo / "doc" / "charts" / f"compression_chart_{args.link}.svg"
     output.write_text(svg)
     print(f"Written: {output}", file=sys.stderr)
 

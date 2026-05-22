@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate doc/comparison_chart.svg from COMPARISONS.md data."""
+"""Generate doc/charts/comparison_chart.svg from COMPARISONS.md data."""
 
 import re
 import sys
@@ -314,7 +314,7 @@ def main():
     data = load_data(comparisons_md)
     svg = generate_svg(data)
 
-    output = repo / "doc" / "comparison_chart.svg"
+    output = repo / "doc" / "charts" / "comparison_chart.svg"
     output.write_text(svg)
     print(f"Written: {output}", file=sys.stderr)
 

@@ -66,7 +66,7 @@ around compio's single-thread invariant.
 See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md) for full tables.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/comparison_chart_bindings.svg" alt="PUSH/PULL throughput: Python bindings" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/comparison_chart_bindings.svg" alt="PUSH/PULL throughput: Python bindings" width="850">
 </p>
 
 Loopback PUSH/PULL throughput vs pyzmq, on a Linux 6.12 (Debian 13) VM on an
@@ -94,6 +94,10 @@ Intel Mac Mini 2018 (i7-8700B, 3.2 GHz), Rust 1.95.0, default features:
 <!-- PERF:END -->
 
 ### REQ/REP latency (TCP loopback)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/comparison_latency_chart_bindings.svg" alt="REQ/REP latency: pyomq vs pyzmq" width="850">
+</p>
 
 Serial ping-pong: 1000 warmup + 10000 measured iterations per cell. Lower is better;
 ratio = pyzmq / pyomq.
@@ -157,11 +161,11 @@ drops from 512 B to 64 B, so small structured messages start compressing too.
 Virtual throughput on bandwidth-limited links (JSON payloads, compio backend):
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/compression_chart_1g.svg" alt="Compression throughput at 1 Gbps" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression_chart_1g.svg" alt="Compression throughput at 1 Gbps" width="850">
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/compression_chart_100m.svg" alt="Compression throughput at 100 Mbps" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression_chart_100m.svg" alt="Compression throughput at 100 Mbps" width="850">
 </p>
 
 See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for full tables including dict-trained ratios.

@@ -378,7 +378,7 @@ without it BLAKE3ZMQ drops to ~50 MiB/s at bulk sizes. CURVE plateaus at
 <!-- END mechanism_frame -->
 
 <p align="center">
-  <img src="doc/mechanism_chart.svg" alt="Mechanism overhead" width="850">
+  <img src="doc/charts/mechanism_chart.svg" alt="Mechanism overhead" width="850">
 </p>
 
 ## Reproducing
@@ -404,8 +404,8 @@ OMQ_BENCH_TRANSPORTS=tcp OMQ_BENCH_PEERS=3 OMQ_BENCH_SIZES=128,2048,32768 cargo 
 # ./scripts/compare_zmqrs.sh [--update-benchmarks]
 
 # Charts (SVG, generated from COMPARISONS.md or JSONL data):
-python3 scripts/gen_comparison_chart.py          # doc/comparison_chart.svg (from COMPARISONS.md)
-python3 scripts/gen_mechanism_chart.py            # doc/mechanism_chart.svg (from BENCHMARKS.md)
+python3 scripts/gen_comparison_chart.py          # doc/charts/comparison_chart.svg (from COMPARISONS.md)
+python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism_chart.svg (from BENCHMARKS.md)
 
 # Compression charts require a bench run first (writes JSONL):
 #   1. Rate-limit loopback:
@@ -413,8 +413,8 @@ python3 scripts/gen_mechanism_chart.py            # doc/mechanism_chart.svg (fro
 #   2. Run bench:
 #      cargo bench -p omq-compio --features lz4,zstd --bench compression
 #   3. Generate chart:
-python3 scripts/gen_compression_chart.py --link 1g    # doc/compression_chart_1g.svg
-python3 scripts/gen_compression_chart.py --link 100m  # doc/compression_chart_100m.svg
+python3 scripts/gen_compression_chart.py --link 1g    # doc/charts/compression_chart_1g.svg
+python3 scripts/gen_compression_chart.py --link 100m  # doc/charts/compression_chart_100m.svg
 #   Use --run-prefix ts-NNNNN to select a specific bench run from the JSONL.
 #   Use --tput-max N (MB/s) to override the right-axis scale.
 #   4. Remove rate limit: sudo tc qdisc del dev lo root
