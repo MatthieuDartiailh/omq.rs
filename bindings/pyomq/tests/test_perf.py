@@ -136,12 +136,16 @@ def _measure_latency(lib_func, endpoint, size, warmup=500, iters=5000):
         req = ctx.socket(zmq_pyzmq.REQ)
     rep.bind(endpoint)
     req.connect(endpoint)
+    rep.setsockopt(zmq_pyzmq.RCVTIMEO if lib_func == "pyzmq" else pyomq.RCVTIMEO, 1000)
     time.sleep(0.05)
 
     def echo():
-        for _ in range(warmup + iters + 100):
-            msg = rep.recv()
-            rep.send(msg)
+        try:
+            while True:
+                msg = rep.recv()
+                rep.send(msg)
+        except Exception:
+            pass
 
     t = threading.Thread(target=echo, daemon=True)
     t.start()
@@ -158,6 +162,7 @@ def _measure_latency(lib_func, endpoint, size, warmup=500, iters=5000):
         rtts.append(time.monotonic() - t0)
 
     req.close()
+    t.join(timeout=2)
     rep.close()
     if lib_func == "pyomq":
         ctx.term()

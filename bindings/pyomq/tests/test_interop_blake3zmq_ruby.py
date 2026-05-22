@@ -7,7 +7,6 @@ env vars.
 
 import os
 import subprocess
-import sys
 
 import pytest
 
@@ -45,7 +44,6 @@ def _hex(raw: bytes) -> str:
 @_skip_no_ruby
 def test_pyomq_blake3zmq_push_ruby_pull(tcp_endpoint):
     server_pub, server_sec = zmq.blake3zmq_keypair()
-    client_pub, client_sec = zmq.blake3zmq_keypair()
 
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
@@ -80,17 +78,6 @@ sock.close
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
-        mon = push.monitor()
-        push.setsockopt(zmq.RCVTIMEO, 10000)
-        # wait for handshake via monitor (poll style)
-        import time
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            info = mon.try_recv()
-            if info and "HandshakeSucceeded" in str(info):
-                break
-            time.sleep(0.01)
-
         for i in range(3):
             push.send(f"encrypted-{i}".encode())
 
@@ -151,8 +138,8 @@ sock.close
         for i in range(3):
             assert pull.recv() == f"from-ruby-{i}".encode()
 
-        stdout, stderr = proc.communicate(timeout=10)
-        assert proc.returncode == 0, f"ruby failed: {stderr.decode()}"
+        proc.wait(timeout=10)
+        assert proc.returncode == 0, f"ruby failed: {proc.stderr.read().decode()}"
     finally:
         proc.kill()
         proc.wait()
