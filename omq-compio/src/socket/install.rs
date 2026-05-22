@@ -148,6 +148,37 @@ pub(super) struct WireDriverConfig {
 /// can await its exit. Caller must already have built the
 /// [`DirectIoState`] (the codec, reader, writer, `poll_fd`, claim atomics
 /// all live there).
+struct WireSnapshotSink {
+    inner: Arc<SocketInner>,
+    tx: flume::Sender<InprocPeerSnapshot>,
+    slot_idx: usize,
+    connection_id: u64,
+}
+
+impl crate::transport::dispatch::SnapshotSink for WireSnapshotSink {
+    fn send(&self, snap: InprocPeerSnapshot) {
+        let identity = snap.identity.clone();
+        {
+            let peers = self.inner.out_peers.read().expect("peers lock");
+            let slot = peers.get(self.slot_idx);
+            let slot = slot.filter(|s| s.connection_id == self.connection_id);
+            if let Some(s) = slot {
+                *s.peer.write().expect("peer lock") = Some(snap.clone());
+            }
+        }
+        if !identity.is_empty() {
+            let mut table = self.inner.identity_to_slot.write().expect("identity table");
+            if let Some(old_idx) = table.insert(identity, self.slot_idx)
+                && old_idx != self.slot_idx
+            {
+                drop(table);
+                self.inner.evict_peer_for_handover(old_idx);
+            }
+        }
+        let _ = self.tx.send(snap);
+    }
+}
+
 fn spawn_snap_listener(
     inner: Arc<SocketInner>,
     snap_rx: flume::Receiver<InprocPeerSnapshot>,
@@ -155,41 +186,15 @@ fn spawn_snap_listener(
     connection_id: u64,
 ) {
     compio::runtime::spawn(async move {
-        let Ok(snap) = snap_rx.recv_async().await else {
+        let Ok(_snap) = snap_rx.recv_async().await else {
             return;
         };
-        let identity = snap.identity.clone();
-        let (out, prev_identity) = {
+        let out = {
             let peers = inner.out_peers.read().expect("peers lock");
             let slot = peers.get(slot_idx);
             let slot = slot.filter(|s| s.connection_id == connection_id);
-            let prev = slot.and_then(|s| {
-                s.peer
-                    .read()
-                    .expect("peer lock")
-                    .as_ref()
-                    .map(|p| p.identity.clone())
-            });
-            if let Some(s) = slot {
-                *s.peer.write().expect("peer lock") = Some(snap);
-            }
-            (slot.map(|s| s.out.clone()), prev)
+            slot.map(|s| s.out.clone())
         };
-        if !identity.is_empty() {
-            let mut table = inner.identity_to_slot.write().expect("identity table");
-            if let Some(prev) = prev_identity
-                && prev != identity
-                && table.get(&prev) == Some(&slot_idx)
-            {
-                table.remove(&prev);
-            }
-            if let Some(old_idx) = table.insert(identity, slot_idx)
-                && old_idx != slot_idx
-            {
-                drop(table);
-                inner.evict_peer_for_handover(old_idx);
-            }
-        }
         if matches!(inner.socket_type, SocketType::Sub | SocketType::XSub) {
             let prefixes: Vec<Bytes> = inner.our_subs.read().expect("our_subs lock").clone();
             if let Some(out) = out.as_ref() {
@@ -457,6 +462,13 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
     } = cfg;
     let (snap_tx, snap_rx) = flume::bounded::<InprocPeerSnapshot>(1);
     spawn_snap_listener(inner.clone(), snap_rx, slot_idx, connection_id);
+    let snapshot_sink: Box<dyn crate::transport::dispatch::SnapshotSink> =
+        Box::new(WireSnapshotSink {
+            inner: inner.clone(),
+            tx: snap_tx,
+            slot_idx,
+            connection_id,
+        });
 
     let socket_type = inner.socket_type;
     let options = inner.options.clone();
@@ -486,7 +498,7 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
             cmd_rx,
             shared_msg_rx,
             peer_in_tx,
-            snap_tx,
+            snapshot_sink,
             Some(monitor_ctx),
         )
         .await;

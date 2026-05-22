@@ -118,11 +118,15 @@ pub(super) async fn dispatch_command(
     Ok(false)
 }
 
+pub(crate) trait SnapshotSink {
+    fn send(&self, snap: InprocPeerSnapshot);
+}
+
 pub(super) async fn dispatch_drained_events(
     drained: SmallVec<[Drained; 8]>,
     socket_type: SocketType,
     peer_in_tx: &blume::Sender<InprocFrame>,
-    peer_snapshot_tx: &flume::Sender<InprocPeerSnapshot>,
+    snapshot_sink: &dyn SnapshotSink,
     monitor_ctx: Option<&MonitorCtx>,
     peer_identity: &Bytes,
 ) -> Result<bool> {
@@ -136,7 +140,7 @@ pub(super) async fn dispatch_drained_events(
                     socket_type: peer_properties.socket_type.unwrap_or(SocketType::Pair),
                     identity: peer_identity.clone(),
                 };
-                let _ = peer_snapshot_tx.send(snap);
+                snapshot_sink.send(snap);
                 if let Some(ctx) = monitor_ctx {
                     let info = PeerInfo {
                         connection_id: ctx.connection_id,

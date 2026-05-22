@@ -35,8 +35,8 @@ use omq_proto::proto::transform::MessageDecoder;
 use omq_proto::proto::{Command, Event, SocketType};
 
 use crate::socket::DirectIoState;
-use crate::transport::dispatch::{Drained, MonitorCtx, dispatch_drained_events};
-use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
+use crate::transport::dispatch::{Drained, MonitorCtx, SnapshotSink, dispatch_drained_events};
+use crate::transport::inproc::InprocFrame;
 use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader};
 use crate::transport::recv_stream::{StreamArmOutcome, pull_stream};
 
@@ -375,7 +375,7 @@ pub(crate) async fn run_connection(
     inbox: Receiver<DriverCommand>,
     shared_msg_rx: Option<Receiver<Message>>,
     peer_in_tx: blume::Sender<InprocFrame>,
-    peer_snapshot_tx: flume::Sender<InprocPeerSnapshot>,
+    snapshot_sink: Box<dyn SnapshotSink>,
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {
     let peer_io: SharedPeerIo = state.peer_io.clone();
@@ -433,7 +433,7 @@ pub(crate) async fn run_connection(
             drained,
             socket_type,
             &peer_in_tx,
-            &peer_snapshot_tx,
+            &*snapshot_sink,
             monitor_ctx.as_ref(),
             &ls.peer_identity,
         )
