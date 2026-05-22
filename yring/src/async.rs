@@ -330,4 +330,30 @@ mod tests {
         let count = receiver.join().unwrap();
         assert_eq!(count, n);
     }
+
+    #[test]
+    fn alternating_push_pop_wakes() {
+        use std::sync::mpsc;
+
+        let (mut p, c) = async_spsc::<u32>(8);
+        let (tx, rx) = mpsc::sync_channel::<u32>(0);
+
+        let handle = std::thread::spawn(move || {
+            futures_lite::future::block_on(async {
+                futures_lite::pin!(c);
+                for _ in 0..5 {
+                    let val = c.next().await.unwrap();
+                    tx.send(val).unwrap();
+                }
+            });
+        });
+
+        for i in 0..5 {
+            p.push_and_flush(i).unwrap();
+            let val = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+            assert_eq!(val, i);
+        }
+
+        handle.join().unwrap();
+    }
 }
