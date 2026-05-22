@@ -366,6 +366,10 @@ impl Connection {
         if !matches!(self.state, State::Ready) {
             return Ok(None);
         }
+        #[cfg(feature = "ws")]
+        if self.ws_role.is_some() {
+            return Ok(None);
+        }
         let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
             return Ok(None);
         };
@@ -406,6 +410,10 @@ impl Connection {
         if !matches!(self.state, State::Ready) {
             return None;
         }
+        #[cfg(feature = "ws")]
+        if self.ws_role.is_some() {
+            return None;
+        }
         let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
         if self.in_buf.len() != hdr.header_len {
             return None;
@@ -429,6 +437,10 @@ impl Connection {
     /// (not Ready, no complete header).
     pub fn begin_supplied_payload_with_prefix(&mut self) -> Option<(usize, Payload)> {
         if !matches!(self.state, State::Ready) {
+            return None;
+        }
+        #[cfg(feature = "ws")]
+        if self.ws_role.is_some() {
             return None;
         }
         let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
