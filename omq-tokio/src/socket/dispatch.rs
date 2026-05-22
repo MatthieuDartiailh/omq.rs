@@ -21,13 +21,16 @@ use crate::transport::{
     Transport as _, inproc as inproc_transport,
 };
 
-/// Byte-stream dispatch across TCP-shaped transports (TCP and IPC).
+/// Byte-stream dispatch across TCP-shaped transports (TCP, IPC, WS).
 /// Inproc does NOT go through this - it skips the ZMTP codec entirely
 /// and uses its own Message-typed channel pair (see `AnyConn`).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AnyStream {
     Tcp(TcpStream),
     Ipc(UnixStream),
+    #[cfg(feature = "ws")]
+    Ws(crate::transport::ws::WsTransport),
 }
 
 impl AnyStream {
@@ -43,6 +46,8 @@ impl AnyStream {
                 Ok(())
             }
             Self::Ipc(s) => options.apply_socket_buffers(s),
+            #[cfg(feature = "ws")]
+            Self::Ws(_) => Ok(()),
         }
     }
 }
@@ -56,6 +61,8 @@ impl AsyncRead for AnyStream {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
             Self::Ipc(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "ws")]
+            Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -69,6 +76,8 @@ impl AsyncWrite for AnyStream {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
             Self::Ipc(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "ws")]
+            Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -76,6 +85,8 @@ impl AsyncWrite for AnyStream {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_flush(cx),
             Self::Ipc(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "ws")]
+            Self::Ws(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -83,6 +94,8 @@ impl AsyncWrite for AnyStream {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
             Self::Ipc(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "ws")]
+            Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -91,18 +104,15 @@ impl AsyncWrite for AnyStream {
 /// (TCP / IPC - runs the ZMTP codec via `ConnectionDriver`) or a
 /// pre-paired Message channel (inproc - runs the codec-less
 /// `InprocPeerDriver`).
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum AnyConn {
     ByteStream {
         stream: AnyStream,
         peer_ident: PeerIdent,
+        leftover: bytes::Bytes,
     },
     Inproc {
         conn: InprocConn,
-        peer_ident: PeerIdent,
-    },
-    #[cfg(feature = "ws")]
-    WebSocket {
-        ws: crate::transport::ws::WsStream,
         peer_ident: PeerIdent,
     },
 }
@@ -118,11 +128,6 @@ impl std::fmt::Debug for AnyConn {
                 .debug_struct("AnyConn::Inproc")
                 .field("peer_ident", peer_ident)
                 .finish(),
-            #[cfg(feature = "ws")]
-            Self::WebSocket { peer_ident, .. } => f
-                .debug_struct("AnyConn::WebSocket")
-                .field("peer_ident", peer_ident)
-                .finish(),
         }
     }
 }
@@ -131,8 +136,14 @@ impl AnyConn {
     pub(crate) fn peer_ident(&self) -> &PeerIdent {
         match self {
             Self::ByteStream { peer_ident, .. } | Self::Inproc { peer_ident, .. } => peer_ident,
-            #[cfg(feature = "ws")]
-            Self::WebSocket { peer_ident, .. } => peer_ident,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn leftover(&self) -> bytes::Bytes {
+        match self {
+            Self::ByteStream { leftover, .. } => leftover.clone(),
+            Self::Inproc { .. } => bytes::Bytes::new(),
         }
     }
 }
@@ -167,6 +178,7 @@ impl AnyListener {
             Self::Tcp(l) => l.accept().await.map(|(s, peer_ident)| AnyConn::ByteStream {
                 stream: AnyStream::Tcp(s),
                 peer_ident,
+                leftover: bytes::Bytes::new(),
             }),
             Self::Inproc(l) => {
                 let peer_ident = PeerIdent::Inproc(l.name().to_string());
@@ -176,14 +188,17 @@ impl AnyListener {
             Self::Ipc(l) => l.accept().await.map(|(s, peer_ident)| AnyConn::ByteStream {
                 stream: AnyStream::Ipc(s),
                 peer_ident,
+                leftover: bytes::Bytes::new(),
             }),
             #[cfg(feature = "ws")]
             Self::Ws(l) => {
                 let (stream, addr) = l.inner.accept().await.map_err(Error::Io)?;
-                let ws = crate::transport::ws::accept(stream, l.tls_acceptor.as_ref()).await?;
-                Ok(AnyConn::WebSocket {
-                    ws,
+                let accepted =
+                    crate::transport::ws::accept(stream, l.tls_acceptor.as_ref()).await?;
+                Ok(AnyConn::ByteStream {
+                    stream: AnyStream::Ws(accepted.transport),
                     peer_ident: PeerIdent::Socket(addr),
+                    leftover: accepted.leftover,
                 })
             }
         }
@@ -251,6 +266,7 @@ pub(super) async fn connect_any(
         return Ok(AnyConn::ByteStream {
             stream: AnyStream::Tcp(s),
             peer_ident,
+            leftover: bytes::Bytes::new(),
         });
     }
     #[cfg(feature = "ws")]
@@ -264,7 +280,7 @@ pub(super) async fn connect_any(
             } => (host, *port, path.as_str()),
             _ => unreachable!(),
         };
-        let ws = crate::transport::ws::connect(
+        let connected = crate::transport::ws::connect(
             host,
             port,
             path,
@@ -273,7 +289,11 @@ pub(super) async fn connect_any(
         )
         .await?;
         let peer_ident = peer_ident_for_endpoint(endpoint);
-        return Ok(AnyConn::WebSocket { ws, peer_ident });
+        return Ok(AnyConn::ByteStream {
+            stream: AnyStream::Ws(connected.transport),
+            peer_ident,
+            leftover: connected.leftover,
+        });
     }
     match endpoint {
         Endpoint::Inproc { name } => {
@@ -290,6 +310,7 @@ pub(super) async fn connect_any(
             Ok(AnyConn::ByteStream {
                 stream: AnyStream::Ipc(s),
                 peer_ident,
+                leftover: bytes::Bytes::new(),
             })
         }
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),

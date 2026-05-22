@@ -153,12 +153,27 @@ pub(super) fn install_accepted_wire_peer(
         inner.options.mechanism,
         omq_proto::options::MechanismConfig::Null
     );
+    #[cfg(feature = "ws")]
+    let ws_role = if endpoint.is_ws_family() {
+        Some(match role {
+            omq_proto::proto::connection::Role::Server => {
+                omq_proto::proto::connection::WsRole::Server
+            }
+            omq_proto::proto::connection::Role::Client => {
+                omq_proto::proto::connection::WsRole::Client
+            }
+        })
+    } else {
+        None
+    };
     let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
         &inner.options,
         reader,
         decoder,
+        #[cfg(feature = "ws")]
+        ws_role,
     ) else {
         return;
     };
@@ -352,96 +367,26 @@ fn handle_driver_exit(
 #[cfg(feature = "ws")]
 pub(super) fn install_ws_peer(
     inner: &std::sync::Arc<SocketInner>,
-    ws: crate::transport::ws::WsStream,
+    stream: compio::net::TcpStream,
     role: omq_proto::proto::connection::Role,
     endpoint: Endpoint,
     connection_id: u64,
     peer_addr: Option<std::net::SocketAddr>,
 ) {
-    let cap = cmd_channel_capacity(&inner.options);
-    let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
-    let handle: WirePeerHandle = std::sync::Arc::new(RwLock::new(cmd_tx));
-    let info_holder: std::sync::Arc<RwLock<Option<PeerInfo>>> =
-        std::sync::Arc::new(RwLock::new(None));
-    let peer_sub = pub_side_peer_sub(inner.socket_type);
-    let peer_groups = radio_side_peer_groups(inner.socket_type);
-
-    let out = PeerOut::Wire(handle);
-    let slot_idx = {
-        let mut peers = inner.out_peers.write().expect("peers lock");
-        let idx = peers.insert(PeerSlot {
-            out,
-            direct_io: None,
-            peer: std::sync::Arc::new(RwLock::new(None)),
-            connection_id,
-            endpoint: endpoint.clone(),
-            info: info_holder.clone(),
-            peer_sub: peer_sub.clone(),
-            peer_groups: peer_groups.clone(),
-            #[cfg(feature = "priority")]
-            priority: omq_proto::DEFAULT_PRIORITY,
-        });
-        inner
-            .peers_gen
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
-        idx
+    let read_clone = stream.clone();
+    let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
+        return;
     };
-    {
-        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
-        while pipes.len() <= slot_idx {
-            pipes.push(None);
-        }
-    }
-    inner.rebuild_peer_keys();
-    inner.on_peer_ready.notify(usize::MAX);
-
-    let (snap_tx, snap_rx) = flume::bounded::<InprocPeerSnapshot>(1);
-    spawn_snap_listener(inner.clone(), snap_rx, slot_idx, connection_id);
-
-    let socket_type = inner.socket_type;
-    let options = inner.options.clone();
-    let peer_in_tx = inner.in_tx.clone();
-    let shared_msg_rx = if is_round_robin_send(socket_type) {
-        inner.shared_send_rx.clone()
-    } else {
-        None
-    };
-    let monitor_ctx = MonitorCtx {
-        monitor: inner.monitor.clone(),
-        endpoint: endpoint.clone(),
+    let (_, writer) = stream.into_split();
+    install_accepted_wire_peer(
+        inner,
+        read_fd.into(),
+        writer.into(),
+        role,
+        endpoint,
         connection_id,
-        peer_info: info_holder.clone(),
-        peer_address: peer_addr,
-        peer_sub,
-        peer_groups,
-    };
-    let inner_for_exit = inner.clone();
-    let endpoint_for_exit = endpoint;
-    compio::runtime::spawn(async move {
-        let res = crate::transport::ws_driver::run_ws_connection(
-            ws,
-            role,
-            socket_type,
-            options,
-            cmd_rx,
-            shared_msg_rx,
-            peer_in_tx,
-            snap_tx,
-            Some(monitor_ctx),
-        )
-        .await;
-        handle_driver_exit(
-            &inner_for_exit,
-            &res,
-            &info_holder,
-            &endpoint_for_exit,
-            connection_id,
-            socket_type,
-            peer_addr,
-        );
-        inner_for_exit.release_slot(slot_idx);
-    })
-    .detach();
+        peer_addr,
+    );
 }
 
 pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinHandle<()> {

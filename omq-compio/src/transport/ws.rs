@@ -1,17 +1,17 @@
 //! WebSocket bind/connect glue (ZWS/2.0, RFC 45).
+//!
+//! Performs the HTTP upgrade handshake and returns a raw TCP stream.
+//! The Connection codec in omq-proto handles WS framing internally.
 
 use std::net::SocketAddr;
 
+use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use compio_ws::tungstenite::client::IntoClientRequest;
-use compio_ws::tungstenite::http::{HeaderValue, Request, Response, StatusCode};
 
 use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::error::{Error, Result};
+use omq_proto::proto::ws_handshake;
 
-pub(crate) type WsStream = compio_ws::WebSocketStream<TcpStream>;
-
-const SUBPROTOCOL: &str = "ZWS2.0";
 const SUBPROTOCOL_NULL: &str = "ZWS2.0/NULL";
 
 fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
@@ -37,10 +37,6 @@ fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
     }
 }
 
-fn ws_config() -> compio_ws::Config {
-    compio_ws::Config::new().disable_nagle(true)
-}
-
 pub(crate) struct WsListener {
     pub(crate) inner: TcpListener,
     pub(crate) local_addr: SocketAddr,
@@ -64,48 +60,34 @@ pub(crate) async fn bind(endpoint: &Endpoint) -> Result<WsListener> {
     })
 }
 
-fn ws_io_err(e: impl std::fmt::Display) -> Error {
-    Error::Io(std::io::Error::other(e.to_string()))
-}
-
 #[allow(clippy::result_large_err)]
-pub(crate) async fn accept(stream: TcpStream) -> Result<WsStream> {
+pub(crate) async fn accept(stream: TcpStream) -> Result<TcpStream> {
     let _ = stream.set_nodelay(true);
-    let ws = compio_ws::accept_hdr_with_config_async(
-        stream,
-        |req: &Request<()>,
-         mut resp: Response<()>|
-         -> std::result::Result<Response<()>, Response<Option<String>>> {
-            let protocols = req
-                .headers()
-                .get("Sec-WebSocket-Protocol")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            let chosen = protocols
-                .split(',')
-                .map(str::trim)
-                .find(|p| *p == SUBPROTOCOL_NULL || *p == SUBPROTOCOL);
-            if let Some(proto) = chosen {
-                resp.headers_mut().insert(
-                    "Sec-WebSocket-Protocol",
-                    HeaderValue::from_str(proto).expect("valid header"),
-                );
-                Ok(resp)
-            } else {
-                let mut err_resp: Response<Option<String>> =
-                    Response::new(Some("no supported ZWS subprotocol".into()));
-                *err_resp.status_mut() = StatusCode::BAD_REQUEST;
-                Err(err_resp)
-            }
-        },
-        ws_config(),
-    )
-    .await
-    .map_err(ws_io_err)?;
-    Ok(ws)
+
+    let buf = vec![0u8; 4096];
+    let mut stream = stream;
+    let compio::buf::BufResult(n, buf) = stream.read(buf).await;
+    let n = n.map_err(Error::Io)?;
+    if n == 0 {
+        return Err(Error::HandshakeFailed("empty HTTP upgrade request".into()));
+    }
+
+    let upgrade = ws_handshake::parse_client_upgrade(&buf[..n])?;
+    let chosen = upgrade
+        .subprotocols
+        .iter()
+        .find(|p| p.as_str() == SUBPROTOCOL_NULL || p.as_str() == "ZWS2.0")
+        .cloned()
+        .unwrap_or_else(|| SUBPROTOCOL_NULL.to_string());
+
+    let accept_value = ws_handshake::compute_ws_accept(&upgrade.key);
+    let response = ws_handshake::format_server_upgrade(&accept_value, &chosen);
+    stream.write_all(response).await.0.map_err(Error::Io)?;
+
+    Ok(stream)
 }
 
-pub(crate) async fn connect(endpoint: &Endpoint) -> Result<WsStream> {
+pub(crate) async fn connect(endpoint: &Endpoint) -> Result<TcpStream> {
     let (host, port, path) = match endpoint {
         Endpoint::Ws {
             host, port, path, ..
@@ -120,18 +102,22 @@ pub(crate) async fn connect(endpoint: &Endpoint) -> Result<WsStream> {
         }
     };
     let addr = resolve_connect(host, port)?;
-    let stream = TcpStream::connect(addr).await.map_err(Error::Io)?;
+    let mut stream = TcpStream::connect(addr).await.map_err(Error::Io)?;
     let _ = stream.set_nodelay(true);
 
-    let url = format!("ws://{host}:{port}{path}");
-    let mut request = url.into_client_request().map_err(ws_io_err)?;
-    request.headers_mut().insert(
-        "Sec-WebSocket-Protocol",
-        HeaderValue::from_static(SUBPROTOCOL_NULL),
-    );
+    let host_header = format!("{host}:{port}");
+    let key = ws_handshake::generate_ws_key();
+    let request = ws_handshake::format_client_upgrade(&host_header, path, &key, SUBPROTOCOL_NULL);
+    stream.write_all(request).await.0.map_err(Error::Io)?;
 
-    let (ws, _response) = compio_ws::client_async_with_config(request, stream, ws_config())
-        .await
-        .map_err(ws_io_err)?;
-    Ok(ws)
+    let buf = vec![0u8; 4096];
+    let compio::buf::BufResult(n, buf) = stream.read(buf).await;
+    let n = n.map_err(Error::Io)?;
+    if n == 0 {
+        return Err(Error::HandshakeFailed("empty HTTP upgrade response".into()));
+    }
+
+    ws_handshake::parse_server_upgrade(&buf[..n], &key)?;
+
+    Ok(stream)
 }

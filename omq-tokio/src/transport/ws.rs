@@ -1,31 +1,31 @@
-//! WebSocket bind/connect glue and WS connection driver (ZWS/2.0, RFC 45).
+//! WebSocket bind/connect glue (ZWS/2.0, RFC 45).
+//!
+//! Performs the HTTP upgrade handshake and returns a raw byte stream
+//! (`WsTransport`). The Connection codec in omq-proto handles WS
+//! framing internally via `ws_role`.
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::{HeaderValue, Request, Response, StatusCode};
-use tokio_util::sync::CancellationToken;
 
 use omq_proto::error::{Error, Result};
-use omq_proto::message::Message;
-use omq_proto::options::Options;
-use omq_proto::proto::connection::{Connection, ConnectionConfig, Role, TransportMode};
-use omq_proto::proto::{Command, Event, SocketType};
-
-use crate::engine::driver::{DriverCommand, DriverConfig, PeerOut};
-use crate::routing::drop_queue::QueueReceiver;
-
-pub(crate) type WsStream = tokio_tungstenite::WebSocketStream<WsTransport>;
+use omq_proto::proto::ws_handshake;
 
 pub(crate) enum WsTransport {
     Plain(TcpStream),
     Tls(tokio_rustls::client::TlsStream<TcpStream>),
     TlsServer(tokio_rustls::server::TlsStream<TcpStream>),
+}
+
+impl std::fmt::Debug for WsTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain(_) => f.write_str("WsTransport::Plain"),
+            Self::Tls(_) => f.write_str("WsTransport::Tls"),
+            Self::TlsServer(_) => f.write_str("WsTransport::TlsServer"),
+        }
+    }
 }
 
 impl tokio::io::AsyncRead for WsTransport {
@@ -78,7 +78,6 @@ impl tokio::io::AsyncWrite for WsTransport {
     }
 }
 
-const SUBPROTOCOL: &str = "ZWS2.0";
 const SUBPROTOCOL_NULL: &str = "ZWS2.0/NULL";
 
 fn ws_err(e: impl std::fmt::Display) -> Error {
@@ -119,49 +118,79 @@ pub(crate) async fn bind(
     })
 }
 
+/// Result of a WebSocket accept: the upgraded stream + any leftover
+/// bytes read past the HTTP headers (may contain WS frames).
+pub(crate) struct WsAccepted {
+    pub transport: WsTransport,
+    pub leftover: bytes::Bytes,
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn accept(
     stream: TcpStream,
     tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
-) -> Result<WsStream> {
+) -> Result<WsAccepted> {
     let _ = stream.set_nodelay(true);
-    let transport = if let Some(acc) = tls_acceptor {
+    let mut transport = if let Some(acc) = tls_acceptor {
         let tls = acc.accept(stream).await.map_err(Error::Io)?;
         WsTransport::TlsServer(tls)
     } else {
         WsTransport::Plain(stream)
     };
-    let ws = tokio_tungstenite::accept_hdr_async(
+
+    let mut buf = vec![0u8; 4096];
+    let mut total = 0;
+    loop {
+        let n = transport.read(&mut buf[total..]).await.map_err(Error::Io)?;
+        if n == 0 {
+            return Err(Error::HandshakeFailed(
+                "connection closed during HTTP upgrade".into(),
+            ));
+        }
+        total += n;
+        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if total >= buf.len() {
+            return Err(Error::HandshakeFailed("HTTP request too large".into()));
+        }
+    }
+
+    let header_end = buf[..total]
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+
+    let upgrade = ws_handshake::parse_client_upgrade(&buf[..header_end])?;
+    let chosen = upgrade
+        .subprotocols
+        .iter()
+        .find(|p| p.as_str() == SUBPROTOCOL_NULL || p.as_str() == "ZWS2.0")
+        .cloned()
+        .unwrap_or_else(|| SUBPROTOCOL_NULL.to_string());
+
+    let accept_value = ws_handshake::compute_ws_accept(&upgrade.key);
+    let response = ws_handshake::format_server_upgrade(&accept_value, &chosen);
+    transport.write_all(&response).await.map_err(Error::Io)?;
+
+    let leftover = if header_end < total {
+        bytes::Bytes::copy_from_slice(&buf[header_end..total])
+    } else {
+        bytes::Bytes::new()
+    };
+
+    Ok(WsAccepted {
         transport,
-        |req: &Request<()>,
-         mut resp: Response<()>|
-         -> std::result::Result<Response<()>, Response<Option<String>>> {
-            let protocols = req
-                .headers()
-                .get("Sec-WebSocket-Protocol")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            let chosen = protocols
-                .split(',')
-                .map(str::trim)
-                .find(|p| *p == SUBPROTOCOL_NULL || *p == SUBPROTOCOL);
-            if let Some(proto) = chosen {
-                resp.headers_mut().insert(
-                    "Sec-WebSocket-Protocol",
-                    HeaderValue::from_str(proto).expect("valid header"),
-                );
-                Ok(resp)
-            } else {
-                let mut err_resp: Response<Option<String>> =
-                    Response::new(Some("no supported ZWS subprotocol".into()));
-                *err_resp.status_mut() = StatusCode::BAD_REQUEST;
-                Err(err_resp)
-            }
-        },
-    )
-    .await
-    .map_err(ws_err)?;
-    Ok(ws)
+        leftover,
+    })
+}
+
+/// Result of a WebSocket connect: the upgraded stream + any leftover
+/// bytes read past the HTTP response headers.
+pub(crate) struct WsConnected {
+    pub transport: WsTransport,
+    pub leftover: bytes::Bytes,
 }
 
 pub(crate) async fn connect(
@@ -170,7 +199,7 @@ pub(crate) async fn connect(
     path: &str,
     tls: bool,
     accept_invalid_certs: bool,
-) -> Result<WsStream> {
+) -> Result<WsConnected> {
     let addr = match host {
         omq_proto::endpoint::Host::Wildcard => {
             return Err(Error::InvalidEndpoint(
@@ -187,15 +216,7 @@ pub(crate) async fn connect(
     let stream = TcpStream::connect(addr).await.map_err(Error::Io)?;
     let _ = stream.set_nodelay(true);
 
-    let scheme = if tls { "wss" } else { "ws" };
-    let url = format!("{scheme}://{host}:{port}{path}");
-    let mut request = url.into_client_request().map_err(ws_err)?;
-    request.headers_mut().insert(
-        "Sec-WebSocket-Protocol",
-        HeaderValue::from_static(SUBPROTOCOL_NULL),
-    );
-
-    let transport = if tls {
+    let mut transport = if tls {
         let connector = build_tls_connector(accept_invalid_certs)?;
         let host_str = match host {
             omq_proto::endpoint::Host::Name(n) => n.clone(),
@@ -209,10 +230,47 @@ pub(crate) async fn connect(
         WsTransport::Plain(stream)
     };
 
-    let (ws, _response) = tokio_tungstenite::client_async(request, transport)
-        .await
-        .map_err(ws_err)?;
-    Ok(ws)
+    let host_header = format!("{host}:{port}");
+    let key = ws_handshake::generate_ws_key();
+    let request = ws_handshake::format_client_upgrade(&host_header, path, &key, SUBPROTOCOL_NULL);
+    transport.write_all(&request).await.map_err(Error::Io)?;
+
+    let mut buf = vec![0u8; 4096];
+    let mut total = 0;
+    loop {
+        let n = transport.read(&mut buf[total..]).await.map_err(Error::Io)?;
+        if n == 0 {
+            return Err(Error::HandshakeFailed(
+                "connection closed during HTTP upgrade".into(),
+            ));
+        }
+        total += n;
+        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if total >= buf.len() {
+            return Err(Error::HandshakeFailed("HTTP response too large".into()));
+        }
+    }
+
+    let header_end = buf[..total]
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+
+    ws_handshake::parse_server_upgrade(&buf[..header_end], &key)?;
+
+    let leftover = if header_end < total {
+        bytes::Bytes::copy_from_slice(&buf[header_end..total])
+    } else {
+        bytes::Bytes::new()
+    };
+
+    Ok(WsConnected {
+        transport,
+        leftover,
+    })
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -295,230 +353,4 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
             .map(|p| p.signature_verification_algorithms.supported_schemes())
             .unwrap_or_default()
     }
-}
-
-// ---- WS Connection Driver ----
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_ws_driver(
-    mut ws: WsStream,
-    role: Role,
-    socket_type: SocketType,
-    options: &Options,
-    mut inbox: mpsc::Receiver<DriverCommand>,
-    peer_out: mpsc::Sender<(u64, PeerOut)>,
-    peer_id: u64,
-    cancel: CancellationToken,
-    config: DriverConfig,
-    shared_rx: Option<QueueReceiver>,
-    recv_direct: Option<async_channel::Sender<Message>>,
-) {
-    let res = run_ws_inner(
-        &mut ws,
-        role,
-        socket_type,
-        options,
-        &mut inbox,
-        &peer_out,
-        peer_id,
-        &cancel,
-        &config,
-        shared_rx.as_ref(),
-        recv_direct.as_ref(),
-    )
-    .await;
-    if let Err(e) = &res {
-        let ev = Event::Command(Command::Error {
-            reason: format!("{e}"),
-        });
-        let _ = peer_out.send((peer_id, PeerOut::Event(ev))).await;
-    }
-    let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
-    let _ = ws.close(None).await;
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn run_ws_inner(
-    ws: &mut WsStream,
-    role: Role,
-    socket_type: SocketType,
-    options: &Options,
-    inbox: &mut mpsc::Receiver<DriverCommand>,
-    peer_out: &mpsc::Sender<(u64, PeerOut)>,
-    peer_id: u64,
-    cancel: &CancellationToken,
-    config: &DriverConfig,
-    shared_rx: Option<&QueueReceiver>,
-    recv_direct: Option<&async_channel::Sender<Message>>,
-) -> Result<()> {
-    let mut cfg = ConnectionConfig::new(role, socket_type)
-        .identity(options.identity.clone())
-        .mechanism(options.mechanism.to_setup())
-        .transport_mode(TransportMode::WebSocket);
-    if let Some(n) = options.max_message_size {
-        cfg = cfg.max_message_size(n);
-    }
-    let mut codec = Connection::new(cfg);
-
-    let hb_interval = config.heartbeat_interval;
-    let hb_timeout = config
-        .heartbeat_timeout
-        .or(config.heartbeat_interval)
-        .unwrap_or(Duration::MAX);
-    let hb_ttl_deciseconds = config
-        .heartbeat_ttl
-        .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
-        .unwrap_or(0);
-
-    let mut handshake_done = false;
-    let mut deadline: Option<Instant> = config.handshake_timeout.map(|t| Instant::now() + t);
-    let mut hb_next: Option<Instant> = None;
-    let mut hb_last_input = Instant::now();
-
-    flush_ws_frames(&mut codec, ws).await?;
-
-    loop {
-        drain_events(
-            &mut codec,
-            &mut handshake_done,
-            &mut deadline,
-            &mut hb_next,
-            hb_interval,
-            peer_out,
-            peer_id,
-            recv_direct,
-        )
-        .await?;
-        flush_ws_frames(&mut codec, ws).await?;
-
-        let sleep_deadline = match (deadline, hb_next) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        let timeout = async {
-            match sleep_deadline {
-                Some(t) => tokio::time::sleep_until(t.into()).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Ok(()),
-            () = timeout => {
-                if let Some(dl) = deadline
-                    && Instant::now() >= dl
-                {
-                    return Err(Error::HandshakeFailed("handshake timeout".into()));
-                }
-                if hb_next.is_some() {
-                    if hb_last_input.elapsed() > hb_timeout {
-                        return Err(Error::Timeout);
-                    }
-                    let ping = Command::Ping {
-                        ttl_deciseconds: hb_ttl_deciseconds,
-                        context: Bytes::new(),
-                    };
-                    codec.send_command(&ping)?;
-                    if let Some(iv) = hb_interval {
-                        hb_next = Some(Instant::now() + iv);
-                    }
-                }
-            }
-            msg = ws.next() => {
-                let Some(msg) = msg else { return Ok(()); };
-                let msg = msg.map_err(ws_err)?;
-                match msg {
-                    tokio_tungstenite::tungstenite::Message::Binary(data) => {
-                        hb_last_input = Instant::now();
-                        codec.handle_ws_message(data)?;
-                    }
-                    tokio_tungstenite::tungstenite::Message::Close(_) => return Ok(()),
-                    _ => {}
-                }
-            }
-            cmd = inbox.recv() => {
-                let Some(cmd) = cmd else { return Ok(()); };
-                match cmd {
-                    DriverCommand::SendMessage(m) => {
-                        codec.send_message(&m)?;
-                        flush_ws_frames(&mut codec, ws).await?;
-                    }
-                    DriverCommand::SendCommand(c) => {
-                        codec.send_command(&c)?;
-                        flush_ws_frames(&mut codec, ws).await?;
-                    }
-                    DriverCommand::Close => return Ok(()),
-                }
-            }
-            msg = async {
-                match shared_rx {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending::<Option<Message>>().await,
-                }
-            } => {
-                if let Some(m) = msg {
-                    codec.send_message(&m)?;
-                    let mut drained = 1usize;
-                    if let Some(rx) = shared_rx {
-                        while let Some(extra) = rx.try_pop() {
-                            codec.send_message(&extra)?;
-                            drained += 1;
-                        }
-                        rx.release_permits(drained);
-                    }
-                    flush_ws_frames(&mut codec, ws).await?;
-                }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn drain_events(
-    codec: &mut Connection,
-    handshake_done: &mut bool,
-    deadline: &mut Option<Instant>,
-    hb_next: &mut Option<Instant>,
-    hb_interval: Option<Duration>,
-    peer_out: &mpsc::Sender<(u64, PeerOut)>,
-    peer_id: u64,
-    recv_direct: Option<&async_channel::Sender<Message>>,
-) -> Result<()> {
-    while let Some(ev) = codec.poll_event() {
-        match ev {
-            Event::HandshakeSucceeded { .. } if !*handshake_done => {
-                *handshake_done = true;
-                *deadline = None;
-                if let Some(iv) = hb_interval {
-                    *hb_next = Some(Instant::now() + iv);
-                }
-            }
-            _ => {}
-        }
-        let _ = peer_out.send((peer_id, PeerOut::Event(ev))).await;
-    }
-    while let Some(m) = codec.poll_message() {
-        if let Some(direct) = recv_direct {
-            let _ = direct.send(m).await;
-            continue;
-        }
-        let ev = Event::Message(m);
-        let _ = peer_out.send((peer_id, PeerOut::Event(ev))).await;
-    }
-    Ok(())
-}
-
-async fn flush_ws_frames(codec: &mut Connection, ws: &mut WsStream) -> Result<()> {
-    let mut any = false;
-    while let Some(frame) = codec.poll_ws_frame() {
-        ws.feed(tokio_tungstenite::tungstenite::Message::Binary(frame))
-            .await
-            .map_err(ws_err)?;
-        any = true;
-    }
-    if any {
-        ws.flush().await.map_err(ws_err)?;
-    }
-    Ok(())
 }

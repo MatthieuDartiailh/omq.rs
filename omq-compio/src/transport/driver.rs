@@ -123,12 +123,21 @@ fn generated_identity(connection_id: u64) -> bytes::Bytes {
 ///
 /// The encoder is stored separately in [`DirectIoState::encoder`]; only
 /// the decoder lives here alongside the codec + reader.
-fn make_codec(role: Role, socket_type: SocketType, options: &Options) -> Connection {
+fn make_codec(
+    role: Role,
+    socket_type: SocketType,
+    options: &Options,
+    #[cfg(feature = "ws")] ws_role: Option<omq_proto::proto::connection::WsRole>,
+) -> Connection {
     let mut cfg = ConnectionConfig::new(role, socket_type)
         .identity(options.identity.clone())
         .mechanism(options.mechanism.to_setup());
     if let Some(n) = options.max_message_size {
         cfg = cfg.max_message_size(n);
+    }
+    #[cfg(feature = "ws")]
+    if let Some(wr) = ws_role {
+        cfg = cfg.ws_role(wr);
     }
     Connection::new(cfg)
 }
@@ -139,12 +148,19 @@ pub(crate) fn build_peer_io(
     options: &Options,
     reader: WireReader,
     decoder: Option<MessageDecoder>,
+    #[cfg(feature = "ws")] ws_role: Option<omq_proto::proto::connection::WsRole>,
 ) -> std::io::Result<(
     SharedPeerIo,
     crate::transport::peer_io::CancellableRecvStream,
 )> {
     let recv_stream = reader.build_recv_stream()?;
-    let codec = make_codec(role, socket_type, options);
+    let codec = make_codec(
+        role,
+        socket_type,
+        options,
+        #[cfg(feature = "ws")]
+        ws_role,
+    );
     let peer_io = Arc::new(std::sync::Mutex::new(PeerIo {
         codec,
         decoder,

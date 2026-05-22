@@ -325,6 +325,10 @@ impl Connection {
     /// into their own flat buffer via [`send_message_flat`] rather than going
     /// through [`send_message`] + [`transmit_chunks`].
     pub fn has_frame_transform(&self) -> bool {
+        #[cfg(feature = "ws")]
+        if self.ws_role.is_some() {
+            return true;
+        }
         #[cfg(any(feature = "curve", feature = "blake3zmq"))]
         {
             self.transform.is_some()

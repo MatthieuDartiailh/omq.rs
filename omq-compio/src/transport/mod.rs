@@ -12,5 +12,3 @@ pub mod tcp;
 pub mod udp;
 #[cfg(feature = "ws")]
 pub mod ws;
-#[cfg(feature = "ws")]
-pub mod ws_driver;
