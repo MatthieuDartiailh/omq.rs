@@ -6,6 +6,7 @@
 Cargo.lock
 Cargo.lock.bak
 !bindings/pyomq/Cargo.lock
+/bindings/pyomq/dist/*.whl
 !examples/zguide-compio/Cargo.lock
 !examples/zguide-tokio/Cargo.lock
 uv.lock
