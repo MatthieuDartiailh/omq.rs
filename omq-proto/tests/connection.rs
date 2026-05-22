@@ -557,17 +557,16 @@ fn bad_signature_rejected() {
 #[cfg(feature = "ws")]
 mod ws {
     use super::*;
-    use omq_proto::proto::connection::TransportMode;
+    use omq_proto::proto::connection::WsRole;
 
     fn ws_push_pull_pair() -> (Connection, Connection) {
         let push = Connection::new(
             ConnectionConfig::new(Role::Client, SocketType::Push)
                 .identity(Bytes::from_static(b"p"))
-                .transport_mode(TransportMode::WebSocket),
+                .ws_role(WsRole::Client),
         );
         let pull = Connection::new(
-            ConnectionConfig::new(Role::Server, SocketType::Pull)
-                .transport_mode(TransportMode::WebSocket),
+            ConnectionConfig::new(Role::Server, SocketType::Pull).ws_role(WsRole::Server),
         );
         (push, pull)
     }
@@ -575,12 +574,16 @@ mod ws {
     fn pump_ws(a: &mut Connection, b: &mut Connection) {
         loop {
             let mut progress = false;
-            while let Some(frame) = a.poll_ws_frame() {
-                b.handle_ws_message(frame).expect("b accepts");
+            let wire_a = a.poll_transmit();
+            if !wire_a.is_empty() {
+                b.handle_input(wire_a).expect("b accepts");
+                a.advance_transmit(a.pending_transmit_size());
                 progress = true;
             }
-            while let Some(frame) = b.poll_ws_frame() {
-                a.handle_ws_message(frame).expect("a accepts");
+            let wire_b = b.poll_transmit();
+            if !wire_b.is_empty() {
+                a.handle_input(wire_b).expect("a accepts");
+                b.advance_transmit(b.pending_transmit_size());
                 progress = true;
             }
             if !progress {
@@ -592,7 +595,7 @@ mod ws {
     #[test]
     fn ws_null_handshake() {
         let (mut push, mut pull) = ws_push_pull_pair();
-        assert!(push.has_pending_ws_frames(), "mechanism start queues READY");
+        assert!(push.has_pending_transmit(), "mechanism start queues READY");
         pump_ws(&mut push, &mut pull);
         assert!(push.is_ready());
         assert!(pull.is_ready());
@@ -650,18 +653,20 @@ mod ws {
     #[test]
     fn ws_incompatible_types_rejected() {
         let mut a = Connection::new(
-            ConnectionConfig::new(Role::Client, SocketType::Push)
-                .transport_mode(TransportMode::WebSocket),
+            ConnectionConfig::new(Role::Client, SocketType::Push).ws_role(WsRole::Client),
         );
         let mut b = Connection::new(
-            ConnectionConfig::new(Role::Server, SocketType::Push)
-                .transport_mode(TransportMode::WebSocket),
+            ConnectionConfig::new(Role::Server, SocketType::Push).ws_role(WsRole::Server),
         );
-        while let Some(frame) = a.poll_ws_frame() {
-            let _ = b.handle_ws_message(frame);
+        let wire_a = a.poll_transmit();
+        if !wire_a.is_empty() {
+            let _ = b.handle_input(wire_a);
+            a.advance_transmit(a.pending_transmit_size());
         }
-        while let Some(frame) = b.poll_ws_frame() {
-            let result = a.handle_ws_message(frame);
+        let wire_b = b.poll_transmit();
+        if !wire_b.is_empty() {
+            let result = a.handle_input(wire_b);
+            b.advance_transmit(b.pending_transmit_size());
             if let Err(Error::HandshakeFailed(msg)) = result {
                 assert!(msg.contains("incompatible"));
                 return;

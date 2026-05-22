@@ -1,6 +1,6 @@
 use std::io::IoSlice;
 
-#[cfg(feature = "curve")]
+#[cfg(any(feature = "curve", feature = "ws"))]
 use bytes::BufMut;
 use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
@@ -10,6 +10,10 @@ use crate::message::{Message, Payload};
 
 use super::super::command::{self, Command};
 use super::super::frame;
+#[cfg(feature = "ws")]
+use super::super::ws_codec;
+#[cfg(feature = "ws")]
+use super::super::zws;
 #[cfg(any(feature = "curve", feature = "blake3zmq"))]
 use super::FrameTransform;
 #[cfg(feature = "blake3zmq")]
@@ -71,16 +75,67 @@ impl Connection {
     }
 
     pub(super) fn emit_frame(&mut self, flags: crate::message::FrameFlags, payload: Payload) {
-        let f = crate::message::Frame { flags, payload };
         #[cfg(feature = "ws")]
-        if self.config.transport_mode == super::TransportMode::WebSocket {
-            self.ws_out_frames
-                .push_back(super::super::zws::encode_frame(&f));
+        if let Some(role) = self.ws_role {
+            self.emit_ws_frame(flags, &payload, role);
             return;
         }
-        let plen = f.payload.len();
+        let plen = payload.len();
+        let f = crate::message::Frame { flags, payload };
         self.out_bytes_total += frame::header_len_for(plen) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
+    }
+
+    #[cfg(feature = "ws")]
+    fn emit_ws_frame(
+        &mut self,
+        flags: crate::message::FrameFlags,
+        payload: &Payload,
+        role: ws_codec::WsRole,
+    ) {
+        self.refill_scratch(15); // max WS header (14) + ZWS flag (1)
+
+        let zws_flag = zws::flags_to_zws(flags);
+        let payload_bytes = payload.as_bytes();
+        let ws_payload_len = 1 + payload_bytes.len(); // ZWS flag + ZMTP payload
+
+        let mask =
+            ws_codec::encode_ws_binary_header(&mut self.header_scratch, ws_payload_len, role);
+
+        if let Some(mask) = mask {
+            // Client: must mask ZWS flag + payload.
+            self.header_scratch.put_u8(zws_flag ^ mask[0]);
+            let header_chunk = self.header_scratch.split().freeze();
+            self.out_bytes_total += header_chunk.len();
+            self.out_chunks.push_back(header_chunk);
+
+            if !payload_bytes.is_empty() {
+                let mut masked = BytesMut::with_capacity(payload_bytes.len());
+                masked.extend_from_slice(&payload_bytes);
+                ws_codec::apply_mask_offset(&mut masked, mask, 1);
+                let payload_chunk = masked.freeze();
+                self.out_bytes_total += payload_chunk.len();
+                self.out_chunks.push_back(payload_chunk);
+            }
+        } else {
+            // Server: zero-copy. ZWS flag goes into scratch with header.
+            self.header_scratch.put_u8(zws_flag);
+            let header_chunk = self.header_scratch.split().freeze();
+            self.out_bytes_total += header_chunk.len();
+            self.out_chunks.push_back(header_chunk);
+
+            if !payload_bytes.is_empty() {
+                self.out_bytes_total += payload_bytes.len();
+                self.out_chunks.push_back(payload_bytes);
+            }
+        }
+    }
+
+    #[cfg(feature = "ws")]
+    fn refill_scratch(&mut self, needed: usize) {
+        if self.header_scratch.capacity() - self.header_scratch.len() < needed {
+            self.header_scratch = BytesMut::with_capacity(64 * 1024);
+        }
     }
 
     /// Queue an application message. Parts serialize in order; the last part
@@ -139,18 +194,38 @@ impl Connection {
         Ok(())
     }
 
-    /// Pop one outbound ZWS frame. Each frame is a complete WebSocket
-    /// binary message (flag byte + payload). Returns `None` when the
-    /// queue is empty.
+    /// Queue a WebSocket close frame.
     #[cfg(feature = "ws")]
-    pub fn poll_ws_frame(&mut self) -> Option<Bytes> {
-        self.ws_out_frames.pop_front()
+    pub fn send_ws_close(&mut self, code: u16) {
+        if self.ws_close_sent {
+            return;
+        }
+        self.ws_close_sent = true;
+        let role = self.ws_role.unwrap_or(ws_codec::WsRole::Server);
+        self.refill_scratch(8);
+        ws_codec::encode_ws_control(
+            &mut self.header_scratch,
+            &mut self.out_chunks,
+            &mut self.out_bytes_total,
+            ws_codec::OP_CLOSE_CODE,
+            &code.to_be_bytes(),
+            role,
+        );
     }
 
-    /// Whether any ZWS frames are pending transmit.
+    /// Queue a WebSocket pong frame echoing the ping payload.
     #[cfg(feature = "ws")]
-    pub fn has_pending_ws_frames(&self) -> bool {
-        !self.ws_out_frames.is_empty()
+    pub(super) fn queue_ws_pong(&mut self, payload: &[u8]) {
+        let role = self.ws_role.unwrap_or(ws_codec::WsRole::Server);
+        self.refill_scratch(6 + payload.len());
+        ws_codec::encode_ws_control(
+            &mut self.header_scratch,
+            &mut self.out_chunks,
+            &mut self.out_bytes_total,
+            ws_codec::OP_PONG_CODE,
+            payload,
+            role,
+        );
     }
 
     /// CURVE-encrypted part: wrap the plaintext per RFC 26 (`"\x07"

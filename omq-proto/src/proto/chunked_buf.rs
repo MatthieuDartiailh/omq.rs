@@ -70,6 +70,36 @@ impl ChunkedInputBuf {
         Some(out)
     }
 
+    /// Copy `N` bytes starting at `offset` into a stack array without consuming.
+    /// Returns `None` if fewer than `offset + N` bytes are buffered.
+    #[cfg(feature = "ws")]
+    pub(crate) fn peek_array_at<const N: usize>(&self, offset: usize) -> Option<[u8; N]> {
+        if self.total_len < offset + N {
+            return None;
+        }
+        let mut out = [0u8; N];
+        let mut pos = 0;
+        let mut skipped = 0;
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            let start = if i == 0 { self.front_offset } else { 0 };
+            let slice = &chunk[start..];
+            if skipped + slice.len() <= offset {
+                skipped += slice.len();
+                continue;
+            }
+            let begin = offset.saturating_sub(skipped);
+            for &b in &slice[begin..] {
+                out[pos] = b;
+                pos += 1;
+                if pos == N {
+                    return Some(out);
+                }
+            }
+            skipped += slice.len();
+        }
+        Some(out)
+    }
+
     /// Consume the first `n` bytes without returning them.
     /// Panics in debug mode if `n > self.len()`.
     #[inline]

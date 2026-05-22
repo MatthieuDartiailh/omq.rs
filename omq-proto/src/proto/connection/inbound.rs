@@ -36,6 +36,14 @@ impl Connection {
 
     #[inline]
     fn drive(&mut self) -> Result<()> {
+        #[cfg(feature = "ws")]
+        if self.ws_role.is_some() {
+            return self.drive_ws();
+        }
+        self.drive_zmtp()
+    }
+
+    fn drive_zmtp(&mut self) -> Result<()> {
         loop {
             let progress = match self.state {
                 State::AwaitingGreeting => self.try_advance_greeting()?,
@@ -475,30 +483,20 @@ impl Connection {
         self.drive()
     }
 
-    /// Feed one complete ZWS binary message (flag byte + body) received
-    /// from a WebSocket. Each WS binary message is one ZMTP frame.
+    /// Parse WS frame headers from raw wire bytes, extract ZWS frames,
+    /// and feed them to the ZMTP state machine.
+    /// Decode a ZWS binary frame payload (already unmasked) and dispatch
+    /// through the ZMTP state machine (mechanism handshake or data phase).
     #[cfg(feature = "ws")]
-    pub fn handle_ws_message(&mut self, msg: Bytes) -> Result<()> {
-        let decoded = super::super::zws::decode_frame(msg)?;
+    fn dispatch_ws_binary(&mut self, flags: FrameFlags, payload: Payload) -> Result<()> {
         match self.state {
-            State::Closed => return Err(Error::Closed),
-            State::AwaitingGreeting => {
-                return Err(Error::Protocol(
-                    "WS message in AwaitingGreeting state".into(),
-                ));
-            }
-            State::AwaitingSuppliedPayload { .. } => {
-                return Err(Error::Protocol(
-                    "WS message while awaiting supplied payload".into(),
-                ));
-            }
             State::MechanismHandshake => {
-                if !decoded.flags.command {
+                if !flags.command {
                     return Err(Error::HandshakeFailed(
                         "peer sent data frame during handshake".into(),
                     ));
                 }
-                let cmd = decode_command_raw(decoded.payload.as_bytes())?;
+                let cmd = decode_command_raw(payload.as_bytes())?;
                 let mut cmds = Vec::new();
                 let step = self.mechanism.on_command(cmd, &mut cmds)?;
                 self.write_outbound_commands(&cmds);
@@ -522,11 +520,96 @@ impl Connection {
                         peer_properties: Arc::new(peer_properties),
                     });
                 }
+                Ok(())
             }
-            State::Ready => {
-                self.decode_assembled_frame(decoded.flags, decoded.payload)?;
+            State::Ready => self.decode_assembled_frame(flags, payload),
+            _ => Err(Error::Protocol(
+                "WS binary frame in unexpected state".into(),
+            )),
+        }
+    }
+
+    #[cfg(feature = "ws")]
+    fn drive_ws(&mut self) -> Result<()> {
+        use super::super::{ws_codec, zws};
+
+        let peer_role = match self.ws_role.unwrap() {
+            ws_codec::WsRole::Client => ws_codec::WsRole::Server,
+            ws_codec::WsRole::Server => ws_codec::WsRole::Client,
+        };
+
+        loop {
+            if matches!(self.state, State::Closed) {
+                return Ok(());
+            }
+
+            let Some(ws_hdr) = ws_codec::peek_ws_header(&self.in_buf, peer_role)? else {
+                return Ok(());
+            };
+
+            let total_frame = ws_hdr.header_len + ws_hdr.payload_len as usize;
+            if self.in_buf.len() < total_frame {
+                return Ok(());
+            }
+
+            self.in_buf.advance(ws_hdr.header_len);
+            let payload_len = ws_hdr.payload_len as usize;
+
+            match ws_hdr.opcode {
+                ws_codec::OP_BINARY_CODE => {
+                    if payload_len == 0 {
+                        return Err(Error::Protocol("empty WS binary frame".into()));
+                    }
+                    let payload = self.in_buf.split_to(payload_len);
+                    let mut raw = bytes::BytesMut::from(payload.as_bytes().as_ref());
+                    if ws_hdr.masked {
+                        ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
+                    }
+                    let flags = zws::zws_to_flags(raw[0])?;
+                    let zmtp_payload = if raw.len() > 1 {
+                        Payload::from_bytes(raw.split_off(1).freeze())
+                    } else {
+                        Payload::new()
+                    };
+                    self.dispatch_ws_binary(flags, zmtp_payload)?;
+                }
+                ws_codec::OP_CLOSE_CODE => {
+                    let mut code = 1005u16;
+                    if payload_len >= 2 {
+                        let raw = self.in_buf.split_to(payload_len);
+                        let b = raw.as_bytes();
+                        let mut code_bytes = [b[0], b[1]];
+                        if ws_hdr.masked {
+                            ws_codec::apply_mask(&mut code_bytes, ws_hdr.mask_key);
+                        }
+                        code = u16::from_be_bytes(code_bytes);
+                    } else if payload_len > 0 {
+                        self.in_buf.advance(payload_len);
+                    }
+                    if !self.ws_close_sent {
+                        self.send_ws_close(code);
+                    }
+                    self.state = State::Closed;
+                    return Ok(());
+                }
+                ws_codec::OP_PING_CODE => {
+                    let ping_data = if payload_len > 0 {
+                        let p = self.in_buf.split_to(payload_len);
+                        let mut raw = p.as_bytes().to_vec();
+                        if ws_hdr.masked {
+                            ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
+                        }
+                        raw
+                    } else {
+                        vec![]
+                    };
+                    self.queue_ws_pong(&ping_data);
+                }
+                ws_codec::OP_PONG_CODE => {
+                    self.in_buf.advance(payload_len);
+                }
+                _ => unreachable!("peek_ws_header rejects unknown opcodes"),
             }
         }
-        Ok(())
     }
 }

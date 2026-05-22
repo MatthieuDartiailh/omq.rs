@@ -14,6 +14,29 @@ pub const FLAG_FINAL: u8 = 0x00;
 pub const FLAG_MORE: u8 = 0x01;
 pub const FLAG_COMMAND: u8 = 0x02;
 
+/// Convert ZMTP frame flags to a ZWS flag byte.
+pub fn flags_to_zws(flags: FrameFlags) -> u8 {
+    if flags.command {
+        FLAG_COMMAND
+    } else if flags.more {
+        FLAG_MORE
+    } else {
+        FLAG_FINAL
+    }
+}
+
+/// Convert a ZWS flag byte to ZMTP frame flags.
+pub fn zws_to_flags(flag: u8) -> Result<FrameFlags> {
+    match flag {
+        FLAG_FINAL => Ok(FrameFlags::LAST),
+        FLAG_MORE => Ok(FrameFlags::MORE),
+        FLAG_COMMAND => Ok(FrameFlags::COMMAND),
+        _ => Err(Error::Protocol(format!(
+            "invalid ZWS flag byte: 0x{flag:02x}"
+        ))),
+    }
+}
+
 /// Encode a single ZMTP frame as a ZWS binary message: `[flag][body]`.
 pub fn encode_frame(frame: &Frame) -> Bytes {
     let flag = if frame.flags.command {

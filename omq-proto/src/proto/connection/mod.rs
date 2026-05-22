@@ -67,20 +67,8 @@ pub enum Role {
     Client,
 }
 
-/// Transport framing mode. Determines whether the connection uses standard
-/// ZMTP byte-stream framing (with 64-byte greeting + length-prefixed frames)
-/// or ZWS message-oriented framing (RFC 45).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TransportMode {
-    /// Standard ZMTP byte-stream framing with 64-byte greeting.
-    #[default]
-    Zmtp,
-    /// ZWS/2.0 (RFC 45): no greeting, 1-byte flag prefix per WebSocket
-    /// binary message. Mechanism is negotiated via `Sec-WebSocket-Protocol`
-    /// header during the HTTP upgrade.
-    #[cfg(feature = "ws")]
-    WebSocket,
-}
+#[cfg(feature = "ws")]
+pub use super::ws_codec::WsRole;
 
 /// Configuration for a new [`Connection`].
 #[derive(Clone, Debug)]
@@ -95,8 +83,10 @@ pub struct ConnectionConfig {
     pub max_message_size: Option<usize>,
     /// Security mechanism to negotiate during the handshake.
     pub mechanism: MechanismSetup,
-    /// Transport framing mode.
-    pub transport_mode: TransportMode,
+    /// WebSocket role. `None` = standard ZMTP byte-stream framing.
+    /// `Some(Client)` or `Some(Server)` = ZWS/2.0 framing with WS masking.
+    #[cfg(feature = "ws")]
+    pub ws_role: Option<WsRole>,
 }
 
 impl ConnectionConfig {
@@ -108,7 +98,8 @@ impl ConnectionConfig {
             identity: bytes::Bytes::new(),
             max_message_size: None,
             mechanism: MechanismSetup::Null,
-            transport_mode: TransportMode::default(),
+            #[cfg(feature = "ws")]
+            ws_role: None,
         }
     }
 
@@ -130,9 +121,10 @@ impl ConnectionConfig {
         self
     }
 
+    #[cfg(feature = "ws")]
     #[must_use]
-    pub fn transport_mode(mut self, mode: TransportMode) -> Self {
-        self.transport_mode = mode;
+    pub fn ws_role(mut self, role: WsRole) -> Self {
+        self.ws_role = Some(role);
         self
     }
 
@@ -237,11 +229,15 @@ pub struct Connection {
     messages: VecDeque<Message>,
     pending_parts: Vec<Payload>,
     pending_size: usize,
-    /// ZWS outbound queue: each entry is one complete ZWS binary message
-    /// (flag byte + payload). Used only when `transport_mode == WebSocket`;
-    /// the byte-stream `out_chunks` queue is unused in WS mode.
+    /// WebSocket role for this connection. `None` = ZMTP byte-stream.
+    /// When set, `emit_frame` wraps ZMTP frames in WS binary frame
+    /// headers and pushes directly into `out_chunks`; inbound `drive()`
+    /// parses WS frame headers before decoding ZMTP.
     #[cfg(feature = "ws")]
-    ws_out_frames: VecDeque<Bytes>,
+    ws_role: Option<super::ws_codec::WsRole>,
+    /// Whether we have sent a WS close frame.
+    #[cfg(feature = "ws")]
+    ws_close_sent: bool,
 }
 
 impl Connection {
@@ -250,7 +246,7 @@ impl Connection {
     pub fn new(config: ConnectionConfig) -> Self {
         let mechanism = config.mechanism.clone().build();
         #[cfg(feature = "ws")]
-        let ws_mode = config.transport_mode == TransportMode::WebSocket;
+        let ws_role = config.ws_role;
         let mut conn = Self {
             state: State::AwaitingGreeting,
             peer_minor: greeting::ZMTP_MINOR,
@@ -269,11 +265,13 @@ impl Connection {
             pending_parts: Vec::new(),
             pending_size: 0,
             #[cfg(feature = "ws")]
-            ws_out_frames: VecDeque::new(),
+            ws_role,
+            #[cfg(feature = "ws")]
+            ws_close_sent: false,
             config,
         };
         #[cfg(feature = "ws")]
-        if ws_mode {
+        if ws_role.is_some() {
             conn.init_ws_mode();
             return conn;
         }

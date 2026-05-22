@@ -21,6 +21,10 @@ pub mod frame;
 pub mod greeting;
 pub mod mechanism;
 pub mod transform;
+#[cfg(feature = "ws")]
+pub(crate) mod ws_codec;
+#[cfg(feature = "ws")]
+pub mod ws_handshake;
 pub mod z85;
 #[cfg(feature = "ws")]
 pub mod zws;
