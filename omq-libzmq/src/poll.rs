@@ -175,7 +175,11 @@ pub extern "C" fn zmq_poll(
     };
     let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, poll_timeout) };
     if rc < 0 {
-        return crate::error::fail(unsafe { *libc::__errno_location() });
+        return crate::error::fail(
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EINTR) as libc::c_int,
+        );
     }
     if rc == 0 {
         return 0;
