@@ -7,8 +7,9 @@ module BenchCompare
 
   module_function
 
-  def cargo_build(crate, bin, quiet: true)
+  def cargo_build(crate, bin, quiet: true, features: [])
     cmd = ['cargo', 'build', '--release', '-p', crate, '--bin', bin]
+    cmd += ['--features', features.join(',')] unless features.empty?
     cmd << '-q' if quiet
     system(*cmd, chdir: ROOT) || abort("Failed to build #{crate}/#{bin}")
   end

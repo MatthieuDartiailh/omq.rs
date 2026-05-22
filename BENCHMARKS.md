@@ -163,10 +163,15 @@ Same methodology as above, using CLIENT/SERVER sockets instead of REQ/REP.
 <!-- BEGIN client_server_latency_percentiles -->
 | transport | size | compio p50 | compio p99 | tokio p50 | tokio p99 |
 |---|---|---|---|---|---|
-| ipc | 128 B | 15.3 µs | 22.8 µs | 39.7 µs | 183 µs |
-| ipc | 8 KiB | 20.5 µs | 29.4 µs | 48.6 µs | 289 µs |
-| tcp | 128 B | 22.5 µs | 32.0 µs | 44.8 µs | 89.8 µs |
-| tcp | 8 KiB | 27.4 µs | 38.5 µs | 51.4 µs | 130 µs |
+| inproc | 128 B | 2.35 µs | 2.42 µs | 16.2 µs | 44.9 µs |
+| inproc | 2 KiB | 2.35 µs | 2.41 µs | 15.9 µs | 33.6 µs |
+| inproc | 8 KiB | 2.31 µs | 2.42 µs | 15.8 µs | 28.8 µs |
+| ipc | 128 B | 14.2 µs | 20.1 µs | 41.1 µs | 89.3 µs |
+| ipc | 2 KiB | 15.1 µs | 21.3 µs | 43.9 µs | 81.9 µs |
+| ipc | 8 KiB | 18.1 µs | 24.2 µs | 49.8 µs | 95.0 µs |
+| tcp | 128 B | 20.6 µs | 29.8 µs | 46.0 µs | 81.4 µs |
+| tcp | 2 KiB | 23.2 µs | 36.6 µs | 47.9 µs | 94.3 µs |
+| tcp | 8 KiB | 24.9 µs | 44.4 µs | 52.0 µs | 102 µs |
 
 <!-- END client_server_latency_percentiles -->
 
@@ -392,6 +397,10 @@ cargo bench -p omq-compio --bench req_rep
 ./scripts/bench_run.rb [--all-features] [--all-sizes]    # adds results to JSONL
 ./scripts/bench_run.rb --with-priority [--all-sizes]     # priority feature only
 ./scripts/bench_report.rb [--update-benchmarks]          # regenerates tables
+
+# WebSocket transport (requires ws feature):
+OMQ_BENCH_TRANSPORTS=ws cargo bench -p omq-compio --features ws --bench push_pull
+OMQ_BENCH_TRANSPORTS=ws cargo bench -p omq-tokio  --features ws --bench push_pull
 
 # Override transports / sizes / peer counts via env:
 OMQ_BENCH_TRANSPORTS=tcp OMQ_BENCH_PEERS=3 OMQ_BENCH_SIZES=128,2048,32768 cargo bench -p omq-compio --bench push_pull

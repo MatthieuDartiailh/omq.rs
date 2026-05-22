@@ -30,8 +30,8 @@ OptionParser.new do |o|
   o.on('--backend BACKEND',  'Run only "compio" or "tokio"')         { |v| options[:backends]  = [v] }
   o.on('--bench TARGET',     'Run only this bench target (by name)') { |v| options[:bench]     = v }
   o.on('--features FEATS',   'Extra cargo --features value')               { |v| options[:features]       = v }
-  o.on('--all-features',     'Enable lz4,zstd,curve,blake3zmq (not priority; use --with-priority)') {
-    options[:features] = 'lz4 zstd curve blake3zmq'
+  o.on('--all-features',     'Enable lz4,zstd,curve,blake3zmq,ws (not priority; use --with-priority)') {
+    options[:features] = 'lz4 zstd curve blake3zmq ws'
   }
   o.on('--all-sizes',        'Full 32 B–128 KiB size sweep (default: 128 B/2 KiB/8 KiB)') {
     options[:all_sizes] = true
@@ -57,7 +57,9 @@ puts "=== bench run #{run_id} ==="
 transport_groups = if ENV['OMQ_BENCH_TRANSPORTS']
                      [nil] # user already picked; pass through as-is
                    else
-                     %w[inproc ipc tcp]
+                     groups = %w[inproc ipc tcp]
+                     groups << 'ws' if options[:features]&.include?('ws')
+                     groups
                    end
 
 unless options[:skip_main]

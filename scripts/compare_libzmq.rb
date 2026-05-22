@@ -42,6 +42,7 @@ OptionParser.new do |opts|
   opts.on('--inproc',            'inproc only')           { transport_filter = 'inproc' }
   opts.on('--ipc',               'IPC only')              { transport_filter = 'ipc' }
   opts.on('--tcp',               'TCP only')              { transport_filter = 'tcp' }
+  opts.on('--ws',                'WebSocket only')        { transport_filter = 'ws' }
   opts.on('--latency',           'also run latency comparison') { run_latency = true }
   opts.on('--update-benchmarks', 'update COMPARISONS.md') { update_benchmarks = true }
 end.parse!
@@ -49,16 +50,19 @@ end.parse!
 # Remaining positional arg is base port.
 base_port = ARGV.shift.to_i if ARGV.first&.match?(/\A\d+\z/)
 
-transports = transport_filter ? [transport_filter] : %w[inproc ipc tcp]
+transports = transport_filter ? [transport_filter] : %w[inproc ipc tcp ws]
 
 # ---------- build ----------
 
+ws_needed = transports.include?('ws')
+ws_features = ws_needed ? ['ws'] : []
+
 $stderr.puts '==> building omq-compio bench_peer...'
-BenchCompare.cargo_build('omq-compio', 'bench_peer')
+BenchCompare.cargo_build('omq-compio', 'bench_peer', features: ws_features)
 omq_peer = File.join(BenchCompare::ROOT, 'target/release/bench_peer')
 
 $stderr.puts '==> building omq-tokio bench_peer...'
-BenchCompare.cargo_build('omq-tokio', 'bench_peer_tokio')
+BenchCompare.cargo_build('omq-tokio', 'bench_peer_tokio', features: ws_features)
 tokio_peer = File.join(BenchCompare::ROOT, 'target/release/bench_peer_tokio')
 
 $stderr.puts '==> building libzmq bench_peer...'
@@ -79,6 +83,9 @@ def addr_for(transport, prefix, idx, base_port)
   when 'tcp'
     offset = { 'o' => 0, 't' => 100, 'z' => 200 }.fetch(prefix, 0)
     (base_port + offset + idx).to_s
+  when 'ws'
+    offset = { 'o' => 300, 't' => 400, 'z' => 500 }.fetch(prefix, 300)
+    "ws://127.0.0.1:#{base_port + offset + idx}/"
   when 'ipc'
     "ipc://@omq-bench-lzq-#{prefix}-#{idx}"
   when 'inproc'
@@ -95,6 +102,7 @@ def run_comparison(transport, peers, base_port, update_benchmarks, omq_version, 
                     when 'inproc' then 'inproc (same process)'
                     when 'ipc'    then 'IPC (abstract namespace)'
                     when 'tcp'    then 'TCP'
+                    when 'ws'     then 'WebSocket'
                     end
 
   puts
@@ -230,6 +238,7 @@ def run_latency_comparison(transport, peers, base_port, update_benchmarks, omq_v
   transport_label = case transport
                     when 'ipc' then 'IPC (abstract namespace)'
                     when 'tcp' then 'TCP'
+                    when 'ws'  then 'WebSocket'
                     end
 
   puts

@@ -81,11 +81,11 @@ if options[:update_benchmarks]
   PRIORITY_CELL = ->(row) { BenchHelpers.format_si(row&.dig(:msgs_s)) || '—' }
   MBPS_CELL     = ->(row) { row ? (BenchHelpers.format_mbps(row[:mbps]) || '—') : '—' }
 
-  CORE = %w[inproc ipc tcp]
+  CORE = %w[inproc ipc tcp ws]
 
   TABLE_DEFS = [
     { stem: 'push_pull_1peer',        pattern: 'push_pull',        peers: 1,
-      transports: { 'compio' => %w[inproc inproc-mt ipc tcp], 'tokio' => CORE } },
+      transports: { 'compio' => %w[inproc inproc-mt ipc tcp ws], 'tokio' => CORE } },
     { stem: 'push_pull_8peer',        pattern: 'push_pull',        peers: 8 },
     { stem: 'push_pull_fanout_8peer', pattern: 'push_pull_fanout', peers: 8 },
     { stem: 'req_rep',                pattern: 'req_rep',           peers: 1 },

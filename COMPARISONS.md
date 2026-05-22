@@ -135,6 +135,46 @@ Refresh: `ruby scripts/compare_libzmq.rb --tcp --update-benchmarks`
 
 <!-- END libzmq_comparison_tcp_tokio -->
 
+## libzmq vs omq — WebSocket
+
+ZWS/2.0 (RFC 45) over TCP loopback. Push binds, pull connects. Requires libzmq built with WebSocket support (4.3.5+) and omq built with the `ws` feature.
+
+Refresh: `ruby scripts/compare_libzmq.rb --ws --update-benchmarks`
+
+**omq-compio:**
+
+<!-- BEGIN libzmq_comparison_ws_compio -->
+| Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × |
+|-------|-------------|------------|-----------------|----------------|----------|
+| 8 B | 7.90M | 63 MB/s | 2.41M | 19 MB/s | 0.30× |
+| 32 B | 7.68M | 246 MB/s | 2.36M | 76 MB/s | 0.31× |
+| 128 B | 2.79M | 357 MB/s | 2.24M | 286 MB/s | 0.80× |
+| 512 B | 1.95M | 1.0 GB/s | 2.02M | 1.0 GB/s | 1.03× |
+| 2 KiB | 659k | 1.4 GB/s | 1.58M | 3.2 GB/s | **2.4×** |
+| 8 KiB | 196k | 1.6 GB/s | 536k | 4.4 GB/s | **2.7×** |
+| 32 KiB | 68.4k | 2.2 GB/s | 161k | 5.3 GB/s | **2.3×** |
+| 128 KiB | 31.8k | 4.2 GB/s | 38.0k | 5.0 GB/s | **1.2×** |
+| 512 KiB | 9.3k | 4.9 GB/s | 3.4k | 1.8 GB/s | 0.36× |
+
+<!-- END libzmq_comparison_ws_compio -->
+
+**omq-tokio:**
+
+<!-- BEGIN libzmq_comparison_ws_tokio -->
+| Size | libzmq msg/s | libzmq MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × |
+|-------|-------------|------------|----------------|---------------|----------|
+| 8 B | 7.90M | 63 MB/s | 3.50M | 28 MB/s | 0.44× |
+| 32 B | 7.68M | 246 MB/s | 3.91M | 125 MB/s | 0.51× |
+| 128 B | 2.79M | 357 MB/s | 3.10M | 397 MB/s | **1.1×** |
+| 512 B | 1.95M | 1.0 GB/s | 2.85M | 1.5 GB/s | **1.5×** |
+| 2 KiB | 659k | 1.4 GB/s | 1.41M | 2.9 GB/s | **2.1×** |
+| 8 KiB | 196k | 1.6 GB/s | 588k | 4.8 GB/s | **3.0×** |
+| 32 KiB | 68.4k | 2.2 GB/s | 150k | 4.9 GB/s | **2.2×** |
+| 128 KiB | 31.8k | 4.2 GB/s | 35.5k | 4.6 GB/s | **1.1×** |
+| 512 KiB | 9.3k | 4.9 GB/s | 3.1k | 1.6 GB/s | 0.33× |
+
+<!-- END libzmq_comparison_ws_tokio -->
+
 > **zmq.rs inproc:** zeromq 0.6 does not implement the inproc transport, so no zmq.rs vs omq inproc comparison is available. See the libzmq vs omq — inproc table above for omq's inproc numbers against a reference implementation.
 
 ## zmq.rs vs omq — IPC
@@ -251,6 +291,14 @@ Refresh: `ruby scripts/compare_libzmq.rb --tcp --latency --update-benchmarks`
 | 128 KiB | 137 µs | 197 µs | 94.1 µs | 157 µs | **1.5×** | 133 µs | 285 µs | 1.03× |
 
 <!-- END libzmq_latency_tcp -->
+
+### WebSocket
+
+Refresh: `ruby scripts/compare_libzmq.rb --ws --latency --update-benchmarks`
+
+<!-- BEGIN libzmq_latency_ws -->
+(run `ruby scripts/compare_libzmq.rb --ws --latency --update-benchmarks` to populate)
+<!-- END libzmq_latency_ws -->
 
 ## REQ/REP latency — zmq.rs vs omq
 
