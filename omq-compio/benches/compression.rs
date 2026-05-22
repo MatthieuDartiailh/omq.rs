@@ -263,33 +263,7 @@ mod inner {
             let stop = stop.clone();
             let ready = ready.clone();
             let dict = dict.clone();
-            std::thread::spawn(move || {
-                let rt = build_runtime().expect("pull runtime");
-                common::block_on_and_drain(rt, async move {
-                    let opts = match dict {
-                        Some(d) => Options::default().compression_dict(d),
-                        None => Options::default(),
-                    }
-                    .compression_level(level);
-                    let pull = Socket::new(SocketType::Pull, opts);
-                    pull.bind(ep).await.expect("bind PULL");
-                    ready.wait();
-                    while !stop.load(Ordering::Relaxed) {
-                        if let Ok(Ok(_)) =
-                            compio::time::timeout(std::time::Duration::from_millis(20), pull.recv())
-                                .await
-                        {
-                            pull_count.fetch_add(1, Ordering::Relaxed);
-                            let mut drained = 0u64;
-                            while pull.try_recv().is_ok() {
-                                drained += 1;
-                            }
-                            pull_count.fetch_add(drained as usize, Ordering::Relaxed);
-                        }
-                    }
-                    drop(pull);
-                });
-            })
+            std::thread::spawn(move || run_pull(ep, dict, level, pull_count, stop, ready))
         };
 
         let push_thread = {
@@ -356,6 +330,41 @@ mod inner {
         let cell = push_thread.join().expect("push thread panicked");
         let _ = pull_thread.join();
         cell
+    }
+
+    fn run_pull(
+        ep: omq_compio::Endpoint,
+        dict: Option<Bytes>,
+        level: i32,
+        pull_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ready: std::sync::Arc<std::sync::Barrier>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let rt = build_runtime().expect("pull runtime");
+        common::block_on_and_drain(rt, async move {
+            let opts = match dict {
+                Some(d) => Options::default().compression_dict(d),
+                None => Options::default(),
+            }
+            .compression_level(level);
+            let pull = Socket::new(SocketType::Pull, opts);
+            pull.bind(ep).await.expect("bind PULL");
+            ready.wait();
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(Ok(_)) =
+                    compio::time::timeout(std::time::Duration::from_millis(20), pull.recv()).await
+                {
+                    pull_count.fetch_add(1, Ordering::Relaxed);
+                    let mut drained = 0u64;
+                    while pull.try_recv().is_ok() {
+                        drained += 1;
+                    }
+                    pull_count.fetch_add(drained as usize, Ordering::Relaxed);
+                }
+            }
+            drop(pull);
+        });
     }
 
     /// Build a JSON-ish payload of approximately `target_bytes`. Repeats
