@@ -19,6 +19,10 @@ use omq_compio::{Endpoint, IpcPath};
 
 pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 8_192];
 pub(crate) const ALL_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
+pub(crate) const CHART_SIZES: &[usize] = &[
+    8, 16, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072,
+    262_144,
+];
 pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 
 pub(crate) const PRIME_ITERS: usize = 2_000;
@@ -80,6 +84,9 @@ pub(crate) fn run_id() -> String {
 pub(crate) fn sizes() -> Vec<usize> {
     if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
         return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+    }
+    if std::env::args().any(|a| a == "--chart-sizes") {
+        return CHART_SIZES.to_vec();
     }
     if std::env::args().any(|a| a == "--all-sizes") {
         return ALL_SIZES.to_vec();

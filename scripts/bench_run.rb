@@ -33,8 +33,11 @@ OptionParser.new do |o|
   o.on('--all-features',     'Enable lz4,zstd,curve,blake3zmq,ws (not priority; use --with-priority)') {
     options[:features] = 'lz4 zstd curve blake3zmq ws'
   }
-  o.on('--all-sizes',        'Full 32 B–128 KiB size sweep (default: 128 B/2 KiB/8 KiB)') {
+  o.on('--all-sizes',        'Full 32 B–128 KiB size sweep (×4 steps, default: 128 B/2 KiB/8 KiB)') {
     options[:all_sizes] = true
+  }
+  o.on('--chart-sizes',      'Dense 8 B–256 KiB sweep (×2 steps, for charts)') {
+    options[:chart_sizes] = true
   }
   o.on('--with-priority',    'Run push_pull with priority feature only (→ results_priority.jsonl)') {
     options[:with_priority] = true
@@ -45,9 +48,10 @@ end.parse!
 
 run_id = options[:id] || Time.now.strftime('%Y-%m-%dT%H:%M:%SZ')
 ENV['OMQ_BENCH_RUN_ID'] = run_id
-# Use the env-var path for --all-sizes so the flag isn't forwarded to libtest
-# (which errors on unrecognised options when cargo bench runs lib unit tests).
+# Use the env-var path so the flag isn't forwarded to libtest
+# (which errors on unrecognized options when cargo bench runs lib unit tests).
 ENV['OMQ_BENCH_SIZES'] = '32,128,512,2048,8192,32768,131072' if options[:all_sizes]
+ENV['OMQ_BENCH_SIZES'] = '8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144' if options[:chart_sizes]
 
 puts "=== bench run #{run_id} ==="
 

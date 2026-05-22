@@ -40,14 +40,16 @@ TRANSPORT_FILTER=""
 for arg in "$@"; do
     case "$arg" in
         --update-benchmarks) UPDATE_BENCHMARKS=true ;;
+        --chart-sizes) CHART_SIZES=true ;;
         --inproc) TRANSPORT_FILTER=inproc ;;
         --ipc)    TRANSPORT_FILTER=ipc ;;
         --tcp)    TRANSPORT_FILTER=tcp ;;
         -h|--help)
-            echo "Usage: $0 [--inproc] [--ipc] [--tcp] [--update-benchmarks] [port]"
+            echo "Usage: $0 [--inproc] [--ipc] [--tcp] [--chart-sizes] [--update-benchmarks] [port]"
             echo "  --inproc            inproc only"
             echo "  --ipc               IPC only (abstract-namespace Unix socket)"
             echo "  --tcp               TCP only"
+            echo "  --chart-sizes       dense ×2 step sweep (8 B – 256 KiB)"
             echo "  --update-benchmarks update COMPARISONS.md"
             echo "  port                override base TCP port (default $BASE_PORT)"
             exit 0 ;;
@@ -178,7 +180,11 @@ ZMQ_VERSION=$(pkg-config --modversion libzmq 2>/dev/null || echo '?')
 
 # ---------- run ----------
 
-SIZES=(8 32 128 512 2048 8192 32768 131072 524288)
+if [ "${CHART_SIZES:-}" = true ]; then
+    SIZES=(8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 65536 131072 262144)
+else
+    SIZES=(8 32 128 512 2048 8192 32768 131072 524288)
+fi
 BENCHMARKS="$REPO/COMPARISONS.md"
 
 run_comparison() {

@@ -115,7 +115,7 @@ if options[:update_benchmarks]
 
       content = BenchHelpers.build_size_table(
         columns: ts, cell_fmt: d.fetch(:cell_fmt, THROUGHPUT_CELL),
-        lookup: lookup, empty_msg: empty,
+        lookup: lookup, empty_msg: empty, sizes: BenchHelpers::TABLE_SIZES,
       )
       bm = BenchHelpers.replace_block(bm, "#{d[:stem]}_#{backend}", content)
     end
@@ -123,12 +123,12 @@ if options[:update_benchmarks]
 
   build_latency_table = ->(pattern, empty_msg) {
     transports = CORE.select do |t|
-      BenchHelpers::SIZE_LABELS.keys.any? do |s|
+      BenchHelpers::TABLE_SIZES.any? do |s|
         BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: s) ||
           BenchHelpers.latest_row(rows_by_backend['tokio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: s)
       end
     end
-    sizes = BenchHelpers::SIZE_LABELS.keys.select do |s|
+    sizes = BenchHelpers::TABLE_SIZES.select do |s|
       transports.any? do |t|
         BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: s) ||
           BenchHelpers.latest_row(rows_by_backend['tokio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: s)
@@ -173,7 +173,7 @@ if options[:update_benchmarks]
     content = BenchHelpers.build_size_table(
       columns: mechanisms, cell_fmt: MBPS_CELL, lookup: lookup,
       empty_msg: "no mechanism data — run: cargo bench -p omq-compio --bench mechanism --features 'curve blake3zmq'",
-      col_align: '---:',
+      col_align: '---:', sizes: BenchHelpers::TABLE_SIZES,
     )
     bm = BenchHelpers.replace_block(bm, 'mechanism_frame', content)
   end

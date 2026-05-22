@@ -25,6 +25,12 @@ pub(crate) const DEFAULT_SIZES: &[usize] = &[128, 2_048, 8_192];
 /// or `OMQ_BENCH_SIZES=32,128,...`.
 pub(crate) const ALL_SIZES: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768, 131_072];
 
+/// Dense ×2 sweep: 8 B → 256 KiB. Enabled via `--chart-sizes`.
+pub(crate) const CHART_SIZES: &[usize] = &[
+    8, 16, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072,
+    262_144,
+];
+
 /// Override with env `OMQ_BENCH_TRANSPORTS=inproc,tcp`.
 pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 
@@ -96,6 +102,9 @@ pub(crate) fn run_id() -> String {
 pub(crate) fn sizes() -> Vec<usize> {
     if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
         return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+    }
+    if std::env::args().any(|a| a == "--chart-sizes") {
+        return CHART_SIZES.to_vec();
     }
     if std::env::args().any(|a| a == "--all-sizes") {
         return ALL_SIZES.to_vec();

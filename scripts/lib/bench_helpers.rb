@@ -5,6 +5,7 @@ require 'json'
 module BenchHelpers
   SIZE_LABELS = {
     8         => '8 B',
+    16        => '16 B',
     32        => '32 B',
     64        => '64 B',
     128       => '128 B',
@@ -14,10 +15,15 @@ module BenchHelpers
     2_048     => '2 KiB',
     4_096     => '4 KiB',
     8_192     => '8 KiB',
+    16_384    => '16 KiB',
     32_768    => '32 KiB',
+    65_536    => '64 KiB',
     131_072   => '128 KiB',
+    262_144   => '256 KiB',
     524_288   => '512 KiB',
   }.freeze
+
+  TABLE_SIZES = [8, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192, 32_768, 131_072, 524_288].freeze
 
   module_function
 
@@ -109,9 +115,10 @@ module BenchHelpers
   # col_align: separator cell (default '---', use '---:' for right-align)
   #
   # Returns markdown ending with \n\n (blank line before END marker).
-  def build_size_table(columns:, cell_fmt:, lookup:, empty_msg:, col_align: '---')
-    live_cols = columns.select { |c| SIZE_LABELS.keys.any? { |s| lookup.call(c, s) } }
-    sizes = SIZE_LABELS.keys.select { |s| live_cols.any? { |c| lookup.call(c, s) } }
+  def build_size_table(columns:, cell_fmt:, lookup:, empty_msg:, col_align: '---', sizes: nil)
+    allowed = sizes || SIZE_LABELS.keys
+    live_cols = columns.select { |c| allowed.any? { |s| lookup.call(c, s) } }
+    sizes = allowed.select { |s| live_cols.any? { |c| lookup.call(c, s) } }
     return "(#{empty_msg})\n" if live_cols.empty?
 
     out = +""
