@@ -325,10 +325,6 @@ impl Connection {
     /// into their own flat buffer via [`send_message_flat`] rather than going
     /// through [`send_message`] + [`transmit_chunks`].
     pub fn has_frame_transform(&self) -> bool {
-        #[cfg(feature = "ws")]
-        if self.ws_role.is_some() {
-            return true;
-        }
         #[cfg(any(feature = "curve", feature = "blake3zmq"))]
         {
             self.transform.is_some()
@@ -337,6 +333,19 @@ impl Connection {
         {
             false
         }
+    }
+
+    /// Whether WS framing is active. When true, outbound data must be
+    /// encoded as WS binary frames, not raw ZMTP frames.
+    #[cfg(feature = "ws")]
+    pub fn is_ws(&self) -> bool {
+        self.ws_role.is_some()
+    }
+
+    /// The WS role for this connection, if any.
+    #[cfg(feature = "ws")]
+    pub fn ws_role(&self) -> Option<super::ws_codec::WsRole> {
+        self.ws_role
     }
 
     /// Permanently close the connection; further input is rejected.

@@ -114,6 +114,39 @@ fn write_payload_flat(buf: &mut BytesMut, part: &Payload) {
     buf.extend_from_slice(part.as_slice());
 }
 
+/// Encode all frames of `msg` as WS binary messages into a flat buffer.
+/// Each frame = `[WS header (2-10B)][ZWS flag (1B)][payload]`.
+/// Server mode only (no masking). Used by the driver fast-path when WS
+/// mode is active without crypto.
+#[cfg(feature = "ws")]
+pub fn encode_message_flat_ws(msg: &Message, buf: &mut BytesMut) {
+    let n = msg.len();
+    let mut i = 0;
+    msg.iter_parts(|part| {
+        let more = i + 1 < n;
+        let ws_payload_len = 1 + part.len(); // ZWS flag + ZMTP payload
+        // WS binary frame header (server, unmasked): FIN=1, opcode=0x02
+        buf.put_u8(0x82); // FIN | BINARY
+        if ws_payload_len <= 125 {
+            buf.put_u8(ws_payload_len as u8);
+        } else if ws_payload_len <= 65535 {
+            buf.put_u8(0x7E);
+            buf.put_u16(ws_payload_len as u16);
+        } else {
+            buf.put_u8(0x7F);
+            buf.put_u64(ws_payload_len as u64);
+        }
+        // ZWS flag byte
+        buf.put_u8(if more {
+            super::zws::FLAG_MORE
+        } else {
+            super::zws::FLAG_FINAL
+        });
+        write_payload_flat(buf, part);
+        i += 1;
+    });
+}
+
 /// Encode all frames of `msg` into a flat contiguous buffer (header + payload
 /// concatenated). Used by the compio fast send path for small messages.
 pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {

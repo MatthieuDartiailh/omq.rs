@@ -381,8 +381,13 @@ where
                         return Ok(());
                     }
                     codec.handle_input(Bytes::copy_from_slice(&read_buf[..n]))?;
+                    #[cfg(feature = "ws")]
+                    let skip_large = codec.is_ws();
+                    #[cfg(not(feature = "ws"))]
+                    let skip_large = false;
                     if config.large_message_threshold > 0
                         && !codec.has_frame_transform()
+                        && !skip_large
                     {
                         while let Some(info) = codec.peek_next_frame_payload_size()? {
                             if info.payload_len < config.large_message_threshold {
@@ -526,6 +531,17 @@ fn encode_msg(
     eq: &mut EncodedQueue,
     passthrough: Option<&(Bytes, usize)>,
 ) {
+    #[cfg(feature = "ws")]
+    if codec.is_ws() {
+        if !codec.has_frame_transform()
+            && codec.ws_role() == Some(omq_proto::proto::connection::WsRole::Server)
+        {
+            eq.encode_ws(msg);
+            return;
+        }
+        let _ = codec.send_message(msg);
+        return;
+    }
     if codec.has_frame_transform() {
         if let Some(enc) = encoder.as_mut() {
             for wire in enc.encode(msg).unwrap_or_default() {
