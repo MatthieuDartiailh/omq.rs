@@ -10,7 +10,8 @@ import sys
 import threading
 import time
 
-SIZES = [8, 32, 128, 512, 2048, 8192, 32768, 131072]
+SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+         16384, 32768, 65536, 131072, 262144]
 TARGET_RUNTIME_S = 0.4
 N_ROUNDS = 3
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
@@ -143,6 +144,8 @@ def measure_latency(lib, endpoint, size, warmup=LATENCY_WARMUP, iters=LATENCY_IT
     ctx = lib.Context() if hasattr(lib, "Context") else lib.Context.instance()
     rep = ctx.socket(lib.REP)
     req = ctx.socket(lib.REQ)
+    rep.linger = 0
+    req.linger = 0
     rep.bind(endpoint)
     req.connect(endpoint)
     time.sleep(0.05)
@@ -171,12 +174,71 @@ def measure_latency(lib, endpoint, size, warmup=LATENCY_WARMUP, iters=LATENCY_IT
 
     req.close()
     rep.close()
-    ctx.term()
+    try:
+        ctx.term()
+    except Exception:
+        pass
 
     rtts.sort()
     p50 = rtts[len(rtts) * 50 // 100] * 1e6
     p99 = rtts[len(rtts) * 99 // 100] * 1e6
     return p50, p99
+
+
+def _measure_latency_subprocess(lib_name, size, warmup, iters):
+    """Run measure_latency in a subprocess to isolate libzmq state."""
+    import subprocess, json
+    code = f"""
+import time, threading, json, socket as sock
+def free_tcp():
+    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f'tcp://127.0.0.1:{{port}}'
+if '{lib_name}' == 'pyzmq':
+    import zmq as lib
+else:
+    import pyomq as lib
+payload = b'x' * {size}
+ep = free_tcp()
+ctx = lib.Context()
+rep = ctx.socket(lib.REP)
+req = ctx.socket(lib.REQ)
+rep.linger = 0
+req.linger = 0
+rep.bind(ep)
+req.connect(ep)
+time.sleep(0.05)
+def echo():
+    try:
+        for _ in range({warmup} + {iters} + 100):
+            rep.send(rep.recv())
+    except Exception:
+        pass
+t = threading.Thread(target=echo, daemon=True)
+t.start()
+for _ in range({warmup}):
+    req.send(payload)
+    req.recv()
+rtts = []
+for _ in range({iters}):
+    t0 = time.monotonic()
+    req.send(payload)
+    req.recv()
+    rtts.append(time.monotonic() - t0)
+req.close()
+rep.close()
+rtts.sort()
+p50 = rtts[len(rtts)*50//100]*1e6
+p99 = rtts[len(rtts)*99//100]*1e6
+print(json.dumps([p50, p99]))
+"""
+    r = subprocess.run([sys.executable, "-c", code],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        return (999999.0, 999999.0)
+    return tuple(json.loads(r.stdout.strip()))
 
 
 def fmt_us(v):
@@ -201,11 +263,12 @@ def run_latency():
 
         # warmup
         measure_latency(pyomq, free_tcp(), size, warmup=200, iters=200)
-        measure_latency(pyzmq, free_tcp(), size, warmup=200, iters=200)
+        _measure_latency_subprocess("pyzmq", size, 200, 200)
 
         # measure (min latency across rounds)
         omq_runs = [measure_latency(pyomq, free_tcp(), size) for _ in range(N_ROUNDS)]
-        pz_runs = [measure_latency(pyzmq, free_tcp(), size) for _ in range(N_ROUNDS)]
+        pz_runs = [_measure_latency_subprocess("pyzmq", size, LATENCY_WARMUP, LATENCY_ITERS)
+                    for _ in range(N_ROUNDS)]
         omq_p50 = min(r[0] for r in omq_runs)
         omq_p99 = min(r[1] for r in omq_runs)
         pz_p50 = min(r[0] for r in pz_runs)

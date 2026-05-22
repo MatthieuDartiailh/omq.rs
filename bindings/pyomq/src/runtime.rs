@@ -39,6 +39,13 @@ thread_local! {
     /// Compio-thread-local: id -> Socket. `Rc` is fine because
     /// everything that touches this map runs on the compio thread.
     static REG: RefCell<HashMap<u64, Rc<InnerSocket>>> = RefCell::new(HashMap::new());
+
+    /// Pump task handles. Stored so the proxy can cancel them to get
+    /// exclusive send/recv access on the underlying socket.
+    static PUMPS: RefCell<HashMap<u64, (
+        compio::runtime::JoinHandle<()>,
+        compio::runtime::JoinHandle<()>,
+    )>> = RefCell::new(HashMap::new());
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -126,17 +133,16 @@ pub fn materialize(
 
         // Send pump: drain Python-side yring into the omq Socket.
         let s = sock.clone();
-        compio::runtime::spawn(async move {
+        let send_pump = compio::runtime::spawn(async move {
             futures::pin_mut!(send_cons);
             while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
                 let _ = s.send(msg).await;
             }
-        })
-        .detach();
+        });
 
         // Recv pump: drain the omq Socket into Python-side yring.
         let s = sock;
-        compio::runtime::spawn(async move {
+        let recv_pump = compio::runtime::spawn(async move {
             while let Ok(msg) = s.recv().await {
                 let mut m = msg;
                 loop {
@@ -154,8 +160,9 @@ pub fn materialize(
                     }
                 }
             }
-        })
-        .detach();
+        });
+
+        PUMPS.with(|p| p.borrow_mut().insert(id, (send_pump, recv_pump)));
 
         id
     })
@@ -167,14 +174,15 @@ pub fn materialize(
 pub fn destroy_socket(id: u64) {
     let (tx, rx) = flume::bounded::<()>(1);
     let job: Job = Box::new(move || {
+        // Cancel pump tasks first — drops their Rc<InnerSocket> clones.
+        PUMPS.with(|p| p.borrow_mut().remove(&id));
+
         let sock = REG.with(|r| r.borrow_mut().remove(&id));
         let Some(mut rc) = sock else {
             let _ = tx.send(());
             return;
         };
         compio::runtime::spawn(async move {
-            // Pump tasks hold Rc clones. Yield until they notice
-            // their channel halves are gone and exit.
             for _ in 0..5 {
                 match Rc::try_unwrap(rc) {
                     Ok(sock) => {
@@ -188,9 +196,6 @@ pub fn destroy_socket(id: u64) {
                     }
                 }
             }
-            // Pumps still running; signal close so dial supervisors
-            // see `closed == true` and break out of their reconnect
-            // loop, then drop the Rc.
             rc.signal_close();
             drop(rc);
             let _ = tx.send(());
@@ -204,6 +209,7 @@ pub fn destroy_socket(id: u64) {
 /// Like `destroy_socket`, but for use *from inside a future already
 /// running on the compio thread*.
 pub fn destroy_socket_local(id: u64) {
+    PUMPS.with(|p| p.borrow_mut().remove(&id));
     REG.with(|r| r.borrow_mut().remove(&id));
 }
 
@@ -254,96 +260,127 @@ where
     }
 }
 
+async fn stop_pumps_async(id: u64) {
+    let handles = PUMPS.with(|p| p.borrow_mut().remove(&id));
+    if let Some((send_h, recv_h)) = handles {
+        let _ = send_h.cancel().await;
+        let _ = recv_h.cancel().await;
+    }
+}
+
+fn drain_recv_ring(
+    inner: &std::sync::Arc<crate::socket::SocketInner>,
+) -> Vec<omq_compio::Message> {
+    let mat = inner.materialized.lock().unwrap();
+    let Some(m) = mat.as_ref() else { return vec![] };
+    let mut cons = m.recv_cons.lock().unwrap();
+    let mut msgs = Vec::new();
+    while let Some(msg) = cons.prefetch_and_pop() {
+        msgs.push(msg);
+    }
+    msgs
+}
+
+fn push_to_capture(
+    cap: &std::sync::Arc<crate::socket::SocketInner>,
+    msg: &omq_compio::Message,
+) {
+    let copy = omq_compio::Message::multipart(msg.iter());
+    let mat = cap.materialized.lock().unwrap();
+    if let Some(m) = mat.as_ref() {
+        let mut prod = m.send_prod.lock().unwrap();
+        let _ = prod.push_and_flush(copy);
+    }
+}
+
 /// Run a forwarding proxy between two sockets on the compio thread.
 ///
-/// Reads from each socket's recv yring (fed by the recv pump), pushes
-/// into the other socket's send yring (drained by the send pump).
-/// Blocks the calling thread until one direction errors.
+/// Stops the send/recv pumps on both sockets, then runs two direct
+/// async loops: fe.recv → be.send and be.recv → fe.send. No rings,
+/// no mutexes, no polling on the forwarding hot path.
+///
+/// Capture socket (if any) stays ring-based: messages are cloned and
+/// pushed to its send ring, drained by its normal send pump.
 pub fn proxy(
     fe_inner: std::sync::Arc<crate::socket::SocketInner>,
     be_inner: std::sync::Arc<crate::socket::SocketInner>,
     cap_inner: Option<std::sync::Arc<crate::socket::SocketInner>>,
 ) {
-    let (done_tx, done_rx) = flume::bounded::<()>(1);
-    let done_tx2 = done_tx.clone();
-    let cap2 = cap_inner.clone();
+    let fe_id = fe_inner.materialized.lock().unwrap().as_ref().unwrap().id;
+    let be_id = be_inner.materialized.lock().unwrap().as_ref().unwrap().id;
 
-    let fe2 = fe_inner.clone();
-    let be2 = be_inner.clone();
+    let (done_tx, done_rx) = flume::bounded::<()>(1);
 
     let job: Job = Box::new(move || {
-        // frontend recv -> backend send
         compio::runtime::spawn(async move {
-            loop {
-                let msg = {
-                    let mat = fe_inner.materialized.lock().unwrap();
-                    let mat = match mat.as_ref() {
-                        Some(m) => m,
-                        None => break,
-                    };
-                    let mut cons = mat.recv_cons.lock().unwrap();
-                    cons.prefetch_and_pop()
-                };
-                if let Some(msg) = msg {
-                    if let Some(cap) = &cap_inner {
-                        let copy = omq_compio::Message::multipart(msg.iter());
-                        let mat = cap.materialized.lock().unwrap();
-                        if let Some(m) = mat.as_ref() {
-                            let mut prod = m.send_prod.lock().unwrap();
-                            let _ = prod.push_and_flush(copy);
-                        }
-                    }
-                    let mat = be_inner.materialized.lock().unwrap();
-                    if let Some(m) = mat.as_ref() {
-                        let mut prod = m.send_prod.lock().unwrap();
-                        if prod.push_and_flush(msg).is_err() {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                } else {
-                    compio::time::sleep(std::time::Duration::from_micros(50)).await;
-                }
-            }
-            let _ = done_tx2.send(());
-        })
-        .detach();
+            stop_pumps_async(fe_id).await;
+            stop_pumps_async(be_id).await;
 
-        // backend recv -> frontend send
-        compio::runtime::spawn(async move {
-            loop {
-                let msg = {
-                    let mat = be2.materialized.lock().unwrap();
-                    let mat = match mat.as_ref() {
-                        Some(m) => m,
-                        None => break,
-                    };
-                    let mut cons = mat.recv_cons.lock().unwrap();
-                    cons.prefetch_and_pop()
-                };
-                if let Some(msg) = msg {
-                    if let Some(cap) = &cap2 {
-                        let copy = omq_compio::Message::multipart(msg.iter());
-                        let mat = cap.materialized.lock().unwrap();
-                        if let Some(m) = mat.as_ref() {
-                            let mut prod = m.send_prod.lock().unwrap();
-                            let _ = prod.push_and_flush(copy);
-                        }
-                    }
-                    let mat = fe2.materialized.lock().unwrap();
-                    if let Some(m) = mat.as_ref() {
-                        let mut prod = m.send_prod.lock().unwrap();
-                        if prod.push_and_flush(msg).is_err() {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                } else {
-                    compio::time::sleep(std::time::Duration::from_micros(50)).await;
+            let fe_drained = drain_recv_ring(&fe_inner);
+            let be_drained = drain_recv_ring(&be_inner);
+
+            let fe_sock = REG.with(|r| r.borrow().get(&fe_id).cloned());
+            let be_sock = REG.with(|r| r.borrow().get(&be_id).cloned());
+            let (Some(fe_sock), Some(be_sock)) = (fe_sock, be_sock) else {
+                let _ = done_tx.send(());
+                return;
+            };
+
+            for msg in fe_drained {
+                if let Some(ref cap) = cap_inner {
+                    push_to_capture(cap, &msg);
+                }
+                if be_sock.send(msg).await.is_err() {
+                    let _ = done_tx.send(());
+                    return;
                 }
             }
+            for msg in be_drained {
+                if let Some(ref cap) = cap_inner {
+                    push_to_capture(cap, &msg);
+                }
+                if fe_sock.send(msg).await.is_err() {
+                    let _ = done_tx.send(());
+                    return;
+                }
+            }
+
+            let fe2 = fe_sock.clone();
+            let be2 = be_sock.clone();
+            let cap2 = cap_inner.clone();
+
+            let fwd_fe_to_be = async {
+                loop {
+                    let msg = fe_sock.recv().await?;
+                    if let Some(ref cap) = cap_inner {
+                        push_to_capture(cap, &msg);
+                    }
+                    be_sock.send(msg).await?;
+                }
+                #[allow(unreachable_code)]
+                Ok::<(), omq_proto::error::Error>(())
+            };
+
+            let fwd_be_to_fe = async {
+                loop {
+                    let msg = be2.recv().await?;
+                    if let Some(ref cap) = cap2 {
+                        push_to_capture(cap, &msg);
+                    }
+                    fe2.send(msg).await?;
+                }
+                #[allow(unreachable_code)]
+                Ok::<(), omq_proto::error::Error>(())
+            };
+
+            futures::pin_mut!(fwd_fe_to_be);
+            futures::pin_mut!(fwd_be_to_fe);
+            let _ = futures::future::select(
+                fwd_fe_to_be,
+                fwd_be_to_fe,
+            )
+            .await;
+
             let _ = done_tx.send(());
         })
         .detach();
@@ -390,11 +427,19 @@ pub fn wait_any(
 
     let deadline = timeout_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
 
+    RECV_READY.park_begin();
+    let ready = poll_ready(&sockets);
+    if !ready.is_empty() {
+        RECV_READY.park_end();
+        return ready;
+    }
+
     loop {
         let wait_dur = match deadline {
             Some(d) => {
                 let now = std::time::Instant::now();
                 if now >= d {
+                    RECV_READY.park_end();
                     return vec![];
                 }
                 d - now
@@ -406,9 +451,11 @@ pub fn wait_any(
 
         let ready = poll_ready(&sockets);
         if !ready.is_empty() {
+            RECV_READY.park_end();
             return ready;
         }
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            RECV_READY.park_end();
             return vec![];
         }
     }

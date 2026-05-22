@@ -33,8 +33,13 @@ pub(crate) struct SendBuffer {
 
 /// Notification primitive for the recv path: compio pump signals Python
 /// thread via eventfd when a message is pushed into the yring.
+///
+/// The `parking` flag avoids syscalls on the hot path. The consumer
+/// sets it before sleeping; the producer only writes to the eventfd
+/// when it sees the flag.
 pub(crate) struct RecvNotify {
     efd: i32,
+    parking: AtomicBool,
 }
 
 unsafe impl Send for RecvNotify {}
@@ -44,14 +49,34 @@ impl RecvNotify {
     pub fn new() -> Self {
         let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
         assert!(efd >= 0, "eventfd creation failed");
-        Self { efd }
+        Self {
+            efd,
+            parking: AtomicBool::new(false),
+        }
     }
 
     pub fn notify(&self) {
+        if self.parking.load(Ordering::Acquire) {
+            let val: u64 = 1;
+            unsafe {
+                libc::write(self.efd, &val as *const u64 as *const libc::c_void, 8);
+            }
+        }
+    }
+
+    pub fn force_wake(&self) {
         let val: u64 = 1;
         unsafe {
             libc::write(self.efd, &val as *const u64 as *const libc::c_void, 8);
         }
+    }
+
+    pub fn park_begin(&self) {
+        self.parking.store(true, Ordering::Release);
+    }
+
+    pub fn park_end(&self) {
+        self.parking.store(false, Ordering::Relaxed);
     }
 
     pub fn wait_timeout(&self, timeout: Duration) -> bool {
@@ -63,8 +88,6 @@ impl RecvNotify {
         let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
         let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
         if ret > 0 {
-            // Drain the counter so poll blocks on next call if no new
-            // notifications arrive.
             let mut val: u64 = 0;
             unsafe {
                 libc::read(
@@ -199,7 +222,11 @@ impl SocketInner {
     /// the next op and exit; the registry entry is removed separately.
     pub fn take_materialized(&self) -> Option<Materialized> {
         self.closed.store(true, Ordering::Relaxed);
-        self.materialized.lock().unwrap().take()
+        let mat = self.materialized.lock().unwrap().take();
+        if let Some(ref m) = mat {
+            m.recv_notify.force_wake();
+        }
+        mat
     }
 }
 
@@ -563,9 +590,7 @@ impl Socket {
                 py.allow_threads(|| {
                     let deadline = timeout.map(|t| Instant::now() + t);
                     loop {
-                        for _ in 0..64 {
-                            std::hint::spin_loop();
-                        }
+                        std::thread::sleep(Duration::from_micros(10));
                         let push_result = {
                             let mat_guard = self.inner.materialized.lock().unwrap();
                             let mat = mat_guard
@@ -581,7 +606,6 @@ impl Socket {
                         if deadline.is_some_and(|d| Instant::now() >= d) {
                             return Err(timeout_err());
                         }
-                        std::thread::yield_now();
                     }
                 })
             }
@@ -602,11 +626,27 @@ impl Socket {
         let timeout = self.inner.overlay.lock().unwrap().rcvtimeo;
         py.allow_threads(|| {
             let deadline = timeout.map(|t| Instant::now() + t);
+
+            recv_notify.park_begin();
+            // Re-check after setting the flag to close the race window.
+            {
+                let mat_guard = self.inner.materialized.lock().unwrap();
+                let mat = mat_guard
+                    .as_ref()
+                    .ok_or_else(|| map_err(PError::Closed))?;
+                let mut cons = mat.recv_cons.lock().unwrap();
+                if let Some(m) = cons.prefetch_and_pop() {
+                    recv_notify.park_end();
+                    return Ok(m);
+                }
+            }
+
             loop {
                 let wait_dur = match deadline {
                     Some(d) => {
                         let now = Instant::now();
                         if now >= d {
+                            recv_notify.park_end();
                             return Err(timeout_err());
                         }
                         d - now
@@ -618,9 +658,13 @@ impl Socket {
                     let mat_guard = self.inner.materialized.lock().unwrap();
                     let mat = mat_guard
                         .as_ref()
-                        .ok_or_else(|| map_err(PError::Closed))?;
+                        .ok_or_else(|| {
+                            recv_notify.park_end();
+                            map_err(PError::Closed)
+                        })?;
                     let mut cons = mat.recv_cons.lock().unwrap();
                     if let Some(m) = cons.prefetch_and_pop() {
+                        recv_notify.park_end();
                         return Ok(m);
                     }
                 }

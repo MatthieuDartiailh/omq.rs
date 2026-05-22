@@ -75,14 +75,22 @@ Intel Mac Mini 2018 (i7-8700B, 3.2 GHz), Rust 1.95.0, default features:
 <!-- PERF:START -->
 | Size    | inproc pyomq | inproc pyzmq | ratio     | tcp pyomq | tcp pyzmq | ratio     |
 |---------|-------------:|-------------:|----------:|----------:|----------:|----------:|
-| 8 B     |     1.30 M/s |      627 k/s | **2.08×** |  1.36 M/s |   565 k/s | **2.41×** |
-| 32 B    |     1.29 M/s |      620 k/s | **2.08×** |  1.36 M/s |   576 k/s | **2.37×** |
-| 128 B   |     1.31 M/s |      516 k/s | **2.54×** |  1.29 M/s |   496 k/s | **2.61×** |
-| 512 B   |     1.29 M/s |      480 k/s | **2.69×** |  1.21 M/s |   461 k/s | **2.62×** |
-| 2 KiB   |     1.17 M/s |      461 k/s | **2.54×** |   908 k/s |   342 k/s | **2.65×** |
-| 8 KiB   |     1.04 M/s |      368 k/s | **2.83×** |   349 k/s |   102 k/s | **3.41×** |
-| 32 KiB  |      622 k/s |      196 k/s | **3.17×** |   116 k/s |    46 k/s | **2.50×** |
-| 128 KiB |      203 k/s |       70 k/s | **2.91×** |    32 k/s |    24 k/s | **1.32×** |
+| 8 B     |     1.65 M/s |      632 k/s | **2.61×** |  1.57 M/s |   585 k/s | **2.69×** |
+| 16 B    |     1.65 M/s |      616 k/s | **2.69×** |  1.60 M/s |   599 k/s | **2.67×** |
+| 32 B    |     1.63 M/s |      622 k/s | **2.62×** |  1.60 M/s |   603 k/s | **2.65×** |
+| 64 B    |     1.62 M/s |      584 k/s | **2.77×** |  1.55 M/s |   540 k/s | **2.87×** |
+| 128 B   |     1.61 M/s |      523 k/s | **3.08×** |  1.57 M/s |   528 k/s | **2.98×** |
+| 256 B   |     1.62 M/s |      527 k/s | **3.08×** |  1.52 M/s |   509 k/s | **3.00×** |
+| 512 B   |     1.60 M/s |      488 k/s | **3.27×** |  1.39 M/s |   498 k/s | **2.79×** |
+| 1 KiB   |     1.50 M/s |      500 k/s | **2.99×** |  1.31 M/s |   477 k/s | **2.75×** |
+| 2 KiB   |     1.47 M/s |      475 k/s | **3.09×** |   962 k/s |   365 k/s | **2.63×** |
+| 4 KiB   |     1.47 M/s |      429 k/s | **3.43×** |   618 k/s |   206 k/s | **3.01×** |
+| 8 KiB   |     1.32 M/s |      379 k/s | **3.48×** |   363 k/s |   108 k/s | **3.37×** |
+| 16 KiB  |      991 k/s |      268 k/s | **3.70×** |   190 k/s |    56 k/s | **3.38×** |
+| 32 KiB  |      765 k/s |      186 k/s | **4.11×** |   113 k/s |    46 k/s | **2.45×** |
+| 64 KiB  |      548 k/s |      127 k/s | **4.30×** |    56 k/s |    38 k/s | **1.50×** |
+| 128 KiB |      268 k/s |       69 k/s | **3.87×** |    26 k/s |    25 k/s | **1.07×** |
+| 256 KiB |      128 k/s |       38 k/s | **3.37×** |    15 k/s |    15 k/s | **1.00×** |
 <!-- PERF:END -->
 
 ### REQ/REP latency (TCP loopback)
@@ -93,14 +101,14 @@ ratio = pyzmq / pyomq.
 <!-- LATENCY_PERF:START -->
 | Size    | pyomq p50 | pyzmq p50 | ratio     | pyomq p99 | pyzmq p99 | ratio     |
 |---------|----------:|----------:|----------:|----------:|----------:|----------:|
-| 8 B     |   67.7 µs |   66.9 µs |     0.99× |    2.8 ms |    587 µs |     0.21× |
-| 32 B    |   94.1 µs |   72.6 µs |     0.77× |    1.0 ms |    524 µs |     0.51× |
-| 128 B   |   64.5 µs |   70.7 µs |     1.10× |    1.1 ms |    1.3 ms | **1.18×** |
-| 512 B   |   72.8 µs |   81.2 µs | **1.12×** |    532 µs |    2.3 ms | **4.38×** |
-| 2 KiB   |   78.8 µs |   89.4 µs | **1.13×** |    2.6 ms |    1.8 ms |     0.66× |
-| 8 KiB   |   71.6 µs |   98.9 µs | **1.38×** |    217 µs |    375 µs | **1.73×** |
-| 32 KiB  |   99.6 µs |    121 µs | **1.21×** |    396 µs |    325 µs |     0.82× |
-| 128 KiB |    175 µs |    162 µs |     0.92× |    1.4 ms |    1.4 ms |     1.02× |
+| 8 B     |   61.8 µs |   70.4 µs | **1.14×** |   84.7 µs |   89.6 µs |     1.06× |
+| 32 B    |   63.0 µs |   72.4 µs | **1.15×** |   80.8 µs |   88.1 µs |     1.09× |
+| 128 B   |   62.5 µs |   73.0 µs | **1.17×** |   80.7 µs |   91.6 µs | **1.13×** |
+| 512 B   |   62.1 µs |   71.7 µs | **1.15×** |   76.4 µs |    101 µs | **1.33×** |
+| 2 KiB   |   65.9 µs |   74.4 µs | **1.13×** |   88.2 µs |   92.3 µs |     1.05× |
+| 8 KiB   |   68.9 µs |   90.1 µs | **1.31×** |   94.7 µs |    112 µs | **1.19×** |
+| 32 KiB  |   80.7 µs |    104 µs | **1.28×** |    109 µs |    139 µs | **1.28×** |
+| 128 KiB |    145 µs |    143 µs |     0.99× |    168 µs |    185 µs | **1.10×** |
 <!-- LATENCY_PERF:END -->
 
 ### `zmq.proxy()` forwarding (128 B, TCP)
@@ -108,14 +116,15 @@ ratio = pyzmq / pyomq.
 <!-- PROXY_PERF:START -->
 |                    | pyomq     | pyzmq     | ratio     |
 |--------------------|----------:|----------:|----------:|
-| PUSH/PULL msg/s    |   963 k/s |   520 k/s | **1.85×** |
-| REQ/REP rt/s       |     8,764/s |     6,521/s | **1.34×** |
+| PUSH/PULL msg/s    |  1.34 M/s |   540 k/s | **2.48×** |
+| REQ/REP rt/s       |  11,222/s |   6,599/s | **1.70×** |
 <!-- PROXY_PERF:END -->
 
-pyomq's `proxy()` runs as a native Rust async loop on the compio thread — no
-Python per-message overhead. pyzmq's `zmq.proxy()` calls libzmq's C-level
-`zmq_proxy`. PUSH/PULL forwarding is throughput-bound and pyomq is ~1.9× faster.
-REQ/REP is latency-bound (4 TCP hops per round-trip) so both are similar.
+pyomq's `proxy()` forwards directly between sockets on the compio thread —
+no rings, no Python per-message overhead. pyzmq's `zmq.proxy()` calls libzmq's
+C-level `zmq_proxy`. PUSH/PULL forwarding is throughput-bound and pyomq is ~2.5×
+faster. REQ/REP proxy is latency-bound (4 TCP hops per round-trip); pyomq is
+~1.7× faster thanks to direct socket forwarding.
 
 Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure and update the tables above.
 
