@@ -65,14 +65,13 @@ fn wait_any(
     sockets: Vec<Bound<'_, socket::Socket>>,
     timeout_ms: Option<u64>,
 ) -> PyResult<Vec<u64>> {
-    let mut receivers = Vec::with_capacity(sockets.len());
+    let mut entries = Vec::with_capacity(sockets.len());
     for sock in &sockets {
         let inner = &sock.borrow().inner;
         let id = inner.ensure_id()?;
-        let recv_rx = inner.recv_rx_clone()?;
-        receivers.push((id, recv_rx, inner.clone()));
+        entries.push((id, inner.clone()));
     }
-    Ok(py.allow_threads(|| runtime::wait_any(receivers, timeout_ms)))
+    Ok(py.allow_threads(|| runtime::wait_any(entries, timeout_ms)))
 }
 
 #[pyfunction]
@@ -83,17 +82,19 @@ fn native_proxy(
     backend: &Bound<'_, socket::Socket>,
     capture: Option<&Bound<'_, socket::Socket>>,
 ) -> PyResult<()> {
-    let fe = &frontend.borrow().inner;
-    let be = &backend.borrow().inner;
-    let fe_recv = fe.recv_rx_clone()?;
-    let be_send = be.send_tx_clone()?;
-    let be_recv = be.recv_rx_clone()?;
-    let fe_send = fe.send_tx_clone()?;
-    let cap_send = match capture {
-        Some(c) => Some(c.borrow().inner.send_tx_clone()?),
+    let fe = frontend.borrow().inner.clone();
+    let be = backend.borrow().inner.clone();
+    fe.ensure_id()?;
+    be.ensure_id()?;
+    let cap = match capture {
+        Some(c) => {
+            let inner = c.borrow().inner.clone();
+            inner.ensure_id()?;
+            Some(inner)
+        }
         None => None,
     };
-    py.allow_threads(|| runtime::proxy(fe_recv, be_send, be_recv, fe_send, cap_send));
+    py.allow_threads(|| runtime::proxy(fe, be, cap));
     Ok(())
 }
 

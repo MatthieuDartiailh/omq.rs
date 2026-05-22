@@ -1,28 +1,19 @@
 //! Sync `Socket` Python class and the shared inner state used by both
 //! the sync and async wrappers.
 //!
-//! Hot path is queue-relayed: every `send` / `recv` is a single
-//! `flume::Sender::try_send` / `Receiver::try_recv` on a per-socket
-//! bounded channel. Two pump tasks on the compio thread bridge the
-//! channels to the actual `omq_compio::Socket`'s async send/recv. No
-//! cross-thread runtime hop on the hot path; per-call overhead is the
-//! flume push (~50-150 ns) plus PyO3 boundary cost.
-//!
-//! GIL handling on the sync path: the fast path (queue not full / not
-//! empty) does NOT call `Python::allow_threads`. Releasing the GIL
-//! costs two atomics and a memory barrier (~30-100 ns) - the same
-//! order as the queue push itself. On the unblocked path that's pure
-//! overhead and other Python threads only stall for the brief ring-
-//! buffer push. The slow path (Full / Empty) does release the GIL
-//! because it can block for milliseconds.
+//! Hot path is queue-relayed: every `send` / `recv` goes through a
+//! per-socket yring SPSC ring buffer. Two pump tasks on the compio
+//! thread bridge the rings to the actual `omq_compio::Socket`'s async
+//! send/recv. The fast path (ring not full / not empty) does NOT call
+//! `Python::allow_threads`. The slow path (Full / Empty) releases the
+//! GIL and parks via spin+condvar.
 
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use flume::{RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError, TrySendError};
 use omq_compio::MonitorEvent;
 use omq_proto::error::Error as PError;
 use pyo3::prelude::*;
@@ -40,12 +31,73 @@ pub(crate) struct SendBuffer {
     pub parts: Vec<Bytes>,
 }
 
+/// Notification primitive for the recv path: compio pump signals Python
+/// thread via eventfd when a message is pushed into the yring.
+pub(crate) struct RecvNotify {
+    efd: i32,
+}
+
+unsafe impl Send for RecvNotify {}
+unsafe impl Sync for RecvNotify {}
+
+impl RecvNotify {
+    pub fn new() -> Self {
+        let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
+        assert!(efd >= 0, "eventfd creation failed");
+        Self { efd }
+    }
+
+    pub fn notify(&self) {
+        let val: u64 = 1;
+        unsafe {
+            libc::write(self.efd, &val as *const u64 as *const libc::c_void, 8);
+        }
+    }
+
+    pub fn wait_timeout(&self, timeout: Duration) -> bool {
+        let mut pfd = libc::pollfd {
+            fd: self.efd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if ret > 0 {
+            // Drain the counter so poll blocks on next call if no new
+            // notifications arrive.
+            let mut val: u64 = 0;
+            unsafe {
+                libc::read(
+                    self.efd,
+                    &mut val as *mut u64 as *mut libc::c_void,
+                    8,
+                );
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn fd(&self) -> i32 {
+        self.efd
+    }
+}
+
+impl Drop for RecvNotify {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.efd) };
+    }
+}
+
 /// State that exists once the underlying omq Socket is materialized.
 /// Held inside `Mutex<Option<...>>` so close() can drop it from `&self`.
 pub(crate) struct Materialized {
     pub id: u64,
-    pub send_tx: flume::Sender<omq_compio::Message>,
-    pub recv_rx: flume::Receiver<omq_compio::Message>,
+    pub send_prod: Mutex<yring::AsyncProducer<omq_compio::Message>>,
+    pub recv_cons: Mutex<yring::Consumer<omq_compio::Message>>,
+    pub recv_notify: Arc<RecvNotify>,
 }
 
 /// Shared state for sync (`Socket`) and async (`AsyncSocket`) wrappers.
@@ -88,20 +140,18 @@ impl SocketInner {
             return Ok(());
         }
         let opts = self.overlay.lock().unwrap().to_options();
-        let (send_tx, send_rx) = match opts.send_hwm {
-            Some(n) => flume::bounded::<omq_compio::Message>(n.max(1) as usize),
-            None => flume::unbounded(),
-        };
-        let (recv_tx, recv_rx) = match opts.recv_hwm {
-            Some(n) => flume::bounded::<omq_compio::Message>(n.max(1) as usize),
-            None => flume::unbounded(),
-        };
+        let send_cap = opts.send_hwm.map(|n| n.max(1) as usize).unwrap_or(65536);
+        let recv_cap = opts.recv_hwm.map(|n| n.max(1) as usize).unwrap_or(65536);
+        let (send_prod, send_cons) = yring::async_spsc(send_cap);
+        let (recv_prod, recv_cons) = yring::spsc(recv_cap);
+        let recv_notify = Arc::new(RecvNotify::new());
         let st = self.socket_type;
-        let id = runtime::materialize(st, opts, send_rx, recv_tx);
+        let id = runtime::materialize(st, opts, send_cons, recv_prod, recv_notify.clone());
         *slot = Some(Materialized {
             id,
-            send_tx,
-            recv_rx,
+            send_prod: Mutex::new(send_prod),
+            recv_cons: Mutex::new(recv_cons),
+            recv_notify,
         });
         Ok(())
     }
@@ -109,30 +159,6 @@ impl SocketInner {
     pub fn ensure_id(&self) -> PyResult<u64> {
         self.materialize()?;
         Ok(self.materialized.lock().unwrap().as_ref().unwrap().id)
-    }
-
-    pub fn send_tx_clone(&self) -> PyResult<flume::Sender<omq_compio::Message>> {
-        self.materialize()?;
-        Ok(self
-            .materialized
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .send_tx
-            .clone())
-    }
-
-    pub fn recv_rx_clone(&self) -> PyResult<flume::Receiver<omq_compio::Message>> {
-        self.materialize()?;
-        Ok(self
-            .materialized
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .recv_rx
-            .clone())
     }
 
     /// Push `bytes` onto the SNDMORE buffer. Returns `Some(msg)` if the
@@ -523,46 +549,82 @@ impl Socket {
 
 impl Socket {
     fn send_message(&self, py: Python<'_>, msg: omq_compio::Message) -> PyResult<()> {
-        let send_tx = self.inner.send_tx_clone()?;
-        match send_tx.try_send(msg) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Disconnected(_)) => Err(map_err(PError::Closed)),
-            Err(TrySendError::Full(msg)) => {
+        self.inner.materialize()?;
+        let result = {
+            let mat_guard = self.inner.materialized.lock().unwrap();
+            let mat = mat_guard.as_ref().unwrap();
+            let mut prod = mat.send_prod.lock().unwrap();
+            prod.push_and_flush(msg)
+        };
+        match result {
+            Ok(_) => Ok(()),
+            Err(mut msg) => {
                 let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
-                py.allow_threads(|| match timeout {
-                    Some(t) => match send_tx.send_timeout(msg, t) {
-                        Ok(()) => Ok(()),
-                        Err(SendTimeoutError::Timeout(_)) => Err(timeout_err()),
-                        Err(SendTimeoutError::Disconnected(_)) => Err(map_err(PError::Closed)),
-                    },
-                    None => match send_tx.send(msg) {
-                        Ok(()) => Ok(()),
-                        Err(SendError(_)) => Err(map_err(PError::Closed)),
-                    },
+                py.allow_threads(|| {
+                    let deadline = timeout.map(|t| Instant::now() + t);
+                    loop {
+                        for _ in 0..64 {
+                            std::hint::spin_loop();
+                        }
+                        let push_result = {
+                            let mat_guard = self.inner.materialized.lock().unwrap();
+                            let mat = mat_guard
+                                .as_ref()
+                                .ok_or_else(|| map_err(PError::Closed))?;
+                            let mut prod = mat.send_prod.lock().unwrap();
+                            prod.push_and_flush(msg)
+                        };
+                        match push_result {
+                            Ok(_) => return Ok(()),
+                            Err(returned) => msg = returned,
+                        }
+                        if deadline.is_some_and(|d| Instant::now() >= d) {
+                            return Err(timeout_err());
+                        }
+                        std::thread::yield_now();
+                    }
                 })
             }
         }
     }
 
     fn recv_message(&self, py: Python<'_>) -> PyResult<omq_compio::Message> {
-        let recv_rx = self.inner.recv_rx_clone()?;
-        match recv_rx.try_recv() {
-            Ok(m) => Ok(m),
-            Err(TryRecvError::Disconnected) => Err(map_err(PError::Closed)),
-            Err(TryRecvError::Empty) => {
-                let timeout = self.inner.overlay.lock().unwrap().rcvtimeo;
-                py.allow_threads(|| match timeout {
-                    Some(t) => match recv_rx.recv_timeout(t) {
-                        Ok(m) => Ok(m),
-                        Err(RecvTimeoutError::Timeout) => Err(timeout_err()),
-                        Err(RecvTimeoutError::Disconnected) => Err(map_err(PError::Closed)),
-                    },
-                    None => match recv_rx.recv() {
-                        Ok(m) => Ok(m),
-                        Err(RecvError::Disconnected) => Err(map_err(PError::Closed)),
-                    },
-                })
+        self.inner.materialize()?;
+        let recv_notify = {
+            let mat_guard = self.inner.materialized.lock().unwrap();
+            let mat = mat_guard.as_ref().unwrap();
+            let mut cons = mat.recv_cons.lock().unwrap();
+            if let Some(m) = cons.prefetch_and_pop() {
+                return Ok(m);
             }
-        }
+            mat.recv_notify.clone()
+        };
+        let timeout = self.inner.overlay.lock().unwrap().rcvtimeo;
+        py.allow_threads(|| {
+            let deadline = timeout.map(|t| Instant::now() + t);
+            loop {
+                let wait_dur = match deadline {
+                    Some(d) => {
+                        let now = Instant::now();
+                        if now >= d {
+                            return Err(timeout_err());
+                        }
+                        d - now
+                    }
+                    None => Duration::from_millis(100),
+                };
+                recv_notify.wait_timeout(wait_dur);
+                {
+                    let mat_guard = self.inner.materialized.lock().unwrap();
+                    let mat = mat_guard
+                        .as_ref()
+                        .ok_or_else(|| map_err(PError::Closed))?;
+                    let mut cons = mat.recv_cons.lock().unwrap();
+                    if let Some(m) = cons.prefetch_and_pop() {
+                        return Ok(m);
+                    }
+                }
+            }
+        })
     }
 }

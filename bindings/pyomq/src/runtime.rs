@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use omq_compio::Socket as InnerSocket;
 
@@ -28,6 +29,11 @@ use omq_compio::Socket as InnerSocket;
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 static SUBMIT: OnceLock<flume::Sender<Job>> = OnceLock::new();
+
+/// Global recv notification: all recv pumps signal this after pushing
+/// a message to an empty ring. `wait_any` parks on it.
+pub(crate) static RECV_READY: std::sync::LazyLock<crate::socket::RecvNotify> =
+    std::sync::LazyLock::new(crate::socket::RecvNotify::new);
 
 thread_local! {
     /// Compio-thread-local: id -> Socket. `Rc` is fine because
@@ -103,39 +109,49 @@ where
 /// per-socket send / recv pumps, and return its id.
 ///
 /// The pumps are the perf-critical piece: Python pushes outbound
-/// messages directly into `send_rx`'s sister `Sender`, and pulls
-/// inbound messages directly from `recv_tx`'s sister `Receiver`. The
-/// pumps relay between those flume queues and the actual omq Socket,
-/// running entirely on the compio thread (where `Rc<InnerSocket>` is
-/// fine and the futures don't need to be Send).
+/// messages into a yring `AsyncProducer`, and pulls inbound messages
+/// from a yring `Consumer`. The pumps relay between these rings and the
+/// actual omq Socket, running entirely on the compio thread.
 pub fn materialize(
     socket_type: omq_compio::SocketType,
     options: omq_compio::Options,
-    send_rx: flume::Receiver<omq_compio::Message>,
-    recv_tx: flume::Sender<omq_compio::Message>,
+    send_cons: yring::AsyncConsumer<omq_compio::Message>,
+    mut recv_prod: yring::Producer<omq_compio::Message>,
+    recv_notify: std::sync::Arc<crate::socket::RecvNotify>,
 ) -> u64 {
     run(move || {
         let id = next_id();
         let sock = Rc::new(InnerSocket::new(socket_type, options));
         REG.with(|r| r.borrow_mut().insert(id, sock.clone()));
 
-        // Send pump: drain Python-side queue into the omq Socket.
-        // Errors from `send` are eaten; HWM-blocking is preserved by
-        // the bounded `send_rx` upstream.
+        // Send pump: drain Python-side yring into the omq Socket.
         let s = sock.clone();
         compio::runtime::spawn(async move {
-            while let Ok(msg) = send_rx.recv_async().await {
+            futures::pin_mut!(send_cons);
+            while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
                 let _ = s.send(msg).await;
             }
         })
         .detach();
 
-        // Recv pump: drain the omq Socket into Python-side queue.
+        // Recv pump: drain the omq Socket into Python-side yring.
         let s = sock;
         compio::runtime::spawn(async move {
             while let Ok(msg) = s.recv().await {
-                if recv_tx.send_async(msg).await.is_err() {
-                    return;
+                let mut m = msg;
+                loop {
+                    match recv_prod.push(m) {
+                        Ok(()) => {
+                            recv_prod.flush();
+                            recv_notify.notify();
+                            RECV_READY.notify();
+                            break;
+                        }
+                        Err(returned) => {
+                            m = returned;
+                            compio::time::sleep(std::time::Duration::from_micros(10)).await;
+                        }
+                    }
                 }
             }
         })
@@ -240,46 +256,92 @@ where
 
 /// Run a forwarding proxy between two sockets on the compio thread.
 ///
-/// Two async tasks loop: one forwards frontend->backend, the other
-/// backend->frontend. Runs entirely on the compio thread using flume
-/// async — no Python hops per message. Blocks the calling thread
-/// until one direction errors (socket closed).
+/// Reads from each socket's recv yring (fed by the recv pump), pushes
+/// into the other socket's send yring (drained by the send pump).
+/// Blocks the calling thread until one direction errors.
 pub fn proxy(
-    fe_recv: flume::Receiver<omq_compio::Message>,
-    be_send: flume::Sender<omq_compio::Message>,
-    be_recv: flume::Receiver<omq_compio::Message>,
-    fe_send: flume::Sender<omq_compio::Message>,
-    cap_send: Option<flume::Sender<omq_compio::Message>>,
+    fe_inner: std::sync::Arc<crate::socket::SocketInner>,
+    be_inner: std::sync::Arc<crate::socket::SocketInner>,
+    cap_inner: Option<std::sync::Arc<crate::socket::SocketInner>>,
 ) {
     let (done_tx, done_rx) = flume::bounded::<()>(1);
     let done_tx2 = done_tx.clone();
-    let cap2 = cap_send.clone();
+    let cap2 = cap_inner.clone();
+
+    let fe2 = fe_inner.clone();
+    let be2 = be_inner.clone();
 
     let job: Job = Box::new(move || {
-        // frontend -> backend
+        // frontend recv -> backend send
         compio::runtime::spawn(async move {
-            while let Ok(msg) = fe_recv.recv_async().await {
-                if let Some(cap) = &cap_send {
-                    let copy = omq_compio::Message::multipart(msg.iter());
-                    let _ = cap.send_async(copy).await;
-                }
-                if be_send.send_async(msg).await.is_err() {
-                    break;
+            loop {
+                let msg = {
+                    let mat = fe_inner.materialized.lock().unwrap();
+                    let mat = match mat.as_ref() {
+                        Some(m) => m,
+                        None => break,
+                    };
+                    let mut cons = mat.recv_cons.lock().unwrap();
+                    cons.prefetch_and_pop()
+                };
+                if let Some(msg) = msg {
+                    if let Some(cap) = &cap_inner {
+                        let copy = omq_compio::Message::multipart(msg.iter());
+                        let mat = cap.materialized.lock().unwrap();
+                        if let Some(m) = mat.as_ref() {
+                            let mut prod = m.send_prod.lock().unwrap();
+                            let _ = prod.push_and_flush(copy);
+                        }
+                    }
+                    let mat = be_inner.materialized.lock().unwrap();
+                    if let Some(m) = mat.as_ref() {
+                        let mut prod = m.send_prod.lock().unwrap();
+                        if prod.push_and_flush(msg).is_err() {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                } else {
+                    compio::time::sleep(std::time::Duration::from_micros(50)).await;
                 }
             }
             let _ = done_tx2.send(());
         })
         .detach();
 
-        // backend -> frontend
+        // backend recv -> frontend send
         compio::runtime::spawn(async move {
-            while let Ok(msg) = be_recv.recv_async().await {
-                if let Some(cap) = &cap2 {
-                    let copy = omq_compio::Message::multipart(msg.iter());
-                    let _ = cap.send_async(copy).await;
-                }
-                if fe_send.send_async(msg).await.is_err() {
-                    break;
+            loop {
+                let msg = {
+                    let mat = be2.materialized.lock().unwrap();
+                    let mat = match mat.as_ref() {
+                        Some(m) => m,
+                        None => break,
+                    };
+                    let mut cons = mat.recv_cons.lock().unwrap();
+                    cons.prefetch_and_pop()
+                };
+                if let Some(msg) = msg {
+                    if let Some(cap) = &cap2 {
+                        let copy = omq_compio::Message::multipart(msg.iter());
+                        let mat = cap.materialized.lock().unwrap();
+                        if let Some(m) = mat.as_ref() {
+                            let mut prod = m.send_prod.lock().unwrap();
+                            let _ = prod.push_and_flush(copy);
+                        }
+                    }
+                    let mat = fe2.materialized.lock().unwrap();
+                    if let Some(m) = mat.as_ref() {
+                        let mut prod = m.send_prod.lock().unwrap();
+                        if prod.push_and_flush(msg).is_err() {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                } else {
+                    compio::time::sleep(std::time::Duration::from_micros(50)).await;
                 }
             }
             let _ = done_tx.send(());
@@ -294,67 +356,62 @@ pub fn proxy(
 /// Block the calling thread until at least one of the given sockets has
 /// an inbound message ready (or until `timeout_ms` elapses). Returns
 /// the list of socket IDs that are ready.
-///
-/// The winning `recv_async()` future consumes one message from the flume
-/// channel; we stash it back into the socket's `rxbuf` so the next
-/// Python `recv()` picks it up without loss.
 pub fn wait_any(
-    receivers: Vec<(
-        u64,
-        flume::Receiver<omq_compio::Message>,
-        std::sync::Arc<crate::socket::SocketInner>,
-    )>,
+    sockets: Vec<(u64, std::sync::Arc<crate::socket::SocketInner>)>,
     timeout_ms: Option<u64>,
 ) -> Vec<u64> {
-    if receivers.is_empty() {
+    if sockets.is_empty() {
         return vec![];
     }
 
-    // Check for already-ready sockets (rxbuf or channel has data).
-    let mut ready: Vec<u64> = receivers
-        .iter()
-        .filter(|(_, rx, inner)| !rx.is_empty() || !inner.rxbuf.lock().unwrap().is_empty())
-        .map(|(id, _, _)| *id)
-        .collect();
+    let poll_ready = |sockets: &[(u64, std::sync::Arc<crate::socket::SocketInner>)]| -> Vec<u64> {
+        sockets
+            .iter()
+            .filter(|(_, inner)| {
+                if !inner.rxbuf.lock().unwrap().is_empty() {
+                    return true;
+                }
+                let mat = inner.materialized.lock().unwrap();
+                if let Some(m) = mat.as_ref() {
+                    let cons = m.recv_cons.lock().unwrap();
+                    !cons.is_empty()
+                } else {
+                    false
+                }
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    };
+
+    let ready = poll_ready(&sockets);
     if !ready.is_empty() {
         return ready;
     }
 
-    // Block the calling thread using flume::Selector (OS-level wait,
-    // no busy-loop). The GIL is already released by the caller.
-    let mut sel = flume::Selector::new();
-    for (id, rx, _) in &receivers {
-        let id = *id;
-        sel = sel.recv(rx, move |res| (id, res));
-    }
+    let deadline = timeout_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
 
-    let (first_id, recv_result) = match timeout_ms {
-        None => sel.wait(),
-        Some(ms) => match sel.wait_timeout(std::time::Duration::from_millis(ms)) {
-            Ok(v) => v,
-            Err(_) => return vec![],
-        },
-    };
+    loop {
+        let wait_dur = match deadline {
+            Some(d) => {
+                let now = std::time::Instant::now();
+                if now >= d {
+                    return vec![];
+                }
+                d - now
+            }
+            None => Duration::from_millis(100),
+        };
 
-    // Stash the consumed message into the socket's rxbuf.
-    if let Ok(msg) = recv_result {
-        let frames: Vec<bytes::Bytes> = msg.iter().collect();
-        if let Some((_, _, inner)) = receivers.iter().find(|(id, _, _)| *id == first_id) {
-            let mut buf = inner.rxbuf.lock().unwrap();
-            buf.splice(0..0, frames);
+        RECV_READY.wait_timeout(wait_dur);
+
+        let ready = poll_ready(&sockets);
+        if !ready.is_empty() {
+            return ready;
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return vec![];
         }
     }
-
-    // Scan all sockets for readiness (non-destructive).
-    ready = receivers
-        .iter()
-        .filter(|(_, rx, inner)| !rx.is_empty() || !inner.rxbuf.lock().unwrap().is_empty())
-        .map(|(id, _, _)| *id)
-        .collect();
-    if !ready.contains(&first_id) {
-        ready.push(first_id);
-    }
-    ready
 }
 
 #[derive(Debug)]

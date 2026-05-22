@@ -103,6 +103,7 @@ impl<T> AsyncProducer<T> {
             return FlushResult::NothingToFlush;
         }
         let count = self.tail - prev_flush;
+        self.cached_head = self.ring.ring.head.0.load(Ordering::Acquire);
         let was_empty = prev_flush == self.cached_head;
         self.ring.ring.flush.0.store(self.tail, Ordering::Release);
         if was_empty {

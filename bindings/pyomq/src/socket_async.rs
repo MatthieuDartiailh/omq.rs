@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use omq_proto::error::Error as PError;
+
+use crate::error::timeout_err;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyType};
 
@@ -86,13 +88,22 @@ impl AsyncSocket {
                 Python::with_gil(|py| Ok(py.None()))
             });
         };
-        let send_tx = self.inner.send_tx_clone()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match send_tx.send_async(msg).await {
-                Ok(()) => Python::with_gil(|py| Ok(py.None())),
-                Err(_) => Err(map_err(PError::Closed)),
+        self.inner.materialize()?;
+        {
+            let mat_guard = self.inner.materialized.lock().unwrap();
+            let mat = mat_guard.as_ref().unwrap();
+            let mut prod = mat.send_prod.lock().unwrap();
+            match prod.push_and_flush(msg) {
+                Ok(_) => {
+                    return runtime::compio_future_into_py(py, move || async move {
+                        Python::with_gil(|py| Ok(py.None()))
+                    });
+                }
+                Err(_returned) => {
+                    return Err(timeout_err());
+                }
             }
-        })
+        }
     }
 
     #[pyo3(signature = (parts, flags = 0))]
@@ -104,13 +115,22 @@ impl AsyncSocket {
     ) -> PyResult<Bound<'py, PyAny>> {
         let _ = flags;
         let msg = conversions::message_from_pylist(parts)?;
-        let send_tx = self.inner.send_tx_clone()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match send_tx.send_async(msg).await {
-                Ok(()) => Python::with_gil(|py| Ok(py.None())),
-                Err(_) => Err(map_err(PError::Closed)),
+        self.inner.materialize()?;
+        {
+            let mat_guard = self.inner.materialized.lock().unwrap();
+            let mat = mat_guard.as_ref().unwrap();
+            let mut prod = mat.send_prod.lock().unwrap();
+            match prod.push_and_flush(msg) {
+                Ok(_) => {
+                    return runtime::compio_future_into_py(py, move || async move {
+                        Python::with_gil(|py| Ok(py.None()))
+                    });
+                }
+                Err(_returned) => {
+                    return Err(timeout_err());
+                }
             }
-        })
+        }
     }
 
     #[pyo3(signature = (flags = 0))]
@@ -121,23 +141,32 @@ impl AsyncSocket {
                 Python::with_gil(|py| Ok(PyBytes::new_bound(py, &head).into_any().unbind()))
             });
         }
-        let recv_rx = self.inner.recv_rx_clone()?;
+        self.inner.materialize()?;
         let inner = self.inner.clone();
         runtime::compio_future_into_py(py, move || async move {
-            match recv_rx.recv_async().await {
-                Ok(msg) => {
-                    let mut parts: Vec<Bytes> = msg.iter().collect();
-                    let head = if parts.is_empty() {
-                        Bytes::new()
-                    } else {
-                        parts.remove(0)
-                    };
-                    if !parts.is_empty() {
-                        inner.store_rxbuf(parts);
+            loop {
+                {
+                    let mat_guard = inner.materialized.lock().unwrap();
+                    let mat = mat_guard
+                        .as_ref()
+                        .ok_or_else(|| map_err(PError::Closed))?;
+                    let mut cons = mat.recv_cons.lock().unwrap();
+                    if let Some(msg) = cons.prefetch_and_pop() {
+                        let mut parts: Vec<Bytes> = msg.iter().collect();
+                        let head = if parts.is_empty() {
+                            Bytes::new()
+                        } else {
+                            parts.remove(0)
+                        };
+                        if !parts.is_empty() {
+                            inner.store_rxbuf(parts);
+                        }
+                        return Python::with_gil(|py| {
+                            Ok(PyBytes::new_bound(py, &head).into_any().unbind())
+                        });
                     }
-                    Python::with_gil(|py| Ok(PyBytes::new_bound(py, &head).into_any().unbind()))
                 }
-                Err(_) => Err(map_err(PError::Closed)),
+                compio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
         })
     }
@@ -157,13 +186,23 @@ impl AsyncSocket {
                 })
             });
         }
-        let recv_rx = self.inner.recv_rx_clone()?;
+        self.inner.materialize()?;
+        let inner = self.inner.clone();
         runtime::compio_future_into_py(py, move || async move {
-            match recv_rx.recv_async().await {
-                Ok(msg) => Python::with_gil(|py| {
-                    Ok(conversions::parts_to_pylist(py, msg).into_any().unbind())
-                }),
-                Err(_) => Err(map_err(PError::Closed)),
+            loop {
+                {
+                    let mat_guard = inner.materialized.lock().unwrap();
+                    let mat = mat_guard
+                        .as_ref()
+                        .ok_or_else(|| map_err(PError::Closed))?;
+                    let mut cons = mat.recv_cons.lock().unwrap();
+                    if let Some(msg) = cons.prefetch_and_pop() {
+                        return Python::with_gil(|py| {
+                            Ok(conversions::parts_to_pylist(py, msg).into_any().unbind())
+                        });
+                    }
+                }
+                compio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
         })
     }

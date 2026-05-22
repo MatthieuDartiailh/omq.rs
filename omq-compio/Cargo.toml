@@ -48,6 +48,8 @@ libc = "0.2"
 compio-ws = { version = "0.4.0-rc.2", optional = true }
 
 [dev-dependencies]
+atomic-waker = "1"
+futures-lite = "2"
 rand = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Used by benches/compression.rs to train a zstd dict from sample
