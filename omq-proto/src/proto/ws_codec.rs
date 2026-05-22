@@ -263,9 +263,14 @@ pub(crate) fn apply_mask_offset(data: &mut [u8], mask: [u8; 4], offset: usize) {
 }
 
 fn generate_mask_key() -> [u8; 4] {
-    use rand::RngCore;
+    use rand::{RngCore, SeedableRng};
+    thread_local! {
+        static RNG: std::cell::RefCell<rand::rngs::SmallRng> = std::cell::RefCell::new(
+            rand::rngs::SmallRng::from_rng(rand::rngs::OsRng).expect("seed SmallRng")
+        );
+    }
     let mut key = [0u8; 4];
-    rand::rngs::OsRng.fill_bytes(&mut key);
+    RNG.with(|rng| rng.borrow_mut().fill_bytes(&mut key));
     key
 }
 

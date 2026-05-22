@@ -46,7 +46,7 @@ crypto_secretbox = { version = "0.1", optional = true }
 subtle = { version = "2", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 lz4-sys = { version = "1", optional = true }
-rand = "0.8"
+rand = { version = "0.8", features = ["small_rng"] }
 zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"], optional = true }
 patricia_tree = "0.10"
 smallvec = { version = "1", features = ["const_generics", "union"] }
