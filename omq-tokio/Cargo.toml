@@ -94,3 +94,7 @@ harness = false
 [[bench]]
 name = "latency"
 harness = false
+
+[[bench]]
+name = "client_server_latency"
+harness = false

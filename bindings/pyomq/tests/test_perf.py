@@ -122,3 +122,60 @@ def test_perf_tcp(size):
         f"[perf tcp    {size:>5}B]  pyomq {omq:>10,.0f} msg/s  "
         f"pyzmq {pz:>10,.0f} msg/s  ratio {ratio:.2f}x"
     )
+
+
+def _measure_latency(lib_func, endpoint, size, warmup=500, iters=5000):
+    payload = b"x" * size
+    if lib_func == "pyomq":
+        ctx = pyomq.Context()
+        rep = ctx.socket(pyomq.REP)
+        req = ctx.socket(pyomq.REQ)
+    else:
+        ctx = zmq_pyzmq.Context.instance()
+        rep = ctx.socket(zmq_pyzmq.REP)
+        req = ctx.socket(zmq_pyzmq.REQ)
+    rep.bind(endpoint)
+    req.connect(endpoint)
+    time.sleep(0.05)
+
+    def echo():
+        for _ in range(warmup + iters + 100):
+            msg = rep.recv()
+            rep.send(msg)
+
+    t = threading.Thread(target=echo, daemon=True)
+    t.start()
+
+    for _ in range(warmup):
+        req.send(payload)
+        req.recv()
+
+    rtts = []
+    for _ in range(iters):
+        t0 = time.monotonic()
+        req.send(payload)
+        req.recv()
+        rtts.append(time.monotonic() - t0)
+
+    req.close()
+    rep.close()
+    if lib_func == "pyomq":
+        ctx.term()
+
+    rtts.sort()
+    return rtts[len(rtts) * 50 // 100] * 1e6
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_perf_latency_tcp(size):
+    _measure_latency("pyomq", _new_tcp_ep(), size, warmup=100, iters=1000)
+    _measure_latency("pyzmq", _new_tcp_ep(), size, warmup=100, iters=1000)
+    omq_runs = [_measure_latency("pyomq", _new_tcp_ep(), size) for _ in range(2)]
+    pz_runs = [_measure_latency("pyzmq", _new_tcp_ep(), size) for _ in range(2)]
+    omq = min(omq_runs)
+    pz = min(pz_runs)
+    ratio = pz / omq if omq > 0 else 0
+    print(
+        f"[perf latency tcp {size:>5}B]  pyomq {omq:>7.1f} µs  "
+        f"pyzmq {pz:>7.1f} µs  ratio {ratio:.2f}x"
+    )

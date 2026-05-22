@@ -121,43 +121,47 @@ if options[:update_benchmarks]
     end
   end
 
-  # latency_percentiles — both backends, transport x size rows, percentile columns
-  begin
+  build_latency_table = ->(pattern, empty_msg) {
     transports = CORE.select do |t|
       BenchHelpers::SIZE_LABELS.keys.any? do |s|
-        BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: s) ||
-          BenchHelpers.latest_row(rows_by_backend['tokio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: s)
+        BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: s) ||
+          BenchHelpers.latest_row(rows_by_backend['tokio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: s)
       end
     end
     sizes = BenchHelpers::SIZE_LABELS.keys.select do |s|
       transports.any? do |t|
-        BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: s) ||
-          BenchHelpers.latest_row(rows_by_backend['tokio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: s)
+        BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: s) ||
+          BenchHelpers.latest_row(rows_by_backend['tokio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: s)
       end
     end
 
     if transports.empty?
-      latency_content = "(no latency data)\n"
+      "(#{empty_msg})\n"
     else
-      latency_content = +""
-      latency_content << "| transport | size | compio p50 | compio p99 | tokio p50 | tokio p99 |\n"
-      latency_content << "|---|---|---|---|---|---|\n"
+      out = +""
+      out << "| transport | size | compio p50 | compio p99 | tokio p50 | tokio p99 |\n"
+      out << "|---|---|---|---|---|---|\n"
       transports.each do |t|
         sizes.each do |sz|
-          c  = BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: 'latency', transport: t, peers: 1, msg_size: sz)
-          tk = BenchHelpers.latest_row(rows_by_backend['tokio']  || [], pattern: 'latency', transport: t, peers: 1, msg_size: sz)
+          c  = BenchHelpers.latest_row(rows_by_backend['compio'] || [], pattern: pattern, transport: t, peers: 1, msg_size: sz)
+          tk = BenchHelpers.latest_row(rows_by_backend['tokio']  || [], pattern: pattern, transport: t, peers: 1, msg_size: sz)
           next if c.nil? && tk.nil?
-          latency_content << "| #{t} | #{BenchHelpers.size_label(sz)} |"
-          latency_content << " #{BenchHelpers.format_us(c&.fetch(:p50_us, nil))} |"
-          latency_content << " #{BenchHelpers.format_us(c&.fetch(:p99_us, nil))} |"
-          latency_content << " #{BenchHelpers.format_us(tk&.fetch(:p50_us, nil))} |"
-          latency_content << " #{BenchHelpers.format_us(tk&.fetch(:p99_us, nil))} |\n"
+          out << "| #{t} | #{BenchHelpers.size_label(sz)} |"
+          out << " #{BenchHelpers.format_us(c&.fetch(:p50_us, nil))} |"
+          out << " #{BenchHelpers.format_us(c&.fetch(:p99_us, nil))} |"
+          out << " #{BenchHelpers.format_us(tk&.fetch(:p50_us, nil))} |"
+          out << " #{BenchHelpers.format_us(tk&.fetch(:p99_us, nil))} |\n"
         end
       end
-      latency_content << "\n"
+      out << "\n"
+      out
     end
-    bm = BenchHelpers.replace_block(bm, 'latency_percentiles', latency_content)
-  end
+  }
+
+  bm = BenchHelpers.replace_block(bm, 'latency_percentiles',
+    build_latency_table.call('latency', 'no latency data'))
+  bm = BenchHelpers.replace_block(bm, 'client_server_latency_percentiles',
+    build_latency_table.call('client_server_latency', 'no client_server_latency data'))
 
   # mechanism_frame — end-to-end mechanism cost over TCP (compio only)
   begin

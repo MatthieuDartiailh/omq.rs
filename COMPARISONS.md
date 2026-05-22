@@ -13,7 +13,7 @@ Same process, no kernel socket overhead. libzmq 5.2.5 (C binary) vs omq-compio (
 
 omq inproc is true zero-copy: payloads are `Arc`-cloned, not memcpy'd. libzmq copies every message through its internal queues, so its throughput drops with size. omq stays flat.
 
-Refresh: `./scripts/compare_libzmq.sh --inproc --update-benchmarks`
+Refresh: `ruby scripts/compare_libzmq.rb --inproc --update-benchmarks`
 
 **omq-compio:**
 
@@ -55,7 +55,7 @@ Refresh: `./scripts/compare_libzmq.sh --inproc --update-benchmarks`
 
 Abstract-namespace Unix socket. Push binds, pull connects. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
 
-Refresh: `./scripts/compare_libzmq.sh --ipc --update-benchmarks`
+Refresh: `ruby scripts/compare_libzmq.rb --ipc --update-benchmarks`
 
 **omq-compio:**
 
@@ -97,23 +97,23 @@ Refresh: `./scripts/compare_libzmq.sh --ipc --update-benchmarks`
 
 TCP loopback, each process pinned to one core. Push binds, pull connects. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
 
-Refresh: `./scripts/compare_libzmq.sh --tcp --update-benchmarks`
+Refresh: `ruby scripts/compare_libzmq.rb --tcp --update-benchmarks`
 
 **omq-compio:**
 
 <!-- BEGIN libzmq_comparison_tcp_compio -->
 | Size | libzmq msg/s | libzmq MB/s | omq-compio msg/s | omq-compio MB/s | compio × |
-|-------|-------------|------------|-----------------|----------------|---------|
-| 8 B | 8.46M | 68 MB/s | 8.97M | 72 MB/s | 1.06× |
-| 32 B | 9.10M | 291 MB/s | 7.60M | 243 MB/s | 0.83× |
-| 128 B | 2.95M | 378 MB/s | 5.11M | 654 MB/s | **1.7×** |
-| 512 B | 1.96M | 1.0 GB/s | 3.51M | 1.8 GB/s | **1.8×** |
-| 2 KiB | 613k | 1.3 GB/s | 1.77M | 3.6 GB/s | **2.9×** |
-| 8 KiB | 190k | 1.6 GB/s | 596k | 4.9 GB/s | **3.1×** |
-| 32 KiB | 75k | 2.5 GB/s | 168k | 5.5 GB/s | **2.2×** |
-| 128 KiB | 33k | 4.3 GB/s | 59k | 7.7 GB/s | **1.8×** |
-| 512 KiB | 9.8k | 5.2 GB/s | 17k | 8.8 GB/s | **1.7×** |
-| 2 MiB | 2.6k | 5.4 GB/s | 3.7k | 7.7 GB/s | **1.4×** |
+|-------|-------------|------------|-----------------|----------------|----------|
+| 8 B | 8.42M | 67 MB/s | 8.16M | 65 MB/s | 0.97× |
+| 32 B | 8.25M | 264 MB/s | 7.14M | 228 MB/s | 0.87× |
+| 128 B | 2.85M | 365 MB/s | 5.45M | 698 MB/s | **1.9×** |
+| 512 B | 1.91M | 980 MB/s | 3.51M | 1.8 GB/s | **1.8×** |
+| 2 KiB | 653k | 1.3 GB/s | 1.70M | 3.5 GB/s | **2.6×** |
+| 8 KiB | 107k | 876 MB/s | 590k | 4.8 GB/s | **5.5×** |
+| 32 KiB | 69.9k | 2.3 GB/s | 104k | 3.4 GB/s | **1.5×** |
+| 128 KiB | 30.6k | 4.0 GB/s | 63.9k | 8.4 GB/s | **2.1×** |
+| 512 KiB | 9.2k | 4.8 GB/s | 16.1k | 8.5 GB/s | **1.7×** |
+| 2 MiB | 2.4k | 5.0 GB/s | 3.3k | 7.0 GB/s | **1.4×** |
 
 <!-- END libzmq_comparison_tcp_compio -->
 
@@ -121,17 +121,17 @@ Refresh: `./scripts/compare_libzmq.sh --tcp --update-benchmarks`
 
 <!-- BEGIN libzmq_comparison_tcp_tokio -->
 | Size | libzmq msg/s | libzmq MB/s | omq-tokio msg/s | omq-tokio MB/s | tokio × |
-|-------|-------------|------------|----------------|---------------|---------|
-| 8 B | 8.46M | 68 MB/s | 4.79M | 38 MB/s | 0.57× |
-| 32 B | 9.10M | 291 MB/s | 4.53M | 145 MB/s | 0.50× |
-| 128 B | 2.95M | 378 MB/s | 5.58M | 714 MB/s | **1.9×** |
-| 512 B | 1.96M | 1.0 GB/s | 4.44M | 2.3 GB/s | **2.3×** |
-| 2 KiB | 613k | 1.3 GB/s | 1.90M | 3.9 GB/s | **3.1×** |
-| 8 KiB | 190k | 1.6 GB/s | 452k | 3.7 GB/s | **2.4×** |
-| 32 KiB | 75k | 2.5 GB/s | 155k | 5.1 GB/s | **2.1×** |
-| 128 KiB | 33k | 4.3 GB/s | 44k | 5.8 GB/s | **1.3×** |
-| 512 KiB | 9.8k | 5.2 GB/s | 14k | 7.4 GB/s | **1.4×** |
-| 2 MiB | 2.6k | 5.4 GB/s | 3.1k | 6.4 GB/s | **1.2×** |
+|-------|-------------|------------|----------------|---------------|----------|
+| 8 B | 8.42M | 67 MB/s | 7.52M | 60 MB/s | 0.89× |
+| 32 B | 8.25M | 264 MB/s | 6.49M | 208 MB/s | 0.79× |
+| 128 B | 2.85M | 365 MB/s | 5.37M | 687 MB/s | **1.9×** |
+| 512 B | 1.91M | 980 MB/s | 4.27M | 2.2 GB/s | **2.2×** |
+| 2 KiB | 653k | 1.3 GB/s | 2.22M | 4.5 GB/s | **3.4×** |
+| 8 KiB | 107k | 876 MB/s | 285k | 2.3 GB/s | **2.7×** |
+| 32 KiB | 69.9k | 2.3 GB/s | 144k | 4.7 GB/s | **2.1×** |
+| 128 KiB | 30.6k | 4.0 GB/s | 35.4k | 4.6 GB/s | **1.2×** |
+| 512 KiB | 9.2k | 4.8 GB/s | 13.0k | 6.8 GB/s | **1.4×** |
+| 2 MiB | 2.4k | 5.0 GB/s | 2.9k | 6.1 GB/s | **1.2×** |
 
 <!-- END libzmq_comparison_tcp_tokio -->
 
@@ -141,7 +141,7 @@ Refresh: `./scripts/compare_libzmq.sh --tcp --update-benchmarks`
 
 Push binds, pull connects. zmq.rs uses a socket file; omq uses abstract-namespace sockets. zmq.rs peer: `scripts/zmqrs_bench_peer/` (zeromq crate, tokio multi-thread). omq-compio: single io_uring thread. omq-tokio: multi-thread.
 
-Refresh: `./scripts/compare_zmqrs.sh --ipc --update-benchmarks`
+Refresh: `ruby scripts/compare_zmqrs.rb --ipc --update-benchmarks`
 
 **omq-compio:**
 
@@ -183,7 +183,7 @@ Refresh: `./scripts/compare_zmqrs.sh --ipc --update-benchmarks`
 
 TCP loopback, push binds, pull connects. zmq.rs <-> omq-tokio is apples-to-apples (both tokio multi-thread). omq-compio is intentionally CPU-constrained (single io_uring thread).
 
-Refresh: `./scripts/compare_zmqrs.sh --tcp --update-benchmarks`
+Refresh: `ruby scripts/compare_zmqrs.rb --tcp --update-benchmarks`
 
 **omq-compio:**
 
@@ -220,6 +220,55 @@ Refresh: `./scripts/compare_zmqrs.sh --tcp --update-benchmarks`
 | 2 MiB | 1.5k | 3.1 GB/s | 3.1k | 6.5 GB/s | **2.1×** | 2.4k | 5.1 GB/s | **1.6×** |
 
 <!-- END zmqrs_comparison_tcp_tokio -->
+
+## REQ/REP latency — libzmq vs omq
+
+Serial ping-pong: one REQ/REP round-trip at a time, p50 and p99 in microseconds.
+Lower is better; speedup = libzmq / omq.
+
+### IPC
+
+Refresh: `ruby scripts/compare_libzmq.rb --ipc --latency --update-benchmarks`
+
+<!-- BEGIN libzmq_latency_ipc -->
+(run `ruby scripts/compare_libzmq.rb --ipc --latency --update-benchmarks` to populate)
+<!-- END libzmq_latency_ipc -->
+
+### TCP
+
+Refresh: `ruby scripts/compare_libzmq.rb --tcp --latency --update-benchmarks`
+
+<!-- BEGIN libzmq_latency_tcp -->
+| Size | libzmq p50 | libzmq p99 | omq-compio p50 | omq-compio p99 | compio × | omq-tokio p50 | omq-tokio p99 | tokio × |
+|-------|-----------|-----------|---------------|---------------|---------|--------------|--------------|--------|
+| 8 B | 67.2 µs | 113 µs | 37.7 µs | 65.1 µs | **1.8×** | 86.7 µs | 141 µs | 0.77× |
+| 32 B | 71.5 µs | 119 µs | 35.8 µs | 65.4 µs | **2.0×** | 84.9 µs | 177 µs | 0.84× |
+| 128 B | 67.9 µs | 177 µs | 37.8 µs | 58.0 µs | **1.8×** | 94.7 µs | 1.3 ms | 0.72× |
+| 512 B | 68.9 µs | 172 µs | 35.4 µs | 66.4 µs | **1.9×** | 79.8 µs | 131 µs | 0.86× |
+| 2 KiB | 68.8 µs | 109 µs | 37.3 µs | 64.7 µs | **1.8×** | 81.5 µs | 213 µs | 0.84× |
+| 8 KiB | 81.9 µs | 216 µs | 39.5 µs | 65.7 µs | **2.1×** | 86.0 µs | 182 µs | 0.95× |
+| 32 KiB | 99.1 µs | 178 µs | 48.0 µs | 82.8 µs | **2.1×** | 99.6 µs | 161 µs | 0.99× |
+| 128 KiB | 137 µs | 197 µs | 94.1 µs | 157 µs | **1.5×** | 133 µs | 285 µs | 1.03× |
+
+<!-- END libzmq_latency_tcp -->
+
+## REQ/REP latency — zmq.rs vs omq
+
+### IPC
+
+Refresh: `ruby scripts/compare_zmqrs.rb --ipc --latency --update-benchmarks`
+
+<!-- BEGIN zmqrs_latency_ipc -->
+(run `ruby scripts/compare_zmqrs.rb --ipc --latency --update-benchmarks` to populate)
+<!-- END zmqrs_latency_ipc -->
+
+### TCP
+
+Refresh: `ruby scripts/compare_zmqrs.rb --tcp --latency --update-benchmarks`
+
+<!-- BEGIN zmqrs_latency_tcp -->
+(run `ruby scripts/compare_zmqrs.rb --tcp --latency --update-benchmarks` to populate)
+<!-- END zmqrs_latency_tcp -->
 
 ## ZMQ_STREAM: omq-compio vs libzmq 4.3.5
 

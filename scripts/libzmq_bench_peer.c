@@ -4,12 +4,17 @@
  * Usage:
  *   libzmq_bench_peer push <addr> <msg_size_bytes>
  *   libzmq_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
+ *   libzmq_bench_peer rep  <addr> <msg_size_bytes>
+ *   libzmq_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
  *
  * <addr>: a port number (→ tcp://127.0.0.1:<port>) or a full ZMQ address
  *         (e.g. ipc:///tmp/bench.sock or tcp://127.0.0.1:15555).
  *
  * Push: binds, sends <msg_size> byte messages forever.
  * Pull: connects, warms up for 500 ms, then counts for <duration> seconds.
+ * Rep:  binds, echoes received messages back forever.
+ * Req:  connects, runs warmup + measured round-trips, prints latency
+ *       percentiles (p50 p99 p999 max iterations) in microseconds.
  *
  * Compile: gcc -O2 -o libzmq_bench_peer libzmq_bench_peer.c -lzmq
  *
@@ -208,6 +213,83 @@ done_inproc:;
            joining to avoid blocking on the push thread's send loop. */
         exit(0);
 
+    } else if (strcmp(role, "rep") == 0) {
+        void *sock = zmq_socket(ctx, ZMQ_REP);
+        if (!sock) die("zmq_socket REP");
+        if (zmq_bind(sock, addr) != 0) die("zmq_bind");
+
+        zmq_msg_t msg;
+        zmq_msg_init(&msg);
+        for (;;) {
+            int rc = zmq_msg_recv(&msg, sock, 0);
+            if (rc < 0) break;
+            int sz = zmq_msg_size(&msg);
+            if (zmq_send(sock, zmq_msg_data(&msg), sz, 0) < 0) break;
+        }
+        zmq_msg_close(&msg);
+        zmq_close(sock);
+
+    } else if (strcmp(role, "req") == 0) {
+        if (argc < 6) goto usage;
+        int iterations = atoi(argv[4]);
+        int warmup = atoi(argv[5]);
+
+        void *sock = zmq_socket(ctx, ZMQ_REQ);
+        if (!sock) die("zmq_socket REQ");
+        if (zmq_connect(sock, addr) != 0) die("zmq_connect");
+
+        struct timespec sleep_ts = {0, 200000000};
+        nanosleep(&sleep_ts, NULL);
+
+        char *buf = calloc(1, size);
+        if (!buf) { perror("calloc"); exit(1); }
+        memset(buf, 'x', size);
+
+        zmq_msg_t reply;
+        zmq_msg_init(&reply);
+
+        for (int i = 0; i < warmup; i++) {
+            if (zmq_send(sock, buf, size, 0) < 0) die("zmq_send warmup");
+            if (zmq_msg_recv(&reply, sock, 0) < 0) die("zmq_recv warmup");
+        }
+
+        uint64_t *rtts = malloc(sizeof(uint64_t) * iterations);
+        if (!rtts) { perror("malloc"); exit(1); }
+
+        for (int i = 0; i < iterations; i++) {
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            if (zmq_send(sock, buf, size, 0) < 0) die("zmq_send");
+            if (zmq_msg_recv(&reply, sock, 0) < 0) die("zmq_recv");
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            rtts[i] = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ULL
+                     + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+        }
+
+        int cmp_u64(const void *a, const void *b) {
+            uint64_t va = *(const uint64_t *)a;
+            uint64_t vb = *(const uint64_t *)b;
+            return (va > vb) - (va < vb);
+        }
+        qsort(rtts, iterations, sizeof(uint64_t), cmp_u64);
+
+        double percentile(uint64_t *sorted, int n, double p) {
+            int idx = (int)(n * p / 100.0);
+            if (idx >= n) idx = n - 1;
+            return sorted[idx] / 1000.0;
+        }
+
+        double p50  = percentile(rtts, iterations, 50);
+        double p99  = percentile(rtts, iterations, 99);
+        double p999 = percentile(rtts, iterations, 99.9);
+        double max  = rtts[iterations - 1] / 1000.0;
+        printf("%.3f %.3f %.3f %.3f %d\n", p50, p99, p999, max, iterations);
+
+        free(rtts);
+        free(buf);
+        zmq_msg_close(&reply);
+        zmq_close(sock);
+
     } else {
         goto usage;
     }
@@ -219,6 +301,8 @@ usage:
     fprintf(stderr, "usage: %s push <addr> <size>\n", argv[0]);
     fprintf(stderr, "       %s pull <addr> <size> <duration_secs>\n", argv[0]);
     fprintf(stderr, "       %s inproc <name> <size> <duration_secs>\n", argv[0]);
+    fprintf(stderr, "       %s rep <addr> <size>\n", argv[0]);
+    fprintf(stderr, "       %s req <addr> <size> <iterations> <warmup>\n", argv[0]);
     fprintf(stderr, "<addr>: port number or full ZMQ address (tcp:// ipc://)\n");
     return 1;
 }

@@ -4,17 +4,19 @@ require 'json'
 
 module BenchHelpers
   SIZE_LABELS = {
-    32      => '32 B',
-    64      => '64 B',
-    128     => '128 B',
-    256     => '256 B',
-    512     => '512 B',
-    1_024   => '1 KiB',
-    2_048   => '2 KiB',
-    4_096   => '4 KiB',
-    8_192   => '8 KiB',
-    32_768  => '32 KiB',
-    131_072 => '128 KiB',
+    8         => '8 B',
+    32        => '32 B',
+    64        => '64 B',
+    128       => '128 B',
+    256       => '256 B',
+    512       => '512 B',
+    1_024     => '1 KiB',
+    2_048     => '2 KiB',
+    4_096     => '4 KiB',
+    8_192     => '8 KiB',
+    32_768    => '32 KiB',
+    131_072   => '128 KiB',
+    524_288   => '512 KiB',
   }.freeze
 
   module_function
@@ -52,6 +54,23 @@ module BenchHelpers
     elsif fv >= 10     then '%.1f µs'  % fv
     else                    '%.2f µs'  % fv
     end
+  end
+
+  def format_mbps_bw(v, nil_str: nil)
+    return nil_str unless v && v > 0
+    v >= 1_000 ? '%.1f GB/s' % (v / 1_000.0) : '%.0f MB/s' % v
+  end
+
+  def speedup_str(val, ref_val)
+    return '—' unless val && ref_val && ref_val > 0
+    r = val.to_f / ref_val
+    r >= 1.1 ? '**%.1f×**' % r : '%.2f×' % r
+  end
+
+  def latency_speedup_str(ref_val, val)
+    return '—' unless val && ref_val && val > 0
+    r = ref_val.to_f / val
+    r >= 1.1 ? '**%.1f×**' % r : '%.2f×' % r
   end
 
   def load_jsonl(path, exclude_runs: [])

@@ -178,7 +178,7 @@ ZMQ_VERSION=$(pkg-config --modversion libzmq 2>/dev/null || echo '?')
 
 # ---------- run ----------
 
-SIZES=(8 32 128 512 2048 8192 32768 131072 524288 2097152)
+SIZES=(8 32 128 512 2048 8192 32768 131072 524288)
 BENCHMARKS="$REPO/COMPARISONS.md"
 
 run_comparison() {

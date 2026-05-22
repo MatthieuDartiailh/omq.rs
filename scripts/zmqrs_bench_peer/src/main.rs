@@ -3,6 +3,8 @@
 //! Usage:
 //!   zmqrs_bench_peer push <addr> <msg_size_bytes>
 //!   zmqrs_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
+//!   zmqrs_bench_peer rep  <addr> <msg_size_bytes>
+//!   zmqrs_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
 //!
 //! <addr>: a port number (→ tcp://127.0.0.1:<port>) or a full ZMQ address
 //!         (e.g. ipc:///tmp/bench.sock or tcp://127.0.0.1:15655).
@@ -11,13 +13,18 @@
 //! Pull: connects, warms up for 500 ms, then counts messages for <duration>
 //!       seconds and prints one line to stdout:
 //!         <count> <elapsed_secs> <msg_size>
+//! Rep:  binds, echoes received messages back forever.
+//! Req:  connects, runs warmup + measured round-trips, prints latency
+//!       percentiles (p50 p99 p999 max iterations) in microseconds.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+use zeromq::{
+    PullSocket, PushSocket, RepSocket, ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage,
+};
 
 fn resolve_addr(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_digit()) {
@@ -42,9 +49,22 @@ async fn main() {
             let duration: f64 = args[4].parse().expect("duration_secs");
             run_pull(&addr, size, Duration::from_secs_f64(duration)).await;
         }
+        Some("rep") => {
+            let addr = resolve_addr(&args[2]);
+            run_rep(&addr).await;
+        }
+        Some("req") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let iterations: usize = args[4].parse().expect("iterations");
+            let warmup: usize = args[5].parse().expect("warmup");
+            run_req(&addr, size, iterations, warmup).await;
+        }
         _ => {
             eprintln!("usage: zmqrs_bench_peer push <addr> <size>");
             eprintln!("       zmqrs_bench_peer pull <addr> <size> <duration_secs>");
+            eprintln!("       zmqrs_bench_peer rep <addr> <size>");
+            eprintln!("       zmqrs_bench_peer req <addr> <size> <iterations> <warmup>");
             eprintln!("<addr>: port number or full ZMQ address (tcp:// ipc://)");
             std::process::exit(1);
         }
@@ -60,6 +80,57 @@ async fn run_push(addr: &str, size: usize) {
             tokio::task::yield_now().await;
         }
     }
+}
+
+async fn run_rep(addr: &str) {
+    let mut rep = RepSocket::new();
+    rep.bind(addr).await.expect("rep bind");
+    loop {
+        match rep.recv().await {
+            Ok(msg) => {
+                let _ = rep.send(msg).await;
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
+    let mut req = ReqSocket::new();
+    req.connect(addr).await.expect("req connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let payload = Bytes::from(vec![b'x'; size]);
+
+    for _ in 0..warmup {
+        req.send(ZmqMessage::from(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+    }
+
+    let mut rtts: Vec<u64> = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let t = Instant::now();
+        req.send(ZmqMessage::from(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+        rtts.push(t.elapsed().as_nanos() as u64);
+    }
+    rtts.sort_unstable();
+
+    let percentile = |sorted: &[u64], p: f64| -> f64 {
+        let n = sorted.len();
+        let mut idx = (n as f64 * p / 100.0) as usize;
+        if idx >= n {
+            idx = n - 1;
+        }
+        sorted[idx] as f64 / 1000.0
+    };
+
+    let p50 = percentile(&rtts, 50.0);
+    let p99 = percentile(&rtts, 99.0);
+    let p999 = percentile(&rtts, 99.9);
+    let max = rtts[iterations - 1] as f64 / 1000.0;
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    std::process::exit(0);
 }
 
 async fn run_pull(addr: &str, size: usize, duration: Duration) {

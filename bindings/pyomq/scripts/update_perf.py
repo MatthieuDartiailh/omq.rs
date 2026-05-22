@@ -131,6 +131,114 @@ def build_throughput_table(results):
     return "\n".join(lines)
 
 
+# ── REQ/REP latency ─────────────────────────────────────────────────
+
+LATENCY_SIZES = [8, 32, 128, 512, 2048, 8192, 32768, 131072]
+LATENCY_WARMUP = 1000
+LATENCY_ITERS = 10000
+
+
+def measure_latency(lib, endpoint, size, warmup=LATENCY_WARMUP, iters=LATENCY_ITERS):
+    payload = b"x" * size
+    ctx = lib.Context() if hasattr(lib, "Context") else lib.Context.instance()
+    rep = ctx.socket(lib.REP)
+    req = ctx.socket(lib.REQ)
+    rep.bind(endpoint)
+    req.connect(endpoint)
+    time.sleep(0.05)
+
+    def echo():
+        try:
+            for _ in range(warmup + iters + 100):
+                msg = rep.recv()
+                rep.send(msg)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=echo, daemon=True)
+    t.start()
+
+    for _ in range(warmup):
+        req.send(payload)
+        req.recv()
+
+    rtts = []
+    for _ in range(iters):
+        t0 = time.monotonic()
+        req.send(payload)
+        req.recv()
+        rtts.append(time.monotonic() - t0)
+
+    req.close()
+    rep.close()
+    ctx.term()
+
+    rtts.sort()
+    p50 = rtts[len(rtts) * 50 // 100] * 1e6
+    p99 = rtts[len(rtts) * 99 // 100] * 1e6
+    return p50, p99
+
+
+def fmt_us(v):
+    if v >= 1000:
+        return f"{v / 1000:.1f} ms"
+    if v >= 100:
+        return f"{v:.0f} µs"
+    if v >= 10:
+        return f"{v:.1f} µs"
+    return f"{v:.2f} µs"
+
+
+def run_latency():
+    import pyomq
+    import zmq as pyzmq
+
+    results = []
+    for size in LATENCY_SIZES:
+        label = fmt_size(size)
+        sys.stdout.write(f"  {label:>7} ...")
+        sys.stdout.flush()
+
+        # warmup
+        measure_latency(pyomq, free_tcp(), size, warmup=200, iters=200)
+        measure_latency(pyzmq, free_tcp(), size, warmup=200, iters=200)
+
+        # measure (min latency across rounds)
+        omq_runs = [measure_latency(pyomq, free_tcp(), size) for _ in range(N_ROUNDS)]
+        pz_runs = [measure_latency(pyzmq, free_tcp(), size) for _ in range(N_ROUNDS)]
+        omq_p50 = min(r[0] for r in omq_runs)
+        omq_p99 = min(r[1] for r in omq_runs)
+        pz_p50 = min(r[0] for r in pz_runs)
+        pz_p99 = min(r[1] for r in pz_runs)
+
+        p50_ratio = pz_p50 / omq_p50 if omq_p50 > 0 else 0
+        p99_ratio = pz_p99 / omq_p99 if omq_p99 > 0 else 0
+
+        results.append((label, omq_p50, pz_p50, p50_ratio, omq_p99, pz_p99, p99_ratio))
+        print(f" p50 {p50_ratio:.2f}x  p99 {p99_ratio:.2f}x")
+
+    return results
+
+
+def build_latency_table(results):
+    lines = [
+        "| Size    | pyomq p50 | pyzmq p50 | ratio     "
+        "| pyomq p99 | pyzmq p99 | ratio     |",
+        "|---------|----------:|----------:|----------:"
+        "|----------:|----------:|----------:|",
+    ]
+    for label, op50, pp50, r50, op99, pp99, r99 in results:
+        r50s = f"**{r50:.2f}×**" if r50 >= 1.1 else f"{r50:.2f}×"
+        r99s = f"**{r99:.2f}×**" if r99 >= 1.1 else f"{r99:.2f}×"
+        lines.append(
+            f"| {label:<7} | {fmt_us(op50):>9} | {fmt_us(pp50):>9} "
+            f"| {r50s:>9} "
+            f"| {fmt_us(op99):>9} | {fmt_us(pp99):>9} "
+            f"| {r99s:>9} |"
+        )
+    return "\n".join(lines)
+
+
 # ── proxy forwarding ─────────────────────────────────────────────────
 
 def measure_proxy_pushpull(lib, n=200_000):
@@ -271,6 +379,10 @@ def main():
     tp_results = run_throughput()
     tp_table = build_throughput_table(tp_results)
 
+    print("\nMeasuring REQ/REP latency (TCP)...")
+    lat_results = run_latency()
+    lat_table = build_latency_table(lat_results)
+
     print("\nMeasuring zmq.proxy() forwarding...")
     proxy_results = run_proxy()
     proxy_table = build_proxy_table(*proxy_results)
@@ -278,12 +390,15 @@ def main():
     print()
     print(tp_table)
     print()
+    print(lat_table)
+    print()
     print(proxy_table)
 
     with open(README) as f:
         content = f.read()
 
     content = update_marker(content, "PERF", tp_table)
+    content = update_marker(content, "LATENCY_PERF", lat_table)
     content = update_marker(content, "PROXY_PERF", proxy_table)
 
     with open(README, "w") as f:

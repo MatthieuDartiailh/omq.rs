@@ -85,6 +85,24 @@ Intel Mac Mini 2018 (i7-8700B, 3.2 GHz), Rust 1.95.0, default features:
 | 128 KiB |      203 k/s |       70 k/s | **2.91×** |    32 k/s |    24 k/s | **1.32×** |
 <!-- PERF:END -->
 
+### REQ/REP latency (TCP loopback)
+
+Serial ping-pong: 1000 warmup + 10000 measured iterations per cell. Lower is better;
+ratio = pyzmq / pyomq.
+
+<!-- LATENCY_PERF:START -->
+| Size    | pyomq p50 | pyzmq p50 | ratio     | pyomq p99 | pyzmq p99 | ratio     |
+|---------|----------:|----------:|----------:|----------:|----------:|----------:|
+| 8 B     |   67.7 µs |   66.9 µs |     0.99× |    2.8 ms |    587 µs |     0.21× |
+| 32 B    |   94.1 µs |   72.6 µs |     0.77× |    1.0 ms |    524 µs |     0.51× |
+| 128 B   |   64.5 µs |   70.7 µs |     1.10× |    1.1 ms |    1.3 ms | **1.18×** |
+| 512 B   |   72.8 µs |   81.2 µs | **1.12×** |    532 µs |    2.3 ms | **4.38×** |
+| 2 KiB   |   78.8 µs |   89.4 µs | **1.13×** |    2.6 ms |    1.8 ms |     0.66× |
+| 8 KiB   |   71.6 µs |   98.9 µs | **1.38×** |    217 µs |    375 µs | **1.73×** |
+| 32 KiB  |   99.6 µs |    121 µs | **1.21×** |    396 µs |    325 µs |     0.82× |
+| 128 KiB |    175 µs |    162 µs |     0.92× |    1.4 ms |    1.4 ms |     1.02× |
+<!-- LATENCY_PERF:END -->
+
 ### `zmq.proxy()` forwarding (128 B, TCP)
 
 <!-- PROXY_PERF:START -->

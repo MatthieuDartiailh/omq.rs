@@ -23,6 +23,7 @@ Cells show `msgs/s / MB/s`.
 <!-- BEGIN push_pull_1peer_compio -->
 | Size | inproc | inproc-mt | ipc | tcp |
 |---|---|---|---|---|
+| 8 B | 4.88M / 39.0 MB/s | 14.99M / 120 MB/s | — | — |
 | 32 B | 3.83M / 122 MB/s | 16.51M / 528 MB/s | 7.42M / 238 MB/s | 7.39M / 236 MB/s |
 | 128 B | 3.73M / 478 MB/s | 14.44M / 1.85 GB/s | 5.31M / 680 MB/s | 5.52M / 707 MB/s |
 | 512 B | 3.80M / 1.95 GB/s | 12.67M / 6.49 GB/s | 3.47M / 1.78 GB/s | 3.58M / 1.83 GB/s |
@@ -154,6 +155,20 @@ All values are wall time.
 | tcp | 128 KiB | 203 µs | 251 µs | 115 µs | 135 µs |
 
 <!-- END latency_percentiles -->
+
+## CLIENT/SERVER latency percentiles
+
+Same methodology as above, using CLIENT/SERVER sockets instead of REQ/REP.
+
+<!-- BEGIN client_server_latency_percentiles -->
+| transport | size | compio p50 | compio p99 | tokio p50 | tokio p99 |
+|---|---|---|---|---|---|
+| ipc | 128 B | 15.3 µs | 22.8 µs | 39.7 µs | 183 µs |
+| ipc | 8 KiB | 20.5 µs | 29.4 µs | 48.6 µs | 289 µs |
+| tcp | 128 B | 22.5 µs | 32.0 µs | 44.8 µs | 89.8 µs |
+| tcp | 8 KiB | 27.4 µs | 38.5 µs | 51.4 µs | 130 µs |
+
+<!-- END client_server_latency_percentiles -->
 
 ## REQ/REP throughput (single peer)
 
