@@ -166,6 +166,10 @@ impl AsyncSocket {
                         });
                     }
                 }
+                // FIXME: replace with an async read on recv_notify.efd
+                // (compio raw fd op) so we wake immediately instead of
+                // polling at 1 ms intervals. Needs recv_notify threaded
+                // through Materialized into this future (~3 files).
                 compio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
         })
