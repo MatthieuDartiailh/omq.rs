@@ -366,6 +366,10 @@ Refresh: `ruby scripts/compare_zmqrs.rb --tcp --latency --update-benchmarks`
 
 <!-- END zmqrs_latency_tcp -->
 
+<p align="center">
+  <img src="doc/charts/latency.svg" alt="REQ/REP latency vs libzmq and zmq.rs" width="850">
+</p>
+
 ## ZMQ_STREAM: omq-compio vs libzmq 4.3.5
 
 Ping-pong throughput: one raw TCP client connected to a STREAM socket.

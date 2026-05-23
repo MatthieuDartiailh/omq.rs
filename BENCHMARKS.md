@@ -122,6 +122,10 @@ traversal.
 
 <!-- END push_pull_fanout_8peer_tokio -->
 
+<p align="center">
+  <img src="doc/charts/throughput.svg" alt="PUSH/PULL throughput: TCP loopback" width="850">
+</p>
+
 ## REQ/REP latency (single peer)
 
 Serial ping-pong: 1 000 warmup + 10 000 measured iterations per cell.
