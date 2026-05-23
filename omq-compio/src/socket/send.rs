@@ -369,15 +369,13 @@ impl Socket {
             if !inner.out_peers.read().expect("peers lock").is_empty() {
                 continue;
             }
-            if inner.peers_gen.load(Ordering::Acquire) > 0 {
-                let stx = inner
-                    .shared_send_tx
-                    .read()
-                    .expect("shared_send_tx lock")
-                    .clone();
-                if let Some(stx) = stx {
-                    return stx.send_async(msg).await.map_err(|_| Error::Closed);
-                }
+            let stx = inner
+                .shared_send_tx
+                .read()
+                .expect("shared_send_tx lock")
+                .clone();
+            if let Some(stx) = stx {
+                return stx.send_async(msg).await.map_err(|_| Error::Closed);
             }
             listener.await;
         }
@@ -511,6 +509,8 @@ impl Socket {
     #[cfg(feature = "priority")]
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
         loop {
+            self.drain_pre_connect_buf().await;
+
             let outcome = self.try_send_priority_walk(&msg);
             match outcome {
                 PriorityOutcome::Sent => return Ok(()),
@@ -521,11 +521,47 @@ impl Socket {
                     return Ok(());
                 }
                 PriorityOutcome::NoLivePeers => {
-                    let listener = self.inner().on_peer_ready.listen();
+                    let inner = self.inner();
+                    let cap = inner.options.send_hwm.map_or(usize::MAX, |h| h as usize);
+                    {
+                        let mut buf = inner.pre_connect_buf.lock().expect("pre_connect_buf");
+                        if buf.len() < cap {
+                            buf.push_back(msg);
+                            return Ok(());
+                        }
+                    }
+                    let listener = inner.on_peer_ready.listen();
                     if self.has_live_peer() {
                         continue;
                     }
                     listener.await;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "priority")]
+    async fn drain_pre_connect_buf(&self) {
+        loop {
+            let queued = self
+                .inner()
+                .pre_connect_buf
+                .lock()
+                .expect("pre_connect_buf")
+                .pop_front();
+            let Some(queued) = queued else { return };
+            match self.try_send_priority_walk(&queued) {
+                PriorityOutcome::Sent => {}
+                PriorityOutcome::AwaitOn(out) => {
+                    let _ = out.send(queued).await;
+                }
+                PriorityOutcome::NoLivePeers => {
+                    self.inner()
+                        .pre_connect_buf
+                        .lock()
+                        .expect("pre_connect_buf")
+                        .push_front(queued);
+                    return;
                 }
             }
         }

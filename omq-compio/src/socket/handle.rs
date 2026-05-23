@@ -311,6 +311,7 @@ impl Socket {
             .write()
             .expect("udp_dialers lock")
             .clear();
+        Self::drain_shared_queue(&self.inner, deadline).await;
         if let Some(tx) = self
             .inner
             .shared_send_tx
@@ -377,6 +378,24 @@ impl Socket {
         }
         self.inner.monitor.closed();
         Ok(())
+    }
+
+    async fn drain_shared_queue(
+        inner: &super::inner::SocketInner,
+        deadline: Option<std::time::Instant>,
+    ) {
+        let has_pending = || {
+            inner
+                .shared_send_rx
+                .as_ref()
+                .is_some_and(|rx| !rx.is_empty())
+        };
+        while has_pending() && !inner.dialers.read().expect("dialers lock").is_empty() {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     pub(super) fn snapshot_peers_now(&self) -> Vec<PeerOut> {

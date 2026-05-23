@@ -263,6 +263,13 @@ pub(super) struct SocketInner {
     /// `PeerSlot.priority`; without, insertion order. The non-priority
     /// round-robin and the priority picker both index into this.
     pub(super) peer_keys: RwLock<Vec<usize>>,
+    /// Pre-connect message buffer for priority mode. Round-robin sends
+    /// that arrive before any peer is connected push here; the first
+    /// send that finds a live peer drains the buffer first. Only used
+    /// when the `priority` feature is enabled (which disables the
+    /// shared send queue).
+    #[cfg(feature = "priority")]
+    pub(super) pre_connect_buf: Mutex<VecDeque<Message>>,
 }
 
 /// Returns `true` for socket types that round-robin their outbound
@@ -278,6 +285,9 @@ pub(super) fn is_round_robin_send(t: SocketType) -> bool {
             | SocketType::Req
             | SocketType::Pair
             | SocketType::Rep
+            | SocketType::Client
+            | SocketType::Scatter
+            | SocketType::Channel
     )
 }
 
@@ -385,6 +395,8 @@ impl SocketInner {
             shared_send_rx,
             rr_index: AtomicUsize::new(0),
             peer_keys: RwLock::new(Vec::new()),
+            #[cfg(feature = "priority")]
+            pre_connect_buf: Mutex::new(VecDeque::new()),
         })
     }
 

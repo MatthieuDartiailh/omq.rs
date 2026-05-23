@@ -28,7 +28,6 @@ async fn push_survives_peer_churn_0_1_3_1_0_1() {
     // Phase 1: 0 -> 1 peer
     let pull_a = Socket::new(SocketType::Pull, Options::default());
     pull_a.connect(ep("churn-compio")).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     push.send(Message::single("phase1")).await.unwrap();
     let msgs = drain(&pull_a, 500).await;

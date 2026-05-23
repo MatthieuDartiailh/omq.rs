@@ -97,7 +97,6 @@ async fn dealer_router_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         Options::default().identity(Bytes::from_static(b"d1")),
     );
     dealer.connect(client_ep).await.unwrap();
-    wait().await;
     dealer.send(Message::single("hi")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), router.recv())
         .await
@@ -145,7 +144,6 @@ async fn client_server_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         Options::default().identity(Bytes::from_static(b"c1")),
     );
     client.connect(client_ep).await.unwrap();
-    wait().await;
     client.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), server.recv())
         .await
@@ -160,7 +158,6 @@ async fn scatter_gather_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     g.bind(server_ep).await.unwrap();
     let s = Socket::new(SocketType::Scatter, Options::default());
     s.connect(client_ep).await.unwrap();
-    wait().await;
     s.send(Message::single("m")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), g.recv())
         .await
@@ -174,7 +171,6 @@ async fn channel_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     a.bind(server_ep).await.unwrap();
     let b = Socket::new(SocketType::Channel, Options::default());
     b.connect(client_ep).await.unwrap();
-    wait().await;
     a.send(Message::single("hi")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), b.recv())
         .await
@@ -352,4 +348,40 @@ async fn channel_tcp() {
 async fn peer_tcp() {
     let p = free_tcp_port();
     peer_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+
+// =====================================================================
+// Send-before-connect: messages queued before any peer connects must
+// be delivered once a peer appears.
+// =====================================================================
+
+#[compio::test]
+async fn send_before_connect_ipc() {
+    let ep = ipc_ep("sbc");
+    let push = Socket::new(SocketType::Push, Options::default());
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(ep.clone()).await.unwrap();
+    push.connect(ep).await.unwrap();
+    // Send immediately, before the handshake can complete.
+    push.send(Message::single("early")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"early"[..]);
+}
+
+#[compio::test]
+async fn send_before_connect_tcp() {
+    let p = free_tcp_port();
+    let push = Socket::new(SocketType::Push, Options::default());
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(tcp_ep(p)).await.unwrap();
+    push.connect(tcp_ep(p)).await.unwrap();
+    push.send(Message::single("early")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"early"[..]);
 }

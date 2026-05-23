@@ -43,7 +43,6 @@ async fn ipv6_push_pull() {
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(tcp6(port)).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     push.send(Message::single("hello v6")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
@@ -62,7 +61,6 @@ async fn ipv6_req_rep() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(tcp6(port)).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
@@ -116,7 +114,6 @@ async fn ipv6_dealer_router() {
         Options::default().identity(bytes::Bytes::from_static(b"v6-cli")),
     );
     dealer.connect(tcp6(port)).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     dealer.send(Message::single("v6-msg")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), router.recv())

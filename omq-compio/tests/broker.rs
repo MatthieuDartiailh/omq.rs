@@ -29,8 +29,6 @@ async fn router_dealer_rep_single_cycle() {
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(backend).await.unwrap();
 
-    compio::time::sleep(Duration::from_millis(50)).await;
-
     let router_c = router.clone();
     let dealer_c = dealer.clone();
     let broker = compio::runtime::spawn(async move {

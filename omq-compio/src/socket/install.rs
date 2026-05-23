@@ -101,6 +101,22 @@ pub(super) fn install_inproc_peer(
         }
     }
     inner.inproc_recv_event.notify(usize::MAX);
+    // Drain any messages that were queued in the shared send queue
+    // before this inproc peer connected. Wire peers get this via
+    // their driver's select loop; inproc has no driver, so we drain
+    // inline.
+    if is_round_robin_send(inner.socket_type)
+        && let Some(rx) = &inner.shared_send_rx
+    {
+        let peers = inner.out_peers.read().expect("peers lock");
+        if let Some(slot) = peers.get(idx) {
+            while let Ok(msg) = rx.try_recv() {
+                if slot.out.try_send_immediate(msg).is_err() {
+                    break;
+                }
+            }
+        }
+    }
     // Synthesise HandshakeSucceeded - inproc has no wire handshake
     // but consumers expect the same monitor signal as wire peers.
     inner.monitor.handshake_succeeded(endpoint, info);
@@ -352,6 +368,8 @@ fn transport_crypto_config(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+#[cfg_attr(not(feature = "ws"), allow(clippy::needless_pass_by_value))]
 fn install_accepted_wire_peer_with_leftover(
     inner: &Arc<SocketInner>,
     reader: WireReader,

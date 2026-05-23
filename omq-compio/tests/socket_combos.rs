@@ -19,7 +19,6 @@ async fn req_to_dealer() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep("req-dealer-comp")).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("request")).await.unwrap();
 
@@ -48,7 +47,6 @@ async fn dealer_to_dealer() {
 
     let dealer_b = Socket::new(SocketType::Dealer, Options::default());
     dealer_b.connect(ep("dealer-dealer-comp")).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     dealer_b.send(Message::single("from-b")).await.unwrap();
     let msg = compio::time::timeout(Duration::from_secs(2), dealer_a.recv())
@@ -78,7 +76,6 @@ async fn dealer_to_dealer_multiple_rounds() {
         .connect(ep("dealer-dealer-rounds-comp"))
         .await
         .unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..5 {
         dealer_b
