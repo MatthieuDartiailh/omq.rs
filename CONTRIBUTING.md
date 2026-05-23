@@ -5,17 +5,9 @@
 ```sh
 git clone https://github.com/paddor/omq.rs.git
 cd omq.rs
-cargo build --workspace
-cargo clippy --workspace --all-targets
 ```
 
-Run the full test suite (covers both backends):
-
-```sh
-./scripts/test-all.sh
-```
-
-MSRV is Rust 1.93, edition 2024.
+MSRV is Rust 1.93, edition 2024. See [DEVELOPMENT.md](DEVELOPMENT.md) for build, test, fuzz, soak, and benchmark commands.
 
 ## Making changes
 
@@ -31,9 +23,6 @@ Before committing:
 cargo clippy --workspace --all-targets   # pedantic warnings are enabled
 cargo fmt                                # rustfmt.toml: edition 2024, max_width 100
 ```
-
-Feature-gated code (`curve`, `blake3zmq`, `lz4`, `zstd`, `ws`, `priority`)
-must be tested with the relevant feature enabled.
 
 ## Pull requests
 

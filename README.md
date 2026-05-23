@@ -156,6 +156,10 @@ Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
 - `omq-compio`: Linux 6.0 or newer (io_uring multi-shot recv with
   provided buffers).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [DEVELOPMENT.md](DEVELOPMENT.md) for build, test, and benchmark commands.
+
 ## License
 
 ISC.
