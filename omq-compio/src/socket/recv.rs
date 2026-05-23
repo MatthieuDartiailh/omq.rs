@@ -159,7 +159,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
                     }
                 }
             }
-            Some(Err(e)) if e.raw_os_error() == Some(105) => {
+            Some(Err(e)) if e.raw_os_error() == Some(libc::ENOBUFS) => {
                 let mut sguard = state.recv_stream.0.lock().await;
                 *sguard = Some(crate::socket::RecvStreamState::OneShot);
             }
@@ -232,7 +232,7 @@ async fn handle_pull_outcome(
             Ok(RecvAction::Return(None))
         }
         PullOutcome::Err(e) => {
-            if e.raw_os_error() != Some(105) {
+            if e.raw_os_error() != Some(libc::ENOBUFS) {
                 state.signal_eof();
                 return Err(Error::Closed);
             }

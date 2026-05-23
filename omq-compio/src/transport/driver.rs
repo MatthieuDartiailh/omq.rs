@@ -649,7 +649,7 @@ impl DriverLoopState {
             StreamArmOutcome::Eof => return Ok(true),
             StreamArmOutcome::ProtoErr(e) => return Err(e),
             StreamArmOutcome::Err(e) => {
-                if e.raw_os_error() != Some(105) {
+                if e.raw_os_error() != Some(libc::ENOBUFS) {
                     return Ok(true);
                 }
                 if accumulating {
