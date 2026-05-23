@@ -166,6 +166,10 @@ All values are wall time.
 
 <!-- END latency_percentiles -->
 
+<p align="center">
+  <img src="doc/charts/latency.svg" alt="REQ/REP latency" width="850">
+</p>
+
 ## CLIENT/SERVER latency percentiles
 
 Same methodology as above, using CLIENT/SERVER sockets instead of REQ/REP.
