@@ -330,6 +330,112 @@ impl AsyncSocket {
         let (_, _, _) = (exc_type, exc_val, exc_tb);
         self.close(py, None)
     }
+
+    // ── Direct hot-path methods (bypass compio thread) ──────────────
+
+    #[pyo3(name = "_send_direct", signature = (payload, flags = 0))]
+    fn send_direct(
+        &self,
+        payload: &Bound<'_, PyAny>,
+        flags: i32,
+    ) -> PyResult<()> {
+        let bytes = conversions::bytes_from_pyany(payload)?;
+        let Some(msg) = self.inner.build_or_buffer(bytes, flags) else {
+            return Ok(());
+        };
+        self.inner.materialize()?;
+        let mat_guard = self.inner.materialized.lock().unwrap();
+        let mat = mat_guard.as_ref().unwrap();
+        let mut prod = mat.send_prod.lock().unwrap();
+        match prod.push_and_flush(msg) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(timeout_err()),
+        }
+    }
+
+    #[pyo3(name = "_send_multipart_direct", signature = (parts, flags = 0))]
+    fn send_multipart_direct(
+        &self,
+        parts: &Bound<'_, PyAny>,
+        flags: i32,
+    ) -> PyResult<()> {
+        let _ = flags;
+        let msg = conversions::message_from_pylist(parts)?;
+        self.inner.materialize()?;
+        let mat_guard = self.inner.materialized.lock().unwrap();
+        let mat = mat_guard.as_ref().unwrap();
+        let mut prod = mat.send_prod.lock().unwrap();
+        match prod.push_and_flush(msg) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(timeout_err()),
+        }
+    }
+
+    #[pyo3(name = "_try_recv")]
+    fn try_recv<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        if let Some(head) = self.inner.pop_rxbuf_head() {
+            return Ok(PyBytes::new_bound(py, &head).into_any().unbind());
+        }
+        self.inner.materialize()?;
+        let mat_guard = self.inner.materialized.lock().unwrap();
+        let mat = mat_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let mut cons = mat.recv_cons.lock().unwrap();
+        if let Some(msg) = cons.prefetch_and_pop() {
+            let mut parts: Vec<Bytes> = msg.iter().collect();
+            let head = if parts.is_empty() {
+                Bytes::new()
+            } else {
+                parts.remove(0)
+            };
+            if !parts.is_empty() {
+                self.inner.store_rxbuf(parts);
+            }
+            Ok(PyBytes::new_bound(py, &head).into_any().unbind())
+        } else {
+            Ok(py.None())
+        }
+    }
+
+    #[pyo3(name = "_try_recv_multipart")]
+    fn try_recv_multipart<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        let leftover = self.inner.take_rxbuf();
+        if !leftover.is_empty() {
+            let parts: Vec<Bound<'_, PyBytes>> = leftover
+                .into_iter()
+                .map(|b| PyBytes::new_bound(py, &b))
+                .collect();
+            return Ok(PyList::new_bound(py, parts).into_any().unbind());
+        }
+        self.inner.materialize()?;
+        let mat_guard = self.inner.materialized.lock().unwrap();
+        let mat = mat_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let mut cons = mat.recv_cons.lock().unwrap();
+        if let Some(msg) = cons.prefetch_and_pop() {
+            Ok(conversions::parts_to_pylist(py, msg).into_any().unbind())
+        } else {
+            Ok(py.None())
+        }
+    }
+
+    #[pyo3(name = "_recv_fd")]
+    fn recv_fd(&self) -> PyResult<i32> {
+        self.inner.materialize()?;
+        let mat_guard = self.inner.materialized.lock().unwrap();
+        let mat = mat_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let recv_notify = mat.recv_notify.clone();
+        let owned_fd = recv_notify
+            .dup_fd()
+            .map_err(|e| map_err(PError::Io(e)))?;
+        recv_notify.park_begin();
+        use std::os::fd::IntoRawFd;
+        Ok(owned_fd.into_raw_fd())
+    }
 }
 
 /// Await a message from the recv queue, using async eventfd reads for

@@ -14,7 +14,9 @@ Use::
 """
 
 import asyncio
+import errno as _errno
 import json
+import os
 import pickle
 
 from . import _native  # type: ignore[attr-defined]
@@ -112,28 +114,80 @@ class Socket:
             raise error.from_native(e) from None
 
     async def send(self, data, flags=0, copy=True, track=False):
-        try:
-            return await self._sock.send(data, flags)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
+        while True:
+            try:
+                self._sock._send_direct(data, flags)
+                return
+            except _native.ZMQError as e:
+                if getattr(e, "errno", None) == _errno.EAGAIN:
+                    await asyncio.sleep(0)
+                    continue
+                raise error.from_native(e) from None
 
     async def recv(self, flags=0, copy=True, track=False):
         try:
-            return await self._sock.recv(flags)
+            return await self._wait_and_recv(self._sock._try_recv)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     async def send_multipart(self, parts, flags=0, copy=True, track=False):
-        try:
-            return await self._sock.send_multipart(parts, flags)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
+        while True:
+            try:
+                self._sock._send_multipart_direct(parts, flags)
+                return
+            except _native.ZMQError as e:
+                if getattr(e, "errno", None) == _errno.EAGAIN:
+                    await asyncio.sleep(0)
+                    continue
+                raise error.from_native(e) from None
 
     async def recv_multipart(self, flags=0, copy=True, track=False):
         try:
-            return await self._sock.recv_multipart(flags)
+            return await self._wait_and_recv(self._sock._try_recv_multipart)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
+
+    async def _wait_and_recv(self, try_fn):
+        result = try_fn()
+        if result is not None:
+            return result
+
+        fd = self._sock._recv_fd()
+
+        result = try_fn()
+        if result is not None:
+            os.close(fd)
+            return result
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        def _on_readable():
+            try:
+                os.read(fd, 8)
+            except OSError:
+                pass
+            try:
+                msg = try_fn()
+            except Exception as e:
+                loop.remove_reader(fd)
+                os.close(fd)
+                if not fut.done():
+                    fut.set_exception(e)
+                return
+            if msg is not None:
+                loop.remove_reader(fd)
+                os.close(fd)
+                if not fut.done():
+                    fut.set_result(msg)
+
+        loop.add_reader(fd, _on_readable)
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            loop.remove_reader(fd)
+            os.close(fd)
+            raise
 
     # ── Serialization helpers ────────────────────────────────────────
 

@@ -112,3 +112,126 @@ async def test_async_mixed_with_sync(tcp_endpoint):
     finally:
         await push.close()
         pull.close()
+
+
+@pytest.mark.asyncio
+async def test_async_sndmore_flag_aggregates(tcp_endpoint):
+    ctx = zmq_async.Context()
+    pull = ctx.socket(pyomq.PULL)
+    push = ctx.socket(pyomq.PUSH)
+    try:
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
+        await push.send(b"a", flags=pyomq.SNDMORE)
+        await push.send(b"b", flags=pyomq.SNDMORE)
+        await push.send(b"c")
+        assert await pull.recv_multipart() == [b"a", b"b", b"c"]
+    finally:
+        await push.close()
+        await pull.close()
+
+
+@pytest.mark.asyncio
+async def test_async_rcvmore_iterates_frames(tcp_endpoint):
+    ctx = zmq_async.Context()
+    pull = ctx.socket(pyomq.PULL)
+    push = ctx.socket(pyomq.PUSH)
+    try:
+        ep = await pull.bind(tcp_endpoint)
+        await push.connect(ep)
+        await push.send_multipart([b"x", b"y", b"z"])
+        assert await pull.recv() == b"x"
+        assert pull.getsockopt(pyomq.RCVMORE) == 1
+        assert await pull.recv() == b"y"
+        assert pull.getsockopt(pyomq.RCVMORE) == 1
+        assert await pull.recv() == b"z"
+        assert pull.getsockopt(pyomq.RCVMORE) == 0
+    finally:
+        await push.close()
+        await pull.close()
+
+
+@pytest.mark.asyncio
+async def test_async_context_manager(tcp_endpoint):
+    ctx = zmq_async.Context()
+    async with ctx.socket(pyomq.PAIR) as a, ctx.socket(pyomq.PAIR) as b:
+        ep = await a.bind(tcp_endpoint)
+        await b.connect(ep)
+        await a.send(b"ping")
+        assert await b.recv() == b"ping"
+        await b.send(b"pong")
+        assert await a.recv() == b"pong"
+
+
+@pytest.mark.asyncio
+async def test_async_req_rep_roundtrip(tcp_endpoint):
+    ctx = zmq_async.Context()
+    rep = ctx.socket(pyomq.REP)
+    req = ctx.socket(pyomq.REQ)
+    try:
+        ep = await rep.bind(tcp_endpoint)
+        await req.connect(ep)
+        await req.send(b"ping")
+        assert await rep.recv() == b"ping"
+        await rep.send(b"pong")
+        assert await req.recv() == b"pong"
+    finally:
+        await req.close()
+        await rep.close()
+
+
+@pytest.mark.asyncio
+async def test_async_unsubscribe_drops_topic(tcp_endpoint):
+    ctx = zmq_async.Context()
+    pub = ctx.socket(pyomq.PUB)
+    sub = ctx.socket(pyomq.SUB)
+    try:
+        ep = await pub.bind(tcp_endpoint)
+        await sub.connect(ep)
+        await sub.subscribe(b"a")
+        await sub.subscribe(b"b")
+        await asyncio.sleep(0.1)
+        await sub.unsubscribe(b"a")
+        await asyncio.sleep(0.1)
+        await pub.send(b"a-one")
+        await pub.send(b"b-two")
+        sub.setsockopt(pyomq.RCVTIMEO, 500)
+        assert await sub.recv() == b"b-two"
+    finally:
+        await pub.close()
+        await sub.close()
+
+
+@pytest.mark.asyncio
+async def test_async_dealer_router_identity(tcp_endpoint):
+    ctx = zmq_async.Context()
+    router = ctx.socket(pyomq.ROUTER)
+    dealer = ctx.socket(pyomq.DEALER)
+    try:
+        dealer.setsockopt(pyomq.IDENTITY, b"client-A")
+        ep = await router.bind(tcp_endpoint)
+        await dealer.connect(ep)
+        await dealer.send(b"hello")
+        parts = await router.recv_multipart()
+        assert parts[0] == b"client-A"
+        assert parts[-1] == b"hello"
+        await router.send_multipart([b"client-A", b"hi-back"])
+        assert await dealer.recv() == b"hi-back"
+    finally:
+        await dealer.close()
+        await router.close()
+
+
+@pytest.mark.asyncio
+async def test_async_close_wakes_pending_recv(tcp_endpoint):
+    ctx = zmq_async.Context()
+    pull = ctx.socket(pyomq.PULL)
+    try:
+        await pull.bind(tcp_endpoint)
+        recv_task = asyncio.create_task(pull.recv())
+        await asyncio.sleep(0.05)
+        await pull.close()
+        with pytest.raises(Exception):
+            await recv_task
+    except Exception:
+        pass
