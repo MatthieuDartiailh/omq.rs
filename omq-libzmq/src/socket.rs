@@ -88,10 +88,14 @@ impl NotifyFd {
         let mut fds = [-1i32; 2];
         unsafe {
             libc::pipe(fds.as_mut_ptr());
+            libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
+            libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
         let (recv_read, recv_write) = (fds[0], fds[1]);
         unsafe {
             libc::pipe(fds.as_mut_ptr());
+            libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
+            libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
         let (send_read, send_write) = (fds[0], fds[1]);
         Self {
