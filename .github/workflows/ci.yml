@@ -131,3 +131,15 @@ jobs:
         run: cargo test -p omq-tokio  --test interop_ruby
       - name: rust ↔ ruby interop (compio)
         run: cargo test -p omq-compio --test interop_ruby
+
+  ci-success:
+    name: CI success
+    needs: [test, feature-matrix, facade, fmt, clippy, clippy-examples, pyomq, ruby-interop]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: check all jobs passed
+        run: |
+          if [[ '${{ toJSON(needs.*.result) }}' =~ (failure|cancelled) ]]; then
+            exit 1
+          fi
