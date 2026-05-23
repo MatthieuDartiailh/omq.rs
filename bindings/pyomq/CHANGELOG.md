@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-23
+
+### Changed
+
+- Async send bypasses the compio thread entirely — yring push runs
+  inline on the Python thread, no future, no cross-thread hop.
+- Async recv uses `loop.add_reader()` on the recv eventfd instead of
+  routing through `compio_future_into_py`. Wakeup goes straight from
+  epoll to a Python callback that pops the yring on the Python thread.
+- Async throughput improved from ~9k msg/s to ~960k msg/s at 128 B
+  (previously bottlenecked by ~100 µs per-message `call_soon_threadsafe`
+  round-trip).
+- Benchmark script (`scripts/update_perf.py`) now measures async
+  throughput and latency (pyomq + pyzmq) and generates dual-axis SVG
+  charts to `doc/charts/`.
+
+### Added
+
+- Native `_send_direct`, `_send_multipart_direct`, `_try_recv`,
+  `_try_recv_multipart`, `_recv_fd` methods on `AsyncSocket` for the
+  Python-side hot path.
+- BLAKE3ZMQ authentication section in README.
+- 7 new async tests: SNDMORE, RCVMORE, context manager, REQ/REP,
+  unsubscribe, DEALER/ROUTER identity, close-while-pending.
+
 ## [0.8.1] - 2026-05-23
 
 ### Changed
