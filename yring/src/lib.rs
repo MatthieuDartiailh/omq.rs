@@ -154,6 +154,7 @@ impl<T> Producer<T> {
             return FlushResult::NothingToFlush;
         }
         let count = self.tail - prev_flush;
+        self.cached_head = self.ring.head.0.load(Ordering::Acquire);
         let was_empty = prev_flush == self.cached_head;
         self.ring.flush.0.store(self.tail, Ordering::Release);
         FlushResult::Flushed { count, was_empty }
@@ -420,5 +421,26 @@ mod tests {
             }
         }
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn flush_was_empty_after_consumer_drains() {
+        let (mut p, mut c) = spsc::<u32>(4);
+        for i in 0..5 {
+            p.push_and_flush(i).unwrap();
+            let val = c.prefetch_and_pop().unwrap();
+            assert_eq!(val, i);
+            // Next flush must see was_empty == true because the
+            // consumer drained the ring.
+        }
+        p.push(99).unwrap();
+        let r = p.flush();
+        assert_eq!(
+            r,
+            FlushResult::Flushed {
+                count: 1,
+                was_empty: true,
+            }
+        );
     }
 }
