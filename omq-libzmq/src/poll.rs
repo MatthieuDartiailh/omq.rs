@@ -122,15 +122,26 @@ fn drain_eventfds(items: &[ZmqPollItem]) {
         }
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
-        // Drain recv eventfd: one read resets counter to 0.
         if (item.events & ZMQ_POLLIN) != 0 {
             #[cfg(target_os = "linux")]
-            let fd = sock.notify.recv_fd;
+            {
+                let fd = sock.notify.recv_fd;
+                let mut val = 0u64;
+                unsafe { libc::read(fd, (&raw mut val).cast(), 8) };
+            }
             #[cfg(not(target_os = "linux"))]
-            let fd = sock.notify.recv_read;
-
-            let mut val: u64 = 0;
-            unsafe { libc::read(fd, (&raw mut val).cast(), 8) };
+            {
+                let fd = sock.notify.recv_read;
+                let mut buf = [0u8; 64];
+                loop {
+                    let n = unsafe {
+                        libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
+                    };
+                    if n <= 0 {
+                        break;
+                    }
+                }
+            }
         }
     }
 }
