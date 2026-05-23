@@ -87,7 +87,6 @@ async fn rep_survives_client_disconnect_mid_cycle() {
     {
         let req1 = Socket::new(SocketType::Req, Options::default());
         req1.connect(ep.clone()).await.unwrap();
-        compio::time::sleep(Duration::from_millis(50)).await;
         req1.send(Message::single("drop-me")).await.unwrap();
 
         // Let REP receive the request (stale envelope now held).
@@ -101,7 +100,6 @@ async fn rep_survives_client_disconnect_mid_cycle() {
     // Second client: full roundtrip must succeed.
     let req2 = Socket::new(SocketType::Req, Options::default());
     req2.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     req2.send(Message::single("real")).await.unwrap();
     let got = compio::time::timeout(Duration::from_millis(500), rep.recv())
@@ -157,7 +155,6 @@ async fn req_rep_roundtrip_sequential_ipv4() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
@@ -182,7 +179,6 @@ async fn req_rep_roundtrip_sequential_with_yield() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
@@ -208,7 +204,6 @@ async fn req_rep_roundtrip_sequential_with_long_yield() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
@@ -234,7 +229,6 @@ async fn req_rep_roundtrip_sequential_spawned_recv() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
@@ -263,7 +257,6 @@ async fn req_rep_sequential_longer_timeout() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     req.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(5), rep.recv())

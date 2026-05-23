@@ -33,7 +33,6 @@ async fn push_distributes_across_inproc_and_tcp() {
 
     let pull_tcp = Socket::new(SocketType::Pull, Options::default());
     pull_tcp.connect(tcp).await.unwrap();
-
     compio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..N {
@@ -98,7 +97,6 @@ async fn push_reverts_to_remaining_after_peer_disconnect() {
 
     let pull_tcp = Socket::new(SocketType::Pull, Options::default());
     pull_tcp.connect(tcp).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..INIT {
         push.send(Message::single(format!("init-{i}")))
