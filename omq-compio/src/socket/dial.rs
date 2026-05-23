@@ -68,6 +68,15 @@ fn reset_peer_channel(
 ) -> (flume::Sender<DriverCommand>, flume::Receiver<DriverCommand>) {
     let cap = cmd_channel_capacity(&inner.options);
     let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
+    #[cfg(feature = "priority")]
+    if super::inner::is_round_robin_send(inner.socket_type) {
+        let mut buf = inner.pre_connect_buf.lock().expect("pre_connect_buf");
+        while let Some(msg) = buf.pop_front() {
+            if cmd_tx.try_send(DriverCommand::SendMessage(msg)).is_err() {
+                break;
+            }
+        }
+    }
     *handle.write().expect("wire peer handle lock") = cmd_tx.clone();
     *info_holder.write().expect("peer_info lock") = None;
     if let Some(set) = peer_sub {

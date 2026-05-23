@@ -117,6 +117,18 @@ pub(super) fn install_inproc_peer(
             }
         }
     }
+    #[cfg(feature = "priority")]
+    if is_round_robin_send(inner.socket_type) {
+        let peers = inner.out_peers.read().expect("peers lock");
+        if let Some(slot) = peers.get(idx) {
+            let mut buf = inner.pre_connect_buf.lock().expect("pre_connect_buf");
+            while let Some(msg) = buf.pop_front() {
+                if slot.out.try_send_immediate(msg).is_err() {
+                    break;
+                }
+            }
+        }
+    }
     // Synthesise HandshakeSucceeded - inproc has no wire handshake
     // but consumers expect the same monitor signal as wire peers.
     inner.monitor.handshake_succeeded(endpoint, info);
@@ -382,6 +394,15 @@ fn install_accepted_wire_peer_with_leftover(
 ) {
     let cap = cmd_channel_capacity(&inner.options);
     let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
+    #[cfg(feature = "priority")]
+    if is_round_robin_send(inner.socket_type) {
+        let mut buf = inner.pre_connect_buf.lock().expect("pre_connect_buf");
+        while let Some(msg) = buf.pop_front() {
+            if cmd_tx.try_send(DriverCommand::SendMessage(msg)).is_err() {
+                break;
+            }
+        }
+    }
     let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
