@@ -1,6 +1,6 @@
 [package]
 name = "omq-compio"
-version = "0.10.0"
+version = "0.10.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -37,7 +37,7 @@ soak = []
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.13.0", default-features = false }
 blume = { path = "../blume", version = "0.2.2" }
-yring = { path = "../yring", version = "0.2.0" }
+yring = { path = "../yring", version = "0.2.1" }
 bytes = "1"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
