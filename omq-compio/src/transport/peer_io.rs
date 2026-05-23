@@ -89,7 +89,7 @@ impl std::fmt::Debug for WireReader {
 
 impl WireReader {
     pub(crate) fn supports_multishot(&self) -> bool {
-        matches!(self, Self::Tcp(_) | Self::Ipc(_))
+        cfg!(target_os = "linux") && matches!(self, Self::Tcp(_) | Self::Ipc(_))
     }
 
     /// Build a multi-shot recv stream backed by compio's `BUF_RING` pool.
