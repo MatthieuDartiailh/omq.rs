@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-23
+
+### Added
+
+- Sans-I/O WebSocket codec (`WsCodec`): HTTP upgrade handshake, frame parser/encoder, mask key generation.
+- `ZMQ_STREAM` socket type for raw TCP communication.
+- WS `EncodedQueue` fast paths: server-side unmasked flat encode and client-side masked flat encode.
+- Thread-local `SmallRng` for WS mask key generation (avoids per-message allocation).
+
+### Fixed
+
+- Skip ZMTP frame introspection APIs in WebSocket mode.
+
 ## [0.12.0] - 2026-05-21
 
 ### Added

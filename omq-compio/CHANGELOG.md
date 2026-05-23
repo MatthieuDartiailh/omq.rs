@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-23
+
+### Added
+
+- WebSocket transport (`ws://`) routed through the internal TCP driver; no `compio-ws` or `tungstenite` dependency.
+- WSS/TLS transport (`wss://`).
+- DNS resolution for TCP and WebSocket transports.
+- `ZMQ_STREAM` socket type for raw TCP communication.
+
+### Fixed
+
+- WS driver: large-message bypass, leftover bytes, and encode path correctness.
+- Build without `ws` feature.
+- REQ socket state machine reset race on reconnect.
+- Clippy pedantic warnings.
+
+### Performance
+
+- WS small-message throughput 3× via recv fast path and send direct-encode.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.13.0.
+
 ## [0.9.1] - 2026-05-21
 
 ### Fixed

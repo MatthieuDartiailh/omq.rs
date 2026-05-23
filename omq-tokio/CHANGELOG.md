@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-23
+
+### Added
+
+- WebSocket transport (`ws://` / `wss://`).
+- `ZMQ_STREAM` socket type for raw TCP communication.
+- WS `EncodedQueue` fast paths (server-side and client-side).
+
+### Fixed
+
+- WS driver: large-message bypass, leftover bytes, and encode path correctness.
+- REQ socket state machine reset race on reconnect.
+
+### Changed
+
+- Drop `tungstenite` / `tokio-tungstenite` dependencies.
+- *(deps)* Bump `omq-proto` to 0.13.0.
+
 ## [0.10.0] - 2026-05-21
 
 ### Changed

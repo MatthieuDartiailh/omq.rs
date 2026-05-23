@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-23
+
 ### Added
 
 - CURVE client authentication via `socket.set_curve_auth()`: pass a list of
@@ -14,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PeerInfo` and returning bool. No ZAP protocol.
 - `PeerInfo` class exposed to authenticator callbacks with a `public_key`
   property (40-byte Z85 bytes).
+
+### Changed
+
+- *(deps)* Bump `omq-compio` to 0.10.0.
 
 ## [0.7.1] - 2026-05-21
 

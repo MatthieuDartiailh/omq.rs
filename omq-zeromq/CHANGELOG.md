@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-23
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.11.0, `omq-proto` to 0.13.0.
+
 ## [0.5.0] - 2026-05-21
 
 ### Changed
