@@ -248,6 +248,7 @@ mod inner {
         seq: usize,
         dict: Option<Bytes>,
     ) -> common::Cell {
+        use std::rc::Rc;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -289,7 +290,7 @@ mod inner {
                     let refs: Vec<&Socket> = pushes.iter().collect();
                     common::wait_connected(&refs).await;
 
-                    let pushes = Arc::new(pushes);
+                    let pushes = Rc::new(pushes);
 
                     let burst = |k: usize| {
                         let pushes = pushes.clone();
@@ -319,7 +320,7 @@ mod inner {
 
                     let cell = common::measure_min_of(payload.len(), pushes.len(), burst).await;
                     stop.store(true, Ordering::Relaxed);
-                    if let Ok(pushes) = Arc::try_unwrap(pushes) {
+                    if let Ok(pushes) = Rc::try_unwrap(pushes) {
                         drop(pushes);
                     }
                     cell
