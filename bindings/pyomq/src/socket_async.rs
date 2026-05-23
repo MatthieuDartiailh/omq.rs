@@ -14,9 +14,13 @@
 //!      spawns it on the compio runtime and bridges completion back
 //!      to the asyncio event loop via `loop.call_soon_threadsafe`.
 
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use compio::BufResult;
+use compio::io::AsyncRead;
+use compio::runtime::fd::AsyncFd;
 use omq_proto::error::Error as PError;
 
 use crate::error::timeout_err;
@@ -95,13 +99,11 @@ impl AsyncSocket {
             let mut prod = mat.send_prod.lock().unwrap();
             match prod.push_and_flush(msg) {
                 Ok(_) => {
-                    return runtime::compio_future_into_py(py, move || async move {
+                    runtime::compio_future_into_py(py, move || async move {
                         Python::with_gil(|py| Ok(py.None()))
-                    });
+                    })
                 }
-                Err(_returned) => {
-                    return Err(timeout_err());
-                }
+                Err(_returned) => Err(timeout_err()),
             }
         }
     }
@@ -122,13 +124,11 @@ impl AsyncSocket {
             let mut prod = mat.send_prod.lock().unwrap();
             match prod.push_and_flush(msg) {
                 Ok(_) => {
-                    return runtime::compio_future_into_py(py, move || async move {
+                    runtime::compio_future_into_py(py, move || async move {
                         Python::with_gil(|py| Ok(py.None()))
-                    });
+                    })
                 }
-                Err(_returned) => {
-                    return Err(timeout_err());
-                }
+                Err(_returned) => Err(timeout_err()),
             }
         }
     }
@@ -144,34 +144,19 @@ impl AsyncSocket {
         self.inner.materialize()?;
         let inner = self.inner.clone();
         runtime::compio_future_into_py(py, move || async move {
-            loop {
-                {
-                    let mat_guard = inner.materialized.lock().unwrap();
-                    let mat = mat_guard
-                        .as_ref()
-                        .ok_or_else(|| map_err(PError::Closed))?;
-                    let mut cons = mat.recv_cons.lock().unwrap();
-                    if let Some(msg) = cons.prefetch_and_pop() {
-                        let mut parts: Vec<Bytes> = msg.iter().collect();
-                        let head = if parts.is_empty() {
-                            Bytes::new()
-                        } else {
-                            parts.remove(0)
-                        };
-                        if !parts.is_empty() {
-                            inner.store_rxbuf(parts);
-                        }
-                        return Python::with_gil(|py| {
-                            Ok(PyBytes::new_bound(py, &head).into_any().unbind())
-                        });
-                    }
-                }
-                // FIXME: replace with an async read on recv_notify.efd
-                // (compio raw fd op) so we wake immediately instead of
-                // polling at 1 ms intervals. Needs recv_notify threaded
-                // through Materialized into this future (~3 files).
-                compio::time::sleep(std::time::Duration::from_millis(1)).await;
+            let msg = async_recv_message(&inner).await?;
+            let mut parts: Vec<Bytes> = msg.iter().collect();
+            let head = if parts.is_empty() {
+                Bytes::new()
+            } else {
+                parts.remove(0)
+            };
+            if !parts.is_empty() {
+                inner.store_rxbuf(parts);
             }
+            Python::with_gil(|py| {
+                Ok(PyBytes::new_bound(py, &head).into_any().unbind())
+            })
         })
     }
 
@@ -193,21 +178,10 @@ impl AsyncSocket {
         self.inner.materialize()?;
         let inner = self.inner.clone();
         runtime::compio_future_into_py(py, move || async move {
-            loop {
-                {
-                    let mat_guard = inner.materialized.lock().unwrap();
-                    let mat = mat_guard
-                        .as_ref()
-                        .ok_or_else(|| map_err(PError::Closed))?;
-                    let mut cons = mat.recv_cons.lock().unwrap();
-                    if let Some(msg) = cons.prefetch_and_pop() {
-                        return Python::with_gil(|py| {
-                            Ok(conversions::parts_to_pylist(py, msg).into_any().unbind())
-                        });
-                    }
-                }
-                compio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
+            let msg = async_recv_message(&inner).await?;
+            Python::with_gil(|py| {
+                Ok(conversions::parts_to_pylist(py, msg).into_any().unbind())
+            })
         })
     }
 
@@ -355,5 +329,81 @@ impl AsyncSocket {
     ) -> PyResult<Bound<'py, PyAny>> {
         let (_, _, _) = (exc_type, exc_val, exc_tb);
         self.close(py, None)
+    }
+}
+
+/// Await a message from the recv queue, using async eventfd reads for
+/// notification instead of polling. Must run on the compio thread.
+///
+/// Unlike the sync path, we never call `park_end()`. With concurrent
+/// async recvs on the same socket, the first winner's `park_end()`
+/// would stop eventfd writes and starve remaining waiters. Leaving
+/// parking=true means the producer always writes — one extra syscall
+/// per push, but correct under concurrency.
+async fn async_recv_message(
+    inner: &Arc<SocketInner>,
+) -> PyResult<omq_compio::Message> {
+    // Fast path: check queue without parking overhead.
+    {
+        let mat_guard = inner.materialized.lock().unwrap();
+        let mat = mat_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let mut cons = mat.recv_cons.lock().unwrap();
+        if let Some(msg) = cons.prefetch_and_pop() {
+            return Ok(msg);
+        }
+    }
+
+    // Slow path: park + async eventfd read.
+    let recv_notify = {
+        let mat_guard = inner.materialized.lock().unwrap();
+        let mat = mat_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        mat.recv_notify.clone()
+    };
+
+    let owned_fd: OwnedFd = recv_notify
+        .dup_fd()
+        .map_err(|e| map_err(PError::Io(e)))?;
+    let async_fd: AsyncFd<OwnedFd> =
+        AsyncFd::new(owned_fd).map_err(|e| map_err(PError::Io(e)))?;
+
+    recv_notify.park_begin();
+
+    // Re-check after setting flag to close the race window.
+    {
+        let mat_guard = inner.materialized.lock().unwrap();
+        let mat = mat_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let mut cons = mat.recv_cons.lock().unwrap();
+        if let Some(msg) = cons.prefetch_and_pop() {
+            return Ok(msg);
+        }
+    }
+
+    loop {
+        let buf = Vec::with_capacity(8);
+        let mut r: &AsyncFd<OwnedFd> = &async_fd;
+        let BufResult(res, _) = AsyncRead::read(&mut r, buf).await;
+
+        match res {
+            Ok(n) if n > 0 => {}
+            Ok(_) => continue,
+            Err(_) => return Err(map_err(PError::Closed)),
+        }
+
+        {
+            let mat_guard = inner.materialized.lock().unwrap();
+            let mat = mat_guard
+                .as_ref()
+                .ok_or_else(|| map_err(PError::Closed))?;
+            let mut cons = mat.recv_cons.lock().unwrap();
+            if let Some(msg) = cons.prefetch_and_pop() {
+                return Ok(msg);
+            }
+        }
     }
 }

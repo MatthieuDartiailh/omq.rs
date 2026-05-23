@@ -106,6 +106,15 @@ impl RecvNotify {
     pub fn fd(&self) -> i32 {
         self.efd
     }
+
+    pub fn dup_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let fd = unsafe { libc::dup(self.efd) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
 }
 
 impl Drop for RecvNotify {

@@ -43,6 +43,7 @@ thread_local! {
 
     /// Pump task handles. Stored so the proxy can cancel them to get
     /// exclusive send/recv access on the underlying socket.
+    #[allow(clippy::type_complexity)]
     static PUMPS: RefCell<HashMap<u64, (
         compio::runtime::JoinHandle<()>,
         compio::runtime::JoinHandle<()>,
