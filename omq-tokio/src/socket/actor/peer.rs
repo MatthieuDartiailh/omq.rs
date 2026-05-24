@@ -84,7 +84,10 @@ impl SocketDriver {
         }
         match self.socket_type {
             SocketType::Req | SocketType::Rep if self.peers.is_empty() => {
-                self.type_state.on_peer_disconnected();
+                self.type_state
+                    .lock()
+                    .expect("type_state")
+                    .on_peer_disconnected();
             }
             _ => {}
         }
@@ -501,7 +504,12 @@ impl SocketDriver {
                 if self.type_state_needs_transform() {
                     let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg).await;
                     let Some(wrapped) = wrapped else { return };
-                    if let Ok(Some(m)) = self.type_state.post_recv(self.socket_type, wrapped)
+                    let transformed = self
+                        .type_state
+                        .lock()
+                        .expect("type_state")
+                        .post_recv(self.socket_type, wrapped);
+                    if let Ok(Some(m)) = transformed
                         && self.recv_tx.send(m).await.is_err()
                     {
                         self.begin_close(None, Some(Duration::ZERO));

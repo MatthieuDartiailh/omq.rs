@@ -6,6 +6,7 @@ mod peer;
 pub(crate) use peer::spawn_driver;
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::channel::oneshot;
@@ -187,8 +188,9 @@ pub(crate) struct SocketDriver {
     send_strategy: SendStrategy,
     send_submitter: SendSubmitter,
     recv_strategy: RecvStrategy,
-    /// REQ / REP envelope + alternation state.
-    type_state: TypeState,
+    /// REQ / REP envelope + alternation state. Shared with the socket
+    /// handle so `Socket::send` can call `pre_send` without an actor hop.
+    type_state: Arc<Mutex<TypeState>>,
     monitor: MonitorPublisher,
     /// Active subscription prefixes for SUB / XSUB. Replayed to new peers
     /// on `HandshakeSucceeded` so late-connecting publishers get our state.
@@ -226,6 +228,7 @@ impl SocketDriver {
         send_ring: super::handle::SpscSendRing,
         recv_notify: super::handle::SpscRecvNotify,
         spsc_activated: super::handle::SpscActivated,
+        type_state: Arc<Mutex<TypeState>>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -247,7 +250,7 @@ impl SocketDriver {
             send_strategy,
             send_submitter,
             recv_strategy,
-            type_state: TypeState::new(),
+            type_state,
             monitor,
             subscriptions: Vec::new(),
             joined_groups: new_joined_groups(),
@@ -349,10 +352,12 @@ impl SocketDriver {
                 }
             }
             SocketCommand::Send { msg, ack } => {
-                // Apply REQ / REP envelope + alternation synchronously; the
-                // actual queue push spawns so HWM backpressure never blocks
-                // the actor loop.
-                let transformed = match self.type_state.pre_send(self.socket_type, msg) {
+                let transformed = match self
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .pre_send(self.socket_type, msg)
+                {
                     Ok(m) => m,
                     Err(e) => {
                         let _ = ack.send(Err(e));

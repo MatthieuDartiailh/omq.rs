@@ -96,7 +96,12 @@ unchanged.
 `Inner` holds a `SendSubmitter` clone built from the `SendStrategy`
 before the driver is spawned. `Socket::send` matches on socket type:
 
-- REQ / REP -- go through `cmd_tx` (alternation bit mutates).
+- REQ / REP -- lock a shared `Arc<Mutex<TypeState>>`, call `pre_send`
+  inline (alternation flip + envelope framing), push the transformed
+  message through the submitter. The same `TypeState` is shared with
+  the actor, which locks it for `post_recv` and `on_peer_disconnected`.
+  Contention is zero: REQ/REP alternation guarantees send and recv
+  never overlap.
 - everything else -- inline-validate frame count and push straight into
   the submitter.
 

@@ -1,6 +1,6 @@
 //! Public `Socket` handle.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
 use tokio::sync::mpsc;
@@ -11,6 +11,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
+use omq_proto::type_state::TypeState;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
@@ -126,6 +127,8 @@ struct Inner {
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
     send_submitter: SendSubmitter,
+    /// Shared with the actor for REQ/REP `pre_send` / `post_recv`.
+    type_state: Arc<Mutex<TypeState>>,
 }
 
 impl Socket {
@@ -166,6 +169,7 @@ impl Socket {
         let recv_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
         let spsc_activated: SpscActivated = Arc::new(tokio::sync::Notify::new());
         let send_ring: Arc<RwLock<Option<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(None));
+        let type_state = Arc::new(Mutex::new(TypeState::new()));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -179,6 +183,7 @@ impl Socket {
             send_ring.clone(),
             recv_notify.clone(),
             spsc_activated.clone(),
+            type_state.clone(),
         );
         spawn_driver(driver);
         Self {
@@ -195,6 +200,7 @@ impl Socket {
                 monitor,
                 root_cancel: cancel,
                 send_submitter,
+                type_state,
             }),
         }
     }
@@ -269,15 +275,13 @@ impl Socket {
     pub async fn send(&self, msg: Message) -> Result<()> {
         match self.inner.socket_type {
             SocketType::Req | SocketType::Rep => {
-                // TypeState::pre_send is stateful (alternation + envelope).
-                // Must go through the actor.
-                let (ack, rx) = oneshot::channel();
-                self.inner
-                    .cmd_tx
-                    .send(SocketCommand::Send { msg, ack })
-                    .await
-                    .map_err(|_| Error::Closed)?;
-                rx.await.map_err(|_| Error::Closed)?
+                let msg = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .pre_send(self.inner.socket_type, msg)?;
+                self.inner.send_submitter.send(msg).await
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;

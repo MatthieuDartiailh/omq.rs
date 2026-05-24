@@ -689,11 +689,48 @@ concurrent_queue's per-pop CAS (3 atomics each), 100 queued messages
 Mutex is never contended, blume wins when messages batch (which they
 always do under load).
 
+## Tokio REQ/REP latency: actor bypass on send
+
+REQ/REP serial ping-pong over TCP measured ~81 µs p50 on tokio vs
+~35 µs on compio and ~38 µs on zmq.rs. Root cause: every REQ/REP
+send traversed 4 task hops (`Socket::send` → `cmd_tx` → actor
+wakes → `tokio::spawn(sub.send(...))` → driver wakes → oneshot ack
+back) because `TypeState::pre_send` mutates the alternation bit
+and the REP envelope, which lived inside the actor.
+
+Fix: share `TypeState` between the socket handle and the actor via
+`Arc<std::sync::Mutex<TypeState>>`. `Socket::send` for REQ/REP
+locks it inline, calls `pre_send`, and pushes through
+`SendSubmitter` — same path PUSH already takes. Contention is zero
+in practice: REQ/REP alternation guarantees send and recv (which
+calls `post_recv` under the same lock in the actor) never overlap.
+
+| transport | before | after | zmq.rs | compio |
+|---|---|---|---|---|
+| TCP 32 B | 81 µs | 72 µs | 38 µs | 34 µs |
+| IPC 32 B | 69 µs | 63 µs | 28 µs | 28 µs |
+
+~10 µs saved (the REQ send-side actor roundtrip). Remaining gap:
+REQ/REP recv still routes through the actor for `post_recv`, and
+the send path still hops through DropQueue → driver.
+
 ## What remains
+
+**REQ/REP recv bypass on tokio.** `post_recv` (envelope stripping
+for REQ, identity tagging for REP) still routes through the actor.
+Moving it to the socket handle side would eliminate 2 more task
+hops per round trip.
 
 **Single-wire-peer bypass on tokio.** The compio direct-encode
 fast path has no equivalent on tokio yet. Analogous shape: per-peer
-`EncodedQueue` clone, claimed via `try_lock`.
+`EncodedQueue` clone, claimed via `try_lock`. Would eliminate the
+DropQueue → driver hop on send and help both latency and
+throughput.
+
+**Read-path zero copy on tokio.** `Bytes::copy_from_slice` in the
+connection driver's read arm copies the full read buffer into a
+new allocation on every syscall return. Switching to `BytesMut` +
+`split()` would eliminate one memcpy per read.
 
 **Same-thread inproc (~4M).** Uses blume (no ypipe). The ypipe
 ring cannot serve same-thread sequential send-all-then-recv-all
