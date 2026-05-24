@@ -348,7 +348,16 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    codec.handle_input(Bytes::copy_from_slice(&read_buf[..n]))?;
+                    if let Err(e) = codec.handle_input(
+                        Bytes::copy_from_slice(&read_buf[..n]),
+                    ) {
+                        while let Some(ev) = codec.poll_event() {
+                            let _ = peer_out
+                                .send((peer_id, PeerOut::Event(ev)))
+                                .await;
+                        }
+                        return Err(e);
+                    }
                     handle_large_messages(
                         &mut codec, &mut reader, &config, &mut last_input,
                     ).await?;
@@ -838,5 +847,97 @@ mod tests {
             Event::HandshakeSucceeded { .. } => {}
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// When READY + ERROR arrive in the same TCP read, `handle_input`
+    /// processes READY (queuing `HandshakeSucceeded`) then returns `Err`
+    /// on ERROR. The driver must drain pending events before
+    /// propagating the error so `HandshakeSucceeded` is not lost.
+    #[tokio::test]
+    async fn coalesced_ready_and_error_still_emits_handshake_succeeded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (server_stream, mut client_stream) = tokio::io::duplex(64 * 1024);
+
+        // Server driver on one end of the duplex.
+        let server_codec = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+        let (_s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
+        let (s_evt_tx, mut s_evt_rx) = mpsc::channel::<(u64, PeerOut)>(16);
+        let s_driver = ConnectionDriver::new(
+            server_stream,
+            server_codec,
+            s_inbox_rx,
+            s_evt_tx,
+            0,
+            CancellationToken::new(),
+        );
+        tokio::spawn(async move { s_driver.run().await });
+
+        // Manual client: use a codec to generate correct wire bytes.
+        let mut client_codec = Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push)
+                .identity(Bytes::from_static(b"x")),
+        );
+
+        // Write client greeting.
+        let greeting = drain_transmit(&mut client_codec);
+        client_stream.write_all(&greeting).await.unwrap();
+
+        // Read server greeting + READY from the duplex and feed to
+        // client codec until it reaches Ready state.
+        let mut buf = vec![0u8; 4096];
+        while !client_codec.is_ready() {
+            let n = client_stream.read(&mut buf).await.unwrap();
+            assert!(n > 0, "server closed before handshake");
+            client_codec
+                .handle_input(Bytes::copy_from_slice(&buf[..n]))
+                .unwrap();
+        }
+
+        // Client codec has produced READY. Also encode ERROR.
+        let ready_bytes = drain_transmit(&mut client_codec);
+        client_codec
+            .send_command(&Command::Error {
+                reason: "boom".into(),
+            })
+            .unwrap();
+        let error_bytes = drain_transmit(&mut client_codec);
+
+        // Write READY + ERROR in a single write so the server driver
+        // reads them in one handle_input call.
+        let mut combined = Vec::with_capacity(ready_bytes.len() + error_bytes.len());
+        combined.extend_from_slice(&ready_bytes);
+        combined.extend_from_slice(&error_bytes);
+        client_stream.write_all(&combined).await.unwrap();
+
+        // Collect all events from the server driver.
+        let mut events = Vec::new();
+        while let Some((_, out)) = s_evt_rx.recv().await {
+            let is_closed = matches!(out, PeerOut::Closed);
+            events.push(out);
+            if is_closed {
+                break;
+            }
+        }
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PeerOut::Event(Event::HandshakeSucceeded { .. }))),
+            "HandshakeSucceeded must not be lost when coalesced with \
+             a post-handshake protocol error; got: {events:?}",
+        );
+    }
+
+    fn drain_transmit(codec: &mut Connection) -> Vec<u8> {
+        let mut out = Vec::new();
+        while codec.has_pending_transmit() {
+            let len_before = out.len();
+            for chunk in codec.transmit_chunks_capped(128) {
+                out.extend_from_slice(&chunk);
+            }
+            codec.advance_transmit(out.len() - len_before);
+        }
+        out
     }
 }
