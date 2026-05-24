@@ -4,7 +4,7 @@ Two-process benchmarks (inproc: single-process). 3 s timed window after 500 ms w
 Hardware: Linux 6.12 (Debian 13) VM, Intel i7-8700B 3.2 GHz 6-core, Rust 1.95.0.
 
 <p align="center">
-  <img src="doc/charts/throughput.svg" alt="PUSH/PULL throughput: TCP loopback" width="850">
+  <img src="doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
 </p>
 
 ## libzmq vs omq — inproc
@@ -365,10 +365,6 @@ Refresh: `ruby scripts/compare_zmqrs.rb --tcp --latency --update-benchmarks`
 | 128 KiB | 104 µs | 121 µs | 142 µs | 952 µs | 0.73× | 135 µs | 176 µs | 0.77× |
 
 <!-- END zmqrs_latency_tcp -->
-
-<p align="center">
-  <img src="doc/charts/latency.svg" alt="REQ/REP latency vs libzmq and zmq.rs" width="850">
-</p>
 
 ## ZMQ_STREAM: omq-compio vs libzmq 4.3.5
 

@@ -123,7 +123,7 @@ traversal.
 <!-- END push_pull_fanout_8peer_tokio -->
 
 <p align="center">
-  <img src="doc/charts/throughput.svg" alt="PUSH/PULL throughput: TCP loopback" width="850">
+  <img src="doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
 </p>
 
 ## REQ/REP latency (single peer)
@@ -169,10 +169,6 @@ All values are wall time.
 | tcp | 128 KiB | 203 µs | 251 µs | 115 µs | 135 µs |
 
 <!-- END latency_percentiles -->
-
-<p align="center">
-  <img src="doc/charts/latency.svg" alt="REQ/REP latency" width="850">
-</p>
 
 ## CLIENT/SERVER latency percentiles
 
@@ -437,7 +433,7 @@ OMQ_BENCH_TRANSPORTS=tcp OMQ_BENCH_PEERS=3 OMQ_BENCH_SIZES=128,2048,32768 cargo 
 # ./scripts/compare_zmqrs.sh [--update-benchmarks]
 
 # Charts (SVG, generated from COMPARISONS.md or JSONL data):
-python3 scripts/gen_comparison_chart.py          # doc/charts/throughput.svg (from COMPARISONS.md)
+python3 scripts/gen_comparison_chart.py          # doc/charts/comparison.svg (from COMPARISONS.md)
 python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism.svg (from BENCHMARKS.md)
 
 # Compression charts require a bench run first (writes JSONL):
