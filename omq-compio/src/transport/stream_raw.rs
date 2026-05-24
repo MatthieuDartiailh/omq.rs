@@ -18,18 +18,18 @@ use event_listener::Event;
 use omq_proto::message::Message;
 
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::InprocFrame;
+use crate::transport::inproc::InboundFrame;
 use crate::transport::peer_io::WireWriter;
 
-fn notification(identity: &Bytes) -> InprocFrame {
-    InprocFrame::message_from(identity.clone(), Message::single(Bytes::new()))
+fn notification(identity: &Bytes) -> InboundFrame {
+    InboundFrame::message_from(identity.clone(), Message::single(Bytes::new()))
 }
 
 pub(crate) async fn run(
     stream: TcpStream,
     mut writer: WireWriter,
     identity: Bytes,
-    in_tx: blume::Sender<InprocFrame>,
+    in_tx: blume::Sender<InboundFrame>,
     cmd_rx: flume::Receiver<DriverCommand>,
 ) {
     // Connect notification.
@@ -56,7 +56,7 @@ pub(crate) async fn run(
                 Ok(n) => {
                     let data = Bytes::copy_from_slice(&buf[..n]);
                     let msg = Message::single(data);
-                    let frame = InprocFrame::message_from(read_identity.clone(), msg);
+                    let frame = InboundFrame::message_from(read_identity.clone(), msg);
                     if read_in_tx.send_async(frame).await.is_err() {
                         break;
                     }

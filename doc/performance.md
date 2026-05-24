@@ -653,13 +653,43 @@ is usually false during sustained send so no notify).
 
 The 32 B TCP gap flipped from 0.84x to 1.40x.
 
-## What remains
+## Fan-in recv: unbox + skip identity clone
 
-**Multi-peer wire routing overhead.** `select_peer()` locks two
-RwLocks, clones PeerOut + Arc<DirectIoState>, picks a peer --
-then multi-peer wire discards the choice and sends through the
-shared queue anyway. Skippable: increment `rr_index`, check alive,
-send to shared queue directly.
+Profile at 16-peer fan-in (N PUSH → 1 PULL), 32 B TCP:
+
+| % | function |
+|---|---|
+| 12.8 | memmove (80 B InboundFrame copies through blume) |
+| 19.1 | blume total (try_send + try_recv + send_async) |
+| 9.2 | Bytes refcount (identity clone + codec Bytes) |
+
+Two fixes:
+
+**Inline `InboundMessage` in `InboundFrame`.** Was
+`Box<InboundMessage>` (heap alloc per message). Now inline (80 B
+enum). The Box moved to the `Command` variant (cold path: handshake
+only). Eliminates malloc+free per message on the hot delivery path.
+
+**Skip `peer_identity.clone()` for non-identity sockets.** PULL/SUB/
+PAIR never use the peer identity — the driver was cloning a `Bytes`
+(Arc bump + drop) unconditionally. Now gated on `needs_identity`
+(ROUTER/REP/SERVER/PEER/STREAM only).
+
+| peers | before | after | gain |
+|---|---|---|---|
+| 8 | 5.54M | **7.03M** | +27% |
+| 16 | ~5.5M | **6.57M** | +19% |
+
+### Why not concurrent_queue for in_tx/in_rx?
+
+blume's swap-drain amortizes the shared Mutex cost across batch size:
+one lock acquisition gives the consumer ALL queued messages. With
+concurrent_queue's per-pop CAS (3 atomics each), 100 queued messages
+= 300 atomic ops vs blume's ~4. On single-threaded compio where the
+Mutex is never contended, blume wins when messages batch (which they
+always do under load).
+
+## What remains
 
 **Single-wire-peer bypass on tokio.** The compio direct-encode
 fast path has no equivalent on tokio yet. Analogous shape: per-peer

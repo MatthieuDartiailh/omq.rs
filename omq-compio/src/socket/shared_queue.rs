@@ -83,10 +83,6 @@ impl SharedQueueSender {
             Err(PushError::Closed(_)) => Err(Error::Closed),
         }
     }
-
-    pub(crate) fn is_disconnected(&self) -> bool {
-        self.inner.queue.is_closed()
-    }
 }
 
 impl SharedQueueReceiver {

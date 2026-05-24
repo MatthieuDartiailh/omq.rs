@@ -9,13 +9,13 @@ use omq_proto::subscription::SubscriptionSet;
 
 use crate::monitor::PeerInfo;
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
+use crate::transport::inproc::{InboundFrame, InprocPeerSnapshot};
 
 use super::direct_io::DirectIoState;
 
 pub(super) enum PeerOut {
     Inproc {
-        sender: blume::Sender<InprocFrame>,
+        sender: blume::Sender<InboundFrame>,
         our_identity: Bytes,
     },
     Wire(WirePeerHandle),
@@ -49,7 +49,7 @@ impl PeerOut {
                 sender,
                 our_identity,
             } => sender
-                .send_async(InprocFrame::message_from(our_identity.clone(), msg))
+                .send_async(InboundFrame::message_from(our_identity.clone(), msg))
                 .await
                 .map_err(|_| Error::Closed),
             Self::Wire(handle) => Self::current_wire_sender(handle)
@@ -65,7 +65,7 @@ impl PeerOut {
                 sender,
                 our_identity,
             } => {
-                let frame = InprocFrame::message_from(our_identity.clone(), msg);
+                let frame = InboundFrame::message_from(our_identity.clone(), msg);
                 sender.try_send(frame).map_err(|e| match e {
                     blume::TrySendError::Full(_) => Error::WouldBlock,
                     blume::TrySendError::Disconnected(_) => Error::Closed,
@@ -92,7 +92,7 @@ impl PeerOut {
                 sender,
                 our_identity,
             } => {
-                let frame = InprocFrame::message_from(our_identity.clone(), msg.clone());
+                let frame = InboundFrame::message_from(our_identity.clone(), msg.clone());
                 sender.try_send(frame).map_err(|e| match e {
                     blume::TrySendError::Full(_) => blume::TrySendError::Full(()),
                     blume::TrySendError::Disconnected(_) => blume::TrySendError::Disconnected(()),
@@ -117,7 +117,7 @@ impl PeerOut {
                 sender,
                 our_identity: _,
             } => sender
-                .send_async(InprocFrame::Command(c))
+                .send_async(InboundFrame::Command(Box::new(c)))
                 .await
                 .map_err(|_| Error::Closed),
             Self::Wire(handle) => Self::current_wire_sender(handle)

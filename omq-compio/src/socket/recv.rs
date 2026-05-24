@@ -6,7 +6,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::{Event, SocketType};
 
-use crate::transport::inproc::InprocFrame;
+use crate::transport::inproc::InboundFrame;
 use crate::transport::peer_io::PeerIo;
 
 use super::Socket;
@@ -386,11 +386,11 @@ impl Socket {
         }
     }
 
-    fn process_inbound_frame(&self, frame: InprocFrame) -> Result<Option<Message>> {
+    fn process_inbound_frame(&self, frame: InboundFrame) -> Result<Option<Message>> {
         let st = self.inner().socket_type;
         match frame {
-            InprocFrame::Message(boxed) => {
-                let crate::transport::inproc::InprocFullMessage { peer_identity, msg } = *boxed;
+            InboundFrame::Message(full) => {
+                let crate::transport::inproc::InboundMessage { peer_identity, msg } = full;
                 if let Some(max) = self.inner().options.max_message_size
                     && msg.byte_len() > max
                 {
@@ -415,10 +415,10 @@ impl Socket {
                     Ok(Some(msg))
                 }
             }
-            InprocFrame::Command(c) => {
+            InboundFrame::Command(c) => {
                 if matches!(st, SocketType::XPub) {
                     use omq_proto::proto::Command;
-                    let body = match c {
+                    let body = match *c {
                         Command::Subscribe(p) => {
                             let mut buf = bytes::BytesMut::with_capacity(1 + p.len());
                             buf.extend_from_slice(&[0x01]);
@@ -545,17 +545,17 @@ impl Socket {
         }
     }
 
-    fn process_inproc_frame_for_direct(&self, frame: InprocFrame) -> Result<Option<Message>> {
+    fn process_inproc_frame_for_direct(&self, frame: InboundFrame) -> Result<Option<Message>> {
         let max = self.inner().options.max_message_size;
         match frame {
-            InprocFrame::Message(boxed) => {
-                let crate::transport::inproc::InprocFullMessage { msg, .. } = *boxed;
+            InboundFrame::Message(full) => {
+                let crate::transport::inproc::InboundMessage { msg, .. } = full;
                 if max.is_some_and(|m| msg.byte_len() > m) {
                     return Ok(None);
                 }
                 self.post_recv_apply(msg)
             }
-            InprocFrame::Command(_) => Ok(None),
+            InboundFrame::Command(_) => Ok(None),
         }
     }
 

@@ -11,7 +11,7 @@ use omq_proto::proto::{Command, SocketType};
 use omq_proto::subscription::SubscriptionSet;
 
 use crate::monitor::{MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo};
-use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
+use crate::transport::inproc::{InboundFrame, InprocPeerSnapshot};
 
 #[derive(Clone, Debug)]
 pub(crate) struct MonitorCtx {
@@ -36,7 +36,7 @@ pub(super) enum Drained {
 async fn handle_sub_cmd(
     socket_type: SocketType,
     monitor_ctx: Option<&MonitorCtx>,
-    peer_in_tx: &blume::Sender<InprocFrame>,
+    peer_in_tx: &blume::Sender<InboundFrame>,
     cmd: Command,
 ) -> std::io::Result<()> {
     let prefix = match &cmd {
@@ -54,7 +54,9 @@ async fn handle_sub_cmd(
         }
     }
     if matches!(socket_type, SocketType::XPub) {
-        let _ = peer_in_tx.send_async(InprocFrame::Command(cmd)).await;
+        let _ = peer_in_tx
+            .send_async(InboundFrame::Command(Box::new(cmd)))
+            .await;
     }
     Ok(())
 }
@@ -63,7 +65,7 @@ pub(super) async fn dispatch_command(
     cmd: Command,
     socket_type: SocketType,
     monitor_ctx: Option<&MonitorCtx>,
-    peer_in_tx: &blume::Sender<InprocFrame>,
+    peer_in_tx: &blume::Sender<InboundFrame>,
 ) -> Result<bool> {
     match cmd {
         Command::Subscribe(_) | Command::Cancel(_) => {
@@ -107,7 +109,7 @@ pub(super) async fn dispatch_command(
         }
         other => {
             if peer_in_tx
-                .send_async(InprocFrame::Command(other))
+                .send_async(InboundFrame::Command(Box::new(other)))
                 .await
                 .is_err()
             {
@@ -125,11 +127,19 @@ pub(crate) trait SnapshotSink {
 pub(super) async fn dispatch_drained_events(
     drained: SmallVec<[Drained; 8]>,
     socket_type: SocketType,
-    peer_in_tx: &blume::Sender<InprocFrame>,
+    peer_in_tx: &blume::Sender<InboundFrame>,
     snapshot_sink: &dyn SnapshotSink,
     monitor_ctx: Option<&MonitorCtx>,
     peer_identity: &Bytes,
 ) -> Result<bool> {
+    let needs_identity = matches!(
+        socket_type,
+        SocketType::Router
+            | SocketType::Server
+            | SocketType::Peer
+            | SocketType::Rep
+            | SocketType::Stream
+    );
     for de in drained {
         match de {
             Drained::Handshake {
@@ -168,7 +178,12 @@ pub(super) async fn dispatch_drained_events(
                         }
                     }
                 }
-                let frame = InprocFrame::message_from(peer_identity.clone(), m);
+                let id = if needs_identity {
+                    peer_identity.clone()
+                } else {
+                    Bytes::new()
+                };
+                let frame = InboundFrame::message_from(id, m);
                 if peer_in_tx.send_async(frame).await.is_err() {
                     return Ok(true);
                 }

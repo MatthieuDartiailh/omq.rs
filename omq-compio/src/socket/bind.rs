@@ -8,7 +8,7 @@ use omq_proto::proto::SocketType;
 
 use crate::monitor::PeerIdent;
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::{self, InprocFrame};
+use crate::transport::inproc::{self, InboundFrame};
 use crate::transport::ipc as ipc_transport;
 use crate::transport::stream_raw;
 use crate::transport::tcp as tcp_transport;
@@ -293,11 +293,10 @@ impl Socket {
                     continue;
                 }
                 let msg = Message::multipart([group, body]);
-                let frame =
-                    InprocFrame::Message(Box::new(crate::transport::inproc::InprocFullMessage {
-                        peer_identity: None,
-                        msg,
-                    }));
+                let frame = InboundFrame::Message(crate::transport::inproc::InboundMessage {
+                    peer_identity: None,
+                    msg,
+                });
                 if inner.in_tx.send_async(frame).await.is_err() {
                     break;
                 }

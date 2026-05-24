@@ -19,7 +19,7 @@ use omq_proto::proto::connection::{Connection, ConnectionConfig, Role, Transport
 use omq_proto::proto::{Command, Event, SocketType};
 
 use crate::transport::dispatch::{Drained, MonitorCtx, dispatch_drained_events};
-use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
+use crate::transport::inproc::{InboundFrame, InprocPeerSnapshot};
 use crate::transport::ws::WsStream;
 
 fn ws_io_err(e: impl std::fmt::Display) -> Error {
@@ -128,7 +128,7 @@ pub(crate) async fn run_ws_connection(
     options: Options,
     inbox: Receiver<DriverCommand>,
     shared_msg_rx: Option<Receiver<Message>>,
-    peer_in_tx: blume::Sender<InprocFrame>,
+    peer_in_tx: blume::Sender<InboundFrame>,
     peer_snapshot_tx: flume::Sender<InprocPeerSnapshot>,
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {

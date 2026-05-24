@@ -31,18 +31,18 @@ use omq_proto::proto::{Command, SocketType};
 /// and non-SPSC-eligible inproc peers. SPSC-eligible cross-thread
 /// peers bypass this entirely (Message goes through the ypipe ring).
 #[derive(Debug)]
-pub enum InprocFrame {
-    Message(Box<InprocFullMessage>),
-    Command(Command),
+pub enum InboundFrame {
+    Message(InboundMessage),
+    Command(Box<Command>),
 }
 
 #[derive(Debug)]
-pub struct InprocFullMessage {
+pub struct InboundMessage {
     pub peer_identity: Option<Bytes>,
     pub msg: Message,
 }
 
-impl InprocFrame {
+impl InboundFrame {
     /// Construct a Message frame tagged with the sender's identity.
     /// Empty identity collapses to `None`. Single-part messages take
     /// the inline `SinglePart` path; everything else boxes the full
@@ -53,7 +53,7 @@ impl InprocFrame {
         } else {
             Some(identity)
         };
-        Self::Message(Box::new(InprocFullMessage { peer_identity, msg }))
+        Self::Message(InboundMessage { peer_identity, msg })
     }
 }
 
@@ -71,7 +71,7 @@ pub struct InprocPeerSnapshot {
 /// snapshot.
 #[derive(Debug)]
 pub struct InprocConn {
-    pub out: blume::Sender<InprocFrame>,
+    pub out: blume::Sender<InboundFrame>,
     pub peer: InprocPeerSnapshot,
     /// SPSC fast-path producer (we push Messages here instead of
     /// through `out`). Present only for eligible cross-thread pairs.
@@ -100,11 +100,11 @@ struct SpscPair {
     listener_parked: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
-type AckPayload = (InprocPeerSnapshot, blume::Sender<InprocFrame>, SpscPair);
+type AckPayload = (InprocPeerSnapshot, blume::Sender<InboundFrame>, SpscPair);
 
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
-    connector_in_tx: blume::Sender<InprocFrame>,
+    connector_in_tx: blume::Sender<InboundFrame>,
     connector_thread: std::thread::ThreadId,
     connector_recv_event: Arc<Event>,
     connector_parked: Arc<std::sync::atomic::AtomicBool>,
@@ -154,7 +154,7 @@ fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
 pub fn bind(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    in_tx: blume::Sender<InprocFrame>,
+    in_tx: blume::Sender<InboundFrame>,
     recv_event: Arc<Event>,
     parked: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InprocListener> {
@@ -190,7 +190,7 @@ pub fn bind(
 pub async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    in_tx: blume::Sender<InprocFrame>,
+    in_tx: blume::Sender<InboundFrame>,
     recv_event: Arc<Event>,
     parked: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InprocConn> {
@@ -264,7 +264,7 @@ pub async fn connect(
 pub struct InprocListener {
     name: String,
     snapshot: InprocPeerSnapshot,
-    in_tx: blume::Sender<InprocFrame>,
+    in_tx: blume::Sender<InboundFrame>,
     recv_event: Arc<Event>,
     parked: Arc<std::sync::atomic::AtomicBool>,
     incoming: flume::Receiver<InprocConnectRequest>,

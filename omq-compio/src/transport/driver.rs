@@ -36,7 +36,7 @@ use omq_proto::proto::{Command, Event, SocketType};
 
 use crate::socket::DirectIoState;
 use crate::transport::dispatch::{Drained, MonitorCtx, SnapshotSink, dispatch_drained_events};
-use crate::transport::inproc::InprocFrame;
+use crate::transport::inproc::InboundFrame;
 use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader};
 use crate::transport::recv_stream::{StreamArmOutcome, pull_stream};
 
@@ -402,7 +402,7 @@ pub(crate) async fn run_connection(
         crate::socket::shared_queue::SharedQueueReceiver,
     >,
     #[cfg(feature = "priority")] shared_msg_rx: Option<Receiver<Message>>,
-    peer_in_tx: blume::Sender<InprocFrame>,
+    peer_in_tx: blume::Sender<InboundFrame>,
     snapshot_sink: Box<dyn SnapshotSink>,
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {

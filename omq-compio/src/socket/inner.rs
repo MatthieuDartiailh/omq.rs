@@ -53,7 +53,7 @@ use omq_proto::type_state::TypeState;
 
 use crate::monitor::{DisconnectReason, MonitorEvent, MonitorPublisher};
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
+use crate::transport::inproc::{InboundFrame, InprocPeerSnapshot};
 use crate::transport::peer_io::{CancellableRecvStream, SharedPeerIo};
 
 pub(super) use super::direct_io::DirectIoState;
@@ -199,8 +199,8 @@ pub(super) struct SocketInner {
     /// Cached route for the common single-peer case. Invalidated
     /// when `peers_gen` advances past the stored generation.
     pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
-    pub(super) in_tx: blume::Sender<InprocFrame>,
-    pub(super) in_rx: blume::Receiver<InprocFrame>,
+    pub(super) in_tx: blume::Sender<InboundFrame>,
+    pub(super) in_rx: blume::Receiver<InboundFrame>,
     /// Per-peer SPSC send pipes, indexed parallel to `out_peers`.
     /// None for wire / same-thread / non-eligible slots.
     pub(super) inproc_send_pipes: UnsafeCell<Vec<Option<InprocSendPipe>>>,
@@ -340,8 +340,8 @@ pub(super) struct UdpDialerEntry {
 impl SocketInner {
     pub(super) fn new(socket_type: SocketType, options: Options) -> Arc<Self> {
         let (in_tx, in_rx) = match options.recv_hwm {
-            None => blume::unbounded::<InprocFrame>(),
-            Some(hwm) => blume::bounded::<InprocFrame>((hwm as usize).max(16)),
+            None => blume::unbounded::<InboundFrame>(),
+            Some(hwm) => blume::bounded::<InboundFrame>((hwm as usize).max(16)),
         };
         // Conflate forces cap-1 with drain-before-send semantics so that only
         // the latest message survives in the queue at any point in time.
