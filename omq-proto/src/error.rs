@@ -39,6 +39,9 @@ pub enum Error {
     #[error("operation would block")]
     WouldBlock,
 
+    #[error("invalid configuration: {0}")]
+    Config(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

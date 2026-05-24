@@ -348,10 +348,51 @@ impl Default for Options {
     }
 }
 
+/// ZMTP PING encodes TTL as tenths of a second in a `u16`.
+const MAX_HEARTBEAT_TTL_MS: u128 = 6_553_500;
+
 impl Options {
     /// Create options with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Check ZMTP protocol limits that would cause hard-to-debug wire
+    /// failures if violated. Called from `Socket::new` in both backends.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        let id_len = self.identity.len();
+        if id_len > 255 {
+            return Err(crate::error::Error::Config(format!(
+                "identity length {id_len} exceeds ZMTP limit of 255 bytes"
+            )));
+        }
+        if let Some(ttl) = self.heartbeat_ttl
+            && ttl.as_millis() > MAX_HEARTBEAT_TTL_MS
+        {
+            return Err(crate::error::Error::Config(format!(
+                "heartbeat_ttl {ttl:?} exceeds ZMTP maximum of 6553.5s"
+            )));
+        }
+        #[cfg(feature = "plain")]
+        if let MechanismConfig::PlainClient {
+            ref username,
+            ref password,
+        } = self.mechanism
+        {
+            if username.len() > 255 {
+                return Err(crate::error::Error::Config(format!(
+                    "PLAIN username length {} exceeds 255-byte limit",
+                    username.len()
+                )));
+            }
+            if password.len() > 255 {
+                return Err(crate::error::Error::Config(format!(
+                    "PLAIN password length {} exceeds 255-byte limit",
+                    password.len()
+                )));
+            }
+        }
+        Ok(())
     }
 
     #[must_use]

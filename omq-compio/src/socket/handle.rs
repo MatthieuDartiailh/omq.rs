@@ -64,7 +64,16 @@ impl Drop for Socket {
 
 impl Socket {
     /// Create a new socket of the given type with the given options.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `options` violates ZMTP protocol limits (identity > 255
+    /// bytes, heartbeat TTL overflow, etc.) or if `conflate` is set on an
+    /// incompatible socket type.
     pub fn new(socket_type: SocketType, options: Options) -> Self {
+        options
+            .validate()
+            .expect("Options::validate failed in Socket::new");
         assert!(
             !options.conflate || crate::socket::supports_conflate(socket_type),
             "Options::conflate(true) is not valid for socket type {socket_type:?} \
