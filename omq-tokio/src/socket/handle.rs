@@ -325,6 +325,20 @@ impl Socket {
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
+        if self.inner.socket_type == SocketType::Req {
+            loop {
+                let msg = self.inner.recv_rx.recv().await?;
+                if let Some(m) = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .post_recv_req_direct(msg)
+                {
+                    return Ok(m);
+                }
+            }
+        }
         self.inner.recv_rx.recv().await
     }
 
@@ -332,6 +346,19 @@ impl Socket {
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.
     pub fn try_recv(&self) -> Result<Message> {
+        if self.inner.socket_type == SocketType::Req {
+            let msg = self.inner.recv_rx.try_recv()?;
+            return match self
+                .inner
+                .type_state
+                .lock()
+                .expect("type_state")
+                .post_recv_req_direct(msg)
+            {
+                Some(m) => Ok(m),
+                None => Err(Error::WouldBlock),
+            };
+        }
         self.inner.recv_rx.try_recv()
     }
 

@@ -710,16 +710,37 @@ calls `post_recv` under the same lock in the actor) never overlap.
 | TCP 32 B | 81 µs | 72 µs | 38 µs | 34 µs |
 | IPC 32 B | 69 µs | 63 µs | 28 µs | 28 µs |
 
-~10 µs saved (the REQ send-side actor roundtrip). Remaining gap:
-REQ/REP recv still routes through the actor for `post_recv`, and
-the send path still hops through DropQueue → driver.
+~10 µs saved (the REQ send-side actor roundtrip).
+
+## Tokio REQ recv bypass (recv_direct)
+
+After the send bypass, REQ recv still routed through the actor: driver →
+`peer_out` → actor (`post_recv` strips empty delimiter, clears
+alternation flag) → `recv_tx`. Two task hops.
+
+Fix: add `Req` to `can_bypass_actor_recv`. The driver pushes
+raw messages directly to `recv_tx`. `Socket::recv` applies
+`post_recv_req_direct` inline — strips the delimiter and clears
+the flag without checking `req_awaiting_reply` as a precondition.
+
+The unchecked variant is necessary because `on_peer_disconnected`
+(actor-side) can clear the flag before `Socket::recv` consumes
+the last queued reply. Before recv_direct this race was impossible:
+both `post_recv` and `on_peer_disconnected` ran sequentially in
+the actor. With recv_direct they're on separate tasks.
+
+REP recv still routes through the actor because it needs the
+identity table lookup from `IdentityRecv::wrap`.
+
+| transport | send bypass | + recv bypass | zmq.rs | compio |
+|---|---|---|---|---|
+| TCP 32 B | 72 µs | 67 µs | 38 µs | 34 µs |
+| IPC 32 B | 63 µs | 61 µs | 28 µs | 28 µs |
+
+~5 µs saved. Remaining gap: REP recv still through actor,
+send path still hops through DropQueue → driver on both sides.
 
 ## What remains
-
-**REQ/REP recv bypass on tokio.** `post_recv` (envelope stripping
-for REQ, identity tagging for REP) still routes through the actor.
-Moving it to the socket handle side would eliminate 2 more task
-hops per round trip.
 
 **Single-wire-peer bypass on tokio.** The compio direct-encode
 fast path has no equivalent on tokio yet. Analogous shape: per-peer

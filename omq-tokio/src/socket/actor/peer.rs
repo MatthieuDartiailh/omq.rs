@@ -697,6 +697,7 @@ fn can_bypass_actor_recv(t: SocketType) -> bool {
         t,
         SocketType::Pull
             | SocketType::Dealer
+            | SocketType::Req
             | SocketType::Sub
             | SocketType::XSub
             | SocketType::Pair

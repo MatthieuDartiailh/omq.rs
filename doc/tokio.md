@@ -122,9 +122,15 @@ TCP reads.
 
 | Bypassed (recv) | Through actor (recv) | Reason |
 |---|---|---|
-| Pull, Dealer, Sub, XSub, Pair, Client, Channel, Gather | Rep, Router, Server, Peer | Identity-prefix prepending |
+| Pull, Dealer, Req, Sub, XSub, Pair, Client, Channel, Gather | Rep, Router, Server, Peer | Identity-prefix prepending |
 |  | Dish | Group membership filter |
 |  | XPub | Subscribe-as-message (0x01/0x00) parsing |
+
+REQ is a special case: the driver pushes raw (envelope-wrapped) messages
+via `recv_direct`, and `Socket::recv` strips the empty delimiter inline
+via `TypeState::post_recv_req_direct`. This variant skips the
+`req_awaiting_reply` flag check to avoid a race with
+`on_peer_disconnected` in the actor.
 
 ## Direct shared-queue arm; pump-task elimination
 
