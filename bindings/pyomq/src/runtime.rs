@@ -134,11 +134,22 @@ pub fn materialize(
         REG.with(|r| r.borrow_mut().insert(id, sock.clone()));
 
         // Send pump: drain Python-side yring into the omq Socket.
+        // Yield every N messages so the connection drivers get
+        // scheduled on this single-threaded compio runtime. Without
+        // this, try_direct_encode's synchronous fast path turns the
+        // loop into a tight spin that starves other tasks.
+        const SEND_YIELD_INTERVAL: u32 = 64;
         let s = sock.clone();
         let send_pump = compio::runtime::spawn(async move {
             futures::pin_mut!(send_cons);
+            let mut batch = 0u32;
             while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
                 let _ = s.send(msg).await;
+                batch += 1;
+                if batch >= SEND_YIELD_INTERVAL {
+                    batch = 0;
+                    compio::time::sleep(std::time::Duration::from_micros(10)).await;
+                }
             }
         });
 
