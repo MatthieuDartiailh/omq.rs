@@ -174,11 +174,12 @@ The flat path is disabled when a frame transform (CURVE, BLAKE3ZMQ) is
 active, since those require the codec's encrypt-in-place flow via
 `send_message`.
 
-## 64 KiB read buffer
+## 128 KiB read buffer
 
-Both backends use a 64 KiB read buffer. With 8 KiB a 32 KiB message
-required 4 syscalls; with 64 KiB it fits in one. The filled buffer is
-consumed inline (no `buf.clone()` that would memcpy the whole payload).
+The connection driver reads into a `BytesMut` (128 KiB initial
+capacity) via `read_buf`. After each read, `buf.split().freeze()`
+hands the codec a zero-copy `Bytes` — no allocation or memcpy per
+syscall. `BytesMut` reuses its backing allocation across reads.
 
 ## Routing strategies
 

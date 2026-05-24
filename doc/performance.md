@@ -740,6 +740,29 @@ identity table lookup from `IdentityRecv::wrap`.
 ~5 µs saved. Remaining gap: REP recv still through actor,
 send path still hops through DropQueue → driver on both sides.
 
+## Tokio read-path zero copy
+
+The connection driver's read arm did
+`Bytes::copy_from_slice(&read_buf[..n])` on every `reader.read`
+return — one full memcpy per syscall. Fix: replace the `Vec<u8>`
+read buffer with `BytesMut` and call `reader.read_buf(&mut buf)`,
+then `buf.split().freeze()` to hand the codec a zero-copy `Bytes`.
+
+PUSH/PULL TCP throughput (two-process, bench_peer):
+
+| size | before | after |
+|---|---|---|
+| 64 B | 5.0M | 11.4M (+128%) |
+| 256 B | 4.2M | 10.6M (+152%) |
+| 1 KiB | 2.9M | 6.4M (+121%) |
+| 4 KiB | 1.2M | 2.4M (+100%) |
+
+The gain is larger than a single memcpy would explain: `BytesMut`
+reuses its allocation across reads (the `split()` advances the
+internal cursor without reallocating), so the read path went from
+one alloc + one copy per syscall to zero allocs and zero copies in
+steady state.
+
 ## What remains
 
 **Single-wire-peer bypass on tokio.** The compio direct-encode
@@ -752,10 +775,6 @@ messages split between DropQueue (pre-handshake) and DirectEncode
 that the driver owns jointly with the sender, not a transfer
 between two independent queues.
 
-**Read-path zero copy on tokio.** `Bytes::copy_from_slice` in the
-connection driver's read arm copies the full read buffer into a
-new allocation on every syscall return. Switching to `BytesMut` +
-`split()` would eliminate one memcpy per read.
 
 **Same-thread inproc (~4M).** Uses blume (no ypipe). The ypipe
 ring cannot serve same-thread sequential send-all-then-recv-all
