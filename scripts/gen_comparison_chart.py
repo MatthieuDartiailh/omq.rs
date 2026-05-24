@@ -174,7 +174,7 @@ def generate_svg(data: dict) -> str:
 
     xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
 
-    msg_max = 10e6
+    msg_max = 16e6
 
     def y_msg(v):
         return t1_y_bot - (v / msg_max) * t1_h
@@ -212,7 +212,7 @@ def generate_svg(data: dict) -> str:
         f"PUSH/PULL throughput — TCP loopback (msg/s, higher is better)</text>"
     )
 
-    for v_m in [2, 4, 6, 8, 10]:
+    for v_m in [4, 8, 12, 16]:
         yy = y_msg(v_m * 1e6)
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
