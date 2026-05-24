@@ -757,14 +757,16 @@ impl DriverLoopState {
 
     async fn flush_codec_to_wire(&mut self, state: &DirectIoState) -> Result<bool> {
         let mut writer = state.writer.lock().await;
-        let chunks = {
-            let io = state.lock_io();
+        let (chunks, total) = {
+            let mut io = state.lock_io();
             if io.codec.has_pending_transmit() {
                 let mut c = io.codec.clone_transmit_chunks();
                 if c.len() > 1024 {
                     c.truncate(1024);
                 }
-                c
+                let t: usize = c.iter().map(Bytes::len).sum();
+                io.codec.advance_transmit(t);
+                (c, t)
             } else {
                 self.codec_maybe_dirty = false;
                 return Ok(false);
@@ -773,12 +775,23 @@ impl DriverLoopState {
         if chunks.is_empty() {
             return Ok(false);
         }
-        let (res, _returned) = writer.write_vectored(chunks).await;
+        let (res, returned) = writer.write_vectored(chunks).await;
         let written = res.map_err(Error::Io)?;
         if written == 0 {
+            state
+                .encoded_queue
+                .lock()
+                .expect("encoded_queue")
+                .put_back_unwritten(returned, 0);
             return Ok(false);
         }
-        state.lock_io().codec.advance_transmit(written);
+        if written < total {
+            state
+                .encoded_queue
+                .lock()
+                .expect("encoded_queue")
+                .put_back_unwritten(returned, written);
+        }
         Ok(true)
     }
 
