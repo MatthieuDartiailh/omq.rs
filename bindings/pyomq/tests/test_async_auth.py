@@ -30,7 +30,7 @@ async def test_async_curve_auth_allowed_keys(tcp_endpoint):
 
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send(b"async-curve-ok")
+        push.send(b"async-curve-ok")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
         assert await pull.recv() == b"async-curve-ok"
     finally:
@@ -59,7 +59,7 @@ async def test_async_curve_auth_callback(tcp_endpoint):
 
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send(b"async-curve-cb")
+        push.send(b"async-curve-cb")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
         assert await pull.recv() == b"async-curve-cb"
     finally:
@@ -93,7 +93,7 @@ async def test_async_blake3zmq_auth_allowed_keys(tcp_endpoint):
 
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send(b"async-blake3-ok")
+        push.send(b"async-blake3-ok")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
         assert await pull.recv() == b"async-blake3-ok"
     finally:
@@ -124,7 +124,7 @@ async def test_async_blake3zmq_auth_callback(tcp_endpoint):
 
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send(b"async-blake3-cb")
+        push.send(b"async-blake3-cb")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
         assert await pull.recv() == b"async-blake3-cb"
     finally:

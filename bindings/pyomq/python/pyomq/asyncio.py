@@ -18,6 +18,7 @@ import errno as _errno
 import json
 import os
 import pickle
+import time
 
 from . import _native  # type: ignore[attr-defined]
 from . import error
@@ -113,14 +114,14 @@ class Socket:
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    async def send(self, data, flags=0, copy=True, track=False):
+    def send(self, data, flags=0, copy=True, track=False):
         while True:
             try:
                 self._sock._send_direct(data, flags)
                 return
             except _native.ZMQError as e:
                 if getattr(e, "errno", None) == _errno.EAGAIN:
-                    await asyncio.sleep(0)
+                    time.sleep(0.0001)
                     continue
                 raise error.from_native(e) from None
 
@@ -130,14 +131,14 @@ class Socket:
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    async def send_multipart(self, parts, flags=0, copy=True, track=False):
+    def send_multipart(self, parts, flags=0, copy=True, track=False):
         while True:
             try:
                 self._sock._send_multipart_direct(parts, flags)
                 return
             except _native.ZMQError as e:
                 if getattr(e, "errno", None) == _errno.EAGAIN:
-                    await asyncio.sleep(0)
+                    time.sleep(0.0001)
                     continue
                 raise error.from_native(e) from None
 
@@ -191,31 +192,31 @@ class Socket:
 
     # ── Serialization helpers ────────────────────────────────────────
 
-    async def send_string(self, u, flags=0, encoding="utf-8"):
-        return await self.send(u.encode(encoding), flags)
+    def send_string(self, u, flags=0, encoding="utf-8"):
+        return self.send(u.encode(encoding), flags)
 
     async def recv_string(self, flags=0, encoding="utf-8"):
         return (await self.recv(flags)).decode(encoding)
 
-    async def send_json(self, obj, flags=0, **kwargs):
-        return await self.send(
+    def send_json(self, obj, flags=0, **kwargs):
+        return self.send(
             json.dumps(obj, **kwargs).encode("utf-8"), flags
         )
 
     async def recv_json(self, flags=0, **kwargs):
         return json.loads(await self.recv(flags), **kwargs)
 
-    async def send_pyobj(self, obj, flags=0, protocol=-1):
-        return await self.send(pickle.dumps(obj, protocol), flags)
+    def send_pyobj(self, obj, flags=0, protocol=-1):
+        return self.send(pickle.dumps(obj, protocol), flags)
 
     async def recv_pyobj(self, flags=0):
         return pickle.loads(await self.recv(flags))
 
-    async def send_serialized(self, msg, serialize, flags=0, copy=True,
-                              **kwargs):
+    def send_serialized(self, msg, serialize, flags=0, copy=True,
+                        **kwargs):
         frames = serialize(msg)
-        return await self.send_multipart(frames, flags=flags, copy=copy,
-                                         **kwargs)
+        return self.send_multipart(frames, flags=flags, copy=copy,
+                                   **kwargs)
 
     async def recv_serialized(self, deserialize, flags=0, copy=True):
         frames = await self.recv_multipart(flags=flags, copy=copy)

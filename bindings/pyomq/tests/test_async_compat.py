@@ -26,7 +26,7 @@ async def test_async_send_recv_string(tcp_endpoint):
     try:
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send_string("hello")
+        push.send_string("hello")
         assert await pull.recv_string() == "hello"
     finally:
         await push.close()
@@ -40,7 +40,7 @@ async def test_async_send_recv_json(tcp_endpoint):
     try:
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send_json({"k": 1})
+        push.send_json({"k": 1})
         assert await pull.recv_json() == {"k": 1}
     finally:
         await push.close()
@@ -54,7 +54,7 @@ async def test_async_send_recv_pyobj(tcp_endpoint):
     try:
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send_pyobj([1, 2, 3])
+        push.send_pyobj([1, 2, 3])
         assert await pull.recv_pyobj() == [1, 2, 3]
     finally:
         await push.close()
@@ -143,7 +143,7 @@ async def test_async_send_recv_serialized(tcp_endpoint):
             assert frames[0] == b"hdr"
             return frames[1].decode("utf-8")
 
-        await push.send_serialized("async-hello", ser)
+        push.send_serialized("async-hello", ser)
         assert await pull.recv_serialized(deser) == "async-hello"
     finally:
         await push.close()

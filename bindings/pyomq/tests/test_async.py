@@ -1,6 +1,7 @@
 """asyncio facade: pyomq.asyncio.Context / Socket roundtrips."""
 
 import asyncio
+import sys
 
 import pytest
 
@@ -16,7 +17,7 @@ async def test_async_push_pull_inproc(inproc_endpoint):
     try:
         await pull.bind(inproc_endpoint)
         await push.connect(inproc_endpoint)
-        await push.send(b"hello")
+        push.send(b"hello")
         assert await pull.recv() == b"hello"
     finally:
         await push.close()
@@ -31,7 +32,7 @@ async def test_async_push_pull_tcp(tcp_endpoint):
     try:
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send(b"tcp-hello")
+        push.send(b"tcp-hello")
         assert await pull.recv() == b"tcp-hello"
     finally:
         await push.close()
@@ -46,7 +47,7 @@ async def test_async_send_multipart(tcp_endpoint):
     try:
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send_multipart([b"a", b"b", b"c"])
+        push.send_multipart([b"a", b"b", b"c"])
         assert await pull.recv_multipart() == [b"a", b"b", b"c"]
     finally:
         await push.close()
@@ -63,8 +64,8 @@ async def test_async_pubsub(tcp_endpoint):
         await sub.connect(ep)
         sub.setsockopt(pyomq.SUBSCRIBE, b"hot/")
         await asyncio.sleep(0.2)  # let SUBSCRIBE propagate
-        await pub.send(b"cold/skip")
-        await pub.send(b"hot/take")
+        pub.send(b"cold/skip")
+        pub.send(b"hot/take")
         sub.setsockopt(pyomq.RCVTIMEO, 1000)
         assert await sub.recv() == b"hot/take"
     finally:
@@ -89,7 +90,7 @@ async def test_async_concurrent_recvs(tcp_endpoint):
         recv_futs = [asyncio.ensure_future(pull.recv()) for _ in range(N)]
         await asyncio.sleep(0.05)  # let them register
         for i in range(N):
-            await push.send(f"msg-{i}".encode())
+            push.send(f"msg-{i}".encode())
         results = sorted(await asyncio.gather(*recv_futs))
         assert results == sorted(f"msg-{i}".encode() for i in range(N))
     finally:
@@ -107,7 +108,7 @@ async def test_async_mixed_with_sync(tcp_endpoint):
     try:
         ep = pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send(b"mixed")
+        push.send(b"mixed")
         assert pull.recv() == b"mixed"
     finally:
         await push.close()
@@ -122,9 +123,9 @@ async def test_async_sndmore_flag_aggregates(tcp_endpoint):
     try:
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send(b"a", flags=pyomq.SNDMORE)
-        await push.send(b"b", flags=pyomq.SNDMORE)
-        await push.send(b"c")
+        push.send(b"a", flags=pyomq.SNDMORE)
+        push.send(b"b", flags=pyomq.SNDMORE)
+        push.send(b"c")
         assert await pull.recv_multipart() == [b"a", b"b", b"c"]
     finally:
         await push.close()
@@ -139,7 +140,7 @@ async def test_async_rcvmore_iterates_frames(tcp_endpoint):
     try:
         ep = await pull.bind(tcp_endpoint)
         await push.connect(ep)
-        await push.send_multipart([b"x", b"y", b"z"])
+        push.send_multipart([b"x", b"y", b"z"])
         assert await pull.recv() == b"x"
         assert pull.getsockopt(pyomq.RCVMORE) == 1
         assert await pull.recv() == b"y"
@@ -157,9 +158,9 @@ async def test_async_context_manager(tcp_endpoint):
     async with ctx.socket(pyomq.PAIR) as a, ctx.socket(pyomq.PAIR) as b:
         ep = await a.bind(tcp_endpoint)
         await b.connect(ep)
-        await a.send(b"ping")
+        a.send(b"ping")
         assert await b.recv() == b"ping"
-        await b.send(b"pong")
+        b.send(b"pong")
         assert await a.recv() == b"pong"
 
 
@@ -171,9 +172,9 @@ async def test_async_req_rep_roundtrip(tcp_endpoint):
     try:
         ep = await rep.bind(tcp_endpoint)
         await req.connect(ep)
-        await req.send(b"ping")
+        req.send(b"ping")
         assert await rep.recv() == b"ping"
-        await rep.send(b"pong")
+        rep.send(b"pong")
         assert await req.recv() == b"pong"
     finally:
         await req.close()
@@ -193,8 +194,8 @@ async def test_async_unsubscribe_drops_topic(tcp_endpoint):
         await asyncio.sleep(0.1)
         await sub.unsubscribe(b"a")
         await asyncio.sleep(0.1)
-        await pub.send(b"a-one")
-        await pub.send(b"b-two")
+        pub.send(b"a-one")
+        pub.send(b"b-two")
         sub.setsockopt(pyomq.RCVTIMEO, 500)
         assert await sub.recv() == b"b-two"
     finally:
@@ -211,15 +212,47 @@ async def test_async_dealer_router_identity(tcp_endpoint):
         dealer.setsockopt(pyomq.IDENTITY, b"client-A")
         ep = await router.bind(tcp_endpoint)
         await dealer.connect(ep)
-        await dealer.send(b"hello")
+        dealer.send(b"hello")
         parts = await router.recv_multipart()
         assert parts[0] == b"client-A"
         assert parts[-1] == b"hello"
-        await router.send_multipart([b"client-A", b"hi-back"])
+        router.send_multipart([b"client-A", b"hi-back"])
         assert await dealer.recv() == b"hi-back"
     finally:
         await dealer.close()
         await router.close()
+
+
+@pytest.mark.asyncio
+async def test_async_push_pull_bulk_tcp(tcp_endpoint):
+    """Async recv with sync sender in a thread."""
+    import threading
+    n = 80_000
+    ctx = zmq_async.Context()
+    pull = ctx.socket(pyomq.PULL)
+    push_sync = pyomq.Context().socket(pyomq.PUSH)
+    try:
+        ep = await pull.bind(tcp_endpoint)
+        push_sync.connect(ep)
+
+        def sender():
+            import time; time.sleep(0.05)
+            for _ in range(n):
+                push_sync.send(b"x" * 128)
+
+        t = threading.Thread(target=sender)
+        t.start()
+
+        rc = 0
+        for _ in range(n):
+            await asyncio.wait_for(pull.recv(), timeout=15)
+            rc += 1
+
+        t.join(timeout=5)
+        assert rc == n
+    finally:
+        push_sync.close()
+        await pull.close()
 
 
 @pytest.mark.asyncio

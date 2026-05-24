@@ -22,7 +22,7 @@ async def test_async_pyomq_push_to_pyzmq_pull(tcp_endpoint):
         ctx = zmq_async.Context()
         push = ctx.socket(pyomq.PUSH)
         await push.connect(ep)
-        await push.send(b"async-pyomq-to-pyzmq")
+        push.send(b"async-pyomq-to-pyzmq")
         # Drop GIL so the in-flight send actually flushes.
         pull.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
         assert pull.recv() == b"async-pyomq-to-pyzmq"
@@ -59,8 +59,8 @@ async def test_async_pyomq_pub_to_pyzmq_sub(tcp_endpoint):
         sub.setsockopt(zmq_pyzmq.SUBSCRIBE, b"hot/")
         sub.connect(ep)
         await asyncio.sleep(0.2)
-        await pub.send(b"cold/skip")
-        await pub.send(b"hot/take")
+        pub.send(b"cold/skip")
+        pub.send(b"hot/take")
         sub.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
         assert sub.recv() == b"hot/take"
         await pub.close()
@@ -79,7 +79,7 @@ async def test_async_dealer_router_identity(tcp_endpoint):
         dealer = ctx.socket(pyomq.DEALER)
         dealer.setsockopt(pyomq.IDENTITY, b"D-async")
         await dealer.connect(ep)
-        await dealer.send(b"hi")
+        dealer.send(b"hi")
         parts = router.recv_multipart()
         assert parts[0] == b"D-async"
         assert parts[-1] == b"hi"
