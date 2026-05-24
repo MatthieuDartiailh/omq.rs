@@ -743,10 +743,14 @@ send path still hops through DropQueue → driver on both sides.
 ## What remains
 
 **Single-wire-peer bypass on tokio.** The compio direct-encode
-fast path has no equivalent on tokio yet. Analogous shape: per-peer
-`EncodedQueue` clone, claimed via `try_lock`. Would eliminate the
-DropQueue → driver hop on send and help both latency and
-throughput.
+fast path has no equivalent on tokio yet. A shared
+`EncodedQueue` between `Socket::send` and the driver (claimed via
+`try_lock`) would eliminate the DropQueue → driver hop on send.
+Dead end: a naive second queue causes FIFO violations when
+messages split between DropQueue (pre-handshake) and DirectEncode
+(post-handshake). Correct approach requires a single shared EQ
+that the driver owns jointly with the sender, not a transfer
+between two independent queues.
 
 **Read-path zero copy on tokio.** `Bytes::copy_from_slice` in the
 connection driver's read arm copies the full read buffer into a
