@@ -2,6 +2,10 @@
 //!
 //! Four-command handshake providing username/password authentication
 //! with no encryption. No frame transform is installed post-handshake.
+//!
+//! Internally split into [`PlainClient`] and [`PlainServer`] so each
+//! role carries only the fields it needs and `our_props` lives on the
+//! struct instead of inside state-enum variants.
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -11,54 +15,64 @@ use crate::proto::command::{self, Command, PeerProperties};
 use crate::proto::greeting::MechanismName;
 
 #[derive(Debug)]
-pub(crate) struct PlainMechanism {
-    role: PlainRole,
-    state: PlainState,
+pub(crate) enum PlainMechanism {
+    Client(PlainClient),
+    Server(PlainServer),
 }
 
 #[derive(Debug)]
-enum PlainRole {
-    Server { authenticator: Authenticator },
-    Client { username: String, password: String },
+pub(crate) struct PlainClient {
+    username: String,
+    password: String,
+    our_props: PeerProperties,
+    state: PlainClientState,
 }
 
 #[derive(Debug)]
-enum PlainState {
+enum PlainClientState {
     NotStarted,
-    AwaitingWelcome { our_props: PeerProperties },
+    AwaitingWelcome,
     AwaitingReady,
-    AwaitingHello { our_props: PeerProperties },
-    AwaitingInitiate { our_props: PeerProperties },
+    Done,
+}
+
+#[derive(Debug)]
+pub(crate) struct PlainServer {
+    authenticator: Authenticator,
+    our_props: PeerProperties,
+    state: PlainServerState,
+}
+
+#[derive(Debug)]
+enum PlainServerState {
+    NotStarted,
+    AwaitingHello,
+    AwaitingInitiate,
     Done,
 }
 
 impl PlainMechanism {
     pub(crate) fn new_server(authenticator: Authenticator) -> Self {
-        Self {
-            role: PlainRole::Server { authenticator },
-            state: PlainState::NotStarted,
-        }
+        Self::Server(PlainServer {
+            authenticator,
+            our_props: PeerProperties::default(),
+            state: PlainServerState::NotStarted,
+        })
     }
 
     pub(crate) fn new_client(username: String, password: String) -> Self {
-        Self {
-            role: PlainRole::Client { username, password },
-            state: PlainState::NotStarted,
-        }
+        Self::Client(PlainClient {
+            username,
+            password,
+            our_props: PeerProperties::default(),
+            state: PlainClientState::NotStarted,
+        })
     }
 
     pub(crate) fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) {
-        match &self.role {
-            PlainRole::Client { username, password } => {
-                out.push(Command::Unknown {
-                    name: Bytes::from_static(b"HELLO"),
-                    body: encode_hello(username, password),
-                });
-                self.state = PlainState::AwaitingWelcome { our_props };
-            }
-            PlainRole::Server { .. } => {
-                self.state = PlainState::AwaitingHello { our_props };
-            }
+        match self {
+            Self::Client(c) => c.start(out, our_props),
+            Self::Server(s) => s.start(our_props),
         }
     }
 
@@ -67,104 +81,111 @@ impl PlainMechanism {
         cmd: Command,
         out: &mut Vec<Command>,
     ) -> Result<MechanismStep> {
-        match (&mut self.state, cmd) {
-            // -- Client: awaiting WELCOME after HELLO ----------------------
-            (PlainState::AwaitingWelcome { .. }, Command::Unknown { name, .. })
+        if let Command::Unknown { ref name, ref body } = cmd
+            && name.as_ref() == b"ERROR"
+        {
+            let reason = if body.is_empty() {
+                String::new()
+            } else {
+                let reason_len = body[0] as usize;
+                let end = (1 + reason_len).min(body.len());
+                String::from_utf8_lossy(&body[1..end]).into_owned()
+            };
+            return Err(Error::HandshakeFailed(format!(
+                "PLAIN peer sent ERROR: {reason}"
+            )));
+        }
+        match self {
+            Self::Client(c) => c.on_command(cmd, out),
+            Self::Server(s) => s.on_command(cmd, out),
+        }
+    }
+}
+
+impl PlainClient {
+    fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) {
+        self.our_props = our_props;
+        out.push(Command::Unknown {
+            name: Bytes::from_static(b"HELLO"),
+            body: encode_hello(&self.username, &self.password),
+        });
+        self.state = PlainClientState::AwaitingWelcome;
+    }
+
+    fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
+        match (&self.state, cmd) {
+            (PlainClientState::AwaitingWelcome, Command::Unknown { name, .. })
                 if name.as_ref() == b"WELCOME" =>
             {
-                let PlainState::AwaitingWelcome { our_props } =
-                    std::mem::replace(&mut self.state, PlainState::AwaitingReady)
-                else {
-                    unreachable!();
-                };
-                let metadata = command::encode_properties(&our_props);
+                let metadata = command::encode_properties(&self.our_props);
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"INITIATE"),
                     body: Bytes::from(metadata),
                 });
+                self.state = PlainClientState::AwaitingReady;
                 Ok(MechanismStep::Continue)
             }
-
-            // -- Client: awaiting READY after INITIATE ---------------------
-            (PlainState::AwaitingReady, Command::Unknown { name, body })
+            (PlainClientState::AwaitingReady, Command::Unknown { name, body })
                 if name.as_ref() == b"READY" =>
             {
                 let peer_properties = command::decode_properties(&body)?;
-                self.state = PlainState::Done;
+                self.state = PlainClientState::Done;
                 Ok(MechanismStep::Complete { peer_properties })
             }
+            (state, other) => Err(Error::HandshakeFailed(format!(
+                "PLAIN client: unexpected {:?} in state {:?}",
+                other.kind(),
+                std::mem::discriminant(state),
+            ))),
+        }
+    }
+}
 
-            // -- Server: awaiting HELLO ------------------------------------
-            (PlainState::AwaitingHello { .. }, Command::Unknown { name, body })
+impl PlainServer {
+    fn start(&mut self, our_props: PeerProperties) {
+        self.our_props = our_props;
+        self.state = PlainServerState::AwaitingHello;
+    }
+
+    fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
+        match (&self.state, cmd) {
+            (PlainServerState::AwaitingHello, Command::Unknown { name, body })
                 if name.as_ref() == b"HELLO" =>
             {
                 let (username, password) = decode_hello(&body)?;
-                let PlainRole::Server { authenticator } = &self.role else {
-                    unreachable!();
-                };
                 let peer = MechanismPeerInfo {
                     mechanism: MechanismName::PLAIN,
                     public_key: [0; 32],
                     username: Some(username),
                     password: Some(password),
                 };
-                if !authenticator.allow(&peer) {
+                if !self.authenticator.allow(&peer) {
                     out.push(Command::Error {
                         reason: "Authentication failed".into(),
                     });
                     return Err(Error::HandshakeFailed("PLAIN credentials rejected".into()));
                 }
-                let PlainState::AwaitingHello { our_props } = std::mem::replace(
-                    &mut self.state,
-                    PlainState::AwaitingInitiate {
-                        our_props: PeerProperties::default(),
-                    },
-                ) else {
-                    unreachable!();
-                };
-                self.state = PlainState::AwaitingInitiate { our_props };
+                self.state = PlainServerState::AwaitingInitiate;
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"WELCOME"),
                     body: Bytes::new(),
                 });
                 Ok(MechanismStep::Continue)
             }
-
-            // -- Server: awaiting INITIATE after WELCOME -------------------
-            (PlainState::AwaitingInitiate { .. }, Command::Unknown { name, body })
+            (PlainServerState::AwaitingInitiate, Command::Unknown { name, body })
                 if name.as_ref() == b"INITIATE" =>
             {
                 let peer_properties = command::decode_properties(&body)?;
-                let PlainState::AwaitingInitiate { our_props } =
-                    std::mem::replace(&mut self.state, PlainState::Done)
-                else {
-                    unreachable!();
-                };
-                let metadata = command::encode_properties(&our_props);
+                let metadata = command::encode_properties(&self.our_props);
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"READY"),
                     body: Bytes::from(metadata),
                 });
+                self.state = PlainServerState::Done;
                 Ok(MechanismStep::Complete { peer_properties })
             }
-
-            // -- Either side: ERROR ----------------------------------------
-            (_, Command::Unknown { name, body }) if name.as_ref() == b"ERROR" => {
-                let reason = if body.is_empty() {
-                    String::new()
-                } else {
-                    let reason_len = body[0] as usize;
-                    let end = (1 + reason_len).min(body.len());
-                    String::from_utf8_lossy(&body[1..end]).into_owned()
-                };
-                Err(Error::HandshakeFailed(format!(
-                    "PLAIN peer sent ERROR: {reason}"
-                )))
-            }
-
-            // -- Unexpected command ----------------------------------------
             (state, other) => Err(Error::HandshakeFailed(format!(
-                "PLAIN: unexpected {:?} in state {:?}",
+                "PLAIN server: unexpected {:?} in state {:?}",
                 other.kind(),
                 std::mem::discriminant(state),
             ))),
