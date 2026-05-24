@@ -11,7 +11,7 @@
 
 use bytes::{Bytes, BytesMut};
 use rand::rngs::StdRng;
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 
 use omq_compio::proto::{
     SocketType, command,
@@ -33,7 +33,7 @@ fn rng() -> StdRng {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
             let mut s = [0u8; 8];
-            rand::thread_rng().fill_bytes(&mut s);
+            rand::rng().fill_bytes(&mut s);
             u64::from_le_bytes(s)
         });
     eprintln!("OMQ_FUZZ_SEED={seed}");
@@ -41,7 +41,7 @@ fn rng() -> StdRng {
 }
 
 fn random_bytes(rng: &mut StdRng, max_len: usize) -> Vec<u8> {
-    let len = rng.gen_range(0..=max_len);
+    let len = rng.random_range(0..=max_len);
     let mut v = vec![0u8; len];
     rng.fill_bytes(&mut v);
     v
@@ -92,7 +92,7 @@ fn fuzz_handle_input_chunked() {
         let raw = random_bytes(&mut rng, 4096);
         let mut pos = 0;
         while pos < raw.len() {
-            let chunk_len = rng.gen_range(1..=raw.len() - pos).min(64);
+            let chunk_len = rng.random_range(1..=raw.len() - pos).min(64);
             if conn
                 .handle_input(Bytes::copy_from_slice(&raw[pos..pos + chunk_len]))
                 .is_err()
@@ -115,12 +115,12 @@ fn fuzz_handle_input_chunked() {
 fn fuzz_handle_input_both_roles() {
     let mut rng = rng();
     for i in 0..iters() / 4 {
-        let role = if rng.gen_bool(0.5) {
+        let role = if rng.random_bool(0.5) {
             Role::Server
         } else {
             Role::Client
         };
-        let st = match rng.gen_range(0..4) {
+        let st = match rng.random_range(0..4) {
             0 => SocketType::Push,
             1 => SocketType::Pull,
             2 => SocketType::Pair,
@@ -148,19 +148,19 @@ fn fuzz_frame_roundtrip() {
     for i in 0..iters() / 2 {
         // Random size sweep covering both short (<=255) and long (>255)
         // header forms, plus boundary +/- 1.
-        let size = match rng.gen_range(0..6) {
+        let size = match rng.random_range(0..6) {
             0 => 0,
-            1 => rng.gen_range(1..=255),
+            1 => rng.random_range(1..=255),
             2 => 255,
             3 => 256,
-            4 => rng.gen_range(256..=65_536),
-            _ => rng.gen_range(0..=65_536),
+            4 => rng.random_range(256..=65_536),
+            _ => rng.random_range(0..=65_536),
         };
         let mut payload = vec![0u8; size];
         rng.fill_bytes(&mut payload);
         let bytes = Bytes::from(payload);
         // command + more is illegal; flip them independently but never both on.
-        let (more, command) = match rng.gen_range(0..3) {
+        let (more, command) = match rng.random_range(0..3) {
             0 => (false, false),
             1 => (true, false),
             _ => (false, true),
@@ -204,15 +204,15 @@ fn fuzz_handle_input_perturbed_greeting() {
     for i in 0..iters() / 4 {
         let mut buf = base.to_vec();
         // Append a random tail of frame-or-junk bytes.
-        let tail_len = rng.gen_range(0..=512);
+        let tail_len = rng.random_range(0..=512);
         let mut tail = vec![0u8; tail_len];
         rng.fill_bytes(&mut tail);
         buf.extend_from_slice(&tail);
         // Flip 0..3 random bytes in the greeting prefix.
-        let flips = rng.gen_range(0..=3);
+        let flips = rng.random_range(0..=3);
         for _ in 0..flips {
-            let pos = rng.gen_range(0..64);
-            buf[pos] = rng.r#gen();
+            let pos = rng.random_range(0..64);
+            buf[pos] = rng.random();
         }
         let cfg =
             ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(MechanismSetup::Null);
@@ -235,13 +235,13 @@ fn fuzz_z85_decode() {
         b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
     for i in 0..iters() / 4 {
         // Mix 90% z85-alphabet bytes with 10% arbitrary, length 0..256.
-        let len = rng.gen_range(0..=256);
+        let len = rng.random_range(0..=256);
         let mut s = String::with_capacity(len);
         for _ in 0..len {
-            if rng.gen_bool(0.9) {
-                s.push(alphabet[rng.gen_range(0..alphabet.len())] as char);
+            if rng.random_bool(0.9) {
+                s.push(alphabet[rng.random_range(0..alphabet.len())] as char);
             } else {
-                let b = rng.gen_range(0u8..=127);
+                let b = rng.random_range(0u8..=127);
                 if b.is_ascii_graphic() || b == b' ' {
                     s.push(b as char);
                 }
@@ -266,7 +266,7 @@ fn fuzz_lz4_decode() {
     for i in 0..iters() / 4 {
         let mut tx = Lz4Decoder::new();
         // Build a random message with 1..=4 random parts.
-        let n_parts = rng.gen_range(1..=4);
+        let n_parts = rng.random_range(1..=4);
         let mut parts_vec: Vec<Bytes> = Vec::new();
         for _ in 0..n_parts {
             let part = random_bytes(&mut rng, 256);
@@ -288,7 +288,7 @@ fn fuzz_zstd_decode() {
     let mut rng = rng();
     for i in 0..iters() / 4 {
         let mut tx = ZstdDecoder::new();
-        let n_parts = rng.gen_range(1..=4);
+        let n_parts = rng.random_range(1..=4);
         let mut parts_vec: Vec<Bytes> = Vec::new();
         for _ in 0..n_parts {
             let part = random_bytes(&mut rng, 256);
@@ -340,13 +340,15 @@ mod mech_fuzz {
     #[cfg(feature = "curve")]
     #[test]
     fn fuzz_curve_server_input() {
-        use omq_compio::CurveKeypair;
+        use omq_compio::{CurveCookieKeyring, CurveKeypair};
+        let keyring = std::sync::Arc::new(CurveCookieKeyring::new());
         let mut rng = rng();
         for i in 0..iters() / 8 {
             let kp = CurveKeypair::generate();
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
                 MechanismSetup::CurveServer {
                     keypair: kp,
+                    cookie_keyring: keyring.clone(),
                     authenticator: None,
                 },
             );
@@ -366,7 +368,8 @@ mod mech_fuzz {
     #[cfg(feature = "curve")]
     #[test]
     fn fuzz_curve_hello_body() {
-        use omq_compio::CurveKeypair;
+        use omq_compio::{CurveCookieKeyring, CurveKeypair};
+        let keyring = std::sync::Arc::new(CurveCookieKeyring::new());
         let greeting = greeting_bytes(b"CURVE");
         let mut rng = rng();
         for i in 0..iters() / 8 {
@@ -374,6 +377,7 @@ mod mech_fuzz {
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
                 MechanismSetup::CurveServer {
                     keypair: kp,
+                    cookie_keyring: keyring.clone(),
                     authenticator: None,
                 },
             );
@@ -381,7 +385,7 @@ mod mech_fuzz {
             let _ = conn.handle_input(Bytes::copy_from_slice(&greeting));
             // HELLO is 194-byte body for the well-formed case;
             // mutate length 0..256 to also hit the early-reject paths.
-            let body_len = rng.gen_range(0..=256);
+            let body_len = rng.random_range(0..=256);
             // First byte of body is the command-name length; spelling
             // "HELLO" is what makes the dispatcher route here.
             let mut body = Vec::with_capacity(1 + 5 + body_len);
@@ -450,7 +454,7 @@ mod mech_fuzz {
             );
             let mut conn = Connection::new(cfg);
             let _ = conn.handle_input(Bytes::copy_from_slice(&greeting));
-            let body_len = rng.gen_range(0..=256);
+            let body_len = rng.random_range(0..=256);
             let mut body = Vec::with_capacity(1 + 5 + body_len);
             body.push(5);
             body.extend_from_slice(b"HELLO");

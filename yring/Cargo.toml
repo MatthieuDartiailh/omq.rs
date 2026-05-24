@@ -16,7 +16,7 @@ default = []
 async = ["dep:atomic-waker", "dep:futures-core"]
 
 [dependencies]
-atomic-waker = { version = "1", optional = true }
+atomic-waker = { version = "1.1.0", optional = true }
 futures-core = { version = "0.3", optional = true, default-features = false }
 
 [dev-dependencies]

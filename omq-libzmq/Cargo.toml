@@ -19,10 +19,10 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 workspace = true
 
 [dependencies]
-omq-compio = { path = "../omq-compio", version = "0.10.0", features = ["plain", "curve", "lz4", "zstd"] }
+omq-compio = { path = "../omq-compio", version = "0.10.1", features = ["plain", "curve", "lz4", "zstd"] }
 yring = { path = "../yring", version = "0.2.1" }
 compio = { version = "0.19.0-rc.1", features = ["runtime"] }
-bytes = "1"
+bytes = "1.11.0"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 futures = { version = "0.3", default-features = false, features = ["async-await"] }
 crypto_box = "0.9"

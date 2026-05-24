@@ -9,9 +9,9 @@ const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-5AB5B7C62A11";
 
 /// Generate a random 16-byte `Sec-WebSocket-Key`, base64-encoded (24 chars).
 pub fn generate_ws_key() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut raw = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut raw);
+    rand::rng().fill_bytes(&mut raw);
     base64_encode(&raw)
 }
 

@@ -19,8 +19,8 @@
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use crypto_box::aead::rand_core::{OsRng, RngCore};
 use crypto_box::{PublicKey, SalsaBox, SecretKey, aead::Aead};
-use rand::{RngCore, rngs::OsRng};
 
 use super::curve_cookie::CurveCookieKeyring;
 use super::{CurveKeypair, CurvePublicKey, MechanismStep};

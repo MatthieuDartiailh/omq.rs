@@ -38,14 +38,14 @@ soak = []
 omq-proto = { path = "../omq-proto", version = "0.13.0", default-features = false }
 blume = { path = "../blume", version = "0.2.2" }
 yring = { path = "../yring", version = "0.2.1" }
-bytes = "1"
+bytes = "1.11.0"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 concurrent-queue = "2"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 compio = { version = "0.19.0-rc.1", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync", "async-fd"] }
 slab = "0.4"
-event-listener = "5"
-async-lock = "3"
+event-listener = "5.4.0"
+async-lock = "3.4.0"
 socket2 = "0.6"
 smallvec = { version = "1", features = ["const_generics", "union"] }
 libc = "0.2"
@@ -57,9 +57,9 @@ compio-tls = { version = "0.10.0-rc.2", optional = true, default-features = fals
 
 
 [dev-dependencies]
-atomic-waker = "1"
+atomic-waker = "1.1.0"
 futures-lite = "2"
-rand = "0.8"
+rand = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Used by benches/compression.rs to train a zstd dict from sample
 # JSON records before driving the with-dict throughput cells.

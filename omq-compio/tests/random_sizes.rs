@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::join;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use xxhash_rust::xxh3::xxh3_128;
 
 use omq_compio::endpoint::IpcPath;
@@ -35,11 +35,11 @@ fn random_message_sizes() {
         push.connect(ep).await.unwrap();
         compio::time::sleep(Duration::from_millis(50)).await;
 
-        let sizes: Vec<usize> = (0..30).map(|_| rng.gen_range(1..=512 * 1024)).collect();
+        let sizes: Vec<usize> = (0..30).map(|_| rng.random_range(1..=512 * 1024)).collect();
 
         let payloads: Vec<Vec<u8>> = sizes
             .iter()
-            .map(|&size| (0..size).map(|_| rng.r#gen()).collect())
+            .map(|&size| (0..size).map(|_| rng.random()).collect())
             .collect();
         let hashes: Vec<u128> = payloads.iter().map(|p| xxh3_128(p)).collect();
 
@@ -80,11 +80,11 @@ fn random_multipart_sizes() {
         compio::time::sleep(Duration::from_millis(50)).await;
 
         for round in 0..10 {
-            let n_parts = rng.gen_range(1..=5);
+            let n_parts = rng.random_range(1..=5);
             let parts: Vec<Vec<u8>> = (0..n_parts)
                 .map(|_| {
-                    let size = rng.gen_range(1..=256 * 1024);
-                    (0..size).map(|_| rng.r#gen()).collect()
+                    let size = rng.random_range(1..=256 * 1024);
+                    (0..size).map(|_| rng.random()).collect()
                 })
                 .collect();
             let hashes: Vec<u128> = parts.iter().map(|p| xxh3_128(p)).collect();

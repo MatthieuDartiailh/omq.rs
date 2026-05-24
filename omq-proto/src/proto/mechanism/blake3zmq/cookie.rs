@@ -15,8 +15,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use zeroize::Zeroizing;
 
 use crate::error::Result;
@@ -47,7 +46,7 @@ impl CookieKeyring {
 
     pub fn with_interval(rotation_interval: Duration) -> Self {
         let mut k = Zeroizing::new([0u8; 32]);
-        OsRng.fill_bytes(k.as_mut());
+        rand::rng().fill_bytes(k.as_mut());
         Self {
             inner: Mutex::new(Inner {
                 current: k,
@@ -65,7 +64,7 @@ impl CookieKeyring {
         let mut g = self.inner.lock().expect("cookie keyring poisoned");
         if g.last_rotated.elapsed() >= g.rotation_interval {
             g.previous = Some(g.current.clone());
-            OsRng.fill_bytes(g.current.as_mut());
+            rand::rng().fill_bytes(g.current.as_mut());
             g.last_rotated = Instant::now();
         }
         g.current.clone()
@@ -103,7 +102,7 @@ impl CookieKeyring {
     pub fn rotate_now(&self) {
         let mut g = self.inner.lock().expect("cookie keyring poisoned");
         g.previous = Some(g.current.clone());
-        OsRng.fill_bytes(g.current.as_mut());
+        rand::rng().fill_bytes(g.current.as_mut());
         g.last_rotated = Instant::now();
     }
 }

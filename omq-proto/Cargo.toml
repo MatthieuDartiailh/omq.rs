@@ -38,18 +38,18 @@ priority = []
 
 [dependencies]
 blake3 = { version = "1", optional = true }
-bytes = "1"
+bytes = "1.11.0"
 # Full AVX2 throughput (~1 GiB/s) requires `-C target-cpu=native` (or
 # `-C target-feature=+avx2`). Without it the scalar path runs ~55 MiB/s on
 # AVX2 hardware. Set RUSTFLAGS="-C target-cpu=native" for production builds.
 # Switch to upstream skerkour/chacha20-blake3 once PR #12 is merged + published.
-chacha20-blake3 = { version = "0.9.12", optional = true }
+chacha20-blake3 = { version = "0.9.13", optional = true }
 crypto_box = { version = "0.9", features = ["std"], optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
 subtle = { version = "2", optional = true }
-x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"], optional = true }
 lz4-sys = { version = "1", optional = true }
-rand = { version = "0.8", features = ["small_rng"] }
+rand = "0.10"
 zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"], optional = true }
 patricia_tree = "0.10"
 smallvec = { version = "1", features = ["const_generics", "union"] }

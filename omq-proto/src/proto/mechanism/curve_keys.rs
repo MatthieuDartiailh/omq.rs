@@ -1,6 +1,6 @@
 //! CURVE Curve25519 keypair: long-term keys + Z85 helpers.
 
-use rand::rngs::OsRng;
+use crypto_box::aead::OsRng;
 use subtle::ConstantTimeEq;
 use zeroize::ZeroizeOnDrop;
 

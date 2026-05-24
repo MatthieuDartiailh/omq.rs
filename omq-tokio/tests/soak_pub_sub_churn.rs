@@ -8,8 +8,8 @@ mod soak_common;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use rand::RngExt;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 
 use omq_tokio::{Message, Options, Socket, SocketType};
 
@@ -26,7 +26,7 @@ fn soak_pub_sub_churn() {
         let publisher = Socket::new(SocketType::Pub, Options::default());
         publisher.bind(ep.clone()).await.unwrap();
 
-        let mut rng = StdRng::from_entropy();
+        let mut rng = rand::make_rng::<StdRng>();
         let mut subs: Vec<Socket> = Vec::new();
         let mut pub_count: u64 = 0;
         let start = Instant::now();
@@ -54,8 +54,8 @@ fn soak_pub_sub_churn() {
             if last_churn.elapsed() >= Duration::from_millis(500) {
                 last_churn = Instant::now();
 
-                if !subs.is_empty() && rng.gen_bool(0.5) {
-                    let idx = rng.gen_range(0..subs.len());
+                if !subs.is_empty() && rng.random_bool(0.5) {
+                    let idx = rng.random_range(0..subs.len());
                     let sub = subs.swap_remove(idx);
                     sub.close().await.unwrap();
                 }
@@ -63,7 +63,7 @@ fn soak_pub_sub_churn() {
                 if subs.len() < 10 {
                     let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(32));
                     sub.connect(ep.clone()).await.unwrap();
-                    let prefix = TOPICS[rng.gen_range(0..TOPICS.len())];
+                    let prefix = TOPICS[rng.random_range(0..TOPICS.len())];
                     sub.subscribe(Bytes::from(prefix.to_string()))
                         .await
                         .unwrap();

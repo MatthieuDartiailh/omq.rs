@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::options::ReconnectPolicy;
 
@@ -34,10 +34,10 @@ pub fn jitter(d: Duration) -> Duration {
     if d.is_zero() {
         return d;
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let ns = d.as_nanos() as u64;
     let delta = ns / 10;
-    let offset = rng.gen_range(0..=2 * delta).saturating_sub(delta);
+    let offset = rng.random_range(0..=2 * delta).saturating_sub(delta);
     Duration::from_nanos(ns.saturating_add(offset))
 }
 

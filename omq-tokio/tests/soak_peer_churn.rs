@@ -7,8 +7,8 @@ mod soak_common;
 
 use std::time::{Duration, Instant};
 
+use rand::RngExt;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 
 use omq_tokio::{Message, Options, Socket, SocketType};
 
@@ -25,20 +25,20 @@ fn soak_peer_churn() {
         initial_pull.connect(ep.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let mut rng = StdRng::from_entropy();
+        let mut rng = rand::make_rng::<StdRng>();
         let mut peers: Vec<Socket> = vec![initial_pull];
         let mut sent: u64 = 0;
         let start = Instant::now();
         let mut last_log = start;
 
         while start.elapsed() < duration {
-            let action = rng.gen_range(0u8..10);
+            let action = rng.random_range(0u8..10);
             if action < 3 && peers.len() < 20 {
                 let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(64));
                 pull.connect(ep.clone()).await.unwrap();
                 peers.push(pull);
             } else if action < 5 && peers.len() > 1 {
-                let idx = rng.gen_range(0..peers.len());
+                let idx = rng.random_range(0..peers.len());
                 let peer = peers.swap_remove(idx);
                 peer.close().await.unwrap();
             }

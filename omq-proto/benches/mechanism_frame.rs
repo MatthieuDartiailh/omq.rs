@@ -68,8 +68,8 @@ fn main() {
     let cipher_b3 = ChaCha20Blake3::new(key_b3);
     let aad: &[u8] = &[];
 
-    let secret_a = SecretKey::generate(&mut rand::rngs::OsRng);
-    let secret_b = SecretKey::generate(&mut rand::rngs::OsRng);
+    let secret_a = SecretKey::generate(&mut crypto_box::aead::OsRng);
+    let secret_b = SecretKey::generate(&mut crypto_box::aead::OsRng);
     let salsa = SalsaBox::new(&secret_b.public_key(), &secret_a);
     let nonce_curve = crypto_box::Nonce::from(black_box([0x22u8; 24]));
 

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rand::rngs::StdRng;
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 
 use omq_tokio::{Endpoint, IpcPath, Message, OnMute, Options, Socket, SocketType};
 
@@ -26,7 +26,7 @@ fn rng() -> StdRng {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
             let mut s = [0u8; 8];
-            rand::thread_rng().fill_bytes(&mut s);
+            rand::rng().fill_bytes(&mut s);
             u64::from_le_bytes(s)
         });
     eprintln!("OMQ_FUZZ_SEED={seed}");
@@ -41,14 +41,14 @@ fn iters() -> usize {
 }
 
 fn random_inproc(rng: &mut StdRng) -> Endpoint {
-    let id: u64 = rng.r#gen();
+    let id: u64 = rng.random();
     Endpoint::Inproc {
         name: format!("fuzz-{id:x}"),
     }
 }
 
 fn random_ipc(rng: &mut StdRng) -> Endpoint {
-    let id: u64 = rng.r#gen();
+    let id: u64 = rng.random();
     let mut p = std::env::temp_dir();
     p.push(format!("omq-fuzz-{}-{id:x}.sock", std::process::id()));
     let _ = std::fs::remove_file(&p);
@@ -59,7 +59,7 @@ fn random_ipc(rng: &mut StdRng) -> Endpoint {
 async fn fuzz_pub_sub_action_sequences() {
     let mut rng = rng();
     for it in 0..iters() {
-        let ep = if rng.gen_bool(0.5) {
+        let ep = if rng.random_bool(0.5) {
             random_inproc(&mut rng)
         } else {
             random_ipc(&mut rng)
@@ -68,7 +68,7 @@ async fn fuzz_pub_sub_action_sequences() {
         let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
         pub_.bind(ep.clone()).await.unwrap();
 
-        let n_subs = rng.gen_range(1..=4);
+        let n_subs = rng.random_range(1..=4);
         let mut subs: Vec<Socket> = Vec::with_capacity(n_subs);
         for _ in 0..n_subs {
             subs.push(Socket::new(SocketType::Sub, Options::default()));
@@ -77,25 +77,25 @@ async fn fuzz_pub_sub_action_sequences() {
         // Random ordering of {connect, subscribe(prefix)} ops on the
         // SUB sockets. Connects happen at most once per sub.
         let mut connected = vec![false; n_subs];
-        let total_actions = rng.gen_range(n_subs..=n_subs * 4);
+        let total_actions = rng.random_range(n_subs..=n_subs * 4);
         for _ in 0..total_actions {
-            let i = rng.gen_range(0..n_subs);
-            let action = rng.gen_range(0..4);
+            let i = rng.random_range(0..n_subs);
+            let action = rng.random_range(0..4);
             match action {
                 0 if !connected[i] => {
                     let _ = subs[i].connect(ep.clone()).await;
                     connected[i] = true;
                 }
                 1 => {
-                    let prefix = if rng.gen_bool(0.5) {
+                    let prefix = if rng.random_bool(0.5) {
                         Bytes::new()
                     } else {
-                        Bytes::from(format!("topic{}", rng.gen_range(0..3)))
+                        Bytes::from(format!("topic{}", rng.random_range(0..3)))
                     };
                     let _ = subs[i].subscribe(prefix).await;
                 }
                 2 => {
-                    let prefix = Bytes::from(format!("topic{}", rng.gen_range(0..3)));
+                    let prefix = Bytes::from(format!("topic{}", rng.random_range(0..3)));
                     let _ = subs[i].unsubscribe(prefix).await;
                 }
                 _ => {
@@ -141,7 +141,7 @@ async fn fuzz_pub_sub_action_sequences() {
 async fn fuzz_push_pull_action_sequences() {
     let mut rng = rng();
     for it in 0..iters() {
-        let ep = if rng.gen_bool(0.5) {
+        let ep = if rng.random_bool(0.5) {
             random_inproc(&mut rng)
         } else {
             random_ipc(&mut rng)
@@ -150,7 +150,7 @@ async fn fuzz_push_pull_action_sequences() {
         let pull = Socket::new(SocketType::Pull, Options::default());
         pull.bind(ep.clone()).await.unwrap();
 
-        let n_pushes = rng.gen_range(1..=4);
+        let n_pushes = rng.random_range(1..=4);
         let mut pushes: Vec<Socket> = Vec::with_capacity(n_pushes);
         for _ in 0..n_pushes {
             pushes.push(Socket::new(SocketType::Push, Options::default()));
@@ -158,16 +158,16 @@ async fn fuzz_push_pull_action_sequences() {
 
         // Random ordering: connect, send, query, disconnect, etc.
         let mut connected = vec![false; n_pushes];
-        let actions = rng.gen_range(n_pushes..=n_pushes * 6);
+        let actions = rng.random_range(n_pushes..=n_pushes * 6);
         for _ in 0..actions {
-            let i = rng.gen_range(0..n_pushes);
-            match rng.gen_range(0..4) {
+            let i = rng.random_range(0..n_pushes);
+            match rng.random_range(0..4) {
                 0 if !connected[i] => {
                     let _ = pushes[i].connect(ep.clone()).await;
                     connected[i] = true;
                 }
                 1 if connected[i] => {
-                    let len = rng.gen_range(0..=512);
+                    let len = rng.random_range(0..=512);
                     let mut payload = vec![0u8; len];
                     rng.fill_bytes(&mut payload);
                     let _ = tokio::time::timeout(

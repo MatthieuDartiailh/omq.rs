@@ -8,7 +8,7 @@ use bytes::Bytes;
 use omq_proto::proto::transform::train_zdict;
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
-use rand::RngCore;
+use rand::Rng;
 
 /// Train a small ZDICT-format dict from 200 copies of `seed`. Used by
 /// the static-dict tests so the bytes pass `with_send_dict`'s ZDICT
@@ -179,7 +179,7 @@ async fn incompressible_data_roundtrip() {
     push.connect(ep).await.unwrap();
 
     let mut random = vec![0u8; 8192];
-    rand::thread_rng().fill_bytes(&mut random);
+    rand::rng().fill_bytes(&mut random);
     push.send(Message::single(random.clone())).await.unwrap();
 
     let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())

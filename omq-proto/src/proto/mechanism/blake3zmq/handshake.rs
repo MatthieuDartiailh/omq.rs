@@ -646,9 +646,9 @@ fn build_cookie(
     sn_secret: &X25519Secret,
     h1: &Hash,
 ) -> Vec<u8> {
-    use rand::RngCore;
+    use rand::Rng;
     let mut nonce = [0u8; NONCE_LEN];
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     let key = kdf(ctx!("cookie"), cookie_key);
     let mut plain = Vec::with_capacity(COOKIE_PLAIN_LEN);
     plain.extend_from_slice(cn_public);

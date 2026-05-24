@@ -15,7 +15,7 @@ categories = ["concurrency", "data-structures"]
 workspace = true
 
 [dependencies]
-event-listener = "5"
+event-listener = "5.4.0"
 
 [dev-dependencies]
 flume = { version = "0.12", default-features = false, features = ["async"] }

@@ -16,7 +16,6 @@
 //! RNG.
 
 use chacha20_blake3::ChaCha20Blake3;
-use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::error::{Error, Result};
@@ -35,7 +34,7 @@ pub type Nonce24 = [u8; 24];
 /// Returns `(secret, public)`. The caller owns the secret bytes and is
 /// responsible for zeroizing them when done.
 pub fn ephemeral_keypair() -> (X25519Secret, X25519Public) {
-    let secret = StaticSecret::random_from_rng(OsRng);
+    let secret = StaticSecret::random();
     let public = PublicKey::from(&secret);
     (secret.to_bytes(), public.to_bytes())
 }

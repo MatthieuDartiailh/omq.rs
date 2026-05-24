@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
-use rand::RngCore;
+use rand::Rng;
 
 /// Bind an `lz4+tcp://` Pull socket to an ephemeral port and return both
 /// the socket and the discovered loopback endpoint.
@@ -182,7 +182,7 @@ async fn incompressible_data_roundtrip() {
     push.connect(ep).await.unwrap();
 
     let mut random = vec![0u8; 8192];
-    rand::thread_rng().fill_bytes(&mut random);
+    rand::rng().fill_bytes(&mut random);
     push.send(Message::single(random.clone())).await.unwrap();
 
     let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())

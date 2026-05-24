@@ -267,10 +267,10 @@ pub(crate) fn generate_mask_key_pub() -> [u8; 4] {
 }
 
 fn generate_mask_key() -> [u8; 4] {
-    use rand::{RngCore, SeedableRng};
+    use rand::Rng;
     thread_local! {
         static RNG: std::cell::RefCell<rand::rngs::SmallRng> = std::cell::RefCell::new(
-            rand::rngs::SmallRng::from_rng(rand::rngs::OsRng).expect("seed SmallRng")
+            rand::make_rng()
         );
     }
     let mut key = [0u8; 4];
