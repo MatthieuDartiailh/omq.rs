@@ -16,6 +16,7 @@ pub mod message;
 pub mod monitor;
 pub mod options;
 pub mod proto;
+pub mod routing;
 pub mod socket_api;
 pub mod subscription;
 pub mod type_state;

@@ -262,6 +262,7 @@ behind).
 | `src/proto/zws.rs` | ZWS/2.0 frame codec (feature `ws`) |
 | `src/endpoint.rs` | URI parsing (`tcp://`, `ipc://`, `lz4+tcp://`, `ws://`, etc.) |
 | `src/options.rs` | `Options` builder (HWM, identity, keepalive, mechanism) |
+| `src/routing.rs` | Socket-type-to-routing-strategy categorization (`SendCategory`, `RecvCategory`) |
 | `src/subscription.rs` | Patricia-trie prefix matcher for SUB/XSUB |
 
 ### omq-compio
@@ -301,7 +302,8 @@ behind).
 ## Adding a new socket type / transport / mechanism
 
 **Socket type.** Add the variant to `omq_proto::proto::SocketType` and
-to `is_compatible`. Wire send/recv strategy in both backends'
+to `is_compatible`. Add it to `send_category` and `recv_category` in
+`omq-proto/src/routing.rs`. Wire send/recv strategy in both backends'
 `routing/` (tokio) or socket actor (compio). The two backends must
 stay in lockstep.
 

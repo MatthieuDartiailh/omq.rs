@@ -18,6 +18,7 @@ use std::sync::atomic::Ordering;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
+use omq_proto::routing::{SendCategory, send_category};
 
 #[cfg(not(feature = "priority"))]
 use crate::socket::encoded_queue::FLAT_THRESHOLD;
@@ -252,28 +253,16 @@ impl Socket {
         } else {
             msg
         };
-        match st {
-            SocketType::Push
-            | SocketType::Dealer
-            | SocketType::Req
-            | SocketType::Pair
-            | SocketType::Client
-            | SocketType::Scatter
-            | SocketType::Channel => self.send_round_robin(msg).await,
-            // REP: pre_send added the peer identity as the first frame; route
-            // back to that specific peer (same as ROUTER identity routing).
-            SocketType::Router
-            | SocketType::Server
-            | SocketType::Peer
-            | SocketType::Rep
-            | SocketType::Stream => self.send_identity_routed(msg).await,
-            SocketType::Pub | SocketType::XPub => self.send_pub_filtered(msg).await,
-            SocketType::Radio => self.send_radio(msg).await,
-            SocketType::Pull
-            | SocketType::Sub
-            | SocketType::XSub
-            | SocketType::Dish
-            | SocketType::Gather => Err(Error::Protocol(format!(
+        match send_category(st) {
+            SendCategory::RoundRobin => self.send_round_robin(msg).await,
+            SendCategory::IdentityRouted => self.send_identity_routed(msg).await,
+            SendCategory::FanOut(kind) => match kind {
+                omq_proto::routing::FanOutKind::Group => self.send_radio(msg).await,
+                omq_proto::routing::FanOutKind::SubscriptionPrefix => {
+                    self.send_pub_filtered(msg).await
+                }
+            },
+            SendCategory::None => Err(Error::Protocol(format!(
                 "send is not supported on recv-only socket type {st:?}"
             ))),
         }
@@ -812,29 +801,17 @@ impl Socket {
 
     fn try_send_dispatch(&self, msg: &Message) -> Result<()> {
         let st = self.inner().socket_type;
-        match st {
-            SocketType::Push
-            | SocketType::Dealer
-            | SocketType::Req
-            | SocketType::Pair
-            | SocketType::Client
-            | SocketType::Scatter
-            | SocketType::Channel => self.try_send_round_robin(msg),
-            SocketType::Router
-            | SocketType::Server
-            | SocketType::Peer
-            | SocketType::Rep
-            | SocketType::Stream => self.try_send_identity_routed(msg),
-            SocketType::Pub | SocketType::XPub => {
-                self.try_send_pub_filtered(msg);
-                Ok(())
-            }
-            SocketType::Radio => self.try_send_radio(msg),
-            SocketType::Pull
-            | SocketType::Sub
-            | SocketType::XSub
-            | SocketType::Dish
-            | SocketType::Gather => Err(Error::Protocol(format!(
+        match send_category(st) {
+            SendCategory::RoundRobin => self.try_send_round_robin(msg),
+            SendCategory::IdentityRouted => self.try_send_identity_routed(msg),
+            SendCategory::FanOut(kind) => match kind {
+                omq_proto::routing::FanOutKind::Group => self.try_send_radio(msg),
+                omq_proto::routing::FanOutKind::SubscriptionPrefix => {
+                    self.try_send_pub_filtered(msg);
+                    Ok(())
+                }
+            },
+            SendCategory::None => Err(Error::Protocol(format!(
                 "send is not supported on recv-only socket type {st:?}"
             ))),
         }

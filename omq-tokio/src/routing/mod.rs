@@ -31,6 +31,7 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
+use omq_proto::routing::{FanOutKind, RecvCategory, SendCategory, recv_category, send_category};
 
 pub(crate) use fair_queue::FairQueueRecv;
 pub(crate) use fan_out::{FanOutMode, FanOutSend, Submitter as FanOutSubmitter};
@@ -67,33 +68,16 @@ impl SendSubmitter {
 
 impl SendStrategy {
     pub(crate) fn for_socket_type(t: SocketType, options: &Options) -> Self {
-        match t {
-            // Recv-only types.
-            SocketType::Pull
-            | SocketType::Sub
-            | SocketType::XSub
-            | SocketType::Dish
-            | SocketType::Gather => Self::None,
-            // Fan-out send (subscription-based).
-            SocketType::Pub | SocketType::XPub => {
+        match send_category(t) {
+            SendCategory::None => Self::None,
+            SendCategory::FanOut(FanOutKind::SubscriptionPrefix) => {
                 Self::FanOut(FanOutSend::new(options, FanOutMode::SubscriptionPrefix))
             }
-            // Fan-out send (group-based, RADIO).
-            SocketType::Radio => Self::FanOut(FanOutSend::new(options, FanOutMode::Group)),
-            // Identity-routed send.
-            SocketType::Router
-            | SocketType::Rep
-            | SocketType::Server
-            | SocketType::Peer
-            | SocketType::Stream => Self::Identity(IdentitySend::new(options)),
-            // Round-robin send.
-            SocketType::Req
-            | SocketType::Dealer
-            | SocketType::Push
-            | SocketType::Pair
-            | SocketType::Client
-            | SocketType::Scatter
-            | SocketType::Channel => Self::RoundRobin(RoundRobinSend::new(options)),
+            SendCategory::FanOut(FanOutKind::Group) => {
+                Self::FanOut(FanOutSend::new(options, FanOutMode::Group))
+            }
+            SendCategory::IdentityRouted => Self::Identity(IdentitySend::new(options)),
+            SendCategory::RoundRobin => Self::RoundRobin(RoundRobinSend::new(options)),
         }
     }
 
@@ -238,19 +222,10 @@ pub(crate) enum RecvStrategy {
 
 impl RecvStrategy {
     pub(crate) fn for_socket_type(t: SocketType, recv_tx: async_channel::Sender<Message>) -> Self {
-        match t {
-            // Send-only types.
-            SocketType::Push | SocketType::Pub | SocketType::Radio | SocketType::Scatter => {
-                Self::None
-            }
-            // Identity-prefix recv.
-            SocketType::Router
-            | SocketType::Rep
-            | SocketType::Server
-            | SocketType::Peer
-            | SocketType::Stream => Self::Identity(IdentityRecv::new(recv_tx)),
-            // Everything else -- fair-queue.
-            _ => Self::FairQueue(FairQueueRecv::new(recv_tx)),
+        match recv_category(t) {
+            RecvCategory::None => Self::None,
+            RecvCategory::Identity => Self::Identity(IdentityRecv::new(recv_tx)),
+            RecvCategory::FairQueue => Self::FairQueue(FairQueueRecv::new(recv_tx)),
         }
     }
 

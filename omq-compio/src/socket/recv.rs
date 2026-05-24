@@ -5,6 +5,7 @@ use bytes::Bytes;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::{Event, SocketType};
+use omq_proto::routing::{RecvCategory, recv_category};
 
 use crate::transport::inproc::InboundFrame;
 use crate::transport::peer_io::PeerIo;
@@ -24,14 +25,7 @@ fn post_recv_needs_type_state(t: SocketType) -> bool {
 }
 
 fn is_identity_recv(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Router
-            | SocketType::Server
-            | SocketType::Peer
-            | SocketType::Rep
-            | SocketType::Stream
-    )
+    recv_category(t) == RecvCategory::Identity
 }
 
 #[inline]
