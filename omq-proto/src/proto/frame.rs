@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::message::{Frame, FrameFlags, Message, Payload};
+use crate::message::{Frame, FrameFlags, Message};
 
 use super::chunked_buf::ChunkedInputBuf;
 
@@ -110,10 +110,6 @@ fn write_frame_header(buf: &mut BytesMut, more: bool, payload_len: usize) {
     }
 }
 
-fn write_payload_flat(buf: &mut BytesMut, part: &Payload) {
-    buf.extend_from_slice(part.as_slice());
-}
-
 /// Encode all frames of `msg` as WS binary messages into a flat buffer.
 /// Each frame = `[WS header (2-10B)][ZWS flag (1B)][payload]`.
 /// Server mode only (no masking). Used by the driver fast-path when WS
@@ -122,9 +118,9 @@ fn write_payload_flat(buf: &mut BytesMut, part: &Payload) {
 pub fn encode_message_flat_ws(msg: &Message, buf: &mut BytesMut) {
     let n = msg.len();
     let mut i = 0;
-    msg.iter_parts(|part| {
+    msg.iter_slices(|slice| {
         let more = i + 1 < n;
-        let ws_payload_len = 1 + part.len(); // ZWS flag + ZMTP payload
+        let ws_payload_len = 1 + slice.len(); // ZWS flag + ZMTP payload
         // WS binary frame header (server, unmasked): FIN=1, opcode=0x02
         buf.put_u8(0x82); // FIN | BINARY
         if ws_payload_len <= 125 {
@@ -142,7 +138,7 @@ pub fn encode_message_flat_ws(msg: &Message, buf: &mut BytesMut) {
         } else {
             super::zws::FLAG_FINAL
         });
-        write_payload_flat(buf, part);
+        buf.extend_from_slice(slice);
         i += 1;
     });
 }
@@ -152,9 +148,9 @@ pub fn encode_message_flat_ws(msg: &Message, buf: &mut BytesMut) {
 pub fn encode_message_flat_ws_masked(msg: &Message, buf: &mut BytesMut) {
     let n = msg.len();
     let mut i = 0;
-    msg.iter_parts(|part| {
+    msg.iter_slices(|slice| {
         let more = i + 1 < n;
-        let ws_payload_len = 1 + part.len();
+        let ws_payload_len = 1 + slice.len();
         let mask = super::ws_codec::generate_mask_key_pub();
         buf.put_u8(0x82); // FIN | BINARY
         if ws_payload_len <= 125 {
@@ -176,7 +172,7 @@ pub fn encode_message_flat_ws_masked(msg: &Message, buf: &mut BytesMut) {
         buf.put_u8(zws_flag ^ mask[0]);
         // Payload, masked
         let start = buf.len();
-        write_payload_flat(buf, part);
+        buf.extend_from_slice(slice);
         super::ws_codec::apply_mask_offset(&mut buf[start..], mask, 1);
         i += 1;
     });
@@ -187,9 +183,9 @@ pub fn encode_message_flat_ws_masked(msg: &Message, buf: &mut BytesMut) {
 pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {
     let n = msg.len();
     let mut i = 0;
-    msg.iter_parts(|part| {
-        write_frame_header(buf, i + 1 < n, part.len());
-        write_payload_flat(buf, part);
+    msg.iter_slices(|slice| {
+        write_frame_header(buf, i + 1 < n, slice.len());
+        buf.extend_from_slice(slice);
         i += 1;
     });
 }
@@ -198,10 +194,10 @@ pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {
 pub fn encode_message_prefixed_flat(prefix: &[u8], msg: &Message, buf: &mut BytesMut) {
     let n = msg.len();
     let mut i = 0;
-    msg.iter_parts(|part| {
-        write_frame_header(buf, i + 1 < n, prefix.len() + part.len());
+    msg.iter_slices(|slice| {
+        write_frame_header(buf, i + 1 < n, prefix.len() + slice.len());
         buf.extend_from_slice(prefix);
-        write_payload_flat(buf, part);
+        buf.extend_from_slice(slice);
         i += 1;
     });
 }

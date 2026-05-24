@@ -212,6 +212,12 @@ pub(super) struct SocketInner {
     /// successful `try_direct_recv`; cleared on peer disconnect.
     /// `UnsafeCell` because compio is single-threaded.
     pub(super) direct_recv_io: UnsafeCell<Option<Arc<DirectIoState>>>,
+    /// Cached `DirectIoState` + generation for the wire send fast path.
+    /// Set on the first successful direct-encode; invalidated when
+    /// `peers_gen` advances past the stored generation. `UnsafeCell` is
+    /// sound because compio is single-threaded.
+    #[cfg(not(feature = "priority"))]
+    pub(super) direct_send_io: UnsafeCell<Option<(Arc<DirectIoState>, u64)>>,
     pub(super) on_peer_ready: Event,
     pub(super) subscriptions: RwLock<SubscriptionSet>,
     /// Active subscription prefixes (SUB / XSUB only). Replayed to
@@ -379,6 +385,8 @@ impl SocketInner {
             inproc_parked: Arc::new(AtomicBool::new(false)),
             recv_cache: RecvCache::new(),
             direct_recv_io: UnsafeCell::new(None),
+            #[cfg(not(feature = "priority"))]
+            direct_send_io: UnsafeCell::new(None),
             on_peer_ready: Event::new(),
             subscriptions: RwLock::new(SubscriptionSet::new()),
             our_subs: RwLock::new(Vec::new()),

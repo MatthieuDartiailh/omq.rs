@@ -222,6 +222,23 @@ impl Socket {
                 }
             }
         }
+        // Wire direct-encode fast path: single wire peer with cached
+        // DirectIoState. Skips Mutex, Arc clone, PeerOut dispatch.
+        #[cfg(not(feature = "priority"))]
+        if matches!(
+            st,
+            SocketType::Push | SocketType::Pair | SocketType::Dealer | SocketType::Channel
+        ) && !pre_send_needs_type_state(st)
+        {
+            let inner = self.inner();
+            let dio = unsafe { &*inner.direct_send_io.get() };
+            if let Some((state, cached_gen)) = dio
+                && *cached_gen == inner.peers_gen.load(Ordering::Acquire)
+                && try_direct_encode(&msg, state)?
+            {
+                return Ok(());
+            }
+        }
         // TypeState's pre_send is a no-op for round-robin / fan-out
         // socket types - only REQ / REP / draft single-frame types
         // touch it. Skip the mutex acquisition entirely when not
@@ -460,6 +477,11 @@ impl Socket {
                 if let Some(state) = direct
                     && try_direct_encode(&msg, &state)?
                 {
+                    // Cache for the UnsafeCell fast path in send().
+                    let cur_gen = self.inner().peers_gen.load(Ordering::Acquire);
+                    unsafe {
+                        *self.inner().direct_send_io.get() = Some((state, cur_gen));
+                    }
                     return Ok(());
                 }
                 // Fall back to per-peer cmd channel. If the driver died

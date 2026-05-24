@@ -474,9 +474,9 @@ than the copy.
 8 B TCP: 3.8M -> 8.2M msg/s (0.45x -> parity with libzmq).
 32 B TCP: 3.7M -> 6.6M msg/s (0.45x -> 0.74x).
 
-Current (after further tuning, see COMPARISONS.md):
-8 B TCP: 8.72M vs libzmq 8.44M (**1.03x**).
-32 B TCP: 7.13M vs libzmq 8.45M (**0.84x**).
+After rounds 1-9: 8 B TCP 8.72M (1.03x libzmq), 32 B TCP
+7.13M (0.84x). The UnsafeCell bypass (below) closed the 32 B
+gap entirely.
 
 ## Inproc cross-core: blume batching channel
 
@@ -613,12 +613,53 @@ Ring work is 3.2% of cycles. The rest is async runtime machinery.
 
 Cross-thread omq-compio: 1.6x libzmq at 8 B, 4x at 128 B.
 
+## Wire send: UnsafeCell bypass (closing the 32 B gap)
+
+Profile at 32 B TCP before this change:
+
+| % | function |
+|---|---|
+| 13.5 | send_round_robin (Mutex + Arc clones) |
+| 10.7 | try_direct_encode (actual encoding) |
+| 9.5 | slow_round_robin (dispatch) |
+| 5.3 | iter_parts (intermediate Payload copy) |
+| 4.5 | memmove |
+
+23% of cycles in routing overhead for a peer set that never
+changes during the benchmark. Two fixes:
+
+**`iter_slices` replaces `iter_parts`.** The old path constructed a
+temporary `Payload` struct (40 B) for each part of an inline message,
+copying the data in and then reading it back out. `iter_slices` yields
+`&[u8]` directly from the message's inline storage. One fewer 32 B
+memcpy per message on the flat-encode path.
+
+**`direct_send_io: UnsafeCell<Option<(Arc<DirectIoState>, u64)>>`.**
+Caches the `DirectIoState` reference with a generation stamp. The
+fast path in `Socket::send` reads it unsafely (sound: compio is
+single-threaded), checks one atomic (`peers_gen`), and calls
+`try_direct_encode` directly. Skips: Mutex lock/unlock,
+2× `Arc::clone`, `PeerOut` enum match, 2× `Arc::drop`.
+
+Per-message atomic ops: 6 → 2 (one `peers_gen` load, one
+`handshake_done` load inside try_direct_encode; `driver_in_select`
+is usually false during sustained send so no notify).
+
+| size | before | after | libzmq | ratio |
+|---|---|---|---|---|
+| 8 B | 8.72M | **15.2M** | 8.5M | **1.79x** |
+| 32 B | 7.13M | **11.7M** | 8.3M | **1.40x** |
+| 128 B | 3.00M | **7.1M** | 2.9M | **2.47x** |
+
+The 32 B TCP gap flipped from 0.84x to 1.40x.
+
 ## What remains
 
-**32 B TCP gap (0.84x).** `VecDeque::push_back` copies 48 B per
-message vs libzmq's in-place write. Closing it requires either a
-chunk-based message queue (`yqueue`-style) or fused
-decode-and-deliver (callback/iterator from `handle_input`).
+**Multi-peer wire routing overhead.** `select_peer()` locks two
+RwLocks, clones PeerOut + Arc<DirectIoState>, picks a peer --
+then multi-peer wire discards the choice and sends through the
+shared queue anyway. Skippable: increment `rr_index`, check alive,
+send to shared queue directly.
 
 **Single-wire-peer bypass on tokio.** The compio direct-encode
 fast path has no equivalent on tokio yet. Analogous shape: per-peer

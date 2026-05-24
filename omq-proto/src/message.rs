@@ -455,17 +455,17 @@ impl Message {
         }
     }
 
-    pub(crate) fn iter_parts(&self, mut f: impl FnMut(&Payload)) {
+    #[inline]
+    pub(crate) fn iter_slices(&self, mut f: impl FnMut(&[u8])) {
         match &self.inner {
             MessageInner::Empty => {}
             MessageInner::Inline { len, data } => {
-                let p = Payload::from_slice(&data[..*len as usize]);
-                f(&p);
+                f(&data[..*len as usize]);
             }
-            MessageInner::Single(p) => f(p),
+            MessageInner::Single(p) => f(p.as_slice()),
             MessageInner::Multi(v) => {
                 for p in v {
-                    f(p);
+                    f(p.as_slice());
                 }
             }
         }
