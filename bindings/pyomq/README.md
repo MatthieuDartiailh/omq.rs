@@ -66,7 +66,7 @@ around compio's single-thread invariant.
 See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md) for full tables.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/pyomq/doc/charts/throughput_bindings.svg" alt="PUSH/PULL throughput: Python bindings" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/pyomq/doc/charts/bindings.svg" alt="pyomq vs pyzmq performance" width="850">
 </p>
 
 Loopback PUSH/PULL throughput vs pyzmq, on a Linux 6.12 (Debian 13) VM on an
@@ -75,18 +75,23 @@ Intel Mac Mini 2018 (i7-8700B, 3.2 GHz), Rust 1.95.0, default features:
 <!-- PERF:START -->
 | Size    | inproc pyomq | inproc pyzmq | ratio     | tcp pyomq | tcp pyzmq | ratio     |
 |---------|-------------:|-------------:|----------:|----------:|----------:|----------:|
-| 128 B   |     1.59 M/s |      497 k/s | **3.21×** |  1.53 M/s |   472 k/s | **3.25×** |
-| 512 B   |     1.56 M/s |      502 k/s | **3.11×** |  1.40 M/s |   458 k/s | **3.06×** |
-| 2 KiB   |     1.48 M/s |      450 k/s | **3.28×** |  1.02 M/s |   361 k/s | **2.84×** |
-| 8 KiB   |     1.32 M/s |      364 k/s | **3.62×** |   334 k/s |   109 k/s | **3.06×** |
-| 32 KiB  |      738 k/s |      185 k/s | **3.98×** |   110 k/s |    46 k/s | **2.42×** |
+| 8 B     |     1.60 M/s |      567 k/s | **2.82×** |  1.49 M/s |   563 k/s | **2.65×** |
+| 16 B    |     1.63 M/s |      581 k/s | **2.82×** |  1.49 M/s |   530 k/s | **2.82×** |
+| 32 B    |     1.60 M/s |      566 k/s | **2.83×** |  1.48 M/s |   543 k/s | **2.72×** |
+| 64 B    |     1.61 M/s |      511 k/s | **3.16×** |  1.45 M/s |   511 k/s | **2.84×** |
+| 128 B   |     1.60 M/s |      487 k/s | **3.29×** |  1.44 M/s |   468 k/s | **3.07×** |
+| 256 B   |     1.60 M/s |      491 k/s | **3.27×** |  1.43 M/s |   472 k/s | **3.04×** |
+| 512 B   |     1.58 M/s |      495 k/s | **3.20×** |  1.36 M/s |   458 k/s | **2.98×** |
+| 1 KiB   |     1.50 M/s |      457 k/s | **3.28×** |  1.25 M/s |   450 k/s | **2.79×** |
+| 2 KiB   |     1.47 M/s |      431 k/s | **3.42×** |   880 k/s |   344 k/s | **2.56×** |
+| 4 KiB   |     1.41 M/s |      408 k/s | **3.45×** |   592 k/s |   199 k/s | **2.98×** |
+| 8 KiB   |     1.31 M/s |      353 k/s | **3.70×** |   334 k/s |   106 k/s | **3.16×** |
+| 16 KiB  |      984 k/s |      262 k/s | **3.76×** |   170 k/s |    56 k/s | **3.01×** |
+| 32 KiB  |      725 k/s |      200 k/s | **3.63×** |   107 k/s |    47 k/s | **2.29×** |
+| 64 KiB  |      472 k/s |      120 k/s | **3.93×** |    54 k/s |    37 k/s | **1.46×** |
 <!-- PERF:END -->
 
 ### REQ/REP latency (TCP loopback)
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/pyomq/doc/charts/latency_bindings.svg" alt="REQ/REP latency: pyomq vs pyzmq" width="850">
-</p>
 
 Serial ping-pong: 1000 warmup + 10000 measured iterations per cell. Lower is better;
 ratio = pyzmq / pyomq.
@@ -94,11 +99,20 @@ ratio = pyzmq / pyomq.
 <!-- LATENCY_PERF:START -->
 | Size    | pyomq p50 | pyzmq p50 | ratio     | pyomq p99 | pyzmq p99 | ratio     |
 |---------|----------:|----------:|----------:|----------:|----------:|----------:|
-| 128 B   |   64.4 µs |   72.8 µs | **1.13×** |   80.9 µs |   88.9 µs |     1.10× |
-| 512 B   |   62.9 µs |   70.0 µs | **1.11×** |   80.2 µs |   95.5 µs | **1.19×** |
-| 2 KiB   |   63.8 µs |   71.5 µs | **1.12×** |   87.7 µs |   96.7 µs | **1.10×** |
-| 8 KiB   |   69.6 µs |   89.6 µs | **1.29×** |   97.9 µs |    122 µs | **1.25×** |
-| 32 KiB  |   84.9 µs |    102 µs | **1.20×** |    110 µs |    118 µs |     1.07× |
+| 8 B     |   62.3 µs |   69.6 µs | **1.12×** |   78.5 µs |   88.8 µs | **1.13×** |
+| 16 B    |   62.0 µs |   70.2 µs | **1.13×** |   85.3 µs |   91.9 µs |     1.08× |
+| 32 B    |   63.4 µs |   69.9 µs | **1.10×** |   79.1 µs |    104 µs | **1.32×** |
+| 64 B    |   62.6 µs |   71.5 µs | **1.14×** |   77.7 µs |   92.1 µs | **1.19×** |
+| 128 B   |   62.0 µs |   72.8 µs | **1.18×** |   94.5 µs |   88.9 µs |     0.94× |
+| 256 B   |   64.4 µs |   72.9 µs | **1.13×** |   81.3 µs |   89.9 µs | **1.11×** |
+| 512 B   |   64.3 µs |   71.4 µs | **1.11×** |   79.4 µs |   89.1 µs | **1.12×** |
+| 1 KiB   |   66.2 µs |   73.0 µs | **1.10×** |   80.8 µs |   90.1 µs | **1.12×** |
+| 2 KiB   |   63.5 µs |   73.7 µs | **1.16×** |   91.1 µs |   90.2 µs |     0.99× |
+| 4 KiB   |   67.1 µs |   75.1 µs | **1.12×** |   97.8 µs |   92.4 µs |     0.95× |
+| 8 KiB   |   67.3 µs |   91.0 µs | **1.35×** |    101 µs |    122 µs | **1.22×** |
+| 16 KiB  |   75.3 µs |   95.2 µs | **1.26×** |   93.0 µs |    110 µs | **1.19×** |
+| 32 KiB  |   82.8 µs |    106 µs | **1.28×** |    100 µs |    123 µs | **1.23×** |
+| 64 KiB  |    116 µs |    116 µs |     1.00× |    136 µs |    140 µs |     1.03× |
 <!-- LATENCY_PERF:END -->
 
 ### `zmq.proxy()` forwarding (128 B, TCP)
@@ -106,8 +120,8 @@ ratio = pyzmq / pyomq.
 <!-- PROXY_PERF:START -->
 |                    | pyomq     | pyzmq     | ratio     |
 |--------------------|----------:|----------:|----------:|
-| PUSH/PULL msg/s    |  1.13 M/s |   545 k/s | **2.08×** |
-| REQ/REP rt/s       |  11,022/s |   6,497/s | **1.70×** |
+| PUSH/PULL msg/s    |   867 k/s |   501 k/s | **1.73×** |
+| REQ/REP rt/s       |  11,816/s |   6,259/s | **1.89×** |
 <!-- PROXY_PERF:END -->
 
 pyomq's `proxy()` forwards directly between sockets on the compio thread —

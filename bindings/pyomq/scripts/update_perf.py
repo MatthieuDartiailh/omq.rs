@@ -3,8 +3,11 @@
 
 Run from the pyomq root (bindings/pyomq/) after `maturin develop --release`.
 Generates SVG charts and updates the README tables.
+
+Pass --skip-pyzmq to reuse cached pyzmq numbers and only re-measure pyomq.
 """
 
+import argparse
 import asyncio
 import json
 import math
@@ -15,21 +18,32 @@ import sys
 import threading
 import time
 
-SIZES = [128, 512, 2048, 8192, 32768]
-LATENCY_SIZES = [128, 512, 2048, 8192, 32768]
+SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+LATENCY_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
 TARGET_RUNTIME_S = 0.4
 N_ROUNDS = 3
 LATENCY_WARMUP = 1000
 LATENCY_ITERS = 10000
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "..", "doc", "charts", ".perf_cache.json")
+
+def load_cache():
+    try:
+        with open(CACHE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_cache(data):
+    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+    with open(CACHE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
 
 
 # ── helpers ──────────────────────────────────────────────────────────
-
-def free_inproc(label):
-    return f"inproc://perf-{label}-{time.monotonic_ns()}"
-
 
 def free_tcp():
     import socket
@@ -66,34 +80,21 @@ def fmt_us(v):
     return f"{v:.2f} µs"
 
 
-# ── sync PUSH/PULL throughput ────────────────────────────────────────
+# ── subprocess runner ────────────────────────────────────────────────
 
-def measure(lib, endpoint, size, n_target_per_s=200_000):
-    payload = b"x" * size
-    ctx = lib.Context() if hasattr(lib, "Context") else lib.Context.instance()
-    pull = ctx.socket(lib.PULL)
-    push = ctx.socket(lib.PUSH)
-    pull.linger = 0
-    push.linger = 0
-    pull.bind(endpoint)
-    push.connect(endpoint)
-
-    n = max(int(n_target_per_s * TARGET_RUNTIME_S), 100)
-
-    def sender():
-        for _ in range(n):
-            push.send(payload)
-
-    t = threading.Thread(target=sender)
-    start = time.monotonic()
-    t.start()
-    for _ in range(n):
-        pull.recv()
-    elapsed = time.monotonic() - start
-    t.join()
-    push.close()
-    pull.close()
-    return n / elapsed
+def _run_subprocess(code, label, timeout=30, retries=2):
+    for attempt in range(1 + retries):
+        try:
+            r = subprocess.run([sys.executable, "-c", code],
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            sys.stderr.write(f"  [{label} timeout, attempt {attempt + 1}]\n")
+            continue
+        if r.returncode != 0:
+            sys.stderr.write(f"  [{label} failed, attempt {attempt + 1}]\n")
+            continue
+        return json.loads(r.stdout.strip())
+    return None
 
 
 def _measure_throughput_subprocess(lib_name, transport, size, n_target_per_s=200_000):
@@ -139,46 +140,43 @@ pull.close()
 print(json.dumps(n / elapsed))
 import sys; sys.stdout.flush(); import os; os._exit(0)
 """
-    try:
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=15)
-    except subprocess.TimeoutExpired:
-        sys.stderr.write(f"  [{lib_name} {transport} {size}B timeout]\n")
-        return 0.0
-    if r.returncode != 0:
-        sys.stderr.write(f"  [{lib_name} {transport} {size}B failed]\n")
-        return 0.0
-    return json.loads(r.stdout.strip())
+    result = _run_subprocess(code, f"{lib_name} {transport} {size}B")
+    return result if result is not None else 0.0
 
 
-def run_throughput():
-    import pyomq
-
+def run_throughput(cached_pyzmq=None):
     results = []
-    for size in SIZES:
+    for idx, size in enumerate(SIZES):
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        # warmup
-        measure(pyomq, free_inproc(f"w-omq-{size}"), size)
-        _measure_throughput_subprocess("pyzmq", "inproc", size)
-        measure(pyomq, free_tcp(), size)
-        _measure_throughput_subprocess("pyzmq", "tcp", size)
+        _measure_throughput_subprocess("pyomq", "inproc", size)
+        _measure_throughput_subprocess("pyomq", "tcp", size)
 
         inproc_omq = max(
-            measure(pyomq, free_inproc(f"omq-{size}-{i}"), size)
-            for i in range(N_ROUNDS)
+            _measure_throughput_subprocess("pyomq", "inproc", size)
+            for _ in range(N_ROUNDS)
         )
-        inproc_pz = max(
+        tcp_omq = max(
+            _measure_throughput_subprocess("pyomq", "tcp", size)
+            for _ in range(N_ROUNDS)
+        )
+
+        if cached_pyzmq:
+            inproc_pz = cached_pyzmq[idx]["inproc"]
+            tcp_pz = cached_pyzmq[idx]["tcp"]
+        else:
             _measure_throughput_subprocess("pyzmq", "inproc", size)
-            for _ in range(N_ROUNDS)
-        )
-        tcp_omq = max(measure(pyomq, free_tcp(), size) for _ in range(N_ROUNDS))
-        tcp_pz = max(
             _measure_throughput_subprocess("pyzmq", "tcp", size)
-            for _ in range(N_ROUNDS)
-        )
+            inproc_pz = max(
+                _measure_throughput_subprocess("pyzmq", "inproc", size)
+                for _ in range(N_ROUNDS)
+            )
+            tcp_pz = max(
+                _measure_throughput_subprocess("pyzmq", "tcp", size)
+                for _ in range(N_ROUNDS)
+            )
 
         inproc_ratio = inproc_omq / inproc_pz if inproc_pz > 0 else 0
         tcp_ratio = tcp_omq / tcp_pz if tcp_pz > 0 else 0
@@ -186,163 +184,122 @@ def run_throughput():
         results.append((label, inproc_omq, inproc_pz, inproc_ratio,
                          tcp_omq, tcp_pz, tcp_ratio))
 
-        print(f" inproc {inproc_ratio:.2f}x  tcp {tcp_ratio:.2f}x")
+        cached = " (cached)" if cached_pyzmq else ""
+        print(f" inproc {inproc_ratio:.2f}x  tcp {tcp_ratio:.2f}x{cached}")
 
     return results
 
 
 # ── async PUSH/PULL throughput ───────────────────────────────────────
 
-async def _measure_async_pyomq(endpoint, size, n):
-    import pyomq
-    import pyomq.asyncio as zmq_async
+def _measure_async_subprocess(lib_name, size, n_target_per_s=200_000):
+    n = min(max(int(n_target_per_s * TARGET_RUNTIME_S), 100), 20_000)
+    if lib_name == "pyzmq":
+        lib_import = "import zmq; import zmq.asyncio"
+        pull_setup = "ctx = zmq.asyncio.Context(); pull = ctx.socket(zmq.PULL); pull.linger = 0"
+        push_setup = "ctx = zmq.asyncio.Context(); push = ctx.socket(zmq.PUSH); push.linger = 0"
+        bind_line = "pull.bind(ep)"
+        connect_line = "push.connect(ep)"
+    else:
+        lib_import = "import pyomq; import pyomq.asyncio as zmq_async"
+        pull_setup = "ctx = zmq_async.Context(); pull = ctx.socket(pyomq.PULL)"
+        push_setup = "ctx = zmq_async.Context(); push = ctx.socket(pyomq.PUSH)"
+        bind_line = "await pull.bind(ep)"
+        connect_line = "await push.connect(ep)"
 
-    payload = b"x" * size
-    ctx = zmq_async.Context()
-    pull = ctx.socket(pyomq.PULL)
-    push = ctx.socket(pyomq.PUSH)
-    await pull.bind(endpoint)
-    await push.connect(endpoint)
-    await asyncio.sleep(0.05)
-
-    async def sender():
-        for _ in range(n):
-            await push.send(payload)
-
-    async def receiver():
-        for _ in range(n):
-            await pull.recv()
-
-    start = time.monotonic()
-    await asyncio.gather(sender(), receiver())
-    elapsed = time.monotonic() - start
-
-    await push.close()
-    await pull.close()
-    return n / elapsed
-
-
-def measure_async_pyomq(endpoint, size, n_target_per_s=200_000):
-    n = max(int(n_target_per_s * TARGET_RUNTIME_S), 100)
-    return asyncio.run(_measure_async_pyomq(endpoint, size, n))
-
-
-def measure_async_pyzmq(_endpoint, size, n_target_per_s=200_000):
-    n = max(int(n_target_per_s * TARGET_RUNTIME_S), 100)
-    code = f"""
-import asyncio, time, json, socket as sock
-def free_tcp():
-    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return f'tcp://127.0.0.1:{{port}}'
-import zmq, zmq.asyncio
+    recv_code = f"""
+import asyncio, time, json, sys
+{lib_import}
 async def run():
-    payload = b'x' * {size}
-    ctx = zmq.asyncio.Context()
-    pull = ctx.socket(zmq.PULL)
-    push = ctx.socket(zmq.PUSH)
-    pull.linger = 0
-    push.linger = 0
-    ep = free_tcp()
-    pull.bind(ep)
-    push.connect(ep)
-    await asyncio.sleep(0.05)
-    async def sender():
-        for _ in range({n}):
-            await push.send(payload)
-    async def receiver():
-        for _ in range({n}):
-            await pull.recv()
-    start = time.monotonic()
-    await asyncio.gather(sender(), receiver())
+    ep = sys.argv[1]
+    {pull_setup}
+    {bind_line}
+    n = {n}
+    count = 0
+    start = None
+    for _ in range(n):
+        await pull.recv()
+        if start is None:
+            start = time.monotonic()
+        count += 1
     elapsed = time.monotonic() - start
-    push.close()
-    pull.close()
-    print(json.dumps({n} / elapsed))
-    import sys; sys.stdout.flush(); import os; os._exit(0)
+    print(json.dumps(count / elapsed))
+    sys.stdout.flush(); import os; os._exit(0)
 asyncio.run(run())
 """
+    send_await = "await " if lib_name == "pyzmq" else ""
+    send_code = f"""
+import asyncio, time, sys
+{lib_import}
+async def run():
+    ep = sys.argv[1]
+    payload = b'x' * {size}
+    {push_setup}
+    {connect_line}
+    await asyncio.sleep(0.1)
+    for _ in range({n}):
+        {send_await}push.send(payload)
+    await asyncio.sleep(0.1)
+    import os; os._exit(0)
+asyncio.run(run())
+"""
+    import socket as sock
+    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    ep = f"tcp://127.0.0.1:{port}"
+
+    recv_proc = subprocess.Popen(
+        [sys.executable, "-c", recv_code, ep],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    send_proc = subprocess.Popen(
+        [sys.executable, "-c", send_code, ep],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    label = f"{lib_name} async tcp {size}B"
     try:
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=15)
-    except subprocess.TimeoutExpired:
+        send_proc.wait(timeout=30)
+        stdout, _ = recv_proc.communicate(timeout=30)
+        return json.loads(stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
+        sys.stderr.write(f"  [{label} timeout]\n")
+        send_proc.kill()
+        recv_proc.kill()
+        send_proc.wait()
+        recv_proc.wait()
         return 0.0
-    if r.returncode != 0:
-        return 0.0
-    return json.loads(r.stdout.strip())
 
 
-def run_async_throughput():
+def run_async_throughput(cached_pyzmq=None):
     results = []
-    for size in SIZES:
+    for idx, size in enumerate(SIZES):
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        measure_async_pyomq(free_tcp(), size)
-        measure_async_pyzmq(free_tcp(), size)
+        _measure_async_subprocess("pyomq", size)
 
-        tcp_omq = max(measure_async_pyomq(free_tcp(), size)
+        tcp_omq = max(_measure_async_subprocess("pyomq", size)
                       for _ in range(N_ROUNDS))
-        tcp_pz = max(measure_async_pyzmq(free_tcp(), size)
-                     for _ in range(N_ROUNDS))
+
+        if cached_pyzmq:
+            tcp_pz = cached_pyzmq[idx]["tcp"]
+        else:
+            _measure_async_subprocess("pyzmq", size)
+            tcp_pz = max(_measure_async_subprocess("pyzmq", size)
+                         for _ in range(N_ROUNDS))
 
         ratio = tcp_omq / tcp_pz if tcp_pz > 0 else 0
         results.append((label, tcp_omq, tcp_pz, ratio))
-        print(f" pyomq {fmt_rate(tcp_omq):>10}  pyzmq {fmt_rate(tcp_pz):>10}  {ratio:.2f}x")
+        cached = " (cached)" if cached_pyzmq else ""
+        print(f" pyomq {fmt_rate(tcp_omq):>10}  pyzmq {fmt_rate(tcp_pz):>10}  {ratio:.2f}x{cached}")
 
     return results
 
 
 # ── sync REQ/REP latency ────────────────────────────────────────────
-
-def measure_latency(lib, endpoint, size, warmup=LATENCY_WARMUP, iters=LATENCY_ITERS):
-    payload = b"x" * size
-    ctx = lib.Context() if hasattr(lib, "Context") else lib.Context.instance()
-    rep = ctx.socket(lib.REP)
-    req = ctx.socket(lib.REQ)
-    rep.linger = 0
-    req.linger = 0
-    rep.bind(endpoint)
-    req.connect(endpoint)
-    time.sleep(0.05)
-
-    def echo():
-        try:
-            for _ in range(warmup + iters + 100):
-                msg = rep.recv()
-                rep.send(msg)
-        except Exception:
-            pass
-
-    t = threading.Thread(target=echo, daemon=True)
-    t.start()
-
-    for _ in range(warmup):
-        req.send(payload)
-        req.recv()
-
-    rtts = []
-    for _ in range(iters):
-        t0 = time.monotonic()
-        req.send(payload)
-        req.recv()
-        rtts.append(time.monotonic() - t0)
-
-    req.close()
-    rep.close()
-    try:
-        ctx.term()
-    except Exception:
-        pass
-
-    rtts.sort()
-    p50 = rtts[len(rtts) * 50 // 100] * 1e6
-    p99 = rtts[len(rtts) * 99 // 100] * 1e6
-    return p50, p99
-
 
 def _measure_latency_subprocess(lib_name, size, warmup, iters):
     code = f"""
@@ -392,41 +349,40 @@ p99 = rtts[len(rtts)*99//100]*1e6
 print(json.dumps([p50, p99]))
 import sys; sys.stdout.flush(); import os; os._exit(0)
 """
-    try:
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        return (999999.0, 999999.0)
-    if r.returncode != 0:
-        return (999999.0, 999999.0)
-    return tuple(json.loads(r.stdout.strip()))
+    result = _run_subprocess(code, f"{lib_name} lat {size}B", timeout=60)
+    return tuple(result) if result is not None else (999999.0, 999999.0)
 
 
-def run_latency():
-    import pyomq
-
+def run_latency(cached_pyzmq=None):
     results = []
-    for size in LATENCY_SIZES:
+    for idx, size in enumerate(LATENCY_SIZES):
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        measure_latency(pyomq, free_tcp(), size, warmup=200, iters=200)
-        _measure_latency_subprocess("pyzmq", size, 200, 200)
+        _measure_latency_subprocess("pyomq", size, 200, 200)
 
-        omq_runs = [measure_latency(pyomq, free_tcp(), size) for _ in range(N_ROUNDS)]
-        pz_runs = [_measure_latency_subprocess("pyzmq", size, LATENCY_WARMUP, LATENCY_ITERS)
-                    for _ in range(N_ROUNDS)]
+        omq_runs = [_measure_latency_subprocess("pyomq", size, LATENCY_WARMUP, LATENCY_ITERS)
+                     for _ in range(N_ROUNDS)]
         omq_p50 = min(r[0] for r in omq_runs)
         omq_p99 = min(r[1] for r in omq_runs)
-        pz_p50 = min(r[0] for r in pz_runs)
-        pz_p99 = min(r[1] for r in pz_runs)
+
+        if cached_pyzmq:
+            pz_p50 = cached_pyzmq[idx]["p50"]
+            pz_p99 = cached_pyzmq[idx]["p99"]
+        else:
+            _measure_latency_subprocess("pyzmq", size, 200, 200)
+            pz_runs = [_measure_latency_subprocess("pyzmq", size, LATENCY_WARMUP, LATENCY_ITERS)
+                        for _ in range(N_ROUNDS)]
+            pz_p50 = min(r[0] for r in pz_runs)
+            pz_p99 = min(r[1] for r in pz_runs)
 
         p50_ratio = pz_p50 / omq_p50 if omq_p50 > 0 else 0
         p99_ratio = pz_p99 / omq_p99 if omq_p99 > 0 else 0
 
         results.append((label, omq_p50, pz_p50, p50_ratio, omq_p99, pz_p99, p99_ratio))
-        print(f" p50 {p50_ratio:.2f}x  p99 {p99_ratio:.2f}x")
+        cached = " (cached)" if cached_pyzmq else ""
+        print(f" p50 {p50_ratio:.2f}x  p99 {p99_ratio:.2f}x{cached}")
 
     return results
 
@@ -441,6 +397,7 @@ def _measure_async_latency_subprocess(lib_name, size, warmup, iters):
         lib_import = "import pyomq; import pyomq.asyncio as actx; lib = pyomq"
         close_expr = "await sock.close()"
 
+    send_await = "await " if lib_name == "pyzmq" else ""
     code = f"""
 import asyncio, time, json, socket as sock
 def free_tcp():
@@ -463,17 +420,17 @@ async def run():
         try:
             for _ in range({warmup} + {iters} + 100):
                 msg = await rep.recv()
-                await rep.send(msg)
+                {send_await}rep.send(msg)
         except Exception:
             pass
     task = asyncio.create_task(echo())
     for _ in range({warmup}):
-        await req.send(payload)
+        {send_await}req.send(payload)
         await req.recv()
     rtts = []
     for _ in range({iters}):
         t0 = time.monotonic()
-        await req.send(payload)
+        {send_await}req.send(payload)
         await req.recv()
         rtts.append(time.monotonic() - t0)
     task.cancel()
@@ -488,43 +445,40 @@ async def run():
     import sys; sys.stdout.flush(); import os; os._exit(0)
 asyncio.run(run())
 """
-    try:
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        sys.stderr.write(f"  [{lib_name} async lat {size}B timeout]\n")
-        return (999999.0, 999999.0)
-    if r.returncode != 0:
-        sys.stderr.write(f"  [{lib_name} async lat {size}B failed: {r.stderr[:200]}]\n")
-        return (999999.0, 999999.0)
-    return tuple(json.loads(r.stdout.strip()))
+    result = _run_subprocess(code, f"{lib_name} async lat {size}B", timeout=60)
+    return tuple(result) if result is not None else (999999.0, 999999.0)
 
 
-def run_async_latency():
+def run_async_latency(cached_pyzmq=None):
     results = []
-    for size in LATENCY_SIZES:
+    for idx, size in enumerate(LATENCY_SIZES):
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
         _measure_async_latency_subprocess("pyomq", size, 200, 200)
-        _measure_async_latency_subprocess("pyzmq", size, 200, 200)
 
         omq_runs = [_measure_async_latency_subprocess("pyomq", size, LATENCY_WARMUP, LATENCY_ITERS)
                     for _ in range(N_ROUNDS)]
-        pz_runs = [_measure_async_latency_subprocess("pyzmq", size, LATENCY_WARMUP, LATENCY_ITERS)
-                   for _ in range(N_ROUNDS)]
-
         omq_p50 = min(r[0] for r in omq_runs)
         omq_p99 = min(r[1] for r in omq_runs)
-        pz_p50 = min(r[0] for r in pz_runs)
-        pz_p99 = min(r[1] for r in pz_runs)
+
+        if cached_pyzmq:
+            pz_p50 = cached_pyzmq[idx]["p50"]
+            pz_p99 = cached_pyzmq[idx]["p99"]
+        else:
+            _measure_async_latency_subprocess("pyzmq", size, 200, 200)
+            pz_runs = [_measure_async_latency_subprocess("pyzmq", size, LATENCY_WARMUP, LATENCY_ITERS)
+                       for _ in range(N_ROUNDS)]
+            pz_p50 = min(r[0] for r in pz_runs)
+            pz_p99 = min(r[1] for r in pz_runs)
 
         p50_ratio = pz_p50 / omq_p50 if omq_p50 > 0 else 0
         p99_ratio = pz_p99 / omq_p99 if omq_p99 > 0 else 0
 
         results.append((label, omq_p50, pz_p50, p50_ratio, omq_p99, pz_p99, p99_ratio))
-        print(f" p50 {p50_ratio:.2f}x  p99 {p99_ratio:.2f}x")
+        cached = " (cached)" if cached_pyzmq else ""
+        print(f" p50 {p50_ratio:.2f}x  p99 {p99_ratio:.2f}x{cached}")
 
     return results
 
@@ -624,23 +578,130 @@ def measure_proxy_reqrep(lib, n=10_000):
     return n / elapsed
 
 
-def run_proxy():
+def _measure_proxy_pyzmq_subprocess(pattern, n):
+    code = f"""
+import threading, time, json, socket as sock
+def free_tcp():
+    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f'tcp://127.0.0.1:{{port}}'
+import zmq
+ctx = zmq.Context()
+"""
+    if pattern == "pushpull":
+        code += f"""
+frontend = ctx.socket(zmq.PULL)
+backend = ctx.socket(zmq.PUSH)
+fe_ep = free_tcp()
+be_ep = free_tcp()
+frontend.bind(fe_ep)
+backend.bind(be_ep)
+sender = ctx.socket(zmq.PUSH)
+sender.connect(fe_ep)
+receiver = ctx.socket(zmq.PULL)
+receiver.connect(be_ep)
+def proxy():
+    try:
+        zmq.proxy(frontend, backend)
+    except Exception:
+        pass
+t = threading.Thread(target=proxy, daemon=True)
+t.start()
+time.sleep(0.05)
+payload = b'x' * 128
+for _ in range(200):
+    sender.send(b'w')
+    receiver.recv()
+n = {n}
+def send_all():
+    for _ in range(n):
+        sender.send(payload)
+st = threading.Thread(target=send_all)
+start = time.monotonic()
+st.start()
+for _ in range(n):
+    receiver.recv()
+elapsed = time.monotonic() - start
+st.join()
+sender.close()
+receiver.close()
+frontend.close()
+backend.close()
+print(json.dumps(n / elapsed))
+import sys; sys.stdout.flush(); import os; os._exit(0)
+"""
+    else:
+        code += f"""
+frontend = ctx.socket(zmq.ROUTER)
+backend = ctx.socket(zmq.DEALER)
+fe_ep = free_tcp()
+be_ep = free_tcp()
+frontend.bind(fe_ep)
+backend.bind(be_ep)
+worker = ctx.socket(zmq.REP)
+worker.connect(be_ep)
+client = ctx.socket(zmq.REQ)
+client.connect(fe_ep)
+def proxy():
+    try:
+        zmq.proxy(frontend, backend)
+    except Exception:
+        pass
+t = threading.Thread(target=proxy, daemon=True)
+t.start()
+time.sleep(0.05)
+for _ in range(100):
+    client.send(b'w')
+    worker.recv()
+    worker.send(b'w')
+    client.recv()
+n = {n}
+payload = b'x' * 128
+start = time.monotonic()
+for _ in range(n):
+    client.send(payload)
+    worker.recv()
+    worker.send(payload)
+    client.recv()
+elapsed = time.monotonic() - start
+client.close()
+worker.close()
+frontend.close()
+backend.close()
+print(json.dumps(n / elapsed))
+import sys; sys.stdout.flush(); import os; os._exit(0)
+"""
+    result = _run_subprocess(code, f"pyzmq proxy {pattern}", timeout=30)
+    return result if result is not None else 0.0
+
+
+def run_proxy(cached_pyzmq=None):
     import pyomq
-    import zmq as pyzmq
 
     sys.stdout.write("  PUSH/PULL ...")
     sys.stdout.flush()
     pp_omq = max(measure_proxy_pushpull(pyomq) for _ in range(N_ROUNDS))
-    pp_pz = max(measure_proxy_pushpull(pyzmq) for _ in range(N_ROUNDS))
-    pp_ratio = pp_omq / pp_pz
-    print(f" {pp_ratio:.2f}x")
+    if cached_pyzmq:
+        pp_pz = cached_pyzmq["pushpull"]
+    else:
+        pp_pz = max(_measure_proxy_pyzmq_subprocess("pushpull", 200_000)
+                    for _ in range(N_ROUNDS))
+    pp_ratio = pp_omq / pp_pz if pp_pz > 0 else 0
+    cached = " (cached)" if cached_pyzmq else ""
+    print(f" {pp_ratio:.2f}x{cached}")
 
     sys.stdout.write("  REQ/REP ...")
     sys.stdout.flush()
     rr_omq = max(measure_proxy_reqrep(pyomq) for _ in range(N_ROUNDS))
-    rr_pz = max(measure_proxy_reqrep(pyzmq) for _ in range(N_ROUNDS))
-    rr_ratio = rr_omq / rr_pz
-    print(f" {rr_ratio:.2f}x")
+    if cached_pyzmq:
+        rr_pz = cached_pyzmq["reqrep"]
+    else:
+        rr_pz = max(_measure_proxy_pyzmq_subprocess("reqrep", 10_000)
+                    for _ in range(N_ROUNDS))
+    rr_ratio = rr_omq / rr_pz if rr_pz > 0 else 0
+    print(f" {rr_ratio:.2f}x{cached}")
 
     return pp_omq, pp_pz, pp_ratio, rr_omq, rr_pz, rr_ratio
 
@@ -653,14 +714,6 @@ C_PYOMQ_ASYNC = "#f97316"
 C_PYZMQ = "#2563eb"
 C_PYZMQ_ASYNC = "#8b5cf6"
 
-PLOT_LEFT = 90
-PLOT_RIGHT = 760
-PLOT_TOP = 45
-PLOT_BOT = 350
-PLOT_W = PLOT_RIGHT - PLOT_LEFT
-PLOT_H = PLOT_BOT - PLOT_TOP
-
-
 def _nice_ceil(v):
     if v <= 0:
         return 1
@@ -671,19 +724,6 @@ def _nice_ceil(v):
         if candidate >= v:
             return candidate
     return 10 * base
-
-
-def _y_pos(val, y_max):
-    frac = val / y_max if y_max > 0 else 0
-    return PLOT_BOT - frac * PLOT_H
-
-
-def _y_pos_log(val, log_min, log_max):
-    if val <= 0:
-        return PLOT_BOT
-    lv = math.log10(val)
-    frac = (lv - log_min) / (log_max - log_min) if log_max > log_min else 0
-    return PLOT_BOT - frac * PLOT_H
 
 
 def _fmt_y_rate(val):
@@ -708,266 +748,259 @@ def _fmt_mbps(val):
     return f"{val:.1f} MB/s"
 
 
-def _svg_header(title):
-    return [
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 440"'
-        ' font-family="system-ui, -apple-system, sans-serif">',
-        '  <rect width="850" height="440" fill="white"/>',
-    ]
+def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
+    n = len(SIZES)
+    svg_w, svg_h = 850, 520
+    x_left, x_right = 90, 760
+    plot_w = x_right - x_left
 
+    t1_top, t1_bot = 35, 248
+    t1_h = t1_bot - t1_top
+    t2_top, t2_bot = 304, 464
+    t2_h = t2_bot - t2_top
 
-def _svg_x_grid_and_labels(xs, x_labels):
-    lines = []
-    for x in xs:
-        lines.append(f'  <line x1="{x:.1f}" y1="{PLOT_TOP}" x2="{x:.1f}"'
-                     f' y2="{PLOT_BOT}" stroke="#e5e7eb" stroke-width="1"/>')
-    for i, label in enumerate(x_labels):
-        lines.append(f'  <text x="{xs[i]:.1f}" y="366" text-anchor="middle"'
-                     f' fill="#374151" font-size="9.5">{label}</text>')
-    return lines
+    xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
+    mid_x = (x_left + x_right) / 2
 
+    sync_omq_tp = [r[4] for r in sync_tp]
+    sync_pz_tp = [r[5] for r in sync_tp]
+    async_omq_tp = [r[1] for r in async_tp]
+    async_pz_tp = [r[2] for r in async_tp]
 
-def _svg_axes_border():
-    return [
-        f'  <line x1="{PLOT_LEFT}" y1="{PLOT_TOP}" x2="{PLOT_LEFT}"'
-        f' y2="{PLOT_BOT}" stroke="#9ca3af" stroke-width="1.5"/>',
-        f'  <line x1="{PLOT_RIGHT}" y1="{PLOT_TOP}" x2="{PLOT_RIGHT}"'
-        f' y2="{PLOT_BOT}" stroke="#9ca3af" stroke-width="1.5"/>',
-        f'  <line x1="{PLOT_LEFT}" y1="{PLOT_BOT}" x2="{PLOT_RIGHT}"'
-        f' y2="{PLOT_BOT}" stroke="#9ca3af" stroke-width="1.5"/>',
-    ]
+    all_rates = [v for vs in [sync_omq_tp, sync_pz_tp, async_omq_tp, async_pz_tp]
+                 for v in vs if v > 0]
+    msg_max = _nice_ceil(max(all_rates))
 
-
-def _svg_legend(series_info, y=392):
-    """series_info: [(name, color, dash), ...]"""
-    lines = []
-    cx = (PLOT_LEFT + PLOT_RIGHT) / 2
-    n = len(series_info)
-    total_w = n * 120
-    x0 = cx - total_w / 2
-    for idx, (name, color, dash) in enumerate(series_info):
-        lx = x0 + idx * 120
-        da = f' stroke-dasharray="{dash}"' if dash else ""
-        lines.append(f'  <line x1="{lx:.0f}" y1="{y}" x2="{lx + 14:.0f}" y2="{y}"'
-                     f' stroke="{color}" stroke-width="2.5"{da}/>')
-        lines.append(f'  <text x="{lx + 18:.0f}" y="{y + 4}" fill="#374151"'
-                     f' font-size="10" font-weight="500">{name}</text>')
-    return lines
-
-
-def _svg_polyline(xs, vals, y_fn, color, dash, with_dots=True, width="2.5"):
-    lines = []
-    pts = " ".join(f"{xs[i]:.1f},{y_fn(v):.1f}" for i, v in enumerate(vals))
-    da = f' stroke-dasharray="{dash}"' if dash else ""
-    lines.append(f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-                 f' stroke-width="{width}" stroke-linecap="round"'
-                 f' stroke-linejoin="round"{da}/>')
-    if with_dots:
-        for i, v in enumerate(vals):
-            y = y_fn(v)
-            lines.append(f'  <circle cx="{xs[i]:.1f}" cy="{y:.1f}" r="3"'
-                         f' fill="{color}" stroke="white" stroke-width="1"/>')
-    return lines
-
-
-def render_throughput_svg(title, x_labels, series_msg, sizes):
-    """Dual-axis throughput chart.
-
-    Left axis:  log-scale msg/s (solid lines with dots)
-    Right axis: linear MB/s     (dashed lines, no dots)
-
-    series_msg: [(name, color, msg_s_values)]
-    sizes:      message sizes in bytes (parallel to values)
-    """
-    n = len(x_labels)
-    xs = [PLOT_LEFT + i * PLOT_W / (n - 1) for i in range(n)]
-
-    all_rates = [v for _, _, vals in series_msg for v in vals if v > 0]
-    log_min = math.floor(math.log10(min(all_rates)))
-    log_max = math.ceil(math.log10(max(all_rates)))
-
-    all_mbps = [v * sizes[i] / 1e6
-                for _, _, vals in series_msg
-                for i, v in enumerate(vals) if v > 0]
+    all_mbps = [v * SIZES[i] / 1e6
+                for vs in [sync_omq_tp, sync_pz_tp, async_omq_tp, async_pz_tp]
+                for i, v in enumerate(vs) if v > 0]
     mbps_max = _nice_ceil(max(all_mbps)) if all_mbps else 1
 
-    lines = _svg_header(title)
+    def y_msg(v):
+        frac = v / msg_max if msg_max > 0 else 0
+        return t1_bot - frac * t1_h
 
-    # Left Y grid (log msg/s) — decades + intermediate ticks (2× and 5×)
-    for decade in range(log_min, log_max + 1):
-        for mult in [1, 2, 5]:
-            val = mult * 10 ** decade
-            if val < 10 ** log_min or val > 10 ** log_max:
-                continue
-            y = _y_pos_log(val, log_min, log_max)
-            is_decade = mult == 1
-            lines.append(f'  <line x1="{PLOT_LEFT}" y1="{y:.1f}" x2="{PLOT_RIGHT}"'
-                         f' y2="{y:.1f}" stroke="{"#e5e7eb" if is_decade else "#f0f0f0"}"'
-                         f' stroke-width="{"1" if is_decade else "0.5"}"/>')
-            lines.append(f'  <text x="{PLOT_LEFT - 8}" y="{y:.1f}" text-anchor="end"'
-                         f' dominant-baseline="middle"'
-                         f' fill="{"#374151" if is_decade else "#9ca3af"}"'
-                         f' font-size="{"10" if is_decade else "8"}">'
-                         f'{_fmt_y_rate(val)}</text>')
+    def y_mbps(v):
+        frac = v / mbps_max if mbps_max > 0 else 0
+        return t1_bot - frac * t1_h
 
-    # Right Y labels (linear MB/s) — 5 evenly spaced ticks
+    lat_max = 200.0
+    lat_step = 20
+
+    def y_lat(v):
+        return t2_bot - (v / lat_max) * t2_h
+
+    L = []
+    L.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
+        f' font-family="system-ui, -apple-system, sans-serif">'
+    )
+    L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
+
+    # ── TOP PANEL: THROUGHPUT ──────────────────────────────────────
+
+    L.append(
+        f'  <text x="{mid_x}" y="18" text-anchor="middle" fill="#111827"'
+        f' font-size="13" font-weight="700">'
+        f'PUSH/PULL throughput — TCP loopback (higher is better)</text>'
+    )
+
+    n_l_ticks = 5
+    for i in range(n_l_ticks + 1):
+        val = i * msg_max / n_l_ticks
+        yy = y_msg(val)
+        L.append(
+            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
+            f' stroke="#e5e7eb" stroke-width="1"/>'
+        )
+        L.append(
+            f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
+            f' dominant-baseline="middle" fill="#374151"'
+            f' font-size="10">{_fmt_y_rate(val)}</text>'
+        )
+
     n_r_ticks = 5
     for i in range(n_r_ticks + 1):
         mbps_val = i * mbps_max / n_r_ticks
-        frac = mbps_val / mbps_max if mbps_max > 0 else 0
-        y = PLOT_BOT - frac * PLOT_H
-        lines.append(f'  <line x1="{PLOT_LEFT}" y1="{y:.1f}" x2="{PLOT_RIGHT}"'
-                     f' y2="{y:.1f}" stroke="#e5e7eb" stroke-width="1"'
-                     f' stroke-dasharray="3,6"/>')
-        lines.append(f'  <text x="{PLOT_RIGHT + 8}" y="{y:.1f}" text-anchor="start"'
-                     f' dominant-baseline="middle" fill="#6b7280"'
-                     f' font-size="10">{_fmt_mbps(mbps_val)}</text>')
+        yy = y_mbps(mbps_val)
+        L.append(
+            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
+            f' stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>'
+        )
+        L.append(
+            f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
+            f' dominant-baseline="middle" fill="#6b7280"'
+            f' font-size="10">{_fmt_mbps(mbps_val)}</text>'
+        )
 
-    lines += _svg_x_grid_and_labels(xs, x_labels)
-    lines += _svg_axes_border()
+    for x in xs:
+        L.append(
+            f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}"'
+            f' stroke="#e5e7eb" stroke-width="1"/>'
+        )
 
-    # Y-axis labels
-    mid_y = (PLOT_TOP + PLOT_BOT) / 2
-    lines.append(f'  <text x="40" y="{mid_y:.0f}" text-anchor="middle"'
-                 f' dominant-baseline="middle" fill="#374151" font-size="11"'
-                 f' font-weight="600" transform="rotate(-90,40,{mid_y:.0f})">'
-                 f'msg/s (log)</text>')
-    lines.append(f'  <text x="830" y="{mid_y:.0f}" text-anchor="middle"'
-                 f' dominant-baseline="middle" fill="#6b7280" font-size="11"'
-                 f' font-weight="600" transform="rotate(90,830,{mid_y:.0f})">'
-                 f'throughput</text>')
+    L.append(
+        f'  <line x1="{x_left}" y1="{t1_top}" x2="{x_left}" y2="{t1_bot}"'
+        f' stroke="#9ca3af" stroke-width="1.5"/>'
+    )
+    L.append(
+        f'  <line x1="{x_right}" y1="{t1_top}" x2="{x_right}" y2="{t1_bot}"'
+        f' stroke="#9ca3af" stroke-width="1.5"/>'
+    )
+    L.append(
+        f'  <line x1="{x_left}" y1="{t1_bot}" x2="{x_right}" y2="{t1_bot}"'
+        f' stroke="#9ca3af" stroke-width="1.5"/>'
+    )
 
-    cx = (PLOT_LEFT + PLOT_RIGHT) / 2
-    lines.append(f'  <text x="{cx:.1f}" y="22" text-anchor="middle" fill="#111827"'
-                 f' font-size="14" font-weight="700">{title}</text>')
+    t1_mid = (t1_top + t1_bot) / 2
+    L.append(
+        f'  <text x="40" y="{t1_mid:.0f}" text-anchor="middle"'
+        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' transform="rotate(-90,40,{t1_mid:.0f})">msg/s</text>'
+    )
+    L.append(
+        f'  <text x="835" y="{t1_mid:.0f}" text-anchor="middle"'
+        f' dominant-baseline="middle" fill="#6b7280" font-size="10" font-weight="600"'
+        f' transform="rotate(90,835,{t1_mid:.0f})">throughput</text>'
+    )
 
-    # Plot: dashed MB/s first (behind), then solid msg/s on top
-    for name, color, vals in series_msg:
-        mbps = [v * sizes[i] / 1e6 for i, v in enumerate(vals)]
-
-        def mbps_y(v):
-            frac = v / mbps_max if mbps_max > 0 else 0
-            return PLOT_BOT - frac * PLOT_H
-
-        lines += _svg_polyline(xs, mbps, mbps_y, color, "6,4",
-                               with_dots=False, width="2")
-
-    for name, color, vals in series_msg:
-        def log_y(v, _lmin=log_min, _lmax=log_max):
-            return _y_pos_log(v, _lmin, _lmax)
-
-        lines += _svg_polyline(xs, vals, log_y, color, None,
-                               with_dots=True, width="2.5")
-
-    legend = [(name, color, None) for name, color, _ in series_msg]
-    lines += _svg_legend(legend, y=388)
-
-    lines.append(f'  <text x="{cx:.1f}" y="418" text-anchor="middle"'
-                 f' fill="#9ca3af" font-size="9">'
-                 f'solid = msg/s (left, log) · dashed = throughput (right)</text>')
-
-    lines.append("</svg>")
-    return "\n".join(lines)
-
-
-def render_latency_svg(title, x_labels, series, y_label="p50 latency"):
-    """Simple linear-axis latency chart."""
-    n = len(x_labels)
-    xs = [PLOT_LEFT + i * PLOT_W / (n - 1) for i in range(n)]
-
-    y_max = 200
-    y_step = 20
-
-    lines = _svg_header(title)
-
-    n_y_ticks = int(y_max / y_step)
-    for i in range(n_y_ticks + 1):
-        val = i * y_step
-        y = _y_pos(val, y_max)
-        lines.append(f'  <line x1="{PLOT_LEFT}" y1="{y:.1f}" x2="{PLOT_RIGHT}"'
-                     f' y2="{y:.1f}" stroke="#e5e7eb" stroke-width="1"/>')
-        lines.append(f'  <text x="{PLOT_LEFT - 8}" y="{y:.1f}" text-anchor="end"'
-                     f' dominant-baseline="middle" fill="#374151"'
-                     f' font-size="10">{_fmt_y_us(val)}</text>')
-
-    lines += _svg_x_grid_and_labels(xs, x_labels)
-    lines += _svg_axes_border()
-
-    mid_y = (PLOT_TOP + PLOT_BOT) / 2
-    lines.append(f'  <text x="30" y="{mid_y:.0f}" text-anchor="middle"'
-                 f' dominant-baseline="middle" fill="#374151" font-size="11"'
-                 f' font-weight="600" transform="rotate(-90,30,{mid_y:.0f})">'
-                 f'{y_label}</text>')
-
-    cx = (PLOT_LEFT + PLOT_RIGHT) / 2
-    lines.append(f'  <text x="{cx:.1f}" y="22" text-anchor="middle" fill="#111827"'
-                 f' font-size="14" font-weight="700">{title}</text>')
-
-    for name, color, dash, vals in series:
-        def lin_y(v, _ymax=y_max):
-            return _y_pos(v, _ymax)
-
-        lines += _svg_polyline(xs, vals, lin_y, color, dash,
-                               with_dots=True, width="2.5")
-
-    legend = [(name, color, dash) for name, color, dash, _ in series]
-    lines += _svg_legend(legend)
-
-    lines.append("</svg>")
-    return "\n".join(lines)
-
-
-def gen_throughput_chart(sync_results, async_results, path):
-    x_labels = [fmt_size(s) for s in SIZES]
-    sync_omq = [r[4] for r in sync_results]
-    sync_pz = [r[5] for r in sync_results]
-    async_omq = [r[1] for r in async_results]
-    async_pz = [r[2] for r in async_results]
-
-    series_msg = [
-        ("pyomq", C_PYOMQ, sync_omq),
-        ("pyomq async", C_PYOMQ_ASYNC, async_omq),
-        ("pyzmq", C_PYZMQ, sync_pz),
-        ("pyzmq async", C_PYZMQ_ASYNC, async_pz),
+    tp_series = [
+        ("pyomq", C_PYOMQ, sync_omq_tp),
+        ("pyomq async", C_PYOMQ_ASYNC, async_omq_tp),
+        ("pyzmq", C_PYZMQ, sync_pz_tp),
+        ("pyzmq async", C_PYZMQ_ASYNC, async_pz_tp),
     ]
 
-    svg = render_throughput_svg(
-        title="PUSH/PULL throughput: TCP loopback (Python bindings)",
-        x_labels=x_labels,
-        series_msg=series_msg,
-        sizes=SIZES,
+    for _, color, vals in tp_series:
+        pts = " ".join(f"{xs[i]:.1f},{y_msg(v):.1f}" for i, v in enumerate(vals))
+        L.append(
+            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+            f' stroke-width="2" stroke-dasharray="6,4"/>'
+        )
+
+    for _, color, vals in tp_series:
+        mbps = [v * SIZES[i] / 1e6 for i, v in enumerate(vals)]
+        pts = " ".join(f"{xs[i]:.1f},{y_mbps(v):.1f}" for i, v in enumerate(mbps))
+        L.append(
+            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+        )
+        for i, v in enumerate(mbps):
+            yy = y_mbps(v)
+            L.append(
+                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
+                f' fill="{color}" stroke="white" stroke-width="1"/>'
+            )
+
+    for i in range(n):
+        L.append(
+            f'  <text x="{xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
+            f' fill="#374151" font-size="8.5">{fmt_size(SIZES[i])}</text>'
+        )
+
+    # ── BOTTOM PANEL: LATENCY ─────────────────────────────────────
+
+    L.append(
+        f'  <text x="{mid_x}" y="288" text-anchor="middle" fill="#111827"'
+        f' font-size="13" font-weight="700">'
+        f'REQ/REP latency — TCP loopback, p50 µs (lower is better)</text>'
     )
+
+    sync_omq_lat = [r[1] for r in sync_lat]
+    sync_pz_lat = [r[2] for r in sync_lat]
+    async_omq_lat = [r[1] for r in async_lat]
+    async_pz_lat = [r[2] for r in async_lat]
+
+    for v in range(int(lat_step), int(lat_max) + 1, int(lat_step)):
+        yy = y_lat(v)
+        L.append(
+            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
+            f' stroke="#e5e7eb" stroke-width="1"/>'
+        )
+        L.append(
+            f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
+            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f'{_fmt_y_us(v)}</text>'
+        )
+
+    for x in xs:
+        L.append(
+            f'  <line x1="{x:.1f}" y1="{t2_top}" x2="{x:.1f}" y2="{t2_bot}"'
+            f' stroke="#e5e7eb" stroke-width="1"/>'
+        )
+
+    L.append(
+        f'  <line x1="{x_left}" y1="{t2_top}" x2="{x_left}" y2="{t2_bot}"'
+        f' stroke="#9ca3af" stroke-width="1.5"/>'
+    )
+    L.append(
+        f'  <line x1="{x_left}" y1="{t2_bot}" x2="{x_right}" y2="{t2_bot}"'
+        f' stroke="#9ca3af" stroke-width="1.5"/>'
+    )
+
+    t2_mid = (t2_top + t2_bot) / 2
+    L.append(
+        f'  <text x="40" y="{t2_mid:.0f}" text-anchor="middle"'
+        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' transform="rotate(-90,40,{t2_mid:.0f})">p50 latency (µs)</text>'
+    )
+
+    lat_series = [
+        ("pyomq", C_PYOMQ, sync_omq_lat),
+        ("pyomq async", C_PYOMQ_ASYNC, async_omq_lat),
+        ("pyzmq", C_PYZMQ, sync_pz_lat),
+        ("pyzmq async", C_PYZMQ_ASYNC, async_pz_lat),
+    ]
+
+    for _, color, vals in lat_series:
+        pts = " ".join(f"{xs[i]:.1f},{y_lat(v):.1f}" for i, v in enumerate(vals))
+        L.append(
+            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+        )
+        for i, v in enumerate(vals):
+            yy = y_lat(v)
+            L.append(
+                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
+                f' fill="{color}" stroke="white" stroke-width="1"/>'
+            )
+
+    for i in range(n):
+        L.append(
+            f'  <text x="{xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
+            f' fill="#374151" font-size="8.5">{fmt_size(SIZES[i])}</text>'
+        )
+
+    # ── LEGEND ────────────────────────────────────────────────────
+
+    leg_y = t2_bot + 40
+    legend_items = [
+        ("pyomq", C_PYOMQ), ("pyomq async", C_PYOMQ_ASYNC),
+        ("pyzmq", C_PYZMQ), ("pyzmq async", C_PYZMQ_ASYNC),
+    ]
+    item_w = 140
+    total_w = len(legend_items) * item_w
+    start_x = mid_x - total_w / 2
+
+    for idx, (label, color) in enumerate(legend_items):
+        lx = start_x + idx * item_w
+        L.append(
+            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
+            f' stroke="{color}" stroke-width="2.5"/>'
+        )
+        L.append(
+            f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{color}"/>'
+        )
+        L.append(
+            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
+            f' font-size="11" font-weight="500">{label}</text>'
+        )
+
+    L.append("</svg>")
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        f.write(svg)
-        f.write("\n")
-    print(f"  wrote {path}")
-
-
-def gen_latency_chart(sync_results, async_results, path):
-    x_labels = [fmt_size(s) for s in LATENCY_SIZES]
-    sync_omq = [r[1] for r in sync_results]
-    sync_pz = [r[2] for r in sync_results]
-    async_omq = [r[1] for r in async_results]
-    async_pz = [r[2] for r in async_results]
-
-    series = [
-        ("pyomq", C_PYOMQ, None, sync_omq),
-        ("pyomq async", C_PYOMQ_ASYNC, "6,4", async_omq),
-        ("pyzmq", C_PYZMQ, None, sync_pz),
-        ("pyzmq async", C_PYZMQ_ASYNC, "6,4", async_pz),
-    ]
-
-    svg = render_latency_svg(
-        title="REQ/REP latency: TCP loopback, p50 (Python bindings)",
-        x_labels=x_labels,
-        series=series,
-    )
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(svg)
+        f.write("\n".join(L))
         f.write("\n")
     print(f"  wrote {path}")
 
@@ -1034,24 +1067,63 @@ def update_marker(content, marker, table):
     return new_content
 
 
+def _extract_pyzmq_cache(tp, atp, lat, alat, proxy):
+    return {
+        "throughput": [
+            {"inproc": r[2], "tcp": r[5]} for r in tp
+        ],
+        "async_throughput": [
+            {"tcp": r[2]} for r in atp
+        ],
+        "latency": [
+            {"p50": r[2], "p99": r[5]} for r in lat
+        ],
+        "async_latency": [
+            {"p50": r[2], "p99": r[5]} for r in alat
+        ],
+        "proxy": {
+            "pushpull": proxy[1],
+            "reqrep": proxy[4],
+        },
+    }
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--skip-pyzmq", action="store_true",
+                        help="reuse cached pyzmq numbers (from a previous full run)")
+    args = parser.parse_args()
+
+    cache = None
+    if args.skip_pyzmq:
+        cache = load_cache()
+        if not cache:
+            print("No cached pyzmq data found. Run a full benchmark first.")
+            sys.exit(1)
+        print("Using cached pyzmq numbers.\n")
+
     print("Measuring sync PUSH/PULL throughput...")
-    tp_results = run_throughput()
+    tp_results = run_throughput(cache.get("throughput") if cache else None)
     tp_table = build_throughput_table(tp_results)
 
     print("\nMeasuring async PUSH/PULL throughput...")
-    atp_results = run_async_throughput()
+    atp_results = run_async_throughput(cache.get("async_throughput") if cache else None)
 
     print("\nMeasuring sync REQ/REP latency (TCP)...")
-    lat_results = run_latency()
+    lat_results = run_latency(cache.get("latency") if cache else None)
     lat_table = build_latency_table(lat_results)
 
     print("\nMeasuring async REQ/REP latency (TCP)...")
-    alat_results = run_async_latency()
+    alat_results = run_async_latency(cache.get("async_latency") if cache else None)
 
     print("\nMeasuring zmq.proxy() forwarding...")
-    proxy_results = run_proxy()
+    proxy_results = run_proxy(cache.get("proxy") if cache else None)
     proxy_table = build_proxy_table(*proxy_results)
+
+    if not args.skip_pyzmq:
+        save_cache(_extract_pyzmq_cache(tp_results, atp_results,
+                                        lat_results, alat_results, proxy_results))
+        print("\nCached pyzmq results for future --skip-pyzmq runs.")
 
     print()
     print(tp_table)
@@ -1071,11 +1143,9 @@ def main():
         f.write(content)
     print(f"\nUpdated {README}")
 
-    print("\nGenerating charts...")
-    gen_throughput_chart(tp_results, atp_results,
-                        os.path.join(CHART_DIR, "throughput_bindings.svg"))
-    gen_latency_chart(lat_results, alat_results,
-                      os.path.join(CHART_DIR, "latency_bindings.svg"))
+    print("\nGenerating chart...")
+    gen_combined_chart(tp_results, atp_results, lat_results, alat_results,
+                       os.path.join(CHART_DIR, "bindings.svg"))
 
 
 if __name__ == "__main__":
