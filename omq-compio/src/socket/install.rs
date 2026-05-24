@@ -105,12 +105,13 @@ pub(super) fn install_inproc_peer(
     // before this inproc peer connected. Wire peers get this via
     // their driver's select loop; inproc has no driver, so we drain
     // inline.
+    #[cfg(not(feature = "priority"))]
     if is_round_robin_send(inner.socket_type)
         && let Some(rx) = &inner.shared_send_rx
     {
         let peers = inner.out_peers.read().expect("peers lock");
         if let Some(slot) = peers.get(idx) {
-            while let Ok(msg) = rx.try_recv() {
+            while let Some(msg) = rx.try_recv() {
                 if slot.out.try_send_immediate(msg).is_err() {
                     break;
                 }

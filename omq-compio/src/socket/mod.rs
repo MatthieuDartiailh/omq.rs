@@ -29,6 +29,8 @@ mod install;
 mod peer;
 mod recv;
 mod send;
+#[cfg(not(feature = "priority"))]
+pub(crate) mod shared_queue;
 
 pub use handle::Socket;
 

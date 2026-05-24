@@ -331,6 +331,31 @@ impl DriverLoopState {
         Ok(())
     }
 
+    #[cfg(not(feature = "priority"))]
+    async fn drain_shared(
+        &mut self,
+        first: Message,
+        shared: &crate::socket::shared_queue::SharedQueueReceiver,
+        state: &DirectIoState,
+        cap: usize,
+    ) -> Result<()> {
+        let mut next = Some(first);
+        while let Some(m) = next.take() {
+            let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
+                self.encode_outbound_message(state, &m, cap).await?
+            } else {
+                self.pending_cmds.push_back(DriverCommand::SendMessage(m));
+                false
+            };
+            if cap_reached {
+                break;
+            }
+            next = shared.try_recv();
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "priority")]
     async fn drain_shared(
         &mut self,
         first: Message,
@@ -373,7 +398,10 @@ pub(crate) async fn run_connection(
     socket_type: SocketType,
     options: Options,
     inbox: Receiver<DriverCommand>,
-    shared_msg_rx: Option<Receiver<Message>>,
+    #[cfg(not(feature = "priority"))] shared_msg_rx: Option<
+        crate::socket::shared_queue::SharedQueueReceiver,
+    >,
+    #[cfg(feature = "priority")] shared_msg_rx: Option<Receiver<Message>>,
     peer_in_tx: blume::Sender<InprocFrame>,
     snapshot_sink: Box<dyn SnapshotSink>,
     monitor_ctx: Option<MonitorCtx>,

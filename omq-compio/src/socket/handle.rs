@@ -312,14 +312,17 @@ impl Socket {
             .expect("udp_dialers lock")
             .clear();
         Self::drain_shared_queue(&self.inner, deadline).await;
-        if let Some(tx) = self
+        if let Some(_tx) = self
             .inner
             .shared_send_tx
             .write()
             .expect("shared_send_tx lock")
             .take()
         {
-            drop(tx);
+            #[cfg(not(feature = "priority"))]
+            if let Some(rx) = &self.inner.shared_send_rx {
+                rx.close();
+            }
         }
         let wire_handles: Vec<WirePeerHandle> = {
             let peers = self.inner.out_peers.read().expect("peers lock");

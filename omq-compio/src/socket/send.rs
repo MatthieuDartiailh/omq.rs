@@ -364,6 +364,26 @@ impl Socket {
             return self.slow_round_robin(out, msg, 1, direct, slot_idx).await;
         }
 
+        // Multi-peer wire-only fast path: skip select_peer entirely.
+        // Wire drivers work-steal from the shared queue; inproc peers
+        // don't, so we can only bypass when there are no inproc peers.
+        // Gate on total > 1 so single-peer wire still bootstraps the
+        // direct_send_io cache via select_peer -> slow_round_robin.
+        if inner.out_peer_count.load(Ordering::Acquire) > 1
+            && inner.inproc_out_count.load(Ordering::Relaxed) == 0
+        {
+            if inner.options.conflate {
+                return self.conflate_shared_queue_send(msg);
+            }
+            let stx = inner
+                .shared_send_tx
+                .read()
+                .expect("shared_send_tx lock")
+                .clone()
+                .ok_or(Error::Closed)?;
+            return stx.send_async(msg).await;
+        }
+
         loop {
             if let Some((chosen, peer_count, direct, slot_idx)) = self.select_peer() {
                 if peer_count == 1 {
@@ -392,7 +412,7 @@ impl Socket {
                 .expect("shared_send_tx lock")
                 .clone();
             if let Some(stx) = stx {
-                return stx.send_async(msg).await.map_err(|_| Error::Closed);
+                return stx.send_async(msg).await;
             }
             listener.await;
         }
@@ -415,7 +435,7 @@ impl Socket {
         if let Some(rx) = &inner.shared_send_rx {
             let _ = rx.try_recv();
         }
-        stx.try_send(msg).map_err(|_| Error::Closed)
+        stx.try_send(msg)
     }
 
     /// `cmd_tx`-routed round-robin send. Used for every wire-side
@@ -503,7 +523,7 @@ impl Socket {
                             .expect("shared_send_tx lock")
                             .clone()
                             .ok_or(Error::Closed)?;
-                        stx.send_async(msg).await.map_err(|_| Error::Closed)
+                        stx.send_async(msg).await
                     }
                 }
             }
@@ -515,7 +535,7 @@ impl Socket {
                     .expect("shared_send_tx lock")
                     .clone()
                     .ok_or(Error::Closed)?;
-                tx.send_async(msg).await.map_err(|_| Error::Closed)
+                tx.send_async(msg).await
             }
         }
     }
@@ -823,6 +843,14 @@ impl Socket {
     #[cfg(not(feature = "priority"))]
     fn try_send_round_robin(&self, msg: &Message) -> Result<()> {
         let inner = self.inner();
+        if inner.out_peer_count.load(Ordering::Acquire) > 1
+            && inner.inproc_out_count.load(Ordering::Relaxed) == 0
+        {
+            if inner.options.conflate {
+                return self.conflate_shared_queue_send(msg.clone());
+            }
+            return self.try_send_via_shared(msg.clone());
+        }
         let peers = inner.out_peers.read().expect("peers lock");
         if peers.is_empty() {
             if inner.options.conflate {
@@ -849,10 +877,7 @@ impl Socket {
             .expect("shared_send_tx lock")
             .clone()
             .ok_or(Error::Closed)?;
-        stx.try_send(msg).map_err(|e| match e {
-            flume::TrySendError::Full(_) => Error::WouldBlock,
-            flume::TrySendError::Disconnected(_) => Error::Closed,
-        })
+        stx.try_send(msg)
     }
 
     #[cfg(not(feature = "priority"))]

@@ -186,6 +186,16 @@ pub(super) struct SocketInner {
     /// Bumped on every `out_peers` write. Lets send/recv skip lock
     /// acquisitions when the peer set is stable.
     pub(super) peers_gen: AtomicU64,
+    /// Total outbound peer count. Used by the multi-peer wire fast
+    /// path to distinguish single-peer (direct encode) from multi-peer
+    /// (shared queue) without locking `out_peers`.
+    #[cfg(not(feature = "priority"))]
+    pub(super) out_peer_count: AtomicUsize,
+    /// Count of inproc outbound peers. When zero, multi-peer wire
+    /// sends skip `select_peer` entirely — all peers drain from the
+    /// shared queue via their drivers.
+    #[cfg(not(feature = "priority"))]
+    pub(super) inproc_out_count: AtomicUsize,
     /// Cached route for the common single-peer case. Invalidated
     /// when `peers_gen` advances past the stored generation.
     pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
@@ -256,7 +266,13 @@ pub(super) struct SocketInner {
     /// `None` for non-round-robin socket types (PUB/XPUB/RADIO/
     /// ROUTER use per-peer queues; XSUB uses fan-out; SUB/PULL/DISH
     /// don't send).
+    #[cfg(not(feature = "priority"))]
+    pub(super) shared_send_tx: RwLock<Option<super::shared_queue::SharedQueueSender>>,
+    #[cfg(not(feature = "priority"))]
+    pub(super) shared_send_rx: Option<super::shared_queue::SharedQueueReceiver>,
+    #[cfg(feature = "priority")]
     pub(super) shared_send_tx: RwLock<Option<flume::Sender<Message>>>,
+    #[cfg(feature = "priority")]
     pub(super) shared_send_rx: Option<flume::Receiver<Message>>,
     /// Round-robin counter for `Socket::send` peer selection on
     /// round-robin socket types. Modulo against the live peer
@@ -348,8 +364,8 @@ impl SocketInner {
         #[cfg(not(feature = "priority"))]
         let (shared_send_tx, shared_send_rx) = if is_round_robin_send(socket_type) {
             let (tx, rx) = match send_cap {
-                Some(cap) => flume::bounded::<Message>(cap),
-                None => flume::unbounded::<Message>(),
+                Some(cap) => super::shared_queue::bounded(cap),
+                None => super::shared_queue::unbounded(),
             };
             (Some(tx), Some(rx))
         } else {
@@ -373,6 +389,10 @@ impl SocketInner {
             options,
             out_peers: RwLock::new(Slab::new()),
             peers_gen: AtomicU64::new(0),
+            #[cfg(not(feature = "priority"))]
+            out_peer_count: AtomicUsize::new(0),
+            #[cfg(not(feature = "priority"))]
+            inproc_out_count: AtomicUsize::new(0),
             cached_route: Mutex::new(None),
             in_tx,
             in_rx,
@@ -419,12 +439,21 @@ impl SocketInner {
     /// register identity (with handover), rebuild peer keys, and
     /// notify waiters. Returns the slab index.
     pub(super) fn insert_peer_slot(&self, slot: PeerSlot, identity: Option<&Bytes>) -> usize {
+        #[cfg(not(feature = "priority"))]
+        let is_inproc = matches!(&slot.out, PeerOut::Inproc { .. });
         let idx = {
             let mut peers = self.out_peers.write().expect("peers lock");
             let idx = peers.insert(slot);
             self.peers_gen.fetch_add(1, Ordering::Release);
             idx
         };
+        #[cfg(not(feature = "priority"))]
+        {
+            self.out_peer_count.fetch_add(1, Ordering::Release);
+            if is_inproc {
+                self.inproc_out_count.fetch_add(1, Ordering::Release);
+            }
+        }
         {
             let pipes = unsafe { &mut *self.inproc_send_pipes.get() };
             while pipes.len() <= idx {
@@ -494,6 +523,13 @@ impl SocketInner {
             let mut peers = self.out_peers.write().expect("peers lock");
             if !peers.contains(slot_idx) {
                 return;
+            }
+            #[cfg(not(feature = "priority"))]
+            {
+                self.out_peer_count.fetch_sub(1, Ordering::Release);
+                if matches!(&peers[slot_idx].out, PeerOut::Inproc { .. }) {
+                    self.inproc_out_count.fetch_sub(1, Ordering::Release);
+                }
             }
             peers.remove(slot_idx);
         }
