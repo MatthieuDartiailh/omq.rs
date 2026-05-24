@@ -156,7 +156,7 @@ fn run_cell_threaded(
                     s.subscribe(Bytes::new()).await.expect("subscribe");
                     while !stop.load(Ordering::Relaxed) {
                         if let Ok(Ok(_)) =
-                            compio::time::timeout(Duration::from_millis(20), s.recv()).await
+                            compio::time::timeout(Duration::from_millis(200), s.recv()).await
                         {
                             subs_ready[i].store(true, Ordering::Relaxed);
                             recv_count.fetch_add(1, Ordering::Relaxed);

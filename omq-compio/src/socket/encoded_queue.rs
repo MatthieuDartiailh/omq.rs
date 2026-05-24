@@ -104,6 +104,14 @@ impl EncodedQueue {
         }
     }
 
+    pub(crate) fn push_raw(&mut self, chunks: Vec<Bytes>) {
+        self.flush_flat_to_chunks();
+        for chunk in chunks {
+            self.total_bytes += chunk.len();
+            self.chunks.push_back(chunk);
+        }
+    }
+
     pub(crate) fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         let take = max_chunks.min(self.chunks.len());
         let chunk_bytes: usize = self.chunks.iter().take(take).map(Bytes::len).sum();

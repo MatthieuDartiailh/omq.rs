@@ -84,10 +84,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
         };
 
         if is_one_shot {
-            let fd = {
-                let io = state.lock_io();
-                io.reader.fd_clone()
-            };
+            let fd = state.lock_io().reader.fd_clone();
             let mut restore = crate::socket::AccRestore {
                 state,
                 buf: state.pending_acc.lock().expect("pending_acc").take(),
@@ -159,7 +156,14 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
                     }
                 }
             }
-            Some(Err(e)) if e.raw_os_error() == Some(libc::ENOBUFS) => {
+            Some(Err(e))
+                if e.raw_os_error() == Some(libc::ENOBUFS)
+                    || e.raw_os_error() == Some(libc::ECANCELED) =>
+            {
+                let mut sguard = state.recv_stream.0.lock().await;
+                *sguard = Some(crate::socket::RecvStreamState::OneShot);
+            }
+            None => {
                 let mut sguard = state.recv_stream.0.lock().await;
                 *sguard = Some(crate::socket::RecvStreamState::OneShot);
             }
@@ -188,12 +192,21 @@ async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
             )
             .await;
             match buf {
-                None => PullOutcome::Eof,
-                Some(Err(e)) => PullOutcome::Err(e),
-                Some(Ok(buf)) => {
-                    if buf.is_empty() {
-                        return PullOutcome::Eof;
+                None => {
+                    *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                    PullOutcome::Fed
+                }
+                Some(Err(e)) => {
+                    let os = e.raw_os_error();
+                    if os == Some(libc::ENOBUFS) || os == Some(libc::ECANCELED) {
+                        *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                        PullOutcome::Fed
+                    } else {
+                        PullOutcome::Err(e)
                     }
+                }
+                Some(Ok(buf)) if buf.is_empty() => PullOutcome::Eof,
+                Some(Ok(buf)) => {
                     let handle_result = {
                         let mut io = state.lock_io();
                         let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
@@ -232,7 +245,8 @@ async fn handle_pull_outcome(
             Ok(RecvAction::Return(None))
         }
         PullOutcome::Err(e) => {
-            if e.raw_os_error() != Some(libc::ENOBUFS) {
+            let os = e.raw_os_error();
+            if os != Some(libc::ENOBUFS) && os != Some(libc::ECANCELED) {
                 state.signal_eof();
                 return Err(Error::Closed);
             }
@@ -657,41 +671,29 @@ impl Socket {
                     RecvAction::Retry | RecvAction::Proceed => {}
                 },
             }
-            Self::flush_codec_output(&state).await?;
+            Self::flush_codec_output(&state);
         }
     }
 
-    async fn flush_codec_output(state: &Arc<DirectIoState>) -> Result<()> {
-        loop {
-            let mut writer = state.writer.lock().await;
-            let chunks = {
-                let io = state.lock_io();
-                if !io.codec.has_pending_transmit() {
-                    break;
-                }
-                let mut c = io.codec.clone_transmit_chunks();
-                if c.len() > 1024 {
-                    c.truncate(1024);
-                }
-                c
-            };
-            if chunks.is_empty() {
-                break;
-            }
-            let (res, _returned) = writer.write_vectored(chunks).await;
-            let written = res.map_err(Error::Io)?;
-            if written == 0 {
-                state.signal_eof();
-                return Err(Error::Closed);
-            }
-            state
-                .peer_io
-                .lock()
-                .expect("peer_io")
-                .codec
-                .advance_transmit(written);
+    fn flush_codec_output(state: &Arc<DirectIoState>) {
+        let mut io = state.lock_io();
+        if !io.codec.has_pending_transmit() {
+            return;
         }
-        Ok(())
+        let chunks = io.codec.clone_transmit_chunks();
+        let total: usize = chunks.iter().map(Bytes::len).sum();
+        io.codec.advance_transmit(total);
+        drop(io);
+        if !chunks.is_empty() {
+            state
+                .encoded_queue
+                .lock()
+                .expect("encoded_queue")
+                .push_raw(chunks);
+            if state.driver_in_select.load(Ordering::Relaxed) {
+                state.transmit_ready.notify(1);
+            }
+        }
     }
 
     #[inline]

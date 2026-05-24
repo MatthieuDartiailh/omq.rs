@@ -649,7 +649,8 @@ impl DriverLoopState {
             StreamArmOutcome::Eof => return Ok(true),
             StreamArmOutcome::ProtoErr(e) => return Err(e),
             StreamArmOutcome::Err(e) => {
-                if e.raw_os_error() != Some(libc::ENOBUFS) {
+                let os = e.raw_os_error();
+                if os != Some(libc::ENOBUFS) && os != Some(libc::ECANCELED) {
                     return Ok(true);
                 }
                 if accumulating {
@@ -766,6 +767,11 @@ impl DriverLoopState {
         let (res, returned) = state.writer.lock().await.write_vectored(tmp).await;
         let written = res.map_err(Error::Io)?;
         if written == 0 {
+            state
+                .encoded_queue
+                .lock()
+                .expect("encoded_queue")
+                .put_back_unwritten(returned, 0);
             return Ok(false);
         }
         let total_drained: usize = returned.iter().map(Bytes::len).sum();
