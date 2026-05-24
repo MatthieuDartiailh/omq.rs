@@ -337,7 +337,8 @@ loop {
   //   Skipped post-handshake when recv_claim == 1 (user owns the codec
   //   inline; double-draining would surface events out of FIFO order).
   //   Skipped post-handshake when !codec_has_input (nothing new).
-  //   HandshakeSucceeded -> set handshake_done, drain pending_cmds; codec_maybe_dirty = true
+  //   HandshakeSucceeded -> set handshake_done, drain pending_cmds into
+  //     encoded_queue (plain) or codec (crypto); codec_maybe_dirty = true
   //   Message -> decoder.decode, send to peer_in_tx (socket inbound)
   //   Command -> update peer_sub/peer_groups, surface to user if XPUB
   //   codec_has_input = false after drain (re-set by stream_arm)
@@ -346,9 +347,12 @@ loop {
   //   (awaits here; sync peer_io is dropped before yielding)
 
   // Step 3a: flush codec transmit buffer [skipped if !codec_maybe_dirty]
-  //   clone_transmit_chunks [sync peer_io lock] -> release
+  //   Only handshake/command data lives here (greeting, READY, PING).
+  //   Message data is encoded into EncodedQueue directly so that the
+  //   codec transmit buffer stays small (never exceeds IOV_MAX chunks).
+  //   clone_transmit_chunks [sync peer_io lock], advance immediately -> release
   //   writer.write_vectored [writer lock only] -> release
-  //   advance_transmit [sync peer_io lock] -> release
+  //   partial write -> put_back_unwritten into encoded_queue
   //   codec_maybe_dirty = false when confirmed empty
   //   if wrote: continue
 
@@ -372,8 +376,9 @@ loop {
                       codec_has_input = true; if claim flipped to 1
                       while parked, notify recv_codec_ready.
                       ENOBUFS -> rearm and continue.
-    cmd_inbox      -> encode SendMessage / SendCommand into codec; codec_maybe_dirty = true
-    shared_queue   -> work-steal, encode into codec; codec_maybe_dirty = true
+    cmd_inbox      -> SendCommand into codec (codec_maybe_dirty = true);
+                      SendMessage into encoded_queue (plain) or codec (crypto)
+    shared_queue   -> work-steal, encode into encoded_queue (plain) or codec (crypto)
     transmit_ready -> (sender woke us), loop to step 3b
   }
 }
@@ -382,8 +387,11 @@ loop {
 ### Lock discipline during step 3a/3b
 
 The codec lock is released **before** `write_vectored`. This lets the
-sender encode the next message (via `EncodedQueue` or the codec path)
-while the I/O syscall is in flight.
+sender encode the next message into `EncodedQueue` while the I/O
+syscall is in flight. Non-crypto message data always flows through
+`EncodedQueue`, never through the codec transmit buffer, so
+`flush_codec_to_wire` (step 3a) and `flush_encoded_queue` (step 3b)
+never compete over the same data and ordering is preserved.
 
 ### Recv-direct claim arbitration
 

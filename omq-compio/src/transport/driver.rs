@@ -257,8 +257,20 @@ impl DriverLoopState {
                                 eq.encode_and_push(wire);
                             }
                         }
-                    } else {
+                    } else if state.uses_crypto {
                         io.codec.send_message(&m)?;
+                    } else {
+                        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                        #[cfg(feature = "ws")]
+                        if state.is_ws {
+                            eq.encode_and_push_flat_ws(&m, state.ws_masked);
+                            continue;
+                        }
+                        if m.byte_len() < crate::socket::FLAT_THRESHOLD {
+                            eq.encode_and_push_flat(&m);
+                        } else {
+                            eq.encode_and_push(&m);
+                        }
                     }
                 }
                 DriverCommand::SendCommand(c) => {
