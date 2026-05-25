@@ -13,9 +13,6 @@
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
-> [!CAUTION]
-> **Experimental.** The API is unstable and may change without notice. Not yet battle-tested in production. Bug reports and testing in real workloads are very welcome.
-
 - Two async backends: **compio** (io_uring, default) and **tokio**
 - 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `zstd+tcp://`)
 - 4 security mechanisms: NULL, PLAIN, CURVE, BLAKE3ZMQ
@@ -31,6 +28,9 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 [How to beat libzmq](doc/performance.md) | [Comparison tables](COMPARISONS.md) | [Benchmarks](BENCHMARKS.md) | [Compression benchmarks](BENCHMARKS_COMPRESSION.md)
 
 ## Install
+
+> [!CAUTION]
+> **Experimental.** The API is unstable and may change without notice. Not yet battle-tested in production. Bug reports and testing in real workloads are very welcome.
 
 ```sh
 cargo add omq                     # compio backend (default)
