@@ -5,11 +5,13 @@
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-%3E%3D%201.93-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-> **16.4M msg/s** inproc | **7.2M msg/s** ipc | **7.2M msg/s** tcp
+> **16.1M msg/s** inproc | **15.5M msg/s** ipc | **15.9M msg/s** tcp
 >
 > **2.5 µs** inproc latency | **14.7 µs** ipc | **21.4 µs** tcp
+>
+> **2x** libzmq TCP throughput | **2x** lower TCP latency
 
-Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all message sizes.
+Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
 - Two async backends: **compio** (io_uring, default) and **tokio**
 - 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `zstd+tcp://`)
@@ -23,7 +25,7 @@ Pure Rust ZeroMQ. Wire-compatible with libzmq, equal or faster across all messag
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
 </p>
 
-[Full comparison tables](COMPARISONS.md) | [All benchmarks](BENCHMARKS.md) | [Compression benchmarks](BENCHMARKS_COMPRESSION.md)
+[How to beat libzmq](doc/performance.md) | [Comparison tables](COMPARISONS.md) | [Benchmarks](BENCHMARKS.md) | [Compression benchmarks](BENCHMARKS_COMPRESSION.md)
 
 ## Install
 
