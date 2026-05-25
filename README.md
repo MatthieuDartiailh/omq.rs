@@ -19,7 +19,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
 
-### vs. libzmq (TCP loopback, two processes)
+### vs. libzmq
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
@@ -28,6 +28,9 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 [How to beat libzmq](doc/performance.md) | [Comparison tables](COMPARISONS.md) | [Benchmarks](BENCHMARKS.md) | [Compression benchmarks](BENCHMARKS_COMPRESSION.md)
 
 ## Install
+
+> [!CAUTION]
+> **Experimental.** The API is unstable and may change without notice. Not yet battle-tested in production. Bug reports and testing in real workloads are very welcome.
 
 ```sh
 cargo add omq                     # compio backend (default)
