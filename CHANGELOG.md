@@ -6,6 +6,12 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-05-25
+
+### pyomq 0.10.1
+
+- Suppress `dead_code` warnings from PyO3 proc-macro call sites.
+
 ## [0.2.11] - 2026-05-25
 
 ### omq-tokio 0.12.1
