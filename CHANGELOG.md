@@ -6,6 +6,13 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.14] - 2026-05-25
+
+### pyomq 0.10.3
+
+- Fix: `destroy_socket()` now cancels its pump tasks before attempting `Rc::try_unwrap`, releasing the `Rc<InnerSocket>` clones the pumps held. Previously sockets lingered as zombies, retaining queue memory until `ctx.term()`.
+- Fix (omq-compio): evict stale `identity_to_slot` entries when a dialer reconnects. Each reconnect previously leaked one map entry, producing steady RSS growth under high reconnect rates.
+
 ## [0.2.13] - 2026-05-25
 
 ### pyomq 0.10.2
