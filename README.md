@@ -9,7 +9,7 @@
 >
 > **2.5 µs** inproc latency | **14.7 µs** ipc | **21.4 µs** tcp
 >
-> **2x** libzmq TCP throughput | **2x** lower TCP latency
+> **2-3x** libzmq TCP throughput | **2x** lower TCP latency
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
