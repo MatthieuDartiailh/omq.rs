@@ -348,10 +348,17 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    let chunk = read_buf.split().freeze();
-                    if read_buf.capacity() < READ_BUF_SIZE {
-                        read_buf.reserve(READ_BUF_SIZE);
-                    }
+                    let chunk = if decoder.is_some() {
+                        let b = Bytes::copy_from_slice(&read_buf);
+                        read_buf.clear();
+                        b
+                    } else {
+                        let chunk = read_buf.split().freeze();
+                        if read_buf.capacity() < READ_BUF_SIZE {
+                            read_buf.reserve(READ_BUF_SIZE);
+                        }
+                        chunk
+                    };
                     if let Err(e) = codec.handle_input(chunk) {
                         while let Some(ev) = codec.poll_event() {
                             let _ = peer_out
