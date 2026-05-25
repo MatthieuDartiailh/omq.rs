@@ -750,13 +750,13 @@ def _fmt_mbps(val):
 
 def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
     n = len(SIZES)
-    svg_w, svg_h = 850, 520
+    svg_w, svg_h = 850, 600
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
 
-    t1_top, t1_bot = 35, 248
+    t1_top, t1_bot = 35, 280
     t1_h = t1_bot - t1_top
-    t2_top, t2_bot = 304, 464
+    t2_top, t2_bot = 340, 520
     t2_h = t2_bot - t2_top
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
@@ -805,7 +805,7 @@ def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
         f'PUSH/PULL throughput — 2-process, TCP loopback (higher is better)</text>'
     )
 
-    n_l_ticks = 5
+    n_l_ticks = 4
     for i in range(n_l_ticks + 1):
         val = i * msg_max / n_l_ticks
         yy = y_msg(val)
@@ -901,7 +901,7 @@ def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
     # ── BOTTOM PANEL: LATENCY ─────────────────────────────────────
 
     L.append(
-        f'  <text x="{mid_x}" y="288" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t2_top - 20}" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
         f'REQ/REP latency — 2-process, TCP loopback, p50 µs (lower is better)</text>'
     )
@@ -1135,8 +1135,6 @@ def main():
     with open(README) as f:
         content = f.read()
 
-    content = update_marker(content, "PERF", tp_table)
-    content = update_marker(content, "LATENCY_PERF", lat_table)
     content = update_marker(content, "PROXY_PERF", proxy_table)
 
     with open(README, "w") as f:
