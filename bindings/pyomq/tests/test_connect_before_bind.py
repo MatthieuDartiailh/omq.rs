@@ -138,14 +138,14 @@ async def _async_push_pull_cbb(ep, delay):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        await push.connect(ep)
+        push.connect(ep)
         await asyncio.sleep(delay)
-        await pull.bind(ep)
+        pull.bind(ep)
         push.send(b"late")
         assert await pull.recv() == b"late"
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()
 
 
 @pytest.mark.parametrize("delay", BIND_DELAYS)
@@ -174,16 +174,16 @@ async def _async_req_rep_cbb(ep, delay):
     req = ctx.socket(zmq.REQ)
     rep = ctx.socket(zmq.REP)
     try:
-        await req.connect(ep)
+        req.connect(ep)
         await asyncio.sleep(delay)
-        await rep.bind(ep)
+        rep.bind(ep)
         req.send(b"q")
         assert await rep.recv() == b"q"
         rep.send(b"a")
         assert await req.recv() == b"a"
     finally:
-        await req.close()
-        await rep.close()
+        req.close()
+        rep.close()
 
 
 @pytest.mark.parametrize("delay", BIND_DELAYS)
@@ -212,16 +212,16 @@ async def _async_pair_cbb(ep, delay):
     a = ctx.socket(zmq.PAIR)
     b = ctx.socket(zmq.PAIR)
     try:
-        await a.connect(ep)
+        a.connect(ep)
         await asyncio.sleep(delay)
-        await b.bind(ep)
+        b.bind(ep)
         a.send(b"from-a")
         assert await b.recv() == b"from-a"
         b.send(b"from-b")
         assert await a.recv() == b"from-b"
     finally:
-        await a.close()
-        await b.close()
+        a.close()
+        b.close()
 
 
 @pytest.mark.parametrize("delay", BIND_DELAYS)

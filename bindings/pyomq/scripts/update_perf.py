@@ -193,83 +193,86 @@ def run_throughput(cached_pyzmq=None):
 # ── async PUSH/PULL throughput ───────────────────────────────────────
 
 def _measure_async_subprocess(lib_name, size, n_target_per_s=200_000):
+    """Async throughput: sync sender thread + async recv, single subprocess."""
     n = min(max(int(n_target_per_s * TARGET_RUNTIME_S), 100), 20_000)
     if lib_name == "pyzmq":
-        lib_import = "import zmq; import zmq.asyncio"
-        pull_setup = "ctx = zmq.asyncio.Context(); pull = ctx.socket(zmq.PULL); pull.linger = 0"
-        push_setup = "ctx = zmq.asyncio.Context(); push = ctx.socket(zmq.PUSH); push.linger = 0"
-        bind_line = "pull.bind(ep)"
-        connect_line = "push.connect(ep)"
-    else:
-        lib_import = "import pyomq; import pyomq.asyncio as zmq_async"
-        pull_setup = "ctx = zmq_async.Context(); pull = ctx.socket(pyomq.PULL)"
-        push_setup = "ctx = zmq_async.Context(); push = ctx.socket(pyomq.PUSH)"
-        bind_line = "await pull.bind(ep)"
-        connect_line = "await push.connect(ep)"
-
-    recv_code = f"""
-import asyncio, time, json, sys
-{lib_import}
+        code = f"""
+import asyncio, threading, time, json, sys, socket as sock
+import zmq, zmq.asyncio
+def free_tcp():
+    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f'tcp://127.0.0.1:{{port}}'
 async def run():
-    ep = sys.argv[1]
-    {pull_setup}
-    {bind_line}
+    ep = free_tcp()
+    ctx = zmq.asyncio.Context()
+    pull = ctx.socket(zmq.PULL); pull.linger = 0
+    pull.bind(ep)
+    sctx = zmq.Context()
+    push = sctx.socket(zmq.PUSH); push.linger = 0
+    push.connect(ep)
+    payload = b'x' * {size}
     n = {n}
-    count = 0
-    start = None
+    def sender():
+        for _ in range(n):
+            push.send(payload)
+    t = threading.Thread(target=sender)
+    t.start()
+    count = 0; start = None
     for _ in range(n):
         await pull.recv()
         if start is None:
             start = time.monotonic()
         count += 1
     elapsed = time.monotonic() - start
+    t.join()
+    push.close(); pull.close()
     print(json.dumps(count / elapsed))
     sys.stdout.flush(); import os; os._exit(0)
 asyncio.run(run())
 """
-    send_await = "await " if lib_name == "pyzmq" else ""
-    send_code = f"""
-import asyncio, time, sys
-{lib_import}
-async def run():
-    ep = sys.argv[1]
-    payload = b'x' * {size}
-    {push_setup}
-    {connect_line}
-    await asyncio.sleep(0.1)
-    for _ in range({n}):
-        {send_await}push.send(payload)
-    await asyncio.sleep(0.1)
-    import os; os._exit(0)
-asyncio.run(run())
-"""
-    import socket as sock
+    else:
+        code = f"""
+import asyncio, threading, time, json, sys, socket as sock
+import pyomq, pyomq.asyncio as zmq_async
+def free_tcp():
     s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
+    s.bind(('127.0.0.1', 0))
     port = s.getsockname()[1]
     s.close()
-    ep = f"tcp://127.0.0.1:{port}"
-
-    recv_proc = subprocess.Popen(
-        [sys.executable, "-c", recv_code, ep],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    send_proc = subprocess.Popen(
-        [sys.executable, "-c", send_code, ep],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    label = f"{lib_name} async tcp {size}B"
-    try:
-        send_proc.wait(timeout=30)
-        stdout, _ = recv_proc.communicate(timeout=30)
-        return json.loads(stdout.strip())
-    except (subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
-        sys.stderr.write(f"  [{label} timeout]\n")
-        send_proc.kill()
-        recv_proc.kill()
-        send_proc.wait()
-        recv_proc.wait()
-        return 0.0
+    return f'tcp://127.0.0.1:{{port}}'
+async def run():
+    ep = free_tcp()
+    ctx = zmq_async.Context()
+    pull = ctx.socket(pyomq.PULL)
+    pull.bind(ep)
+    push = pyomq.Context().socket(pyomq.PUSH)
+    push.connect(ep)
+    payload = b'x' * {size}
+    n = {n}
+    def sender():
+        for _ in range(n):
+            push.send(payload)
+    t = threading.Thread(target=sender)
+    t.start()
+    count = 0; start = None
+    for _ in range(n):
+        await pull.recv()
+        if start is None:
+            start = time.monotonic()
+        count += 1
+    elapsed = time.monotonic() - start
+    t.join()
+    push.close()
+    pull.close()
+    print(json.dumps(count / elapsed))
+    sys.stdout.flush(); import os; os._exit(0)
+asyncio.run(run())
+"""
+    result = _run_subprocess(code, f"{lib_name} async tcp {size}B")
+    return result if result is not None else 0.0
 
 
 def run_async_throughput(cached_pyzmq=None):
@@ -279,17 +282,14 @@ def run_async_throughput(cached_pyzmq=None):
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        _measure_async_subprocess("pyomq", size)
-
         tcp_omq = max(_measure_async_subprocess("pyomq", size)
-                      for _ in range(N_ROUNDS))
+                      for _ in range(N_ROUNDS + 1))
 
         if cached_pyzmq:
             tcp_pz = cached_pyzmq[idx]["tcp"]
         else:
-            _measure_async_subprocess("pyzmq", size)
             tcp_pz = max(_measure_async_subprocess("pyzmq", size)
-                         for _ in range(N_ROUNDS))
+                         for _ in range(N_ROUNDS + 1))
 
         ratio = tcp_omq / tcp_pz if tcp_pz > 0 else 0
         results.append((label, tcp_omq, tcp_pz, ratio))
@@ -395,7 +395,7 @@ def _measure_async_latency_subprocess(lib_name, size, warmup, iters):
         close_expr = "sock.close()"
     else:
         lib_import = "import pyomq; import pyomq.asyncio as actx; lib = pyomq"
-        close_expr = "await sock.close()"
+        close_expr = "sock.close()"
 
     send_await = "await " if lib_name == "pyzmq" else ""
     code = f"""
@@ -413,8 +413,8 @@ async def run():
     ctx = actx.Context()
     rep = ctx.socket(lib.REP)
     req = ctx.socket(lib.REQ)
-    {"" if lib_name == "pyzmq" else "await "}rep.bind(ep)
-    {"" if lib_name == "pyzmq" else "await "}req.connect(ep)
+    rep.bind(ep)
+    req.connect(ep)
     await asyncio.sleep(0.05)
     async def echo():
         try:

@@ -224,10 +224,27 @@ pub fn destroy_socket(id: u64) {
 }
 
 /// Like `destroy_socket`, but for use *from inside a future already
-/// running on the compio thread*.
-pub fn destroy_socket_local(id: u64) {
-    PUMPS.with(|p| p.borrow_mut().remove(&id));
-    REG.with(|r| r.borrow_mut().remove(&id));
+/// running on the compio thread*. Properly closes the socket with
+/// linger so pending messages are flushed before returning.
+pub async fn destroy_socket_local(id: u64) {
+    stop_pumps_async(id).await;
+
+    let sock = REG.with(|r| r.borrow_mut().remove(&id));
+    let Some(mut rc) = sock else { return };
+    for _ in 0..5 {
+        match Rc::try_unwrap(rc) {
+            Ok(sock) => {
+                let _ = sock.close().await;
+                return;
+            }
+            Err(still_shared) => {
+                rc = still_shared;
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+    rc.signal_close();
+    drop(rc);
 }
 
 /// Run an async op on the socket identified by `id` and return the

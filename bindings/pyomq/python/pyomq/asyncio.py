@@ -7,10 +7,10 @@ Use::
 
     ctx = zmq_async.Context()
     sock = ctx.socket(pyomq.PUSH)
-    await sock.connect("tcp://127.0.0.1:5555")
-    await sock.send(b"hello")
+    sock.connect("tcp://127.0.0.1:5555")
+    sock.send(b"hello")
     msg = await sock.recv()
-    await sock.close()
+    sock.close()
 """
 
 import asyncio
@@ -85,32 +85,32 @@ class Socket:
 
     # ── I/O ──────────────────────────────────────────────────────────
 
-    async def bind(self, endpoint):
+    def bind(self, endpoint):
         try:
-            ep = await self._sock.bind(endpoint)
+            ep = self._sock.bind(endpoint)
             self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
             return ep
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    async def connect(self, endpoint):
+    def connect(self, endpoint):
         try:
-            await self._sock.connect(endpoint)
+            self._sock.connect(endpoint)
             self._last_endpoint = (
                 endpoint.encode() if isinstance(endpoint, str) else endpoint
             )
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    async def unbind(self, endpoint):
+    def unbind(self, endpoint):
         try:
-            return await self._sock.unbind(endpoint)
+            return self._sock.unbind(endpoint)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    async def disconnect(self, endpoint):
+    def disconnect(self, endpoint):
         try:
-            return await self._sock.disconnect(endpoint)
+            return self._sock.disconnect(endpoint)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
@@ -283,36 +283,36 @@ class Socket:
 
     # ── Subscriptions ────────────────────────────────────────────────
 
-    async def subscribe(self, prefix):
+    def subscribe(self, prefix):
         try:
-            return await self._sock.subscribe(prefix)
+            return self._sock.subscribe(prefix)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    async def unsubscribe(self, prefix):
+    def unsubscribe(self, prefix):
         try:
-            return await self._sock.unsubscribe(prefix)
+            return self._sock.unsubscribe(prefix)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    async def join(self, group):
+    def join(self, group):
         try:
-            return await self._sock.join(group)
+            return self._sock.join(group)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    async def leave(self, group):
+    def leave(self, group):
         try:
-            return await self._sock.leave(group)
+            return self._sock.leave(group)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
-    async def close(self, linger=None):
+    def close(self, linger=None):
         if not self._closed:
             self._closed = True
-            await self._sock.close(linger)
+            self._sock.close(linger)
 
     async def poll(self, timeout=None, flags=POLLIN):
         p = Poller()
@@ -323,11 +323,18 @@ class Socket:
                 return mask
         return 0
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+        return False
+
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *args):
-        await self.close()
+        self.close()
         return False
 
 

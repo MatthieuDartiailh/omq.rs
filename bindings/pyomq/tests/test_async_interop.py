@@ -21,12 +21,12 @@ async def test_async_pyomq_push_to_pyzmq_pull(tcp_endpoint):
     try:
         ctx = zmq_async.Context()
         push = ctx.socket(pyomq.PUSH)
-        await push.connect(ep)
+        push.connect(ep)
         push.send(b"async-pyomq-to-pyzmq")
         # Drop GIL so the in-flight send actually flushes.
         pull.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
         assert pull.recv() == b"async-pyomq-to-pyzmq"
-        await push.close()
+        push.close()
     finally:
         pull.close()
 
@@ -35,7 +35,7 @@ async def test_async_pyomq_push_to_pyzmq_pull(tcp_endpoint):
 async def test_async_pyzmq_push_to_pyomq_pull(tcp_endpoint):
     ctx = zmq_async.Context()
     pull = ctx.socket(pyomq.PULL)
-    ep = await pull.bind(tcp_endpoint)
+    ep = pull.bind(tcp_endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         push = py_ctx.socket(zmq_pyzmq.PUSH)
@@ -45,14 +45,14 @@ async def test_async_pyzmq_push_to_pyomq_pull(tcp_endpoint):
         assert await pull.recv() == b"pyzmq-to-async-pyomq"
         push.close()
     finally:
-        await pull.close()
+        pull.close()
 
 
 @pytest.mark.asyncio
 async def test_async_pyomq_pub_to_pyzmq_sub(tcp_endpoint):
     ctx = zmq_async.Context()
     pub = ctx.socket(pyomq.PUB)
-    ep = await pub.bind(tcp_endpoint)
+    ep = pub.bind(tcp_endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         sub = py_ctx.socket(zmq_pyzmq.SUB)
@@ -63,7 +63,7 @@ async def test_async_pyomq_pub_to_pyzmq_sub(tcp_endpoint):
         pub.send(b"hot/take")
         sub.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
         assert sub.recv() == b"hot/take"
-        await pub.close()
+        pub.close()
     finally:
         sub.close()
 
@@ -78,13 +78,13 @@ async def test_async_dealer_router_identity(tcp_endpoint):
         ctx = zmq_async.Context()
         dealer = ctx.socket(pyomq.DEALER)
         dealer.setsockopt(pyomq.IDENTITY, b"D-async")
-        await dealer.connect(ep)
+        dealer.connect(ep)
         dealer.send(b"hi")
         parts = router.recv_multipart()
         assert parts[0] == b"D-async"
         assert parts[-1] == b"hi"
         router.send_multipart([b"D-async", b"reply"])
         assert await dealer.recv() == b"reply"
-        await dealer.close()
+        dealer.close()
     finally:
         router.close()

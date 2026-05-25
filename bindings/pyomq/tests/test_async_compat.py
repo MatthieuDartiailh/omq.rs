@@ -11,8 +11,8 @@ async def test_async_again_exception(tcp_endpoint):
     ctx = zmq_async.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = await pull.bind(tcp_endpoint)
-        await pull.close()
+        ep = pull.bind(tcp_endpoint)
+        pull.close()
         with pytest.raises(zmq.ContextTerminated):
             await pull.recv()
     finally:
@@ -24,13 +24,13 @@ async def test_async_send_recv_string(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = await pull.bind(tcp_endpoint)
-        await push.connect(ep)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_string("hello")
         assert await pull.recv_string() == "hello"
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()
 
 
 async def test_async_send_recv_json(tcp_endpoint):
@@ -38,13 +38,13 @@ async def test_async_send_recv_json(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = await pull.bind(tcp_endpoint)
-        await push.connect(ep)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_json({"k": 1})
         assert await pull.recv_json() == {"k": 1}
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()
 
 
 async def test_async_send_recv_pyobj(tcp_endpoint):
@@ -52,20 +52,20 @@ async def test_async_send_recv_pyobj(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = await pull.bind(tcp_endpoint)
-        await push.connect(ep)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send_pyobj([1, 2, 3])
         assert await pull.recv_pyobj() == [1, 2, 3]
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()
 
 
 async def test_async_closed_property(tcp_endpoint):
     ctx = zmq_async.Context()
     sock = ctx.socket(zmq.PUSH)
     assert sock.closed is False
-    await sock.close()
+    sock.close()
     assert sock.closed is True
 
 
@@ -73,14 +73,14 @@ async def test_async_context_property():
     ctx = zmq_async.Context()
     sock = ctx.socket(zmq.PUSH)
     assert sock.context is ctx
-    await sock.close()
+    sock.close()
 
 
 async def test_async_socket_type():
     ctx = zmq_async.Context()
     sock = ctx.socket(zmq.PUSH)
     assert sock.socket_type == zmq.PUSH
-    await sock.close()
+    sock.close()
 
 
 # ── New Phase 2/3 parity tests ─────────────────────────────────────
@@ -93,7 +93,7 @@ async def test_async_setsockopt_string():
         sock.setsockopt_string(zmq.IDENTITY, "foo")
         assert sock.getsockopt_string(zmq.IDENTITY) == "foo"
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_set_string_get_string():
@@ -103,7 +103,7 @@ async def test_async_set_string_get_string():
         sock.set_string(zmq.IDENTITY, "bar")
         assert sock.get_string(zmq.IDENTITY) == "bar"
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_set_hwm_get_hwm():
@@ -115,7 +115,7 @@ async def test_async_set_hwm_get_hwm():
         assert sock.getsockopt(zmq.SNDHWM) == 300
         assert sock.getsockopt(zmq.RCVHWM) == 300
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_hwm_property():
@@ -125,7 +125,7 @@ async def test_async_hwm_property():
         sock.hwm = 150
         assert sock.hwm == 150
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_send_recv_serialized(tcp_endpoint):
@@ -133,8 +133,8 @@ async def test_async_send_recv_serialized(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = await pull.bind(tcp_endpoint)
-        await push.connect(ep)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
 
         def ser(msg):
             return [b"hdr", msg.encode("utf-8")]
@@ -146,8 +146,8 @@ async def test_async_send_recv_serialized(tcp_endpoint):
         push.send_serialized("async-hello", ser)
         assert await pull.recv_serialized(deser) == "async-hello"
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()
 
 
 async def test_async_repr():
@@ -158,7 +158,7 @@ async def test_async_repr():
         assert "pyomq.asyncio.Socket" in r
         assert "PULL" in r
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_underlying():
@@ -167,7 +167,7 @@ async def test_async_underlying():
     try:
         assert sock.underlying is sock
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_attr_linger():
@@ -179,7 +179,7 @@ async def test_async_attr_linger():
         sock.linger = 500
         assert sock.linger == 500
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_attr_identity():
@@ -189,7 +189,7 @@ async def test_async_attr_identity():
         sock.identity = b"async-id"
         assert sock.identity == b"async-id"
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_attr_unknown_raises():
@@ -199,7 +199,7 @@ async def test_async_attr_unknown_raises():
         with pytest.raises(AttributeError):
             _ = sock.nonexistent_attribute
     finally:
-        await sock.close()
+        sock.close()
 
 
 async def test_async_context_closed():

@@ -28,14 +28,14 @@ async def test_async_curve_auth_allowed_keys(tcp_endpoint):
         push.curve_publickey = client_pub
         push.curve_secretkey = client_sec
 
-        ep = await pull.bind(tcp_endpoint)
-        await push.connect(ep)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send(b"async-curve-ok")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
         assert await pull.recv() == b"async-curve-ok"
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()
 
 
 @pytest.mark.skipif(not pyomq.has("curve"), reason="curve feature not compiled")
@@ -57,14 +57,14 @@ async def test_async_curve_auth_callback(tcp_endpoint):
         push.curve_publickey = client_pub
         push.curve_secretkey = client_sec
 
-        ep = await pull.bind(tcp_endpoint)
-        await push.connect(ep)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send(b"async-curve-cb")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
         assert await pull.recv() == b"async-curve-cb"
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()
 
 
 # ── BLAKE3ZMQ ────────────────────────────────────────────────────────
@@ -91,14 +91,14 @@ async def test_async_blake3zmq_auth_allowed_keys(tcp_endpoint):
         push.blake3zmq_publickey = client_pub
         push.blake3zmq_secretkey = client_sec
 
-        ep = await pull.bind(tcp_endpoint)
-        await push.connect(ep)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send(b"async-blake3-ok")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
         assert await pull.recv() == b"async-blake3-ok"
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()
 
 
 @pytest.mark.skipif(
@@ -122,11 +122,11 @@ async def test_async_blake3zmq_auth_callback(tcp_endpoint):
         push.blake3zmq_publickey = client_pub
         push.blake3zmq_secretkey = client_sec
 
-        ep = await pull.bind(tcp_endpoint)
-        await push.connect(ep)
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
         push.send(b"async-blake3-cb")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
         assert await pull.recv() == b"async-blake3-cb"
     finally:
-        await push.close()
-        await pull.close()
+        push.close()
+        pull.close()

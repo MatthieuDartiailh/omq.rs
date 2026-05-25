@@ -56,26 +56,26 @@ impl AsyncSocket {
         self.inner.ensure_id()
     }
 
-    fn bind<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
+    fn bind(&self, py: Python<'_>, endpoint: &str) -> PyResult<String> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::async_string(&self.inner, py, |s| async move {
+        dispatch::sync_string(&self.inner, py, |s| async move {
             s.bind(ep).await.map(|bound| bound.to_string())
         })
     }
 
-    fn connect<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
+    fn connect(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::async_unit(&self.inner, py, |s| async move { s.connect(ep).await })
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.connect(ep).await })
     }
 
-    fn unbind<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
+    fn unbind(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::async_unit(&self.inner, py, |s| async move { s.unbind(ep).await })
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.unbind(ep).await })
     }
 
-    fn disconnect<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
+    fn disconnect(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::async_unit(&self.inner, py, |s| async move { s.disconnect(ep).await })
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.disconnect(ep).await })
     }
 
     #[pyo3(signature = (payload, flags = 0))]
@@ -185,40 +185,28 @@ impl AsyncSocket {
         })
     }
 
-    fn subscribe<'py>(
-        &self,
-        py: Python<'py>,
-        prefix: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn subscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
-        dispatch::async_unit(&self.inner, py, |s| async move { s.subscribe(bytes).await })
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.subscribe(bytes).await })
     }
 
-    fn unsubscribe<'py>(
-        &self,
-        py: Python<'py>,
-        prefix: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn unsubscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
-        dispatch::async_unit(
+        dispatch::sync_unit(
             &self.inner,
             py,
             |s| async move { s.unsubscribe(bytes).await },
         )
     }
 
-    fn join<'py>(&self, py: Python<'py>, group: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn join(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
-        dispatch::async_unit(&self.inner, py, |s| async move { s.join(bytes).await })
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.join(bytes).await })
     }
 
-    fn leave<'py>(
-        &self,
-        py: Python<'py>,
-        group: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn leave(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
-        dispatch::async_unit(&self.inner, py, |s| async move { s.leave(bytes).await })
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.leave(bytes).await })
     }
 
     /// Return an `asyncio.Future` that resolves to a list of connection-
@@ -299,34 +287,27 @@ impl AsyncSocket {
     }
 
     #[pyo3(signature = (_linger=None))]
-    fn close<'py>(&self, py: Python<'py>, _linger: Option<i64>) -> PyResult<Bound<'py, PyAny>> {
+    fn close(&self, py: Python<'_>, _linger: Option<i64>) -> PyResult<()> {
         let m = self.inner.take_materialized();
-        runtime::compio_future_into_py(py, move || async move {
-            if let Some(m) = m {
-                runtime::destroy_socket_local(m.id);
-            }
-            Python::with_gil(|py| Ok(py.None()))
-        })
+        let Some(m) = m else {
+            return Ok(());
+        };
+        py.allow_threads(|| runtime::destroy_socket(m.id));
+        Ok(())
     }
 
-    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = slf.borrow().inner.clone();
-        runtime::compio_future_into_py(py, move || async move {
-            Python::with_gil(|py| {
-                let py_self = AsyncSocket { inner };
-                Ok(Py::new(py, py_self)?.into_any())
-            })
-        })
+    fn __aenter__<'py>(slf: Bound<'py, Self>) -> Bound<'py, Self> {
+        slf
     }
 
     #[pyo3(signature = (exc_type=None, exc_val=None, exc_tb=None))]
-    fn __aexit__<'py>(
+    fn __aexit__(
         &self,
-        py: Python<'py>,
-        exc_type: Option<Bound<'py, PyType>>,
-        exc_val: Option<Bound<'py, PyAny>>,
-        exc_tb: Option<Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+        py: Python<'_>,
+        exc_type: Option<Bound<'_, PyType>>,
+        exc_val: Option<Bound<'_, PyAny>>,
+        exc_tb: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
         let (_, _, _) = (exc_type, exc_val, exc_tb);
         self.close(py, None)
     }

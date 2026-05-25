@@ -941,6 +941,7 @@ dependencies = [
  "futures",
  "libc",
  "omq-proto",
+ "rustc-hash",
  "slab",
  "smallvec",
  "socket2",
