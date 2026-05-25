@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_proto::options::{KeepAlive, ReconnectPolicy};
+use omq_proto::options::{KeepAlive, OnMute, ReconnectPolicy};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -24,7 +24,7 @@ use omq_compio as backend;
 // SocketInner accessed via fully-qualified path; no top-level import.
 
 /// Wrapper-only state that doesn't live on `Options`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Overlay {
     pub rcvtimeo: Option<Duration>,
     pub sndtimeo: Option<Duration>,
@@ -62,6 +62,57 @@ pub struct Overlay {
     pub blake3zmq_serverkey: Option<Vec<u8>>,
     #[cfg(feature = "blake3zmq")]
     pub blake3zmq_authenticator: Option<crate::blake3zmq_auth::Blake3ZmqAuthenticator>,
+    pub on_mute: OnMute,
+    pub compression_level: i32,
+    pub compression_dict: Option<Bytes>,
+    pub compression_auto_train: bool,
+}
+
+impl Default for Overlay {
+    fn default() -> Self {
+        Self {
+            rcvtimeo: None,
+            sndtimeo: None,
+            linger: None,
+            send_hwm: None,
+            recv_hwm: None,
+            identity: Bytes::new(),
+            keepalive: KeepAlive::Default,
+            keepalive_idle: None,
+            keepalive_intvl: None,
+            keepalive_cnt: None,
+            max_message_size: None,
+            router_mandatory: false,
+            heartbeat_ivl: None,
+            heartbeat_ttl: None,
+            heartbeat_timeout: None,
+            handshake_ivl: None,
+            conflate: false,
+            reconnect_ivl: None,
+            reconnect_ivl_max: None,
+            send_buffer_size: None,
+            recv_buffer_size: None,
+            plain_server: false,
+            plain_username: None,
+            plain_password: None,
+            curve_server: false,
+            curve_publickey: None,
+            curve_secretkey: None,
+            curve_serverkey: None,
+            #[cfg(feature = "curve")]
+            curve_authenticator: None,
+            blake3zmq_server: false,
+            blake3zmq_publickey: None,
+            blake3zmq_secretkey: None,
+            blake3zmq_serverkey: None,
+            #[cfg(feature = "blake3zmq")]
+            blake3zmq_authenticator: None,
+            on_mute: OnMute::Block,
+            compression_level: -3,
+            compression_dict: None,
+            compression_auto_train: true,
+        }
+    }
 }
 
 impl Overlay {
@@ -89,6 +140,10 @@ impl Overlay {
                 (Some(min), None) => ReconnectPolicy::Fixed(min),
                 (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
             },
+            on_mute: self.on_mute,
+            compression_level: self.compression_level,
+            compression_dict: self.compression_dict.clone(),
+            compression_auto_train: self.compression_auto_train,
             ..Default::default()
         };
         #[cfg(feature = "plain")]
@@ -234,6 +289,10 @@ impl Overlay {
             blake3zmq_serverkey: None,
             #[cfg(feature = "blake3zmq")]
             blake3zmq_authenticator: None,
+            on_mute: o.on_mute,
+            compression_level: o.compression_level,
+            compression_dict: o.compression_dict.clone(),
+            compression_auto_train: o.compression_auto_train,
         }
     }
 }
@@ -426,6 +485,40 @@ pub fn setsockopt(
         constants::BLAKE3ZMQ_SERVERKEY => {
             let v: &[u8] = value.extract()?;
             ov.blake3zmq_serverkey = Some(v.to_vec());
+        }
+        constants::OMQ_ON_MUTE => {
+            ov.on_mute = match value.extract::<i64>()? {
+                0 => OnMute::Block,
+                1 => OnMute::DropNewest,
+                2 => OnMute::DropOldest,
+                v => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "OMQ_ON_MUTE must be 0 (Block), 1 (DropNewest), or 2 (DropOldest), \
+                         got {v}"
+                    )));
+                }
+            };
+        }
+        constants::OMQ_COMPRESSION_LEVEL => {
+            ov.compression_level = value.extract::<i32>()?;
+        }
+        constants::OMQ_COMPRESSION_DICT => {
+            let v: &[u8] = value.extract()?;
+            if v.is_empty() {
+                ov.compression_dict = None;
+            } else {
+                const DICT_MAX: usize = 64 * 1024 - 4;
+                if v.len() > DICT_MAX {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "compression dict must be at most {DICT_MAX} bytes, got {}",
+                        v.len()
+                    )));
+                }
+                ov.compression_dict = Some(Bytes::copy_from_slice(v));
+            }
+        }
+        constants::OMQ_COMPRESSION_AUTO_TRAIN => {
+            ov.compression_auto_train = value.extract::<i64>()? != 0;
         }
         // No-ops accepted for source-compat with pyzmq:
         constants::IMMEDIATE
@@ -699,6 +792,32 @@ pub fn getsockopt<'py>(
                 .clone()
                 .unwrap_or_default();
             Ok(PyBytes::new_bound(py, &v).into_any())
+        }
+        constants::OMQ_ON_MUTE => {
+            let v: i64 = match sock.overlay.lock().unwrap().on_mute {
+                OnMute::Block => 0,
+                OnMute::DropNewest => 1,
+                OnMute::DropOldest => 2,
+            };
+            Ok(int_to_bound(py, v))
+        }
+        constants::OMQ_COMPRESSION_LEVEL => {
+            let v = sock.overlay.lock().unwrap().compression_level as i64;
+            Ok(int_to_bound(py, v))
+        }
+        constants::OMQ_COMPRESSION_DICT => {
+            let v = sock
+                .overlay
+                .lock()
+                .unwrap()
+                .compression_dict
+                .clone()
+                .unwrap_or_default();
+            Ok(PyBytes::new_bound(py, &v).into_any())
+        }
+        constants::OMQ_COMPRESSION_AUTO_TRAIN => {
+            let v = sock.overlay.lock().unwrap().compression_auto_train as i64;
+            Ok(int_to_bound(py, v))
         }
         // Compat no-ops: return sensible defaults.
         constants::MECHANISM => Ok(int_to_bound(py, 0_i64)),
