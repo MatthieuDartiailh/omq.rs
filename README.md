@@ -162,6 +162,10 @@ Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [DEVELOPMENT.md](DEVELOPMENT.md) for build, test, and benchmark commands.
 
+## AI disclosure
+
+This project was built with significant LLM assistance throughout: architecture, implementation, tests, benchmark infrastructure, and docs. It's an experiment in what LLM-assisted development can and can't do. The design decisions and direction are mine.
+
 ## License
 
 ISC.
