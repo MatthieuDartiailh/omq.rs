@@ -111,7 +111,11 @@ where
         let _ = otx.send(f());
     });
     submit_chan().send(job).expect("pyomq: compio runtime gone");
-    orx.recv().expect("pyomq: runtime dropped result")
+    // Release the GIL (if held) while blocking so detached compio
+    // tasks that need Python::with_gil() can make progress.
+    pyo3::Python::with_gil(|py| {
+        py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result"))
+    })
 }
 
 /// Build a socket on the compio thread, store it in the registry, spawn
