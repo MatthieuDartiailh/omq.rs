@@ -253,3 +253,82 @@ def test_has_feature():
     assert isinstance(zmq.has("plain"), bool)
     assert zmq.has("gssapi") is False
     assert zmq.has("INPROC") is True
+
+
+# Group H: omq-specific options.
+
+
+def test_on_mute_round_trip():
+    ctx, s = _push()
+    try:
+        assert s.getsockopt(zmq.OMQ_ON_MUTE) == zmq.OMQ_ON_MUTE_BLOCK
+        s.setsockopt(zmq.OMQ_ON_MUTE, zmq.OMQ_ON_MUTE_DROP_NEWEST)
+        assert s.getsockopt(zmq.OMQ_ON_MUTE) == zmq.OMQ_ON_MUTE_DROP_NEWEST
+        s.setsockopt(zmq.OMQ_ON_MUTE, zmq.OMQ_ON_MUTE_DROP_OLDEST)
+        assert s.getsockopt(zmq.OMQ_ON_MUTE) == zmq.OMQ_ON_MUTE_DROP_OLDEST
+        s.setsockopt(zmq.OMQ_ON_MUTE, zmq.OMQ_ON_MUTE_BLOCK)
+        assert s.getsockopt(zmq.OMQ_ON_MUTE) == zmq.OMQ_ON_MUTE_BLOCK
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_on_mute_rejects_invalid():
+    ctx, s = _push()
+    try:
+        with pytest.raises((zmq.ZMQError, ValueError)):
+            s.setsockopt(zmq.OMQ_ON_MUTE, 99)
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_compression_level_round_trip():
+    ctx, s = _push()
+    try:
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_LEVEL) == -3
+        s.setsockopt(zmq.OMQ_COMPRESSION_LEVEL, 5)
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_LEVEL) == 5
+        s.setsockopt(zmq.OMQ_COMPRESSION_LEVEL, -1)
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_LEVEL) == -1
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_compression_dict_round_trip():
+    ctx, s = _push()
+    try:
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_DICT) == b""
+        d = b"my-dict-bytes-1234"
+        s.setsockopt(zmq.OMQ_COMPRESSION_DICT, d)
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_DICT) == d
+        s.setsockopt(zmq.OMQ_COMPRESSION_DICT, b"")
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_DICT) == b""
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_compression_dict_rejects_oversize():
+    ctx, s = _push()
+    try:
+        oversize = b"\x00" * (64 * 1024)
+        with pytest.raises((zmq.ZMQError, ValueError)):
+            s.setsockopt(zmq.OMQ_COMPRESSION_DICT, oversize)
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_compression_auto_train_round_trip():
+    ctx, s = _push()
+    try:
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN) == 1
+        s.setsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN, 0)
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN) == 0
+        s.setsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN, 1)
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN) == 1
+    finally:
+        s.close()
+        ctx.term()

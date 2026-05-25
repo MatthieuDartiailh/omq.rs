@@ -67,6 +67,17 @@ pub const BLAKE3ZMQ_PUBLICKEY: i32 = 1001;
 pub const BLAKE3ZMQ_SECRETKEY: i32 = 1002;
 pub const BLAKE3ZMQ_SERVERKEY: i32 = 1003;
 
+// omq-specific options (no libzmq equivalent):
+pub const OMQ_ON_MUTE: i32 = 1004;
+pub const OMQ_COMPRESSION_LEVEL: i32 = 1005;
+pub const OMQ_COMPRESSION_DICT: i32 = 1006;
+pub const OMQ_COMPRESSION_AUTO_TRAIN: i32 = 1007;
+
+// OnMute enum values:
+pub const OMQ_ON_MUTE_BLOCK: i32 = 0;
+pub const OMQ_ON_MUTE_DROP_NEWEST: i32 = 1;
+pub const OMQ_ON_MUTE_DROP_OLDEST: i32 = 2;
+
 // Additional compat constants (used in options.rs match arms):
 pub const RATE: i32 = 8;
 pub const SNDBUF: i32 = 11;
@@ -158,6 +169,13 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         BLAKE3ZMQ_PUBLICKEY,
         BLAKE3ZMQ_SECRETKEY,
         BLAKE3ZMQ_SERVERKEY,
+        OMQ_ON_MUTE,
+        OMQ_COMPRESSION_LEVEL,
+        OMQ_COMPRESSION_DICT,
+        OMQ_COMPRESSION_AUTO_TRAIN,
+        OMQ_ON_MUTE_BLOCK,
+        OMQ_ON_MUTE_DROP_NEWEST,
+        OMQ_ON_MUTE_DROP_OLDEST,
         SNDMORE,
         NOBLOCK,
         DONTWAIT
