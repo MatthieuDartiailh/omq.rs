@@ -83,7 +83,15 @@ impl SocketDriver {
             });
         }
         match self.socket_type {
-            SocketType::Req | SocketType::Rep if self.peers.is_empty() => {
+            SocketType::Req if self.peers.is_empty() => {
+                self.req_awaiting_reply
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                self.type_state
+                    .lock()
+                    .expect("type_state")
+                    .on_peer_disconnected();
+            }
+            SocketType::Rep if self.peers.is_empty() => {
                 self.type_state
                     .lock()
                     .expect("type_state")

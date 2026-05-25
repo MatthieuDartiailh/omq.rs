@@ -763,6 +763,19 @@ internal cursor without reallocating), so the read path went from
 one alloc + one copy per syscall to zero allocs and zero copies in
 steady state.
 
+## Atomic REQ alternation flag
+
+REQ's `pre_send` / `post_recv` only mutates a single bool
+(`req_awaiting_reply`). REQ strict alternation (send-recv-send-recv)
+guarantees no concurrent access between the two. Replaced the
+shared `Mutex<TypeState>` lock with an `AtomicBool` (Relaxed
+ordering — the DropQueue/async_channel between send and recv
+provides happens-before). REP keeps the Mutex because it stores
+`Option<Vec<Bytes>>` for the envelope.
+
+Saves ~200 ns per send+recv pair (uncontended Mutex overhead:
+CAS + memory barrier + function call).
+
 ## What remains
 
 **Single-wire-peer bypass on tokio.** The compio direct-encode
@@ -775,6 +788,19 @@ messages split between DropQueue (pre-handshake) and DirectEncode
 that the driver owns jointly with the sender, not a transfer
 between two independent queues.
 
+**Per-peer wire yring for recv.** Replacing the MPMC
+`async_channel` on the recv_direct path with per-peer yring SPSC
+rings (same pattern as inproc) would eliminate the channel
+overhead. Dead end: `tokio::sync::Notify` notifications are lost
+when the driver pushes multiple messages in a tight loop
+(driver's `while codec.poll_message()` doesn't yield between
+messages). The Notify stores at most one permit; subsequent
+`notify_one()` calls are no-ops. The consumer's
+`try_drain_consumers()` should prefetch all available items, but
+empirically hangs after ~28/30 messages in the random_sizes test.
+Root cause unclear — possibly a subtle interaction between the
+biased select's `notified()` registration and the producer's
+`flush()` visibility. Needs investigation.
 
 **Same-thread inproc (~4M).** Uses blume (no ypipe). The ypipe
 ring cannot serve same-thread sequential send-all-then-recv-all

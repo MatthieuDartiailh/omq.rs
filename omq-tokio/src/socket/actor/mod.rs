@@ -6,6 +6,7 @@ mod peer;
 pub(crate) use peer::spawn_driver;
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -191,6 +192,9 @@ pub(crate) struct SocketDriver {
     /// REQ / REP envelope + alternation state. Shared with the socket
     /// handle so `Socket::send` can call `pre_send` without an actor hop.
     type_state: Arc<Mutex<TypeState>>,
+    /// REQ alternation flag. Shared with the socket handle for lock-free
+    /// send/recv on REQ. Actor resets on peer disconnect.
+    req_awaiting_reply: Arc<AtomicBool>,
     monitor: MonitorPublisher,
     /// Active subscription prefixes for SUB / XSUB. Replayed to new peers
     /// on `HandshakeSucceeded` so late-connecting publishers get our state.
@@ -229,6 +233,7 @@ impl SocketDriver {
         recv_notify: super::handle::SpscRecvNotify,
         spsc_activated: super::handle::SpscActivated,
         type_state: Arc<Mutex<TypeState>>,
+        req_awaiting_reply: Arc<AtomicBool>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -251,6 +256,7 @@ impl SocketDriver {
             send_submitter,
             recv_strategy,
             type_state,
+            req_awaiting_reply,
             monitor,
             subscriptions: Vec::new(),
             joined_groups: new_joined_groups(),

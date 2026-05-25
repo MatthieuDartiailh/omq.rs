@@ -1,11 +1,13 @@
 //! Public `Socket` handle.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use bytes::Bytes;
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -127,8 +129,11 @@ struct Inner {
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
     send_submitter: SendSubmitter,
-    /// Shared with the actor for REQ/REP `pre_send` / `post_recv`.
+    /// Shared with the actor for REP `pre_send` / `post_recv`.
     type_state: Arc<Mutex<TypeState>>,
+    /// REQ alternation flag. Avoids Mutex on the REQ hot path.
+    /// Shared with the actor for `on_peer_disconnected` reset.
+    req_awaiting_reply: Arc<AtomicBool>,
 }
 
 impl Socket {
@@ -170,6 +175,7 @@ impl Socket {
         let spsc_activated: SpscActivated = Arc::new(tokio::sync::Notify::new());
         let send_ring: Arc<RwLock<Option<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(None));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
+        let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -184,6 +190,7 @@ impl Socket {
             recv_notify.clone(),
             spsc_activated.clone(),
             type_state.clone(),
+            req_awaiting_reply.clone(),
         );
         spawn_driver(driver);
         Self {
@@ -201,6 +208,7 @@ impl Socket {
                 root_cancel: cancel,
                 send_submitter,
                 type_state,
+                req_awaiting_reply,
             }),
         }
     }
@@ -274,7 +282,17 @@ impl Socket {
     /// peer's driver inbox (not waited-on-wire).
     pub async fn send(&self, msg: Message) -> Result<()> {
         match self.inner.socket_type {
-            SocketType::Req | SocketType::Rep => {
+            SocketType::Req => {
+                if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
+                    return Err(Error::Protocol(
+                        "REQ socket must receive a reply before sending again".into(),
+                    ));
+                }
+                let msg = Message::with_prefix(Bytes::new(), msg);
+                self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
+                self.inner.send_submitter.send(msg).await
+            }
+            SocketType::Rep => {
                 let msg = self
                     .inner
                     .type_state
@@ -327,16 +345,15 @@ impl Socket {
     pub async fn recv(&self) -> Result<Message> {
         if self.inner.socket_type == SocketType::Req {
             loop {
-                let msg = self.inner.recv_rx.recv().await?;
-                if let Some(m) = self
-                    .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .post_recv_req_direct(msg)
-                {
-                    return Ok(m);
+                let mut msg = self.inner.recv_rx.recv().await?;
+                match msg.pop_front() {
+                    Some(delim) if delim.is_empty() => {}
+                    _ => continue,
                 }
+                self.inner
+                    .req_awaiting_reply
+                    .store(false, Ordering::Relaxed);
+                return Ok(msg);
             }
         }
         self.inner.recv_rx.recv().await
@@ -347,17 +364,15 @@ impl Socket {
     /// delivered by the background driver are visible.
     pub fn try_recv(&self) -> Result<Message> {
         if self.inner.socket_type == SocketType::Req {
-            let msg = self.inner.recv_rx.try_recv()?;
-            return match self
-                .inner
-                .type_state
-                .lock()
-                .expect("type_state")
-                .post_recv_req_direct(msg)
-            {
-                Some(m) => Ok(m),
-                None => Err(Error::WouldBlock),
-            };
+            let mut msg = self.inner.recv_rx.try_recv()?;
+            match msg.pop_front() {
+                Some(delim) if delim.is_empty() => {}
+                _ => return Err(Error::WouldBlock),
+            }
+            self.inner
+                .req_awaiting_reply
+                .store(false, Ordering::Relaxed);
+            return Ok(msg);
         }
         self.inner.recv_rx.try_recv()
     }
