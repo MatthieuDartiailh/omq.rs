@@ -162,14 +162,14 @@ def generate_svg(data: dict) -> str:
     lat = data["lat"]
     n = len(sizes)
 
-    svg_w, svg_h = 850, 520
+    svg_w, svg_h = 850, 600
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
 
-    t1_y_top, t1_y_bot = 35, 248
+    t1_y_top, t1_y_bot = 35, 280
     t1_h = t1_y_bot - t1_y_top
 
-    t2_y_top, t2_y_bot = 304, 464
+    t2_y_top, t2_y_bot = 340, 520
     t2_h = t2_y_bot - t2_y_top
 
     xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
@@ -305,7 +305,7 @@ def generate_svg(data: dict) -> str:
     # ── BOTTOM PANEL: LATENCY ─────────────────────────────────────
 
     L.append(
-        f'  <text x="{mid_x}" y="288" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t2_y_top - 20}" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
         f"REQ/REP latency — 2-process, TCP loopback (p50 µs, lower is better)</text>"
     )
