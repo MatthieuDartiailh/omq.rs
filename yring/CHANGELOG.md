@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-25
+
+### Fixed
+
+- Sync `Producer::flush()` missed wakeup on stale `cached_head`.
+- `async_spsc` missed wakeup on low-throughput flush.
+
+### Changed
+
+- *(deps)* Pin `atomic-waker` to 1.1.0.
+
 ## [0.2.1] - 2026-05-23
 
 ### Fixed

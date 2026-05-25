@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-25
+
+### Fixed
+
+- Framing desync: route pending messages through encoded queue.
+- `flush_codec_to_wire` race with recv-direct's `flush_codec_output`.
+- recv-direct cancel-safety: `ENOBUFS`/`ECANCELED` under sustained load no longer kills connections.
+- Round-robin send blocking forever when no peer is connected.
+- `MultiShot` recv disabled on non-Linux (use `OneShot` instead).
+- Drain `pre_connect_buf` on peer install for priority feature.
+
+### Performance
+
+- Optimize fan-in recv: inline `InboundFrame`, skip identity clone.
+- Optimize multi-peer wire send path.
+- Bypass per-message routing overhead on single-peer wire send.
+- Use `FxHashMap`/`FxHashSet` for internal maps.
+
+### Changed
+
+- Register peer identity synchronously during handshake dispatch.
+- *(deps)* Bump `omq-proto` to 0.14.0, `yring` to 0.2.2, `blume` to 0.2.4. Upgrade `rand` 0.8 → 0.10.
+
 ## [0.10.1] - 2026-05-23
 
 ### Changed

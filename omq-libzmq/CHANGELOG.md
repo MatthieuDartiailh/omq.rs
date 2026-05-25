@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-25
+
+### Fixed
+
+- `drain_eventfds` on non-Linux: loop until pipe is empty.
+- Set `O_NONBLOCK` on pipe fds in non-Linux `NotifyFd`.
+
+### Changed
+
+- Use `FxHashMap` for internal maps.
+- *(deps)* Bump `omq-compio` to 0.11.0, `yring` to 0.2.2.
+
 ## [0.3.1] - 2026-05-23
 
 ### Changed

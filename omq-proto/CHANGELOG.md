@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-05-25
+
+### Added
+
+- `routing` module: centralized socket-type-to-routing-strategy categorization (`SendCategory`, `RecvCategory`, `FanOutKind`).
+- `Options::validate()` for ZMTP protocol-limit checks.
+- `Message::prepend_empty_delimiter()` for REQ pre-send framing.
+- `Error::Config` variant for configuration validation failures.
+
+### Changed
+
+- CURVE mechanism split into `CurveClient` and `CurveServer` for compile-time role enforcement.
+- PLAIN mechanism split into `PlainClient` and `PlainServer`.
+- Bypass per-message routing overhead on single-peer wire send.
+- *(deps)* Upgrade `rand` 0.8 → 0.10.
+
 ## [0.13.0] - 2026-05-23
 
 ### Added

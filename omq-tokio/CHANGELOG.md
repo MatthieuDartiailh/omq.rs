@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-25
+
+### Added
+
+- Zero-copy read path with `BytesMut`.
+- recv-direct bypass for REQ sockets.
+- Bypass actor for REQ/REP send (latency optimization).
+- Atomic REQ alternation flag, bypass Mutex on hot path.
+
+### Fixed
+
+- Drain codec events before propagating `handle_input` error.
+
+### Changed
+
+- Use `FxHashMap`/`FxHashSet` for internal maps.
+- *(deps)* Bump `omq-proto` to 0.14.0, `yring` to 0.2.2. Upgrade `rand` 0.8 → 0.10.
+
 ## [0.11.1] - 2026-05-23
 
 ### Changed
