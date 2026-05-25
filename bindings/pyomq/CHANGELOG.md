@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-25
+
+### Changed
+
+- *(deps)* Bump `omq-compio` to 0.11.0, `omq-proto` to 0.14.0, `blume` to 0.2.4, `yring` to 0.2.2.
+
 ## [0.9.0] - 2026-05-23
 
 ### Changed
