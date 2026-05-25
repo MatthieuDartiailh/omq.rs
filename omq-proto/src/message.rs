@@ -503,6 +503,31 @@ impl Message {
     }
 
     #[inline]
+    pub(crate) fn prepend_empty_delimiter(self) -> Self {
+        let empty = Payload::from_bytes(Bytes::new());
+        match self.inner {
+            MessageInner::Empty => Self {
+                inner: MessageInner::Single(empty),
+            },
+            MessageInner::Inline { len, data } => {
+                let body = Payload::from_slice(&data[..len as usize]);
+                Self {
+                    inner: MessageInner::Multi(vec![empty, body]),
+                }
+            }
+            MessageInner::Single(p) => Self {
+                inner: MessageInner::Multi(vec![empty, p]),
+            },
+            MessageInner::Multi(mut v) => {
+                v.insert(0, empty);
+                Self {
+                    inner: MessageInner::Multi(v),
+                }
+            }
+        }
+    }
+
+    #[inline]
     pub(crate) fn from_payloads_vec(parts: Vec<Payload>) -> Self {
         match parts.len() {
             0 => Self::new(),

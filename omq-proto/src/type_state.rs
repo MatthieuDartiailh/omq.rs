@@ -75,13 +75,8 @@ impl TypeState {
                         "REQ socket must receive a reply before sending again".into(),
                     ));
                 }
-                let mut new_msg = Message::new();
-                new_msg.push_part_payload(Payload::from_bytes(Bytes::new()));
-                for p in msg.into_parts_payload() {
-                    new_msg.push_part_payload(p);
-                }
                 self.req_awaiting_reply = true;
-                Ok(new_msg)
+                Ok(msg.prepend_empty_delimiter())
             }
             SocketType::Rep => {
                 let Some(envelope) = self.rep_envelope.take() else {
