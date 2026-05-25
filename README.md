@@ -13,13 +13,16 @@
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
+> [!CAUTION]
+> **Experimental.** The API is unstable and may change without notice. Not yet battle-tested in production. Bug reports and testing in real workloads are very welcome.
+
 - Two async backends: **compio** (io_uring, default) and **tokio**
 - 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `zstd+tcp://`)
 - 4 security mechanisms: NULL, PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
 
-### vs. libzmq (TCP loopback, two processes)
+### vs. libzmq
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">

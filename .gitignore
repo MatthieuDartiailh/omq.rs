@@ -1,5 +1,4 @@
-/.cla*
-/CLA*
+/.claude/
 /target
 **/target
 **/*.rs.bk
