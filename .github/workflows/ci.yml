@@ -3,7 +3,13 @@ name: ci
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'doc/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'doc/**'
 
 env:
   CARGO_TERM_COLOR: always
