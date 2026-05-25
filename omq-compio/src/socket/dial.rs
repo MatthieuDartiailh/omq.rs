@@ -107,10 +107,19 @@ async fn install_and_run(
         .fetch_add(1, std::sync::atomic::Ordering::Release);
 
     let idx = if let Some(idx) = *slot_idx {
-        let mut peers = inner.out_peers.write().expect("peers lock");
-        if let Some(slot) = peers.get_mut(idx) {
-            slot.connection_id = conn_id;
+        {
+            let mut peers = inner.out_peers.write().expect("peers lock");
+            if let Some(slot) = peers.get_mut(idx) {
+                slot.connection_id = conn_id;
+            }
         }
+        // Evict stale identity entries for this slot from the previous connection.
+        // Without this, each reconnect leaks one entry in identity_to_slot.
+        inner
+            .identity_to_slot
+            .write()
+            .expect("identity table")
+            .retain(|_, &mut v| v != idx);
         idx
     } else {
         let mut peers = inner.out_peers.write().expect("peers lock");

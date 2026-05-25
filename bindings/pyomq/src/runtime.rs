@@ -191,30 +191,36 @@ pub fn materialize(
 pub fn destroy_socket(id: u64) {
     let (tx, rx) = flume::bounded::<()>(1);
     let job: Job = Box::new(move || {
-        // Cancel pump tasks first — drops their Rc<InnerSocket> clones.
-        PUMPS.with(|p| p.borrow_mut().remove(&id));
-
         let sock = REG.with(|r| r.borrow_mut().remove(&id));
-        let Some(mut rc) = sock else {
-            let _ = tx.send(());
+        let handles = PUMPS.with(|p| p.borrow_mut().remove(&id));
+        let Some(rc) = sock else {
+            // No socket; still cancel any orphaned pumps before signalling done.
+            compio::runtime::spawn(async move {
+                if let Some((send_h, recv_h)) = handles {
+                    let _ = send_h.cancel().await;
+                    let _ = recv_h.cancel().await;
+                }
+                let _ = tx.send(());
+            })
+            .detach();
             return;
         };
         compio::runtime::spawn(async move {
-            for _ in 0..5 {
-                match Rc::try_unwrap(rc) {
-                    Ok(sock) => {
-                        let _ = sock.close().await;
-                        let _ = tx.send(());
-                        return;
-                    }
-                    Err(still_shared) => {
-                        rc = still_shared;
-                        compio::time::sleep(std::time::Duration::from_millis(1)).await;
-                    }
+            // Cancel pumps and await completion so their Rc<InnerSocket>
+            // clones are released before we attempt close. Dropping a compio
+            // JoinHandle detaches the task; only cancel().await truly cancels.
+            if let Some((send_h, recv_h)) = handles {
+                let _ = send_h.cancel().await;
+                let _ = recv_h.cancel().await;
+            }
+            match Rc::try_unwrap(rc) {
+                Ok(sock) => {
+                    let _ = sock.close().await;
+                }
+                Err(still_shared) => {
+                    still_shared.signal_close();
                 }
             }
-            rc.signal_close();
-            drop(rc);
             let _ = tx.send(());
         })
         .detach();
