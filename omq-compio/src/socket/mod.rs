@@ -86,9 +86,9 @@ fn pub_side_peer_sub(st: SocketType) -> Option<Arc<RwLock<SubscriptionSet>>> {
 /// fan-out filter, or `None` if the socket type doesn't filter.
 fn radio_side_peer_groups(
     st: SocketType,
-) -> Option<Arc<RwLock<std::collections::HashSet<bytes::Bytes>>>> {
+) -> Option<Arc<RwLock<rustc_hash::FxHashSet<bytes::Bytes>>>> {
     if matches!(st, SocketType::Radio) {
-        Some(Arc::new(RwLock::new(std::collections::HashSet::new())))
+        Some(Arc::new(RwLock::new(rustc_hash::FxHashSet::default())))
     } else {
         None
     }

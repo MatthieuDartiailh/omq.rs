@@ -33,7 +33,7 @@ pub(super) struct PeerSlot {
     pub(super) endpoint: Endpoint,
     pub(super) info: Arc<RwLock<Option<PeerInfo>>>,
     pub(super) peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    pub(super) peer_groups: Option<Arc<RwLock<std::collections::HashSet<bytes::Bytes>>>>,
+    pub(super) peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<bytes::Bytes>>>>,
     #[cfg(feature = "priority")]
     pub(super) priority: u8,
 }

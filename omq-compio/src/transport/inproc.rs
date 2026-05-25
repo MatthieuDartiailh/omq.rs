@@ -11,8 +11,9 @@
 //! recv. Costs one shared `blume::Sender` clone per peer (cheap;
 //! blume Senders are atomic-refcounted handles).
 
-use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
+
+use rustc_hash::FxHashMap;
 
 use event_listener::Event;
 
@@ -114,15 +115,15 @@ struct InprocConnectRequest {
 type ReqSender = flume::Sender<InprocConnectRequest>;
 
 struct InprocRegistry {
-    bound: HashMap<String, ReqSender>,
-    waiting: HashMap<String, Vec<flume::Sender<ReqSender>>>,
+    bound: FxHashMap<String, ReqSender>,
+    waiting: FxHashMap<String, Vec<flume::Sender<ReqSender>>>,
 }
 
 /// Global registry of bound inproc names and pending connectors.
 static REGISTRY: LazyLock<Mutex<InprocRegistry>> = LazyLock::new(|| {
     Mutex::new(InprocRegistry {
-        bound: HashMap::new(),
-        waiting: HashMap::new(),
+        bound: FxHashMap::default(),
+        waiting: FxHashMap::default(),
     })
 });
 

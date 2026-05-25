@@ -11,8 +11,9 @@
 //! `connection_added`) drain their queues onto `DriverHandle::inbox`
 //! using the shared `pump::drain` helper.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use smallvec::SmallVec;
 
@@ -110,13 +111,13 @@ pub(crate) struct FanOutSend {
 
 #[derive(Debug)]
 struct FanOutInner {
-    peers: HashMap<u64, FanOutPeer>,
+    peers: FxHashMap<u64, FanOutPeer>,
 }
 
 #[derive(Debug)]
 struct FanOutPeer {
     subscriptions: SubscriptionSet,
-    groups: HashSet<String>,
+    groups: FxHashSet<String>,
     /// "Any group" sentinel for UDP RADIO peers, where DISH never sends
     /// JOIN over the wire and the receiver does its own filter. With
     /// this flag set, every group matches.
@@ -137,7 +138,7 @@ impl FanOutSend {
         let (hwm, on_mute) = super::effective_queue_params(options);
         Self {
             inner: Arc::new(Mutex::new(FanOutInner {
-                peers: HashMap::new(),
+                peers: FxHashMap::default(),
             })),
             defaults: Defaults { hwm, on_mute },
             mode,
@@ -174,7 +175,7 @@ impl FanOutSend {
             peer_id,
             FanOutPeer {
                 subscriptions: SubscriptionSet::new(),
-                groups: HashSet::new(),
+                groups: FxHashSet::default(),
                 any_groups,
                 queue,
                 pump_cancel,

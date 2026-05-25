@@ -9,7 +9,9 @@
 //! [`Socket`]: super::Socket
 
 use std::cell::UnsafeCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -238,14 +240,14 @@ pub(super) struct SocketInner {
     /// Identity → slot index lookup for ROUTER outbound. Holds the
     /// LATEST peer for an identity, so reconnect replaces the stale
     /// slot without leaking state. Empty for non-router socket types.
-    pub(super) identity_to_slot: RwLock<HashMap<Bytes, usize>>,
+    pub(super) identity_to_slot: RwLock<FxHashMap<Bytes, usize>>,
     pub(super) monitor: MonitorPublisher,
     pub(super) next_connection_id: AtomicU64,
     /// Set by `close()` / `Drop` so install paths bail.
     pub(super) closed: AtomicBool,
     /// DISH local-filter group set (UDP RADIO/DISH only). The DISH
     /// listener task locks this on every datagram receive.
-    pub(super) joined_groups: RwLock<HashSet<Bytes>>,
+    pub(super) joined_groups: RwLock<FxHashSet<Bytes>>,
     /// UDP RADIO outbound dialers (one per `connect()` call).
     pub(super) udp_dialers: RwLock<Vec<UdpDialerEntry>>,
     /// Active listeners. Each `bind()` registers one entry whose
@@ -411,11 +413,11 @@ impl SocketInner {
             subscriptions: RwLock::new(SubscriptionSet::new()),
             our_subs: RwLock::new(Vec::new()),
             type_state: Mutex::new(TypeState::new()),
-            identity_to_slot: RwLock::new(HashMap::new()),
+            identity_to_slot: RwLock::new(FxHashMap::default()),
             monitor: MonitorPublisher::new(),
             next_connection_id: AtomicU64::new(0),
             closed: AtomicBool::new(false),
-            joined_groups: RwLock::new(HashSet::new()),
+            joined_groups: RwLock::new(FxHashSet::default()),
             udp_dialers: RwLock::new(Vec::new()),
             listeners: RwLock::new(Vec::new()),
             dialers: RwLock::new(Vec::new()),

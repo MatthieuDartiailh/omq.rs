@@ -21,7 +21,7 @@ pub(crate) struct MonitorCtx {
     pub peer_info: Arc<RwLock<Option<PeerInfo>>>,
     pub peer_address: Option<std::net::SocketAddr>,
     pub peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    pub peer_groups: Option<Arc<RwLock<std::collections::HashSet<bytes::Bytes>>>>,
+    pub peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<bytes::Bytes>>>>,
 }
 
 pub(super) enum Drained {

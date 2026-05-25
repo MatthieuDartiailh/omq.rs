@@ -5,9 +5,10 @@ mod peer;
 
 pub(crate) use peer::spawn_driver;
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+
+use rustc_hash::FxHashMap;
 use std::time::{Duration, Instant};
 
 use futures::channel::oneshot;
@@ -183,7 +184,7 @@ pub(crate) struct SocketDriver {
     peer_out_tx: mpsc::Sender<(u64, crate::engine::PeerOut)>,
     peer_out_rx: mpsc::Receiver<(u64, crate::engine::PeerOut)>,
     next_peer_id: u64,
-    peers: HashMap<u64, PeerEntry>,
+    peers: FxHashMap<u64, PeerEntry>,
     listeners: Vec<ListenerEntry>,
     dialers: Vec<DialerEntry>,
     send_strategy: SendStrategy,
@@ -249,7 +250,7 @@ impl SocketDriver {
             peer_out_tx,
             peer_out_rx,
             next_peer_id: 0,
-            peers: HashMap::new(),
+            peers: FxHashMap::default(),
             listeners: Vec::new(),
             dialers: Vec::new(),
             send_strategy,

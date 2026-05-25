@@ -13,8 +13,9 @@
 //! Recv: we prepend the peer's identity as the first frame of the message
 //! before delivering to the socket's recv channel.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 use tokio::task::JoinHandle;
@@ -72,8 +73,8 @@ pub(crate) struct IdentitySend {
 
 #[derive(Debug)]
 struct IdentityInner {
-    peers: HashMap<u64, IdentityPeer>,
-    identity_to_peer: HashMap<Bytes, u64>,
+    peers: FxHashMap<u64, IdentityPeer>,
+    identity_to_peer: FxHashMap<Bytes, u64>,
 }
 
 #[derive(Debug)]
@@ -95,8 +96,8 @@ impl IdentitySend {
         let hwm = options.send_hwm.map_or(usize::MAX, |n| n as usize);
         Self {
             inner: Arc::new(Mutex::new(IdentityInner {
-                peers: HashMap::new(),
-                identity_to_peer: HashMap::new(),
+                peers: FxHashMap::default(),
+                identity_to_peer: FxHashMap::default(),
             })),
             defaults: Defaults {
                 hwm,
@@ -168,14 +169,14 @@ impl IdentitySend {
 /// Recv strategy that prepends each peer's identity as the first frame.
 #[derive(Debug)]
 pub(crate) struct IdentityRecv {
-    peers: Arc<Mutex<HashMap<u64, Bytes>>>,
+    peers: Arc<Mutex<FxHashMap<u64, Bytes>>>,
     recv_tx: async_channel::Sender<Message>,
 }
 
 impl IdentityRecv {
     pub(crate) fn new(recv_tx: async_channel::Sender<Message>) -> Self {
         Self {
-            peers: Arc::new(Mutex::new(HashMap::new())),
+            peers: Arc::new(Mutex::new(FxHashMap::default())),
             recv_tx,
         }
     }

@@ -13,8 +13,9 @@
 //! `Options::send_hwm` at the `SocketDriver` layer where each
 //! channel is wired up.
 
-use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
+
+use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 use futures::channel::oneshot;
@@ -115,8 +116,8 @@ struct InprocConnectRequest {
 }
 
 /// Global registry of bound inproc names → request channel.
-static REGISTRY: LazyLock<Mutex<HashMap<String, mpsc::Sender<InprocConnectRequest>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static REGISTRY: LazyLock<Mutex<FxHashMap<String, mpsc::Sender<InprocConnectRequest>>>> =
+    LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
 /// Bind to `name`. The returned `InprocListener` yields one
 /// `InprocConn` per accepted connector. `snapshot` is captured

@@ -98,7 +98,7 @@ async fn install_and_run(
     info_holder: &Arc<RwLock<Option<PeerInfo>>>,
     peer_addr: Option<std::net::SocketAddr>,
     peer_sub: Option<&Arc<RwLock<SubscriptionSet>>>,
-    peer_groups: Option<&Arc<RwLock<std::collections::HashSet<Bytes>>>>,
+    peer_groups: Option<&Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
     #[cfg(feature = "priority")] priority: u8,
 ) {
     *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
@@ -218,7 +218,7 @@ async fn dial_supervisor_tcp(
     direct_io_handle: DirectIoHandle,
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
+    peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
     #[cfg(feature = "priority")] priority: u8,
 ) {
     let mut slot_idx: Option<usize> = None;
@@ -377,7 +377,7 @@ async fn dial_supervisor_ipc(
     direct_io_handle: DirectIoHandle,
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
+    peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
     #[cfg(feature = "priority")] priority: u8,
 ) {
     let ep_ident = match &endpoint {

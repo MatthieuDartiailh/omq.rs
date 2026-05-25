@@ -10,8 +10,9 @@
 //! - **RADIO** connects, sends every datagram unfiltered (the receiver
 //!   does the filter).
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+use rustc_hash::FxHashSet;
 
 use bytes::Bytes;
 use tokio::net::UdpSocket;
@@ -27,10 +28,10 @@ use omq_proto::message::Message;
 /// Joined-groups set, shared between the socket actor (mutated by
 /// `apply_join`) and every UDP DISH listener task (read on each recv).
 /// Lock hold time is one `HashSet::contains`; contention is negligible.
-pub(crate) type JoinedGroups = Arc<Mutex<HashSet<Bytes>>>;
+pub(crate) type JoinedGroups = Arc<Mutex<FxHashSet<Bytes>>>;
 
 pub(crate) fn new_joined_groups() -> JoinedGroups {
-    Arc::new(Mutex::new(HashSet::new()))
+    Arc::new(Mutex::new(FxHashSet::default()))
 }
 
 /// One bound UDP listener (DISH side). Cancelling the token tears down

@@ -168,7 +168,7 @@ pub(super) struct WireDriverConfig {
     pub(super) info_holder: Arc<RwLock<Option<PeerInfo>>>,
     pub(super) peer_address: Option<std::net::SocketAddr>,
     pub(super) peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    pub(super) peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
+    pub(super) peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
     pub(super) release_on_exit: bool,
 }
 
