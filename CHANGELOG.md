@@ -6,15 +6,26 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
-### omq-libzmq 0.2.0 (was omq-zmq)
+## [0.2.11] - 2026-05-25
 
+### omq-tokio 0.12.1
+
+- Fix: copy read buffer on compression transports to prevent buffer retention across reads.
+
+### omq-libzmq 0.4.1
+
+- Fix: eliminate TOCTOU race in IPv6 test port allocation (bind to `:0`, read actual endpoint).
 - Package renamed from `omq-zmq` to `omq-libzmq`. Library name (`omq_zmq`) unchanged.
 - 7 formerly-ENOTSUP socket options now store and round-trip values. 13 rarely-used options explicitly accepted as no-ops.
-- `zmq_msg_get`/`zmq_msg_gets` improved for libzmq compatibility. Context options expanded.
+- `zmq_msg_get`/`zmq_msg_sets` improved for libzmq compatibility. Context options expanded.
 
-### omq-zeromq 0.4.0
+### omq-zeromq 0.7.0
 
 - `Socket::disconnect()` method.
+
+### omq 0.12.1
+
+- Dependency version bumps.
 
 ## [0.2.10] - 2026-05-20
 
