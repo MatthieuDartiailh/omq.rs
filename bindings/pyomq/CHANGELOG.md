@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-05-25
+
+### Fixed
+
+- `pyproject.toml` version was not bumped in 0.10.1.
+
+## [0.10.1] - 2026-05-25
+
+### Fixed
+
+- Suppress `dead_code` warnings from PyO3 proc-macro call sites.
+
 ## [0.10.0] - 2026-05-25
 
 ### Changed
