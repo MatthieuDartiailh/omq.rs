@@ -16,6 +16,26 @@ def fmt_size(b: int) -> str:
     return f"{b} B"
 
 
+def _nice_ceil(v):
+    if v <= 0:
+        return 1
+    exp = math.floor(math.log10(v))
+    base = 10 ** exp
+    for m in [1, 2, 5, 10]:
+        candidate = m * base
+        if candidate >= v:
+            return candidate
+    return 10 * base
+
+
+def _fmt_y_rate(val):
+    if val >= 1_000_000:
+        return f"{val / 1_000_000:g}M"
+    if val >= 1_000:
+        return f"{val / 1_000:g}k"
+    return f"{val:g}"
+
+
 def load_data(jsonl_path: Path, run_prefix: str | None = None) -> dict:
     rows = []
     for line in jsonl_path.read_text().splitlines():
@@ -80,10 +100,7 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
     xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
 
     all_msgs = [d["msgs_s"] for s in series.values() for d in s.values() if d["msgs_s"] > 0]
-    msg_log_min = float(math.floor(math.log10(min(all_msgs))))
-    msg_log_max = float(math.ceil(math.log10(max(all_msgs))))
-    if msg_log_max - msg_log_min < 2:
-        msg_log_max = msg_log_min + 2
+    msg_max = _nice_ceil(max(all_msgs)) if all_msgs else 1e6
 
     if tput_max_mb is None:
         max_virt = max(
@@ -97,10 +114,7 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
     def y_msg(v):
         if v <= 0:
             return y_bot
-        log_v = math.log10(v)
-        frac = (log_v - msg_log_min) / (msg_log_max - msg_log_min)
-        frac = max(0.0, min(1.0, frac))
-        return y_bot - frac * plot_h
+        return y_bot - (v / msg_max) * plot_h
 
     def y_tput(v):
         return y_bot - (v / tput_max) * plot_h
@@ -128,46 +142,20 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
     )
     L.append(f'  <rect width="850" height="{svg_h}" fill="white"/>')
 
-    # Left-axis: msg/s log scale (major decade labels)
-    decade_labels = {
-        1: "1", 2: "100", 3: "1k", 4: "10k", 5: "100k", 6: "1M", 7: "10M",
-    }
-    for exp in range(int(msg_log_min), int(msg_log_max) + 1):
-        yy = y_bot - (exp - msg_log_min) / (msg_log_max - msg_log_min) * plot_h
+    # Left-axis: msg/s linear scale
+    n_l_ticks = 5
+    for i in range(n_l_ticks + 1):
+        val = i * msg_max / n_l_ticks
+        yy = y_msg(val)
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
             f' stroke="#e5e7eb" stroke-width="1"/>'
         )
-        label = decade_labels.get(exp, f"1e{exp}")
         L.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">{label}</text>'
+            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f'{_fmt_y_rate(val)}</text>'
         )
-
-    # Left-axis: minor gridlines
-    minor_prefixes = {2: "2", 3: "3", 5: "5"}
-    minor_suffixes = {1: "", 2: "", 3: "k", 4: "k", 5: "k", 6: "M", 7: "M"}
-    minor_divisors = {1: 1, 2: 1, 3: 1000, 4: 1000, 5: 1000, 6: 1e6, 7: 1e6}
-    for base_exp in range(int(msg_log_min), int(msg_log_max)):
-        for mult in [2, 3, 5]:
-            log_v = base_exp + math.log10(mult)
-            if log_v <= msg_log_min or log_v >= msg_log_max:
-                continue
-            yy = y_bot - (log_v - msg_log_min) / (msg_log_max - msg_log_min) * plot_h
-            L.append(
-                f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
-                f' y2="{yy:.1f}" stroke="#f0f0f0" stroke-width="0.5"/>'
-            )
-            val = mult * (10 ** base_exp)
-            suffix = minor_suffixes.get(base_exp, "")
-            divisor = minor_divisors.get(base_exp, 1)
-            label = f"{int(val / divisor)}{suffix}" if divisor else ""
-            if label:
-                L.append(
-                    f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-                    f' dominant-baseline="middle" fill="#9ca3af"'
-                    f' font-size="8">{label}</text>'
-                )
 
     # Right-axis: virtual throughput (dashed)
     step = max(50, (tput_max_mb // 5 // 50) * 50) or 50
@@ -213,7 +201,7 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
     L.append(
         f'  <text x="40" y="{mid_y:.1f}" text-anchor="middle"'
         f' dominant-baseline="middle" fill="#374151" font-size="11" font-weight="600"'
-        f' transform="rotate(-90,40,{mid_y:.1f})">msg/s (log)</text>'
+        f' transform="rotate(-90,40,{mid_y:.1f})">msg/s</text>'
     )
     L.append(
         f'  <text x="830" y="{mid_y:.1f}" text-anchor="middle"'
@@ -223,25 +211,13 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
     L.append(
         f'  <text x="{mid_x:.1f}" y="22" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f'Compression transports: structured JSON, {link_label} (omq-compio)</text>'
+        f'Compression transports: structured JSON, 2-process, {link_label} (omq-compio)</text>'
     )
 
     # --- Plot lines ---
     present = [k for k in order if k in series]
 
-    # Dashed: virtual throughput
-    for name in present:
-        d = series[name]
-        pts = " ".join(
-            f"{xs[i]:.1f},{y_tput(d[sizes[i]]['virt_gbps']):.1f}"
-            for i in range(n) if sizes[i] in d
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
-            f' stroke-width="2" stroke-dasharray="6,4"/>'
-        )
-
-    # Solid: msg/s with dots
+    # Dashed: msg/s
     for name in present:
         d = series[name]
         active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
@@ -250,10 +226,22 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
         )
         L.append(
             f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
+            f' stroke-width="2" stroke-dasharray="6,4"/>'
+        )
+
+    # Solid: virtual throughput with dots
+    for name in present:
+        d = series[name]
+        active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
+        pts = " ".join(
+            f"{xs[i]:.1f},{y_tput(d[s]['virt_gbps']):.1f}" for i, s in active
+        )
+        L.append(
+            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
             f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
         )
         for i, s in active:
-            yy = y_msg(d[s]["msgs_s"])
+            yy = y_tput(d[s]["virt_gbps"])
             L.append(
                 f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
                 f' fill="{colors[name]}" stroke="white" stroke-width="1"/>'
@@ -268,11 +256,11 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
         c = colors[name]
         L.append(
             f'  <line x1="{lx}" y1="{leg_y1}" x2="{lx + 14}" y2="{leg_y1}"'
-            f' stroke="{c}" stroke-width="2.5"/>'
+            f' stroke="{c}" stroke-width="2" stroke-dasharray="4,3"/>'
         )
         L.append(
             f'  <line x1="{lx}" y1="{leg_y2}" x2="{lx + 14}" y2="{leg_y2}"'
-            f' stroke="{c}" stroke-width="2" stroke-dasharray="4,3"/>'
+            f' stroke="{c}" stroke-width="2.5"/>'
         )
         L.append(
             f'  <text x="{lx + 18}" y="{leg_y1 + 4}" fill="#374151" font-size="10"'
@@ -283,7 +271,7 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
     L.append(
         f'  <text x="{mid_x:.1f}" y="{footer_y}" text-anchor="middle"'
         f' fill="#9ca3af" font-size="9">'
-        f'solid = msg/s (left, log) · dashed = virtual throughput (right, linear)</text>'
+        f'dashed = msg/s (left) · solid = virtual throughput (right)</text>'
     )
     L.append("</svg>")
 

@@ -157,18 +157,7 @@ def generate_svg(data: dict[int, dict[str, float]]) -> str:
     cx = left + plot_w / 2
     L.append(f'  <text x="{cx:.1f}" y="22" text-anchor="middle" fill="#111827" '
              f'font-size="14" font-weight="700">'
-             f'PUSH/PULL throughput: TCP loopback (Python bindings)</text>')
-
-    for name in SERIES:
-        color = COLORS[name]
-        tp_pts = []
-        for i, sz in enumerate(sizes):
-            rate = data[sz].get(name, 0)
-            if rate > 0:
-                tp_pts.append(f"{xs[i]:.1f},{y_tp(rate * sz / 1024**3):.1f}")
-        if tp_pts:
-            L.append(f'  <polyline points="{" ".join(tp_pts)}" fill="none" '
-                     f'stroke="{color}" stroke-width="2" stroke-dasharray="6,4"/>')
+             f'PUSH/PULL throughput: 2-process, TCP loopback (Python bindings)</text>')
 
     for name in SERIES:
         color = COLORS[name]
@@ -179,9 +168,21 @@ def generate_svg(data: dict[int, dict[str, float]]) -> str:
                 pts.append((xs[i], y_rate(rate)))
         if pts:
             L.append(f'  <polyline points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in pts)}" '
+                     f'fill="none" stroke="{color}" stroke-width="2" '
+                     f'stroke-dasharray="6,4"/>')
+
+    for name in SERIES:
+        color = COLORS[name]
+        tp_pts = []
+        for i, sz in enumerate(sizes):
+            rate = data[sz].get(name, 0)
+            if rate > 0:
+                tp_pts.append((xs[i], y_tp(rate * sz / 1024**3)))
+        if tp_pts:
+            L.append(f'  <polyline points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in tp_pts)}" '
                      f'fill="none" stroke="{color}" stroke-width="2.5" '
                      f'stroke-linecap="round" stroke-linejoin="round"/>')
-            for x, y in pts:
+            for x, y in tp_pts:
                 L.append(f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}" '
                          f'stroke="white" stroke-width="1"/>')
 
@@ -190,14 +191,14 @@ def generate_svg(data: dict[int, dict[str, float]]) -> str:
     for i, (lx, name) in enumerate([(lx1, "pyomq"), (lx2, "pyzmq")]):
         color = COLORS[name]
         L.append(f'  <line x1="{lx}" y1="{ly}" x2="{lx+14}" y2="{ly}" '
-                 f'stroke="{color}" stroke-width="2.5"/>')
-        L.append(f'  <line x1="{lx}" y1="{ly+12}" x2="{lx+14}" y2="{ly+12}" '
                  f'stroke="{color}" stroke-width="2" stroke-dasharray="4,3"/>')
+        L.append(f'  <line x1="{lx}" y1="{ly+12}" x2="{lx+14}" y2="{ly+12}" '
+                 f'stroke="{color}" stroke-width="2.5"/>')
         L.append(f'  <text x="{lx+18}" y="{ly+4}" fill="#374151" font-size="10" '
                  f'font-weight="500">{name}</text>')
 
     L.append(f'  <text x="{cx:.1f}" y="{ly+30}" text-anchor="middle" fill="#9ca3af" '
-             f'font-size="9">solid = msg/s (left) · dashed = throughput (right)</text>')
+             f'font-size="9">dashed = msg/s (left) · solid = throughput (right)</text>')
     L.append("</svg>")
     return "\n".join(L)
 

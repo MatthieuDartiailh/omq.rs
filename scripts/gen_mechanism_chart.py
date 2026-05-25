@@ -15,6 +15,26 @@ def fmt_size(b: int) -> str:
     return f"{b} B"
 
 
+def _nice_ceil(v):
+    if v <= 0:
+        return 1
+    exp = math.floor(math.log10(v))
+    base = 10 ** exp
+    for m in [1, 2, 5, 10]:
+        candidate = m * base
+        if candidate >= v:
+            return candidate
+    return 10 * base
+
+
+def _fmt_y_rate(val):
+    if val >= 1_000_000:
+        return f"{val / 1_000_000:g}M"
+    if val >= 1_000:
+        return f"{val / 1_000:g}k"
+    return f"{val:g}"
+
+
 def load_data(jsonl: Path) -> dict:
     rows = []
     for line in jsonl.read_text().splitlines():
@@ -61,16 +81,14 @@ def generate_svg(data: dict) -> str:
 
     xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
 
-    msg_log_min = 3.0  # log10(1k)
-    msg_log_max = 7.0  # log10(10M)
+    all_msgs = [pt[0] for pts in series.values() for pt in pts if pt[0] > 0]
+    msg_max = _nice_ceil(max(all_msgs)) if all_msgs else 10e6
     tput_max = 10.0    # GB/s
 
     def y_msg(v):
         if v <= 0:
             return y_bot
-        log_v = math.log10(v)
-        frac = (log_v - msg_log_min) / (msg_log_max - msg_log_min)
-        return y_bot - frac * plot_h
+        return y_bot - (v / msg_max) * plot_h
 
     def y_tput(v):
         return y_bot - (v / tput_max) * plot_h
@@ -86,42 +104,20 @@ def generate_svg(data: dict) -> str:
     )
     L.append(f'  <rect width="850" height="{svg_h}" fill="white"/>')
 
-    # Left-axis: msg/s log scale (major)
-    for exp, label in [(3, "1k"), (4, "10k"), (5, "100k"), (6, "1M"), (7, "10M")]:
-        yy = y_bot - (exp - msg_log_min) / (msg_log_max - msg_log_min) * plot_h
+    # Left-axis: msg/s linear scale
+    n_l_ticks = 5
+    for i in range(n_l_ticks + 1):
+        val = i * msg_max / n_l_ticks
+        yy = y_msg(val)
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
             f' stroke="#e5e7eb" stroke-width="1"/>'
         )
         L.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">{label}</text>'
+            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f'{_fmt_y_rate(val)}</text>'
         )
-
-    # Left-axis: minor gridlines
-    minor_labels = {
-        (3, 2): "2k", (3, 3): "3k", (3, 5): "5k",
-        (4, 2): "20k", (4, 3): "30k", (4, 5): "50k",
-        (5, 2): "200k", (5, 3): "300k", (5, 5): "500k",
-        (6, 2): "2M", (6, 3): "3M", (6, 5): "5M",
-    }
-    for base_exp in range(int(msg_log_min), int(msg_log_max)):
-        for mult in [2, 3, 5]:
-            log_v = base_exp + math.log10(mult)
-            if log_v <= msg_log_min or log_v >= msg_log_max:
-                continue
-            yy = y_bot - (log_v - msg_log_min) / (msg_log_max - msg_log_min) * plot_h
-            L.append(
-                f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
-                f' y2="{yy:.1f}" stroke="#f0f0f0" stroke-width="0.5"/>'
-            )
-            label = minor_labels.get((base_exp, mult), "")
-            if label:
-                L.append(
-                    f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-                    f' dominant-baseline="middle" fill="#9ca3af"'
-                    f' font-size="8">{label}</text>'
-                )
 
     # Right-axis: throughput (dashed)
     for v in [2, 4, 6, 8]:
@@ -170,7 +166,7 @@ def generate_svg(data: dict) -> str:
     L.append(
         f'  <text x="40" y="{mid_y:.1f}" text-anchor="middle"'
         f' dominant-baseline="middle" fill="#374151" font-size="11" font-weight="600"'
-        f' transform="rotate(-90,40,{mid_y:.1f})">msg/s (log)</text>'
+        f' transform="rotate(-90,40,{mid_y:.1f})">msg/s</text>'
     )
     L.append(
         f'  <text x="812" y="{mid_y:.1f}" text-anchor="middle"'
@@ -180,30 +176,30 @@ def generate_svg(data: dict) -> str:
     L.append(
         f'  <text x="{mid_x:.1f}" y="22" text-anchor="middle" fill="#111827"'
         f' font-size="14" font-weight="700">'
-        f'PUSH/PULL throughput: mechanism overhead (omq-compio, TCP)</text>'
+        f'PUSH/PULL throughput: mechanism overhead, 2-process (omq-compio, TCP)</text>'
     )
 
-    # Dashed throughput lines
-    for name in order:
-        pts = " ".join(
-            f"{xs[i]:.1f},{y_tput(series[name][i][1]):.1f}" for i in range(n)
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
-            f' stroke-width="2" stroke-dasharray="6,4"/>'
-        )
-
-    # Solid msg/s lines with dots
+    # Dashed msg/s lines
     for name in order:
         pts = " ".join(
             f"{xs[i]:.1f},{y_msg(series[name][i][0]):.1f}" for i in range(n)
         )
         L.append(
             f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
+            f' stroke-width="2" stroke-dasharray="6,4"/>'
+        )
+
+    # Solid throughput lines with dots
+    for name in order:
+        pts = " ".join(
+            f"{xs[i]:.1f},{y_tput(series[name][i][1]):.1f}" for i in range(n)
+        )
+        L.append(
+            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
             f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
         )
         for i in range(n):
-            yy = y_msg(series[name][i][0])
+            yy = y_tput(series[name][i][1])
             L.append(
                 f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
                 f' fill="{colors[name]}" stroke="white" stroke-width="1"/>'
@@ -218,11 +214,11 @@ def generate_svg(data: dict) -> str:
         c = colors[name]
         L.append(
             f'  <line x1="{lx}" y1="{leg_y1}" x2="{lx + 14}" y2="{leg_y1}"'
-            f' stroke="{c}" stroke-width="2.5"/>'
+            f' stroke="{c}" stroke-width="2" stroke-dasharray="4,3"/>'
         )
         L.append(
             f'  <line x1="{lx}" y1="{leg_y2}" x2="{lx + 14}" y2="{leg_y2}"'
-            f' stroke="{c}" stroke-width="2" stroke-dasharray="4,3"/>'
+            f' stroke="{c}" stroke-width="2.5"/>'
         )
         L.append(
             f'  <text x="{lx + 18}" y="{leg_y1 + 4}" fill="#374151" font-size="10"'
@@ -233,7 +229,7 @@ def generate_svg(data: dict) -> str:
     L.append(
         f'  <text x="{mid_x:.1f}" y="{footer_y}" text-anchor="middle"'
         f' fill="#9ca3af" font-size="9">'
-        f'solid = msg/s (left, log) · dashed = throughput (right, linear)</text>'
+        f'dashed = msg/s (left) · solid = throughput (right)</text>'
     )
     L.append("</svg>")
 

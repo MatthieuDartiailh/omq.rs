@@ -209,7 +209,7 @@ def generate_svg(data: dict) -> str:
     L.append(
         f'  <text x="{mid_x}" y="18" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f"PUSH/PULL throughput — TCP loopback (msg/s, higher is better)</text>"
+        f"PUSH/PULL throughput — 2-process, TCP loopback (higher is better)</text>"
     )
 
     for v_m in [4, 8, 12, 16]:
@@ -267,18 +267,7 @@ def generate_svg(data: dict) -> str:
         f' transform="rotate(90,812,{t1_mid:.1f})">throughput</text>'
     )
 
-    # Dashed throughput (GB/s) lines
-    for name in tput_draw_order:
-        idxs = [i for i in range(n) if name in tput[sizes[i]]]
-        pts = " ".join(
-            f"{xs[i]:.1f},{y_tput(tput[sizes[i]][name][1]):.1f}" for i in idxs
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
-            f' stroke-width="2" stroke-dasharray="6,4"/>'
-        )
-
-    # Solid msg/s lines with dots
+    # Dashed msg/s lines
     for name in tput_draw_order:
         idxs = [i for i in range(n) if name in tput[sizes[i]]]
         pts = " ".join(
@@ -286,10 +275,21 @@ def generate_svg(data: dict) -> str:
         )
         L.append(
             f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
+            f' stroke-width="2" stroke-dasharray="6,4"/>'
+        )
+
+    # Solid throughput (GB/s) lines with dots
+    for name in tput_draw_order:
+        idxs = [i for i in range(n) if name in tput[sizes[i]]]
+        pts = " ".join(
+            f"{xs[i]:.1f},{y_tput(tput[sizes[i]][name][1]):.1f}" for i in idxs
+        )
+        L.append(
+            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
             f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
         )
         for i in idxs:
-            yy = y_msg(tput[sizes[i]][name][0])
+            yy = y_tput(tput[sizes[i]][name][1])
             L.append(
                 f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
                 f' fill="{colors[name]}" stroke="white" stroke-width="1"/>'
@@ -307,7 +307,7 @@ def generate_svg(data: dict) -> str:
     L.append(
         f'  <text x="{mid_x}" y="288" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f"REQ/REP latency — TCP loopback (p50 µs, lower is better)</text>"
+        f"REQ/REP latency — 2-process, TCP loopback (p50 µs, lower is better)</text>"
     )
 
     for v in [25, 50, 75, 100, 125, 150]:

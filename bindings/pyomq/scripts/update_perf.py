@@ -802,7 +802,7 @@ def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
     L.append(
         f'  <text x="{mid_x}" y="18" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f'PUSH/PULL throughput — TCP loopback (higher is better)</text>'
+        f'PUSH/PULL throughput — 2-process, TCP loopback (higher is better)</text>'
     )
 
     n_l_ticks = 5
@@ -903,7 +903,7 @@ def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
     L.append(
         f'  <text x="{mid_x}" y="288" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f'REQ/REP latency — TCP loopback, p50 µs (lower is better)</text>'
+        f'REQ/REP latency — 2-process, TCP loopback, p50 µs (lower is better)</text>'
     )
 
     sync_omq_lat = [r[1] for r in sync_lat]

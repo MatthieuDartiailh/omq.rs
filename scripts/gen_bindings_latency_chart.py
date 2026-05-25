@@ -161,7 +161,7 @@ def generate_svg(data: dict[int, dict[str, float]]) -> str:
              f' transform="rotate(-90,40,{mid_y:.1f})">p50 latency (log)</text>')
     L.append(f'  <text x="{mid_x:.1f}" y="22" text-anchor="middle" fill="#111827"'
              f' font-size="14" font-weight="700">'
-             f'REQ/REP latency: pyomq vs pyzmq, TCP loopback (p50)</text>')
+             f'REQ/REP latency: pyomq vs pyzmq, 2-process, TCP loopback (p50)</text>')
 
     # Lines with dots (pyzmq drawn first = behind)
     for name in reversed(SERIES):
