@@ -6,6 +6,12 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-05-25
+
+### pyomq 0.10.2
+
+- Fix: `pyproject.toml` version was not bumped in 0.10.1.
+
 ## [0.2.12] - 2026-05-25
 
 ### pyomq 0.10.1
