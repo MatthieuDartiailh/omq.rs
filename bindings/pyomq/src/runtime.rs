@@ -226,6 +226,7 @@ pub fn destroy_socket(id: u64) {
 /// Like `destroy_socket`, but for use *from inside a future already
 /// running on the compio thread*. Properly closes the socket with
 /// linger so pending messages are flushed before returning.
+#[allow(dead_code)]
 pub async fn destroy_socket_local(id: u64) {
     stop_pumps_async(id).await;
 

@@ -46,6 +46,7 @@ where
 }
 
 /// Async version: drive a `Result<()>`-returning op via an asyncio.Future.
+#[allow(dead_code)]
 pub(crate) fn async_unit<'py, F, Fut>(
     inner: &Arc<SocketInner>,
     py: Python<'py>,
@@ -66,6 +67,7 @@ where
 }
 
 /// Async version: drive a `Result<String>`-returning op via an asyncio.Future.
+#[allow(dead_code)]
 pub(crate) fn async_string<'py, F, Fut>(
     inner: &Arc<SocketInner>,
     py: Python<'py>,
