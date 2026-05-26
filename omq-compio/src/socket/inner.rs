@@ -38,7 +38,7 @@ impl RecvCache {
     /// Borrow the inner deque mutably. Caller must be on the owning
     /// runtime thread (always true in compio's cooperative model).
     #[inline]
-    #[allow(clippy::mut_from_ref)]
+    #[expect(clippy::mut_from_ref)]
     pub(super) fn get(&self) -> &mut VecDeque<Message> {
         unsafe { &mut *self.0.get() }
     }
@@ -122,7 +122,7 @@ impl LocalStream {
     /// `ENOBUFS` under sustained delivery on a small `BUF_RING` pool.
     /// The previous stream's lingering op is cancelled when its slot
     /// drops.
-    #[allow(clippy::await_holding_lock)]
+    #[expect(clippy::await_holding_lock)]
     pub(crate) async fn rearm(&self, peer_io: &SharedPeerIo) -> std::io::Result<()> {
         let io = peer_io.lock().expect("peer_io");
         if !io.reader.supports_multishot() {
@@ -384,7 +384,7 @@ impl SocketInner {
         } else {
             options.identity.clone()
         };
-        #[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded by design
+        #[expect(clippy::arc_with_non_send_sync)] // compio is single-threaded by design
         Arc::new(Self {
             socket_type,
             inproc_identity,

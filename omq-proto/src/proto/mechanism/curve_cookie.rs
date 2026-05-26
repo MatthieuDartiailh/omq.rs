@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 const NONCE_COOKIE_PREFIX: &[u8; 8] = b"COOKIE--";
 const DEFAULT_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
+#[expect(clippy::trivially_copy_pass_by_ref)]
 fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
     let mut n = [0u8; 24];
     n[..8].copy_from_slice(prefix);

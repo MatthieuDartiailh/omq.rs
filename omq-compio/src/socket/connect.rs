@@ -43,7 +43,7 @@ impl Socket {
         self.connect_inner(endpoint, opts.priority.get()).await
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn connect_inner(
         &self,
         endpoint: Endpoint,
@@ -124,7 +124,6 @@ impl Socket {
             .detach();
             return Ok(());
         }
-        #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
         match endpoint {
             Endpoint::Inproc { name } => {
                 let snapshot = self.inner().snapshot();
@@ -144,7 +143,7 @@ impl Socket {
                 } else {
                     let inner = self.inner().clone();
                     #[cfg(feature = "priority")]
-                    #[allow(clippy::redundant_locals)]
+                    #[expect(clippy::redundant_locals)]
                     let priority = priority;
                     compio::runtime::spawn(async move {
                         let Ok(conn) =

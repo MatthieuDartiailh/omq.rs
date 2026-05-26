@@ -25,6 +25,7 @@ fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
         Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
         Host::Name(name) => resolve_name(name, port),
+        _ => unreachable!(),
     }
 }
 
@@ -35,6 +36,7 @@ fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
         )),
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
         Host::Name(name) => resolve_name(name, port),
+        _ => unreachable!(),
     }
 }
 

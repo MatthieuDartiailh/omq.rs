@@ -6,7 +6,6 @@
 //! as an explicit flag - it would otherwise be an awkward special
 //! case for `get_longest_common_prefix` against an empty stored key.
 
-use bytes::Bytes;
 use patricia_tree::PatriciaSet;
 
 #[derive(Debug, Default, Clone)]
@@ -22,12 +21,11 @@ impl SubscriptionSet {
     }
 
     /// Add a subscription. Empty prefix is recorded as `subscribe_all`.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn add(&mut self, prefix: Bytes) {
+    pub fn add(&mut self, prefix: &[u8]) {
         if prefix.is_empty() {
             self.subscribe_all = true;
         } else {
-            self.set.insert(&prefix[..]);
+            self.set.insert(prefix);
         }
     }
 
@@ -63,7 +61,7 @@ mod tests {
     #[test]
     fn subscribe_all_matches_everything() {
         let mut s = SubscriptionSet::new();
-        s.add(Bytes::new());
+        s.add(b"");
         assert!(s.matches(b""));
         assert!(s.matches(b"anything"));
         assert!(s.matches(b"\xff\xff"));
@@ -72,7 +70,7 @@ mod tests {
     #[test]
     fn prefix_match() {
         let mut s = SubscriptionSet::new();
-        s.add(Bytes::from_static(b"news."));
+        s.add(b"news.");
         assert!(s.matches(b"news.sports"));
         assert!(s.matches(b"news."));
         assert!(!s.matches(b"weather"));
@@ -82,8 +80,8 @@ mod tests {
     #[test]
     fn multiple_prefixes() {
         let mut s = SubscriptionSet::new();
-        s.add(Bytes::from_static(b"a"));
-        s.add(Bytes::from_static(b"b"));
+        s.add(b"a");
+        s.add(b"b");
         assert!(s.matches(b"apple"));
         assert!(s.matches(b"banana"));
         assert!(!s.matches(b"cherry"));
@@ -92,7 +90,7 @@ mod tests {
     #[test]
     fn remove_clears_prefix() {
         let mut s = SubscriptionSet::new();
-        s.add(Bytes::from_static(b"x"));
+        s.add(b"x");
         assert!(s.matches(b"x"));
         s.remove(b"x");
         assert!(!s.matches(b"x"));
@@ -101,8 +99,8 @@ mod tests {
     #[test]
     fn remove_empty_clears_subscribe_all() {
         let mut s = SubscriptionSet::new();
-        s.add(Bytes::new());
-        s.add(Bytes::from_static(b"x"));
+        s.add(b"");
+        s.add(b"x");
         s.remove(b"");
         assert!(!s.matches(b"y"));
         assert!(s.matches(b"x"));
@@ -114,8 +112,8 @@ mod tests {
         // "foo*" topics match. Add the longer one first to make sure
         // the trie shape doesn't trip the match.
         let mut s = SubscriptionSet::new();
-        s.add(Bytes::from_static(b"foobar"));
-        s.add(Bytes::from_static(b"foo"));
+        s.add(b"foobar");
+        s.add(b"foo");
         assert!(s.matches(b"foo"));
         assert!(s.matches(b"foobar"));
         assert!(s.matches(b"foobaz"));
@@ -132,7 +130,8 @@ mod tests {
         // do anything pathological.
         let mut s = SubscriptionSet::new();
         for i in 0..1000u32 {
-            s.add(Bytes::from(format!("topic-{i:04}-")));
+            let topic = format!("topic-{i:04}-");
+            s.add(topic.as_bytes());
         }
         assert!(s.matches(b"topic-0042-payload"));
         assert!(s.matches(b"topic-0999-x"));

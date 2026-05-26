@@ -40,7 +40,7 @@ use super::frame;
 /// without applying name-dispatched body parsing. Used during the mechanism
 /// handshake where opaque CURVE READY / INITIATE bodies must reach the
 /// mechanism untouched.
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 fn decode_command_raw(body: bytes::Bytes) -> Result<Command> {
     if body.is_empty() {
         return Err(Error::Protocol("empty command frame".into()));

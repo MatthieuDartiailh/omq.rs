@@ -192,10 +192,11 @@ impl FanOutSend {
     }
 
     /// Record a SUBSCRIBE command from the given peer.
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn peer_subscribe(&self, peer_id: u64, prefix: Bytes) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
-            p.subscriptions.add(prefix);
+            p.subscriptions.add(&prefix);
         }
     }
 

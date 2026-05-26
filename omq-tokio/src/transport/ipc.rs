@@ -52,7 +52,7 @@ impl Transport for IpcTransport {
     }
 }
 
-#[allow(clippy::unused_async)]
+#[expect(clippy::unused_async)]
 async fn bind_filesystem(endpoint: &Endpoint, path: &Path) -> Result<IpcListener> {
     // Best-effort cleanup of any stale socket at this path. Ignore
     // failure: the real bind below surfaces a precise error if the

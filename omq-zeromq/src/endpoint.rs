@@ -74,6 +74,7 @@ pub(crate) fn from_omq_endpoint(ep: &omq_proto::Endpoint) -> ZmqResult<Endpoint>
                         "unresolved hostname in endpoint: {name}"
                     )));
                 }
+                _ => unreachable!(),
             };
             Ok(Endpoint::Tcp(SocketAddr::new(ip, *port)))
         }
@@ -88,6 +89,7 @@ pub(crate) fn from_omq_endpoint(ep: &omq_proto::Endpoint) -> ZmqResult<Endpoint>
                         "unresolved hostname in endpoint: {name}"
                     )));
                 }
+                _ => unreachable!(),
             };
             Ok(Endpoint::Udp(SocketAddr::new(ip, *port)))
         }

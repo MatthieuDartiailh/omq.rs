@@ -124,7 +124,7 @@ impl NotifyFd {
 }
 
 // socket_type read in Phase 3 (ZMQ_TYPE getsockopt).
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Debug)]
 pub(crate) struct OmqSocket {
     pub id: u64,
@@ -294,7 +294,6 @@ fn register_inproc_bind(sock: &Arc<OmqSocket>, name: &str) {
 }
 
 /// Register an inproc connect. If the binder exists, install bypass.
-#[allow(clippy::collapsible_if)]
 fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
     let ctx = &sock.ctx;
     let binder = ctx
@@ -324,7 +323,7 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
 }
 
 #[unsafe(no_mangle)]
-#[allow(clippy::arc_with_non_send_sync)]
+#[expect(clippy::arc_with_non_send_sync)]
 pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
     if ctx_ptr.is_null() {
         set_errno(libc::EFAULT);
@@ -713,7 +712,6 @@ pub extern "C" fn zmq_socket_monitor(
             use omq_compio::monitor::MonitorEvent;
 
             while let Ok(ev) = stream.recv().await {
-                #[allow(clippy::match_wildcard_for_single_variants)]
                 let (event_id, value, endpoint): (u16, i32, String) = match &ev {
                     MonitorEvent::Listening { endpoint } => (0x0008, 0, endpoint.to_string()),
                     MonitorEvent::Accepted { endpoint, .. } => (0x0020, 0, endpoint.to_string()),

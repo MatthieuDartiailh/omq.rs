@@ -199,7 +199,6 @@ impl IdentityRecv {
     /// Produce the identity-prefixed message without sending it. Used when
     /// the socket type applies a post-recv transform (REP) before
     /// delivery.
-    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn wrap(&self, peer_id: u64, msg: Message) -> Message {
         let identity = {
             let g = self.peers.lock().expect("identity recv poisoned");

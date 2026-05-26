@@ -30,7 +30,7 @@ impl From<crate::socket::OneShotLargeRecvOutcome> for StreamArmOutcome {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub(super) async fn pull_stream(
     state: &Arc<DirectIoState>,
     peer_io: &SharedPeerIo,

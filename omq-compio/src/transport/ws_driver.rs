@@ -120,7 +120,7 @@ impl WsLoopState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_ws_connection(
     mut ws: WsStream,
     role: Role,

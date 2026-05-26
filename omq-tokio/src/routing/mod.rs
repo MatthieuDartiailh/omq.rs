@@ -258,7 +258,7 @@ impl RecvStrategy {
     /// sees the full envelope; for `FairQueue`, returns the message
     /// unchanged. Used when the `type_state` needs to post-process (REQ,
     /// REP) rather than hitting the recv channel directly.
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     pub(crate) async fn wrap_for_transform(&self, peer_id: u64, msg: Message) -> Option<Message> {
         match self {
             Self::None => None,

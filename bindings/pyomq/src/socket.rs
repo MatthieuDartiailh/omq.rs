@@ -309,6 +309,9 @@ fn monitor_event_to_dict(py: Python<'_>, ev: &MonitorEvent) -> PyResult<PyObject
         MonitorEvent::Closed => {
             d.set_item("event", "closed")?;
         }
+        _ => {
+            d.set_item("event", "unknown")?;
+        }
     }
     Ok(d.into())
 }

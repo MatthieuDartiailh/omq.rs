@@ -78,9 +78,8 @@ impl tokio::io::AsyncWrite for WsTransport {
     }
 }
 
-#[allow(clippy::match_wildcard_for_single_variants)]
 fn mechanism_subprotocol(
-    #[cfg_attr(not(feature = "plain"), allow(unused_variables))]
+    #[cfg_attr(not(feature = "plain"), expect(unused_variables))]
     mechanism: &omq_proto::options::MechanismConfig,
 ) -> &'static str {
     #[cfg(feature = "plain")]
@@ -128,6 +127,7 @@ pub(crate) async fn bind(
             .map_err(Error::Io)?
             .next()
             .ok_or_else(|| Error::InvalidEndpoint(format!("DNS lookup failed for {name}")))?,
+        _ => unreachable!(),
     };
     let listener = TcpListener::bind(addr).await.map_err(Error::Io)?;
     let local = listener.local_addr().map_err(Error::Io)?;
@@ -145,7 +145,6 @@ pub(crate) struct WsAccepted {
     pub leftover: bytes::Bytes,
 }
 
-#[allow(clippy::result_large_err)]
 pub(crate) async fn accept(
     stream: TcpStream,
     tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
@@ -233,6 +232,7 @@ pub(crate) async fn connect(
             .map_err(Error::Io)?
             .next()
             .ok_or_else(|| Error::InvalidEndpoint(format!("DNS lookup failed for {name}")))?,
+        _ => unreachable!(),
     };
     let stream = TcpStream::connect(addr).await.map_err(Error::Io)?;
     let _ = stream.set_nodelay(true);
@@ -243,6 +243,7 @@ pub(crate) async fn connect(
             omq_proto::endpoint::Host::Name(n) => n.clone(),
             omq_proto::endpoint::Host::Ip(ip) => ip.to_string(),
             omq_proto::endpoint::Host::Wildcard => "localhost".into(),
+            _ => unreachable!(),
         };
         let domain = rustls_pki_types::ServerName::try_from(host_str).map_err(ws_err)?;
         let tls_stream = connector.connect(domain, stream).await.map_err(Error::Io)?;
@@ -295,7 +296,7 @@ pub(crate) async fn connect(
     })
 }
 
-#[allow(clippy::unnecessary_wraps)]
+#[expect(clippy::unnecessary_wraps)]
 fn build_tls_connector(accept_invalid_certs: bool) -> Result<tokio_rustls::TlsConnector> {
     use std::sync::Arc;
     let _ = rustls::crypto::ring::default_provider().install_default();

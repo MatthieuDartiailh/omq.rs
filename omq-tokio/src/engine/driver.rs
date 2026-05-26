@@ -107,7 +107,6 @@ pub struct DriverHandle {
 /// per-connection shim task that wrapped Events into the
 /// `SocketDriver`'s `InternalEvent::PeerEvent` / `PeerClosed`.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum PeerOut {
     Event(Event),
     Closed,
@@ -246,7 +245,7 @@ where
         result
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn run_inner(self) -> Result<()> {
         let Self {
             stream,
@@ -477,7 +476,7 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn drain_on_cancel<W: AsyncWrite + Unpin>(
     inbox: &mut mpsc::Receiver<DriverCommand>,
     shared_msg_rx: Option<&QueueReceiver>,
@@ -567,6 +566,7 @@ fn encode_msg(
         match codec.ws_role() {
             Some(omq_proto::proto::connection::WsRole::Server) => eq.encode_ws(msg),
             Some(omq_proto::proto::connection::WsRole::Client) => eq.encode_ws_masked(msg),
+            Some(_) => unreachable!(),
             None => unreachable!(),
         }
         return;
@@ -697,7 +697,7 @@ mod tests {
     /// is the simplest way to test it without involving the inproc
     /// transport (which since the inproc fast-path landed bypasses
     /// the codec entirely).
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     async fn inproc_pair(_name: &str) -> (DriverHandle, EventAdapter, DriverHandle, EventAdapter) {
         let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
 

@@ -40,7 +40,7 @@ impl MonitorStream {
                     }
                 }
                 Err(omq_proto::MonitorRecvError::Lagged(_)) => {}
-                Err(omq_proto::MonitorRecvError::Closed) => return None,
+                Err(_) => return None,
             }
         }
     }
@@ -69,7 +69,7 @@ pub(crate) fn map_event(event: &omq_proto::monitor::MonitorEvent) -> Option<Sock
         }
         ME::Disconnected { .. } => Some(SocketEvent::Disconnected),
         ME::Closed => Some(SocketEvent::Closed),
-        ME::PeerCommand { .. } => None,
+        _ => None,
     }
 }
 

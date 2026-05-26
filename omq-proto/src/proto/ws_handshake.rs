@@ -195,7 +195,7 @@ pub fn parse_server_upgrade(response: &[u8], expected_key: &str) -> Result<Strin
 
 // --- Inline SHA-1 (RFC 3174) ---
 
-#[allow(clippy::many_single_char_names, clippy::unreadable_literal)]
+#[expect(clippy::many_single_char_names, clippy::unreadable_literal)]
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
 

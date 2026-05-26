@@ -1,5 +1,5 @@
 //! Socket options overlay and `zmq_setsockopt` / `zmq_getsockopt`.
-#![allow(clippy::cast_possible_wrap)]
+#![expect(clippy::cast_possible_wrap)]
 
 use std::ffi::c_int;
 use std::time::Duration;
@@ -8,7 +8,7 @@ use bytes::Bytes;
 use omq_compio::options::{KeepAlive, MechanismConfig, ReconnectPolicy};
 
 #[derive(Clone, Debug, Default)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 pub(crate) struct SocketOverlay {
     pub send_hwm: Option<u32>,
     pub recv_hwm: Option<u32>,
@@ -207,7 +207,7 @@ const ZMQ_NULL: c_int = 0;
 const ZMQ_PLAIN: c_int = 1;
 const ZMQ_CURVE: c_int = 2;
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_setsockopt(
     sock: *mut libc::c_void,
@@ -455,7 +455,7 @@ pub extern "C" fn zmq_setsockopt(
             sock_arc.overlay.lock().unwrap().ipv6 = read_i32(optval, optvallen) != 0;
         }
         // Always-on in omq; accept silently.
-        #[allow(clippy::match_same_arms)]
+        #[expect(clippy::match_same_arms)]
         ZMQ_ROUTER_HANDOVER => {}
         ZMQ_BACKLOG => {
             sock_arc.overlay.lock().unwrap().backlog = read_i32(optval, optvallen);
@@ -478,7 +478,7 @@ pub extern "C" fn zmq_setsockopt(
         ZMQ_XPUB_NODROP => {
             sock_arc.overlay.lock().unwrap().xpub_nodrop = read_i32(optval, optvallen) != 0;
         }
-        #[allow(clippy::match_same_arms)]
+        #[expect(clippy::match_same_arms)]
         ZMQ_AFFINITY
         | ZMQ_RATE
         | ZMQ_RECOVERY_IVL
@@ -536,7 +536,7 @@ fn do_subscribe(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_getsockopt(
     sock: *mut libc::c_void,
@@ -605,7 +605,6 @@ pub extern "C" fn zmq_getsockopt(
         }
         ZMQ_TYPE => {
             use omq_compio::SocketType;
-            #[allow(clippy::wildcard_in_or_patterns)]
             let v: i32 = match sock_arc.socket_type {
                 SocketType::Pair => 0,
                 SocketType::Pub => 1,
@@ -627,6 +626,7 @@ pub extern "C" fn zmq_getsockopt(
                 SocketType::Peer => 19,
                 SocketType::Channel => 20,
                 SocketType::Stream => 11,
+                _ => unreachable!(),
             };
             write_i32(optval, optvallen, v)
         }

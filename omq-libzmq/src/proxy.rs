@@ -12,8 +12,7 @@ const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_DONTWAIT: i32 = 1;
 
-#[allow(clippy::large_stack_arrays)]
-#[allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
+#[expect(clippy::large_stack_arrays)]
 fn forward(from: *mut c_void, to: *mut c_void, capture: *mut c_void) -> libc::c_int {
     let mut buf = [0u8; 65536];
     loop {
@@ -40,7 +39,7 @@ fn forward(from: *mut c_void, to: *mut c_void, capture: *mut c_void) -> libc::c_
     0
 }
 
-#[allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
+#[expect(clippy::borrow_as_ptr)]
 fn getsockopt_rcvmore(sock: *mut c_void) -> bool {
     let mut v: i32 = 0;
     let mut sz = std::mem::size_of::<i32>();

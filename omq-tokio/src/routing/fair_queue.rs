@@ -21,10 +21,10 @@ impl FairQueueRecv {
         Self { recv_tx }
     }
 
-    #[allow(clippy::unused_self)]
+    #[expect(clippy::unused_self)]
     pub(crate) fn connection_added(&mut self, _peer_id: u64) {}
 
-    #[allow(clippy::unused_self)]
+    #[expect(clippy::unused_self)]
     pub(crate) fn connection_removed(&mut self, _peer_id: u64) {}
 
     pub(crate) async fn deliver(&self, _peer_id: u64, msg: Message) -> Result<()> {

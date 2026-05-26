@@ -16,7 +16,7 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 pub(crate) struct IoThread {
     submit: flume::Sender<Job>,
     // Keep the JoinHandle so the thread is joined when the context drops.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -65,7 +65,7 @@ fn build_compio_runtime() -> std::io::Result<compio::runtime::Runtime> {
 }
 
 impl OmqContext {
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[expect(clippy::arc_with_non_send_sync)]
     fn new(n_io_threads: usize) -> Arc<Self> {
         let n = n_io_threads.max(1);
         let terminated = Arc::new(AtomicBool::new(false));
@@ -222,7 +222,7 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
         ZMQ_MAX_MSGSZ => {
             ctx.max_msg_size.store(i64::from(value), Ordering::Relaxed);
         }
-        #[allow(clippy::match_same_arms)]
+        #[expect(clippy::match_same_arms)]
         ZMQ_SOCKET_LIMIT | ZMQ_IPV6_CTX => {}
         _ => return crate::error::fail(libc::EINVAL),
     }

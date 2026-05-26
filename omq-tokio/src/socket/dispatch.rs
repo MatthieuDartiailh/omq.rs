@@ -24,7 +24,6 @@ use crate::transport::{
 /// Byte-stream dispatch across TCP-shaped transports (TCP, IPC, WS).
 /// Inproc does NOT go through this - it skips the ZMTP codec entirely
 /// and uses its own Message-typed channel pair (see `AnyConn`).
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AnyStream {
     Tcp(TcpStream),
@@ -104,7 +103,6 @@ impl AsyncWrite for AnyStream {
 /// (TCP / IPC - runs the ZMTP codec via `ConnectionDriver`) or a
 /// pre-paired Message channel (inproc - runs the codec-less
 /// `InprocPeerDriver`).
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum AnyConn {
     ByteStream {
         stream: AnyStream,
@@ -136,14 +134,6 @@ impl AnyConn {
     pub(crate) fn peer_ident(&self) -> &PeerIdent {
         match self {
             Self::ByteStream { peer_ident, .. } | Self::Inproc { peer_ident, .. } => peer_ident,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn leftover(&self) -> bytes::Bytes {
-        match self {
-            Self::ByteStream { leftover, .. } => leftover.clone(),
-            Self::Inproc { .. } => bytes::Bytes::new(),
         }
     }
 }

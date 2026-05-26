@@ -54,7 +54,6 @@ pub const MAX_DICT_BYTES: usize = 8192;
 
 // Dict-aware bindings missing from `lz4-sys` 1.11. The symbols live in
 // the `liblz4` static lib that `lz4-sys` already links (`links = "lz4"`).
-#[allow(non_snake_case)]
 unsafe extern "C" {
     fn LZ4_loadDict(
         stream: *mut lz4_sys::LZ4StreamEncode,
@@ -163,8 +162,16 @@ impl Lz4Encoder {
 
     /// Override the multi-block threshold. Parts larger than this use
     /// LZ4M encoding. Both peers must agree on this value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` exceeds `i32::MAX` (lz4 API limit).
     #[must_use]
     pub fn with_block_size(mut self, size: usize) -> Self {
+        assert!(
+            i32::try_from(size).is_ok(),
+            "LZ4 block size {size} exceeds i32::MAX"
+        );
         self.block_size = size;
         self
     }
@@ -196,7 +203,7 @@ impl Lz4Encoder {
         Ok(out)
     }
 
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap)]
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
         let plain = part.as_bytes();
         let threshold = if self.send_dict.is_some() {
@@ -241,7 +248,7 @@ impl Lz4Encoder {
         )))
     }
 
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap)]
     fn encode_part_multiblock(&mut self, plain: &[u8]) -> Result<Payload> {
         let total = plain.len();
         let block_size = self.block_size;
@@ -308,8 +315,16 @@ impl Lz4Decoder {
     }
 
     /// Override the multi-block threshold. Must match the encoder's value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` exceeds `i32::MAX` (lz4 API limit).
     #[must_use]
     pub fn with_block_size(mut self, size: usize) -> Self {
+        assert!(
+            i32::try_from(size).is_ok(),
+            "LZ4 block size {size} exceeds i32::MAX"
+        );
         self.block_size = size;
         self
     }
@@ -384,7 +399,7 @@ fn ensure_stream(stream: &mut *mut lz4_sys::LZ4StreamEncode) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::cast_possible_wrap)]
+#[expect(clippy::cast_possible_wrap)]
 fn compress_block(
     stream: *mut lz4_sys::LZ4StreamEncode,
     dict: Option<&Bytes>,
@@ -416,7 +431,7 @@ fn compress_block(
     Ok(n as usize)
 }
 
-#[allow(clippy::cast_possible_wrap)]
+#[expect(clippy::cast_possible_wrap)]
 fn decode_lz4b(
     body: &[u8],
     dict: Option<&Bytes>,
@@ -473,7 +488,7 @@ fn decode_lz4b(
     Ok(Payload::from_bytes(Bytes::from(out)))
 }
 
-#[allow(clippy::cast_possible_wrap)]
+#[expect(clippy::cast_possible_wrap)]
 fn decode_lz4m(
     body: &[u8],
     dict: Option<&Bytes>,
@@ -558,7 +573,7 @@ fn decode_lz4m(
 mod tests {
     use super::*;
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn rt(msg: Message) -> Message {
         let mut enc = Lz4Encoder::new();
         let mut dec = Lz4Decoder::new();

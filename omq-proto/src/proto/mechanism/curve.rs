@@ -44,7 +44,7 @@ fn nonce_short(prefix: &[u8; 16], counter: u64) -> [u8; 24] {
 }
 
 /// Construct a 24-byte nonce as `prefix(8) || suffix(16)`.
-#[allow(clippy::trivially_copy_pass_by_ref)]
+#[expect(clippy::trivially_copy_pass_by_ref)]
 fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
     let mut n = [0u8; 24];
     n[..8].copy_from_slice(prefix);
@@ -174,12 +174,10 @@ pub(crate) enum CurveMechanism {
 }
 
 impl CurveMechanism {
-    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_client(our_keypair: CurveKeypair, server_public: CurvePublicKey) -> Self {
         Self::Client(CurveClient::new(our_keypair, server_public))
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_server(
         our_keypair: CurveKeypair,
         cookie_keyring: Arc<CurveCookieKeyring>,
@@ -267,7 +265,7 @@ impl std::fmt::Debug for CurveClientState {
 }
 
 impl CurveClient {
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn new(our_keypair: CurveKeypair, server_public: CurvePublicKey) -> Self {
         let our_lt_secret = SecretKey::from_bytes(*our_keypair.secret.as_bytes());
         let our_lt_public = PublicKey::from_bytes(*our_keypair.public.as_bytes());
@@ -564,8 +562,6 @@ enum CurveServerState {
     Done {
         our_eph_secret: SecretKey,
         peer_eph_public: PublicKey,
-        #[allow(dead_code)]
-        peer_lt_public: PublicKey,
     },
 }
 
@@ -580,7 +576,7 @@ impl std::fmt::Debug for CurveServerState {
 }
 
 impl CurveServer {
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn new(
         our_keypair: CurveKeypair,
         cookie_keyring: Arc<CurveCookieKeyring>,
@@ -776,7 +772,6 @@ impl CurveServer {
         self.state = CurveServerState::Done {
             our_eph_secret: sn_secret,
             peer_eph_public: cp,
-            peer_lt_public: cl,
         };
         Ok(props)
     }

@@ -154,6 +154,7 @@ pub struct WssTls {
 /// available behind the opt-in `curve` feature; BLAKE3ZMQ behind
 /// the opt-in `blake3zmq` feature.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub enum MechanismConfig {
     /// NULL: no encryption, no peer authentication.
     #[default]
@@ -706,6 +707,7 @@ impl From<Bytes> for Options {
 
 /// Reconnection policy applied after a lost connection on `connect()` sockets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReconnectPolicy {
     /// No reconnect; the connection is dropped permanently on failure.
     Disabled,
@@ -726,6 +728,7 @@ impl Default for ReconnectPolicy {
 
 /// What to do when the send HWM is reached and a new message arrives.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OnMute {
     /// Block the sender until room is available.
     #[default]
@@ -740,6 +743,7 @@ pub enum OnMute {
 /// libzmq's `ZMQ_TCP_KEEPALIVE = -1`); `Disabled` clears `SO_KEEPALIVE`;
 /// `Enabled` sets `SO_KEEPALIVE` and pins the three timing knobs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KeepAlive {
     /// OS defaults; nothing applied to the socket.
     #[default]

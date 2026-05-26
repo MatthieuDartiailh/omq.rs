@@ -62,7 +62,7 @@ impl SpscAwareRecv {
         None
     }
 
-    #[allow(clippy::needless_continue)]
+    #[expect(clippy::needless_continue)]
     async fn recv(&self) -> Result<Message> {
         loop {
             if let Some(msg) = self.try_drain_consumers() {

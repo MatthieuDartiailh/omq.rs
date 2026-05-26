@@ -86,7 +86,7 @@ impl std::fmt::Debug for SessionKeys {
 }
 
 /// Server-side handshake state machine.
-#[allow(missing_debug_implementations, reason = "fields hold secret material")]
+#[expect(missing_debug_implementations, reason = "fields hold secret material")]
 pub struct Server {
     permanent: Keypair,
     /// Shared cookie keyring with periodic rotation per RFC §9.2.
@@ -398,7 +398,7 @@ impl Server {
 }
 
 /// Client-side handshake state machine.
-#[allow(missing_debug_implementations, reason = "fields hold secret material")]
+#[expect(missing_debug_implementations, reason = "fields hold secret material")]
 pub struct Client {
     permanent: Keypair,
     server_public: X25519Public,

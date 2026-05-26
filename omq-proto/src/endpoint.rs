@@ -17,6 +17,7 @@ use crate::error::{Error, Result};
 /// The scheme picks the transport; the rest of the string carries transport-
 /// specific addressing.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Endpoint {
     /// `tcp://host:port` (IPv4, IPv6, or DNS name).
     Tcp { host: Host, port: u16 },
@@ -52,6 +53,7 @@ pub enum Endpoint {
 /// Kept as a distinct variant so resolution can be deferred until bind/connect
 /// time without forcing callers to reparse.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Host {
     Ip(IpAddr),
     Name(String),
@@ -61,6 +63,7 @@ pub enum Host {
 
 /// IPC path, possibly in the Linux abstract namespace (leading `@`).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IpcPath {
     Filesystem(PathBuf),
     /// Linux abstract namespace (no filesystem entry).
@@ -69,6 +72,7 @@ pub enum IpcPath {
 
 /// Role for an endpoint in a single-string spec: bind, connect, or default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EndpointRole {
     /// `@endpoint` -- explicit bind.
     Bind,

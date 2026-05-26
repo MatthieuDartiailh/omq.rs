@@ -20,6 +20,7 @@ use crate::proto::PeerProperties;
 /// monitor events and by identity-routed strategies that want to
 /// distinguish peers before the ZMTP handshake completes.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PeerIdent {
     Socket(SocketAddr),
     Path(String),
@@ -38,6 +39,7 @@ impl fmt::Display for PeerIdent {
 
 /// A connection-lifecycle event emitted by a socket.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MonitorEvent {
     /// Bind succeeded and the listener is active.
     Listening { endpoint: Endpoint },
@@ -88,6 +90,7 @@ pub enum MonitorEvent {
 
 /// The peer-sent commands surfaced via [`MonitorEvent::PeerCommand`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum PeerCommandKind {
     /// The peer sent ZMTP `ERROR { reason }`.
     Error { reason: String },
@@ -112,6 +115,7 @@ pub struct ConnectionStatus {
 
 /// Why a connection was closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DisconnectReason {
     /// Peer closed the TCP/IPC/inproc stream.
     PeerClosed,
@@ -141,6 +145,7 @@ pub struct PeerInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum MonitorRecvError {
     #[error("socket closed")]
     Closed,
@@ -149,6 +154,7 @@ pub enum MonitorRecvError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum MonitorTryRecvError {
     #[error("no events ready")]
     Empty,

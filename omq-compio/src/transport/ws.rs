@@ -15,7 +15,7 @@ use omq_proto::options::MechanismConfig;
 use omq_proto::proto::ws_handshake;
 
 fn mechanism_subprotocol(
-    #[cfg_attr(not(feature = "plain"), allow(unused_variables))] mechanism: &MechanismConfig,
+    #[cfg_attr(not(feature = "plain"), expect(unused_variables))] mechanism: &MechanismConfig,
 ) -> &'static str {
     #[cfg(feature = "plain")]
     match mechanism {
@@ -37,6 +37,7 @@ fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
         Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
         Host::Name(name) => super::tcp::resolve_name(name, port),
+        _ => unreachable!(),
     }
 }
 
@@ -47,6 +48,7 @@ fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
         )),
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
         Host::Name(name) => super::tcp::resolve_name(name, port),
+        _ => unreachable!(),
     }
 }
 
@@ -55,7 +57,7 @@ fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
 pub(crate) type TlsStream = compio_tls::TlsStream<TcpStream>;
 pub(crate) type SharedTls = std::sync::Arc<async_lock::Mutex<TlsStream>>;
 
-#[allow(clippy::unnecessary_wraps)]
+#[expect(clippy::unnecessary_wraps)]
 pub(crate) fn build_tls_connector(accept_invalid_certs: bool) -> Result<compio_tls::TlsConnector> {
     use std::sync::Arc;
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -244,7 +246,6 @@ fn extract_leftover(http: &HttpRead) -> bytes::Bytes {
     }
 }
 
-#[allow(clippy::result_large_err)]
 pub(crate) async fn accept(
     stream: TcpStream,
     tls_acceptor: Option<&compio_tls::TlsAcceptor>,
@@ -325,6 +326,7 @@ pub(crate) async fn connect(
                 return connect_tls_ip(&connector, stream, ip, port, path, subprotocol).await;
             }
             Host::Wildcard => "localhost",
+            _ => unreachable!(),
         };
         let mut tls = connector.connect(domain, stream).await.map_err(Error::Io)?;
         let host_header = format!("{host}:{port}");
