@@ -26,107 +26,109 @@ fn soak_priority() {
     let sent = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let rt = compio::runtime::Runtime::new().expect("runtime");
-    rt.block_on(async {
-        let ep1 = Endpoint::Inproc {
-            name: "soak-prio-1".into(),
-        };
-        let ep3 = Endpoint::Inproc {
-            name: "soak-prio-3".into(),
-        };
-        let ep5 = Endpoint::Inproc {
-            name: "soak-prio-5".into(),
-        };
+    {
+        let rt = compio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let ep1 = Endpoint::Inproc {
+                name: "soak-prio-1".into(),
+            };
+            let ep3 = Endpoint::Inproc {
+                name: "soak-prio-3".into(),
+            };
+            let ep5 = Endpoint::Inproc {
+                name: "soak-prio-5".into(),
+            };
 
-        let pull1 = Socket::new(SocketType::Pull, Options::default());
-        let pull3 = Socket::new(SocketType::Pull, Options::default());
-        let pull5 = Socket::new(SocketType::Pull, Options::default());
-        pull1.bind(ep1.clone()).await.unwrap();
-        pull3.bind(ep3.clone()).await.unwrap();
-        pull5.bind(ep5.clone()).await.unwrap();
+            let pull1 = Socket::new(SocketType::Pull, Options::default());
+            let pull3 = Socket::new(SocketType::Pull, Options::default());
+            let pull5 = Socket::new(SocketType::Pull, Options::default());
+            pull1.bind(ep1.clone()).await.unwrap();
+            pull3.bind(ep3.clone()).await.unwrap();
+            pull5.bind(ep5.clone()).await.unwrap();
 
-        let push = Socket::new(SocketType::Push, Options::default());
-        push.connect_with(
-            ep1,
-            ConnectOpts {
-                priority: NonZeroU8::new(1).unwrap(),
-            },
-        )
-        .await
-        .unwrap();
-        push.connect_with(
-            ep3,
-            ConnectOpts {
-                priority: NonZeroU8::new(3).unwrap(),
-            },
-        )
-        .await
-        .unwrap();
-        push.connect_with(
-            ep5,
-            ConnectOpts {
-                priority: NonZeroU8::new(5).unwrap(),
-            },
-        )
-        .await
-        .unwrap();
+            let push = Socket::new(SocketType::Push, Options::default());
+            push.connect_with(
+                ep1,
+                ConnectOpts {
+                    priority: NonZeroU8::new(1).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+            push.connect_with(
+                ep3,
+                ConnectOpts {
+                    priority: NonZeroU8::new(3).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+            push.connect_with(
+                ep5,
+                ConnectOpts {
+                    priority: NonZeroU8::new(5).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
 
-        let start = Instant::now();
-        let mut last_log = start;
+            let start = Instant::now();
+            let mut last_log = start;
 
-        while start.elapsed() < duration {
-            // Send a batch.
-            for _ in 0..100 {
-                if stop.load(Ordering::Relaxed) {
-                    break;
+            while start.elapsed() < duration {
+                // Send a batch.
+                for _ in 0..100 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Ok(Ok(())) = compio::time::timeout(
+                        Duration::from_millis(50),
+                        push.send(Message::single("x")),
+                    )
+                    .await
+                    {
+                        sent.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-                if let Ok(Ok(())) = compio::time::timeout(
-                    Duration::from_millis(50),
-                    push.send(Message::single("x")),
-                )
-                .await
-                {
-                    sent.fetch_add(1, Ordering::Relaxed);
+
+                // Drain all PULLs.
+                for pull in [&pull1, &pull3, &pull5] {
+                    while pull.try_recv().is_ok() {
+                        delivered.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+
+                if last_log.elapsed() >= Duration::from_secs(30) {
+                    let s = sent.load(Ordering::Relaxed);
+                    let d = delivered.load(Ordering::Relaxed);
+                    eprintln!(
+                        "[priority] {:.0}s, sent {s}, delivered {d}",
+                        start.elapsed().as_secs_f64(),
+                    );
+                    last_log = Instant::now();
                 }
             }
 
-            // Drain all PULLs.
+            // Final drain.
             for pull in [&pull1, &pull3, &pull5] {
                 while pull.try_recv().is_ok() {
                     delivered.fetch_add(1, Ordering::Relaxed);
                 }
             }
 
-            if last_log.elapsed() >= Duration::from_secs(30) {
-                let s = sent.load(Ordering::Relaxed);
-                let d = delivered.load(Ordering::Relaxed);
-                eprintln!(
-                    "[priority] {:.0}s, sent {s}, delivered {d}",
-                    start.elapsed().as_secs_f64(),
-                );
-                last_log = Instant::now();
-            }
-        }
+            let s = sent.load(Ordering::Relaxed);
+            let d = delivered.load(Ordering::Relaxed);
+            eprintln!(
+                "[priority] done: sent {s}, delivered {d} in {:.1}s",
+                duration.as_secs_f64(),
+            );
 
-        // Final drain.
-        for pull in [&pull1, &pull3, &pull5] {
-            while pull.try_recv().is_ok() {
-                delivered.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        let s = sent.load(Ordering::Relaxed);
-        let d = delivered.load(Ordering::Relaxed);
-        eprintln!(
-            "[priority] done: sent {s}, delivered {d} in {:.1}s",
-            duration.as_secs_f64(),
-        );
-
-        push.close().await.unwrap();
-        pull1.close().await.unwrap();
-        pull3.close().await.unwrap();
-        pull5.close().await.unwrap();
-    });
+            push.close().await.unwrap();
+            pull1.close().await.unwrap();
+            pull3.close().await.unwrap();
+            pull5.close().await.unwrap();
+        });
+    }
 
     let report = monitor.stop();
     report.assert_no_leak("priority");
