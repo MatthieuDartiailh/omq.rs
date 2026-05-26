@@ -9,8 +9,8 @@
 //!   `bench_peer_tokio` rep \<addr\> \<`msg_size`\>
 //!   `bench_peer_tokio` req \<addr\> \<`msg_size`\> \<iterations\> \<warmup\>
 //!
-//! \<addr\>: a port number (`tcp://127.0.0.1:<port>`) or a full endpoint
-//!   (e.g. `ipc:///tmp/bench.sock`).
+//! \<addr\>: a port number (`4000`), an `ip:port` pair (`0.0.0.0:4000`),
+//!   a full URI (`tcp://0.0.0.0:4000`), or an IPC path (`ipc:///tmp/foo.sock`).
 //!
 //! Push: binds, sends \<`msg_size`\> byte messages forever.
 //! Pull: connects, warms up for 500 ms, then counts messages for \<duration\>
@@ -32,9 +32,18 @@ fn parse_ep(s: &str) -> Endpoint {
             host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
             port,
         }
+    } else if let Some((ip, port)) = s.split_once(':') {
+        if let (Ok(addr), Ok(port)) = (ip.parse::<Ipv4Addr>(), port.parse::<u16>()) {
+            return Endpoint::Tcp {
+                host: Host::Ip(addr.into()),
+                port,
+            };
+        }
+        s.parse()
+            .expect("valid endpoint (port, ip:port, or full URI)")
     } else {
         s.parse()
-            .expect("valid endpoint (port number or ipc:// path)")
+            .expect("valid endpoint (port, ip:port, or full URI)")
     }
 }
 
