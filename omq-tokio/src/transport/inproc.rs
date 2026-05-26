@@ -73,7 +73,7 @@ fn is_recv_side(t: SocketType) -> bool {
 /// CANCEL, JOIN, LEAVE, ERROR). No frame headers, no greeting,
 /// no codec.
 #[derive(Debug)]
-pub enum InprocFrame {
+pub enum InboundFrame {
     Message(Message),
     Command(Command),
 }
@@ -92,8 +92,8 @@ pub struct InprocPeerSnapshot {
 /// `in_rx` is what WE receive from.
 #[derive(Debug)]
 pub struct InprocConn {
-    pub out: mpsc::Sender<InprocFrame>,
-    pub in_rx: mpsc::Receiver<InprocFrame>,
+    pub out: mpsc::Sender<InboundFrame>,
+    pub in_rx: mpsc::Receiver<InboundFrame>,
     pub peer: InprocPeerSnapshot,
     pub spsc: Option<Arc<InprocSpsc>>,
 }
@@ -109,8 +109,8 @@ pub const DEFAULT_INPROC_HWM: usize = 1024;
 /// returns its own snapshot to the connector.
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
-    connector_to_listener_rx: mpsc::Receiver<InprocFrame>,
-    listener_to_connector_tx: mpsc::Sender<InprocFrame>,
+    connector_to_listener_rx: mpsc::Receiver<InboundFrame>,
+    listener_to_connector_tx: mpsc::Sender<InboundFrame>,
     connector_recv_notify: Arc<tokio::sync::Notify>,
     accept_ack: oneshot::Sender<(InprocPeerSnapshot, Option<Arc<InprocSpsc>>)>,
 }
@@ -166,8 +166,8 @@ pub async fn connect(
     .ok_or_else(|| Error::InvalidEndpoint(format!("no inproc binding: {name}")))?;
 
     // (connector→listener) and (listener→connector) directions.
-    let (c2l_tx, c2l_rx) = mpsc::channel::<InprocFrame>(DEFAULT_INPROC_HWM);
-    let (l2c_tx, l2c_rx) = mpsc::channel::<InprocFrame>(DEFAULT_INPROC_HWM);
+    let (c2l_tx, c2l_rx) = mpsc::channel::<InboundFrame>(DEFAULT_INPROC_HWM);
+    let (l2c_tx, l2c_rx) = mpsc::channel::<InboundFrame>(DEFAULT_INPROC_HWM);
     let (ack_tx, ack_rx) = oneshot::channel();
 
     let request = InprocConnectRequest {
@@ -298,7 +298,7 @@ mod tests {
 
         client_side
             .out
-            .send(InprocFrame::Message(Message::single("hi")))
+            .send(InboundFrame::Message(Message::single("hi")))
             .await
             .unwrap();
         let f = tokio::time::timeout(std::time::Duration::from_millis(100), {
@@ -309,10 +309,10 @@ mod tests {
         .unwrap()
         .unwrap();
         match f {
-            InprocFrame::Message(m) => {
+            InboundFrame::Message(m) => {
                 assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
             }
-            InprocFrame::Command(_) => panic!("expected Message"),
+            InboundFrame::Command(_) => panic!("expected Message"),
         }
     }
 

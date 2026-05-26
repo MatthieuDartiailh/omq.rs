@@ -223,7 +223,7 @@ blocked by the driver's read path.
 ## Inproc bypasses ZMTP
 
 Same-process `inproc://` connections skip wire framing entirely.
-Global name registry, direct `InprocFrame` exchange via channels.
+Global name registry, direct `InboundFrame` exchange via channels.
 Hot-path `SinglePart` variant is ~72 B. Throughput: ~3M msg/s
 for any size below 32 KiB, >100 GB/s nominal at 32 KiB+ (no
 kernel crossing).
@@ -567,7 +567,7 @@ separate I/O thread, but it pipelines encode against write.
 Each SPSC-eligible inproc connection (PUSH/PULL, PAIR) gets a
 dedicated `blume::spsc` ring (1024-slot, lock-free). Per-peer
 rings replace the shared blume MPSC channel. The ring carries
-`Message` directly (48 B by value); no `InprocFrame` wrapper, no
+`Message` directly (48 B by value); no `InboundFrame` wrapper, no
 `Bytes` clone, no heap allocation for messages <=39 B.
 
 Send fast path (PUSH/PAIR, single peer): one `UnsafeCell` access

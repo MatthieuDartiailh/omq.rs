@@ -64,7 +64,7 @@ connected:
               +----------+-----------+
               |   socket-wide        |   <- single queue per socket
               |   inbound queue      |      (no per-peer recv queues)
-              |   (InprocFrame)      |
+              |   (InboundFrame)     |
               +----------------------+
                   ^       ^       ^
                   |       |       |     drivers push decoded

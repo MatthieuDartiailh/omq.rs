@@ -1,6 +1,6 @@
 use super::{
     AnyConn, AnyStream, ConnectionConfig, ConnectionDriver, DisconnectReason, DriverConfig,
-    DriverHandle, Duration, Endpoint, InprocConn, InprocFrame, InprocPeerSnapshot, InternalEvent,
+    DriverHandle, Duration, Endpoint, InboundFrame, InprocConn, InprocPeerSnapshot, InternalEvent,
     Message, MessageEncoder, MonitorEvent, PeerCommandKind, PeerEntry, PeerIdent, PeerInfo,
     ReconnectPolicy, Result, Role, SocketDriver, SocketType, ZmtpConnection, ZmtpEvent,
     generated_identity, max_peer_count, mpsc, peer_ident_socket_addr, supports_groups,
@@ -737,8 +737,8 @@ struct InprocDriverCtx {
 #[expect(clippy::too_many_lines)]
 async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
-    mut in_rx: mpsc::Receiver<InprocFrame>,
-    out: mpsc::Sender<InprocFrame>,
+    mut in_rx: mpsc::Receiver<InboundFrame>,
+    out: mpsc::Sender<InboundFrame>,
     ctx: InprocDriverCtx,
 ) {
     use crate::engine::{DriverCommand, PeerOut};
@@ -789,19 +789,19 @@ async fn inproc_peer_driver(
                 () = cancel.cancelled() => return,
                 cmd = inbox.recv() => match cmd {
                     Some(DriverCommand::SendMessage(m)) => {
-                        if out.send(InprocFrame::Message(m)).await.is_err() {
+                        if out.send(InboundFrame::Message(m)).await.is_err() {
                             return;
                         }
                     }
                     Some(DriverCommand::SendCommand(c)) => {
-                        if out.send(InprocFrame::Command(c)).await.is_err() {
+                        if out.send(InboundFrame::Command(c)).await.is_err() {
                             return;
                         }
                     }
                     Some(DriverCommand::Close) | None => return,
                 },
                 frame = in_rx.recv() => match frame {
-                    Some(InprocFrame::Message(m)) => {
+                    Some(InboundFrame::Message(m)) => {
                         if let Some(max) = max_message_size
                             && m.byte_len() > max
                         {
@@ -841,7 +841,7 @@ async fn inproc_peer_driver(
                             }
                         }
                     }
-                    Some(InprocFrame::Command(c)) => {
+                    Some(InboundFrame::Command(c)) => {
                         if emit_event(&peer_out, peer_id, ZmtpEvent::Command(c))
                             .await
                             .is_err()

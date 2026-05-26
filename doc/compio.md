@@ -45,7 +45,7 @@ SocketInner {
   identity_to_slot: RwLock<HashMap<Bytes,usize>>, // ROUTER lookup
 
   // Inbound
-  in_tx/in_rx: blume::channel<InprocFrame>,   // socket-wide receive queue (batching MPSC)
+  in_tx/in_rx: blume::channel<InboundFrame>,   // socket-wide receive queue (batching MPSC)
   on_peer_ready: Event,                      // notified on peer add/handshake
 
   // Subscription / group state (SUB / XSUB / DISH)
@@ -86,7 +86,7 @@ fast path reads the inner `Option`; `None` means reconnect is in flight
 
 ```rust
 enum PeerOut {
-  Inproc { sender: blume::Sender<InprocFrame>, our_identity: Bytes },
+  Inproc { sender: blume::Sender<InboundFrame>, our_identity: Bytes },
   Wire(WirePeerHandle),  // Arc<RwLock<flume::Sender<DriverCommand>>>
 }
 ```
@@ -514,7 +514,7 @@ Cancel-safety: dropping the recv future at any `.await` is safe.
 
 ### `in_rx` fallback loop
 
-Processes `InprocFrame` variants from the socket-wide bounded channel:
+Processes `InboundFrame` variants from the socket-wide bounded channel:
 - `SinglePart { peer_identity, body }` -- hot path, ~72 B slot
 - `Message(Box<InprocFullMessage>)` -- multipart, boxed to keep slot small
 - `Command(Command)` -- XPUB-only: wrap as `\x01<topic>` or `\x00<topic>`
@@ -538,7 +538,7 @@ No driver, no codec, no handshake. A global `REGISTRY`
 sends a request.
 
 Peers exchange an `InprocPeerSnapshot` (socket type + identity)
-synchronously. Messages flow as `InprocFrame` through blume channels
+synchronously. Messages flow as `InboundFrame` through blume channels
 (batching MPSC -- swap-drain consumer amortizes cross-core cache
 coherency cost). The `InprocListener` drops from the registry on
 `Drop`.
@@ -607,7 +607,7 @@ after each handshake via `our_subs` and `joined_groups`.
 
 ## Memory and allocation model
 
-### `InprocFrame::SinglePart`
+### `InboundFrame::SinglePart`
 
 The single-part variant carries `Option<Bytes>` (identity) and `Bytes`
 (body) inline (~72 B). The `Message` struct is 48 B (custom enum with
