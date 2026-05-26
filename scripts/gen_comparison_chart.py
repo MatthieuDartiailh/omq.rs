@@ -162,14 +162,14 @@ def generate_svg(data: dict) -> str:
     lat = data["lat"]
     n = len(sizes)
 
-    svg_w, svg_h = 850, 600
+    svg_w, svg_h = 850, 640
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
 
-    t1_y_top, t1_y_bot = 35, 280
+    t1_y_top, t1_y_bot = 35, 270
     t1_h = t1_y_bot - t1_y_top
 
-    t2_y_top, t2_y_bot = 340, 520
+    t2_y_top, t2_y_bot = 350, 540
     t2_h = t2_y_bot - t2_y_top
 
     xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
@@ -368,10 +368,10 @@ def generate_svg(data: dict) -> str:
 
     # ── LEGEND ────────────────────────────────────────────────────
 
-    leg_y = t2_y_bot + 40
+    leg_y = t2_y_bot + 60
     legend_items = [
-        ("libzmq", "libzmq"), ("compio", "omq-compio"),
-        ("tokio", "omq-tokio"), ("zmqrs", "zmq.rs"),
+        ("libzmq", "libzmq v4.3.5"), ("compio", "omq-compio"),
+        ("tokio", "omq-tokio"), ("zmqrs", "zmq.rs v0.6.0"),
     ]
     item_w = 140
     total_w = len(legend_items) * item_w

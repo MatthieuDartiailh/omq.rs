@@ -40,7 +40,13 @@ mod inner {
         std::env::var("OMQ_BENCH_ZSTD_LEVEL")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(-3)
+            .unwrap_or(omq_proto::proto::transform::zstd::DEFAULT_LEVEL)
+    }
+
+    fn send_hwm() -> Option<u32> {
+        std::env::var("OMQ_BENCH_SEND_HWM")
+            .ok()
+            .and_then(|s| s.parse().ok())
     }
 
     fn active_transports() -> Vec<String> {
@@ -53,6 +59,13 @@ mod inner {
             .collect()
     }
 
+    fn compression_sizes() -> Vec<usize> {
+        if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
+            return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        }
+        common::CHART_SIZES.to_vec()
+    }
+
     pub(super) fn compio_main() {
         let transports = active_transports();
         if transports.is_empty() {
@@ -60,10 +73,13 @@ mod inner {
         }
 
         common::print_header("PUSH/PULL - JSON payloads (virtual throughput)");
+        println!();
 
         let peer_counts = common::peers_override();
         let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
-        let sizes = common::sizes();
+        let sizes = compression_sizes();
+
+        let dict = train_zstd_dict();
 
         let mut seq = 0usize;
         for transport in &transports {
@@ -74,73 +90,81 @@ mod inner {
                     seq += 1;
                     let payload = json_payload(approx_size);
                     let actual = payload.len();
-                    let wire_bytes_per_msg = wire_size(transport, &payload, None);
-                    let cell = run_cell(transport, peers, payload.clone(), seq, None);
+                    // zstd auto-trains a dict for small messages, so
+                    // use the pre-trained dict for wire_size + run_cell
+                    // at <= 1 KiB to match what the socket would do.
+                    let dict = if transport == "zstd+tcp" {
+                        Some(&dict)
+                    } else {
+                        None
+                    };
+                    let wire_bytes_per_msg = wire_size(transport, &payload, dict);
+                    let cell = run_cell(transport, peers, payload.clone(), seq, dict.cloned());
                     let wire_mbps = (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
-                    // Three rates per cell: msgs/s, wire MB/s (what
-                    // the network actually carries), virtual MB/s
-                    // (what the application sees / the compression-
-                    // ratio multiplier on a bandwidth-bounded link).
+                    let cpu_pct = if cell.elapsed.as_nanos() > 0 {
+                        cell.cpu_time.as_secs_f64() / cell.elapsed.as_secs_f64() * 100.0
+                    } else {
+                        0.0
+                    };
                     println!(
-                        "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, n={})",
+                        "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, cpu {:.0}%, n={})",
                         format!("{approx_size}B"),
                         cell.msgs_s,
                         wire_mbps,
                         cell.mbps,
                         cell.elapsed.as_secs_f64(),
+                        cpu_pct,
                         cell.n,
                     );
-                    append_compression_jsonl(PATTERN, transport, peers, actual, cell, wire_mbps);
+                    append_compression_jsonl(
+                        PATTERN,
+                        transport,
+                        peers,
+                        actual,
+                        wire_bytes_per_msg,
+                        cell,
+                    );
                 }
                 println!();
             }
         }
 
-        let zstd_dict = train_zstd_dict();
-        let lz4_dict = train_lz4_dict();
-
-        let dict_transports: Vec<&str> = transports
-            .iter()
-            .map(String::as_str)
-            .filter(|t| *t != "tcp")
-            .collect();
-
-        println!("--- with-dict throughput, small payloads ---");
-        for transport in &dict_transports {
-            for &peers in peer_counts {
-                common::print_subheader(transport, peers);
-                let dict = if *transport == "lz4+tcp" {
-                    lz4_dict.clone()
+        // lz4 with pre-trained dict (lz4 has no auto-train)
+        println!("--- lz4 with pre-trained dict ---");
+        for &peers in peer_counts {
+            common::print_subheader("lz4+tcp", peers);
+            for &approx_size in &sizes {
+                seq += 1;
+                let payload = json_payload(approx_size);
+                let actual = payload.len();
+                let wire_bytes_per_msg = wire_size("lz4+tcp", &payload, Some(&dict));
+                let cell = run_cell("lz4+tcp", peers, payload.clone(), seq, Some(dict.clone()));
+                let wire_mbps = (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
+                let cpu_pct = if cell.elapsed.as_nanos() > 0 {
+                    cell.cpu_time.as_secs_f64() / cell.elapsed.as_secs_f64() * 100.0
                 } else {
-                    zstd_dict.clone()
+                    0.0
                 };
-                for &approx_size in &sizes {
-                    seq += 1;
-                    let payload = json_payload(approx_size);
-                    let actual = payload.len();
-                    let wire_bytes_per_msg = wire_size(transport, &payload, Some(&dict));
-                    let cell = run_cell(transport, peers, payload.clone(), seq, Some(dict.clone()));
-                    let wire_mbps = (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
-                    println!(
-                        "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, n={})",
-                        format!("{approx_size}B"),
-                        cell.msgs_s,
-                        wire_mbps,
-                        cell.mbps,
-                        cell.elapsed.as_secs_f64(),
-                        cell.n,
-                    );
-                    append_compression_jsonl(
-                        "compression_json_dict",
-                        transport,
-                        peers,
-                        actual,
-                        cell,
-                        wire_mbps,
-                    );
-                }
-                println!();
+                println!(
+                    "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, cpu {:.0}%, n={})",
+                    format!("{approx_size}B"),
+                    cell.msgs_s,
+                    wire_mbps,
+                    cell.mbps,
+                    cell.elapsed.as_secs_f64(),
+                    cpu_pct,
+                    cell.n,
+                );
+                append_compression_jsonl(
+                    "compression_json_dict",
+                    "lz4+tcp",
+                    peers,
+                    actual,
+                    wire_bytes_per_msg,
+                    cell,
+                );
             }
+            println!();
         }
     }
 
@@ -149,21 +173,22 @@ mod inner {
         transport: &str,
         peers: usize,
         msg_size: usize,
+        wire_bytes: usize,
         c: common::Cell,
-        wire_mbps: f64,
     ) {
         if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
             return;
         }
-        let path = common::results_path();
+        let path = common::compression_results_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let row = format!(
-            r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"msg_count":{n},"elapsed":{el},"mbps":{mbps},"msgs_s":{msgs_s},"wire_mbps":{wire_mbps}}}"#,
+            r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"wire_bytes":{wire_bytes},"msg_count":{n},"elapsed":{el},"cpu_time":{cpu},"mbps":{mbps},"msgs_s":{msgs_s}}}"#,
             run = common::run_id(),
             n = c.n,
             el = c.elapsed.as_secs_f64(),
+            cpu = c.cpu_time.as_secs_f64(),
             mbps = c.mbps,
             msgs_s = c.msgs_s,
         );
@@ -217,7 +242,7 @@ mod inner {
         let mut samples_buf: Vec<u8> = Vec::with_capacity(200 * 512);
         let mut sizes: Vec<usize> = Vec::with_capacity(200);
         for i in 0..200 {
-            let s = json_payload(256 + (i * 37) % 768);
+            let s = json_payload(64 + (i * 10) % (2048 - 64));
             sizes.push(s.len());
             samples_buf.extend_from_slice(&s);
         }
@@ -226,19 +251,6 @@ mod inner {
             .expect("zstd train_from_buffer");
         dict_buf.truncate(n);
         Bytes::from(dict_buf)
-    }
-
-    /// Build a 4 KiB lz4 dict. LZ4 uses any bytes as a prefix-match
-    /// window, so concatenating a few representative records gives the
-    /// matcher useful patterns. (No formal LZ4 trainer exists.)
-    fn train_lz4_dict() -> Bytes {
-        let mut buf = Vec::with_capacity(4 * 1024);
-        while buf.len() < 4 * 1024 {
-            let s = json_payload(512);
-            let take = (4 * 1024 - buf.len()).min(s.len());
-            buf.extend_from_slice(&s[..take]);
-        }
-        Bytes::from(buf)
     }
 
     fn run_cell(
@@ -257,6 +269,8 @@ mod inner {
         let pull_count = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(std::sync::Barrier::new(2));
+
+        let label = format!("{transport} ~{}B {peers}p", payload.len());
 
         let pull_thread = {
             let ep = ep.clone();
@@ -278,11 +292,14 @@ mod inner {
                     ready.wait();
                     let mut pushes: Vec<Socket> = Vec::with_capacity(peers);
                     for _ in 0..peers {
-                        let opts = match &dict {
+                        let mut opts = match &dict {
                             Some(d) => Options::default().compression_dict(d.clone()),
                             None => Options::default(),
                         }
                         .compression_level(level);
+                        if let Some(hwm) = send_hwm() {
+                            opts = opts.send_hwm(hwm);
+                        }
                         let p = Socket::new(SocketType::Push, opts);
                         p.connect(ep.clone()).await.expect("connect PUSH");
                         pushes.push(p);
@@ -318,7 +335,11 @@ mod inner {
                         }
                     };
 
-                    let cell = common::measure_min_of(payload.len(), pushes.len(), burst).await;
+                    let cell = common::with_timeout(
+                        &label,
+                        common::measure_min_of(payload.len(), pushes.len(), burst),
+                    )
+                    .await;
                     stop.store(true, Ordering::Relaxed);
                     if let Ok(pushes) = Rc::try_unwrap(pushes) {
                         drop(pushes);
@@ -368,25 +389,58 @@ mod inner {
         });
     }
 
-    /// Build a JSON-ish payload of approximately `target_bytes`. Repeats
-    /// a structured record template - captures the kind of redundancy
-    /// real eventing traffic has (repeated field names, common values,
-    /// timestamp-shaped strings) so lz4 / zstd can actually compress.
     fn json_payload(target_bytes: usize) -> Bytes {
-        // Template record. The bracketed timestamp and id vary per copy
-        // so the data isn't pure repetition (zstd would crush that
-        // unrealistically), but the field names and the common literals
-        // recur - typical for log / event shipping.
-        const TEMPLATE: &str = r#"{"ts":"2026-04-27T12:34:56.{ID}Z","level":"INFO","service":"api-gateway","trace_id":"{ID}","span_id":"{ID}","user_id":"u-{ID}","method":"POST","path":"/v1/widgets/{ID}","status":200,"latency_ms":42,"region":"us-east-1","host":"api-{ID}.svc.cluster.local","msg":"request handled successfully"}
-"#;
-        let mut out = String::with_capacity(target_bytes + TEMPLATE.len());
+        const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR"];
+        const SERVICES: &[&str] = &[
+            "api-gateway",
+            "auth-svc",
+            "order-svc",
+            "payment-svc",
+            "notify-svc",
+        ];
+        const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
+        const PATHS: &[&str] = &[
+            "/v1/widgets",
+            "/v1/users",
+            "/v1/orders",
+            "/v2/events",
+            "/v1/health",
+        ];
+        const REGIONS: &[&str] = &[
+            "us-east-1",
+            "us-west-2",
+            "eu-west-1",
+            "ap-south-1",
+            "eu-central-1",
+        ];
+        const STATUSES: &[u16] = &[200, 201, 204, 400, 404, 500, 502, 503];
+        const MSGS: &[&str] = &[
+            "request handled successfully",
+            "resource created",
+            "cache miss, fetched from origin",
+            "rate limit approaching threshold",
+            "upstream timeout, retrying",
+        ];
+
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(target_bytes + 512);
         let mut counter: u32 = 0;
         while out.len() < target_bytes {
-            let mut rec = TEMPLATE.to_string();
-            // Vary the "{ID}" placeholders so successive records differ.
-            let id = format!("{:08x}", counter.wrapping_mul(0x9E37_79B1));
-            rec = rec.replace("{ID}", &id);
-            out.push_str(&rec);
+            let h = counter.wrapping_mul(0x9E37_79B1) as usize;
+            let id = format!("{h:08x}");
+            let level = LEVELS[h % LEVELS.len()];
+            let service = SERVICES[(h >> 4) % SERVICES.len()];
+            let method = METHODS[(h >> 8) % METHODS.len()];
+            let path = PATHS[(h >> 12) % PATHS.len()];
+            let region = REGIONS[(h >> 16) % REGIONS.len()];
+            let status = STATUSES[(h >> 20) % STATUSES.len()];
+            let latency = (h % 500) as u32 + 1;
+            let msg = MSGS[(h >> 24) % MSGS.len()];
+            let _ = write!(
+                out,
+                r#"{{"ts":"2026-04-27T12:34:56.{id}Z","level":"{level}","service":"{service}","trace_id":"{id}","span_id":"{id}","user_id":"u-{id}","method":"{method}","path":"{path}/{id}","status":{status},"latency_ms":{latency},"region":"{region}","host":"{service}-{id}.svc.cluster.local","msg":"{msg}"}}{nl}"#,
+                nl = '\n',
+            );
             counter = counter.wrapping_add(1);
         }
         out.truncate(target_bytes);

@@ -156,5 +156,6 @@ fn run_cell(
         elapsed,
         mbps,
         msgs_s,
+        cpu_time: Duration::ZERO,
     })
 }

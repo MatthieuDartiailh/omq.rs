@@ -2,6 +2,7 @@
 
 Two-process benchmarks (inproc: single-process). 3 s timed window after 500 ms warmup.
 Hardware: Linux 6.12 (Debian 13) VM, Intel i7-8700B 3.2 GHz 6-core, Rust 1.95.0.
+Compared against libzmq v4.3.5 and zmq.rs (zeromq crate v0.6.0).
 
 <p align="center">
   <img src="doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
@@ -9,7 +10,7 @@ Hardware: Linux 6.12 (Debian 13) VM, Intel i7-8700B 3.2 GHz 6-core, Rust 1.95.0.
 
 ## libzmq vs omq — inproc
 
-Same process, no kernel socket overhead. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
+Same process, no kernel socket overhead. libzmq v4.3.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
 
 omq inproc is true zero-copy: payloads are `Arc`-cloned, not memcpy'd. libzmq copies every message through its internal queues, so its throughput drops with size. omq stays flat.
 
@@ -53,7 +54,7 @@ Refresh: `ruby scripts/compare_libzmq.rb --inproc --update-benchmarks`
 
 ## libzmq vs omq — IPC
 
-Abstract-namespace Unix socket. Push binds, pull connects. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
+Abstract-namespace Unix socket. Push binds, pull connects. libzmq v4.3.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
 
 Refresh: `ruby scripts/compare_libzmq.rb --ipc --update-benchmarks`
 
@@ -95,7 +96,7 @@ Refresh: `ruby scripts/compare_libzmq.rb --ipc --update-benchmarks`
 
 ## libzmq vs omq — TCP
 
-TCP loopback, each process pinned to one core. Push binds, pull connects. libzmq 5.2.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
+TCP loopback, each process pinned to one core. Push binds, pull connects. libzmq v4.3.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
 
 Refresh: `ruby scripts/compare_libzmq.rb --tcp --update-benchmarks`
 
@@ -366,7 +367,7 @@ Refresh: `ruby scripts/compare_zmqrs.rb --tcp --latency --update-benchmarks`
 
 <!-- END zmqrs_latency_tcp -->
 
-## ZMQ_STREAM: omq-compio vs libzmq 4.3.5
+## ZMQ_STREAM: omq-compio vs libzmq v4.3.5
 
 Ping-pong throughput: one raw TCP client connected to a STREAM socket.
 Each iteration sends one message and waits for the response before

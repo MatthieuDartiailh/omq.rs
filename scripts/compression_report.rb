@@ -1,43 +1,45 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Update COMPRESSION.md tables from compression bench JSONL results.
+# Update BENCHMARKS_COMPRESSION.md tables from compression bench JSONL results.
 #
-# Each invocation updates one link-speed section. Run the bench at each
-# speed, then update the corresponding section:
+# The bench runs at full loopback speed.  This script projects throughput
+# at the requested link speed:
+#   effective_msgs_s = min(cpu_msgs_s, link_bytes_s / wire_bytes)
 #
-#   sudo tc qdisc replace dev lo root tbf rate 100mbit burst 128kb latency 50ms
 #   cargo bench -p omq-compio --features lz4,zstd --bench compression
 #   ruby scripts/compression_report.rb --link 100m
-#   sudo tc qdisc del dev lo root
-#
-#   sudo tc qdisc replace dev lo root tbf rate 1gbit burst 512kb latency 50ms
-#   cargo bench -p omq-compio --features lz4,zstd --bench compression
 #   ruby scripts/compression_report.rb --link 1g
-#   sudo tc qdisc del dev lo root
+#   ruby scripts/compression_report.rb --link 10m
 
 require 'optparse'
 require_relative 'lib/bench_helpers'
 
 ROOT = File.expand_path('..', __dir__)
 COMPRESSION_PATH = File.join(ROOT, 'BENCHMARKS_COMPRESSION.md')
-JSONL_PATH = File.join(ROOT, 'omq-compio', 'benches', 'results.jsonl')
+JSONL_PATH = File.join(ROOT, 'omq-compio', 'benches', 'results_compression.jsonl')
+
+LINK_BYTES_S = {
+  '1g'   => 1_000_000_000.0 / 8,
+  '100m' => 100_000_000.0 / 8,
+  '10m'  => 10_000_000.0 / 8,
+}.freeze
 
 options = { link: nil, prefix: nil }
 OptionParser.new do |o|
-  o.banner = 'Usage: ruby scripts/compression_report.rb --link 100m|1g [--run-prefix PREFIX]'
-  o.on('--link LINK', '100m or 1g: which section to update') { |v| options[:link] = v }
+  o.banner = 'Usage: ruby scripts/compression_report.rb --link 10m|100m|1g [--run-prefix PREFIX]'
+  o.on('--link LINK', '10m, 100m, or 1g: which section to update') { |v| options[:link] = v }
   o.on('--run-prefix PREFIX', 'Select rows by run ID prefix') { |v| options[:prefix] = v }
 end.parse!
 
-abort 'Error: --link is required (100m or 1g)' unless options[:link]
-abort 'Error: --link must be 100m or 1g' unless %w[100m 1g].include?(options[:link])
+abort 'Error: --link is required (10m, 100m, or 1g)' unless options[:link]
+abort "Error: --link must be one of: #{LINK_BYTES_S.keys.join(', ')}" unless LINK_BYTES_S.key?(options[:link])
 
 rows = BenchHelpers.load_jsonl(JSONL_PATH).select do |r|
   %i[compression_json compression_json_dict].include?(r[:pattern].to_sym)
 end
 
-abort 'No compression_json rows in results.jsonl' if rows.empty?
+abort 'No compression_json rows in results_compression.jsonl' if rows.empty?
 
 rows.sort_by! { |r| r[:run_id] }
 
@@ -45,25 +47,28 @@ if options[:prefix]
   selected = rows.select { |r| r[:run_id].start_with?(options[:prefix]) }
 else
   latest_id = rows.last[:run_id]
-  latest_ts = latest_id[/ts-(\d+)/, 1]&.to_i || 0
-  selected = rows.select do |r|
-    ts = r[:run_id][/ts-(\d+)/, 1]&.to_i || 0
-    (ts - latest_ts).abs < 600
-  end
-  selected = rows.last(30) if selected.empty?
+  selected = rows.select { |r| r[:run_id] == latest_id }
 end
 
-warn "Using #{selected.size} rows near #{selected.last[:run_id]}"
+abort 'No rows matched' if selected.empty?
+warn "Using #{selected.size} rows from #{selected.last[:run_id]}"
+
+link_bytes_s = LINK_BYTES_S[options[:link]]
 
 data = {}
 selected.each do |r|
   key = [r[:pattern].to_sym, r[:transport], r[:msg_size]]
-  data[key] = r
+  cpu_msgs_s = r[:msgs_s]
+  wire_bytes = r[:wire_bytes] || r[:msg_size]
+  wire_limited = link_bytes_s / [wire_bytes, 1].max
+  eff_msgs_s = [cpu_msgs_s, wire_limited].min
+  eff_mbps = eff_msgs_s * r[:msg_size] / 1_000_000.0
+  data[key] = r.merge(msgs_s: eff_msgs_s, mbps: eff_mbps)
 end
 
 def build_table(data, pattern)
   transports = %w[tcp lz4+tcp zstd+tcp]
-  transports = %w[lz4+tcp zstd+tcp] if pattern == :compression_json_dict
+  transports = %w[lz4+tcp] if pattern == :compression_json_dict
   sizes = data.keys
     .select { |p, _t, _s| p == pattern }
     .map { |_p, _t, s| s }

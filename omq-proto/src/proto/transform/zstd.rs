@@ -29,7 +29,7 @@
 //! next outbound message via the existing `SENTINEL_DICT` path. If
 //! training fails (samples too uniform, etc.) auto-train is
 //! disabled for the connection - no retry. Samples larger than
-//! `TRAIN_MAX_SAMPLE_LEN` (1024 B) are skipped to keep the trainer
+//! `TRAIN_MAX_SAMPLE_LEN` (2 KiB) are skipped to keep the trainer
 //! input balanced.
 
 use bytes::Bytes;
@@ -60,7 +60,7 @@ const MIN_COMPRESS_WITH_DICT: usize = 64;
 /// `MAX_DICT_BYTES = 64 KiB - 4`.
 pub const MAX_DICT_BYTES: usize = 64 * 1024 - 4;
 
-/// RFC §5.2: default compression level. Negative = Zstd "fast" strategy.
+/// Default compression level. Negative = Zstd "fast" strategy.
 pub const DEFAULT_LEVEL: i32 = -3;
 
 /// Auto-train: trained dictionary capacity (RFC §6.5).
@@ -71,7 +71,7 @@ const TRAIN_MAX_SAMPLES: usize = 1000;
 const TRAIN_MAX_BYTES: usize = 100 * 1024;
 
 /// Auto-train: skip samples larger than this.
-const TRAIN_MAX_SAMPLE_LEN: usize = 1024;
+const TRAIN_MAX_SAMPLE_LEN: usize = 2048;
 
 /// User-range dict-id space per RFC §6.5.
 const USER_DICT_ID_MIN: u32 = 32_768;
@@ -201,7 +201,7 @@ impl ZstdEncoder {
         Ok(s)
     }
 
-    /// Override the compression level (default -3, RFC §5.2).
+    /// Override the compression level (default -3).
     #[must_use]
     pub fn with_level(mut self, level: i32) -> Self {
         self.level = level;
