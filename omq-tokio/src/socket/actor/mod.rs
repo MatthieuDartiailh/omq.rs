@@ -33,7 +33,7 @@ use crate::routing::{
     RecvStrategy, SendStrategy, SendSubmitter, max_peer_count, supports_groups, supports_subscribe,
 };
 use crate::transport::{
-    Canceled, InprocConn, InprocFrame, InprocPeerSnapshot, PeerIdent, dial_with_backoff,
+    Canceled, InboundFrame, InprocConn, InprocPeerSnapshot, PeerIdent, dial_with_backoff,
 };
 use omq_proto::endpoint::Endpoint;
 use omq_proto::endpoint::reject_encrypted_inproc;

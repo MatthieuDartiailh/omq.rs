@@ -25,7 +25,7 @@ pub mod tcp;
 pub mod udp;
 
 pub use backoff::{Canceled, dial_with_backoff};
-pub use inproc::{InprocConn, InprocFrame, InprocListener, InprocPeerSnapshot};
+pub use inproc::{InboundFrame, InprocConn, InprocListener, InprocPeerSnapshot};
 pub use ipc::IpcTransport;
 pub use tcp::TcpTransport;
 #[cfg(feature = "ws")]
