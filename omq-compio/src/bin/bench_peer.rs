@@ -10,8 +10,7 @@
 //!
 //! Push: binds, sends \<`msg_size`\> byte messages forever.
 //! Pull: connects, warms up for 500 ms, then counts messages for \<duration\>
-//!       seconds and prints one line to stdout:
-//!         \<count\> \<`elapsed_secs`\> \<`msg_size`\>
+//!       seconds and prints a human-readable summary block to stdout.
 //! Rep: binds a REP socket, echoes every received message back forever.
 //! Req: connects a REQ socket, runs \<warmup\> warm-up round-trips, then
 //!      measures \<iterations\> round-trips and prints one line to stdout:
@@ -191,7 +190,7 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
 
 async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
     let pull = Socket::new(SocketType::Pull, bench_options(size));
-    pull.connect(ep).await.expect("pull connect");
+    pull.connect(ep.clone()).await.expect("pull connect");
 
     compio::time::sleep(Duration::from_millis(500)).await;
 
@@ -209,7 +208,56 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("{count} {elapsed:.6} {size}");
+    print_pull_summary(&ep, count, elapsed, size);
+}
+
+#[expect(clippy::cast_precision_loss)]
+fn print_pull_summary(ep: &Endpoint, count: u64, elapsed: f64, size: usize) {
+    let total_bytes = u128::from(count) * size as u128;
+    let msgs_per_sec = count as f64 / elapsed;
+    let bytes_per_sec = total_bytes as f64 / elapsed;
+    let mib_per_sec = bytes_per_sec / (1024.0 * 1024.0);
+    let mbit_per_sec = bytes_per_sec * 8.0 / 1_000_000.0;
+    let total_mib = total_bytes as f64 / (1024.0 * 1024.0);
+
+    println!();
+    println!("=== PULL ===");
+    println!("  Endpoint    : {ep}");
+    println!("  Msg size    : {} B", with_commas(&size.to_string()));
+    println!("  Elapsed     : {elapsed:.3} s");
+    println!("  Messages    : {}", with_commas(&count.to_string()));
+    println!(
+        "  Throughput  : {} msg/s",
+        with_commas(&format!("{msgs_per_sec:.0}"))
+    );
+    println!(
+        "  Bandwidth   : {} MiB/s  ({} Mbit/s)",
+        with_commas(&format!("{mib_per_sec:.2}")),
+        with_commas(&format!("{mbit_per_sec:.2}"))
+    );
+    println!(
+        "  Total       : {} MiB",
+        with_commas(&format!("{total_mib:.2}"))
+    );
+    println!();
+}
+
+fn with_commas(s: &str) -> String {
+    let (int_part, dec_part) = s.find('.').map_or((s, ""), |i| s.split_at(i));
+    let (sign, digits) = int_part
+        .strip_prefix('-')
+        .map_or(("", int_part), |d| ("-", d));
+    let mut out = String::with_capacity(s.len() + digits.len() / 3 + 1);
+    out.push_str(sign);
+    let len = digits.len();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.push_str(dec_part);
+    out
 }
 
 async fn run_rep(ep: Endpoint, size: usize) {
