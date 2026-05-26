@@ -65,7 +65,9 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         let Ok(mut eq) = state.encoded_queue.try_lock() else {
             return Ok(false);
         };
-        if eq.total_bytes() >= DIRECT_CAP {
+        if eq.total_bytes() >= DIRECT_CAP
+            || state.direct_msg_count.load(Ordering::Relaxed) >= state.send_hwm
+        {
             return Ok(false);
         }
         let msg_total = msg.byte_len();
@@ -73,6 +75,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         if state.is_ws {
             eq.encode_and_push_flat_ws(msg, state.ws_masked);
             drop(eq);
+            state.direct_msg_count.fetch_add(1, Ordering::Relaxed);
             if state.driver_in_select.load(Ordering::Relaxed) {
                 state.transmit_ready.notify(1);
             }
@@ -84,6 +87,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             eq.encode_and_push(msg);
         }
         drop(eq);
+        state.direct_msg_count.fetch_add(1, Ordering::Relaxed);
         if state.driver_in_select.load(Ordering::Relaxed) {
             state.transmit_ready.notify(1);
         }
@@ -103,7 +107,9 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         let Ok(mut eq) = state.encoded_queue.try_lock() else {
             return Ok(false);
         };
-        if eq.total_bytes() >= DIRECT_CAP {
+        if eq.total_bytes() >= DIRECT_CAP
+            || state.direct_msg_count.load(Ordering::Relaxed) >= state.send_hwm
+        {
             return Ok(false);
         }
         let prefix_len = sentinel.len();
@@ -114,6 +120,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             eq.encode_and_push_prefixed(sentinel, msg);
         }
         drop(eq);
+        state.direct_msg_count.fetch_add(1, Ordering::Relaxed);
         if state.driver_in_select.load(Ordering::Relaxed) {
             state.transmit_ready.notify(1);
         }
@@ -138,7 +145,9 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
     let Ok(mut eq) = state.encoded_queue.try_lock() else {
         return Ok(false);
     };
-    if eq.total_bytes() >= DIRECT_CAP {
+    if eq.total_bytes() >= DIRECT_CAP
+        || state.direct_msg_count.load(Ordering::Relaxed) >= state.send_hwm
+    {
         return Ok(false);
     }
     for wire in &wires {
@@ -149,6 +158,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         }
     }
     drop(eq);
+    state.direct_msg_count.fetch_add(1, Ordering::Relaxed);
     if state.driver_in_select.load(Ordering::Relaxed) {
         state.transmit_ready.notify(1);
     }

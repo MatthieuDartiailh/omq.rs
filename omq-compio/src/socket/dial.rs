@@ -301,6 +301,7 @@ async fn dial_supervisor_tcp(
             encoder,
             uses_crypto,
             inner.options.large_message_threshold.unwrap_or(0),
+            super::cmd_channel_capacity(&inner.options),
             #[cfg(feature = "ws")]
             false,
             #[cfg(feature = "ws")]
@@ -442,6 +443,7 @@ async fn dial_supervisor_ipc(
             None,
             uses_crypto,
             inner.options.large_message_threshold.unwrap_or(0),
+            super::cmd_channel_capacity(&inner.options),
             #[cfg(feature = "ws")]
             false,
             #[cfg(feature = "ws")]
