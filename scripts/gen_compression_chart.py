@@ -182,9 +182,11 @@ def generate_svg(panels: dict[str, dict]) -> str:
     x_label_space = 20
     legend_h = 50
 
+    bottom_pad = 40
+    right_pad = 15
     svg_h = (top_margin + n_panels * (panel_h + x_label_space)
-             + (n_panels - 1) * panel_gap + legend_h)
-    svg_w = 850
+             + (n_panels - 1) * panel_gap + legend_h + bottom_pad)
+    svg_w = 850 + right_pad
     mid_x = (x_left + x_right) / 2
 
     all_sizes = set()

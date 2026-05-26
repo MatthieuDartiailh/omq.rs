@@ -118,11 +118,7 @@ drops from 512 B to 64 B, so small structured messages start compressing too.
 Virtual throughput on bandwidth-limited links (JSON payloads, compio backend):
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression_1g.svg" alt="Compression throughput at 1 Gbps" width="850">
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression_100m.svg" alt="Compression throughput at 100 Mbps" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression.svg" alt="Compression throughput at 1 Gbps, 100 Mbps, and 10 Mbps" width="850">
 </p>
 
 See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for full tables including dict-trained ratios.
