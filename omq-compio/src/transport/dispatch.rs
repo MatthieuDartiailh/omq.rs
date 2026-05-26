@@ -48,7 +48,7 @@ async fn handle_sub_cmd(
     {
         let mut s = set.write().expect("peer_sub lock");
         match cmd {
-            Command::Subscribe(_) => s.add(prefix.clone()),
+            Command::Subscribe(_) => s.add(&prefix),
             Command::Cancel(_) => s.remove(&prefix),
             _ => {}
         }

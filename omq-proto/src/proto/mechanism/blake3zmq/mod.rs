@@ -117,7 +117,7 @@ enum HandshakeState {
 }
 
 impl Blake3ZmqMechanism {
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn new_server(
         keypair: Blake3ZmqKeypair,
         cookie_keyring: Arc<CookieKeyring>,
@@ -136,7 +136,7 @@ impl Blake3ZmqMechanism {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn new_client(keypair: Blake3ZmqKeypair, server_public: Blake3ZmqPublicKey) -> Self {
         Self {
             is_client: true,
@@ -151,7 +151,7 @@ impl Blake3ZmqMechanism {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn start(
         &mut self,
         out: &mut Vec<Command>,
@@ -186,7 +186,7 @@ impl Blake3ZmqMechanism {
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn on_command(
         &mut self,
         cmd: Command,

@@ -70,7 +70,7 @@ async fn maybe_sleep_until(deadline: Option<Instant>) {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 struct DriverLoopState {
     closing: bool,
     deadline: Option<Instant>,
@@ -159,7 +159,7 @@ pub(crate) fn build_peer_io(
     } else {
         None
     };
-    #[cfg_attr(not(feature = "ws"), allow(unused_mut))]
+    #[cfg_attr(not(feature = "ws"), expect(unused_mut))]
     let mut codec = make_codec(
         role,
         socket_type,
@@ -175,7 +175,7 @@ pub(crate) fn build_peer_io(
         let _ = codec.handle_input(leftover);
         let _ = wr; // suppress unused
     }
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[expect(clippy::arc_with_non_send_sync)]
     let peer_io = Arc::new(std::sync::Mutex::new(PeerIo {
         codec,
         decoder,
@@ -404,7 +404,7 @@ impl DriverLoopState {
 /// fastest absorbs more work (work-stealing). `None` for
 /// per-peer-routing socket types (PUB / XPUB / RADIO / ROUTER /
 /// XSUB).
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn run_connection(
     state: Arc<DirectIoState>,
     socket_type: SocketType,

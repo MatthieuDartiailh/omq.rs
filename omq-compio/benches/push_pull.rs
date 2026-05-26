@@ -284,6 +284,7 @@ async fn wait_connected_with_monitors(socks: &[&Socket], monitors: &mut [Monitor
                         MonitorEvent::Disconnected { .. } => "disconnected",
                         MonitorEvent::Closed => "closed",
                         MonitorEvent::PeerCommand { .. } => "peer_command",
+                        _ => "unknown",
                     };
                     *counts.entry(k).or_default() += 1;
                 }

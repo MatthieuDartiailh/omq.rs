@@ -219,7 +219,7 @@ pub(crate) struct SocketDriver {
 }
 
 impl SocketDriver {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         socket_type: SocketType,
         options: Options,
@@ -442,7 +442,7 @@ impl SocketDriver {
         }
     }
 
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     async fn teardown(&mut self) {
         self.send_strategy.shutdown();
         for p in self.peers.values() {

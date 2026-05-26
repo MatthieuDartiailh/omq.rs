@@ -39,7 +39,6 @@ impl Socket {
         if endpoint.is_ws_family() {
             return self.bind_ws(endpoint).await;
         }
-        #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
         match endpoint {
             Endpoint::Inproc { name } => self.bind_inproc(name).await,
             Endpoint::Ipc(_) => self.bind_ipc(endpoint).await,
@@ -50,7 +49,7 @@ impl Socket {
         }
     }
 
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     async fn bind_inproc(&self, name: String) -> Result<Endpoint> {
         let snapshot = self.inner().snapshot();
         let listener = inproc::bind(

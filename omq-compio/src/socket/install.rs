@@ -59,7 +59,7 @@ pub(super) fn install_inproc_peer(
     // SubscriptionSet, so nothing is over-delivered.
     let peer_sub = if matches!(inner.socket_type, SocketType::Pub | SocketType::XPub) {
         let mut s = SubscriptionSet::new();
-        s.add(Bytes::new());
+        s.add(b"");
         Some(Arc::new(RwLock::new(s)))
     } else {
         None
@@ -135,7 +135,6 @@ pub(super) fn install_inproc_peer(
     inner.monitor.handshake_succeeded(endpoint, info);
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn install_accepted_wire_peer(
     inner: &Arc<SocketInner>,
     reader: WireReader,
@@ -328,7 +327,7 @@ pub(super) fn install_ws_peer(
             );
         }
         WsTransport::Tls(tls) => {
-            #[allow(clippy::arc_with_non_send_sync)]
+            #[expect(clippy::arc_with_non_send_sync)]
             let shared: crate::transport::ws::SharedTls =
                 std::sync::Arc::new(async_lock::Mutex::new(*tls));
             install_accepted_wire_peer_with_leftover(
@@ -380,9 +379,8 @@ fn transport_crypto_config(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
-#[cfg_attr(not(feature = "ws"), allow(clippy::needless_pass_by_value))]
+#[expect(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "ws"), expect(clippy::needless_pass_by_value))]
 fn install_accepted_wire_peer_with_leftover(
     inner: &Arc<SocketInner>,
     reader: WireReader,
@@ -391,7 +389,7 @@ fn install_accepted_wire_peer_with_leftover(
     endpoint: Endpoint,
     connection_id: u64,
     peer_addr: Option<std::net::SocketAddr>,
-    #[cfg_attr(not(feature = "ws"), allow(unused_variables))] leftover: Option<bytes::Bytes>,
+    #[cfg_attr(not(feature = "ws"), expect(unused_variables))] leftover: Option<bytes::Bytes>,
 ) {
     let cap = cmd_channel_capacity(&inner.options);
     let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
@@ -451,7 +449,7 @@ fn install_accepted_wire_peer_with_leftover(
         #[cfg(feature = "ws")]
         ws_masked,
     );
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[expect(clippy::arc_with_non_send_sync)]
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let slot_idx = inner.insert_peer_slot(
         PeerSlot {

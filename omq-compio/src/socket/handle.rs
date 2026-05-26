@@ -111,7 +111,7 @@ impl Socket {
     }
 
     /// Remove a previously-established bind.
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     pub async fn unbind(&self, endpoint: Endpoint) -> Result<()> {
         let mut listeners = self.inner.listeners.write().expect("listeners lock");
         let before = listeners.len();
@@ -124,7 +124,7 @@ impl Socket {
     }
 
     /// Remove a previously-started connect.
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     pub async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
         let mut dialers = self.inner.dialers.write().expect("dialers lock");
         let mut udp = self.inner.udp_dialers.write().expect("udp_dialers lock");
@@ -139,7 +139,7 @@ impl Socket {
     }
 
     /// Snapshot the live status of one connected peer by `connection_id`.
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     pub async fn connection_info(
         &self,
         connection_id: u64,
@@ -163,7 +163,7 @@ impl Socket {
     }
 
     /// Snapshot every currently-connected peer.
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     pub async fn connections(&self) -> Result<Vec<crate::monitor::ConnectionStatus>> {
         let peers = self.inner.out_peers.read().expect("peers lock");
         Ok(peers
@@ -212,7 +212,7 @@ impl Socket {
             .subscriptions
             .write()
             .expect("subscriptions lock")
-            .add(prefix.clone());
+            .add(&prefix);
         {
             let mut subs = self.inner.our_subs.write().expect("our_subs lock");
             if !subs.iter().any(|p| p == &prefix) {

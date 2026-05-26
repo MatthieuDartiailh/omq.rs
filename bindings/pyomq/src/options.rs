@@ -267,6 +267,7 @@ impl Overlay {
                 ReconnectPolicy::Fixed(d) => Some(d),
                 ReconnectPolicy::Exponential { min, .. } => Some(min),
                 ReconnectPolicy::Disabled => None,
+                _ => unreachable!(),
             },
             reconnect_ivl_max: match o.reconnect {
                 ReconnectPolicy::Exponential { max, .. } => Some(max),
@@ -631,6 +632,7 @@ pub fn getsockopt<'py>(
                 KeepAlive::Default => -1,
                 KeepAlive::Disabled => 0,
                 KeepAlive::Enabled { .. } => 1,
+                _ => unreachable!(),
             };
             Ok(int_to_bound(py, v))
         }
@@ -798,6 +800,7 @@ pub fn getsockopt<'py>(
                 OnMute::Block => 0,
                 OnMute::DropNewest => 1,
                 OnMute::DropOldest => 2,
+                _ => unreachable!(),
             };
             Ok(int_to_bound(py, v))
         }

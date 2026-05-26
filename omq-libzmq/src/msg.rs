@@ -8,7 +8,7 @@ use std::ffi::{CStr, c_int};
 use bytes::Bytes;
 
 // kind discriminants
-#[allow(dead_code)]
+#[expect(dead_code)]
 const KIND_EMPTY: u8 = 0;
 const KIND_HEAP: u8 = 1;
 const KIND_EXTERNAL: u8 = 2;
@@ -165,7 +165,7 @@ pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
         return crate::error::fail(libc::EFAULT);
     }
     let r = unsafe { repr(msg) };
-    #[allow(clippy::collapsible_match)]
+    #[expect(clippy::collapsible_match)]
     match r.kind {
         KIND_HEAP => {
             if !r.ptr.is_null() {
@@ -458,7 +458,7 @@ pub extern "C" fn zmq_msg_recv(
             r.hint = std::ptr::null_mut();
             r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
             r.reserved = [0; 16];
-            #[allow(clippy::cast_possible_wrap)]
+            #[expect(clippy::cast_possible_wrap)]
             {
                 sz as c_int
             }

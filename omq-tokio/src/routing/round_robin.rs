@@ -115,7 +115,7 @@ impl RoundRobinSend {
         // Byte-stream: driver reads from shared_rx directly; no pump needed.
     }
 
-    #[allow(clippy::unused_self)]
+    #[expect(clippy::unused_self)]
     pub(crate) fn connection_removed(&mut self, _peer_id: u64) {
         // Byte-stream drivers self-cancel via their CancellationToken.
         // Inproc pumps self-cancel when peer inbox closes (driver exits).
@@ -274,7 +274,7 @@ impl RoundRobinSend {
         }
     }
 
-    #[allow(dead_code)] // kept for parity with the non-priority impl's API
+    #[expect(dead_code)] // kept for parity with the non-priority impl's API
     pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle) {
         self.connection_added_with_priority(peer_id, handle, omq_proto::DEFAULT_PRIORITY);
     }
@@ -327,7 +327,7 @@ impl RoundRobinSend {
     /// been dispatched"; once we've handed each `SendMessage` off to
     /// an inbox via `try_send/send`, it's the connection driver's job
     /// to flush, not ours.
-    #[allow(clippy::unused_self)]
+    #[expect(clippy::unused_self)]
     pub(crate) fn is_drained(&self) -> bool {
         true
     }

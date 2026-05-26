@@ -74,6 +74,7 @@ pub async fn bind(endpoint: &Endpoint) -> Result<UdpSocket> {
                 "udp bind requires an IP literal or *, not a hostname".into(),
             ));
         }
+        _ => unreachable!(),
     };
     let sock = UdpSocket::bind(SocketAddr::new(ip, port)).await?;
     Ok(sock)
@@ -119,6 +120,7 @@ fn host_to_lookup(host: &Host, port: u16) -> Result<SocketAddr> {
                 .next()
                 .ok_or_else(|| Error::InvalidEndpoint(format!("udp: no address for {name}")))
         }
+        _ => unreachable!(),
     }
 }
 

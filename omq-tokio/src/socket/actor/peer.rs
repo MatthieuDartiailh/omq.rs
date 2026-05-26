@@ -734,7 +734,7 @@ struct InprocDriverCtx {
 /// exchange), then forwards Messages and Commands between the
 /// `SocketDriver`'s inbox and the partner's channels until either
 /// side drops.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
     mut in_rx: mpsc::Receiver<InprocFrame>,
@@ -754,7 +754,7 @@ async fn inproc_peer_driver(
         spsc,
     } = ctx;
 
-    #[allow(clippy::items_after_statements)]
+    #[expect(clippy::items_after_statements)]
     async fn emit_event(
         peer_out: &mpsc::Sender<(u64, crate::engine::PeerOut)>,
         peer_id: u64,

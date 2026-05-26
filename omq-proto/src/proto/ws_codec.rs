@@ -21,6 +21,7 @@ const LEN_MASK: u8 = 0x7F;
 
 /// Which side of the WebSocket connection this codec represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WsRole {
     Client,
     Server,

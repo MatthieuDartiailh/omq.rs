@@ -4,7 +4,7 @@ use crate::message::Message;
 use crate::options::Options;
 use crate::proto::SocketType;
 
-#[allow(async_fn_in_trait)]
+#[expect(async_fn_in_trait)]
 pub trait SocketApi: Clone {
     fn new(socket_type: SocketType, options: Options) -> Self;
     fn socket_type(&self) -> SocketType;

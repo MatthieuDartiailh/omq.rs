@@ -47,7 +47,7 @@ impl MonitorPublisher {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn publish(&self, event: MonitorEvent) {
         let mut sinks = self.sinks.lock().expect("monitor sinks");
         sinks.retain(|sink| !sink.tx.is_disconnected());

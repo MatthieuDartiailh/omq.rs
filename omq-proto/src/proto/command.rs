@@ -31,6 +31,7 @@ pub const PING_CONTEXT_MAX: usize = 16;
 
 /// A parsed ZMTP command.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Command {
     /// Handshake completion, carries peer properties.
     Ready(PeerProperties),
@@ -57,6 +58,7 @@ pub enum Command {
 
 /// One kind per [`Command`] variant, useful for telemetry and dispatch logic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CommandKind {
     Ready,
     Subscribe,
@@ -179,7 +181,7 @@ pub fn encode(cmd: &Command, out: &mut BytesMut) {
 }
 
 /// Parse a command from the payload bytes of a COMMAND-flagged frame.
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 pub fn decode(body: Bytes) -> Result<Command> {
     if body.is_empty() {
         return Err(Error::Protocol("empty command frame".into()));
@@ -296,7 +298,7 @@ pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties>
     Ok(props)
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 fn decode_ping(body: Bytes) -> Result<Command> {
     if body.len() < 2 {
         return Err(Error::Protocol("PING body missing TTL".into()));
@@ -312,7 +314,7 @@ fn decode_ping(body: Bytes) -> Result<Command> {
     })
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 fn decode_error(body: Bytes) -> Result<Command> {
     if body.is_empty() {
         return Err(Error::Protocol("ERROR body missing reason length".into()));
@@ -331,7 +333,7 @@ fn decode_error(body: Bytes) -> Result<Command> {
 mod tests {
     use super::*;
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn roundtrip(cmd: Command) -> Command {
         let mut buf = BytesMut::new();
         encode(&cmd, &mut buf);

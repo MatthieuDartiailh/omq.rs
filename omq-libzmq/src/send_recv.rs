@@ -1,5 +1,5 @@
 //! `zmq_send` / `zmq_recv` entry points.
-#![allow(clippy::cast_possible_wrap)]
+#![expect(clippy::cast_possible_wrap)]
 
 use std::ffi::c_int;
 use std::sync::Arc;

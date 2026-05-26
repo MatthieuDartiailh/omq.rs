@@ -117,6 +117,7 @@ impl DropQueue {
                     }
                 }
             }
+            _ => unreachable!(),
         }
     }
 

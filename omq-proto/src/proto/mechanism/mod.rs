@@ -311,7 +311,7 @@ impl SecurityMechanism {
     /// data-phase AEAD that operates on raw frame payloads;
     /// CURVE produces a per-part MESSAGE-command transform.
     #[cfg(any(feature = "curve", feature = "blake3zmq"))]
-    #[cfg_attr(not(feature = "curve"), allow(clippy::unnecessary_wraps))]
+    #[cfg_attr(not(feature = "curve"), expect(clippy::unnecessary_wraps))]
     pub(crate) fn build_transform(&self) -> Result<Option<FrameTransform>> {
         match self {
             Self::Null(_) => Ok(None),

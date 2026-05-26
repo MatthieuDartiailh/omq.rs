@@ -38,6 +38,7 @@ pub use greeting::{Greeting, MechanismName, VERSION_SNIFF_LEN, ZMTP_MAJOR, ZMTP_
 ///
 /// The value carries the wire-level ASCII name returned by [`Self::as_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SocketType {
     // Standard
     Req,

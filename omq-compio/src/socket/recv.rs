@@ -486,7 +486,7 @@ impl Socket {
         handle.read().expect("direct_io handle lock").clone()
     }
 
-    #[allow(clippy::unused_self)]
+    #[expect(clippy::unused_self)]
     fn drain_and_swap(
         &self,
         io: &mut PeerIo,
