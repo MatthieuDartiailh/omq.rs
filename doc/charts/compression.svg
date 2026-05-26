@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 940" font-family="system-ui, -apple-system, sans-serif">
-  <rect width="850" height="940" fill="white"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 865 980" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="865" height="980" fill="white"/>
   <text x="425.0" y="16" text-anchor="middle" fill="#111827" font-size="12" font-weight="700">Compression transports: structured JSON, PUSH/PULL, 2-thread (omq-compio)</text>
   <text x="425.0" y="45" text-anchor="middle" fill="#111827" font-size="12" font-weight="700">1 Gbps</text>
   <line x1="90" y1="244.2" x2="760" y2="244.2" stroke="#e5e7eb" stroke-width="1"/>
