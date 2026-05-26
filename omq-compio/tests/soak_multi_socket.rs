@@ -74,79 +74,83 @@ fn soak_multi_socket() {
     let monitor = soak_common::ResourceMonitor::start();
     let mut tracker = soak_common::ThroughputTracker::new(Duration::from_secs(10));
 
-    let rt = compio::runtime::Runtime::new().expect("runtime");
-    rt.block_on(async {
-        let pairs = create_pairs().await;
-        eprintln!("[multi_socket] created {} socket pairs", pairs.len());
-        compio::time::sleep(Duration::from_millis(100)).await;
+    {
+        let rt = compio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let pairs = create_pairs().await;
+            eprintln!("[multi_socket] created {} socket pairs", pairs.len());
+            compio::time::sleep(Duration::from_millis(100)).await;
 
-        let start = Instant::now();
-        let mut total_exchanged: u64 = 0;
-        let mut last_log = start;
+            let start = Instant::now();
+            let mut total_exchanged: u64 = 0;
+            let mut last_log = start;
 
-        while start.elapsed() < duration {
-            // Multiple messages per pair per iteration to increase throughput.
-            for _ in 0..10 {
-                for pair in &pairs {
-                    let sent = compio::time::timeout(
-                        Duration::from_millis(1),
-                        pair.sender.send(Message::single("multi")),
-                    )
-                    .await;
-
-                    if sent.is_err() || sent.unwrap().is_err() {
-                        continue;
-                    }
-
-                    if pair.kind != "req/rep-tcp" {
-                        continue;
-                    }
-
-                    if let Ok(Ok(_)) =
-                        compio::time::timeout(Duration::from_millis(5), pair.receiver.recv()).await
-                    {
-                        total_exchanged += 1;
-                        let _ = compio::time::timeout(
-                            Duration::from_millis(5),
-                            pair.receiver.send(Message::single("reply")),
+            while start.elapsed() < duration {
+                // Multiple messages per pair per iteration to increase throughput.
+                for _ in 0..10 {
+                    for pair in &pairs {
+                        let sent = compio::time::timeout(
+                            Duration::from_millis(1),
+                            pair.sender.send(Message::single("multi")),
                         )
                         .await;
-                        let _ = compio::time::timeout(Duration::from_millis(5), pair.sender.recv())
+
+                        if sent.is_err() || sent.unwrap().is_err() {
+                            continue;
+                        }
+
+                        if pair.kind != "req/rep-tcp" {
+                            continue;
+                        }
+
+                        if let Ok(Ok(_)) =
+                            compio::time::timeout(Duration::from_millis(5), pair.receiver.recv())
+                                .await
+                        {
+                            total_exchanged += 1;
+                            let _ = compio::time::timeout(
+                                Duration::from_millis(5),
+                                pair.receiver.send(Message::single("reply")),
+                            )
                             .await;
+                            let _ =
+                                compio::time::timeout(Duration::from_millis(5), pair.sender.recv())
+                                    .await;
+                        }
                     }
+                }
+
+                // Drain non-REQ/REP receivers without blocking.
+                for pair in &pairs {
+                    if pair.kind != "req/rep-tcp" {
+                        while pair.receiver.try_recv().is_ok() {
+                            total_exchanged += 1;
+                        }
+                    }
+                }
+
+                tracker.record(total_exchanged);
+
+                if last_log.elapsed() >= Duration::from_secs(30) {
+                    eprintln!(
+                        "[multi_socket] {:.0}s, exchanged {total_exchanged}",
+                        start.elapsed().as_secs_f64(),
+                    );
+                    last_log = Instant::now();
                 }
             }
 
-            // Drain non-REQ/REP receivers without blocking.
-            for pair in &pairs {
-                if pair.kind != "req/rep-tcp" {
-                    while pair.receiver.try_recv().is_ok() {
-                        total_exchanged += 1;
-                    }
-                }
+            for pair in pairs {
+                pair.sender.close().await.unwrap();
+                pair.receiver.close().await.unwrap();
             }
 
-            tracker.record(total_exchanged);
-
-            if last_log.elapsed() >= Duration::from_secs(30) {
-                eprintln!(
-                    "[multi_socket] {:.0}s, exchanged {total_exchanged}",
-                    start.elapsed().as_secs_f64(),
-                );
-                last_log = Instant::now();
-            }
-        }
-
-        for pair in pairs {
-            pair.sender.close().await.unwrap();
-            pair.receiver.close().await.unwrap();
-        }
-
-        eprintln!(
-            "[multi_socket] done: {total_exchanged} messages across 50 pairs in {:.1}s",
-            start.elapsed().as_secs_f64(),
-        );
-    });
+            eprintln!(
+                "[multi_socket] done: {total_exchanged} messages across 50 pairs in {:.1}s",
+                start.elapsed().as_secs_f64(),
+            );
+        });
+    }
 
     let report = monitor.stop();
     report.assert_no_leak("multi_socket");

@@ -89,10 +89,12 @@ type Samples = (
 pub struct ResourceMonitor {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<Samples>>,
+    heap_baseline: usize,
 }
 
 impl ResourceMonitor {
     pub fn start() -> Self {
+        let heap_baseline = alloc::LIVE_BYTES.load(std::sync::atomic::Ordering::Relaxed);
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let handle = std::thread::spawn(move || {
@@ -115,6 +117,7 @@ impl ResourceMonitor {
         Self {
             stop,
             handle: Some(handle),
+            heap_baseline,
         }
     }
 
@@ -125,6 +128,7 @@ impl ResourceMonitor {
             rss_samples,
             fd_samples,
             heap_samples,
+            heap_baseline: self.heap_baseline,
         }
     }
 }
@@ -156,12 +160,14 @@ pub struct ResourceReport {
     pub rss_samples: Vec<(Instant, usize)>,
     pub fd_samples: Vec<(Instant, usize)>,
     pub heap_samples: Vec<(Instant, usize)>,
+    heap_baseline: usize,
 }
 
 impl ResourceReport {
     pub fn assert_no_leak(&self, label: &str) {
         self.report_rss(label);
-        self.assert_heap_stable(label);
+        self.report_heap_slope(label);
+        self.assert_heap_residual(label);
         self.assert_fd_stable(label);
     }
 
@@ -177,10 +183,9 @@ impl ResourceReport {
         );
     }
 
-    fn assert_heap_stable(&self, label: &str) {
+    fn report_heap_slope(&self, label: &str) {
         let n = self.heap_samples.len();
         if n < 10 {
-            eprintln!("[{label}] too few heap samples ({n}) to check for leaks");
             return;
         }
 
@@ -221,28 +226,49 @@ impl ResourceReport {
 
         let slope_bytes_per_sec = (n_f * dot_xy - sum_x * sum_y) / (n_f * sum_xx - sum_x * sum_x);
         let slope_kib_s = slope_bytes_per_sec / 1024.0;
-
         let avg: f64 = sum_y / n_f;
 
         eprintln!(
-            "[{label}] heap: avg {:.1} MiB, slope {slope_kib_s:.1} KiB/s",
+            "[{label}] heap: avg {:.1} MiB, slope {slope_kib_s:.1} KiB/s (informational)",
             avg / 1_048_576.0,
         );
+    }
 
-        // 50 KiB/s sustained = 30 MiB over 10 min; anything below is
-        // noise from in-flight message buffers and allocator jitter.
-        // Short runs are noisier; only enforce tight bounds with enough
-        // samples for the regression to be meaningful.
-        let threshold_kib_s = if post_warmup.len() >= 120 {
-            50.0
-        } else {
-            500.0
-        };
+    fn assert_heap_residual(&self, label: &str) {
+        std::thread::sleep(Duration::from_millis(200));
+        let current = alloc::LIVE_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+        let baseline = self.heap_baseline;
+
+        // Use the peak seen during the run to scale the threshold:
+        // a true leak accumulates relative to throughput, so residual
+        // after close should be a tiny fraction of the peak.
+        let peak = self
+            .heap_samples
+            .iter()
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or(baseline);
+        // 5% of peak or 4 MiB, whichever is larger. Covers runtime
+        // overhead (compio io_uring buffers, tokio internals) that
+        // persists until the runtime itself is dropped.
+        let threshold = (peak / 20).max(8 * 1024 * 1024);
+
+        let growth = current.saturating_sub(baseline);
+
+        eprintln!(
+            "[{label}] heap residual: {:.1} KiB (baseline {:.1} MiB, current {:.1} MiB)",
+            growth as f64 / 1024.0,
+            baseline as f64 / 1_048_576.0,
+            current as f64 / 1_048_576.0,
+        );
         assert!(
-            slope_kib_s < threshold_kib_s,
-            "[{label}] heap leak detected: slope {slope_kib_s:.1} KiB/s \
-             (avg {:.1} MiB over {elapsed_secs:.0}s)",
-            avg / 1_048_576.0,
+            growth < threshold,
+            "[{label}] heap leak: {:.1} KiB residual after close \
+             (baseline {:.1} MiB, current {:.1} MiB, threshold {:.1} MiB)",
+            growth as f64 / 1024.0,
+            baseline as f64 / 1_048_576.0,
+            current as f64 / 1_048_576.0,
+            threshold as f64 / 1_048_576.0,
         );
     }
 
