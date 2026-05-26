@@ -837,6 +837,14 @@ impl DriverLoopState {
         } else {
             self.drain_buf = returned;
         }
+        if state
+            .encoded_queue
+            .lock()
+            .expect("encoded_queue")
+            .is_empty()
+        {
+            state.direct_msg_count.store(0, Ordering::Relaxed);
+        }
         Ok(true)
     }
 }
