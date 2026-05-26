@@ -41,6 +41,18 @@ cargo clippy --workspace --all-targets   # pre-commit hook checks this
 ./scripts/test-all.sh                    # full sweep, both backends
 ```
 
+Clippy must pass under all three configurations before pushing:
+
+```sh
+cargo clippy --workspace --all-targets                # default features
+cargo clippy --workspace --all-targets --all-features # feature-gated paths
+(cd bindings/pyomq && cargo clippy --all-targets)     # separate workspace
+```
+
+`#[allow]` vs `#[expect]`: use `#[expect]` by default. Use `#[allow]`
+only when the lint fires in some feature combinations but not others
+(the expectation would be unfulfilled when the lint is silent).
+
 Lints: `missing_debug_implementations` = **deny**,
 `unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
 
