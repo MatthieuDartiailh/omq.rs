@@ -37,6 +37,7 @@ pub(crate) struct DirectIoState {
     pub(crate) encoded_queue: Mutex<EncodedQueue>,
     pub(crate) driver_in_select: AtomicBool,
     pub(crate) direct_msg_count: AtomicUsize,
+    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) send_hwm: usize,
     pub(crate) large_recv_pending: AtomicUsize,
     pub(crate) pending_acc: Mutex<Option<BytesMut>>,
