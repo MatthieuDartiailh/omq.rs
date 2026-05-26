@@ -1,33 +1,29 @@
 # Compression Transport Benchmarks
 
-Linux 6.12 (Debian 13) VM on an Intel Mac Mini 2018 (i7-8700B, 3.2 GHz
-base, turbo disabled, governor=performance, 6 vCPU), Rust 1.95.0,
-default features.
+Realistic JSON event-log payloads over TCP loopback. Zstd level -3
+(fast strategy), LZ4 default. Zstd auto-trains a dictionary for messages <= 2 KiB;
+lz4+dict reuses the same zstd-trained dictionary.
 
-Each cell is the **min wall time** across multiple runs with warmup.
-Sources: `omq-compio/benches/`.
+Virtual throughput = msg/s x uncompressed size (effective app data rate
+on a constrained link). Three panels show 1 Gbps, 100 Mbps, and 10 Mbps.
 
-Structured JSON payloads (event-log records with timestamps, trace IDs,
-repeated field names) over TCP loopback rate-limited with Linux `tc tbf`.
-Sender and receiver run on separate threads so compression and
-decompression overlap.
+- **Slow links:** zstd with auto-dict dominates at small messages.
+- **Fast links:** lz4 wins where CPU is the bottleneck.
+- **Why zstd level -3:** level 3 (zstd default) compresses ~2% better
+  but costs 14-20% more CPU at larger sizes. At dict-assisted sizes
+  (<= 2 KiB), the receiver is the bottleneck, so neither level matters.
 
-Zstd compression uses OMQ's default level -3 (fast strategy). Configurable via socket options.
+<details><summary>Test environment</summary>
 
-Virtual throughput = msg/s x uncompressed message size: the effective
-application data rate the compression ratio buys on a constrained link.
+Linux 6.12 (Debian 13) VM, Intel i7-8700B 3.2 GHz (turbo off,
+governor=performance, 6 vCPU), Rust 1.95.0. Min wall time across
+multiple runs with warmup. Link-speed projections computed from
+measured compression ratio and CPU-limited throughput.
 
-At 1 Gbps, LZ4 wins on raw speed; zstd catches up only at larger payloads where
-its higher ratio compensates for slower compression.
-
-<p align="center">
-  <img src="doc/charts/compression_1g.svg" alt="Compression throughput at 1 Gbps" width="850">
-</p>
-
-At 100 Mbps, the wire is the bottleneck and zstd's superior ratio dominates: zstd outperforms LZ4 at every payload size.
+</details>
 
 <p align="center">
-  <img src="doc/charts/compression_100m.svg" alt="Compression throughput at 100 Mbps" width="850">
+  <img src="doc/charts/compression.svg" alt="Compression throughput at 1 Gbps, 100 Mbps, and 10 Mbps" width="850">
 </p>
 
 ## Throughput tables
@@ -37,26 +33,46 @@ At 100 Mbps, the wire is the bottleneck and zstd's superior ratio dominates: zst
 <!-- BEGIN compression_100m -->
 | Size | tcp msg/s | lz4+tcp msg/s | zstd+tcp msg/s | tcp virt | lz4+tcp virt | zstd+tcp virt |
 |---|---:|---:|---:|---:|---:|---:|
-| 128 B | 96.1k | 93.3k | 182k | 12.3 MB/s | 11.9 MB/s | 23.3 MB/s |
-| 512 B | 24.0k | 37.3k | 126k | 12.3 MB/s | 19.1 MB/s | 64.5 MB/s |
-| 2 KiB | 6.1k | 22.6k | 26.7k | 12.4 MB/s | 46.2 MB/s | 54.8 MB/s |
-| 8 KiB | 1.5k | 8.8k | 15.3k | 12.5 MB/s | 72.4 MB/s | 125 MB/s |
-| 32 KiB | 381 | 2.6k | 5.3k | 12.5 MB/s | 84.6 MB/s | 173 MB/s |
-| 128 KiB | 95 | 664 | 1.4k | 12.5 MB/s | 87.0 MB/s | 183 MB/s |
+| 8 B | 1.56M | 1.04M | 1.04M | 12.5 MB/s | 8.33 MB/s | 8.33 MB/s |
+| 16 B | 781k | 625k | 625k | 12.5 MB/s | 10.0 MB/s | 10.0 MB/s |
+| 32 B | 391k | 347k | 347k | 12.5 MB/s | 11.1 MB/s | 11.1 MB/s |
+| 64 B | 195k | 184k | 187k | 12.5 MB/s | 11.8 MB/s | 11.9 MB/s |
+| 128 B | 97.7k | 94.7k | 186k | 12.5 MB/s | 12.1 MB/s | 23.8 MB/s |
+| 256 B | 48.8k | 48.1k | 187k | 12.5 MB/s | 12.3 MB/s | 47.7 MB/s |
+| 512 B | 24.4k | 36.1k | 186k | 12.5 MB/s | 18.5 MB/s | 95.0 MB/s |
+| 1 KiB | 12.2k | 23.7k | 183k | 12.5 MB/s | 24.3 MB/s | 188 MB/s |
+| 2 KiB | 6.1k | 15.8k | 85.6k | 12.5 MB/s | 32.4 MB/s | 175 MB/s |
+| 4 KiB | 3.1k | 9.5k | 20.4k | 12.5 MB/s | 39.0 MB/s | 83.7 MB/s |
+| 8 KiB | 1.5k | 5.6k | 8.9k | 12.5 MB/s | 46.1 MB/s | 73.1 MB/s |
+| 16 KiB | 763 | 3.1k | 4.3k | 12.5 MB/s | 51.4 MB/s | 71.3 MB/s |
+| 32 KiB | 381 | 1.7k | 2.7k | 12.5 MB/s | 54.6 MB/s | 87.6 MB/s |
+| 64 KiB | 191 | 859 | 1.3k | 12.5 MB/s | 56.3 MB/s | 87.1 MB/s |
+| 128 KiB | 95 | 432 | 662 | 12.5 MB/s | 56.6 MB/s | 86.8 MB/s |
+| 256 KiB | 48 | 217 | 330 | 12.5 MB/s | 56.8 MB/s | 86.6 MB/s |
 
 <!-- END compression_100m -->
 
-### 100 Mbps, with pre-trained dict
+### 100 Mbps, lz4 with pre-trained dict
 
 <!-- BEGIN compression_100m_dict -->
-| Size | lz4+tcp msg/s | zstd+tcp msg/s | lz4+tcp virt | zstd+tcp virt |
-|---|---:|---:|---:|---:|
-| 128 B | 500k | 194k | 64.0 MB/s | 24.9 MB/s |
-| 512 B | 477k | 189k | 244 MB/s | 96.9 MB/s |
-| 2 KiB | 51.4k | 101k | 105 MB/s | 206 MB/s |
-| 8 KiB | 11.3k | 19.8k | 92.6 MB/s | 162 MB/s |
-| 32 KiB | 2.7k | 5.9k | 89.6 MB/s | 194 MB/s |
-| 128 KiB | 669 | 1.4k | 87.7 MB/s | 183 MB/s |
+| Size | lz4+tcp msg/s | lz4+tcp virt |
+|---|---:|---:|
+| 8 B | 1.04M | 8.33 MB/s |
+| 16 B | 625k | 10.0 MB/s |
+| 32 B | 470k | 15.1 MB/s |
+| 64 B | 431k | 27.6 MB/s |
+| 128 B | 431k | 55.2 MB/s |
+| 256 B | 431k | 110 MB/s |
+| 512 B | 417k | 213 MB/s |
+| 1 KiB | 321k | 328 MB/s |
+| 2 KiB | 82.2k | 168 MB/s |
+| 4 KiB | 18.4k | 75.4 MB/s |
+| 8 KiB | 7.8k | 63.8 MB/s |
+| 16 KiB | 3.7k | 60.6 MB/s |
+| 32 KiB | 1.8k | 59.6 MB/s |
+| 64 KiB | 898 | 58.9 MB/s |
+| 128 KiB | 442 | 57.9 MB/s |
+| 256 KiB | 219 | 57.4 MB/s |
 
 <!-- END compression_100m_dict -->
 
@@ -65,52 +81,118 @@ At 100 Mbps, the wire is the bottleneck and zstd's superior ratio dominates: zst
 <!-- BEGIN compression_1g -->
 | Size | tcp msg/s | lz4+tcp msg/s | zstd+tcp msg/s | tcp virt | lz4+tcp virt | zstd+tcp virt |
 |---|---:|---:|---:|---:|---:|---:|
-| 128 B | 959k | 930k | 182k | 123 MB/s | 119 MB/s | 23.3 MB/s |
-| 512 B | 240k | 371k | 121k | 123 MB/s | 190 MB/s | 61.9 MB/s |
-| 2 KiB | 60.7k | 224k | 216k | 124 MB/s | 459 MB/s | 442 MB/s |
-| 8 KiB | 15.2k | 87.5k | 80.8k | 125 MB/s | 717 MB/s | 662 MB/s |
-| 32 KiB | 3.8k | 25.3k | 23.4k | 125 MB/s | 829 MB/s | 768 MB/s |
-| 128 KiB | 954 | 6.0k | 5.8k | 125 MB/s | 783 MB/s | 754 MB/s |
+| 8 B | 15.62M | 4.73M | 4.19M | 125 MB/s | 37.8 MB/s | 33.5 MB/s |
+| 16 B | 7.81M | 4.64M | 4.09M | 125 MB/s | 74.3 MB/s | 65.5 MB/s |
+| 32 B | 3.91M | 3.47M | 3.47M | 125 MB/s | 111 MB/s | 111 MB/s |
+| 64 B | 1.95M | 1.84M | 187k | 125 MB/s | 118 MB/s | 11.9 MB/s |
+| 128 B | 977k | 947k | 186k | 125 MB/s | 121 MB/s | 23.8 MB/s |
+| 256 B | 488k | 481k | 187k | 125 MB/s | 123 MB/s | 47.7 MB/s |
+| 512 B | 244k | 361k | 186k | 125 MB/s | 185 MB/s | 95.0 MB/s |
+| 1 KiB | 122k | 237k | 183k | 125 MB/s | 243 MB/s | 188 MB/s |
+| 2 KiB | 61.0k | 158k | 177k | 125 MB/s | 324 MB/s | 362 MB/s |
+| 4 KiB | 30.5k | 95.1k | 95.5k | 125 MB/s | 390 MB/s | 391 MB/s |
+| 8 KiB | 15.3k | 56.3k | 41.6k | 125 MB/s | 461 MB/s | 341 MB/s |
+| 16 KiB | 7.6k | 31.4k | 16.0k | 125 MB/s | 514 MB/s | 261 MB/s |
+| 32 KiB | 3.8k | 16.7k | 7.4k | 125 MB/s | 546 MB/s | 242 MB/s |
+| 64 KiB | 1.9k | 8.6k | 3.0k | 125 MB/s | 563 MB/s | 200 MB/s |
+| 128 KiB | 954 | 4.3k | 1.5k | 125 MB/s | 566 MB/s | 195 MB/s |
+| 256 KiB | 477 | 1.8k | 753 | 125 MB/s | 469 MB/s | 197 MB/s |
 
 <!-- END compression_1g -->
 
-### 1 Gbps, with pre-trained dict
+### 1 Gbps, lz4 with pre-trained dict
 
 <!-- BEGIN compression_1g_dict -->
-| Size | lz4+tcp msg/s | zstd+tcp msg/s | lz4+tcp virt | zstd+tcp virt |
-|---|---:|---:|---:|---:|
-| 128 B | 643k | 190k | 82.3 MB/s | 24.4 MB/s |
-| 512 B | 623k | 190k | 319 MB/s | 97.2 MB/s |
-| 2 KiB | 343k | 169k | 703 MB/s | 346 MB/s |
-| 8 KiB | 111k | 96.2k | 907 MB/s | 788 MB/s |
-| 32 KiB | 26.7k | 18.8k | 876 MB/s | 616 MB/s |
-| 128 KiB | 5.9k | 4.9k | 769 MB/s | 639 MB/s |
+| Size | lz4+tcp msg/s | lz4+tcp virt |
+|---|---:|---:|
+| 8 B | 4.68M | 37.5 MB/s |
+| 16 B | 4.95M | 79.2 MB/s |
+| 32 B | 470k | 15.1 MB/s |
+| 64 B | 507k | 32.5 MB/s |
+| 128 B | 485k | 62.1 MB/s |
+| 256 B | 482k | 123 MB/s |
+| 512 B | 456k | 233 MB/s |
+| 1 KiB | 472k | 483 MB/s |
+| 2 KiB | 293k | 601 MB/s |
+| 4 KiB | 129k | 526 MB/s |
+| 8 KiB | 73.2k | 600 MB/s |
+| 16 KiB | 37.0k | 606 MB/s |
+| 32 KiB | 18.2k | 596 MB/s |
+| 64 KiB | 8.4k | 550 MB/s |
+| 128 KiB | 3.3k | 435 MB/s |
+| 256 KiB | 1.6k | 407 MB/s |
 
 <!-- END compression_1g_dict -->
 
+### 10 Mbps
+
+<!-- BEGIN compression_10m -->
+| Size | tcp msg/s | lz4+tcp msg/s | zstd+tcp msg/s | tcp virt | lz4+tcp virt | zstd+tcp virt |
+|---|---:|---:|---:|---:|---:|---:|
+| 8 B | 156k | 104k | 104k | 1.25 MB/s | 0.83 MB/s | 0.83 MB/s |
+| 16 B | 78.1k | 62.5k | 62.5k | 1.25 MB/s | 1.00 MB/s | 1.00 MB/s |
+| 32 B | 39.1k | 34.7k | 34.7k | 1.25 MB/s | 1.11 MB/s | 1.11 MB/s |
+| 64 B | 19.5k | 18.4k | 50.0k | 1.25 MB/s | 1.18 MB/s | 3.20 MB/s |
+| 128 B | 9.8k | 9.5k | 50.0k | 1.25 MB/s | 1.21 MB/s | 6.40 MB/s |
+| 256 B | 4.9k | 4.8k | 46.3k | 1.25 MB/s | 1.23 MB/s | 11.9 MB/s |
+| 512 B | 2.4k | 3.6k | 46.3k | 1.25 MB/s | 1.85 MB/s | 23.7 MB/s |
+| 1 KiB | 1.2k | 2.4k | 39.1k | 1.25 MB/s | 2.43 MB/s | 40.0 MB/s |
+| 2 KiB | 610 | 1.6k | 8.6k | 1.25 MB/s | 3.24 MB/s | 17.5 MB/s |
+| 4 KiB | 305 | 951 | 2.0k | 1.25 MB/s | 3.90 MB/s | 8.37 MB/s |
+| 8 KiB | 153 | 563 | 892 | 1.25 MB/s | 4.61 MB/s | 7.31 MB/s |
+| 16 KiB | 76 | 314 | 435 | 1.25 MB/s | 5.14 MB/s | 7.13 MB/s |
+| 32 KiB | 38 | 167 | 267 | 1.25 MB/s | 5.46 MB/s | 8.76 MB/s |
+| 64 KiB | 19 | 86 | 133 | 1.25 MB/s | 5.63 MB/s | 8.71 MB/s |
+| 128 KiB | 10 | 43 | 66 | 1.25 MB/s | 5.66 MB/s | 8.68 MB/s |
+| 256 KiB | 5 | 22 | 33 | 1.25 MB/s | 5.68 MB/s | 8.66 MB/s |
+
+<!-- END compression_10m -->
+
+### 10 Mbps, lz4 with pre-trained dict
+
+<!-- BEGIN compression_10m_dict -->
+| Size | lz4+tcp msg/s | lz4+tcp virt |
+|---|---:|---:|
+| 8 B | 104k | 0.83 MB/s |
+| 16 B | 62.5k | 1.00 MB/s |
+| 32 B | 56.8k | 1.82 MB/s |
+| 64 B | 43.1k | 2.76 MB/s |
+| 128 B | 43.1k | 5.52 MB/s |
+| 256 B | 43.1k | 11.0 MB/s |
+| 512 B | 41.7k | 21.3 MB/s |
+| 1 KiB | 32.1k | 32.8 MB/s |
+| 2 KiB | 8.2k | 16.8 MB/s |
+| 4 KiB | 1.8k | 7.54 MB/s |
+| 8 KiB | 778 | 6.38 MB/s |
+| 16 KiB | 370 | 6.06 MB/s |
+| 32 KiB | 182 | 5.96 MB/s |
+| 64 KiB | 90 | 5.89 MB/s |
+| 128 KiB | 44 | 5.79 MB/s |
+| 256 KiB | 22 | 5.74 MB/s |
+
+<!-- END compression_10m_dict -->
+
 ## Running the benchmarks
 
-Rate-limit loopback, run the compression bench, generate charts and
-tables, then remove the limit:
+One bench run at full loopback speed measures CPU-limited msg/s and
+wire bytes per message. The chart and report scripts then project
+throughput at each link speed: `effective_msgs_s = min(cpu_msgs_s,
+link_bytes_s / wire_bytes)`. This avoids `tc tbf`, which
+under-throttles small packets on loopback (they fit inside the token
+bucket burst and loop back before the qdisc can shape them).
 
 ```sh
-# 100 Mbps
-sudo tc qdisc replace dev lo root tbf rate 100mbit burst 128kb latency 50ms
-OMQ_BENCH_SIZES=128,512,2048,8192,32768,131072 cargo bench -p omq-compio --features lz4,zstd --bench compression
-python3 scripts/gen_compression_chart.py --link 100m --tput-max 300
-ruby scripts/compression_report.rb --link 100m
-sudo tc qdisc del dev lo root
+cargo bench -p omq-compio --features lz4,zstd --bench compression
 
-# 1 Gbps
-sudo tc qdisc replace dev lo root tbf rate 1gbit burst 512kb latency 50ms
-OMQ_BENCH_SIZES=128,512,2048,8192,32768,131072 cargo bench -p omq-compio --features lz4,zstd --bench compression
-python3 scripts/gen_compression_chart.py --link 1g --tput-max 1024
+# Generate chart and tables
+python3 scripts/gen_compression_chart.py
 ruby scripts/compression_report.rb --link 1g
-sudo tc qdisc del dev lo root
+ruby scripts/compression_report.rb --link 100m
+ruby scripts/compression_report.rb --link 10m
 ```
 
 Environment variables:
 
-- `OMQ_BENCH_SIZES` -- override payload sizes (default: 128,2048,8192)
+- `OMQ_BENCH_SIZES` -- override payload sizes (default: chart sizes, 8 B to 256 KiB)
 - `OMQ_BENCH_ZSTD_LEVEL` -- override zstd compression level (default: -3)
 - `OMQ_BENCH_ROUNDS` / `OMQ_BENCH_ROUND_MS` -- tune measurement duration

@@ -87,14 +87,26 @@ pub(crate) fn results_path() -> PathBuf {
     p
 }
 
+pub(crate) fn compression_results_path() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("benches");
+    p.push("results_compression.jsonl");
+    p
+}
+
 pub(crate) fn run_id() -> String {
-    std::env::var("OMQ_BENCH_RUN_ID").unwrap_or_else(|_| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        format!("ts-{now}")
-    })
+    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::var("OMQ_BENCH_RUN_ID").unwrap_or_else(|_| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                format!("ts-{now}")
+            })
+        })
+        .clone()
 }
 
 pub(crate) fn sizes() -> Vec<usize> {
@@ -290,13 +302,19 @@ where
         n = n.saturating_mul(4);
     };
 
-    let mut times = Vec::with_capacity(n_rounds);
+    let mut rounds_data = Vec::with_capacity(n_rounds);
     for _ in 0..n_rounds {
+        let cpu0 = thread_cpu_time();
         let t = Instant::now();
         burst(final_n).await;
-        times.push(t.elapsed());
+        let wall = t.elapsed();
+        let cpu = thread_cpu_time().saturating_sub(cpu0);
+        rounds_data.push((wall, cpu));
     }
-    let elapsed = *times.iter().min().expect("at least one round");
+    let &(elapsed, cpu_time) = rounds_data
+        .iter()
+        .min_by_key(|(w, _)| *w)
+        .expect("at least one round");
     let mbps = (final_n * msg_size) as f64 / elapsed.as_secs_f64() / 1_000_000.0;
     let msgs_s = final_n as f64 / elapsed.as_secs_f64();
     Cell {
@@ -304,6 +322,7 @@ where
         elapsed,
         mbps,
         msgs_s,
+        cpu_time,
     }
 }
 
@@ -313,6 +332,16 @@ pub(crate) struct Cell {
     pub elapsed: Duration,
     pub mbps: f64,
     pub msgs_s: f64,
+    pub cpu_time: Duration,
+}
+
+pub(crate) fn thread_cpu_time() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, std::ptr::from_mut(&mut ts)) };
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
 pub(crate) fn print_header(label: &str) {
@@ -334,12 +363,18 @@ pub(crate) fn print_subheader(transport: &str, peers: usize) {
 }
 
 pub(crate) fn print_cell(msg_size: usize, c: Cell) {
+    let cpu_pct = if c.elapsed.as_nanos() > 0 {
+        c.cpu_time.as_secs_f64() / c.elapsed.as_secs_f64() * 100.0
+    } else {
+        0.0
+    };
     println!(
-        "  {:>6}  {:>8.1} MB/s  {:>8.0} msg/s  ({:.2}s, n={})",
+        "  {:>6}  {:>8.1} MB/s  {:>8.0} msg/s  ({:.2}s, cpu {:.0}%, n={})",
         format!("{msg_size}B"),
         c.mbps,
         c.msgs_s,
         c.elapsed.as_secs_f64(),
+        cpu_pct,
         c.n,
     );
 }
@@ -353,7 +388,7 @@ pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_siz
         let _ = std::fs::create_dir_all(parent);
     }
     let row = format!(
-        r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"msg_count":{n},"elapsed":{el},"mbps":{mbps},"msgs_s":{msgs_s}}}"#,
+        r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"msg_count":{n},"elapsed":{el},"cpu_time":{cpu},"mbps":{mbps},"msgs_s":{msgs_s}}}"#,
         run = run_id(),
         pattern = pattern,
         transport = transport,
@@ -361,6 +396,7 @@ pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_siz
         msg_size = msg_size,
         n = c.n,
         el = c.elapsed.as_secs_f64(),
+        cpu = c.cpu_time.as_secs_f64(),
         mbps = c.mbps,
         msgs_s = c.msgs_s,
     );

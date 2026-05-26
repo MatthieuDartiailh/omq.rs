@@ -1,11 +1,39 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/compression.svg from compression bench JSONL data."""
+"""Generate doc/charts/compression.svg -- three-panel combined chart.
+
+Panels (top to bottom): 1 Gbps, 100 Mbps, 10 Mbps.
+Each panel: dashed = msg/s log scale (left axis), solid = virtual throughput (right axis).
+
+The bench runs at full loopback speed.  Each panel projects what throughput
+would be at its link speed: effective_msgs_s = min(cpu_msgs_s, link_bytes_s / wire_bytes).
+"""
 
 import json
 import math
 import sys
-from collections import defaultdict
 from pathlib import Path
+
+
+LINK_SPEEDS = [
+    ("1g",   1_000_000_000 / 8),
+    ("100m", 100_000_000 / 8),
+    ("10m",  10_000_000 / 8),
+]
+LINK_LABELS = {"1g": "1 Gbps", "100m": "100 Mbps", "10m": "10 Mbps"}
+
+COLORS = {
+    "tcp":            "#eab308",
+    "lz4+tcp":        "#60a5fa",
+    "lz4+tcp+dict":   "#1d4ed8",
+    "zstd+tcp":       "#f97316",
+}
+LABELS = {
+    "tcp":            "tcp",
+    "lz4+tcp":        "lz4",
+    "lz4+tcp+dict":   "lz4+dict",
+    "zstd+tcp":       "zstd",
+}
+SERIES_ORDER = ["tcp", "lz4+tcp", "lz4+tcp+dict", "zstd+tcp"]
 
 
 def fmt_size(b: int) -> str:
@@ -16,18 +44,6 @@ def fmt_size(b: int) -> str:
     return f"{b} B"
 
 
-def _nice_ceil(v):
-    if v <= 0:
-        return 1
-    exp = math.floor(math.log10(v))
-    base = 10 ** exp
-    for m in [1, 2, 5, 10]:
-        candidate = m * base
-        if candidate >= v:
-            return candidate
-    return 10 * base
-
-
 def _fmt_y_rate(val):
     if val >= 1_000_000:
         return f"{val / 1_000_000:g}M"
@@ -36,242 +52,336 @@ def _fmt_y_rate(val):
     return f"{val:g}"
 
 
-def load_data(jsonl_path: Path, run_prefix: str | None = None) -> dict:
-    rows = []
+def _fmt_tput(mb):
+    if mb >= 1024:
+        v = mb / 1024
+        return f"{v:.1f} GB/s" if v < 10 else f"{v:.0f} GB/s"
+    if mb >= 10:
+        return f"{mb:.0f} MB/s"
+    return f"{mb:.1f} MB/s"
+
+
+def _tput_ticks(max_mb):
+    if max_mb <= 0:
+        return [1]
+    candidates = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+    for step in candidates:
+        n_ticks = max_mb / step
+        if 3 <= n_ticks <= 8:
+            return [step * i for i in range(1, int(max_mb / step) + 1)]
+    step = candidates[-1]
+    return [step * i for i in range(1, int(max_mb / step) + 1)]
+
+
+def _log_ticks(data_min, data_max):
+    """Return (axis_min, axis_max, tick_values) for a log-scale axis.
+
+    Axis endpoints use the 1-2-5 sequence so the top is at most ~2x
+    above data_max.  Labeled gridlines are at decade boundaries only.
+    """
+    if data_min <= 0:
+        data_min = 1
+    if data_max <= data_min:
+        data_max = data_min * 10
+
+    steps = [1, 2, 5]
+
+    def prev_125(v):
+        exp = math.floor(math.log10(v))
+        for s in reversed(steps):
+            if s * 10 ** exp <= v:
+                return s * 10 ** exp
+        return 10 ** exp
+
+    def next_125(v):
+        exp = math.floor(math.log10(v))
+        for s in steps:
+            if s * 10 ** exp >= v:
+                return s * 10 ** exp
+        return 10 ** (exp + 1)
+
+    lo = prev_125(data_min)
+    hi = next_125(data_max)
+
+    axis_min = math.log10(lo)
+    axis_max = math.log10(hi)
+
+    first_dec = math.ceil(axis_min)
+    last_dec = math.floor(axis_max)
+    ticks = [10 ** e for e in range(first_dec, last_dec + 1)]
+
+    return axis_min, axis_max, ticks
+
+
+def load_raw_data(jsonl_path: Path) -> dict:
+    """Load the latest run and return per-series raw data (cpu_msgs_s, wire_bytes, msg_size)."""
+    all_rows = []
     for line in jsonl_path.read_text().splitlines():
         line = line.strip()
         if not line:
             continue
         r = json.loads(line)
         if r["pattern"] in ("compression_json", "compression_json_dict"):
-            rows.append(r)
+            all_rows.append(r)
 
-    rows.sort(key=lambda r: r["run_id"])
-    if not rows:
-        print("ERROR: no compression_json rows found", file=sys.stderr)
+    if not all_rows:
+        print("ERROR: no compression rows found", file=sys.stderr)
         sys.exit(1)
 
-    if run_prefix:
-        selected = [r for r in rows if r["run_id"].startswith(run_prefix)]
-        print(f"Using {len(selected)} rows matching {run_prefix}*", file=sys.stderr)
-    else:
-        latest_id = rows[-1]["run_id"]
-        try:
-            latest_ts = int(latest_id.split("-")[1])
-        except (IndexError, ValueError):
-            latest_ts = 0
-        selected = [r for r in rows
-                    if r["run_id"].startswith("ts-")
-                    and abs(int(r["run_id"].split("-")[1]) - latest_ts) < 600]
-        if not selected:
-            selected = rows
-        print(f"Using {len(selected)} rows near {latest_id}", file=sys.stderr)
+    all_rows.sort(key=lambda r: r["run_id"])
+    latest_id = all_rows[-1]["run_id"]
+    selected = [r for r in all_rows if r["run_id"] == latest_id]
+    print(f"Using {len(selected)} rows from run {latest_id}", file=sys.stderr)
 
     sizes_set = set()
     series = {}
-
     for r in selected:
         transport = r["transport"]
         is_dict = r["pattern"] == "compression_json_dict"
         key = f"{transport}+dict" if is_dict else transport
         sizes_set.add(r["msg_size"])
         series.setdefault(key, {})[r["msg_size"]] = {
-            "msgs_s": r["msgs_s"],
-            "virt_gbps": r["mbps"] / 1024,
-            "wire_gbps": r["wire_mbps"] / 1024,
+            "cpu_msgs_s": r["msgs_s"],
+            "msg_size": r["msg_size"],
+            "wire_bytes": r.get("wire_bytes", r["msg_size"]),
         }
 
-    sizes = sorted(sizes_set)
-    return {"sizes": sizes, "series": series}
+    return {"sizes": sorted(sizes_set), "series": series}
 
 
-def generate_svg(data: dict, link_label: str = "1 Gbps link",
-                 tput_max_mb: int | None = None) -> str:
-    sizes = data["sizes"]
-    series = data["series"]
-    n = len(sizes)
+def project(raw: dict, link_bytes_s: float) -> dict:
+    """Project throughput at a given link speed."""
+    series = {}
+    for key, size_data in raw["series"].items():
+        series[key] = {}
+        for sz, d in size_data.items():
+            wire = d["wire_bytes"]
+            cpu = d["cpu_msgs_s"]
+            wire_limited = link_bytes_s / max(wire, 1)
+            eff_msgs_s = min(cpu, wire_limited)
+            virt_mbps = eff_msgs_s * d["msg_size"] / 1_000_000
+            series[key][sz] = {
+                "msgs_s": eff_msgs_s,
+                "virt_gbps": virt_mbps / 1024,
+            }
+    return {"sizes": raw["sizes"], "series": series}
 
+
+def generate_svg(panels: dict[str, dict]) -> str:
+    links = [label for label, _ in LINK_SPEEDS if label in panels]
+    if not links:
+        print("ERROR: no panel data", file=sys.stderr)
+        sys.exit(1)
+
+    n_panels = len(links)
     x_left, x_right = 90, 760
-    y_top, y_bot = 45, 350
-    svg_h = 450
     plot_w = x_right - x_left
-    plot_h = y_bot - y_top
+    panel_h = 220
+    panel_gap = 70
+    top_margin = 30
+    x_label_space = 20
+    legend_h = 50
 
-    xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
+    svg_h = (top_margin + n_panels * (panel_h + x_label_space)
+             + (n_panels - 1) * panel_gap + legend_h)
+    svg_w = 850
+    mid_x = (x_left + x_right) / 2
 
-    all_msgs = [d["msgs_s"] for s in series.values() for d in s.values() if d["msgs_s"] > 0]
-    msg_max = _nice_ceil(max(all_msgs)) if all_msgs else 1e6
-
-    if tput_max_mb is None:
-        max_virt = max(
-            d["virt_gbps"]
-            for s in series.values()
-            for d in s.values()
-        )
-        tput_max_mb = int(math.ceil(max_virt * 1024 / 50) * 50)  # round up to 50 MB/s
-    tput_max = tput_max_mb / 1024  # GB/s
-
-    def y_msg(v):
-        if v <= 0:
-            return y_bot
-        return y_bot - (v / msg_max) * plot_h
-
-    def y_tput(v):
-        return y_bot - (v / tput_max) * plot_h
-
-    colors = {
-        "tcp":            "#eab308",
-        "lz4+tcp":        "#60a5fa",
-        "lz4+tcp+dict":   "#1d4ed8",
-        "zstd+tcp":       "#f97316",
-        "zstd+tcp+dict":  "#dc2626",
-    }
-    labels = {
-        "tcp":            "tcp",
-        "lz4+tcp":        "lz4",
-        "lz4+tcp+dict":   "lz4+dict",
-        "zstd+tcp":       "zstd",
-        "zstd+tcp+dict":  "zstd+dict",
-    }
-    order = ["tcp", "lz4+tcp", "lz4+tcp+dict", "zstd+tcp", "zstd+tcp+dict"]
+    all_sizes = set()
+    for d in panels.values():
+        all_sizes.update(d["sizes"])
+    sizes = sorted(all_sizes)
+    n = len(sizes)
+    xs = [x_left + i * plot_w / (n - 1) for i in range(n)] if n > 1 else [mid_x]
 
     L = []
     L.append(
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 {svg_h}"'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
         f' font-family="system-ui, -apple-system, sans-serif">'
     )
-    L.append(f'  <rect width="850" height="{svg_h}" fill="white"/>')
-
-    # Left-axis: msg/s linear scale
-    n_l_ticks = 5
-    for i in range(n_l_ticks + 1):
-        val = i * msg_max / n_l_ticks
-        yy = y_msg(val)
-        L.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
-        )
-        L.append(
-            f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">'
-            f'{_fmt_y_rate(val)}</text>'
-        )
-
-    # Right-axis: virtual throughput (dashed)
-    step = max(50, (tput_max_mb // 5 // 50) * 50) or 50
-    for mb in range(step, tput_max_mb + 1, step):
-        v = mb / 1024  # GB/s
-        yy = y_tput(v)
-        label = f"{mb / 1024:.1f} GB/s" if mb >= 1024 else f"{mb} MB/s"
-        L.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>'
-        )
-        L.append(
-            f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#6b7280" font-size="10">'
-            f'{label}</text>'
-        )
-
-    # Vertical gridlines
-    for x in xs:
-        L.append(
-            f'  <line x1="{x:.1f}" y1="{y_top}" x2="{x:.1f}" y2="{y_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
-        )
-
-    # Axes
-    for axis_line in [
-        f'{x_left}" y1="{y_top}" x2="{x_left}" y2="{y_bot}',
-        f'{x_right}" y1="{y_top}" x2="{x_right}" y2="{y_bot}',
-        f'{x_left}" y1="{y_bot}" x2="{x_right}" y2="{y_bot}',
-    ]:
-        L.append(f'  <line x1="{axis_line}" stroke="#9ca3af" stroke-width="1.5"/>')
-
-    # X-axis labels
-    for i, s in enumerate(sizes):
-        L.append(
-            f'  <text x="{xs[i]:.1f}" y="{y_bot + 16}" text-anchor="middle"'
-            f' fill="#374151" font-size="9.5">{fmt_size(s)}</text>'
-        )
-
-    # Axis titles
-    mid_y = (y_top + y_bot) / 2
-    mid_x = (x_left + x_right) / 2
+    L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
     L.append(
-        f'  <text x="40" y="{mid_y:.1f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="11" font-weight="600"'
-        f' transform="rotate(-90,40,{mid_y:.1f})">msg/s</text>'
-    )
-    L.append(
-        f'  <text x="830" y="{mid_y:.1f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#6b7280" font-size="11" font-weight="600"'
-        f' transform="rotate(90,830,{mid_y:.1f})">virtual throughput</text>'
-    )
-    L.append(
-        f'  <text x="{mid_x:.1f}" y="22" text-anchor="middle" fill="#111827"'
-        f' font-size="13" font-weight="700">'
-        f'Compression transports: structured JSON, 2-process, {link_label} (omq-compio)</text>'
+        f'  <text x="{mid_x}" y="16" text-anchor="middle" fill="#111827"'
+        f' font-size="12" font-weight="700">'
+        f'Compression transports: structured JSON, PUSH/PULL, 2-thread (omq-compio)</text>'
     )
 
-    # --- Plot lines ---
-    present = [k for k in order if k in series]
+    last_x_label_y = 0
 
-    # Dashed: msg/s
-    for name in present:
-        d = series[name]
-        active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
-        pts = " ".join(
-            f"{xs[i]:.1f},{y_msg(d[s]['msgs_s']):.1f}" for i, s in active
+    for pi, link in enumerate(links):
+        data = panels[link]
+        series = data["series"]
+        y_top = (top_margin + pi * (panel_h + x_label_space + panel_gap) + 25)
+        y_bot = y_top + panel_h
+        plot_h = y_bot - y_top
+
+        all_msgs = [d["msgs_s"] for s in series.values()
+                    for d in s.values() if d["msgs_s"] > 0]
+        msg_min = min(all_msgs) if all_msgs else 1
+        msg_max = max(all_msgs) if all_msgs else 1e6
+        axis_min, axis_max, msg_ticks = _log_ticks(msg_min, msg_max)
+
+        max_virt = max(
+            (d["virt_gbps"] for s in series.values() for d in s.values()),
+            default=0.001,
         )
+        tput_max_mb = int(math.ceil(max_virt * 1024 / 10) * 10)
+        if tput_max_mb < 10:
+            tput_max_mb = int(math.ceil(max_virt * 1024))
+        tput_max = tput_max_mb / 1024
+
+        def y_msg(v, _bot=y_bot, _h=plot_h, _lmin=axis_min, _lmax=axis_max):
+            if v <= 0:
+                return _bot
+            lv = math.log10(v)
+            frac = max(0, min(1, (lv - _lmin) / (_lmax - _lmin)))
+            return _bot - frac * _h
+
+        def y_tput(v, _bot=y_bot, _h=plot_h, _max=tput_max):
+            return _bot - (v / _max) * _h
+
+        link_label = LINK_LABELS.get(link, link)
         L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
-            f' stroke-width="2" stroke-dasharray="6,4"/>'
+            f'  <text x="{mid_x:.1f}" y="{y_top - 10}" text-anchor="middle"'
+            f' fill="#111827" font-size="12" font-weight="700">'
+            f'{link_label}</text>'
         )
 
-    # Solid: virtual throughput with dots
-    for name in present:
-        d = series[name]
-        active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
-        pts = " ".join(
-            f"{xs[i]:.1f},{y_tput(d[s]['virt_gbps']):.1f}" for i, s in active
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
-        )
-        for i, s in active:
-            yy = y_tput(d[s]["virt_gbps"])
+        # Left-axis gridlines (msg/s, log scale)
+        for val in msg_ticks:
+            yy = y_msg(val)
             L.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{colors[name]}" stroke="white" stroke-width="1"/>'
+                f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
+                f' stroke="#e5e7eb" stroke-width="1"/>'
+            )
+            L.append(
+                f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
+                f' dominant-baseline="middle" fill="#374151" font-size="9">'
+                f'{_fmt_y_rate(val)}</text>'
             )
 
-    # Legend
-    leg_y1 = y_bot + 38
-    leg_y2 = leg_y1 + 12
-    legend_xs = [90, 220, 360, 500, 630]
-    for i, name in enumerate(present):
-        lx = legend_xs[i]
-        c = colors[name]
+        # Right-axis gridlines (virtual throughput)
+        ticks = _tput_ticks(tput_max_mb)
+        for mb in ticks:
+            v = mb / 1024
+            yy = y_tput(v)
+            L.append(
+                f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
+                f' stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>'
+            )
+            L.append(
+                f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
+                f' dominant-baseline="middle" fill="#6b7280" font-size="9">'
+                f'{_fmt_tput(mb)}</text>'
+            )
+
+        # Vertical gridlines
+        for x in xs:
+            L.append(
+                f'  <line x1="{x:.1f}" y1="{y_top}" x2="{x:.1f}" y2="{y_bot}"'
+                f' stroke="#e5e7eb" stroke-width="1"/>'
+            )
+
+        # Axes
+        for axis_line in [
+            f'{x_left}" y1="{y_top}" x2="{x_left}" y2="{y_bot}',
+            f'{x_right}" y1="{y_top}" x2="{x_right}" y2="{y_bot}',
+            f'{x_left}" y1="{y_bot}" x2="{x_right}" y2="{y_bot}',
+        ]:
+            L.append(
+                f'  <line x1="{axis_line}" stroke="#9ca3af" stroke-width="1.5"/>'
+            )
+
+        # X-axis labels
+        last_x_label_y = y_bot + 14
+        for i, s in enumerate(sizes):
+            L.append(
+                f'  <text x="{xs[i]:.1f}" y="{last_x_label_y}" text-anchor="middle"'
+                f' fill="#374151" font-size="8">{fmt_size(s)}</text>'
+            )
+
+        # Axis titles
+        mid_y = (y_top + y_bot) / 2
         L.append(
-            f'  <line x1="{lx}" y1="{leg_y1}" x2="{lx + 14}" y2="{leg_y1}"'
-            f' stroke="{c}" stroke-width="2" stroke-dasharray="4,3"/>'
+            f'  <text x="40" y="{mid_y:.1f}" text-anchor="middle"'
+            f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+            f' transform="rotate(-90,40,{mid_y:.1f})">msg/s (log)</text>'
         )
         L.append(
-            f'  <line x1="{lx}" y1="{leg_y2}" x2="{lx + 14}" y2="{leg_y2}"'
+            f'  <text x="840" y="{mid_y:.1f}" text-anchor="middle"'
+            f' dominant-baseline="middle" fill="#6b7280" font-size="10" font-weight="600"'
+            f' transform="rotate(90,840,{mid_y:.1f})">virtual throughput</text>'
+        )
+
+        # Plot lines
+        present = [k for k in SERIES_ORDER if k in series]
+
+        # Dashed: msg/s (log)
+        for name in present:
+            d = series[name]
+            active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
+            if not active:
+                continue
+            pts = " ".join(
+                f"{xs[i]:.1f},{y_msg(d[s]['msgs_s']):.1f}" for i, s in active
+            )
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{COLORS[name]}"'
+                f' stroke-width="1.5" stroke-dasharray="5,3"/>'
+            )
+
+        # Solid: virtual throughput with dots
+        for name in present:
+            d = series[name]
+            active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
+            if not active:
+                continue
+            pts = " ".join(
+                f"{xs[i]:.1f},{y_tput(d[s]['virt_gbps']):.1f}" for i, s in active
+            )
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{COLORS[name]}"'
+                f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+            )
+            for i, s in active:
+                yy = y_tput(d[s]["virt_gbps"])
+                L.append(
+                    f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="2.5"'
+                    f' fill="{COLORS[name]}" stroke="white" stroke-width="1"/>'
+                )
+
+    # Legend below last panel's x-axis labels
+    leg_y1 = last_x_label_y + 18
+    leg_y2 = leg_y1 + 12
+    all_present = []
+    for link in links:
+        for k in SERIES_ORDER:
+            if k in panels[link]["series"] and k not in all_present:
+                all_present.append(k)
+
+    n_items = len(all_present)
+    item_w = plot_w / max(n_items, 1)
+    for i, name in enumerate(all_present):
+        lx = x_left + i * item_w
+        c = COLORS[name]
+        L.append(
+            f'  <line x1="{lx:.0f}" y1="{leg_y1}" x2="{lx + 14:.0f}" y2="{leg_y1}"'
+            f' stroke="{c}" stroke-width="1.5" stroke-dasharray="4,3"/>'
+        )
+        L.append(
+            f'  <line x1="{lx:.0f}" y1="{leg_y2}" x2="{lx + 14:.0f}" y2="{leg_y2}"'
             f' stroke="{c}" stroke-width="2.5"/>'
         )
         L.append(
-            f'  <text x="{lx + 18}" y="{leg_y1 + 4}" fill="#374151" font-size="10"'
-            f' font-weight="500">{labels[name]}</text>'
+            f'  <text x="{lx + 18:.0f}" y="{leg_y1 + 4}" fill="#374151" font-size="10"'
+            f' font-weight="500">{LABELS[name]}</text>'
         )
 
-    footer_y = y_bot + 68
+    footer_y = leg_y2 + 18
     L.append(
         f'  <text x="{mid_x:.1f}" y="{footer_y}" text-anchor="middle"'
         f' fill="#9ca3af" font-size="9">'
-        f'dashed = msg/s (left) · solid = virtual throughput (right)</text>'
+        f'dashed = msg/s log (left) · solid = virtual throughput (right)</text>'
     )
     L.append("</svg>")
 
@@ -279,30 +389,22 @@ def generate_svg(data: dict, link_label: str = "1 Gbps link",
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--link", default="1g",
-                        help="Link label for title and filename suffix (e.g. 1g, 100m)")
-    parser.add_argument("--run-prefix", default=None,
-                        help="Run ID prefix to select (e.g. ts-177923)")
-    parser.add_argument("--tput-max", type=int, default=None,
-                        help="Right-axis max in MB/s (auto-detected if omitted)")
-    args = parser.parse_args()
-
-    link_labels = {"1g": "1 Gbps link", "100m": "100 Mbps link", "10g": "10 Gbps link"}
-    link_label = link_labels.get(args.link, f"{args.link} link")
-
     repo = Path(__file__).resolve().parent.parent
-    jsonl = repo / "omq-compio" / "benches" / "results.jsonl"
+    jsonl = repo / "omq-compio" / "benches" / "results_compression.jsonl"
 
     if not jsonl.exists():
-        print(f"ERROR: {jsonl} not found. Run the compression bench first.", file=sys.stderr)
+        print(f"ERROR: {jsonl} not found. Run the compression bench first.",
+              file=sys.stderr)
         sys.exit(1)
 
-    data = load_data(jsonl, run_prefix=args.run_prefix)
-    svg = generate_svg(data, link_label=link_label, tput_max_mb=args.tput_max)
+    raw = load_raw_data(jsonl)
 
-    output = repo / "doc" / "charts" / f"compression_{args.link}.svg"
+    panels = {}
+    for label, link_bytes_s in LINK_SPEEDS:
+        panels[label] = project(raw, link_bytes_s)
+
+    svg = generate_svg(panels)
+    output = repo / "doc" / "charts" / "compression.svg"
     output.write_text(svg)
     print(f"Written: {output}", file=sys.stderr)
 
