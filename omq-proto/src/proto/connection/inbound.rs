@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::message::{FrameFlags, Message, Payload};
 
 use super::super::command::{self, Command, PeerProperties};
-use super::super::greeting::{self, effective_minor};
+use super::super::greeting::{self, MechanismName, effective_minor};
 use super::super::mechanism::MechanismStep;
 use super::super::{frame, is_compatible};
 #[cfg(any(feature = "curve", feature = "blake3zmq"))]
@@ -68,6 +68,13 @@ impl Connection {
                 our_mech.as_str().unwrap_or("<invalid>"),
                 g.mechanism.as_str().unwrap_or("<invalid>"),
             )));
+        }
+        // RFC 23: "When a peer uses the NULL security mechanism, the as-server
+        // field MUST be zero."
+        if our_mech == MechanismName::NULL && g.as_server {
+            return Err(Error::HandshakeFailed(
+                "peer sent as-server=1 with NULL mechanism".into(),
+            ));
         }
         self.peer_minor = effective_minor(g.minor);
         self.peer_greeting = raw;

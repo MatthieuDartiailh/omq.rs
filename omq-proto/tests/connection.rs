@@ -675,3 +675,24 @@ mod ws {
         panic!("expected incompatible socket type rejection");
     }
 }
+
+#[test]
+fn null_rejects_peer_as_server() {
+    use bytes::BytesMut;
+    use omq_proto::proto::greeting::{Greeting, MechanismName};
+
+    let mut pull = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+    // Drain the greeting pull wants to send
+    let _ = pull.poll_transmit();
+
+    // Craft a greeting with as_server=1 and NULL mechanism
+    let bad_greeting = Greeting::current(MechanismName::NULL, true);
+    let mut buf = BytesMut::new();
+    bad_greeting.encode(&mut buf);
+
+    let err = pull.handle_input(buf.freeze()).unwrap_err();
+    assert!(
+        matches!(err, Error::HandshakeFailed(ref msg) if msg.contains("as-server")),
+        "expected as-server rejection, got: {err:?}"
+    );
+}

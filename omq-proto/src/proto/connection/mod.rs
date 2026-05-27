@@ -303,10 +303,10 @@ impl Connection {
     }
 
     fn queue_greeting(&mut self) {
-        let g = Greeting::current(
-            self.config.mechanism_name(),
-            self.config.role == Role::Server,
-        );
+        let mech = self.config.mechanism_name();
+        // RFC 23: "When a peer uses the NULL security mechanism, the as-server field MUST be zero."
+        let as_server = mech != MechanismName::NULL && self.config.role == Role::Server;
+        let g = Greeting::current(mech, as_server);
         let mut buf = BytesMut::new();
         g.encode(&mut buf);
         let bytes = buf.freeze();
