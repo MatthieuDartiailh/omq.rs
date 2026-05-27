@@ -368,6 +368,20 @@ impl NullMechanism {
     }
 
     fn on_command(&mut self, cmd: Command, _out: &mut Vec<Command>) -> Result<MechanismStep> {
+        if let Command::Unknown { ref name, ref body } = cmd
+            && name.as_ref() == b"ERROR"
+        {
+            let reason = if body.is_empty() {
+                String::new()
+            } else {
+                let reason_len = body[0] as usize;
+                let end = (1 + reason_len).min(body.len());
+                String::from_utf8_lossy(&body[1..end]).into_owned()
+            };
+            return Err(Error::HandshakeFailed(format!(
+                "NULL peer sent ERROR: {reason}"
+            )));
+        }
         match (self.state, cmd) {
             (NullState::AwaitingReady, Command::Ready(props)) => {
                 self.state = NullState::Done;
@@ -452,6 +466,27 @@ mod tests {
             .on_command(Command::Subscribe(bytes::Bytes::default()), &mut out)
             .unwrap_err();
         assert!(matches!(err, Error::HandshakeFailed(_)));
+    }
+
+    #[test]
+    fn null_surfaces_error_reason() {
+        let mut m = NullMechanism::new();
+        let mut out = Vec::new();
+        m.start(&mut out, PeerProperties::default());
+        out.clear();
+        let err = m
+            .on_command(
+                Command::Unknown {
+                    name: bytes::Bytes::from_static(b"ERROR"),
+                    body: bytes::Bytes::from_static(b"\x04auth"),
+                },
+                &mut out,
+            )
+            .unwrap_err();
+        match err {
+            Error::HandshakeFailed(msg) => assert!(msg.contains("auth"), "{msg}"),
+            other => panic!("expected HandshakeFailed, got {other:?}"),
+        }
     }
 
     #[test]

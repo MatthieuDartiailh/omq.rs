@@ -495,6 +495,9 @@ impl Socket {
         while let Some(ev) = io.codec.poll_event() {
             match ev {
                 Event::Message(_) => unreachable!("messages use poll_message"),
+                // Direct-recv sockets (PULL/SUB/PAIR/…) don't process
+                // post-handshake commands here; PING/PONG are already
+                // handled inside the codec.
                 Event::Command(_) => {}
                 Event::HandshakeSucceeded { .. } => {
                     io.handshake_done = true;

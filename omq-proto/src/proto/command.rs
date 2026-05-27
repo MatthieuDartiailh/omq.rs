@@ -264,10 +264,21 @@ pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties>
     let mut props = PeerProperties::default();
     while !body.is_empty() {
         let name_len = body[0] as usize;
+        if name_len == 0 {
+            return Err(Error::Protocol("READY property name is empty".into()));
+        }
         if body.len() < 1 + name_len + 4 {
             return Err(Error::Protocol("READY property truncated".into()));
         }
         let name = body.slice(1..=name_len);
+        if !name
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'+')
+        {
+            return Err(Error::Protocol(
+                "READY property name contains invalid characters".into(),
+            ));
+        }
         let value_len =
             u32::from_be_bytes(body[1 + name_len..1 + name_len + 4].try_into().unwrap()) as usize;
         let val_start = 1 + name_len + 4;
@@ -277,9 +288,12 @@ pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties>
         let value = body.slice(val_start..val_start + value_len);
         body = body.slice(val_start + value_len..);
 
-        let name_str = std::str::from_utf8(&name)
-            .map_err(|_| Error::Protocol("READY property name not ASCII".into()))?;
+        // Safe: we validated ASCII alphanumeric + [-_.+] above.
+        let name_str = std::str::from_utf8(&name).expect("validated ASCII");
         if name_str.eq_ignore_ascii_case("Socket-Type") {
+            if props.socket_type.is_some() {
+                return Err(Error::Protocol("duplicate Socket-Type property".into()));
+            }
             let t = SocketType::from_wire(&value).ok_or_else(|| {
                 Error::Protocol(format!(
                     "unknown peer socket type: {:?}",
@@ -288,6 +302,9 @@ pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties>
             })?;
             props.socket_type = Some(t);
         } else if name_str.eq_ignore_ascii_case("Identity") {
+            if props.identity.is_some() {
+                return Err(Error::Protocol("duplicate Identity property".into()));
+            }
             if !value.is_empty() {
                 props.identity = Some(value);
             }
@@ -458,6 +475,54 @@ mod tests {
     fn decode_truncated_name() {
         let b = Bytes::from_static(&[5, b'x']);
         assert!(matches!(decode(b), Err(Error::Protocol(_))));
+    }
+
+    #[test]
+    fn rejects_empty_property_name() {
+        let mut body = BytesMut::new();
+        body.put_u8(0); // name_len = 0
+        body.put_u32(1);
+        body.put_u8(b'x');
+        assert!(matches!(
+            decode_properties_inner(body.freeze()),
+            Err(Error::Protocol(msg)) if msg.contains("empty")
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_property_name_chars() {
+        let mut body = BytesMut::new();
+        body.put_u8(3);
+        body.put_slice(b"a b"); // space is invalid
+        body.put_u32(1);
+        body.put_u8(b'v');
+        assert!(matches!(
+            decode_properties_inner(body.freeze()),
+            Err(Error::Protocol(msg)) if msg.contains("invalid characters")
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_socket_type() {
+        let mut body = BytesMut::new();
+        write_property(&mut body, b"Socket-Type", b"PUSH");
+        write_property(&mut body, b"Socket-Type", b"PULL");
+        assert!(matches!(
+            decode_properties_inner(body.freeze()),
+            Err(Error::Protocol(msg)) if msg.contains("duplicate Socket-Type")
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_identity() {
+        let mut body = BytesMut::new();
+        write_property(&mut body, b"Socket-Type", b"PUSH");
+        write_property(&mut body, b"Identity", b"alice");
+        write_property(&mut body, b"Identity", b"bob");
+        assert!(matches!(
+            decode_properties_inner(body.freeze()),
+            Err(Error::Protocol(msg)) if msg.contains("duplicate Identity")
+        ));
     }
 
     #[test]

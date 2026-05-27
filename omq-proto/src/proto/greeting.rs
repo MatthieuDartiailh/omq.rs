@@ -187,7 +187,7 @@ pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<(Greeting, 
     let raw_bytes = raw_payload.as_bytes();
     let major = raw[10];
     let minor = raw[11];
-    if major != ZMTP_MAJOR {
+    if major < ZMTP_MAJOR {
         return Err(Error::UnsupportedZmtpVersion { major, minor });
     }
     let mut mech_raw = [0u8; MECHANISM_BYTES];
@@ -329,5 +329,25 @@ mod tests {
         let mut buf = encode_to_buf(&s);
         let (d, _) = try_decode(&mut buf).unwrap().unwrap();
         assert!(d.as_server);
+    }
+
+    #[test]
+    fn accepts_higher_major_version() {
+        let mut g = Greeting::current(MechanismName::NULL, false);
+        g.major = 4;
+        let mut buf = encode_to_buf(&g);
+        let (decoded, _) = try_decode(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded.major, 4);
+    }
+
+    #[test]
+    fn rejects_lower_major_version() {
+        let mut g = Greeting::current(MechanismName::NULL, false);
+        g.major = 2;
+        let mut buf = encode_to_buf(&g);
+        assert!(matches!(
+            try_decode(&mut buf),
+            Err(Error::UnsupportedZmtpVersion { major: 2, .. })
+        ));
     }
 }
