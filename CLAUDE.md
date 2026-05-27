@@ -10,11 +10,12 @@ out-of-tree (maturin etc.).
   handshakes (NULL / PLAIN / CURVE / BLAKE3ZMQ), compression transforms
   (lz4 / zstd), endpoint parsing, options, subscription matcher.
   No async, no I/O. Mirrors `rustls::ConnectionCommon` / `quinn-proto`.
+- **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
+  Works on Linux and macOS (and likely other mio targets).
 - **`omq-compio`** -- single-threaded compio backend (io_uring on
-  Linux). **Primary backend.**
-- **`omq-tokio`** -- multi-thread tokio backend. Alternative backend.
+  Linux, IOCP on Windows). Not available on macOS.
 - **`omq`** -- facade crate. Re-exports one backend via Cargo features:
-  `compio-backend` (default) or `tokio-backend`. Mutually exclusive.
+  `tokio-backend` (default) or `compio-backend`. Mutually exclusive.
 - **`blume`** -- batching MPSC channel for `omq-compio` inbound delivery.
 - **`yring`** -- bounded SPSC ring buffer for inproc transport.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq.so` /

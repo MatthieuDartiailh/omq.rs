@@ -1,10 +1,10 @@
 //! Two-process throughput and latency peer for omq-compio.
 //!
 //! Usage:
-//!   `bench_peer` push \<endpoint\> \<`msg_size_bytes`\>
-//!   `bench_peer` pull \<endpoint\> \<`msg_size_bytes`\> \<`duration_secs`\>
-//!   `bench_peer` rep  \<endpoint\> \<`msg_size_bytes`\>
-//!   `bench_peer` req  \<endpoint\> \<`msg_size_bytes`\> \<iterations\> \<warmup\>
+//!   `bench_peer_compio` push \<endpoint\> \<`msg_size_bytes`\>
+//!   `bench_peer_compio` pull \<endpoint\> \<`msg_size_bytes`\> \<`duration_secs`\>
+//!   `bench_peer_compio` rep  \<endpoint\> \<`msg_size_bytes`\>
+//!   `bench_peer_compio` req  \<endpoint\> \<`msg_size_bytes`\> \<iterations\> \<warmup\>
 //!
 //! Endpoint: a port number (`4000`), an `ip:port` pair (`0.0.0.0:4000`),
 //! a full URI (`tcp://0.0.0.0:4000`), or an IPC path (`ipc:///tmp/foo.sock`).
@@ -108,12 +108,12 @@ fn main() {
                 run_req(ep, size, iterations, warmup).await;
             }
             _ => {
-                eprintln!("usage: bench_peer push <endpoint> <size>");
-                eprintln!("       bench_peer pull <endpoint> <size> <duration_secs>");
-                eprintln!("       bench_peer inproc <name> <size> <duration_secs>");
-                eprintln!("       bench_peer inproc-st <name> <size> <duration_secs>");
-                eprintln!("       bench_peer rep <endpoint> <size>");
-                eprintln!("       bench_peer req <endpoint> <size> <iterations> <warmup>");
+                eprintln!("usage: bench_peer_compio push <endpoint> <size>");
+                eprintln!("       bench_peer_compio pull <endpoint> <size> <duration_secs>");
+                eprintln!("       bench_peer_compio inproc <name> <size> <duration_secs>");
+                eprintln!("       bench_peer_compio inproc-st <name> <size> <duration_secs>");
+                eprintln!("       bench_peer_compio rep <endpoint> <size>");
+                eprintln!("       bench_peer_compio req <endpoint> <size> <iterations> <warmup>");
                 std::process::exit(1);
             }
         }

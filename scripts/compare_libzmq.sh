@@ -9,7 +9,7 @@
 # are created.
 #
 # Inproc requires both sockets in the same process, so each peer binary
-# runs its own push+pull internally (bench_peer inproc / libzmq_bench_peer
+# runs its own push+pull internally (bench_peer_compio inproc / libzmq_bench_peer
 # inproc).
 #
 # Usage:
@@ -65,9 +65,9 @@ fi
 
 # ---------- build ----------
 
-echo "==> building omq-compio bench_peer..."
-cargo build --release -p omq-compio --bin bench_peer -q
-OMQ_PEER="$REPO/target/release/bench_peer"
+echo "==> building omq-compio bench_peer_compio..."
+cargo build --release -p omq-compio --bin bench_peer_compio -q
+OMQ_PEER="$REPO/target/release/bench_peer_compio"
 
 echo "==> building omq-tokio bench_peer..."
 cargo build --release -p omq-tokio --bin bench_peer_tokio -q

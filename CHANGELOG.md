@@ -6,6 +6,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### omq 0.12.2
+
+- Breaking: `tokio-backend` is now the default Cargo feature (was `compio-backend`). Users who relied on the default must either add `--no-default-features --features compio-backend` or leave their `Cargo.toml` as-is (no change needed for tokio users).
+
 ## [0.2.14] - 2026-05-25
 
 ### pyomq 0.10.3
