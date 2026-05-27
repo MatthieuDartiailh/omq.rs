@@ -18,12 +18,12 @@
 //!   header to bound the output buffer (RFC §5.4 / §5.6).
 //! - Thresholds: 64 B with dict, 512 B without (RFC §5.5).
 //! - Net-saving check: skip if compressed >= plaintext - 4 (RFC §5.5).
-//! - Dict cap: 64 KiB total (sentinel + bytes) (RFC §6.2).
+//! - Dict cap: 8 KiB total (sentinel + bytes) (RFC §6.2).
 //!
 //! Auto-trained dictionaries (RFC §6.5): opt-in via `with_auto_train`.
 //! Samples flow through `encode` until either 1000 messages or
 //! 100 KiB total plaintext have been collected, at which point we
-//! call `zstd_safe::train_from_buffer` to produce an 8 KiB dict,
+//! call `zstd_safe::train_from_buffer` to produce a dict (default 2 KiB),
 //! patch its dict-id field to a random user-range value
 //! (`32768..2^31`), install it as the send dict, and ship it on the
 //! next outbound message via the existing `SENTINEL_DICT` path. If
@@ -55,16 +55,14 @@ const SENTINEL_DICT: [u8; 4] = ZDICT_MAGIC;
 const MIN_COMPRESS_NO_DICT: usize = 512;
 const MIN_COMPRESS_WITH_DICT: usize = 64;
 
-/// RFC §6.2: a dictionary message MUST NOT exceed 64 KiB total
-/// (sentinel + dict bytes), so the dict body itself is capped at
-/// `MAX_DICT_BYTES = 64 KiB - 4`.
-pub const MAX_DICT_BYTES: usize = 64 * 1024 - 4;
+/// Default maximum dict size accepted from a peer (8 KiB).
+pub const MAX_DICT_BYTES: usize = 8 * 1024;
 
 /// Default compression level. Negative = Zstd "fast" strategy.
 pub const DEFAULT_LEVEL: i32 = -3;
 
-/// Auto-train: trained dictionary capacity (RFC §6.5).
-const DICT_CAPACITY: usize = 8 * 1024;
+/// Auto-train: default trained dictionary capacity (RFC §6.5).
+pub const DEFAULT_DICT_CAPACITY: usize = 2048;
 
 /// Auto-train: trigger thresholds. Whichever fires first wins.
 const TRAIN_MAX_SAMPLES: usize = 1000;
@@ -123,6 +121,10 @@ pub struct ZstdEncoder {
     train: Option<TrainState>,
     /// Reusable output buffer for compress2.
     out_buf: Vec<u8>,
+    /// User override for the compression threshold.
+    threshold_override: Option<usize>,
+    /// Auto-train dict capacity in bytes.
+    dict_capacity: usize,
 }
 
 impl std::fmt::Debug for ZstdEncoder {
@@ -157,6 +159,8 @@ impl ZstdEncoder {
             cctx_configured: false,
             train: None,
             out_buf: Vec::new(),
+            threshold_override: None,
+            dict_capacity: DEFAULT_DICT_CAPACITY,
         }
     }
 
@@ -172,11 +176,34 @@ impl ZstdEncoder {
         self
     }
 
+    #[must_use]
+    pub fn with_threshold(mut self, threshold: usize) -> Self {
+        self.threshold_override = Some(threshold);
+        self
+    }
+
+    #[must_use]
+    pub fn with_dict_capacity(mut self, capacity: usize) -> Self {
+        self.dict_capacity = capacity;
+        self
+    }
+
+    fn effective_threshold(&self) -> usize {
+        self.threshold_override
+            .unwrap_or(if self.send_dict.is_some() {
+                MIN_COMPRESS_WITH_DICT
+            } else {
+                MIN_COMPRESS_NO_DICT
+            })
+    }
+
     /// Per-part size below which `encode` is guaranteed to use
     /// `SENTINEL_PLAIN`. `None` when a send-side dictionary is installed
-    /// or auto-train is active.
+    /// or auto-train is active and no explicit threshold override is set.
     pub fn passthrough_threshold(&self) -> Option<usize> {
-        if self.send_dict.is_none() && self.train.is_none() {
+        if self.threshold_override.is_some() {
+            Some(self.effective_threshold())
+        } else if self.send_dict.is_none() && self.train.is_none() {
             Some(MIN_COMPRESS_NO_DICT)
         } else {
             None
@@ -257,7 +284,7 @@ impl ZstdEncoder {
             samples_buf.extend_from_slice(s);
             sizes.push(s.len());
         }
-        let mut dict_buf: Vec<u8> = Vec::with_capacity(DICT_CAPACITY);
+        let mut dict_buf: Vec<u8> = Vec::with_capacity(self.dict_capacity);
         let Ok(trained_len) = zstd_safe::train_from_buffer(&mut dict_buf, &samples_buf, &sizes)
         else {
             return;
@@ -277,12 +304,7 @@ impl ZstdEncoder {
 
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
         let plain = part.as_bytes();
-        let threshold = if self.send_dict.is_some() {
-            MIN_COMPRESS_WITH_DICT
-        } else {
-            MIN_COMPRESS_NO_DICT
-        };
-        if plain.len() < threshold {
+        if plain.len() < self.effective_threshold() {
             return Ok(plaintext_payload(&plain));
         }
 
@@ -330,6 +352,7 @@ impl Default for ZstdEncoder {
 pub struct ZstdDecoder {
     recv_dict: Option<Bytes>,
     max_message_size: Option<usize>,
+    max_recv_dict_size: usize,
     dctx: DCtx<'static>,
 }
 
@@ -350,6 +373,7 @@ impl ZstdDecoder {
         Self {
             recv_dict: None,
             max_message_size: None,
+            max_recv_dict_size: MAX_DICT_BYTES,
             dctx: DCtx::create(),
         }
     }
@@ -358,6 +382,12 @@ impl ZstdDecoder {
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_recv_dict_size(mut self, max: usize) -> Self {
+        self.max_recv_dict_size = max;
         self
     }
 
@@ -397,7 +427,7 @@ impl ZstdDecoder {
                 // first 4 bytes corrupts it for `decompress_using_dict`
                 // and breaks interop with peers that ship the dict raw
                 // (omq-zstd Ruby).
-                validate_dict(&bytes, "Zstd", MAX_DICT_BYTES)?;
+                validate_dict(&bytes, "Zstd", self.max_recv_dict_size)?;
                 self.recv_dict = Some(bytes);
                 return Ok(None);
             } else {

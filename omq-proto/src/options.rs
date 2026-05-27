@@ -14,12 +14,10 @@ use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 use crate::proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey};
 #[cfg(feature = "curve")]
 use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey};
-/// Upper bound for `Options::compression_dict`. Matches the smaller
-/// of the two dict-size limits across the supported compression
-/// transports - the lz4 RFC's 64 KiB minus 4 (sentinel + ZDICT
-/// magic). Inlined as a const so the `compression_dict` setter
-/// works regardless of which compression features are enabled.
-const COMPRESSION_DICT_MAX: usize = 64 * 1024 - 4;
+/// Upper bound for `Options::compression_dict`. Both transports
+/// cap at 8 KiB. Inlined as a const so the `compression_dict`
+/// setter works regardless of which compression features are enabled.
+const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
 /// Per-socket configuration.
 #[derive(Clone, Debug)]
@@ -90,18 +88,19 @@ pub struct Options {
     /// compressed against it. Must be 1..=8192 bytes.
     pub compression_dict: Option<Bytes>,
 
-    /// Zstd auto-trained dictionaries (RFC §6.5). Defaults to **on**
-    /// - when neither `compression_dict` nor any other dict source
-    ///   is configured on a `zstd+tcp://` connection, the encoder
-    ///   samples the first 1000 outbound messages or 100 KiB total
-    ///   plaintext (whichever fires first), trains an 8 KiB dict, and
-    ///   ships it. After that the per-frame compression threshold
-    ///   drops from 512 B to 64 B and small messages start riding the
-    ///   dict. Setting `compression_dict` overrides - auto-train is
-    ///   silently disabled when a static dict is supplied.
-    ///   Ignored by `lz4+tcp://` (LZ4 has no standard trainer).
-    ///   Set to `false` to suppress training (e.g. tests that need a
-    ///   deterministic wire shape).
+    /// Zstd auto-trained dictionaries (RFC §6.5). Defaults to **on**.
+    /// When neither `compression_dict` nor any other dict source
+    /// is configured on a `zstd+tcp://` connection, the encoder
+    /// samples the first 1000 outbound messages or 100 KiB total
+    /// plaintext (whichever fires first), trains a dict (capacity
+    /// controlled by `compression_dict_capacity`, default 2 KiB),
+    /// and ships it. After that the per-frame compression threshold
+    /// drops from 512 B to 64 B and small messages start riding the
+    /// dict. Setting `compression_dict` overrides: auto-train is
+    /// silently disabled when a static dict is supplied.
+    /// Ignored by `lz4+tcp://` (LZ4 has no standard trainer).
+    /// Set to `false` to suppress training (e.g. tests that need a
+    /// deterministic wire shape).
     pub compression_auto_train: bool,
 
     /// Zstd compression level. Negative values select the "fast" strategy
@@ -109,6 +108,23 @@ pub struct Options {
     /// positive values trade speed for ratio. Ignored by `lz4+tcp://`.
     /// Default: -3.
     pub compression_level: i32,
+
+    /// Minimum payload size (bytes) before compression is attempted.
+    /// Messages smaller than this are sent uncompressed regardless of
+    /// dict presence. `None` uses the built-in defaults (which vary by
+    /// transport and dict presence). Useful on high-bandwidth links
+    /// where compressing tiny messages wastes CPU.
+    pub compression_threshold: Option<usize>,
+
+    /// Zstd auto-train dict capacity in bytes. Controls the maximum
+    /// size of the dictionary produced by auto-training. Default: 2048.
+    /// Ignored by `lz4+tcp://` and when `compression_dict` is set.
+    pub compression_dict_capacity: Option<usize>,
+
+    /// Maximum dictionary size (bytes) accepted from a peer. Dicts
+    /// larger than this are rejected. Default: 8192 for both
+    /// transports.
+    pub max_recv_dict_size: Option<usize>,
 
     /// Switch the recv path to a sized one-shot read for any inbound
     /// frame whose wire payload is at least this many bytes.
@@ -342,6 +358,9 @@ impl Default for Options {
             compression_dict: None,
             compression_auto_train: true,
             compression_level: -3,
+            compression_threshold: None,
+            compression_dict_capacity: None,
+            max_recv_dict_size: None,
             large_message_threshold: Some(128 * 1024),
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
@@ -694,6 +713,33 @@ impl Options {
     #[must_use]
     pub fn compression_level(mut self, level: i32) -> Self {
         self.compression_level = level;
+        self
+    }
+
+    /// Override the minimum payload size for compression. Messages
+    /// smaller than `threshold` bytes are sent uncompressed. Useful
+    /// on high-bandwidth links where compressing tiny messages wastes
+    /// CPU without meaningful wire savings.
+    #[must_use]
+    pub fn compression_threshold(mut self, threshold: usize) -> Self {
+        self.compression_threshold = Some(threshold);
+        self
+    }
+
+    /// Set the zstd auto-train dictionary capacity in bytes
+    /// (default 2048). Ignored by `lz4+tcp://` and when
+    /// `compression_dict` is set.
+    #[must_use]
+    pub fn compression_dict_capacity(mut self, capacity: usize) -> Self {
+        self.compression_dict_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the maximum dictionary size accepted from a peer.
+    /// Dicts larger than this are rejected at decode time.
+    #[must_use]
+    pub fn max_recv_dict_size(mut self, max: usize) -> Self {
+        self.max_recv_dict_size = Some(max);
         self
     }
 }

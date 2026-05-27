@@ -21,11 +21,18 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 
 ### vs. libzmq
 
+[How to beat libzmq](doc/performance.md) | [Comparison tables](COMPARISONS.md)
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
 </p>
 
-[How to beat libzmq](doc/performance.md) | [Comparison tables](COMPARISONS.md) | [Benchmarks](BENCHMARKS.md) | [Compression benchmarks (!)](BENCHMARKS_COMPRESSION.md)
+<details>
+<summary>Compression transport throughput (lz4 / zstd, dict 2 KiB)</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression_2048.svg" alt="Compression throughput at 1 Gbps, 100 Mbps, and 10 Mbps" width="850">
+</p>
+</details>
 
 ## Install
 
