@@ -13,8 +13,8 @@ Lints: `missing_debug_implementations` = **deny**,
 ## Unit and integration tests
 
 ```sh
-cargo test  -p omq-compio               # default features
-cargo test  -p omq-tokio
+cargo test  -p omq-tokio                # default features
+cargo test  -p omq-compio
 cargo test  -p omq-proto
 cargo test  -p blume
 cargo test  -p omq-tokio --test req_rep -- some_test_name

@@ -4,16 +4,16 @@ Facade crate for [omq](https://github.com/paddor/omq.rs). Re-exports one backend
 
 | Feature | Backend | Crate |
 |---------|---------|-------|
-| `compio-backend` (default) | Single-threaded, io_uring | [omq-compio](https://crates.io/crates/omq-compio) |
-| `tokio-backend` | Multi-threaded, tokio | [omq-tokio](https://crates.io/crates/omq-tokio) |
+| `tokio-backend` (default) | Multi-threaded, tokio | [omq-tokio](https://crates.io/crates/omq-tokio) |
+| `compio-backend` | Single-threaded, io_uring | [omq-compio](https://crates.io/crates/omq-compio) |
 
 Mutually exclusive.
 
 ## Install
 
 ```sh
-cargo add omq                     # compio backend (default)
-cargo add omq --no-default-features --features tokio-backend
+cargo add omq                     # tokio backend (default)
+cargo add omq --no-default-features --features compio-backend
 ```
 
 ## Usage

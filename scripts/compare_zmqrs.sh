@@ -71,9 +71,9 @@ echo "==> building omq-tokio bench_peer..."
 cargo build --release -p omq-tokio --bin bench_peer_tokio -q
 TOKIO_PEER="$REPO/target/release/bench_peer_tokio"
 
-echo "==> building omq-compio bench_peer..."
-cargo build --release -p omq-compio --bin bench_peer -q
-COMPIO_PEER="$REPO/target/release/bench_peer"
+echo "==> building omq-compio bench_peer_compio..."
+cargo build --release -p omq-compio --bin bench_peer_compio -q
+COMPIO_PEER="$REPO/target/release/bench_peer_compio"
 
 echo "==> building omq-zeromq bench_peer..."
 cargo build --release -p omq-zeromq --bin bench_peer_zeromq -q

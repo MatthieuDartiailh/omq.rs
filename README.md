@@ -13,7 +13,7 @@
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
-- Two async backends: **compio** (io_uring, default) and **tokio**
+- Two async backends: **tokio** (default, Linux/macOS) and **compio** (io_uring, Linux)
 - 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `zstd+tcp://`)
 - 4 security mechanisms: NULL, PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
@@ -33,8 +33,8 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 > **Experimental.** The API is unstable and may change without notice. Not yet battle-tested in production. Bug reports and testing in real workloads are very welcome.
 
 ```sh
-cargo add omq                     # compio backend (default)
-cargo add omq --no-default-features --features tokio-backend
+cargo add omq                     # tokio backend (default)
+cargo add omq --no-default-features --features compio-backend
 ```
 
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv — just async Rust:
@@ -54,8 +54,8 @@ assert_eq!(&msg[0], b"hello");
 
 `omq` is a thin facade; pick one backend at build time:
 
-- `compio-backend` (default): single-thread io_uring/IOCP ([`omq-compio`](omq-compio/))
-- `tokio-backend`: multi-thread tokio + mio ([`omq-tokio`](omq-tokio/))
+- `tokio-backend` (default): multi-thread tokio + mio ([`omq-tokio`](omq-tokio/))
+- `compio-backend`: single-thread io_uring/IOCP ([`omq-compio`](omq-compio/))
 
 Identical public `Socket` API on both, verified by `coverage_matrix` + `interop_compio` test suites.
 
@@ -66,8 +66,8 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 | feature           | what it adds                                      | extra deps                       |
 |-------------------|---------------------------------------------------|----------------------------------|
-| `compio-backend`  | (default) compio io_uring/IOCP backend            | -                                |
-| `tokio-backend`   | tokio multi-thread backend                        | -                                |
+| `tokio-backend`   | (default) tokio multi-thread backend              | -                                |
+| `compio-backend`  | compio io_uring/IOCP backend                      | -                                |
 | `plain`           | PLAIN username/password auth (RFC 24)             | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
 | `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
@@ -106,8 +106,8 @@ independent, versioned, and published separately.
 |-------|-------------|
 | [`omq`](omq/) | Facade: re-exports `omq-compio` or `omq-tokio` at build time |
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions |
-| [`omq-compio`](omq-compio/) | Primary backend: single-thread io_uring / IOCP |
-| [`omq-tokio`](omq-tokio/) | Alternative backend: multi-thread tokio |
+| [`omq-tokio`](omq-tokio/) | Default backend: multi-thread tokio |
+| [`omq-compio`](omq-compio/) | io_uring backend: single-thread io_uring / IOCP |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
 | [`omq-zeromq`](omq-zeromq/) | Drop-in replacement for the [`zeromq`](https://crates.io/crates/zeromq) Rust crate |
 | [`blume`](blume/) | Batching MPSC channel with swap-drain consumer |
@@ -154,8 +154,9 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 
 ## Platform and requirements
 
-Linux first. `omq-compio` uses io_uring on Linux, kqueue on macOS.
-`omq-tokio` uses mio / epoll / kqueue.
+Linux and macOS (and likely other mio targets). `omq-tokio` uses mio /
+epoll / kqueue. `omq-compio` uses io_uring (Linux 6.0+) and is not
+available on macOS.
 
 - Rust 1.93 or newer (edition 2024).
 - `omq-compio`: Linux 6.0 or newer (io_uring multi-shot recv with

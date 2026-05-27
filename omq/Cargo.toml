@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pure Rust ØMQ/ZeroMQ. Facade over omq-compio (default) or omq-tokio. Wire-compatible with libzmq."
+description = "Pure Rust ØMQ/ZeroMQ. Facade over omq-tokio (default) or omq-compio. Wire-compatible with libzmq."
 readme = "README.md"
 keywords = ["zeromq", "zmq", "messaging", "networking", "async"]
 categories = ["network-programming", "asynchronous"]
@@ -15,10 +15,10 @@ categories = ["network-programming", "asynchronous"]
 workspace = true
 
 [features]
-# Pick exactly one backend. compio is the default; tokio-backend is
-# for callers already invested in a tokio runtime. Enabling both is a
+# Pick exactly one backend. tokio is the default; compio-backend is
+# for single-threaded io_uring environments. Enabling both is a
 # compile-time error.
-default = ["compio-backend"]
+default = ["tokio-backend"]
 compio-backend = ["dep:omq-compio"]
 tokio-backend = ["dep:omq-tokio"]
 
@@ -58,5 +58,5 @@ omq-compio = { path = "../omq-compio", version = "0.11.0", default-features = fa
 omq-tokio  = { path = "../omq-tokio",  version = "0.12.1", default-features = false, optional = true }
 
 [package.metadata.docs.rs]
-features = ["compio-backend", "curve", "blake3zmq", "plain", "lz4", "zstd", "ws", "priority"]
+features = ["tokio-backend", "curve", "blake3zmq", "plain", "lz4", "zstd", "ws", "priority"]
 rustdoc-args = ["--cfg", "docsrs"]

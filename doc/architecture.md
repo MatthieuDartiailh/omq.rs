@@ -11,8 +11,8 @@ runtime backends differ. Detail lives in [`compio.md`](compio.md),
 +------------------------------------------------------------------+
 |  user code                                                       |
 |  +-> omq (facade, picks one backend at build time):              |
-|         omq-compio  (default, single-thread io_uring/IOCP)       |
-|         omq-tokio   (multi-thread, mio/epoll/kqueue)             |
+|         omq-tokio   (default, multi-thread, mio/epoll/kqueue)    |
+|         omq-compio  (single-thread io_uring/IOCP)                |
 +------------------------------------------------------------------+
         |  Socket::send / Socket::recv / connect / bind / monitor
         v

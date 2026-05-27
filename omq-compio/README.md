@@ -1,7 +1,6 @@
 # omq-compio
 
-compio backend for [omq](https://crates.io/crates/omq). Single-threaded, io_uring-based.
-Primary backend, used by default when you `cargo add omq`.
+compio backend for [omq](https://crates.io/crates/omq). Single-threaded, io_uring-based (Linux / IOCP on Windows).
 
 Built on [omq-proto](https://crates.io/crates/omq-proto) and
 [compio](https://crates.io/crates/compio) (io_uring on Linux, IOCP on Windows).
