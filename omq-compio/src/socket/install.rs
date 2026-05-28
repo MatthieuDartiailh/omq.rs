@@ -444,7 +444,6 @@ fn install_accepted_wire_peer_with_leftover(
         encoder,
         uses_crypto,
         inner.options.large_message_threshold.unwrap_or(0),
-        cmd_channel_capacity(&inner.options),
         #[cfg(feature = "ws")]
         is_ws,
         #[cfg(feature = "ws")]

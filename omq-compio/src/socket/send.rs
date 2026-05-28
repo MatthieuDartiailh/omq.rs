@@ -52,6 +52,7 @@ use super::inner::PeerOut;
 #[cfg(not(feature = "priority"))]
 fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
     const DIRECT_CAP: usize = 512 * 1024;
+    const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
 
     // Crypto connections must go through the codec's send_message.
     if state.uses_crypto {
@@ -66,7 +67,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             return Ok(false);
         };
         if eq.total_bytes() >= DIRECT_CAP
-            || state.direct_msg_count.load(Ordering::Relaxed) >= state.send_hwm
+            || state.direct_msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
         {
             return Ok(false);
         }
@@ -108,7 +109,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             return Ok(false);
         };
         if eq.total_bytes() >= DIRECT_CAP
-            || state.direct_msg_count.load(Ordering::Relaxed) >= state.send_hwm
+            || state.direct_msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
         {
             return Ok(false);
         }
@@ -146,7 +147,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         return Ok(false);
     };
     if eq.total_bytes() >= DIRECT_CAP
-        || state.direct_msg_count.load(Ordering::Relaxed) >= state.send_hwm
+        || state.direct_msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
     {
         return Ok(false);
     }
