@@ -82,6 +82,14 @@ impl SocketDriver {
                 reason,
             });
         }
+        // Clear the DirectIo slot if the disconnected peer owned it.
+        // This unblocks the eligibility check for the next peer's
+        // DirectIo installation.
+        if let Ok(mut guard) = self.direct_io.try_lock()
+            && guard.as_ref().is_some_and(|dio| dio.peer_id == peer_id)
+        {
+            *guard = None;
+        }
         match self.socket_type {
             SocketType::Req if self.peers.is_empty() => {
                 self.req_awaiting_reply
@@ -207,6 +215,7 @@ impl SocketDriver {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     fn spawn_byte_stream_connection(
         &mut self,
         stream: AnyStream,
@@ -625,13 +634,11 @@ impl SocketDriver {
         {
             let dio_slot = self.direct_io.clone();
             let pending = self.direct_io_pending.clone();
-            let ready = self.direct_io_ready.clone();
             tokio::spawn(async move {
                 if let Ok(dio) = rx.await {
                     *dio_slot.lock().await = Some(dio);
                 }
                 pending.store(false, std::sync::atomic::Ordering::Release);
-                ready.notify_waiters();
             });
         }
     }

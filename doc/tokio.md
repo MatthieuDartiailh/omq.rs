@@ -201,6 +201,31 @@ prefers the highest-priority alive peer; lower tiers run only when
 higher tiers are blocked or disconnected. This trades work-stealing
 for per-peer queues -- relevant for ordering, not for raw throughput.
 
+## Direct I/O: single-peer send bypass
+
+For single-peer wire connections (REQ/REP/DEALER/ROUTER/CLIENT/
+SERVER/PAIR), the driver hands off the write half of the TCP socket
+to a `DirectIo` struct after the ZMTP handshake completes.
+`Socket::send` encodes ZMTP frames into an `EncodedQueue` and
+writes directly to the wire, eliminating the send-path cross-task
+hop through `shared_msg_rx`.
+
+The driver continues running in a continuation loop after handoff.
+It keeps the read half, the codec, and a clone of the shared writer
+(`Arc<Mutex<Writer>>`). The continuation loop handles:
+
+- Recv: reads from the wire, feeds the codec, routes messages via
+  `recv_direct` (PULL/DEALER/REQ/SUB/PAIR/CLIENT) or `peer_out`
+  (REP/ROUTER/SERVER).
+- Heartbeat: sends PING commands via the shared writer.
+- Fallback writes: drains `shared_msg_rx` for messages that arrived
+  via `send_submitter` (e.g. before `DirectIo` was installed).
+- EOF detection: sets `DirectIo`'s dead flag and exits normally;
+  `run()` sends `PeerOut::Closed` so the actor can reconnect.
+
+Disabled when a frame transform is active (CURVE, BLAKE3ZMQ) —
+the codec's encrypt-in-place state cannot be split from the writer.
+
 ## Reconnect and monitor
 
 Both follow the same shape as compio (see [`compio.md`](compio.md) for

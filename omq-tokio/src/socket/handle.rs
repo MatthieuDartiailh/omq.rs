@@ -22,6 +22,7 @@ use crate::routing::{SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocSpsc;
 
 pub(crate) type DirectIoSlot = Arc<tokio::sync::Mutex<Option<DirectIo>>>;
+pub(crate) type DirectIoPending = Arc<AtomicBool>;
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
 pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
@@ -137,17 +138,10 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
-    /// Direct I/O bypass: when set, send/recv do TCP I/O directly on
-    /// the user task, eliminating all data-path cross-task wakeups.
+    /// Direct I/O bypass: when set, send does TCP I/O directly on the
+    /// user task, eliminating the send-path cross-task wakeup. Recv
+    /// stays on the driver (which continues running after handoff).
     direct_io: DirectIoSlot,
-    /// Notified when `direct_io` transitions from None to Some. Lets
-    /// send/recv block until DirectIo is installed instead of falling
-    /// through to the DropQueue (whose consumer has exited).
-    direct_io_ready: Arc<tokio::sync::Notify>,
-    /// True when a direct-IO handoff is in progress. Tells send/recv to
-    /// wait on `direct_io_ready` rather than falling through to the
-    /// normal path (whose consumer/producer has exited).
-    direct_io_pending: Arc<AtomicBool>,
 }
 
 impl Socket {
@@ -191,8 +185,7 @@ impl Socket {
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let direct_io: DirectIoSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let direct_io_ready = Arc::new(tokio::sync::Notify::new());
-        let direct_io_pending = Arc::new(AtomicBool::new(false));
+        let direct_io_pending: DirectIoPending = Arc::new(AtomicBool::new(false));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -209,7 +202,6 @@ impl Socket {
             type_state.clone(),
             req_awaiting_reply.clone(),
             direct_io.clone(),
-            direct_io_ready.clone(),
             direct_io_pending.clone(),
         );
         spawn_driver(driver);
@@ -230,8 +222,6 @@ impl Socket {
                 type_state,
                 req_awaiting_reply,
                 direct_io,
-                direct_io_ready,
-                direct_io_pending,
             }),
         }
     }
@@ -307,9 +297,29 @@ impl Socket {
         match self.inner.socket_type {
             SocketType::Req => {
                 if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
-                    return Err(Error::Protocol(
-                        "REQ socket must receive a reply before sending again".into(),
-                    ));
+                    // The driver detects peer disconnect (EOF) and resets
+                    // req_awaiting_reply via on_peer_disconnected. Give
+                    // the actor a chance to process PeerClosed, then check
+                    // if the DirectIo is dead.
+                    tokio::task::yield_now().await;
+                    if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
+                        let guard = self.inner.direct_io.lock().await;
+                        if guard.as_ref().is_some_and(DirectIo::is_dead) {
+                            let peer_id = guard.as_ref().unwrap().peer_id;
+                            drop(guard);
+                            self.clear_direct_io_slot(peer_id).await;
+                            self.inner
+                                .req_awaiting_reply
+                                .store(false, Ordering::Relaxed);
+                        } else {
+                            drop(guard);
+                            if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
+                                return Err(Error::Protocol(
+                                    "REQ socket must receive a reply before sending again".into(),
+                                ));
+                            }
+                        }
+                    }
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
@@ -322,20 +332,41 @@ impl Socket {
                     .lock()
                     .expect("type_state")
                     .pre_send(self.inner.socket_type, msg)?;
-                return self.send_with_direct_io(msg).await;
-            }
-            SocketType::Router | SocketType::Server => {
-                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
+                // pre_send restores the saved envelope which includes the
+                // peer identity (added by wrap_for_transform on recv). The
+                // identity routing strategy normally strips it; DirectIo
+                // bypasses that, so strip it here.
                 {
                     let guard = self.inner.direct_io.lock().await;
                     if let Some(dio) = guard.as_ref() {
+                        let peer_id = dio.peer_id;
                         let mut msg = msg;
                         let _routing_id = msg.pop_front();
                         return match dio.send_msg(&msg).await {
                             Ok(()) => Ok(()),
                             Err(e) => {
                                 drop(guard);
-                                self.clear_direct_io_slot().await;
+                                self.clear_direct_io_slot(peer_id).await;
+                                Err(e)
+                            }
+                        };
+                    }
+                }
+                return self.inner.send_submitter.send(msg).await;
+            }
+            SocketType::Router | SocketType::Server => {
+                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
+                {
+                    let guard = self.inner.direct_io.lock().await;
+                    if let Some(dio) = guard.as_ref() {
+                        let peer_id = dio.peer_id;
+                        let mut msg = msg;
+                        let _routing_id = msg.pop_front();
+                        return match dio.send_msg(&msg).await {
+                            Ok(()) => Ok(()),
+                            Err(e) => {
+                                drop(guard);
+                                self.clear_direct_io_slot(peer_id).await;
                                 Err(e)
                             }
                         };
@@ -390,36 +421,16 @@ impl Socket {
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
         match self.inner.socket_type {
-            SocketType::Req => self.recv_direct_io_req().await,
-            t if is_direct_io_eligible(t) => loop {
-                // Always try the buffered recv channel first — the
-                // driver may have decoded messages before handing off.
-                if let Ok(msg) = self.inner.recv_rx.try_recv() {
-                    return Ok(msg);
+            SocketType::Req => loop {
+                let mut msg = self.inner.recv_rx.recv().await?;
+                match msg.pop_front() {
+                    Some(delim) if delim.is_empty() => {}
+                    _ => continue,
                 }
-                let notified = self.inner.direct_io_ready.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                {
-                    let guard = self.inner.direct_io.lock().await;
-                    if let Some(dio) = guard.as_ref() {
-                        match self.recv_direct_io_typed(dio).await {
-                            Ok(msg) => return Ok(msg),
-                            Err(_) => {
-                                drop(guard);
-                                self.clear_direct_io_slot().await;
-                                continue;
-                            }
-                        }
-                    }
-                }
-                tokio::select! {
-                    biased;
-                    res = self.inner.recv_rx.recv() => {
-                        return res.map_err(|_| Error::Closed);
-                    }
-                    () = &mut notified => continue,
-                }
+                self.inner
+                    .req_awaiting_reply
+                    .store(false, Ordering::Relaxed);
+                return Ok(msg);
             },
             _ => self.inner.recv_rx.recv().await,
         }
@@ -665,96 +676,28 @@ impl Socket {
         {
             let guard = self.inner.direct_io.lock().await;
             if let Some(dio) = guard.as_ref() {
-                match dio.send_msg(&msg).await {
-                    Ok(()) => return Ok(()),
-                    Err(_) => {
-                        drop(guard);
-                        self.clear_direct_io_slot().await;
-                        return self.inner.send_submitter.send(msg).await;
-                    }
+                if let Ok(()) = dio.send_msg(&msg).await {
+                    return Ok(());
                 }
+                let failed_peer_id = dio.peer_id;
+                drop(guard);
+                self.clear_direct_io_slot(failed_peer_id).await;
+                return self.inner.send_submitter.send(msg).await;
             }
         }
         self.inner.send_submitter.send(msg).await
     }
 
-    async fn recv_direct_io_req(&self) -> Result<Message> {
-        loop {
-            let notified = self.inner.direct_io_ready.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            {
-                let guard = self.inner.direct_io.lock().await;
-                if let Some(dio) = guard.as_ref() {
-                    match dio.recv_msg().await {
-                        Ok(mut msg) => {
-                            match msg.pop_front() {
-                                Some(delim) if delim.is_empty() => {}
-                                _ => continue,
-                            }
-                            self.inner
-                                .req_awaiting_reply
-                                .store(false, Ordering::Relaxed);
-                            return Ok(msg);
-                        }
-                        Err(e) => {
-                            drop(guard);
-                            return self.handle_direct_io_error(e).await;
-                        }
-                    }
-                }
-            }
-            // DirectIo not ready yet. Wait or use the normal recv path
-            // (messages arriving during handshake go via recv_direct).
-            tokio::select! {
-                biased;
-                () = &mut notified => continue,
-                res = self.inner.recv_rx.recv() => {
-                    let mut msg = res.map_err(|_| Error::Closed)?;
-                    match msg.pop_front() {
-                        Some(delim) if delim.is_empty() => {}
-                        _ => continue,
-                    }
-                    self.inner
-                        .req_awaiting_reply
-                        .store(false, Ordering::Relaxed);
-                    return Ok(msg);
-                }
-            }
-        }
-    }
-
-    async fn recv_direct_io_typed(&self, dio: &DirectIo) -> Result<Message> {
-        let st = self.inner.socket_type;
-        match dio.recv_msg().await {
-            Ok(msg) => match st {
-                SocketType::Rep => {
-                    let result = self
-                        .inner
-                        .type_state
-                        .lock()
-                        .expect("type_state")
-                        .post_recv(st, msg);
-                    match result {
-                        Ok(Some(m)) => Ok(m),
-                        Ok(None) => Err(Error::Protocol("REP envelope error".into())),
-                        Err(e) => Err(e),
-                    }
-                }
-                SocketType::Router | SocketType::Server => {
-                    Ok(Message::with_prefix(dio.peer_identity.clone(), msg))
-                }
-                _ => Ok(msg),
-            },
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn clear_direct_io_slot(&self) {
+    async fn clear_direct_io_slot(&self, expected_peer_id: u64) {
         let mut guard = self.inner.direct_io.lock().await;
+        if guard
+            .as_ref()
+            .is_some_and(|dio| dio.peer_id != expected_peer_id)
+        {
+            return;
+        }
         if let Some(dio) = guard.take() {
             let peer_id = dio.peer_id;
-            dio.cancel_heartbeat();
             drop(guard);
             let _ = self
                 .inner
@@ -762,11 +705,6 @@ impl Socket {
                 .send(SocketCommand::DirectIoDisconnected { peer_id })
                 .await;
         }
-    }
-
-    async fn handle_direct_io_error(&self, err: Error) -> Result<Message> {
-        self.clear_direct_io_slot().await;
-        Err(err)
     }
 }
 

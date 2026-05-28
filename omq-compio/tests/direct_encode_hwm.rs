@@ -1,6 +1,6 @@
 //! Regression test: the direct-encode fast path must provide backpressure.
-//! Bounded by a 512 KiB byte cap (DIRECT_CAP); the cmd channel (bounded
-//! at send_hwm) provides the per-message backpressure layer.
+//! Bounded by a 512 KiB byte cap (`DIRECT_CAP`); the cmd channel (bounded
+//! at `send_hwm`) provides the per-message backpressure layer.
 
 #![cfg(not(feature = "priority"))]
 

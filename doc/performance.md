@@ -1,9 +1,7 @@
 # How to beat libzmq
 
 Design choices and dead ends behind the throughput numbers in
-[`../COMPARISONS.md`](../COMPARISONS.md). For anyone building or
-maintaining a ZMQ-shaped library who wants to know which
-optimizations stack and which don't.
+[`../COMPARISONS.md`](../COMPARISONS.md).
 
 For structure, see [`architecture.md`](architecture.md),
 [`compio.md`](compio.md), [`tokio.md`](tokio.md).
@@ -99,12 +97,12 @@ oneshot ack) plus a per-peer mpsc hop.
 ## Choosing an io_uring runtime
 
 Tried `monoio` first. Working port, fast I/O, but the API was
-rough (buffer ownership, lifetimes, cancellation). `compio` had
-cleaner ergonomics (closer to tokio) and cross-platform support
-(io_uring on Linux, IOCP on Windows, kqueue on macOS). Stuck.
+difficult (buffer ownership, lifetimes, cancellation). `compio` had
+better ergonomics (closer to tokio) and cross-platform support
+(io_uring on Linux, IOCP on Windows, kqueue on macOS).
 
-omq-tokio is maintained as a second backend because tokio remains
-the runtime of choice for most Rust apps.
+omq-tokio is maintained as a second backend because most Rust
+applications use tokio.
 
 ## Even with io_uring, hops are the bottleneck
 
@@ -547,8 +545,7 @@ below bench noise floor. Kept on a side branch.
 
 libzmq's I/O thread overlaps encoding with kernel writes.
 omq-compio is single-threaded: encoding and `write_vectored` run
-sequentially. That is a structural disadvantage the implementation
-has to overcome by being shorter everywhere else:
+sequentially. omq compensates by being shorter everywhere else:
 
 - No actor hop on send for non-REQ/REP.
 - No pump task hop for byte-stream peers.
@@ -559,8 +556,7 @@ has to overcome by being shorter everywhere else:
 - Encode/write pipelined via lock decomposition (writer mutex
   separate from codec mutex).
 
-The last point is the structural answer: omq does not have a
-separate I/O thread, but it pipelines encode against write.
+No separate I/O thread, but encode pipelines against write.
 
 ## Inproc per-peer ypipe: 3M -> 17M msg/s
 
@@ -671,7 +667,7 @@ enum). The Box moved to the `Command` variant (cold path: handshake
 only). Eliminates malloc+free per message on the hot delivery path.
 
 **Skip `peer_identity.clone()` for non-identity sockets.** PULL/SUB/
-PAIR never use the peer identity — the driver was cloning a `Bytes`
+PAIR never use the peer identity. The driver was cloning a `Bytes`
 (Arc bump + drop) unconditionally. Now gated on `needs_identity`
 (ROUTER/REP/SERVER/PEER/STREAM only).
 
@@ -701,7 +697,7 @@ and the REP envelope, which lived inside the actor.
 Fix: share `TypeState` between the socket handle and the actor via
 `Arc<std::sync::Mutex<TypeState>>`. `Socket::send` for REQ/REP
 locks it inline, calls `pre_send`, and pushes through
-`SendSubmitter` — same path PUSH already takes. Contention is zero
+`SendSubmitter`. Same path PUSH already takes. Contention is zero
 in practice: REQ/REP alternation guarantees send and recv (which
 calls `post_recv` under the same lock in the actor) never overlap.
 
@@ -720,7 +716,7 @@ alternation flag) → `recv_tx`. Two task hops.
 
 Fix: add `Req` to `can_bypass_actor_recv`. The driver pushes
 raw messages directly to `recv_tx`. `Socket::recv` applies
-`post_recv_req_direct` inline — strips the delimiter and clears
+`post_recv_req_direct` inline. Strips the delimiter and clears
 the flag without checking `req_awaiting_reply` as a precondition.
 
 The unchecked variant is necessary because `on_peer_disconnected`
@@ -744,7 +740,7 @@ send path still hops through DropQueue → driver on both sides.
 
 The connection driver's read arm did
 `Bytes::copy_from_slice(&read_buf[..n])` on every `reader.read`
-return — one full memcpy per syscall. Fix: replace the `Vec<u8>`
+return. One full memcpy per syscall. Fix: replace the `Vec<u8>`
 read buffer with `BytesMut` and call `reader.read_buf(&mut buf)`,
 then `buf.split().freeze()` to hand the codec a zero-copy `Bytes`.
 
@@ -769,24 +765,78 @@ REQ's `pre_send` / `post_recv` only mutates a single bool
 (`req_awaiting_reply`). REQ strict alternation (send-recv-send-recv)
 guarantees no concurrent access between the two. Replaced the
 shared `Mutex<TypeState>` lock with an `AtomicBool` (Relaxed
-ordering — the DropQueue/async_channel between send and recv
+ordering; the DropQueue/async_channel between send and recv
 provides happens-before). REP keeps the Mutex because it stores
 `Option<Vec<Bytes>>` for the envelope.
 
 Saves ~200 ns per send+recv pair (uncontended Mutex overhead:
 CAS + memory barrier + function call).
 
+## Tokio direct I/O: single-peer send bypass
+
+For single-peer connections (REQ/REP/DEALER/ROUTER/CLIENT/SERVER/
+PAIR), the driver hands off the wire writer to a `DirectIo` struct
+after the ZMTP handshake. `Socket::send` encodes ZMTP frames via
+`EncodedQueue` and writes directly to the wire. Zero task hops on
+the send path.
+
+The driver continues running after handoff in a continuation loop.
+It keeps the reader and codec, handles recv (via `recv_direct` or
+`peer_out`), heartbeat PINGs, EOF detection, and fallback writes
+for messages routed through `send_submitter`. The writer is shared
+between `DirectIo` and the driver via `Arc<Mutex<Writer>>`.
+
+Disabled when a frame transform is active (CURVE, BLAKE3ZMQ).
+The codec's encrypt-in-place flow cannot use the flat-encode path.
+
+### Dead end: bidirectional DirectIo (driver exits after handoff)
+
+Goal: eliminate both send and recv task hops. Hand reader, writer,
+and codec to `DirectIo`, let the driver exit, do all I/O inline
+on the user task. REQ/REP IPC latency dropped from 63 µs to
+47 µs. But the code needed three workarounds because the driver
+was gone and nobody was watching the connection.
+
+1. **`probe_connection()`**: zero-timeout read after every write
+   to detect peer EOF. Without a driver reading continuously, a
+   dead peer was invisible until the next `recv_msg`. REQ strict
+   alternation made this fatal: if the peer died after a send,
+   the next send would block forever on `req_awaiting_reply`.
+
+2. **`flush_codec_via_spawn()`**: `recv_msg` held the state lock
+   (reader + codec) while blocking on `reader.read_buf`. When the
+   codec produced a PONG response, it could not write because the
+   writer lived behind a separate mutex that the caller might also
+   be contending. Fix: spawn a task per PONG write.
+
+3. **Spawn-on-backpressure**: `send_msg` tried a zero-timeout
+   write. On partial write or timeout it transferred the
+   `OwnedMutexGuard` to a spawned task so the caller would not
+   block. Another spawn per backpressured send.
+
+Each spawn is a heap allocation + scheduler interaction + waker
+registration, visible on the hot path under load. Error
+propagation was non-local: a write error in a spawned task set
+an atomic flag that the next call checked, but the error itself
+was lost.
+
+A separate attempt tried a pausable background reader task for
+EOF detection (replacing `probe_connection`). Zero-timeout reads
+left stale waker registrations in tokio's reactor, causing real
+reads to miss wake-ups. REQ/REP IPC hung at 2048 B+.
+
+Send-only DirectIo avoids all three: the driver never exits, so
+it detects EOF natively, writes heartbeat PINGs directly, and
+applies backpressure through `write_all`. Cost: recv goes through
+the driver (~3 µs per message on the latency path).
+
 ## What remains
 
-**Single-wire-peer bypass on tokio.** The compio direct-encode
-fast path has no equivalent on tokio yet. A shared
-`EncodedQueue` between `Socket::send` and the driver (claimed via
-`try_lock`) would eliminate the DropQueue → driver hop on send.
-Dead end: a naive second queue causes FIFO violations when
-messages split between DropQueue (pre-handshake) and DirectEncode
-(post-handshake). Correct approach requires a single shared EQ
-that the driver owns jointly with the sender, not a transfer
-between two independent queues.
+**Single-wire-peer bypass on tokio (send-side encode).** The compio
+direct-encode fast path (`try_direct_encode` via sync `try_lock`)
+has no direct equivalent on tokio. DirectIo handles the single-peer
+case; the compio-style shared `EncodedQueue` for multi-peer
+round-robin remains future work.
 
 **Per-peer wire yring for recv.** Replacing the MPMC
 `async_channel` on the recv_direct path with per-peer yring SPSC
@@ -798,7 +848,7 @@ messages). The Notify stores at most one permit; subsequent
 `notify_one()` calls are no-ops. The consumer's
 `try_drain_consumers()` should prefetch all available items, but
 empirically hangs after ~28/30 messages in the random_sizes test.
-Root cause unclear — possibly a subtle interaction between the
+Root cause unclear. Possibly a subtle interaction between the
 biased select's `notified()` registration and the producer's
 `flush()` visibility. Needs investigation.
 

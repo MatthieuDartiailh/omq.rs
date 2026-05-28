@@ -221,8 +221,7 @@ pub(crate) struct SocketDriver {
     recv_notify: super::handle::SpscRecvNotify,
     spsc_activated: super::handle::SpscActivated,
     direct_io: super::handle::DirectIoSlot,
-    direct_io_ready: Arc<tokio::sync::Notify>,
-    direct_io_pending: Arc<AtomicBool>,
+    direct_io_pending: super::handle::DirectIoPending,
 }
 
 impl SocketDriver {
@@ -243,8 +242,7 @@ impl SocketDriver {
         type_state: Arc<Mutex<TypeState>>,
         req_awaiting_reply: Arc<AtomicBool>,
         direct_io: super::handle::DirectIoSlot,
-        direct_io_ready: Arc<tokio::sync::Notify>,
-        direct_io_pending: Arc<AtomicBool>,
+        direct_io_pending: super::handle::DirectIoPending,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -281,7 +279,6 @@ impl SocketDriver {
             recv_notify,
             spsc_activated,
             direct_io,
-            direct_io_ready,
             direct_io_pending,
         }
     }
