@@ -57,6 +57,13 @@ only when the lint fires in some feature combinations but not others
 Lints: `missing_debug_implementations` = **deny**,
 `unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
 
+## Cross-library benchmarks and charts
+
+```sh
+python3 scripts/run_comparisons.py          # run benchmarks → benchmarks/comparisons.jsonl
+python3 scripts/gen_comparison_chart.py     # JSONL → doc/charts/*.svg
+```
+
 **interop_compio dep constraint:** `omq-tokio/Cargo.toml`'s compio
 dev-dep must use the same git rev as `omq-compio`'s dep. Different
 revs link two `compio-runtime` instances -> TLS mismatch panic.
@@ -83,7 +90,7 @@ See `doc/` for details:
 - [`doc/architecture.md`](doc/architecture.md) -- diagrams, two-queue model, message types, transport/mechanism tables
 - [`doc/compio.md`](doc/compio.md) -- compio internals: key types, DirectIoState, EncodedQueue, driver loop, recv-direct
 - [`doc/tokio.md`](doc/tokio.md) -- tokio internals: actor shape, send/recv bypass, routing strategies
-- [`doc/performance.md`](doc/performance.md) -- how omq beat libzmq: design decisions, dead ends, profiling
+- [`doc/performance.md`](doc/performance.md) -- omq's performance journey: design decisions, dead ends, profiling. Technical and brief. No em-dashes, no frill.
 - [`doc/libzmq/errors.md`](doc/libzmq/errors.md) -- libzmq error handling catalog
 - [`doc/libzmq/gaps.md`](doc/libzmq/gaps.md) -- error handling gap analysis vs omq
 - [`doc/libzmq/perf.md`](doc/libzmq/perf.md) -- libzmq performance internals reference

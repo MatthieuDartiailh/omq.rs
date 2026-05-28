@@ -11,7 +11,8 @@
 //!
 //! Push: binds, sends \<`msg_size`\> byte messages forever.
 //! Pull: connects, warms up for 500 ms, then counts messages for \<duration\>
-//!       seconds and prints a human-readable summary block to stdout.
+//!       seconds and prints raw stats to stdout (for scripts) and a
+//!       human-readable summary to stderr.
 //! Rep: binds a REP socket, echoes every received message back forever.
 //! Req: connects a REQ socket, runs \<warmup\> warm-up round-trips, then
 //!      measures \<iterations\> round-trips and prints one line to stdout:
@@ -107,6 +108,20 @@ fn main() {
                 let warmup: usize = args[5].parse().expect("warmup");
                 run_req(ep, size, iterations, warmup).await;
             }
+            Some("inproc-latency") => {
+                let name = args[2].clone();
+                let size: usize = args[3].parse().expect("msg_size");
+                let iterations: usize = args[4].parse().expect("iterations");
+                let warmup: usize = args[5].parse().expect("warmup");
+                run_inproc_latency(name, size, iterations, warmup).await;
+            }
+            Some("inproc-st-latency") => {
+                let name = args[2].clone();
+                let size: usize = args[3].parse().expect("msg_size");
+                let iterations: usize = args[4].parse().expect("iterations");
+                let warmup: usize = args[5].parse().expect("warmup");
+                run_inproc_st_latency(name, size, iterations, warmup).await;
+            }
             _ => {
                 eprintln!("usage: bench_peer_compio push <endpoint> <size>");
                 eprintln!("       bench_peer_compio pull <endpoint> <size> <duration_secs>");
@@ -114,6 +129,12 @@ fn main() {
                 eprintln!("       bench_peer_compio inproc-st <name> <size> <duration_secs>");
                 eprintln!("       bench_peer_compio rep <endpoint> <size>");
                 eprintln!("       bench_peer_compio req <endpoint> <size> <iterations> <warmup>");
+                eprintln!(
+                    "       bench_peer_compio inproc-latency <name> <size> <iterations> <warmup>"
+                );
+                eprintln!(
+                    "       bench_peer_compio inproc-st-latency <name> <size> <iterations> <warmup>"
+                );
                 std::process::exit(1);
             }
         }
@@ -218,11 +239,12 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    print_pull_summary(&ep, count, elapsed, size);
+    println!("{count} {elapsed:.6} {size}");
+    eprint_pull_summary(&ep, count, elapsed, size);
 }
 
 #[expect(clippy::cast_precision_loss)]
-fn print_pull_summary(ep: &Endpoint, count: u64, elapsed: f64, size: usize) {
+fn eprint_pull_summary(ep: &Endpoint, count: u64, elapsed: f64, size: usize) {
     let total_bytes = u128::from(count) * size as u128;
     let msgs_per_sec = count as f64 / elapsed;
     let bytes_per_sec = total_bytes as f64 / elapsed;
@@ -230,26 +252,26 @@ fn print_pull_summary(ep: &Endpoint, count: u64, elapsed: f64, size: usize) {
     let mbit_per_sec = bytes_per_sec * 8.0 / 1_000_000.0;
     let total_mib = total_bytes as f64 / (1024.0 * 1024.0);
 
-    println!();
-    println!("=== PULL ===");
-    println!("  Endpoint    : {ep}");
-    println!("  Msg size    : {} B", with_commas(&size.to_string()));
-    println!("  Elapsed     : {elapsed:.3} s");
-    println!("  Messages    : {}", with_commas(&count.to_string()));
-    println!(
+    eprintln!();
+    eprintln!("=== PULL ===");
+    eprintln!("  Endpoint    : {ep}");
+    eprintln!("  Msg size    : {} B", with_commas(&size.to_string()));
+    eprintln!("  Elapsed     : {elapsed:.3} s");
+    eprintln!("  Messages    : {}", with_commas(&count.to_string()));
+    eprintln!(
         "  Throughput  : {} msg/s",
         with_commas(&format!("{msgs_per_sec:.0}"))
     );
-    println!(
+    eprintln!(
         "  Bandwidth   : {} MiB/s  ({} Mbit/s)",
         with_commas(&format!("{mib_per_sec:.2}")),
         with_commas(&format!("{mbit_per_sec:.2}"))
     );
-    println!(
+    eprintln!(
         "  Total       : {} MiB",
         with_commas(&format!("{total_mib:.2}"))
     );
-    println!();
+    eprintln!();
 }
 
 fn with_commas(s: &str) -> String {
@@ -313,6 +335,99 @@ fn percentile(sorted: &[u64], p: f64) -> f64 {
     }
     let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
     sorted[idx] as f64 / 1_000.0
+}
+
+async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup: usize) {
+    use std::sync::{Arc, Barrier};
+
+    let ep = Endpoint::Inproc { name };
+    let ready = Arc::new(Barrier::new(2));
+
+    let rep_ep = ep.clone();
+    let rep_ready = ready.clone();
+    std::thread::spawn(move || {
+        let rt = compio::runtime::RuntimeBuilder::new()
+            .build()
+            .expect("rep runtime");
+        rt.block_on(async move {
+            let rep = Socket::new(SocketType::Rep, Options::default());
+            rep.bind(rep_ep).await.expect("rep bind");
+            rep_ready.wait();
+            loop {
+                let msg = rep.recv().await.unwrap();
+                rep.send(msg).await.unwrap();
+            }
+        });
+    });
+
+    ready.wait();
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep).await.expect("req connect");
+    compio::time::sleep(Duration::from_millis(200)).await;
+
+    let payload = Bytes::from(vec![b'x'; size]);
+
+    for _ in 0..warmup {
+        req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+    }
+
+    let mut rtts = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+        rtts.push(t0.elapsed().as_nanos() as u64);
+    }
+
+    rtts.sort_unstable();
+    let p50 = percentile(&rtts, 50.0);
+    let p99 = percentile(&rtts, 99.0);
+    let p999 = percentile(&rtts, 99.9);
+    let max = percentile(&rtts, 100.0);
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+}
+
+async fn run_inproc_st_latency(name: String, size: usize, iterations: usize, warmup: usize) {
+    let ep = Endpoint::Inproc { name };
+
+    let rep_ep = ep.clone();
+    compio::runtime::spawn(async move {
+        let rep = Socket::new(SocketType::Rep, Options::default());
+        rep.bind(rep_ep).await.expect("rep bind");
+        loop {
+            let msg = rep.recv().await.unwrap();
+            rep.send(msg).await.unwrap();
+        }
+    })
+    .detach();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep).await.expect("req connect");
+    compio::time::sleep(Duration::from_millis(200)).await;
+
+    let payload = Bytes::from(vec![b'x'; size]);
+
+    for _ in 0..warmup {
+        req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+    }
+
+    let mut rtts = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+        rtts.push(t0.elapsed().as_nanos() as u64);
+    }
+
+    rtts.sort_unstable();
+    let p50 = percentile(&rtts, 50.0);
+    let p99 = percentile(&rtts, 99.0);
+    let p999 = percentile(&rtts, 99.9);
+    let max = percentile(&rtts, 100.0);
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    std::process::exit(0);
 }
 
 async fn run_inproc_same_thread(name: String, size: usize, duration: Duration) {

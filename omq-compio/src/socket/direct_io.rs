@@ -37,8 +37,6 @@ pub(crate) struct DirectIoState {
     pub(crate) encoded_queue: Mutex<EncodedQueue>,
     pub(crate) driver_in_select: AtomicBool,
     pub(crate) direct_msg_count: AtomicUsize,
-    #[cfg_attr(feature = "priority", allow(dead_code))]
-    pub(crate) send_hwm: usize,
     pub(crate) large_recv_pending: AtomicUsize,
     pub(crate) pending_acc: Mutex<Option<BytesMut>>,
     pub(crate) large_message_threshold: usize,
@@ -242,7 +240,6 @@ impl DirectIoState {
         encoder: Option<MessageEncoder>,
         uses_crypto: bool,
         large_message_threshold: usize,
-        send_hwm: usize,
         #[cfg(feature = "ws")] is_ws: bool,
         #[cfg(feature = "ws")] ws_masked: bool,
     ) -> Arc<Self> {
@@ -270,7 +267,6 @@ impl DirectIoState {
             encoded_queue: Mutex::new(EncodedQueue::new()),
             driver_in_select: AtomicBool::new(false),
             direct_msg_count: AtomicUsize::new(0),
-            send_hwm,
             large_recv_pending: AtomicUsize::new(0),
             pending_acc: Mutex::new(None),
             large_message_threshold,

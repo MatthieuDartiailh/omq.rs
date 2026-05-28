@@ -426,8 +426,8 @@ Cells show `msgs/s / MB/s`.
 ## Cross-library comparisons
 
 See [COMPARISONS.md](COMPARISONS.md) for two-process TCP benchmarks against
-libzmq and zmq.rs. Run `./scripts/compare_libzmq.sh --update-benchmarks` or
-`./scripts/compare_zmqrs.sh --update-benchmarks` to refresh those tables.
+libzmq and zmq.rs. Run `python3 scripts/run_comparisons.py --update-markdown`
+to refresh those tables.
 
 ## Compression transport benchmarks
 
@@ -523,16 +523,14 @@ OMQ_BENCH_TRANSPORTS=ws cargo bench -p omq-tokio  --features ws --bench push_pul
 # Override transports / sizes / peer counts via env:
 OMQ_BENCH_TRANSPORTS=tcp OMQ_BENCH_PEERS=3 OMQ_BENCH_SIZES=128,2048,32768 cargo bench -p omq-compio --bench push_pull
 
-# Two-process libzmq vs omq comparison (requires libzmq installed):
-# build: gcc scripts/libzmq_bench_peer.c -o scripts/libzmq_bench_peer -lzmq
-# then run scripts/compare_libzmq.sh [--update-benchmarks]
+# Two-process comparison (requires libzmq installed for --scope all):
+python3 scripts/run_comparisons.py               # full sweep, all impls
+python3 scripts/run_comparisons.py --quick-run    # 3 sizes only
+python3 scripts/run_comparisons.py --scope omq    # omq-only refresh
 
-# Two-process zmq.rs vs omq comparison (pure Rust, no system packages):
-# ./scripts/compare_zmqrs.sh [--update-benchmarks]
-
-# Charts (SVG, generated from COMPARISONS.md or JSONL data):
-python3 scripts/gen_comparison_chart.py          # doc/charts/comparison.svg (from COMPARISONS.md)
-python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism.svg (from BENCHMARKS.md)
+# Charts (SVG, generated from JSONL data):
+python3 scripts/gen_comparison_chart.py          # doc/charts/comparison.svg + comparison_inproc.svg
+python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism.svg
 
 # Compression charts require a bench run first (writes JSONL):
 #   1. Rate-limit loopback:

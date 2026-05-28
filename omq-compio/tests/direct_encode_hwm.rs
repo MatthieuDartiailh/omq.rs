@@ -1,6 +1,6 @@
-//! Regression test: the direct-encode fast path must respect `send_hwm`.
-//! Previously it was bounded only by a 512 KiB byte cap, allowing
-//! thousands of small messages to bypass backpressure.
+//! Regression test: the direct-encode fast path must provide backpressure.
+//! Bounded by a 512 KiB byte cap (`DIRECT_CAP`); the cmd channel (bounded
+//! at `send_hwm`) provides the per-message backpressure layer.
 
 #![cfg(not(feature = "priority"))]
 
@@ -46,18 +46,10 @@ async fn direct_encode_respects_send_hwm() {
         }
     }
 
-    // With send_hwm enforcement on the direct-encode path, the total
-    // buffering is bounded by: send_hwm (direct) + send_hwm (cmd chan)
-    // + send_hwm (shared queue) + kernel TCP buffers (system-dependent,
+    // Total buffering: DIRECT_CAP / 8 KiB = 64 msgs (byte-capped)
+    // + send_hwm (cmd channel) + kernel TCP buffers (system-dependent,
     // typically 128-512 KiB on Linux). At 8 KiB per message that gives
-    // roughly 48 + ~64 = ~112 messages before backpressure.
-    //
-    // Without the fix, the direct path alone would accept up to
-    // DIRECT_CAP / 8 KiB = 64 msgs byte-capped, so the difference is
-    // small at 8 KiB. The real regression this guards against is small
-    // messages: at ~10 B per msg the old byte cap allowed ~50k messages
-    // vs the new 16-message count cap. The 8 KiB payload ensures TCP
-    // buffers actually fill during the test.
+    // roughly 64 + 16 + ~32 = ~112 messages before backpressure.
     assert!(
         accepted < 500,
         "accepted {accepted} messages — expected backpressure well before 500 \

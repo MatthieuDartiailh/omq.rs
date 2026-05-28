@@ -17,8 +17,12 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
+use crate::engine::direct_io::DirectIo;
 use crate::routing::{SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocSpsc;
+
+pub(crate) type DirectIoSlot = Arc<tokio::sync::Mutex<Option<DirectIo>>>;
+pub(crate) type DirectIoPending = Arc<AtomicBool>;
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
 pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
@@ -134,6 +138,10 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
+    /// Direct I/O bypass: when set, send does TCP I/O directly on the
+    /// user task, eliminating the send-path cross-task wakeup. Recv
+    /// stays on the driver (which continues running after handoff).
+    direct_io: DirectIoSlot,
 }
 
 impl Socket {
@@ -176,6 +184,8 @@ impl Socket {
         let send_ring: Arc<RwLock<Option<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(None));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
+        let direct_io: DirectIoSlot = Arc::new(tokio::sync::Mutex::new(None));
+        let direct_io_pending: DirectIoPending = Arc::new(AtomicBool::new(false));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -191,6 +201,8 @@ impl Socket {
             spsc_activated.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
+            direct_io.clone(),
+            direct_io_pending.clone(),
         );
         spawn_driver(driver);
         Self {
@@ -209,6 +221,7 @@ impl Socket {
                 send_submitter,
                 type_state,
                 req_awaiting_reply,
+                direct_io,
             }),
         }
     }
@@ -284,13 +297,33 @@ impl Socket {
         match self.inner.socket_type {
             SocketType::Req => {
                 if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
-                    return Err(Error::Protocol(
-                        "REQ socket must receive a reply before sending again".into(),
-                    ));
+                    // The driver detects peer disconnect (EOF) and resets
+                    // req_awaiting_reply via on_peer_disconnected. Give
+                    // the actor a chance to process PeerClosed, then check
+                    // if the DirectIo is dead.
+                    tokio::task::yield_now().await;
+                    if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
+                        let guard = self.inner.direct_io.lock().await;
+                        if guard.as_ref().is_some_and(DirectIo::is_dead) {
+                            let peer_id = guard.as_ref().unwrap().peer_id;
+                            drop(guard);
+                            self.clear_direct_io_slot(peer_id).await;
+                            self.inner
+                                .req_awaiting_reply
+                                .store(false, Ordering::Relaxed);
+                        } else {
+                            drop(guard);
+                            if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
+                                return Err(Error::Protocol(
+                                    "REQ socket must receive a reply before sending again".into(),
+                                ));
+                            }
+                        }
+                    }
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
-                self.inner.send_submitter.send(msg).await
+                return self.send_with_direct_io(msg).await;
             }
             SocketType::Rep => {
                 let msg = self
@@ -299,7 +332,51 @@ impl Socket {
                     .lock()
                     .expect("type_state")
                     .pre_send(self.inner.socket_type, msg)?;
-                self.inner.send_submitter.send(msg).await
+                // pre_send restores the saved envelope which includes the
+                // peer identity (added by wrap_for_transform on recv). The
+                // identity routing strategy normally strips it; DirectIo
+                // bypasses that, so strip it here.
+                {
+                    let guard = self.inner.direct_io.lock().await;
+                    if let Some(dio) = guard.as_ref() {
+                        let peer_id = dio.peer_id;
+                        let mut msg = msg;
+                        let _routing_id = msg.pop_front();
+                        return match dio.send_msg(&msg).await {
+                            Ok(()) => Ok(()),
+                            Err(e) => {
+                                drop(guard);
+                                self.clear_direct_io_slot(peer_id).await;
+                                Err(e)
+                            }
+                        };
+                    }
+                }
+                return self.inner.send_submitter.send(msg).await;
+            }
+            SocketType::Router | SocketType::Server => {
+                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
+                {
+                    let guard = self.inner.direct_io.lock().await;
+                    if let Some(dio) = guard.as_ref() {
+                        let peer_id = dio.peer_id;
+                        let mut msg = msg;
+                        let _routing_id = msg.pop_front();
+                        return match dio.send_msg(&msg).await {
+                            Ok(()) => Ok(()),
+                            Err(e) => {
+                                drop(guard);
+                                self.clear_direct_io_slot(peer_id).await;
+                                Err(e)
+                            }
+                        };
+                    }
+                }
+                return self.inner.send_submitter.send(msg).await;
+            }
+            _ if is_direct_io_eligible(self.inner.socket_type) => {
+                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
+                return self.send_with_direct_io(msg).await;
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
@@ -343,8 +420,8 @@ impl Socket {
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
-        if self.inner.socket_type == SocketType::Req {
-            loop {
+        match self.inner.socket_type {
+            SocketType::Req => loop {
                 let mut msg = self.inner.recv_rx.recv().await?;
                 match msg.pop_front() {
                     Some(delim) if delim.is_empty() => {}
@@ -354,9 +431,9 @@ impl Socket {
                     .req_awaiting_reply
                     .store(false, Ordering::Relaxed);
                 return Ok(msg);
-            }
+            },
+            _ => self.inner.recv_rx.recv().await,
         }
-        self.inner.recv_rx.recv().await
     }
 
     /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
@@ -578,6 +655,56 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
             "SERVER socket requires [routing_id, body] (2 parts)".into(),
         )),
         _ => Ok(()),
+    }
+}
+
+fn is_direct_io_eligible(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Req
+            | SocketType::Rep
+            | SocketType::Dealer
+            | SocketType::Router
+            | SocketType::Client
+            | SocketType::Server
+            | SocketType::Pair
+    )
+}
+
+impl Socket {
+    async fn send_with_direct_io(&self, msg: Message) -> Result<()> {
+        {
+            let guard = self.inner.direct_io.lock().await;
+            if let Some(dio) = guard.as_ref() {
+                if let Ok(()) = dio.send_msg(&msg).await {
+                    return Ok(());
+                }
+                let failed_peer_id = dio.peer_id;
+                drop(guard);
+                self.clear_direct_io_slot(failed_peer_id).await;
+                return self.inner.send_submitter.send(msg).await;
+            }
+        }
+        self.inner.send_submitter.send(msg).await
+    }
+
+    async fn clear_direct_io_slot(&self, expected_peer_id: u64) {
+        let mut guard = self.inner.direct_io.lock().await;
+        if guard
+            .as_ref()
+            .is_some_and(|dio| dio.peer_id != expected_peer_id)
+        {
+            return;
+        }
+        if let Some(dio) = guard.take() {
+            let peer_id = dio.peer_id;
+            drop(guard);
+            let _ = self
+                .inner
+                .cmd_tx
+                .send(SocketCommand::DirectIoDisconnected { peer_id })
+                .await;
+        }
     }
 }
 

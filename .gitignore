@@ -12,6 +12,7 @@ uv.lock
 .DS_Store
 /tmp/
 **/benches/results*.jsonl
+benchmarks/*.jsonl
 **/.venv/
 __pycache__/
 *.egg-info/

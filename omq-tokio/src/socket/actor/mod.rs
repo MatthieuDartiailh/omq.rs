@@ -103,6 +103,9 @@ pub(crate) enum SocketCommand {
     Close {
         ack: Option<oneshot::Sender<Result<()>>>,
     },
+    DirectIoDisconnected {
+        peer_id: u64,
+    },
 }
 
 /// Events produced inside the driver (listeners accepting, connections
@@ -154,6 +157,7 @@ struct PeerEntry {
     /// `connect()` (without `_with`).
     #[cfg(feature = "priority")]
     priority: u8,
+    direct_io_rx: Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
 }
 
 struct ListenerEntry {
@@ -216,6 +220,8 @@ pub(crate) struct SocketDriver {
     send_ring: super::handle::SpscSendRing,
     recv_notify: super::handle::SpscRecvNotify,
     spsc_activated: super::handle::SpscActivated,
+    direct_io: super::handle::DirectIoSlot,
+    direct_io_pending: super::handle::DirectIoPending,
 }
 
 impl SocketDriver {
@@ -235,6 +241,8 @@ impl SocketDriver {
         spsc_activated: super::handle::SpscActivated,
         type_state: Arc<Mutex<TypeState>>,
         req_awaiting_reply: Arc<AtomicBool>,
+        direct_io: super::handle::DirectIoSlot,
+        direct_io_pending: super::handle::DirectIoPending,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -270,6 +278,8 @@ impl SocketDriver {
             send_ring,
             recv_notify,
             spsc_activated,
+            direct_io,
+            direct_io_pending,
         }
     }
 
@@ -412,6 +422,13 @@ impl SocketDriver {
             }
             SocketCommand::Close { ack } => {
                 self.begin_close(ack, self.options.linger);
+            }
+            SocketCommand::DirectIoDisconnected { peer_id } => {
+                self.handle_internal_event(InternalEvent::PeerClosed {
+                    peer_id,
+                    reason: DisconnectReason::PeerClosed,
+                })
+                .await;
             }
         }
     }
