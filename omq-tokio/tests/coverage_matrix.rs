@@ -100,6 +100,16 @@ async fn dealer_router_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .unwrap();
     assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
     assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+    router
+        .send(Message::multipart(["d1", "reply"]))
+        .await
+        .unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(2), dealer.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r.part_bytes(0).unwrap(), &b"reply"[..]);
 }
 
 async fn pair_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
@@ -147,6 +157,16 @@ async fn client_server_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
         .unwrap();
     assert_eq!(m.part_bytes(0).unwrap(), &b"c1"[..]);
     assert_eq!(m.part_bytes(1).unwrap(), &b"ping"[..]);
+    server
+        .send(Message::multipart(["c1", "pong"]))
+        .await
+        .unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(2), client.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
 }
 
 async fn scatter_gather_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {

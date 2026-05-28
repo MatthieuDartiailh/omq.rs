@@ -266,6 +266,12 @@ impl SocketDriver {
             heartbeat_ttl: self.options.heartbeat_ttl,
             large_message_threshold: self.options.large_message_threshold.unwrap_or(0),
         };
+        let has_encoder = MessageEncoder::for_endpoint(&endpoint, &self.options);
+        let codec_has_transform = codec.has_frame_transform() || has_encoder.is_some();
+        #[cfg(feature = "ws")]
+        let is_ws = matches!(&stream, AnyStream::Ws(_));
+        #[cfg(not(feature = "ws"))]
+        let is_ws = false;
         let driver = ConnectionDriver::with_config(
             stream,
             codec,
@@ -275,7 +281,7 @@ impl SocketDriver {
             child_cancel.clone(),
             driver_cfg,
         );
-        let driver = match MessageEncoder::for_endpoint(&endpoint, &self.options) {
+        let driver = match has_encoder {
             Some((enc, dec)) => driver.with_encoder(enc).with_decoder(dec),
             None => driver,
         };
@@ -283,6 +289,30 @@ impl SocketDriver {
         let driver = match self.send_strategy.shared_rx() {
             Some(rx) => driver.with_shared_rx(rx),
             None => driver,
+        };
+
+        // Direct I/O bypass: hand the stream + codec to the Socket
+        // handle after the ZMTP handshake so send/recv do TCP I/O
+        // directly on the user task (zero data-path wakeups).
+        let use_direct_io = is_direct_io_eligible(self.socket_type)
+            && self.peers.is_empty()
+            && !codec_has_transform
+            && !is_ws
+            && self.direct_io.try_lock().is_ok_and(|g| g.is_none());
+
+        let (direct_io_tx, direct_io_rx) = if use_direct_io {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            self.direct_io_pending
+                .store(true, std::sync::atomic::Ordering::Release);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
+        let driver = if let Some(tx) = direct_io_tx {
+            driver.with_direct_io_tx(tx)
+        } else {
+            driver
         };
 
         // Recv bypass: for socket types whose recv path is a plain fair-queue
@@ -295,14 +325,7 @@ impl SocketDriver {
             driver
         };
 
-        // Insert the peer BEFORE spawning the driver task. Once
-        // spawned, the driver may run on another worker before this
-        // function returns; if it finishes (e.g. the peer immediately
-        // drops the stream) and the resulting `PeerClosed` lands
-        // before SocketDriver gets to insert this peer, the matching
-        // `peers.remove(peer_id)` would silently no-op and the peer
-        // entry would leak. Inserting first makes the (insert, then
-        // PeerOut::Event / PeerOut::Closed) order unambiguous.
+        // Insert the peer BEFORE spawning the driver task.
         self.peers.insert(
             peer_id,
             PeerEntry {
@@ -317,6 +340,7 @@ impl SocketDriver {
                 is_client: !is_server,
                 #[cfg(feature = "priority")]
                 priority,
+                direct_io_rx,
             },
         );
 
@@ -360,6 +384,7 @@ impl SocketDriver {
                 is_client: !is_server,
                 #[cfg(feature = "priority")]
                 priority,
+                direct_io_rx: None,
             },
         );
 
@@ -444,6 +469,7 @@ impl SocketDriver {
                 is_client: !is_server,
                 #[cfg(feature = "priority")]
                 priority,
+                direct_io_rx: None,
             },
         );
 
@@ -591,6 +617,23 @@ impl SocketDriver {
         );
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;
+
+        // Direct I/O: await the oneshot in a background task so the
+        // actor stays responsive to commands (e.g. QueryConnections).
+        if let Some(p) = self.peers.get_mut(&peer_id)
+            && let Some(rx) = p.direct_io_rx.take()
+        {
+            let dio_slot = self.direct_io.clone();
+            let pending = self.direct_io_pending.clone();
+            let ready = self.direct_io_ready.clone();
+            tokio::spawn(async move {
+                if let Ok(dio) = rx.await {
+                    *dio_slot.lock().await = Some(dio);
+                }
+                pending.store(false, std::sync::atomic::Ordering::Release);
+                ready.notify_waiters();
+            });
+        }
     }
 
     async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
@@ -698,6 +741,19 @@ impl SocketDriver {
             command,
         });
     }
+}
+
+fn is_direct_io_eligible(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Req
+            | SocketType::Rep
+            | SocketType::Dealer
+            | SocketType::Router
+            | SocketType::Client
+            | SocketType::Server
+            | SocketType::Pair
+    )
 }
 
 fn can_bypass_actor_recv(t: SocketType) -> bool {

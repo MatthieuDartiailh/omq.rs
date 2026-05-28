@@ -1,5 +1,6 @@
 //! Per-connection driver: one tokio task per live peer connection.
 
+use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
+use super::direct_io::{DirectIo, HeartbeatConfig};
 use super::encoded_queue::EncodedQueue;
 use crate::routing::drop_queue::QueueReceiver;
 
@@ -144,6 +146,11 @@ where
     /// the recv path is a plain fair-queue delivery with no per-type
     /// post-processing (no `TypeState::post_recv`, no identity-prefix).
     recv_direct: Option<async_channel::Sender<Message>>,
+    /// When set, the driver hands off the stream + codec to a `DirectIo`
+    /// after the ZMTP handshake completes, then exits. The `Socket` handle
+    /// does I/O directly on the user task, eliminating all data-path
+    /// cross-task wakeups.
+    direct_io_tx: Option<futures::channel::oneshot::Sender<DirectIo>>,
 }
 
 impl<T> ConnectionDriver<T>
@@ -190,6 +197,7 @@ where
             decoder: None,
             shared_msg_rx: None,
             recv_direct: None,
+            direct_io_tx: None,
         }
     }
 
@@ -227,6 +235,17 @@ where
         self
     }
 
+    /// After handshake, hand off the stream + codec to a `DirectIo` and
+    /// exit. The `Socket` handle does I/O directly on the user task.
+    #[must_use]
+    pub(crate) fn with_direct_io_tx(
+        mut self,
+        tx: futures::channel::oneshot::Sender<DirectIo>,
+    ) -> Self {
+        self.direct_io_tx = Some(tx);
+        self
+    }
+
     /// Run the driver to completion. Returns:
     /// - `Ok(())` on clean shutdown (peer EOF, canceled, `Close` command,
     ///   inbox dropped).
@@ -240,13 +259,21 @@ where
     pub async fn run(self) -> Result<()> {
         let peer_out = self.peer_out.clone();
         let peer_id = self.peer_id;
-        let result = self.run_inner().await;
-        let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
+        let (result, handed_off) = self.run_inner().await;
+        if !handed_off {
+            let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
+        }
         result
     }
 
+    async fn run_inner(self) -> (Result<()>, bool) {
+        let mut handed_off = false;
+        let result = self.run_inner_body(&mut handed_off).await;
+        (result, handed_off)
+    }
+
     #[expect(clippy::too_many_lines)]
-    async fn run_inner(self) -> Result<()> {
+    async fn run_inner_body(self, handed_off: &mut bool) -> Result<()> {
         let Self {
             stream,
             mut codec,
@@ -259,6 +286,7 @@ where
             mut decoder,
             shared_msg_rx,
             recv_direct,
+            mut direct_io_tx,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let (mut reader, mut writer) = split(stream);
@@ -277,11 +305,15 @@ where
             .heartbeat_ttl
             .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
             .unwrap_or(0);
+        let mut direct_io_identity = Bytes::new();
+        let mut direct_io_armed = false;
+        let mut direct_io_msgs: VecDeque<Message> = VecDeque::new();
 
         loop {
             // Clear the handshake deadline once we're past it.
             if handshake_deadline.is_some() && codec.is_ready() {
                 handshake_deadline = None;
+                if direct_io_tx.is_some() {}
             }
 
             // 1a. Drain control-plane events (handshake, commands) first
@@ -289,11 +321,24 @@ where
             // messages — the actor needs the peer identity map populated
             // before it can apply post_recv transforms (REP envelope).
             while let Some(ev) = codec.poll_event() {
+                // Capture peer identity for direct-IO handoff.
+                if let Event::HandshakeSucceeded {
+                    peer_properties, ..
+                } = &ev
+                {
+                    if direct_io_tx.is_some() {
+                        direct_io_identity = peer_properties.identity.clone().unwrap_or_default();
+                    }
+                }
                 if peer_out.send((peer_id, PeerOut::Event(ev))).await.is_err() {
                     return Ok(());
                 }
             }
             // 1b. Drain decoded application messages (data plane).
+            // When a DirectIo handoff is armed, queue messages for the
+            // handoff instead of routing through the actor — the actor
+            // would apply post_recv transforms (identity prefix) that
+            // conflict with DirectIo's inline processing.
             while let Some(m) = codec.poll_message() {
                 let m = match decoder.as_mut() {
                     Some(dec) => match dec.decode(m)? {
@@ -302,22 +347,80 @@ where
                     },
                     None => m,
                 };
-                match recv_direct.as_ref() {
-                    Some(tx) => {
-                        if tx.send(m).await.is_err() {
-                            return Ok(());
+                if direct_io_armed {
+                    direct_io_msgs.push_back(m);
+                } else {
+                    match recv_direct.as_ref() {
+                        Some(tx) => {
+                            if tx.send(m).await.is_err() {
+                                return Ok(());
+                            }
                         }
-                    }
-                    None => {
-                        if peer_out
-                            .send((peer_id, PeerOut::Event(Event::Message(m))))
-                            .await
-                            .is_err()
-                        {
-                            return Ok(());
+                        None => {
+                            if peer_out
+                                .send((peer_id, PeerOut::Event(Event::Message(m))))
+                                .await
+                                .is_err()
+                            {
+                                return Ok(());
+                            }
                         }
                     }
                 }
+            }
+
+            // Direct I/O handoff (two-phase): after the handshake
+            // completes, arm the flag. The select loop runs one more
+            // iteration so the shared_msg_rx arm can drain any queued
+            // messages. On the NEXT iteration the handoff fires.
+            if handshake_deadline.is_none()
+                && direct_io_tx.is_some()
+                && codec.is_ready()
+                && !direct_io_armed
+            {
+                direct_io_armed = true;
+            } else if direct_io_armed && direct_io_tx.is_some() {
+                // Flush READY and any pending codec output first, then
+                // drain messages queued before DirectIo was ready.
+                while codec.has_pending_transmit() {
+                    flush_once(&mut writer, &mut codec).await?;
+                }
+                if let Some(ref rx) = shared_msg_rx {
+                    let mut n = 0usize;
+                    while let Some(msg) = rx.try_pop() {
+                        encode_msg(
+                            &msg,
+                            &mut encoder,
+                            &mut codec,
+                            &mut eq,
+                            passthrough.as_ref(),
+                        );
+                        n += 1;
+                    }
+                    if n > 0 {
+                        rx.release_permits(n);
+                        flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
+                    }
+                }
+                let heartbeat = hb_interval.map(|interval| HeartbeatConfig {
+                    interval,
+                    timeout: hb_timeout,
+                    ttl_deciseconds: hb_ttl_deciseconds,
+                });
+                let dio = DirectIo::with_messages(
+                    Box::new(reader),
+                    Box::new(writer),
+                    codec,
+                    read_buf,
+                    heartbeat,
+                    direct_io_identity.clone(),
+                    peer_id,
+                    direct_io_msgs,
+                );
+                let tx = direct_io_tx.take().unwrap();
+                let _ = tx.send(dio);
+                *handed_off = true;
+                return Ok(());
             }
 
             let want_write = codec.has_pending_transmit() || !eq.is_empty();

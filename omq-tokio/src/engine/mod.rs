@@ -7,6 +7,7 @@
 //!
 //! The socket actor composes one of these per peer.
 
+pub mod direct_io;
 pub mod driver;
 mod encoded_queue;
 

@@ -17,8 +17,11 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
+use crate::engine::direct_io::DirectIo;
 use crate::routing::{SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocSpsc;
+
+pub(crate) type DirectIoSlot = Arc<tokio::sync::Mutex<Option<DirectIo>>>;
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
 pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
@@ -134,6 +137,17 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
+    /// Direct I/O bypass: when set, send/recv do TCP I/O directly on
+    /// the user task, eliminating all data-path cross-task wakeups.
+    direct_io: DirectIoSlot,
+    /// Notified when `direct_io` transitions from None to Some. Lets
+    /// send/recv block until DirectIo is installed instead of falling
+    /// through to the DropQueue (whose consumer has exited).
+    direct_io_ready: Arc<tokio::sync::Notify>,
+    /// True when a direct-IO handoff is in progress. Tells send/recv to
+    /// wait on `direct_io_ready` rather than falling through to the
+    /// normal path (whose consumer/producer has exited).
+    direct_io_pending: Arc<AtomicBool>,
 }
 
 impl Socket {
@@ -176,6 +190,9 @@ impl Socket {
         let send_ring: Arc<RwLock<Option<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(None));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
+        let direct_io: DirectIoSlot = Arc::new(tokio::sync::Mutex::new(None));
+        let direct_io_ready = Arc::new(tokio::sync::Notify::new());
+        let direct_io_pending = Arc::new(AtomicBool::new(false));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -191,6 +208,9 @@ impl Socket {
             spsc_activated.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
+            direct_io.clone(),
+            direct_io_ready.clone(),
+            direct_io_pending.clone(),
         );
         spawn_driver(driver);
         Self {
@@ -209,6 +229,9 @@ impl Socket {
                 send_submitter,
                 type_state,
                 req_awaiting_reply,
+                direct_io,
+                direct_io_ready,
+                direct_io_pending,
             }),
         }
     }
@@ -290,7 +313,7 @@ impl Socket {
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
-                self.inner.send_submitter.send(msg).await
+                return self.send_with_direct_io(msg).await;
             }
             SocketType::Rep => {
                 let msg = self
@@ -299,7 +322,30 @@ impl Socket {
                     .lock()
                     .expect("type_state")
                     .pre_send(self.inner.socket_type, msg)?;
-                self.inner.send_submitter.send(msg).await
+                return self.send_with_direct_io(msg).await;
+            }
+            SocketType::Router | SocketType::Server => {
+                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
+                {
+                    let guard = self.inner.direct_io.lock().await;
+                    if let Some(dio) = guard.as_ref() {
+                        let mut msg = msg;
+                        let _routing_id = msg.pop_front();
+                        return match dio.send_msg(&msg).await {
+                            Ok(()) => Ok(()),
+                            Err(e) => {
+                                drop(guard);
+                                self.clear_direct_io_slot().await;
+                                Err(e)
+                            }
+                        };
+                    }
+                }
+                return self.inner.send_submitter.send(msg).await;
+            }
+            _ if is_direct_io_eligible(self.inner.socket_type) => {
+                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
+                return self.send_with_direct_io(msg).await;
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
@@ -343,20 +389,40 @@ impl Socket {
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
-        if self.inner.socket_type == SocketType::Req {
-            loop {
-                let mut msg = self.inner.recv_rx.recv().await?;
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
+        match self.inner.socket_type {
+            SocketType::Req => self.recv_direct_io_req().await,
+            t if is_direct_io_eligible(t) => loop {
+                // Always try the buffered recv channel first — the
+                // driver may have decoded messages before handing off.
+                if let Ok(msg) = self.inner.recv_rx.try_recv() {
+                    return Ok(msg);
                 }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Relaxed);
-                return Ok(msg);
-            }
+                let notified = self.inner.direct_io_ready.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let guard = self.inner.direct_io.lock().await;
+                    if let Some(dio) = guard.as_ref() {
+                        match self.recv_direct_io_typed(dio).await {
+                            Ok(msg) => return Ok(msg),
+                            Err(_) => {
+                                drop(guard);
+                                self.clear_direct_io_slot().await;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                tokio::select! {
+                    biased;
+                    res = self.inner.recv_rx.recv() => {
+                        return res.map_err(|_| Error::Closed);
+                    }
+                    () = &mut notified => continue,
+                }
+            },
+            _ => self.inner.recv_rx.recv().await,
         }
-        self.inner.recv_rx.recv().await
     }
 
     /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
@@ -578,6 +644,129 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
             "SERVER socket requires [routing_id, body] (2 parts)".into(),
         )),
         _ => Ok(()),
+    }
+}
+
+fn is_direct_io_eligible(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Req
+            | SocketType::Rep
+            | SocketType::Dealer
+            | SocketType::Router
+            | SocketType::Client
+            | SocketType::Server
+            | SocketType::Pair
+    )
+}
+
+impl Socket {
+    async fn send_with_direct_io(&self, msg: Message) -> Result<()> {
+        {
+            let guard = self.inner.direct_io.lock().await;
+            if let Some(dio) = guard.as_ref() {
+                match dio.send_msg(&msg).await {
+                    Ok(()) => return Ok(()),
+                    Err(_) => {
+                        drop(guard);
+                        self.clear_direct_io_slot().await;
+                        return self.inner.send_submitter.send(msg).await;
+                    }
+                }
+            }
+        }
+        self.inner.send_submitter.send(msg).await
+    }
+
+    async fn recv_direct_io_req(&self) -> Result<Message> {
+        loop {
+            let notified = self.inner.direct_io_ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let guard = self.inner.direct_io.lock().await;
+                if let Some(dio) = guard.as_ref() {
+                    match dio.recv_msg().await {
+                        Ok(mut msg) => {
+                            match msg.pop_front() {
+                                Some(delim) if delim.is_empty() => {}
+                                _ => continue,
+                            }
+                            self.inner
+                                .req_awaiting_reply
+                                .store(false, Ordering::Relaxed);
+                            return Ok(msg);
+                        }
+                        Err(e) => {
+                            drop(guard);
+                            return self.handle_direct_io_error(e).await;
+                        }
+                    }
+                }
+            }
+            // DirectIo not ready yet. Wait or use the normal recv path
+            // (messages arriving during handshake go via recv_direct).
+            tokio::select! {
+                biased;
+                () = &mut notified => continue,
+                res = self.inner.recv_rx.recv() => {
+                    let mut msg = res.map_err(|_| Error::Closed)?;
+                    match msg.pop_front() {
+                        Some(delim) if delim.is_empty() => {}
+                        _ => continue,
+                    }
+                    self.inner
+                        .req_awaiting_reply
+                        .store(false, Ordering::Relaxed);
+                    return Ok(msg);
+                }
+            }
+        }
+    }
+
+    async fn recv_direct_io_typed(&self, dio: &DirectIo) -> Result<Message> {
+        let st = self.inner.socket_type;
+        match dio.recv_msg().await {
+            Ok(msg) => match st {
+                SocketType::Rep => {
+                    let result = self
+                        .inner
+                        .type_state
+                        .lock()
+                        .expect("type_state")
+                        .post_recv(st, msg);
+                    match result {
+                        Ok(Some(m)) => Ok(m),
+                        Ok(None) => Err(Error::Protocol("REP envelope error".into())),
+                        Err(e) => Err(e),
+                    }
+                }
+                SocketType::Router | SocketType::Server => {
+                    Ok(Message::with_prefix(dio.peer_identity.clone(), msg))
+                }
+                _ => Ok(msg),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn clear_direct_io_slot(&self) {
+        let mut guard = self.inner.direct_io.lock().await;
+        if let Some(dio) = guard.take() {
+            let peer_id = dio.peer_id;
+            dio.cancel_heartbeat();
+            drop(guard);
+            let _ = self
+                .inner
+                .cmd_tx
+                .send(SocketCommand::DirectIoDisconnected { peer_id })
+                .await;
+        }
+    }
+
+    async fn handle_direct_io_error(&self, err: Error) -> Result<Message> {
+        self.clear_direct_io_slot().await;
+        Err(err)
     }
 }
 
