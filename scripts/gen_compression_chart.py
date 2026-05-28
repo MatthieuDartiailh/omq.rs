@@ -113,8 +113,11 @@ def _log_ticks(data_min, data_max):
     return axis_min, axis_max, ticks
 
 
-def load_raw_data(jsonl_path: Path) -> dict:
-    """Load the latest run and return per-series raw data (cpu_msgs_s, wire_bytes, msg_size)."""
+def load_raw_data(jsonl_path: Path, dict_size: int | None = None) -> dict:
+    """Load the latest run and return per-series raw data (cpu_msgs_s, wire_bytes, msg_size).
+
+    dict_size: if set, only include dict rows whose dict_size field matches.
+    """
     all_rows = []
     for line in jsonl_path.read_text().splitlines():
         line = line.strip()
@@ -133,12 +136,26 @@ def load_raw_data(jsonl_path: Path) -> dict:
     selected = [r for r in all_rows if r["run_id"] == latest_id]
     print(f"Using {len(selected)} rows from run {latest_id}", file=sys.stderr)
 
+    if dict_size is not None:
+        selected = [
+            r for r in selected
+            if r["pattern"] != "compression_json_dict"
+            or r.get("dict_size") == dict_size
+        ]
+        print(f"  filtered to {len(selected)} rows with dict_size={dict_size}",
+              file=sys.stderr)
+
     sizes_set = set()
     series = {}
     for r in selected:
         transport = r["transport"]
         is_dict = r["pattern"] == "compression_json_dict"
-        key = f"{transport}+dict" if is_dict else transport
+        if is_dict and transport == "zstd+tcp":
+            key = "zstd+tcp"
+        elif is_dict:
+            key = f"{transport}+dict"
+        else:
+            key = transport
         sizes_set.add(r["msg_size"])
         series.setdefault(key, {})[r["msg_size"]] = {
             "cpu_msgs_s": r["msgs_s"],
@@ -167,7 +184,12 @@ def project(raw: dict, link_bytes_s: float) -> dict:
     return {"sizes": raw["sizes"], "series": series}
 
 
-def generate_svg(panels: dict[str, dict]) -> str:
+def generate_svg(
+    panels: dict[str, dict],
+    tput_caps: dict[str, float] | None = None,
+    msgs_ranges: dict[str, tuple[float, float]] | None = None,
+    dict_size_label: str | None = None,
+) -> str:
     links = [label for label, _ in LINK_SPEEDS if label in panels]
     if not links:
         print("ERROR: no panel data", file=sys.stderr)
@@ -205,7 +227,8 @@ def generate_svg(panels: dict[str, dict]) -> str:
     L.append(
         f'  <text x="{mid_x}" y="16" text-anchor="middle" fill="#111827"'
         f' font-size="12" font-weight="700">'
-        f'Compression transports: structured JSON, PUSH/PULL, 2-thread (omq-compio)</text>'
+        f'Compression transports: structured JSON, PUSH/PULL, 2-thread (omq-compio)'
+        f'{f" — dict {dict_size_label}" if dict_size_label else ""}</text>'
     )
 
     last_x_label_y = 0
@@ -217,20 +240,28 @@ def generate_svg(panels: dict[str, dict]) -> str:
         y_bot = y_top + panel_h
         plot_h = y_bot - y_top
 
-        all_msgs = [d["msgs_s"] for s in series.values()
-                    for d in s.values() if d["msgs_s"] > 0]
-        msg_min = min(all_msgs) if all_msgs else 1
-        msg_max = max(all_msgs) if all_msgs else 1e6
-        axis_min, axis_max, msg_ticks = _log_ticks(msg_min, msg_max)
+        if msgs_ranges and link in msgs_ranges:
+            axis_min, axis_max, msg_ticks = _log_ticks(
+                msgs_ranges[link][0], msgs_ranges[link][1])
+        else:
+            all_msgs = [d["msgs_s"] for s in series.values()
+                        for d in s.values() if d["msgs_s"] > 0]
+            msg_min = min(all_msgs) if all_msgs else 1
+            msg_max = max(all_msgs) if all_msgs else 1e6
+            axis_min, axis_max, msg_ticks = _log_ticks(msg_min, msg_max)
 
-        max_virt = max(
-            (d["virt_gbps"] for s in series.values() for d in s.values()),
-            default=0.001,
-        )
-        tput_max_mb = int(math.ceil(max_virt * 1024 / 10) * 10)
-        if tput_max_mb < 10:
-            tput_max_mb = int(math.ceil(max_virt * 1024))
-        tput_max = tput_max_mb / 1024
+        if tput_caps and link in tput_caps:
+            tput_max = tput_caps[link] / 1024
+            tput_max_mb = int(tput_max * 1024)
+        else:
+            max_virt = max(
+                (d["virt_gbps"] for s in series.values() for d in s.values()),
+                default=0.001,
+            )
+            tput_max_mb = int(math.ceil(max_virt * 1024 / 10) * 10)
+            if tput_max_mb < 10:
+                tput_max_mb = int(math.ceil(max_virt * 1024))
+            tput_max = tput_max_mb / 1024
 
         def y_msg(v, _bot=y_bot, _h=plot_h, _lmin=axis_min, _lmax=axis_max):
             if v <= 0:
@@ -391,6 +422,24 @@ def generate_svg(panels: dict[str, dict]) -> str:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dict-size", type=int, default=None,
+                        help="filter dict rows to this dict_size (bytes)")
+    parser.add_argument("--tput-1g", type=float, default=None,
+                        help="fixed throughput cap for 1 Gbps panel (MB/s)")
+    parser.add_argument("--tput-100m", type=float, default=None,
+                        help="fixed throughput cap for 100 Mbps panel (MB/s)")
+    parser.add_argument("--tput-10m", type=float, default=None,
+                        help="fixed throughput cap for 10 Mbps panel (MB/s)")
+    parser.add_argument("--msgs-1g", type=str, default=None,
+                        help="fixed msg/s range for 1 Gbps panel (min,max)")
+    parser.add_argument("--msgs-100m", type=str, default=None,
+                        help="fixed msg/s range for 100 Mbps panel (min,max)")
+    parser.add_argument("--msgs-10m", type=str, default=None,
+                        help="fixed msg/s range for 10 Mbps panel (min,max)")
+    args = parser.parse_args()
+
     repo = Path(__file__).resolve().parent.parent
     jsonl = repo / "omq-compio" / "benches" / "results_compression.jsonl"
 
@@ -399,14 +448,35 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    raw = load_raw_data(jsonl)
+    raw = load_raw_data(jsonl, dict_size=args.dict_size or 2048)
 
     panels = {}
     for label, link_bytes_s in LINK_SPEEDS:
         panels[label] = project(raw, link_bytes_s)
 
-    svg = generate_svg(panels)
-    output = repo / "doc" / "charts" / "compression.svg"
+    tput_caps = {}
+    if args.tput_1g is not None:
+        tput_caps["1g"] = args.tput_1g
+    if args.tput_100m is not None:
+        tput_caps["100m"] = args.tput_100m
+    if args.tput_10m is not None:
+        tput_caps["10m"] = args.tput_10m
+
+    msgs_ranges = {}
+    for key, attr in [("1g", "msgs_1g"), ("100m", "msgs_100m"), ("10m", "msgs_10m")]:
+        val = getattr(args, attr)
+        if val:
+            lo, hi = val.split(",")
+            msgs_ranges[key] = (float(lo), float(hi))
+
+    ds = args.dict_size or 2048
+    if ds >= 1024:
+        dict_size_label = f"{ds // 1024} KiB"
+    else:
+        dict_size_label = f"{ds} B"
+
+    svg = generate_svg(panels, tput_caps or None, msgs_ranges or None, dict_size_label)
+    output = repo / "doc" / "charts" / f"compression_{ds}.svg"
     output.write_text(svg)
     print(f"Written: {output}", file=sys.stderr)
 

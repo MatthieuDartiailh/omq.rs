@@ -97,13 +97,19 @@ impl MessageEncoder {
             #[cfg(feature = "lz4")]
             Endpoint::Lz4Tcp { .. } => {
                 use lz4::{Lz4Decoder, Lz4Encoder};
-                let enc = match options.compression_dict.clone() {
+                let mut enc = match options.compression_dict.clone() {
                     Some(d) => Lz4Encoder::with_send_dict(d)
                         .expect("compression_dict validated at Options::compression_dict"),
                     None => Lz4Encoder::new(),
                 }
                 .with_max_message_size(options.max_message_size);
-                let dec = Lz4Decoder::new().with_max_message_size(options.max_message_size);
+                if let Some(t) = options.compression_threshold {
+                    enc = enc.with_threshold(t);
+                }
+                let mut dec = Lz4Decoder::new().with_max_message_size(options.max_message_size);
+                if let Some(m) = options.max_recv_dict_size {
+                    dec = dec.with_max_recv_dict_size(m);
+                }
                 Some((MessageEncoder::Lz4(enc), MessageDecoder::Lz4(dec)))
             }
             #[cfg(feature = "zstd")]
@@ -119,7 +125,16 @@ impl MessageEncoder {
                 if options.compression_auto_train && options.compression_dict.is_none() {
                     enc = enc.with_auto_train();
                 }
-                let dec = ZstdDecoder::new().with_max_message_size(options.max_message_size);
+                if let Some(t) = options.compression_threshold {
+                    enc = enc.with_threshold(t);
+                }
+                if let Some(c) = options.compression_dict_capacity {
+                    enc = enc.with_dict_capacity(c);
+                }
+                let mut dec = ZstdDecoder::new().with_max_message_size(options.max_message_size);
+                if let Some(m) = options.max_recv_dict_size {
+                    dec = dec.with_max_recv_dict_size(m);
+                }
                 Some((MessageEncoder::Zstd(enc), MessageDecoder::Zstd(dec)))
             }
             _ => None,

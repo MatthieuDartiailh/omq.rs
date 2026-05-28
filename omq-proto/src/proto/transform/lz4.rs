@@ -45,9 +45,10 @@ const LZ4M_BLOCK_SIZE: usize = 0x4000_0000;
 const MIN_COMPRESS_NO_DICT: usize = 512;
 
 /// Below this size, plaintext passthrough wins when a dict is installed.
-/// Dicts make small-payload compression viable; the threshold drops
-/// accordingly. Matches RFC §5.4.
-const MIN_COMPRESS_WITH_DICT: usize = 32;
+/// At 128B+, dict compression ratios reach 4-5x (2 KiB dict) and the
+/// CPU cost is acceptable. Below 128B, ratios are marginal and the
+/// per-message overhead is 5-7x higher than passthrough.
+const MIN_COMPRESS_WITH_DICT: usize = 128;
 
 /// Maximum LZ4 dictionary size in bytes (RFC §6.2).
 pub const MAX_DICT_BYTES: usize = 8192;
@@ -95,6 +96,8 @@ pub struct Lz4Encoder {
     out_buf: Vec<u8>,
     /// Cached LZ4 compress stream for dict-aware compression.
     stream: *mut lz4_sys::LZ4StreamEncode,
+    /// User override for the compression threshold.
+    threshold_override: Option<usize>,
 }
 
 // LZ4 streams are pure data; no thread-locals or globals are touched.
@@ -118,6 +121,7 @@ impl Default for Lz4Encoder {
             block_size: LZ4M_BLOCK_SIZE,
             out_buf: Vec::new(),
             stream: std::ptr::null_mut(),
+            threshold_override: None,
         }
     }
 }
@@ -150,6 +154,7 @@ impl Lz4Encoder {
             block_size: LZ4M_BLOCK_SIZE,
             out_buf: Vec::new(),
             stream: std::ptr::null_mut(),
+            threshold_override: None,
         })
     }
 
@@ -176,11 +181,28 @@ impl Lz4Encoder {
         self
     }
 
+    #[must_use]
+    pub fn with_threshold(mut self, threshold: usize) -> Self {
+        self.threshold_override = Some(threshold);
+        self
+    }
+
+    fn effective_threshold(&self) -> usize {
+        self.threshold_override
+            .unwrap_or(if self.send_dict.is_some() {
+                MIN_COMPRESS_WITH_DICT
+            } else {
+                MIN_COMPRESS_NO_DICT
+            })
+    }
+
     /// Per-part size below which `encode` is guaranteed to use
     /// `SENTINEL_PLAIN` (no actual compression). `None` when a send-side
-    /// dictionary is installed — the threshold then depends on the dict.
+    /// dictionary is installed and no explicit threshold override is set.
     pub fn passthrough_threshold(&self) -> Option<usize> {
-        if self.send_dict.is_none() {
+        if self.threshold_override.is_some() {
+            Some(self.effective_threshold())
+        } else if self.send_dict.is_none() {
             Some(MIN_COMPRESS_NO_DICT)
         } else {
             None
@@ -206,12 +228,7 @@ impl Lz4Encoder {
     #[expect(clippy::cast_possible_wrap)]
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
         let plain = part.as_bytes();
-        let threshold = if self.send_dict.is_some() {
-            MIN_COMPRESS_WITH_DICT
-        } else {
-            MIN_COMPRESS_NO_DICT
-        };
-        if plain.len() < threshold {
+        if plain.len() < self.effective_threshold() {
             return Ok(plaintext_payload(&plain));
         }
         if plain.len() > self.block_size {
@@ -290,6 +307,8 @@ pub struct Lz4Decoder {
     max_message_size: Option<usize>,
     /// Per-block decompressed size limit. Must match the encoder's value.
     block_size: usize,
+    /// Maximum dict size accepted from a peer.
+    max_recv_dict_size: usize,
 }
 
 impl Default for Lz4Decoder {
@@ -298,6 +317,7 @@ impl Default for Lz4Decoder {
             recv_dict: None,
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
+            max_recv_dict_size: MAX_DICT_BYTES,
         }
     }
 }
@@ -311,6 +331,12 @@ impl Lz4Decoder {
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_recv_dict_size(mut self, max: usize) -> Self {
+        self.max_recv_dict_size = max;
         self
     }
 
@@ -376,7 +402,7 @@ impl Lz4Decoder {
                         ));
                     }
                     let dict = bytes.slice(4..);
-                    validate_dict(&dict, "LZ4", MAX_DICT_BYTES)?;
+                    validate_dict(&dict, "LZ4", self.max_recv_dict_size)?;
                     self.recv_dict = Some(dict);
                     return Ok(None);
                 }
@@ -711,9 +737,9 @@ mod tests {
     #[test]
     fn dict_aware_roundtrip_small_payload_uses_lz4b() {
         // 64-byte payload - below the no-dict threshold (512) but above
-        // the with-dict threshold (32). The dict makes it compressible.
+        // the with-dict threshold (128). The dict makes it compressible.
         let dict = Bytes::from(vec![b'q'; 256]);
-        let plain = vec![b'q'; 64];
+        let plain = vec![b'q'; 192];
         let msg = Message::single(plain.clone());
 
         let mut enc = Lz4Encoder::with_send_dict(dict.clone()).unwrap();
