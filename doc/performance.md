@@ -786,6 +786,11 @@ It keeps the reader and codec, handles recv (via `recv_direct` or
 for messages routed through `send_submitter`. The writer is shared
 between `DirectIo` and the driver via `Arc<Mutex<Writer>>`.
 
+When a second peer connects, the actor drops the pending oneshot
+receiver (canceling any in-flight install) and clears the slot.
+Routing socket types (REP, ROUTER, SERVER) would misroute replies
+to the first peer's stream otherwise.
+
 Disabled when a frame transform is active (CURVE, BLAKE3ZMQ).
 The codec's encrypt-in-place flow cannot use the flat-encode path.
 

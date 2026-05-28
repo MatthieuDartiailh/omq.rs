@@ -356,6 +356,10 @@ impl SocketDriver {
         // Disable send fast path when a second peer of any type connects.
         if self.peers.len() > 1 {
             *self.send_ring.write().unwrap() = None;
+            self.pending_direct_io_rx = None;
+            if let Ok(mut guard) = self.direct_io.try_lock() {
+                *guard = None;
+            }
         }
 
         tokio::spawn(async move {
@@ -627,19 +631,10 @@ impl SocketDriver {
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;
 
-        // Direct I/O: await the oneshot in a background task so the
-        // actor stays responsive to commands (e.g. QueryConnections).
         if let Some(p) = self.peers.get_mut(&peer_id)
             && let Some(rx) = p.direct_io_rx.take()
         {
-            let dio_slot = self.direct_io.clone();
-            let pending = self.direct_io_pending.clone();
-            tokio::spawn(async move {
-                if let Ok(dio) = rx.await {
-                    *dio_slot.lock().await = Some(dio);
-                }
-                pending.store(false, std::sync::atomic::Ordering::Release);
-            });
+            self.pending_direct_io_rx = Some(rx);
         }
     }
 

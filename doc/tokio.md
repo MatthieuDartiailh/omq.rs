@@ -223,8 +223,13 @@ It keeps the read half, the codec, and a clone of the shared writer
 - EOF detection: sets `DirectIo`'s dead flag and exits normally;
   `run()` sends `PeerOut::Closed` so the actor can reconnect.
 
-Disabled when a frame transform is active (CURVE, BLAKE3ZMQ) —
-the codec's encrypt-in-place state cannot be split from the writer.
+When a second peer connects, the actor drops the pending oneshot
+receiver (canceling any in-flight install) and clears the slot.
+Without this, routing types (REP/ROUTER/SERVER) would send all
+replies to the first peer's stream.
+
+Disabled when a frame transform is active (CURVE, BLAKE3ZMQ).
+The codec's encrypt-in-place state cannot be split from the writer.
 
 ## Reconnect and monitor
 
