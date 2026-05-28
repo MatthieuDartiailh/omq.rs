@@ -212,3 +212,45 @@ async fn req_rep_1000_cycles_tcp() {
 
     rep_task.await.unwrap();
 }
+
+/// Three REQ sockets connect to one REP. Each sends a request and
+/// expects its own reply back. Verifies that `DirectIo` (installed for
+/// the first peer) does not misroute replies once more peers arrive.
+#[tokio::test]
+async fn three_req_to_one_rep_direct_io_routing() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
+
+    let mut reqs: Vec<Socket> = Vec::new();
+    for _ in 0..3 {
+        let req = Socket::new(SocketType::Req, Options::default());
+        req.connect(ep.clone()).await.unwrap();
+        reqs.push(req);
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for (i, req) in reqs.iter().enumerate() {
+        req.send(Message::single(format!("from-{i}")))
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(5), rep.recv())
+            .await
+            .unwrap_or_else(|_| panic!("rep.recv timed out on req {i}"))
+            .unwrap();
+        assert_eq!(msg.part_bytes(0).unwrap(), format!("from-{i}").as_bytes());
+
+        rep.send(Message::single(format!("reply-{i}")))
+            .await
+            .unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), req.recv())
+            .await
+            .unwrap_or_else(|_| panic!("req[{i}].recv timed out"))
+            .unwrap();
+        assert_eq!(
+            reply.part_bytes(0).unwrap(),
+            format!("reply-{i}").as_bytes()
+        );
+    }
+}

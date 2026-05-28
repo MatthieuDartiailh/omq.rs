@@ -222,6 +222,8 @@ pub(crate) struct SocketDriver {
     spsc_activated: super::handle::SpscActivated,
     direct_io: super::handle::DirectIoSlot,
     direct_io_pending: super::handle::DirectIoPending,
+    pending_direct_io_rx:
+        Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
 }
 
 impl SocketDriver {
@@ -280,6 +282,7 @@ impl SocketDriver {
             spsc_activated,
             direct_io,
             direct_io_pending,
+            pending_direct_io_rx: None,
         }
     }
 
@@ -324,6 +327,16 @@ impl SocketDriver {
                         },
                     };
                     self.handle_internal_event(evt).await;
+                }
+                Ok(dio) = async {
+                    self.pending_direct_io_rx.as_mut().unwrap().await
+                }, if self.pending_direct_io_rx.is_some() => {
+                    self.pending_direct_io_rx = None;
+                    if self.peers.len() == 1 {
+                        *self.direct_io.lock().await = Some(dio);
+                    }
+                    self.direct_io_pending
+                        .store(false, std::sync::atomic::Ordering::Release);
                 }
             }
         }
