@@ -14,7 +14,8 @@
 //!
 //! Push: binds, sends \<`msg_size`\> byte messages forever.
 //! Pull: connects, warms up for 500 ms, then counts messages for \<duration\>
-//!       seconds and prints a human-readable summary block to stdout.
+//!       seconds and prints raw stats to stdout (for scripts) and a
+//!       human-readable summary to stderr.
 //! Rep: binds, echoes every received message back. Killed by SIGTERM.
 //! Req: connects, runs warmup + measured round-trips, prints:
 //!         \<`p50_us`\> \<`p99_us`\> \<`p999_us`\> \<`max_us`\> \<iterations\>
@@ -94,12 +95,20 @@ async fn main() {
             let warmup: usize = args[5].parse().expect("warmup");
             run_req(ep, size, iterations, warmup).await;
         }
+        Some("inproc-latency") => {
+            let name = args[2].clone();
+            let size: usize = args[3].parse().expect("msg_size");
+            let iterations: usize = args[4].parse().expect("iterations");
+            let warmup: usize = args[5].parse().expect("warmup");
+            run_inproc_latency(name, size, iterations, warmup).await;
+        }
         _ => {
             eprintln!("usage: bench_peer_tokio push <addr> <size>");
             eprintln!("       bench_peer_tokio pull <addr> <size> <duration_secs>");
             eprintln!("       bench_peer_tokio inproc <name> <size> <duration_secs>");
             eprintln!("       bench_peer_tokio rep <addr> <size>");
             eprintln!("       bench_peer_tokio req <addr> <size> <iterations> <warmup>");
+            eprintln!("       bench_peer_tokio inproc-latency <name> <size> <iterations> <warmup>");
             eprintln!("<addr>: port number or full endpoint (tcp:// ipc://)");
             std::process::exit(1);
         }
@@ -179,11 +188,12 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    print_pull_summary(&ep, count, elapsed, size);
+    println!("{count} {elapsed:.6} {size}");
+    eprint_pull_summary(&ep, count, elapsed, size);
 }
 
 #[expect(clippy::cast_precision_loss)]
-fn print_pull_summary(ep: &Endpoint, count: u64, elapsed: f64, size: usize) {
+fn eprint_pull_summary(ep: &Endpoint, count: u64, elapsed: f64, size: usize) {
     let total_bytes = u128::from(count) * size as u128;
     let msgs_per_sec = count as f64 / elapsed;
     let bytes_per_sec = total_bytes as f64 / elapsed;
@@ -191,26 +201,26 @@ fn print_pull_summary(ep: &Endpoint, count: u64, elapsed: f64, size: usize) {
     let mbit_per_sec = bytes_per_sec * 8.0 / 1_000_000.0;
     let total_mib = total_bytes as f64 / (1024.0 * 1024.0);
 
-    println!();
-    println!("=== PULL ===");
-    println!("  Endpoint    : {ep}");
-    println!("  Msg size    : {} B", with_commas(&size.to_string()));
-    println!("  Elapsed     : {elapsed:.3} s");
-    println!("  Messages    : {}", with_commas(&count.to_string()));
-    println!(
+    eprintln!();
+    eprintln!("=== PULL ===");
+    eprintln!("  Endpoint    : {ep}");
+    eprintln!("  Msg size    : {} B", with_commas(&size.to_string()));
+    eprintln!("  Elapsed     : {elapsed:.3} s");
+    eprintln!("  Messages    : {}", with_commas(&count.to_string()));
+    eprintln!(
         "  Throughput  : {} msg/s",
         with_commas(&format!("{msgs_per_sec:.0}"))
     );
-    println!(
+    eprintln!(
         "  Bandwidth   : {} MiB/s  ({} Mbit/s)",
         with_commas(&format!("{mib_per_sec:.2}")),
         with_commas(&format!("{mbit_per_sec:.2}"))
     );
-    println!(
+    eprintln!(
         "  Total       : {} MiB",
         with_commas(&format!("{total_mib:.2}"))
     );
-    println!();
+    eprintln!();
 }
 
 fn with_commas(s: &str) -> String {
@@ -229,6 +239,46 @@ fn with_commas(s: &str) -> String {
     }
     out.push_str(dec_part);
     out
+}
+
+async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup: usize) {
+    let ep = Endpoint::Inproc { name };
+
+    let rep_ep = ep.clone();
+    tokio::spawn(async move {
+        let rep = Socket::new(SocketType::Rep, Options::default());
+        rep.bind(rep_ep).await.expect("rep bind");
+        loop {
+            let msg = rep.recv().await.unwrap();
+            rep.send(msg).await.unwrap();
+        }
+    });
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep).await.expect("req connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let payload = Bytes::from(vec![b'x'; size]);
+
+    for _ in 0..warmup {
+        req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+    }
+
+    let mut rtts = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+        rtts.push(t0.elapsed().as_nanos() as u64);
+    }
+
+    rtts.sort_unstable();
+    let p50 = percentile(&rtts, 50.0);
+    let p99 = percentile(&rtts, 99.0);
+    let p999 = percentile(&rtts, 99.9);
+    let max = percentile(&rtts, 100.0);
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
 }
 
 async fn run_rep(ep: Endpoint, size: usize) {

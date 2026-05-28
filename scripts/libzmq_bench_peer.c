@@ -290,6 +290,98 @@ done_inproc:;
         zmq_msg_close(&reply);
         zmq_close(sock);
 
+    } else if (strcmp(role, "inproc-latency") == 0) {
+        if (argc < 6) goto usage;
+        const char *name = argv[2];
+        int iterations = atoi(argv[4]);
+        int warmup = atoi(argv[5]);
+
+        /* REP thread */
+        typedef struct { void *ctx; const char *name; int size; } InprocRepArg;
+        InprocRepArg rep_arg = { ctx, name, size };
+
+        void *inproc_rep_thread(void *arg_) {
+            InprocRepArg *a = arg_;
+            char addr[256];
+            snprintf(addr, sizeof(addr), "inproc://%s", a->name);
+            void *sock = zmq_socket(a->ctx, ZMQ_REP);
+            if (!sock || zmq_bind(sock, addr) != 0) return NULL;
+            zmq_msg_t msg;
+            zmq_msg_init(&msg);
+            for (;;) {
+                int rc = zmq_msg_recv(&msg, sock, 0);
+                if (rc < 0) break;
+                int sz = zmq_msg_size(&msg);
+                if (zmq_send(sock, zmq_msg_data(&msg), sz, 0) < 0) break;
+            }
+            zmq_msg_close(&msg);
+            zmq_close(sock);
+            return NULL;
+        }
+
+        pthread_t tid;
+        pthread_create(&tid, NULL, inproc_rep_thread, &rep_arg);
+
+        char inproc_addr[256];
+        snprintf(inproc_addr, sizeof(inproc_addr), "inproc://%s", name);
+
+        struct timespec sleep_ts = {0, 200000000};
+        nanosleep(&sleep_ts, NULL);
+
+        void *sock = zmq_socket(ctx, ZMQ_REQ);
+        if (!sock) die("zmq_socket REQ");
+        if (zmq_connect(sock, inproc_addr) != 0) die("zmq_connect");
+
+        char *buf = calloc(1, size);
+        if (!buf) { perror("calloc"); exit(1); }
+        memset(buf, 'x', size);
+
+        zmq_msg_t reply;
+        zmq_msg_init(&reply);
+
+        for (int i = 0; i < warmup; i++) {
+            if (zmq_send(sock, buf, size, 0) < 0) die("zmq_send warmup");
+            if (zmq_msg_recv(&reply, sock, 0) < 0) die("zmq_recv warmup");
+        }
+
+        uint64_t *rtts = malloc(sizeof(uint64_t) * iterations);
+        if (!rtts) { perror("malloc"); exit(1); }
+
+        for (int i = 0; i < iterations; i++) {
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            if (zmq_send(sock, buf, size, 0) < 0) die("zmq_send");
+            if (zmq_msg_recv(&reply, sock, 0) < 0) die("zmq_recv");
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            rtts[i] = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ULL
+                     + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+        }
+
+        int cmp_u64(const void *a, const void *b) {
+            uint64_t va = *(const uint64_t *)a;
+            uint64_t vb = *(const uint64_t *)b;
+            return (va > vb) - (va < vb);
+        }
+        qsort(rtts, iterations, sizeof(uint64_t), cmp_u64);
+
+        double percentile(uint64_t *sorted, int n, double p) {
+            int idx = (int)(n * p / 100.0);
+            if (idx >= n) idx = n - 1;
+            return sorted[idx] / 1000.0;
+        }
+
+        double p50  = percentile(rtts, iterations, 50);
+        double p99  = percentile(rtts, iterations, 99);
+        double p999 = percentile(rtts, iterations, 99.9);
+        double max  = rtts[iterations - 1] / 1000.0;
+        printf("%.3f %.3f %.3f %.3f %d\n", p50, p99, p999, max, iterations);
+
+        free(rtts);
+        free(buf);
+        zmq_msg_close(&reply);
+        zmq_close(sock);
+        exit(0);
+
     } else {
         goto usage;
     }
@@ -303,6 +395,7 @@ usage:
     fprintf(stderr, "       %s inproc <name> <size> <duration_secs>\n", argv[0]);
     fprintf(stderr, "       %s rep <addr> <size>\n", argv[0]);
     fprintf(stderr, "       %s req <addr> <size> <iterations> <warmup>\n", argv[0]);
+    fprintf(stderr, "       %s inproc-latency <name> <size> <iterations> <warmup>\n", argv[0]);
     fprintf(stderr, "<addr>: port number or full ZMQ address (tcp:// ipc://)\n");
     return 1;
 }

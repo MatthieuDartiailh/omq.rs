@@ -73,6 +73,7 @@ def build_table(data, pattern)
     .select { |p, _t, _s| p == pattern }
     .map { |_p, _t, s| s }
     .uniq.sort
+    .select { |s| BenchHelpers::TABLE_SIZES.include?(s) }
 
   return "(no data)\n" if sizes.empty?
 

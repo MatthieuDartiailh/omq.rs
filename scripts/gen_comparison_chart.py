@@ -1,201 +1,318 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/comparison.svg from COMPARISONS.md data.
+"""Generate comparison SVG charts from benchmarks/comparisons.jsonl.
 
-Two-panel SVG:
-  Top: PUSH/PULL throughput (msg/s, log scale)
-  Bottom: REQ/REP latency (p50 µs, linear)
-
-Throughput: libzmq, omq-compio, omq-tokio, zmq.rs.
-Latency: libzmq, omq-compio, omq-tokio.
+Produces:
+  doc/charts/comparison.svg        — TCP: throughput + latency (4 impls)
+  doc/charts/comparison_inproc.svg — inproc: throughput + latency (3 impls, no zmq.rs)
 """
 
-import math
-import re
+import json
 import sys
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parent.parent
+JSONL_PATH = REPO / "benchmarks" / "comparisons.jsonl"
 
-def parse_msgs_s(s: str) -> float:
-    s = s.strip().replace(",", "")
-    if s.endswith("M"):
-        return float(s[:-1]) * 1e6
-    if s.endswith("k"):
-        return float(s[:-1]) * 1e3
-    return float(s)
+COLORS = {
+    "libzmq": "#eab308",
+    "omq-compio": "#dc2626",
+    "omq-compio-st": "#f87171",
+    "omq-tokio": "#f97316",
+    "zmq.rs": "#2563eb",
+}
 
-
-def parse_throughput(s: str) -> float:
-    s = s.strip()
-    m = re.match(r"([\d.]+)\s*(MB/s|GB/s)", s)
-    if not m:
-        raise ValueError(f"Cannot parse throughput: {s!r}")
-    val = float(m.group(1))
-    if m.group(2) == "MB/s":
-        val /= 1024
-    return val
-
-
-def parse_latency_us(s: str) -> float:
-    s = s.strip()
-    m = re.match(r"([\d.]+)\s*µs", s)
-    if not m:
-        raise ValueError(f"Cannot parse latency: {s!r}")
-    return float(m.group(1))
-
-
-def parse_size_bytes(s: str) -> int:
-    s = s.strip()
-    m = re.match(r"([\d.]+)\s*(B|KiB|MiB)", s)
-    if not m:
-        raise ValueError(f"Cannot parse size: {s!r}")
-    n = float(m.group(1))
-    unit = m.group(2)
-    if unit == "KiB":
-        n *= 1024
-    elif unit == "MiB":
-        n *= 1024 * 1024
-    return int(n)
+LABELS = {
+    "libzmq": "libzmq v4.3.5",
+    "omq-compio": "omq-compio",
+    "omq-compio-st": "omq-compio (st)",
+    "omq-tokio": "omq-tokio",
+    "zmq.rs": "zmq.rs v0.6.0",
+}
 
 
 def fmt_size(b: int) -> str:
     if b >= 1024 * 1024:
-        return f"{b // (1024*1024)} MiB"
+        return f"{b // (1024 * 1024)} MiB"
     if b >= 1024:
         return f"{b // 1024} KiB"
     return f"{b} B"
 
 
-def parse_throughput_table(text: str, marker: str) -> list[dict]:
-    begin = f"<!-- BEGIN {marker} -->"
-    end = f"<!-- END {marker} -->"
-    section = text.split(begin)[1].split(end)[0]
+# ── data loading ──────────────────────────────────────────────────
+
+def load_jsonl() -> list[dict]:
+    if not JSONL_PATH.exists():
+        print(f"ERROR: {JSONL_PATH} not found", file=sys.stderr)
+        sys.exit(1)
     rows = []
-    for line in section.strip().splitlines():
+    for line in JSONL_PATH.read_text().splitlines():
         line = line.strip()
-        if not line.startswith("|") or "---" in line:
-            continue
-        cells = [c.strip() for c in line.split("|")[1:-1]]
-        if cells[0] in ("Size", ""):
-            continue
-        rows.append({
-            "size": parse_size_bytes(cells[0]),
-            "ref_msgs": parse_msgs_s(cells[1]),
-            "ref_tput": parse_throughput(cells[2]),
-            "omq_msgs": parse_msgs_s(cells[3]),
-            "omq_tput": parse_throughput(cells[4]),
-        })
+        if line:
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
     return rows
 
 
-def parse_latency_table(text: str, marker: str) -> list[dict]:
-    begin = f"<!-- BEGIN {marker} -->"
-    end = f"<!-- END {marker} -->"
-    parts = text.split(begin)
-    if len(parts) < 2:
-        return []
-    section = parts[1].split(end)[0]
-    rows = []
-    for line in section.strip().splitlines():
-        line = line.strip()
-        if not line.startswith("|") or "---" in line:
+def load_data(transport: str, impls: list[str]) -> dict:
+    rows = load_jsonl()
+    t_rows = [r for r in rows if r.get("transport") == transport]
+
+    tput: dict[int, dict[str, tuple[float, float]]] = {}
+    lat: dict[int, dict[str, float]] = {}
+
+    seen_tput: dict[tuple, str] = {}
+    seen_lat: dict[tuple, str] = {}
+
+    for r in t_rows:
+        impl_name = r.get("impl")
+        if impl_name not in impls:
             continue
-        cells = [c.strip() for c in line.split("|")[1:-1]]
-        if cells[0] in ("Size", ""):
-            continue
-        try:
-            rows.append({
-                "size": parse_size_bytes(cells[0]),
-                "libzmq_p50": parse_latency_us(cells[1]),
-                "compio_p50": parse_latency_us(cells[3]),
-                "tokio_p50": parse_latency_us(cells[6]),
-            })
-        except (ValueError, IndexError):
-            continue
-    return rows
+        run_id = r.get("run_id", "")
+        size = r.get("msg_size")
+        kind = r.get("kind")
 
+        if kind == "throughput":
+            key = (impl_name, size)
+            if key not in seen_tput or run_id >= seen_tput[key]:
+                seen_tput[key] = run_id
+                msgs_s = r.get("msgs_s", 0)
+                mbps = r.get("mbps", 0)
+                gbs = mbps / 1000.0
+                tput.setdefault(size, {})[impl_name] = (msgs_s, gbs)
 
-def load_data(comparisons_md: Path) -> dict:
-    text = comparisons_md.read_text()
+        elif kind == "latency":
+            key = (impl_name, size)
+            if key not in seen_lat or run_id >= seen_lat[key]:
+                seen_lat[key] = run_id
+                lat.setdefault(size, {})[impl_name] = r.get("p50_us", 0)
 
-    libzmq_compio = parse_throughput_table(text, "libzmq_comparison_tcp_compio")
-    libzmq_tokio = parse_throughput_table(text, "libzmq_comparison_tcp_tokio")
-    zmqrs_compio = parse_throughput_table(text, "zmqrs_comparison_tcp_compio")
-
-    tput = {}
-    for r in libzmq_compio:
-        s = r["size"]
-        tput.setdefault(s, {})
-        tput[s]["libzmq"] = (r["ref_msgs"], r["ref_tput"])
-        tput[s]["compio"] = (r["omq_msgs"], r["omq_tput"])
-    for r in libzmq_tokio:
-        s = r["size"]
-        tput.setdefault(s, {})
-        tput[s]["tokio"] = (r["omq_msgs"], r["omq_tput"])
-    for r in zmqrs_compio:
-        s = r["size"]
-        tput.setdefault(s, {})
-        tput[s]["zmqrs"] = (r["ref_msgs"], r["ref_tput"])
-
-    latency_rows = parse_latency_table(text, "libzmq_latency_tcp")
-    lat = {}
-    for r in latency_rows:
-        lat[r["size"]] = {
-            "libzmq": r["libzmq_p50"],
-            "compio": r["compio_p50"],
-            "tokio": r["tokio_p50"],
-        }
-
-    zmqrs_latency = parse_latency_table(text, "zmqrs_latency_tcp")
-    for r in zmqrs_latency:
-        if r["size"] in lat:
-            lat[r["size"]]["zmqrs"] = r["libzmq_p50"]
-
-    max_size = 128 * 1024
-    sizes = sorted(s for s in tput if s in lat and s <= max_size)
-
+    sizes = sorted(s for s in tput if s <= 32768)
     return {"sizes": sizes, "tput": tput, "lat": lat}
 
 
-def generate_svg(data: dict) -> str:
+# ── SVG helpers ───────────────────────────────────────────────────
+
+def svg_line(x1, y1, x2, y2, stroke="#e5e7eb", width=1, dash=None) -> str:
+    d = f' stroke-dasharray="{dash}"' if dash else ""
+    return (
+        f'  <line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}"'
+        f' stroke="{stroke}" stroke-width="{width}"{d}/>'
+    )
+
+
+def svg_text(x, y, text, anchor="middle", fill="#374151", size=10, weight=None,
+             baseline=None, rotate=None) -> str:
+    parts = [f'  <text x="{x:.1f}" y="{y:.1f}" text-anchor="{anchor}"']
+    if baseline:
+        parts[0] += f' dominant-baseline="{baseline}"'
+    parts[0] += f' fill="{fill}" font-size="{size}"'
+    if weight:
+        parts[0] += f' font-weight="{weight}"'
+    if rotate:
+        parts[0] += f' transform="rotate({rotate},{x:.1f},{y:.1f})"'
+    parts[0] += f">{text}</text>"
+    return parts[0]
+
+
+def svg_polyline(points: list[tuple[float, float]], color: str, width=2.5,
+                 dash=None) -> str:
+    pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+    d = f' stroke-dasharray="{dash}"' if dash else ""
+    cap = ' stroke-linecap="round" stroke-linejoin="round"' if not dash else ""
+    return (
+        f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+        f' stroke-width="{width}"{cap}{d}/>'
+    )
+
+
+def svg_dots(points: list[tuple[float, float]], color: str) -> list[str]:
+    return [
+        f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="3"'
+        f' fill="{color}" stroke="white" stroke-width="1"/>'
+        for x, y in points
+    ]
+
+
+# ── chart panels ─────────────────────────────────────────────────
+
+def draw_throughput_panel(
+    L: list[str], sizes: list[int], xs: list[float], tput: dict,
+    impls: list[str], x_left: float, x_right: float, y_top: float, y_bot: float,
+    title: str,
+):
+    h = y_bot - y_top
+    mid_x = (x_left + x_right) / 2
+
+    all_msgs = [
+        tput[s][name][0]
+        for s in sizes for name in impls if name in tput.get(s, {})
+    ]
+    msg_max = max(all_msgs) * 1.15 if all_msgs else 16e6
+
+    all_gbs = [
+        tput[s][name][1]
+        for s in sizes for name in impls if name in tput.get(s, {})
+    ]
+    tput_max = max(all_gbs) * 1.15 if all_gbs else 10.0
+
+    def y_msg(v):
+        return y_bot - (v / msg_max) * h
+
+    def y_tput(v):
+        return y_bot - (v / tput_max) * h
+
+    L.append(svg_text(mid_x, y_top - 17, title, size=13, weight="700", fill="#111827"))
+
+    # msg/s gridlines (left axis)
+    step_msg = nice_step(msg_max, 5)
+    v = step_msg
+    while v <= msg_max:
+        yy = y_msg(v)
+        L.append(svg_line(x_left, yy, x_right, yy))
+        label = f"{v / 1e6:.0f}M" if v >= 1e6 else f"{v / 1e3:.0f}k"
+        L.append(svg_text(x_left - 8, yy, label, anchor="end", baseline="middle"))
+        v += step_msg
+
+    # GB/s gridlines (right axis, dashed)
+    step_gbs = nice_step(tput_max, 5)
+    v = step_gbs
+    while v <= tput_max:
+        yy = y_tput(v)
+        L.append(svg_line(x_left, yy, x_right, yy, dash="3,6"))
+        L.append(svg_text(x_right + 8, yy, f"{v:.0f} GB/s",
+                          anchor="start", baseline="middle", fill="#6b7280"))
+        v += step_gbs
+
+    # vertical gridlines
+    for x in xs:
+        L.append(svg_line(x, y_top, x, y_bot))
+
+    # axes
+    L.append(svg_line(x_left, y_top, x_left, y_bot, stroke="#9ca3af", width=1.5))
+    L.append(svg_line(x_right, y_top, x_right, y_bot, stroke="#9ca3af", width=1.5))
+    L.append(svg_line(x_left, y_bot, x_right, y_bot, stroke="#9ca3af", width=1.5))
+
+    # axis labels
+    mid_y = (y_top + y_bot) / 2
+    L.append(svg_text(40, mid_y, "msg/s", weight="600", rotate=-90))
+    L.append(svg_text(812, mid_y, "throughput", weight="600",
+                      fill="#6b7280", rotate=90))
+
+    # dashed msg/s lines
+    draw_order = [name for name in ["zmq.rs", "libzmq", "omq-tokio", "omq-compio"]
+                  if name in impls]
+    for name in draw_order:
+        pts = [
+            (xs[i], y_msg(tput[sizes[i]][name][0]))
+            for i in range(len(sizes)) if name in tput.get(sizes[i], {})
+        ]
+        if pts:
+            L.append(svg_polyline(pts, COLORS[name], width=2, dash="6,4"))
+
+    # solid throughput lines with dots
+    for name in draw_order:
+        pts = [
+            (xs[i], y_tput(tput[sizes[i]][name][1]))
+            for i in range(len(sizes)) if name in tput.get(sizes[i], {})
+        ]
+        if pts:
+            L.append(svg_polyline(pts, COLORS[name]))
+            L.extend(svg_dots(pts, COLORS[name]))
+
+    # x-axis labels
+    for i, s in enumerate(sizes):
+        L.append(svg_text(xs[i], y_bot + 14, fmt_size(s), size=8.5))
+
+
+def draw_latency_panel(
+    L: list[str], sizes: list[int], xs: list[float], lat: dict,
+    impls: list[str], x_left: float, x_right: float, y_top: float, y_bot: float,
+    title: str,
+):
+    h = y_bot - y_top
+    mid_x = (x_left + x_right) / 2
+
+    all_vals = [
+        lat[s][name]
+        for s in sizes for name in impls if name in lat.get(s, {})
+    ]
+    lat_max = max(all_vals) * 1.2 if all_vals else 150.0
+
+    def y_lat(v):
+        return y_bot - (v / lat_max) * h
+
+    L.append(svg_text(mid_x, y_top - 17, title, size=13, weight="700", fill="#111827"))
+
+    # gridlines
+    step = nice_step(lat_max, 6)
+    v = step
+    while v <= lat_max:
+        yy = y_lat(v)
+        L.append(svg_line(x_left, yy, x_right, yy))
+        L.append(svg_text(x_left - 8, yy, f"{v:.0f}", anchor="end", baseline="middle"))
+        v += step
+
+    # vertical gridlines
+    for x in xs:
+        L.append(svg_line(x, y_top, x, y_bot))
+
+    # axes
+    L.append(svg_line(x_left, y_top, x_left, y_bot, stroke="#9ca3af", width=1.5))
+    L.append(svg_line(x_left, y_bot, x_right, y_bot, stroke="#9ca3af", width=1.5))
+
+    # axis label
+    mid_y = (y_top + y_bot) / 2
+    L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
+
+    draw_order = [name for name in ["libzmq", "omq-tokio", "zmq.rs", "omq-compio"]
+                  if name in impls]
+    for name in draw_order:
+        pts = [
+            (xs[i], y_lat(lat[sizes[i]][name]))
+            for i in range(len(sizes)) if name in lat.get(sizes[i], {})
+        ]
+        if pts:
+            L.append(svg_polyline(pts, COLORS[name]))
+            L.extend(svg_dots(pts, COLORS[name]))
+
+    # x-axis labels
+    for i, s in enumerate(sizes):
+        L.append(svg_text(xs[i], y_bot + 14, fmt_size(s), size=8.5))
+
+
+def nice_step(max_val: float, target_lines: int) -> float:
+    raw = max_val / target_lines
+    mag = 10 ** int(f"{raw:.0e}".split("e")[1])
+    for s in [1, 2, 2.5, 5, 10]:
+        step = s * mag
+        if max_val / step <= target_lines + 1:
+            return step
+    return mag * 10
+
+
+# ── chart generation ──────────────────────────────────────────────
+
+def generate_chart(data: dict, impls: list[str], transport_label: str) -> str:
     sizes = data["sizes"]
     tput = data["tput"]
     lat = data["lat"]
     n = len(sizes)
+    if n < 2:
+        print(f"WARNING: only {n} data points for {transport_label}", file=sys.stderr)
+        if n == 0:
+            return ""
 
-    svg_w, svg_h = 850, 640
+    has_latency = any(s in lat and any(name in lat[s] for name in impls) for s in sizes)
+
+    svg_w, svg_h = 850, 640 if has_latency else 340
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
 
     t1_y_top, t1_y_bot = 35, 270
-    t1_h = t1_y_bot - t1_y_top
 
-    t2_y_top, t2_y_bot = 350, 540
-    t2_h = t2_y_bot - t2_y_top
-
-    xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
-
-    msg_max = 16e6
-
-    def y_msg(v):
-        return t1_y_bot - (v / msg_max) * t1_h
-
-    tput_max_gbs = 10.0
-
-    def y_tput(v):
-        return t1_y_bot - (v / tput_max_gbs) * t1_h
-
-    lat_max = 150.0
-
-    def y_lat(v):
-        return t2_y_bot - (v / lat_max) * t2_h
-
-    colors = {
-        "libzmq": "#eab308", "compio": "#dc2626",
-        "tokio": "#f97316", "zmqrs": "#2563eb",
-    }
-    tput_draw_order = ["zmqrs", "libzmq", "tokio", "compio"]
-    lat_draw_order = ["libzmq", "tokio", "zmqrs", "compio"]
-    mid_x = (x_left + x_right) / 2
+    xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
 
     L = []
     L.append(
@@ -204,189 +321,36 @@ def generate_svg(data: dict) -> str:
     )
     L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
 
-    # ── TOP PANEL: THROUGHPUT ──────────────────────────────────────
-
-    L.append(
-        f'  <text x="{mid_x}" y="18" text-anchor="middle" fill="#111827"'
-        f' font-size="13" font-weight="700">'
-        f"PUSH/PULL throughput — 2-process, TCP loopback (higher is better)</text>"
+    draw_throughput_panel(
+        L, sizes, xs, tput, impls, x_left, x_right, t1_y_top, t1_y_bot,
+        f"PUSH/PULL throughput — 2-process, {transport_label} (higher is better)",
     )
 
-    for v_m in [4, 8, 12, 16]:
-        yy = y_msg(v_m * 1e6)
-        L.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+    if has_latency:
+        t2_y_top, t2_y_bot = 350, 540
+        draw_latency_panel(
+            L, sizes, xs, lat, impls, x_left, x_right, t2_y_top, t2_y_bot,
+            f"REQ/REP latency — 2-process, {transport_label} (p50 µs, lower is better)",
         )
-        L.append(
-            f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">{v_m}M</text>'
-        )
+        leg_y = t2_y_bot + 60
+    else:
+        leg_y = t1_y_bot + 60
 
-    for x in xs:
-        L.append(
-            f'  <line x1="{x:.1f}" y1="{t1_y_top}" x2="{x:.1f}" y2="{t1_y_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
-        )
-
-    # Right-axis gridlines (GB/s, linear, dashed)
-    for v in [2, 4, 6, 8, 10]:
-        yy = y_tput(v)
-        L.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>'
-        )
-        L.append(
-            f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#6b7280" font-size="10">'
-            f'{v} GB/s</text>'
-        )
-
-    L.append(
-        f'  <line x1="{x_left}" y1="{t1_y_top}" x2="{x_left}" y2="{t1_y_bot}"'
-        f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-    L.append(
-        f'  <line x1="{x_right}" y1="{t1_y_top}" x2="{x_right}" y2="{t1_y_bot}"'
-        f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-    L.append(
-        f'  <line x1="{x_left}" y1="{t1_y_bot}" x2="{x_right}" y2="{t1_y_bot}"'
-        f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-
-    t1_mid = (t1_y_top + t1_y_bot) / 2
-    L.append(
-        f'  <text x="40" y="{t1_mid:.1f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
-        f' transform="rotate(-90,40,{t1_mid:.1f})">msg/s</text>'
-    )
-    L.append(
-        f'  <text x="812" y="{t1_mid:.1f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#6b7280" font-size="10" font-weight="600"'
-        f' transform="rotate(90,812,{t1_mid:.1f})">throughput</text>'
-    )
-
-    # Dashed msg/s lines
-    for name in tput_draw_order:
-        idxs = [i for i in range(n) if name in tput[sizes[i]]]
-        pts = " ".join(
-            f"{xs[i]:.1f},{y_msg(tput[sizes[i]][name][0]):.1f}" for i in idxs
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
-            f' stroke-width="2" stroke-dasharray="6,4"/>'
-        )
-
-    # Solid throughput (GB/s) lines with dots
-    for name in tput_draw_order:
-        idxs = [i for i in range(n) if name in tput[sizes[i]]]
-        pts = " ".join(
-            f"{xs[i]:.1f},{y_tput(tput[sizes[i]][name][1]):.1f}" for i in idxs
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
-        )
-        for i in idxs:
-            yy = y_tput(tput[sizes[i]][name][1])
-            L.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{colors[name]}" stroke="white" stroke-width="1"/>'
-            )
-
-    # X-axis labels (top panel)
-    for i, s in enumerate(sizes):
-        L.append(
-            f'  <text x="{xs[i]:.1f}" y="{t1_y_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(s)}</text>'
-        )
-
-    # ── BOTTOM PANEL: LATENCY ─────────────────────────────────────
-
-    L.append(
-        f'  <text x="{mid_x}" y="{t2_y_top - 20}" text-anchor="middle" fill="#111827"'
-        f' font-size="13" font-weight="700">'
-        f"REQ/REP latency — 2-process, TCP loopback (p50 µs, lower is better)</text>"
-    )
-
-    for v in [25, 50, 75, 100, 125, 150]:
-        yy = y_lat(v)
-        L.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
-        )
-        L.append(
-            f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">{v}</text>'
-        )
-
-    for x in xs:
-        L.append(
-            f'  <line x1="{x:.1f}" y1="{t2_y_top}" x2="{x:.1f}" y2="{t2_y_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
-        )
-
-    L.append(
-        f'  <line x1="{x_left}" y1="{t2_y_top}" x2="{x_left}" y2="{t2_y_bot}"'
-        f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-    L.append(
-        f'  <line x1="{x_left}" y1="{t2_y_bot}" x2="{x_right}" y2="{t2_y_bot}"'
-        f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-
-    t2_mid = (t2_y_top + t2_y_bot) / 2
-    L.append(
-        f'  <text x="40" y="{t2_mid:.1f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
-        f' transform="rotate(-90,40,{t2_mid:.1f})">p50 latency (µs)</text>'
-    )
-
-    for name in lat_draw_order:
-        idxs = [i for i in range(n) if name in lat[sizes[i]]]
-        pts = " ".join(
-            f"{xs[i]:.1f},{y_lat(lat[sizes[i]][name]):.1f}" for i in idxs
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{colors[name]}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
-        )
-        for i in idxs:
-            yy = y_lat(lat[sizes[i]][name])
-            L.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{colors[name]}" stroke="white" stroke-width="1"/>'
-            )
-
-    # X-axis labels (bottom panel only — shared x-axis via aligned gridlines)
-    for i, s in enumerate(sizes):
-        L.append(
-            f'  <text x="{xs[i]:.1f}" y="{t2_y_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(s)}</text>'
-        )
-
-    # ── LEGEND ────────────────────────────────────────────────────
-
-    leg_y = t2_y_bot + 60
-    legend_items = [
-        ("libzmq", "libzmq v4.3.5"), ("compio", "omq-compio"),
-        ("tokio", "omq-tokio"), ("zmqrs", "zmq.rs v0.6.0"),
-    ]
+    # legend
+    mid_x = (x_left + x_right) / 2
+    legend_items = [(k, LABELS[k]) for k in impls if k in COLORS]
     item_w = 140
     total_w = len(legend_items) * item_w
     start_x = mid_x - total_w / 2
 
     for i, (key, label) in enumerate(legend_items):
         lx = start_x + i * item_w
-        c = colors[key]
+        c = COLORS[key]
         L.append(
             f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
             f' stroke="{c}" stroke-width="2.5"/>'
         )
-        L.append(
-            f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>'
-        )
+        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
         L.append(
             f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
             f' font-size="11" font-weight="500">{label}</text>'
@@ -397,19 +361,29 @@ def generate_svg(data: dict) -> str:
 
 
 def main():
-    repo = Path(__file__).resolve().parent.parent
-    comparisons_md = repo / "COMPARISONS.md"
+    # TCP chart (4 impls)
+    tcp_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs"]
+    tcp_data = load_data("tcp", tcp_impls)
 
-    if not comparisons_md.exists():
-        print(f"ERROR: {comparisons_md} not found", file=sys.stderr)
-        sys.exit(1)
+    if tcp_data["sizes"]:
+        svg = generate_chart(tcp_data, tcp_impls, "TCP loopback")
+        out = REPO / "doc" / "charts" / "comparison.svg"
+        out.write_text(svg)
+        print(f"Written: {out}", file=sys.stderr)
+    else:
+        print("No TCP data found", file=sys.stderr)
 
-    data = load_data(comparisons_md)
-    svg = generate_svg(data)
+    # Inproc chart (4 impls: libzmq, compio mt+st, tokio; no zmq.rs)
+    inproc_impls = ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio"]
+    inproc_data = load_data("inproc", inproc_impls)
 
-    output = repo / "doc" / "charts" / "comparison.svg"
-    output.write_text(svg)
-    print(f"Written: {output}", file=sys.stderr)
+    if inproc_data["sizes"]:
+        svg = generate_chart(inproc_data, inproc_impls, "inproc")
+        out = REPO / "doc" / "charts" / "comparison_inproc.svg"
+        out.write_text(svg)
+        print(f"Written: {out}", file=sys.stderr)
+    else:
+        print("No inproc data found", file=sys.stderr)
 
 
 if __name__ == "__main__":

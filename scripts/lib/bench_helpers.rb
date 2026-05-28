@@ -23,7 +23,7 @@ module BenchHelpers
     524_288   => '512 KiB',
   }.freeze
 
-  TABLE_SIZES = [8, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192, 32_768, 131_072, 524_288].freeze
+  TABLE_SIZES = [32, 1_024, 4_096].freeze
 
   module_function
 

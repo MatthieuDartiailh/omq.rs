@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 640" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="850" height="640" fill="white"/>
+  <text x="425.0" y="18.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH/PULL throughput — 2-process, inproc (higher is better)</text>
+  <line x1="90.0" y1="200.1" x2="760.0" y2="200.1" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82.0" y="200.1" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">5M</text>
+  <line x1="90.0" y1="130.1" x2="760.0" y2="130.1" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82.0" y="130.1" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">10M</text>
+  <line x1="90.0" y1="60.2" x2="760.0" y2="60.2" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82.0" y="60.2" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">15M</text>
+  <line x1="90.0" y1="223.7" x2="760.0" y2="223.7" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>
+  <text x="768.0" y="223.7" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">10 GB/s</text>
+  <line x1="90.0" y1="177.4" x2="760.0" y2="177.4" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>
+  <text x="768.0" y="177.4" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">20 GB/s</text>
+  <line x1="90.0" y1="131.2" x2="760.0" y2="131.2" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>
+  <text x="768.0" y="131.2" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">30 GB/s</text>
+  <line x1="90.0" y1="84.9" x2="760.0" y2="84.9" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>
+  <text x="768.0" y="84.9" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">40 GB/s</text>
+  <line x1="90.0" y1="38.6" x2="760.0" y2="38.6" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>
+  <text x="768.0" y="38.6" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">50 GB/s</text>
+  <line x1="90.0" y1="35.0" x2="90.0" y2="270.0" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="425.0" y1="35.0" x2="425.0" y2="270.0" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="760.0" y1="35.0" x2="760.0" y2="270.0" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="90.0" y1="35.0" x2="90.0" y2="270.0" stroke="#9ca3af" stroke-width="1.5"/>
+  <line x1="760.0" y1="35.0" x2="760.0" y2="270.0" stroke="#9ca3af" stroke-width="1.5"/>
+  <line x1="90.0" y1="270.0" x2="760.0" y2="270.0" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="40.0" y="152.5" text-anchor="middle" fill="#374151" font-size="10" font-weight="600" transform="rotate(-90,40.0,152.5)">msg/s</text>
+  <text x="812.0" y="152.5" text-anchor="middle" fill="#6b7280" font-size="10" font-weight="600" transform="rotate(90,812.0,152.5)">throughput</text>
+  <polyline points="90.0,221.7 425.0,217.4 760.0,218.8" fill="none" stroke="#f97316" stroke-width="2" stroke-dasharray="6,4"/>
+  <polyline points="90.0,65.7 425.0,112.9 760.0,119.2" fill="none" stroke="#dc2626" stroke-width="2" stroke-dasharray="6,4"/>
+  <polyline points="90.0,269.5 425.0,252.2 760.0,200.6" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="269.5" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="252.2" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="200.6" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <polyline points="90.0,267.8 425.0,216.8 760.0,65.7" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="267.8" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="216.8" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="65.7" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <text x="90.0" y="284.0" text-anchor="middle" fill="#374151" font-size="8.5">32 B</text>
+  <text x="425.0" y="284.0" text-anchor="middle" fill="#374151" font-size="8.5">1 KiB</text>
+  <text x="760.0" y="284.0" text-anchor="middle" fill="#374151" font-size="8.5">4 KiB</text>
+  <text x="425.0" y="333.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">REQ/REP latency — 2-process, inproc (p50 µs, lower is better)</text>
+  <line x1="90.0" y1="497.1" x2="760.0" y2="497.1" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82.0" y="497.1" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">5</text>
+  <line x1="90.0" y1="454.2" x2="760.0" y2="454.2" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82.0" y="454.2" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">10</text>
+  <line x1="90.0" y1="411.2" x2="760.0" y2="411.2" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82.0" y="411.2" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">15</text>
+  <line x1="90.0" y1="368.3" x2="760.0" y2="368.3" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82.0" y="368.3" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">20</text>
+  <line x1="90.0" y1="350.0" x2="90.0" y2="540.0" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="425.0" y1="350.0" x2="425.0" y2="540.0" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="760.0" y1="350.0" x2="760.0" y2="540.0" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="90.0" y1="350.0" x2="90.0" y2="540.0" stroke="#9ca3af" stroke-width="1.5"/>
+  <line x1="90.0" y1="540.0" x2="760.0" y2="540.0" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="40.0" y="445.0" text-anchor="middle" fill="#374151" font-size="10" font-weight="600" transform="rotate(-90,40.0,445.0)">p50 latency (µs)</text>
+  <polyline points="90.0,381.7 425.0,401.8 760.0,399.4" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="381.7" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="401.8" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="399.4" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <polyline points="90.0,391.5 425.0,393.4 760.0,402.3" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="391.5" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="393.4" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="402.3" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <text x="90.0" y="554.0" text-anchor="middle" fill="#374151" font-size="8.5">32 B</text>
+  <text x="425.0" y="554.0" text-anchor="middle" fill="#374151" font-size="8.5">1 KiB</text>
+  <text x="760.0" y="554.0" text-anchor="middle" fill="#374151" font-size="8.5">4 KiB</text>
+  <line x1="145" y1="600" x2="159" y2="600" stroke="#eab308" stroke-width="2.5"/>
+  <circle cx="152" cy="600" r="2.5" fill="#eab308"/>
+  <text x="165" y="604" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5</text>
+  <line x1="285" y1="600" x2="299" y2="600" stroke="#dc2626" stroke-width="2.5"/>
+  <circle cx="292" cy="600" r="2.5" fill="#dc2626"/>
+  <text x="305" y="604" fill="#374151" font-size="11" font-weight="500">omq-compio</text>
+  <line x1="425" y1="600" x2="439" y2="600" stroke="#f87171" stroke-width="2.5"/>
+  <circle cx="432" cy="600" r="2.5" fill="#f87171"/>
+  <text x="445" y="604" fill="#374151" font-size="11" font-weight="500">omq-compio (st)</text>
+  <line x1="565" y1="600" x2="579" y2="600" stroke="#f97316" stroke-width="2.5"/>
+  <circle cx="572" cy="600" r="2.5" fill="#f97316"/>
+  <text x="585" y="604" fill="#374151" font-size="11" font-weight="500">omq-tokio</text>
+</svg>
