@@ -12,7 +12,10 @@ use crate::message::{MAX_INLINE_PAYLOAD, Payload};
 /// so no memcpy occurs on read paths either.
 #[derive(Debug, Default)]
 pub(crate) struct ChunkedInputBuf {
-    chunks: VecDeque<Bytes>,
+    /// Current front chunk, accessed directly without `VecDeque` indirection.
+    front: Bytes,
+    /// Remaining chunks after `front`.
+    rest: VecDeque<Bytes>,
     total_len: usize,
     front_offset: usize,
 }
@@ -28,7 +31,12 @@ impl ChunkedInputBuf {
             return;
         }
         self.total_len += chunk.len();
-        self.chunks.push_back(chunk);
+        if self.front_offset >= self.front.len() {
+            self.front = chunk;
+            self.front_offset = 0;
+        } else {
+            self.rest.push_back(chunk);
+        }
     }
 
     #[inline]
@@ -49,17 +57,22 @@ impl ChunkedInputBuf {
             return None;
         }
         let mut out = [0u8; N];
-        let front = self.chunks.front()?;
-        let front_remaining = &front[self.front_offset..];
+        let front_remaining = &self.front[self.front_offset..];
         if front_remaining.len() >= N {
             out.copy_from_slice(&front_remaining[..N]);
             return Some(out);
         }
-        // Slow path: data spans multiple chunks.
+        // Slow path: data spans front + rest chunks.
         let mut pos = 0;
-        for (i, chunk) in self.chunks.iter().enumerate() {
-            let start = if i == 0 { self.front_offset } else { 0 };
-            for &b in &chunk[start..] {
+        for &b in front_remaining {
+            out[pos] = b;
+            pos += 1;
+            if pos == N {
+                return Some(out);
+            }
+        }
+        for chunk in &self.rest {
+            for &b in chunk.as_ref() {
                 out[pos] = b;
                 pos += 1;
                 if pos == N {
@@ -80,9 +93,20 @@ impl ChunkedInputBuf {
         let mut out = [0u8; N];
         let mut pos = 0;
         let mut skipped = 0;
-        for (i, chunk) in self.chunks.iter().enumerate() {
-            let start = if i == 0 { self.front_offset } else { 0 };
-            let slice = &chunk[start..];
+        let front_remaining = &self.front[self.front_offset..];
+        if skipped + front_remaining.len() > offset {
+            let begin = offset - skipped;
+            for &b in &front_remaining[begin..] {
+                out[pos] = b;
+                pos += 1;
+                if pos == N {
+                    return Some(out);
+                }
+            }
+        }
+        skipped += front_remaining.len();
+        for chunk in &self.rest {
+            let slice = chunk.as_ref();
             if skipped + slice.len() <= offset {
                 skipped += slice.len();
                 continue;
@@ -100,6 +124,16 @@ impl ChunkedInputBuf {
         Some(out)
     }
 
+    #[inline]
+    fn advance_front(&mut self) {
+        if let Some(next) = self.rest.pop_front() {
+            self.front = next;
+        } else {
+            self.front = Bytes::new();
+        }
+        self.front_offset = 0;
+    }
+
     /// Consume the first `n` bytes without returning them.
     /// Panics in debug mode if `n > self.len()`.
     #[inline]
@@ -107,12 +141,10 @@ impl ChunkedInputBuf {
         debug_assert!(n <= self.total_len, "advance past end");
         self.total_len -= n;
         while n > 0 {
-            let front = self.chunks.front().expect("total_len accounting");
-            let avail = front.len() - self.front_offset;
+            let avail = self.front.len() - self.front_offset;
             if n >= avail {
                 n -= avail;
-                self.chunks.pop_front();
-                self.front_offset = 0;
+                self.advance_front();
             } else {
                 self.front_offset += n;
                 break;
@@ -131,34 +163,28 @@ impl ChunkedInputBuf {
             return;
         }
         self.total_len -= n;
-        let front = self.chunks.front().expect("total_len accounting");
-        let avail = front.len() - self.front_offset;
+        let avail = self.front.len() - self.front_offset;
         if n <= avail {
-            let src = &front[self.front_offset..self.front_offset + n];
+            let src = &self.front[self.front_offset..self.front_offset + n];
             // SAFETY: `&[u8]` and `&[MaybeUninit<u8>]` have identical
             // layout (guaranteed by MaybeUninit's repr(transparent)).
-            // The cast reinterprets initialized bytes as MaybeUninit so
-            // copy_from_slice can write into the uninit destination.
             let src_mu: &[std::mem::MaybeUninit<u8>] = unsafe {
                 &*(std::ptr::from_ref::<[u8]>(src) as *const [std::mem::MaybeUninit<u8>])
             };
             dest[..n].copy_from_slice(src_mu);
             self.front_offset += n;
-            if self.front_offset >= front.len() {
-                self.chunks.pop_front();
-                self.front_offset = 0;
+            if self.front_offset >= self.front.len() {
+                self.advance_front();
             }
             return;
         }
         let mut remaining = n;
         let mut pos = 0;
         while remaining > 0 {
-            let front = self.chunks.front().expect("total_len accounting");
             let start = self.front_offset;
-            let avail = front.len() - start;
+            let avail = self.front.len() - start;
             let take = remaining.min(avail);
-            let src = &front[start..start + take];
-            // SAFETY: same cast as above — initialized &[u8] to &[MaybeUninit<u8>].
+            let src = &self.front[start..start + take];
             let src_mu: &[std::mem::MaybeUninit<u8>] = unsafe {
                 &*(std::ptr::from_ref::<[u8]>(src) as *const [std::mem::MaybeUninit<u8>])
             };
@@ -166,8 +192,7 @@ impl ChunkedInputBuf {
             pos += take;
             remaining -= take;
             if take >= avail {
-                self.chunks.pop_front();
-                self.front_offset = 0;
+                self.advance_front();
             } else {
                 self.front_offset += take;
             }
@@ -187,41 +212,37 @@ impl ChunkedInputBuf {
         self.total_len -= n;
 
         // Fast path: entirely within the front chunk past front_offset.
-        let front = self.chunks.front().expect("total_len accounting");
-        let avail = front.len() - self.front_offset;
+        let avail = self.front.len() - self.front_offset;
         if n <= avail {
             let start = self.front_offset;
             let payload = if n <= MAX_INLINE_PAYLOAD {
-                Payload::inline(&front[start..start + n])
+                Payload::inline(&self.front[start..start + n])
             } else {
-                Payload::from_bytes(front.slice(start..start + n))
+                Payload::from_bytes(self.front.slice(start..start + n))
             };
             self.front_offset += n;
-            if self.front_offset >= front.len() {
-                self.chunks.pop_front();
-                self.front_offset = 0;
+            if self.front_offset >= self.front.len() {
+                self.advance_front();
             }
             return payload;
         }
 
-        // Slow path: spans multiple chunks — coalesce into one contiguous buffer.
+        // Slow path: spans front + rest chunks. Coalesce into one contiguous buffer.
         let mut remaining = n;
         let mut buf = BytesMut::with_capacity(n);
 
-        let first = self.chunks.pop_front().expect("total_len accounting");
-        let tail = &first[self.front_offset..];
-        remaining -= tail.len();
-        buf.extend_from_slice(tail);
-        self.front_offset = 0;
+        buf.extend_from_slice(&self.front[self.front_offset..]);
+        remaining -= avail;
+        self.advance_front();
 
         while remaining > 0 {
-            let front = self.chunks.front().expect("total_len accounting");
-            if remaining >= front.len() {
-                let chunk = self.chunks.pop_front().expect("total_len accounting");
-                remaining -= chunk.len();
-                buf.extend_from_slice(&chunk);
+            let chunk_len = self.front.len();
+            if remaining >= chunk_len {
+                buf.extend_from_slice(&self.front);
+                remaining -= chunk_len;
+                self.advance_front();
             } else {
-                buf.extend_from_slice(&front[..remaining]);
+                buf.extend_from_slice(&self.front[..remaining]);
                 self.front_offset = remaining;
                 remaining = 0;
             }

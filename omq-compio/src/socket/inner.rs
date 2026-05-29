@@ -178,6 +178,7 @@ pub(super) struct InprocRecvState {
 
 pub(super) struct SocketInner {
     pub(super) socket_type: SocketType,
+    pub(super) simple_recv: bool,
     pub(super) options: Options,
     /// Stable identity for inproc peer tagging. Equal to `options.identity`
     /// when one is set; otherwise a 9-byte auto-generated value (leading 0x00
@@ -387,6 +388,7 @@ impl SocketInner {
         #[expect(clippy::arc_with_non_send_sync)] // compio is single-threaded by design
         Arc::new(Self {
             socket_type,
+            simple_recv: matches!(socket_type, SocketType::Pull | SocketType::Pair),
             inproc_identity,
             options,
             out_peers: RwLock::new(Slab::new()),

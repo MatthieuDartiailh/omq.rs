@@ -603,7 +603,7 @@ pub(crate) async fn run_connection(
                     return Ok(());
                 }
                 ls.stream_rounds += 1;
-                if ls.stream_rounds >= 64 {
+                if ls.stream_rounds >= 256 {
                     ls.stream_rounds = 0;
                     if let Ok(cmd) = inbox.try_recv() {
                         ls.drain_inbox(cmd, &inbox, &state, cap)

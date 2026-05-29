@@ -292,16 +292,47 @@ impl Socket {
     }
 
     /// Receive the next message, blocking until one is available or the socket is closed.
+    #[expect(clippy::too_many_lines)]
     pub async fn recv(&self) -> Result<Message> {
         use futures::FutureExt;
-        let st = self.inner().socket_type;
-        if direct_recv_eligible(st) {
+        let inner = self.inner();
+        let st = inner.socket_type;
+        if inner.simple_recv {
+            let cache = inner.recv_cache.get();
+            if let Some(msg) = cache.pop_front() {
+                return Ok(msg);
+            }
+            let dio = unsafe { &*inner.direct_recv_io.get() };
+            if let Some(ref state) = *dio
+                && let Ok(mut io) = state.peer_io.try_lock()
+            {
+                while let Some(ev) = io.codec.poll_event() {
+                    if let Event::HandshakeSucceeded { .. } = ev {
+                        io.handshake_done = true;
+                    }
+                }
+                if !cache.is_empty() {
+                    return Ok(cache.pop_front().expect("non-empty"));
+                }
+                if io.decoder.is_some() {
+                    self.drain_decoder_into(&mut io, cache)?;
+                } else {
+                    io.codec.swap_messages(cache);
+                }
+                if let Some(msg) = cache.pop_front() {
+                    return Ok(msg);
+                }
+            }
+            if let Some(msg) = self.try_direct_recv().await? {
+                return Ok(msg);
+            }
+        } else if direct_recv_eligible(st) {
             if let Some(msg) = self.drain_recv_cache(st)? {
                 return Ok(msg);
             }
             if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
-                let cache = self.inner().recv_cache.get();
-                let dio = unsafe { &*self.inner().direct_recv_io.get() };
+                let cache = inner.recv_cache.get();
+                let dio = unsafe { &*inner.direct_recv_io.get() };
                 if let Some(ref state) = *dio
                     && let Ok(mut io) = state.peer_io.try_lock()
                     && let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache)
@@ -439,24 +470,52 @@ impl Socket {
     /// Non-blocking receive; returns `Err(WouldBlock)` if no message is queued.
     #[inline]
     pub fn try_recv(&self) -> Result<Message> {
-        let st = self.inner().socket_type;
-        if direct_recv_eligible(st) {
-            if let Some(msg) = self.drain_recv_cache(st)? {
+        let inner = self.inner();
+        if inner.simple_recv {
+            let cache = inner.recv_cache.get();
+            if let Some(msg) = cache.pop_front() {
                 return Ok(msg);
             }
-            if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
-                let dio = unsafe { &*self.inner().direct_recv_io.get() };
-                if let Some(ref state) = *dio {
-                    let cache = self.inner().recv_cache.get();
-                    let mut io = state.lock_io();
-                    if let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache) {
-                        return Ok(msg);
+            let dio = unsafe { &*inner.direct_recv_io.get() };
+            if let Some(ref state) = *dio {
+                let mut io = state.lock_io();
+                while let Some(ev) = io.codec.poll_event() {
+                    if let Event::HandshakeSucceeded { .. } = ev {
+                        io.handshake_done = true;
+                    }
+                }
+                if !cache.is_empty() {
+                    return Ok(cache.pop_front().expect("non-empty"));
+                }
+                if io.decoder.is_some() {
+                    self.drain_decoder_into(&mut io, cache)?;
+                } else {
+                    io.codec.swap_messages(cache);
+                }
+                if let Some(msg) = cache.pop_front() {
+                    return Ok(msg);
+                }
+            }
+        } else {
+            let st = inner.socket_type;
+            if direct_recv_eligible(st) {
+                if let Some(msg) = self.drain_recv_cache(st)? {
+                    return Ok(msg);
+                }
+                if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
+                    let dio = unsafe { &*inner.direct_recv_io.get() };
+                    if let Some(ref state) = *dio {
+                        let cache = inner.recv_cache.get();
+                        let mut io = state.lock_io();
+                        if let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache) {
+                            return Ok(msg);
+                        }
                     }
                 }
             }
         }
-        let recv_state = unsafe { &mut *self.inner().inproc_recv.get() };
-        let max = self.inner().options.max_message_size;
+        let recv_state = unsafe { &mut *inner.inproc_recv.get() };
+        let max = inner.options.max_message_size;
         for c in &mut recv_state.consumers {
             if let Some(msg) = c.prefetch_and_pop() {
                 if max.is_some_and(|m| msg.byte_len() > m) {
@@ -466,7 +525,7 @@ impl Socket {
             }
         }
         loop {
-            let frame = self.inner().in_rx.try_recv().map_err(|e| match e {
+            let frame = inner.in_rx.try_recv().map_err(|e| match e {
                 blume::TryRecvError::Empty => Error::WouldBlock,
                 blume::TryRecvError::Disconnected => Error::Closed,
             })?;
@@ -523,6 +582,27 @@ impl Socket {
             io.codec.swap_messages(cache);
         }
         Ok(cache.pop_front())
+    }
+
+    #[inline(never)]
+    #[expect(clippy::unused_self)]
+    fn drain_decoder_into(
+        &self,
+        io: &mut PeerIo,
+        cache: &mut std::collections::VecDeque<Message>,
+    ) -> Result<()> {
+        while let Some(m) = io.codec.poll_message() {
+            let m = if let Some(dec) = io.decoder.as_mut() {
+                match dec.decode(m)? {
+                    Some(plain) => plain,
+                    None => continue,
+                }
+            } else {
+                m
+            };
+            cache.push_back(m);
+        }
+        Ok(())
     }
 
     fn post_recv_apply(&self, msg: Message) -> Result<Option<Message>> {

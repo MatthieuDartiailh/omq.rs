@@ -302,6 +302,16 @@ impl Message {
         }
     }
 
+    /// Create a single-part message from a byte slice. Avoids heap
+    /// allocation for payloads up to 39 bytes.
+    #[inline]
+    pub fn from_slice(data: &[u8]) -> Self {
+        if data.len() <= MAX_INLINE_MESSAGE {
+            return Self::from_inline(data);
+        }
+        Self::single(Bytes::copy_from_slice(data))
+    }
+
     /// Create a multi-part message from an iterator of byte-like values.
     pub fn multipart<I, P>(parts: I) -> Self
     where
