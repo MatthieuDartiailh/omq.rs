@@ -334,3 +334,176 @@ ctx.term()
         let _ = child.wait_with_output();
     });
 }
+
+// ---------------------------------------------------------------------
+// compio CURVE PUB -> pyzmq CURVE SUB
+// Exercises the inbound SUBSCRIBE-over-CURVE path: libzmq's SUB sends
+// SUBSCRIBE as a CURVE MESSAGE with the COMMAND bit (0x02) in the
+// encrypted inner flags byte. omq must read that bit to demux the
+// subscription; without it the PUB never registers the filter and the
+// SUB receives nothing.
+// ---------------------------------------------------------------------
+
+#[compio::test]
+async fn rust_curve_pub_to_pyzmq_sub() {
+    if skip_if_no_pyzmq_curve() {
+        return;
+    }
+
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub_z85 = server_kp.public.to_z85();
+    let client_pub_z85 = client_kp.public.to_z85();
+    let client_sec_z85 = client_kp.secret.to_z85();
+
+    let port = free_tcp_port();
+    let pub_sock = Socket::new(SocketType::Pub, Options::default().curve_server(server_kp));
+    pub_sock.bind(loopback(port)).await.unwrap();
+
+    let script = r#"
+import os, sys, zmq
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.SUB)
+s.curve_secretkey = os.environ['CLI_SEC'].encode()
+s.curve_publickey = os.environ['CLI_PUB'].encode()
+s.curve_serverkey = os.environ['SRV_PUB'].encode()
+s.subscribe(b"")
+s.connect(f"tcp://127.0.0.1:{os.environ['PORT']}")
+for _ in range(3):
+    sys.stdout.write(s.recv().decode() + "\n"); sys.stdout.flush()
+s.close(linger=0)
+ctx.term()
+"#;
+
+    let child = Command::new("python3")
+        .args(["-c", script])
+        .env("PORT", port.to_string())
+        .env("SRV_PUB", &server_pub_z85)
+        .env("CLI_PUB", &client_pub_z85)
+        .env("CLI_SEC", &client_sec_z85)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn python3 sub");
+
+    wait_for_curve_handshake(&pub_sock).await;
+
+    for _ in 0..60 {
+        let _ = pub_sock.send(Message::single("curve-pubsub")).await;
+        compio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let out = rx
+        .recv()
+        .expect("python child join failed")
+        .expect("python wait failed");
+    assert!(
+        out.status.success(),
+        "pyzmq sub exited non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines.iter().all(|l| *l == "curve-pubsub"));
+}
+
+// ---------------------------------------------------------------------
+// pyzmq CURVE PUB -> compio CURVE SUB
+// Exercises the outbound SUBSCRIBE-over-CURVE path: omq's SUB must
+// set the COMMAND bit (0x02) in the encrypted inner flags byte when
+// sending SUBSCRIBE, so that libzmq's PUB recognizes it as a command
+// and registers the subscription filter.
+// ---------------------------------------------------------------------
+
+#[compio::test]
+async fn pyzmq_curve_pub_to_rust_sub() {
+    if skip_if_no_pyzmq_curve() {
+        return;
+    }
+
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub_z85 = server_kp.public.to_z85();
+    let server_sec_z85 = server_kp.secret.to_z85();
+    let server_pub_for_client = server_kp.public;
+
+    let port = free_tcp_port();
+
+    let script = r#"
+import os, sys, zmq, time
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.PUB)
+s.curve_server = True
+s.curve_secretkey = os.environ['SRV_SEC'].encode()
+s.curve_publickey = os.environ['SRV_PUB'].encode()
+s.bind(f"tcp://127.0.0.1:{os.environ['PORT']}")
+sys.stdout.write("READY\n"); sys.stdout.flush()
+for i in range(60):
+    s.send(f"msg-{i}".encode())
+    time.sleep(0.05)
+s.close(linger=0)
+ctx.term()
+"#;
+
+    let mut child = Command::new("python3")
+        .args(["-c", script])
+        .env("PORT", port.to_string())
+        .env("SRV_PUB", &server_pub_z85)
+        .env("SRV_SEC", &server_sec_z85)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn python3 pub");
+
+    let stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut r = BufReader::new(stdout);
+        let mut first = String::new();
+        let _ = r.read_line(&mut first);
+        let _ = ready_tx.send(first.trim() == "READY");
+    });
+    let ready = compio::time::timeout(Duration::from_secs(5), async move {
+        loop {
+            match ready_rx.try_recv() {
+                Ok(v) => return v,
+                Err(mpsc::TryRecvError::Empty) => {
+                    compio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(_) => return false,
+            }
+        }
+    })
+    .await
+    .expect("python bind timed out");
+    assert!(ready, "python pub did not signal READY");
+
+    let sub = Socket::new(
+        SocketType::Sub,
+        Options::default().curve_client(client_kp, server_pub_for_client),
+    );
+    sub.subscribe("").await.unwrap();
+    sub.connect(loopback(port)).await.unwrap();
+
+    let Ok(Ok(m)) = compio::time::timeout(Duration::from_secs(10), sub.recv()).await else {
+        let _ = child.kill();
+        let mut err = String::new();
+        let _ = stderr.read_to_string(&mut err);
+        panic!("SUB never received from pyzmq PUB over CURVE\nstderr={err}");
+    };
+    assert!(
+        std::str::from_utf8(&m.part_bytes(0).unwrap())
+            .unwrap()
+            .starts_with("msg-")
+    );
+
+    let _ = thread::spawn(move || {
+        let _ = child.wait();
+        let _ = stderr;
+    });
+}

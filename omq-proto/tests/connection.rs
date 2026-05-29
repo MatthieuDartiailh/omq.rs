@@ -271,6 +271,95 @@ fn curve_handshake_and_message_roundtrip() {
     assert_eq!(m.part_bytes(0).unwrap(), &b"encrypted hello"[..]);
 }
 
+/// SUBSCRIBE sent through CURVE must arrive as `Event::Command` even when
+/// the outer wire frame is DATA (not COMMAND). This simulates libzmq's
+/// behavior: it wraps all post-handshake traffic in DATA frames and relies
+/// on the encrypted inner flags byte (bit 0x02 = COMMAND) for demux.
+///
+/// Without the fix, the receiver trusted the outer frame's COMMAND bit,
+/// which is never set by libzmq for CURVE traffic. SUBSCRIBE was then
+/// misclassified as application data and silently dropped.
+#[cfg(feature = "curve")]
+#[test]
+fn curve_command_demux() {
+    use omq_proto::proto::command::Command;
+    use omq_proto::proto::mechanism::{CurveKeypair, MechanismSetup};
+
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+
+    let mut pub_conn = Connection::new(
+        ConnectionConfig::new(Role::Server, SocketType::Pub).mechanism(
+            MechanismSetup::CurveServer {
+                keypair: server_kp,
+                cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
+                authenticator: None,
+            },
+        ),
+    );
+    let mut sub_conn = Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Sub).mechanism(
+            MechanismSetup::CurveClient {
+                keypair: client_kp,
+                server_public: server_pub,
+            },
+        ),
+    );
+
+    pump(&mut pub_conn, &mut sub_conn);
+    while pub_conn.poll_event().is_some() {}
+    while sub_conn.poll_event().is_some() {}
+
+    // SUB sends SUBSCRIBE "news." through CURVE. omq emits this as a wire
+    // COMMAND frame (outer bit 0x04 set). Clear that bit to simulate what
+    // libzmq sends: a DATA frame whose encrypted inner byte carries COMMAND.
+    sub_conn
+        .send_command(&Command::Subscribe(Bytes::from_static(b"news.")))
+        .unwrap();
+    let wire = sub_conn.poll_transmit();
+    sub_conn.advance_transmit(wire.len());
+
+    let mut libzmq_wire = wire.to_vec();
+    assert_ne!(libzmq_wire[0] & 0x04, 0, "sanity: starts as COMMAND frame");
+    libzmq_wire[0] &= !0x04; // clear COMMAND bit -> DATA frame
+
+    pub_conn
+        .handle_input(Bytes::from(libzmq_wire))
+        .expect("pub accepts subscribe in DATA frame");
+
+    let ev = pub_conn.poll_event().expect("expected command event");
+    match ev {
+        Event::Command(Command::Subscribe(prefix)) => {
+            assert_eq!(&prefix[..], b"news.");
+        }
+        Event::Message(_) => panic!("SUBSCRIBE misclassified as data (COMMAND flag lost in CURVE)"),
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    // Same for CANCEL.
+    sub_conn
+        .send_command(&Command::Cancel(Bytes::from_static(b"news.")))
+        .unwrap();
+    let wire = sub_conn.poll_transmit();
+    sub_conn.advance_transmit(wire.len());
+
+    let mut libzmq_wire = wire.to_vec();
+    libzmq_wire[0] &= !0x04;
+
+    pub_conn
+        .handle_input(Bytes::from(libzmq_wire))
+        .expect("pub accepts cancel in DATA frame");
+
+    let ev = pub_conn.poll_event().expect("expected cancel event");
+    match ev {
+        Event::Command(Command::Cancel(prefix)) => {
+            assert_eq!(&prefix[..], b"news.");
+        }
+        other => panic!("expected Cancel, got: {other:?}"),
+    }
+}
+
 // --- Direct-recv codec API: peek / begin / supply -----------------
 
 fn ready_pair() -> (Connection, Connection) {

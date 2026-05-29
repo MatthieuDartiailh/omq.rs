@@ -969,7 +969,10 @@ mod tests {
             let body = c_tx.encrypt_message(more, command, b"payload").unwrap();
             let (got_more, got_command, pt) = s_tx.decrypt_message(&body).unwrap();
             assert_eq!(got_more, more, "MORE bit changed over CURVE");
-            assert_eq!(got_command, command, "COMMAND bit lost over CURVE (more={more})");
+            assert_eq!(
+                got_command, command,
+                "COMMAND bit lost over CURVE (more={more})"
+            );
             assert_eq!(&pt[..], b"payload");
         }
     }
