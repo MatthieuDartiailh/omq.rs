@@ -1,6 +1,7 @@
+use std::cell::Cell;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Instant;
 
@@ -26,7 +27,7 @@ pub(crate) struct DirectIoState {
     pub(crate) eof_signal: Event,
     pub(crate) last_input_nanos: AtomicU64,
     pub(crate) hb_epoch: Instant,
-    pub(crate) handshake_done: AtomicBool,
+    pub(crate) handshake_done: Cell<bool>,
     #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) has_transform: bool,
     #[cfg_attr(feature = "priority", allow(dead_code))]
@@ -34,10 +35,10 @@ pub(crate) struct DirectIoState {
     #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
     pub(crate) encoder: async_lock::Mutex<Option<MessageEncoder>>,
-    pub(crate) encoded_queue: Mutex<EncodedQueue>,
-    pub(crate) driver_in_select: AtomicBool,
-    pub(crate) direct_msg_count: AtomicUsize,
-    pub(crate) socket_closing: AtomicBool,
+    pub(crate) encoded_queue: EncodedQueueCell,
+    pub(crate) driver_in_select: Cell<bool>,
+    pub(crate) direct_msg_count: Cell<usize>,
+    pub(crate) socket_closing: Cell<bool>,
     pub(crate) large_recv_pending: AtomicUsize,
     pub(crate) pending_acc: Mutex<Option<BytesMut>>,
     pub(crate) large_message_threshold: usize,
@@ -260,15 +261,15 @@ impl DirectIoState {
             eof_signal: Event::new(),
             last_input_nanos: AtomicU64::new(0),
             hb_epoch: Instant::now(),
-            handshake_done: AtomicBool::new(false),
+            handshake_done: Cell::new(false),
             has_transform,
             uses_crypto,
             transform_passthrough,
             encoder: async_lock::Mutex::new(encoder),
-            encoded_queue: Mutex::new(EncodedQueue::new()),
-            driver_in_select: AtomicBool::new(false),
-            direct_msg_count: AtomicUsize::new(0),
-            socket_closing: AtomicBool::new(false),
+            encoded_queue: EncodedQueueCell::new(),
+            driver_in_select: Cell::new(false),
+            direct_msg_count: Cell::new(0),
+            socket_closing: Cell::new(false),
             large_recv_pending: AtomicUsize::new(0),
             pending_acc: Mutex::new(None),
             large_message_threshold,
@@ -278,5 +279,76 @@ impl DirectIoState {
             #[cfg(feature = "ws")]
             ws_masked,
         })
+    }
+}
+
+/// Non-atomic interior-mutable wrapper for `EncodedQueue`.
+///
+/// Sound only on a single thread (compio's cooperative runtime).
+/// Replaces `Mutex<EncodedQueue>` to avoid atomic CAS on every
+/// lock/unlock in the send hot path.
+pub(crate) struct EncodedQueueCell {
+    borrowed: Cell<bool>,
+    inner: std::cell::UnsafeCell<EncodedQueue>,
+}
+
+impl EncodedQueueCell {
+    fn new() -> Self {
+        Self {
+            borrowed: Cell::new(false),
+            inner: std::cell::UnsafeCell::new(EncodedQueue::new()),
+        }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn try_borrow_mut(&self) -> Option<EncodedQueueGuard<'_>> {
+        if self.borrowed.get() {
+            return None;
+        }
+        self.borrowed.set(true);
+        Some(EncodedQueueGuard { cell: self })
+    }
+
+    #[inline]
+    pub(crate) fn borrow_mut(&self) -> EncodedQueueGuard<'_> {
+        debug_assert!(!self.borrowed.get(), "EncodedQueueCell: already borrowed");
+        self.borrowed.set(true);
+        EncodedQueueGuard { cell: self }
+    }
+}
+
+pub(crate) struct EncodedQueueGuard<'a> {
+    cell: &'a EncodedQueueCell,
+}
+
+impl std::ops::Deref for EncodedQueueGuard<'_> {
+    type Target = EncodedQueue;
+    #[inline]
+    fn deref(&self) -> &EncodedQueue {
+        unsafe { &*self.cell.inner.get() }
+    }
+}
+
+impl std::ops::DerefMut for EncodedQueueGuard<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut EncodedQueue {
+        unsafe { &mut *self.cell.inner.get() }
+    }
+}
+
+impl Drop for EncodedQueueGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.cell.borrowed.set(false);
+    }
+}
+
+#[expect(clippy::missing_fields_in_debug)]
+impl std::fmt::Debug for EncodedQueueCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncodedQueueCell")
+            .field("borrowed", &self.borrowed.get())
+            .finish()
     }
 }

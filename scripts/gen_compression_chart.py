@@ -106,9 +106,12 @@ def _log_ticks(data_min, data_max):
     axis_min = math.log10(lo)
     axis_max = math.log10(hi)
 
-    first_dec = math.ceil(axis_min)
-    last_dec = math.floor(axis_max)
-    ticks = [10 ** e for e in range(first_dec, last_dec + 1)]
+    ticks = []
+    for e in range(math.floor(axis_min), math.ceil(axis_max) + 1):
+        for s in [1, 2, 5]:
+            v = s * 10 ** e
+            if lo <= v <= hi:
+                ticks.append(v)
 
     return axis_min, axis_max, ticks
 
@@ -340,11 +343,6 @@ def generate_svg(
             f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
             f' transform="rotate(-90,40,{mid_y:.1f})">msg/s (log)</text>'
         )
-        L.append(
-            f'  <text x="840" y="{mid_y:.1f}" text-anchor="middle"'
-            f' dominant-baseline="middle" fill="#6b7280" font-size="10" font-weight="600"'
-            f' transform="rotate(90,840,{mid_y:.1f})">virtual throughput</text>'
-        )
 
         # Plot lines
         present = [k for k in SERIES_ORDER if k in series]
@@ -454,13 +452,12 @@ def main():
     for label, link_bytes_s in LINK_SPEEDS:
         panels[label] = project(raw, link_bytes_s)
 
-    tput_caps = {}
-    if args.tput_1g is not None:
-        tput_caps["1g"] = args.tput_1g
-    if args.tput_100m is not None:
-        tput_caps["100m"] = args.tput_100m
-    if args.tput_10m is not None:
-        tput_caps["10m"] = args.tput_10m
+    default_caps = {"1g": 1000, "100m": 400, "10m": 60}
+    tput_caps = {
+        "1g": args.tput_1g if args.tput_1g is not None else default_caps["1g"],
+        "100m": args.tput_100m if args.tput_100m is not None else default_caps["100m"],
+        "10m": args.tput_10m if args.tput_10m is not None else default_caps["10m"],
+    }
 
     msgs_ranges = {}
     for key, attr in [("1g", "msgs_1g"), ("100m", "msgs_100m"), ("10m", "msgs_10m")]:
@@ -475,7 +472,7 @@ def main():
     else:
         dict_size_label = f"{ds} B"
 
-    svg = generate_svg(panels, tput_caps or None, msgs_ranges or None, dict_size_label)
+    svg = generate_svg(panels, tput_caps, msgs_ranges or None, dict_size_label)
     output = repo / "doc" / "charts" / f"compression_{ds}.svg"
     output.write_text(svg)
     print(f"Written: {output}", file=sys.stderr)

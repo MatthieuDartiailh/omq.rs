@@ -60,15 +60,13 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
     }
 
     if !state.has_transform {
-        if !state.handshake_done.load(Ordering::Relaxed) {
+        if !state.handshake_done.get() {
             return Ok(false);
         }
-        let Ok(mut eq) = state.encoded_queue.try_lock() else {
+        let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
             return Ok(false);
         };
-        if eq.total_bytes() >= DIRECT_CAP
-            || state.direct_msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
-        {
+        if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
             return Ok(false);
         }
         let msg_total = msg.byte_len();
@@ -76,8 +74,8 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         if state.is_ws {
             eq.encode_and_push_flat_ws(msg, state.ws_masked);
             drop(eq);
-            state.direct_msg_count.fetch_add(1, Ordering::Relaxed);
-            if state.driver_in_select.load(Ordering::Relaxed) {
+            state.direct_msg_count.set(state.direct_msg_count.get() + 1);
+            if state.driver_in_select.get() {
                 state.transmit_ready.notify(1);
             }
             return Ok(true);
@@ -88,29 +86,21 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             eq.encode_and_push(msg);
         }
         drop(eq);
-        state.direct_msg_count.fetch_add(1, Ordering::Relaxed);
-        if state.driver_in_select.load(Ordering::Relaxed) {
+        state.direct_msg_count.set(state.direct_msg_count.get() + 1);
+        if state.driver_in_select.get() {
             state.transmit_ready.notify(1);
         }
         return Ok(true);
     }
 
-    // Passthrough-transform fast path: lz4+tcp / zstd+tcp with message
-    // parts below the compression threshold.  All parts will be encoded
-    // as `SENTINEL_PLAIN | payload` regardless — no actual compression.
-    // We bypass the codec async-mutex and encode directly into
-    // `encoded_queue` just like the no-transform path, but prepend the
-    // 4-byte plaintext sentinel to each part payload.
     if let Some((ref sentinel, threshold)) = state.transform_passthrough
-        && state.handshake_done.load(Ordering::Relaxed)
+        && state.handshake_done.get()
         && msg.iter().all(|b| b.len() < threshold)
     {
-        let Ok(mut eq) = state.encoded_queue.try_lock() else {
+        let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
             return Ok(false);
         };
-        if eq.total_bytes() >= DIRECT_CAP
-            || state.direct_msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
-        {
+        if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
             return Ok(false);
         }
         let prefix_len = sentinel.len();
@@ -121,20 +111,17 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             eq.encode_and_push_prefixed(sentinel, msg);
         }
         drop(eq);
-        state.direct_msg_count.fetch_add(1, Ordering::Relaxed);
-        if state.driver_in_select.load(Ordering::Relaxed) {
+        state.direct_msg_count.set(state.direct_msg_count.get() + 1);
+        if state.driver_in_select.get() {
             state.transmit_ready.notify(1);
         }
         return Ok(true);
     }
 
-    // Transform active with large or dict-aware messages: encode via the
-    // encoder mutex (separate from peer_io) then push into encoded_queue.
-    // This avoids contending with the read loop on peer_io.
     let Some(mut enc_guard) = state.encoder.try_lock() else {
         return Ok(false);
     };
-    if !state.handshake_done.load(Ordering::Relaxed) {
+    if !state.handshake_done.get() {
         return Ok(false);
     }
     let enc = enc_guard
@@ -143,12 +130,10 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
     let wires = enc.encode(msg)?;
     drop(enc_guard);
 
-    let Ok(mut eq) = state.encoded_queue.try_lock() else {
+    let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
         return Ok(false);
     };
-    if eq.total_bytes() >= DIRECT_CAP
-        || state.direct_msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
-    {
+    if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
         return Ok(false);
     }
     for wire in &wires {
@@ -159,8 +144,8 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         }
     }
     drop(eq);
-    state.direct_msg_count.fetch_add(1, Ordering::Relaxed);
-    if state.driver_in_select.load(Ordering::Relaxed) {
+    state.direct_msg_count.set(state.direct_msg_count.get() + 1);
+    if state.driver_in_select.get() {
         state.transmit_ready.notify(1);
     }
     Ok(true)

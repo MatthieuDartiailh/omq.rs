@@ -183,12 +183,18 @@ def draw_throughput_panel(
     L.append(svg_text(mid_x, y_top - 17, title, size=13, weight="700", fill="#111827"))
 
     # msg/s gridlines (left axis)
-    step_msg = nice_step(msg_max, 8)
+    step_msg = nice_step(msg_max, 12)
     v = step_msg
     while v <= msg_max:
         yy = y_msg(v)
         L.append(svg_line(x_left, yy, x_right, yy))
-        label = f"{v / 1e6:.0f}M" if v >= 1e6 else f"{v / 1e3:.0f}k"
+        millions = v / 1e6
+        if millions >= 1 and millions == int(millions):
+            label = f"{int(millions)}M"
+        elif v >= 1e6:
+            label = f"{millions:.1f}M"
+        else:
+            label = f"{v / 1e3:.0f}k"
         L.append(svg_text(x_left - 8, yy, label, anchor="end", baseline="middle"))
         v += step_msg
 
@@ -429,7 +435,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
 
 def main():
-    FIXED_MSG_MAX = 16e6
+    FIXED_MSG_MAX = 25e6
     FIXED_GBS_MAX = 6.0
     FIXED_LAT_MAX = 100.0
     FIXED_INPROC_LAT_MAX = 25.0

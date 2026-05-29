@@ -144,9 +144,16 @@ fn main() {
 async fn run_push(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options(size));
     push.bind(ep).await.expect("push bind");
-    let payload = Bytes::from(vec![b'x'; size]);
-    loop {
-        push.send(Message::single(payload.clone())).await.unwrap();
+    let payload = vec![b'x'; size];
+    if size <= omq_proto::message::MAX_INLINE_MESSAGE {
+        loop {
+            push.send(Message::from_slice(&payload)).await.unwrap();
+        }
+    } else {
+        let msg = Message::single(payload);
+        loop {
+            push.send(msg.clone()).await.unwrap();
+        }
     }
 }
 

@@ -835,6 +835,110 @@ it detects EOF natively, writes heartbeat PINGs directly, and
 applies backpressure through `write_all`. Cost: recv goes through
 the driver (~3 µs per message on the latency path).
 
+### ChunkedInputBuf front-cache
+
+`ChunkedInputBuf` is the codec's inbound byte buffer. It held received
+data as a `VecDeque<Bytes>`. Every `peek_array` call (two per frame:
+flags byte then header) went through `VecDeque::front()` which does
+ring buffer indexing (`to_physical_idx` + `wrap_add`). At 14M msg/s
+that was 28M ring-index operations per second, showing as 12% self-time
+in `peek_frame_header`.
+
+Pulled the front chunk out of the `VecDeque` into a dedicated `front:
+Bytes` field on `ChunkedInputBuf`. Reads go through `self.front`
+(direct field access) instead of `self.chunks.front()`. When the front
+is consumed, `advance_front()` pops the next chunk from the remaining
+`VecDeque`.
+
+Result: `peek_frame_header` dropped from 12.3% to 10.1%.
+Small but real. The remaining cost is bounds-checked slice indexing
+on `self.front[self.front_offset..]`, which is inherent.
+
+### Specialized try_recv for PULL/PAIR
+
+Profiling showed `try_recv` at 29% self-time and `drain_recv_cache`
+at 7%. For a PULL socket, every call evaluated five `matches!` checks
+(all constant), wrapped/unwrapped two `Result`s that could never be
+`Err`, and called two functions whose PULL branches were trivial.
+The `Result::branch` from the `?` operator alone was 12.6%.
+
+Added a `simple_recv: bool` flag on `SocketInner`, set at construction
+for PULL and PAIR. When true, `try_recv` takes an inline fast path:
+direct `cache.pop_front()`, then lock + `swap_messages` + pop. No
+function calls, no `Result` wrapping, no `matches!` dispatch. The
+generic path for SUB/REQ/REP/etc. is unchanged.
+
+Result: `try_recv` self-time dropped from 29% to 15%.
+`drain_recv_cache` disappeared from the top. Combined with the push-side
+fix below, 8 B TCP throughput went from ~14M to ~17M msg/s.
+
+### Message::from_slice
+
+The bench was constructing messages via `Bytes::from(vec![b'x'; 8])`
+then cloning the `Bytes` each iteration. For 8 bytes, `Bytes` still
+heap-allocates (no inline representation). Clone and drop each touch
+a refcount. This cost 12.8% of push-side CPU.
+
+Added `Message::from_slice(&[u8])` which copies directly into the
+inline `MessageInner::Inline` variant for payloads up to 39 bytes.
+No heap allocation, no refcounting. Falls back to
+`Bytes::copy_from_slice` for larger payloads.
+
+A real user sending small messages from a `&[u8]` buffer gets the
+same benefit. This is the realistic fast path, not a benchmark trick.
+
+### Cell-based send path (replacing atomics and Mutex)
+
+After the recv-side optimizations, the push side became the bottleneck.
+Profiling showed 13.8% on `encoded_queue: Mutex<EncodedQueue>` lock
+and unlock (two atomic CAS operations per message), plus 5.9% on
+`direct_msg_count: AtomicUsize` and `driver_in_select: AtomicBool`.
+All accesses are on a single compio runtime thread. The atomics are
+correct but unnecessary: each costs 5-20 ns vs <1 ns for a plain
+memory write.
+
+Replaced five fields on `DirectIoState` with non-atomic equivalents:
+
+- `encoded_queue: Mutex<EncodedQueue>` -> `EncodedQueueCell` (a
+  `Cell<bool>` borrow flag + `UnsafeCell<EncodedQueue>`, with a RAII
+  guard that clears the flag on drop). `try_borrow_mut()` is a plain
+  bool check instead of an atomic CAS.
+- `direct_msg_count: AtomicUsize` -> `Cell<usize>`
+- `driver_in_select: AtomicBool` -> `Cell<bool>`
+- `handshake_done: AtomicBool` -> `Cell<bool>`
+- `socket_closing: AtomicBool` -> `Cell<bool>`
+
+The safety invariant is the same one that already covers `RecvCache`,
+`LocalStream`, and the `UnsafeCell` fields on `SocketInner`: compio
+is single-threaded, `DirectIoState` never crosses thread boundaries,
+and the existing `unsafe impl Sync` on the `Arc` covers `Cell` fields.
+
+Result: 8 B TCP throughput went from 17M to 22M msg/s.
+
+### Dead end: Vec for Connection::messages (replacing VecDeque)
+
+Profiling 8 B TCP PULL at ~14M msg/s showed 10% self-time attributed
+to `VecDeque::push_back` / `clear` inside `drive_zmtp`. The theory:
+`VecDeque`'s ring buffer indexing (`wrap_index`: add + branch per
+`push_back` and `pop_front`) is overhead that a flat `Vec` avoids.
+
+Replaced `messages: VecDeque<Message>` with `Vec<Message>` plus a
+`messages_drain: usize` index. `push` is a pointer bump. `poll_message`
+reads via `ptr::read` at the drain index (no replacement write).
+`swap_messages` exchanges the `Vec` with the recv cache and resets the
+drain index. Same O(1) swap semantics.
+
+Also replaced the compio `RecvCache` (`VecDeque<Message>`) with the
+same `Vec` + drain index pattern.
+
+Result: neutral. 13.8-14.5M msg/s, same range as before. The perf
+attribution was misleading: `mod.rs:1917` pointed at `VecDeque::clear`
+(which is never called on the hot path), not `push_back`. The actual
+`push_back` cost is already low because `VecDeque` at steady state
+never reallocates, and `wrap_index` is a single well-predicted branch.
+The `Vec` traded ring buffer indexing for `ptr::read` + `set_len`
+bookkeeping with no net gain. Reverted.
+
 ## What remains
 
 **Single-wire-peer bypass on tokio (send-side encode).** The compio
