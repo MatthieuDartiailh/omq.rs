@@ -37,22 +37,38 @@ run() {
 # Run a function in the background, keeping at most $jobs parallel workers.
 # Usage: par <func> [args...]
 _par_pids=()
+_par_rc=0
 par() {
-    # Reap any finished workers and check for failures.
+    # Reap any finished workers.
     local new_pids=()
     for pid in "${_par_pids[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             new_pids+=("$pid")
         else
-            wait "$pid"  # collect exit status; set -e propagates failure
+            # set -e is suppressed inside if/else, so capture explicitly.
+            wait "$pid" || _par_rc=$?
         fi
     done
     _par_pids=("${new_pids[@]}")
 
+    # Fail fast: drain remaining workers and abort.
+    if [[ $_par_rc -ne 0 ]]; then
+        for pid in "${_par_pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+        exit "$_par_rc"
+    fi
+
     # Block until a slot is free.
     while [[ ${#_par_pids[@]} -ge $jobs ]]; do
-        wait "${_par_pids[0]}"
+        wait "${_par_pids[0]}" || _par_rc=$?
         _par_pids=("${_par_pids[@]:1}")
+        if [[ $_par_rc -ne 0 ]]; then
+            for pid in "${_par_pids[@]}"; do
+                wait "$pid" 2>/dev/null || true
+            done
+            exit "$_par_rc"
+        fi
     done
 
     "$@" &
@@ -61,9 +77,12 @@ par() {
 
 par_wait() {
     for pid in "${_par_pids[@]}"; do
-        wait "$pid"
+        wait "$pid" || _par_rc=$?
     done
     _par_pids=()
+    if [[ $_par_rc -ne 0 ]]; then
+        exit "$_par_rc"
+    fi
 }
 
 # ---------------------------------------------------------------- #
@@ -101,6 +120,7 @@ all_features='plain curve blake3zmq lz4 zstd priority'
 par run cargo test -p omq-proto  --features "$all_features"
 par run cargo test -p omq-tokio  --features "$all_features"
 par run cargo test -p omq-compio --features "$all_features"
+par_wait
 
 # ---------------------------------------------------------------- #
 # 4) Facade crate, both backend choices. Verifies the public API
