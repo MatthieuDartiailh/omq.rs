@@ -372,6 +372,7 @@ mod inner {
 
                     let pushes = Rc::new(pushes);
 
+                    let inline = payload.len() <= omq_proto::message::MAX_INLINE_MESSAGE;
                     let burst = |k: usize| {
                         let pushes = pushes.clone();
                         let payload = payload.clone();
@@ -384,8 +385,15 @@ mod inner {
                                 let p = pushes.clone();
                                 let payload = payload.clone();
                                 handles.push(compio::runtime::spawn(async move {
-                                    for _ in 0..per {
-                                        p[i].send(Message::single(payload.clone())).await.unwrap();
+                                    if inline {
+                                        for _ in 0..per {
+                                            p[i].send(Message::from_slice(&payload)).await.unwrap();
+                                        }
+                                    } else {
+                                        let msg = Message::single(payload);
+                                        for _ in 0..per {
+                                            p[i].send(msg.clone()).await.unwrap();
+                                        }
                                     }
                                 }));
                             }

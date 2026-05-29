@@ -853,11 +853,6 @@ def gen_combined_chart(data, path):
         f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{t1_mid:.0f})">msg/s</text>'
     )
-    L.append(
-        f'  <text x="835" y="{t1_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#6b7280" font-size="10" font-weight="600"'
-        f' transform="rotate(90,835,{t1_mid:.0f})">throughput</text>'
-    )
 
     tp_series = [
         ("pyomq", C_PYOMQ, sync_omq_tp),
@@ -990,6 +985,13 @@ def gen_combined_chart(data, path):
             f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
             f' font-size="11" font-weight="500">{label}</text>'
         )
+
+    footer_y = leg_y + 18
+    L.append(
+        f'  <text x="{mid_x:.1f}" y="{footer_y}" text-anchor="middle"'
+        f' fill="#9ca3af" font-size="9">'
+        f'dashed = msg/s (left) · solid = throughput (right)</text>'
+    )
 
     L.append("</svg>")
 
