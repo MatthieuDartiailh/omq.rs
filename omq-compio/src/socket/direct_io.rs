@@ -15,6 +15,7 @@ use crate::transport::peer_io::{CancellableRecvStream, PeerIo, SharedPeerIo, Wir
 use super::encoded_queue::EncodedQueue;
 use super::inner::{LocalStream, RecvStreamState};
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct DirectIoState {
     pub(crate) peer_io: SharedPeerIo,
     pub(crate) writer: async_lock::Mutex<WireWriter>,
@@ -231,7 +232,7 @@ impl DirectIoState {
         self.peer_io.lock().expect("peer_io")
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub(crate) fn new(
         peer_io: SharedPeerIo,
         writer: WireWriter,

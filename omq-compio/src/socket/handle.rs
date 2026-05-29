@@ -10,7 +10,7 @@ use omq_proto::proto::SocketType;
 
 use crate::monitor::MonitorStream;
 
-use super::inner::{PeerOut, SocketInner, WirePeerHandle};
+use super::inner::{PeerOut, SocketInner};
 
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
 /// driver tasks. Close happens via the explicit [`Socket::close`] method
@@ -332,48 +332,35 @@ impl Socket {
                 rx.close();
             }
         }
-        let wire_handles: Vec<WirePeerHandle> = {
-            let peers = self.inner.out_peers.read().expect("peers lock");
-            peers
-                .iter()
-                .filter_map(|(_, p)| match &p.out {
-                    PeerOut::Wire(handle) => Some(handle.clone()),
-                    PeerOut::Inproc { .. } => None,
-                })
-                .collect()
-        };
-        // Signal all wire drivers to close. The socket_closing flag
-        // is checked at the top of each driver loop iteration,
-        // bypassing the inbox which may be full of stale SendMessage
-        // commands from direct-encode fallbacks.
-        {
-            let peers = self.inner.out_peers.read().expect("peers lock");
-            for (_, p) in peers.iter() {
-                if let Some(dio_handle) = &p.direct_io
-                    && let Some(dio) = dio_handle.read().expect("dio lock").as_ref()
-                {
-                    dio.socket_closing.set(true);
-                    dio.transmit_ready.notify(usize::MAX);
+        loop {
+            {
+                let peers = self.inner.out_peers.read().expect("peers lock");
+                for (_, p) in peers.iter() {
+                    if let Some(dio_handle) = &p.direct_io
+                        && let Some(dio) = dio_handle.read().expect("dio lock").as_ref()
+                    {
+                        dio.socket_closing.set(true);
+                        dio.transmit_ready.notify(usize::MAX);
+                    }
                 }
             }
-        }
-
-        loop {
-            let inproc_pending = {
+            let (inproc_pending, wire_alive) = {
                 let peers = self.inner.out_peers.read().expect("peers lock");
-                peers.iter().any(|(_, p)| match &p.out {
+                let inproc = peers.iter().any(|(_, p)| match &p.out {
                     PeerOut::Inproc { sender, .. } => {
                         !sender.is_empty() && !sender.is_disconnected()
                     }
                     PeerOut::Wire(_) => false,
-                })
+                });
+                let wire = peers.iter().any(|(_, p)| match &p.out {
+                    PeerOut::Wire(handle) => !handle
+                        .read()
+                        .expect("wire peer handle lock")
+                        .is_disconnected(),
+                    PeerOut::Inproc { .. } => false,
+                });
+                (inproc, wire)
             };
-            let wire_alive = wire_handles.iter().any(|handle| {
-                !handle
-                    .read()
-                    .expect("wire peer handle lock")
-                    .is_disconnected()
-            });
             if !inproc_pending && !wire_alive {
                 break;
             }
@@ -403,10 +390,6 @@ impl Socket {
         // peer_in_tx.send_async() get unblocked with SendError.
         self.inner.in_rx.close();
 
-        // Drop all sender clones so the cmd channels fully disconnect.
-        // Drivers see Err(Disconnected) on their next inbox poll and exit.
-        drop(wire_handles);
-
         // Yield so the cooperative executor can run driver tasks to
         // completion, freeing DirectIoState and EncodedQueue buffers.
         for _ in 0..20 {
@@ -422,10 +405,23 @@ impl Socket {
         deadline: Option<std::time::Instant>,
     ) {
         let has_pending = || {
-            inner
+            if inner
                 .shared_send_rx
                 .as_ref()
                 .is_some_and(|rx| !rx.is_empty())
+            {
+                return true;
+            }
+            #[cfg(feature = "priority")]
+            if !inner
+                .pre_connect_buf
+                .lock()
+                .expect("pre_connect_buf")
+                .is_empty()
+            {
+                return true;
+            }
+            false
         };
         while has_pending() && !inner.dialers.read().expect("dialers lock").is_empty() {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {

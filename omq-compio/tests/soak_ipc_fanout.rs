@@ -1,13 +1,15 @@
-//! Regression test for sustained IPC PUB/SUB fan-out with recv timeouts.
+#![cfg(feature = "soak")]
+//! Soak: sustained IPC PUB/SUB fan-out with recv timeouts.
 //!
 //! Under sustained load, multishot recv buffer pools can exhaust (ENOBUFS)
 //! and if recv timeouts cancel operations mid-flight, connections could
-//! spuriously break. This test exercises the fixed code paths:
-//! - ENOBUFS in `pull_and_feed` → fallback to one-shot (not `signal_eof`)
-//! - ENOBUFS in `accumulate_large_recv` → fallback to one-shot
+//! spuriously break. This exercises the fixed code paths:
+//! - ENOBUFS in `pull_and_feed` / `accumulate_large_recv` → one-shot fallback
 //! - `flush_codec_output` cancel-safety (`encoded_queue`, not direct write)
 //! - `flush_encoded_queue` written==0 data preservation
-//! - multishot stream `None` during accumulation → fallback to one-shot
+//! - multishot stream `None` during accumulation → one-shot fallback
+
+mod soak_common;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -22,20 +24,16 @@ fn block_on_and_drain<F: std::future::Future>(rt: &compio::runtime::Runtime, fut
     out
 }
 
-/// Sustained IPC PUB → 3 SUBs fan-out with aggressive recv timeouts.
-/// The SUBs use a 20ms recv timeout which triggers frequent io_uring
-/// read cancellations. Under load this provokes ENOBUFS on the multishot
-/// recv path. Without the fixes, the connection breaks and messages are
-/// lost, causing this test to hang.
+const PEERS: usize = 3;
+const MSG_SIZE: usize = 131_072;
+
 #[test]
-fn sustained_ipc_fanout_no_message_loss() {
-    const PEERS: usize = 3;
-    const MSG_SIZE: usize = 131_072;
-    const TOTAL_MESSAGES: usize = 50;
+fn soak_ipc_fanout_no_message_loss() {
+    let duration = soak_common::soak_duration();
 
     let ep: omq_compio::Endpoint = {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("omq-test-sustained-{}.sock", std::process::id()));
+        dir.push(format!("omq-soak-fanout-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&dir);
         omq_compio::Endpoint::Ipc(omq_compio::endpoint::IpcPath::Filesystem(dir))
     };
@@ -86,7 +84,6 @@ fn sustained_ipc_fanout_no_message_loss() {
 
                 let payload = Bytes::from(vec![0xABu8; MSG_SIZE]);
 
-                // Wait for all subs to connect and subscribe.
                 loop {
                     let _ = pub_.send(Message::single(payload.clone())).await;
                     if subs_ready.iter().all(|r| r.load(Ordering::Relaxed)) {
@@ -95,28 +92,30 @@ fn sustained_ipc_fanout_no_message_loss() {
                     compio::time::sleep(Duration::from_micros(50)).await;
                 }
 
-                // Send TOTAL_MESSAGES and verify all are received.
-                let before = recv_count.load(Ordering::Relaxed);
-                let target = before + TOTAL_MESSAGES * PEERS;
-                for _ in 0..TOTAL_MESSAGES {
+                let start = std::time::Instant::now();
+                let mut sent: u64 = 0;
+                let mut last_log = start;
+                while start.elapsed() < duration {
                     pub_.send(Message::single(payload.clone())).await.unwrap();
-                }
-
-                // Wait for all receives with a generous timeout.
-                let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while recv_count.load(Ordering::Relaxed) < target {
-                    if std::time::Instant::now() > deadline {
-                        let got = recv_count.load(Ordering::Relaxed);
-                        stop.store(true, Ordering::Relaxed);
-                        panic!(
-                            "message loss: expected {target} receives, got {got} \
-                             (deficit {})",
-                            target - got
+                    sent += 1;
+                    if last_log.elapsed() >= Duration::from_secs(30) {
+                        let r = recv_count.load(Ordering::Relaxed);
+                        eprintln!(
+                            "[ipc_fanout] {:.0}s, sent {sent}, recvd {r}",
+                            start.elapsed().as_secs_f64(),
                         );
+                        last_log = std::time::Instant::now();
                     }
-                    compio::time::sleep(Duration::from_micros(100)).await;
                 }
                 stop.store(true, Ordering::Relaxed);
+
+                let r = recv_count.load(Ordering::Relaxed);
+                let expected = sent as usize * PEERS;
+                eprintln!(
+                    "[ipc_fanout] done: sent {sent}, recvd {r}, expected {expected} in {:.1}s",
+                    start.elapsed().as_secs_f64(),
+                );
+                assert_eq!(r, expected, "message loss detected");
             });
         })
     };

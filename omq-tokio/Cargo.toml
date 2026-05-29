@@ -37,13 +37,13 @@ omq-proto = { path = "../omq-proto", version = "0.14.0", default-features = fals
 yring = { path = "../yring", version = "0.2.2" }
 async-channel = "2.5.0"
 bytes = "1.11.0"
-concurrent-queue = "2"
+concurrent-queue = "2.5.0"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 rand = "0.10"
-rustc-hash = "2"
+rustc-hash = "2.1.0"
 smallvec = { version = "1", features = ["const_generics", "union"] }
-thiserror = "2"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+thiserror = "2.0.18"
+tokio = { version = "1.52.0", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 socket2 = "0.6"
 libc = "0.2"
@@ -54,7 +54,7 @@ rustls-pki-types = { version = "1", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["test-util"] }
+tokio = { version = "1.52.0", features = ["test-util"] }
 rcgen = "0.14"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Cross-runtime interop tests drive a compio backend on a dedicated
