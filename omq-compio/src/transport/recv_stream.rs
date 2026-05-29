@@ -83,7 +83,13 @@ pub(super) async fn pull_stream(
                 )
                 .await;
                 match buf {
-                    None => StreamArmOutcome::Eof,
+                    // Mid-accumulation: the connection is alive (we're partway
+                    // through a large message). Fall back to one-shot reads to
+                    // finish the payload.
+                    None => {
+                        *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                        StreamArmOutcome::Fed
+                    }
                     Some(Err(e)) => StreamArmOutcome::Err(e),
                     Some(Ok(buf)) if buf.is_empty() => StreamArmOutcome::Eof,
                     Some(Ok(buf)) => {
