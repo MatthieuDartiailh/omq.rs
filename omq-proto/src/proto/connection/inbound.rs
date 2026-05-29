@@ -238,17 +238,20 @@ impl Connection {
             return self.dispatch_decrypted(flags.command, flags.more, plaintext);
         }
 
-        // CURVE: wire body is `\x07 "MESSAGE" flags(1) nonce(8) box(...)`.
-        // libzmq does NOT set the COMMAND bit; the wire flag is forwarded
-        // after decrypt so the receiver demuxes command-vs-data.
+        // CURVE: wire body is `\x07 "MESSAGE" nonce(8) box(flags(1) || data)`.
+        // The MORE and COMMAND bits live in the *encrypted* inner flags byte
+        // (libzmq msg flags: MORE 0x01, COMMAND 0x02), so the command-vs-data
+        // demux must use the decrypted flag — the outer wire frame is never
+        // COMMAND-flagged for CURVE traffic.
         #[cfg(feature = "curve")]
         if let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() {
             let body = payload.as_bytes();
             if body.len() >= CURVE_MESSAGE_PREFIX.len()
                 && &body[..CURVE_MESSAGE_PREFIX.len()] == CURVE_MESSAGE_PREFIX
             {
-                let (more, plaintext) = tx.decrypt_message(&body[CURVE_MESSAGE_PREFIX.len()..])?;
-                return self.dispatch_decrypted(flags.command, more, plaintext);
+                let (more, command, plaintext) =
+                    tx.decrypt_message(&body[CURVE_MESSAGE_PREFIX.len()..])?;
+                return self.dispatch_decrypted(command, more, plaintext);
             }
             return Err(Error::Protocol(
                 "expected CURVE-wrapped MESSAGE on data-phase connection".into(),

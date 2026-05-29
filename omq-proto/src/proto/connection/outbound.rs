@@ -52,7 +52,7 @@ impl Connection {
                 && let Some(FrameTransform::Curve(tx)) = self.transform.as_mut()
             {
                 let plaintext = body.freeze();
-                let Ok(enc) = tx.encrypt_message(false, &plaintext) else {
+                let Ok(enc) = tx.encrypt_message(false, true, &plaintext) else {
                     continue;
                 };
                 let mut wire = BytesMut::with_capacity(8 + enc.len());
@@ -240,7 +240,7 @@ impl Connection {
             unreachable!("send_part_curve called without curve transform");
         };
         let plaintext = part.as_bytes();
-        let body = tx.encrypt_message(more, &plaintext)?;
+        let body = tx.encrypt_message(more, false, &plaintext)?;
         let mut wire = BytesMut::with_capacity(8 + body.len());
         wire.put_u8(b"MESSAGE".len() as u8);
         wire.put_slice(b"MESSAGE");

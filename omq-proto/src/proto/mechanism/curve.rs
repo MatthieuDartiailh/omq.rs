@@ -90,18 +90,25 @@ impl std::fmt::Debug for CurveTransform {
 }
 
 impl CurveTransform {
-    /// Encrypt a single application frame's payload, returning the body of
-    /// the MESSAGE command after the `\x07MESSAGE` name prefix:
-    /// `nonce(8) || box(flags(1) || plaintext)`. The MORE bit lives
-    /// *inside* the encrypted plaintext per RFC 26 / libzmq.
-    pub(crate) fn encrypt_message(&mut self, more: bool, plaintext: &[u8]) -> Result<Bytes> {
+    /// Encrypt a single frame's payload, returning the body of the MESSAGE
+    /// command after the `\x07MESSAGE` name prefix:
+    /// `nonce(8) || box(flags(1) || plaintext)`. The flags byte lives *inside*
+    /// the encrypted plaintext per RFC 26 / libzmq and carries MORE (0x01) and
+    /// COMMAND (0x02), so a wrapped ZMTP command (e.g. SUBSCRIBE) is told apart
+    /// from application data by the peer.
+    pub(crate) fn encrypt_message(
+        &mut self,
+        more: bool,
+        command: bool,
+        plaintext: &[u8],
+    ) -> Result<Bytes> {
         self.out_counter = self
             .out_counter
             .checked_add(1)
             .ok_or_else(|| Error::Protocol("CURVE outbound nonce counter exhausted".into()))?;
         let nonce = nonce_short(&self.out_prefix, self.out_counter);
         let mut pt = Vec::with_capacity(1 + plaintext.len());
-        pt.push(u8::from(more));
+        pt.push(u8::from(more) | (u8::from(command) << 1));
         pt.extend_from_slice(plaintext);
         let ct = self
             .salsa
@@ -114,8 +121,11 @@ impl CurveTransform {
     }
 
     /// Decrypt a MESSAGE command body (post-`\x07MESSAGE` prefix). Returns
-    /// `(more, plaintext)`. Body layout: `nonce(8) || box(flags(1) || data)`.
-    pub(crate) fn decrypt_message(&mut self, body: &[u8]) -> Result<(bool, Bytes)> {
+    /// `(more, command, plaintext)`. Body layout: `nonce(8) || box(flags(1) || data)`.
+    /// The inner flags byte carries libzmq's msg flags — MORE (0x01) and COMMAND
+    /// (0x02) — so a CURVE-wrapped ZMTP command (e.g. SUBSCRIBE) can be told apart
+    /// from application data.
+    pub(crate) fn decrypt_message(&mut self, body: &[u8]) -> Result<(bool, bool, Bytes)> {
         if body.len() < 8 + 16 + 1 {
             return Err(Error::Protocol("MESSAGE command too short".into()));
         }
@@ -137,8 +147,9 @@ impl CurveTransform {
             ));
         }
         let more = pt[0] & 0x01 != 0;
+        let command = pt[0] & 0x02 != 0;
         self.in_counter = counter;
-        Ok((more, Bytes::copy_from_slice(&pt[1..])))
+        Ok((more, command, Bytes::copy_from_slice(&pt[1..])))
     }
 }
 
@@ -940,15 +951,27 @@ mod tests {
         let mut s_tx = server.build_transform().unwrap();
         let mut c_tx = client.build_transform().unwrap();
 
-        let body = c_tx.encrypt_message(false, b"hello server").unwrap();
-        let (more, pt) = s_tx.decrypt_message(&body).unwrap();
+        let body = c_tx.encrypt_message(false, false, b"hello server").unwrap();
+        let (more, _command, pt) = s_tx.decrypt_message(&body).unwrap();
         assert!(!more);
         assert_eq!(&pt[..], b"hello server");
 
-        let body = s_tx.encrypt_message(true, b"hi client").unwrap();
-        let (more, pt) = c_tx.decrypt_message(&body).unwrap();
+        let body = s_tx.encrypt_message(true, false, b"hi client").unwrap();
+        let (more, _command, pt) = c_tx.decrypt_message(&body).unwrap();
         assert!(more);
         assert_eq!(&pt[..], b"hi client");
+
+        // The COMMAND bit must round-trip independently of MORE: it's what lets a
+        // CURVE-wrapped ZMTP command (e.g. SUBSCRIBE) be told apart from application data
+        // on the far side. Dropping it silently turned every SUBSCRIBE into data, so a PUB
+        // never registered a (libzmq) SUB's subscription and the SUB received nothing.
+        for (more, command) in [(false, false), (true, false), (false, true), (true, true)] {
+            let body = c_tx.encrypt_message(more, command, b"payload").unwrap();
+            let (got_more, got_command, pt) = s_tx.decrypt_message(&body).unwrap();
+            assert_eq!(got_more, more, "MORE bit changed over CURVE");
+            assert_eq!(got_command, command, "COMMAND bit lost over CURVE (more={more})");
+            assert_eq!(&pt[..], b"payload");
+        }
     }
 
     #[test]
