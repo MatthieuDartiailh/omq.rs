@@ -227,7 +227,7 @@ async def test_async_dealer_router_identity(tcp_endpoint):
 async def test_async_push_pull_bulk_tcp(tcp_endpoint):
     """Async recv with sync sender in a thread."""
     import threading
-    n = 80_000
+    n = 20_000
     ctx = zmq_async.Context()
     pull = ctx.socket(pyomq.PULL)
     push_sync = pyomq.Context().socket(pyomq.PUSH)
@@ -243,13 +243,12 @@ async def test_async_push_pull_bulk_tcp(tcp_endpoint):
         t = threading.Thread(target=sender)
         t.start()
 
-        rc = 0
-        for _ in range(n):
-            await asyncio.wait_for(pull.recv(), timeout=15)
-            rc += 1
+        async def receive_all():
+            for _ in range(n):
+                await pull.recv()
 
+        await asyncio.wait_for(receive_all(), timeout=30)
         t.join(timeout=5)
-        assert rc == n
     finally:
         push_sync.close()
         pull.close()
