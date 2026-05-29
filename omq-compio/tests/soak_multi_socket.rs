@@ -153,6 +153,7 @@ fn soak_multi_socket() {
     }
 
     let report = monitor.stop();
-    report.assert_no_leak("multi_socket");
     tracker.assert_stable("multi_socket");
+    drop(tracker);
+    report.assert_no_leak("multi_socket");
 }

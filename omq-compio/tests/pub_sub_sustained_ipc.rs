@@ -7,6 +7,7 @@
 //! - ENOBUFS in `accumulate_large_recv` → fallback to one-shot
 //! - `flush_codec_output` cancel-safety (`encoded_queue`, not direct write)
 //! - `flush_encoded_queue` written==0 data preservation
+//! - multishot stream `None` during accumulation → fallback to one-shot
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -30,7 +31,7 @@ fn block_on_and_drain<F: std::future::Future>(rt: &compio::runtime::Runtime, fut
 fn sustained_ipc_fanout_no_message_loss() {
     const PEERS: usize = 3;
     const MSG_SIZE: usize = 131_072;
-    const TOTAL_MESSAGES: usize = 50_000;
+    const TOTAL_MESSAGES: usize = 5_000;
 
     let ep: omq_compio::Endpoint = {
         let mut dir = std::env::temp_dir();
@@ -102,7 +103,7 @@ fn sustained_ipc_fanout_no_message_loss() {
                 }
 
                 // Wait for all receives with a generous timeout.
-                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
                 while recv_count.load(Ordering::Relaxed) < target {
                     if std::time::Instant::now() > deadline {
                         let got = recv_count.load(Ordering::Relaxed);

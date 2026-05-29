@@ -335,21 +335,26 @@ impl ResourceReport {
 // ---------------------------------------------------------------------------
 
 pub struct ThroughputTracker {
-    #[allow(dead_code)]
-    window: Duration,
+    interval: Duration,
+    last_record: Instant,
     samples: Vec<(Instant, u64)>,
 }
 
 impl ThroughputTracker {
-    pub fn new(window: Duration) -> Self {
+    pub fn new(interval: Duration) -> Self {
         Self {
-            window,
+            interval,
+            last_record: Instant::now(),
             samples: Vec::new(),
         }
     }
 
     pub fn record(&mut self, cumulative_count: u64) {
-        self.samples.push((Instant::now(), cumulative_count));
+        let now = Instant::now();
+        if now.duration_since(self.last_record) >= self.interval {
+            self.samples.push((now, cumulative_count));
+            self.last_record = now;
+        }
     }
 
     pub fn assert_stable(&self, label: &str) {

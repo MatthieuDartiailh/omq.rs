@@ -691,8 +691,7 @@ fn encode_msg(
         match codec.ws_role() {
             Some(omq_proto::proto::connection::WsRole::Server) => eq.encode_ws(msg),
             Some(omq_proto::proto::connection::WsRole::Client) => eq.encode_ws_masked(msg),
-            Some(_) => unreachable!(),
-            None => unreachable!(),
+            Some(_) | None => unreachable!(),
         }
         return;
     }

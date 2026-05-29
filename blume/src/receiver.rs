@@ -94,6 +94,15 @@ impl<T> Receiver<T> {
         cache.is_empty() && self.shared.is_send_empty()
     }
 
+    /// Signal senders that the receiver is closed. Subsequent and
+    /// in-flight `send_async` calls will return `SendError`.
+    pub fn close(&self) {
+        let mut inner = self.shared.inner.lock().expect("blume: poisoned");
+        inner.closed_recv = true;
+        drop(inner);
+        self.shared.send_event.notify(usize::MAX);
+    }
+
     fn drain_cache_into(cache: &mut VecDeque<T>, out: &mut Vec<T>) -> usize {
         let n = cache.len();
         out.reserve(n);

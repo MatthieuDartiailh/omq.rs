@@ -81,6 +81,7 @@ struct DriverLoopState {
     shared_closed: bool,
     peer_identity: Bytes,
     drain_buf: Vec<Bytes>,
+    stream_rounds: u32,
 }
 
 impl DriverLoopState {
@@ -95,6 +96,7 @@ impl DriverLoopState {
             shared_closed: false,
             peer_identity: Bytes::new(),
             drain_buf: Vec::with_capacity(64),
+            stream_rounds: 0,
         }
     }
 }
@@ -442,12 +444,18 @@ pub(crate) async fn run_connection(
         // notification is worth issuing.
         state.driver_in_select.store(false, Ordering::Relaxed);
 
-        // Close path: once the user has asked to close AND the
-        // handshake completed AND every pending command has been
-        // encoded AND the codec + encoded_queue have nothing left to
-        // write, we exit cleanly. Pre-handshake closes wait here for
-        // the handshake (or its own timeout); a stuck peer is bounded
-        // by Socket::close's wall-clock budget.
+        if !ls.closing && state.socket_closing.load(Ordering::Acquire) {
+            ls.closing = true;
+            // Drain inbox in one shot so stale SendMessage commands
+            // don't block the close condition via one-at-a-time
+            // delivery through the select. Safe to drain eagerly here
+            // because no new sends arrive after socket_closing is set.
+            let cap = max_batch_bytes();
+            while let Ok(cmd) = inbox.try_recv() {
+                ls.drain_inbox(cmd, &inbox, &state, cap).await?;
+            }
+        }
+
         if ls.closing {
             let io = state.lock_io();
             let eq = state.encoded_queue.lock().expect("encoded_queue");
@@ -578,7 +586,6 @@ pub(crate) async fn run_connection(
         let cap = max_batch_bytes();
         futures::select_biased! {
             () = eof_fut.fuse() => {
-                // Recv direct path observed EOF / read error.
                 return Ok(());
             }
             () = timeout_fut.fuse() => {
@@ -595,9 +602,18 @@ pub(crate) async fn run_connection(
                 ).await? {
                     return Ok(());
                 }
+                ls.stream_rounds += 1;
+                if ls.stream_rounds >= 64 {
+                    ls.stream_rounds = 0;
+                    if let Ok(cmd) = inbox.try_recv() {
+                        ls.drain_inbox(cmd, &inbox, &state, cap)
+                            .await?;
+                    }
+                }
             }
             cmd = cmd_fut.fuse() => {
                 let Ok(cmd) = cmd else { return Ok(()) };
+                ls.stream_rounds = 0;
                 ls.drain_inbox(cmd, &inbox, &state, cap)
                     .await?;
             }

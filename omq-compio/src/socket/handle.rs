@@ -9,7 +9,6 @@ use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 
 use crate::monitor::MonitorStream;
-use crate::transport::driver::DriverCommand;
 
 use super::inner::{PeerOut, SocketInner, WirePeerHandle};
 
@@ -343,14 +342,19 @@ impl Socket {
                 })
                 .collect()
         };
-        for handle in &wire_handles {
-            let tx = handle.read().expect("wire peer handle lock").clone();
-            if tx.try_send(DriverCommand::Close).is_err() {
-                let _ = compio::time::timeout(
-                    Duration::from_millis(100),
-                    tx.send_async(DriverCommand::Close),
-                )
-                .await;
+        // Signal all wire drivers to close. The socket_closing flag
+        // is checked at the top of each driver loop iteration,
+        // bypassing the inbox which may be full of stale SendMessage
+        // commands from direct-encode fallbacks.
+        {
+            let peers = self.inner.out_peers.read().expect("peers lock");
+            for (_, p) in peers.iter() {
+                if let Some(dio_handle) = &p.direct_io
+                    && let Some(dio) = dio_handle.read().expect("dio lock").as_ref()
+                {
+                    dio.socket_closing.store(true, Ordering::Release);
+                    dio.transmit_ready.notify(usize::MAX);
+                }
             }
         }
 
@@ -381,13 +385,34 @@ impl Socket {
             compio::time::sleep(Duration::from_millis(5)).await;
         }
         self.inner.dialers.write().expect("dialers lock").clear();
-        {
-            let mut peers = self.inner.out_peers.write().expect("peers lock");
-            peers.clear();
-            self.inner
-                .peers_gen
-                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.inner.out_peers.write().expect("peers lock").clear();
+        self.inner.peers_gen.fetch_add(1, Ordering::Release);
+
+        // Drop cached DirectIoState refs so the Arc can reach zero
+        // once the driver task exits and drops its own ref.
+        #[cfg(not(feature = "priority"))]
+        unsafe {
+            *self.inner.direct_send_io.get() = None;
         }
+        unsafe {
+            *self.inner.direct_recv_io.get() = None;
+        }
+        *self.inner.cached_route.lock().expect("cached_route") = None;
+
+        // Close the inbound channel so drivers blocked on
+        // peer_in_tx.send_async() get unblocked with SendError.
+        self.inner.in_rx.close();
+
+        // Drop all sender clones so the cmd channels fully disconnect.
+        // Drivers see Err(Disconnected) on their next inbox poll and exit.
+        drop(wire_handles);
+
+        // Yield so the cooperative executor can run driver tasks to
+        // completion, freeing DirectIoState and EncodedQueue buffers.
+        for _ in 0..20 {
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+
         self.inner.monitor.closed();
         Ok(())
     }
