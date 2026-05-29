@@ -76,6 +76,7 @@ compile_error!(
 );
 
 #[cfg(feature = "compio-backend")]
+#[allow(ambiguous_glob_reexports)]
 pub use omq_compio::*;
 
 #[cfg(feature = "tokio-backend")]

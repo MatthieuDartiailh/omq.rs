@@ -29,7 +29,7 @@ pub(crate) enum AnyStream {
     Tcp(TcpStream),
     Ipc(UnixStream),
     #[cfg(feature = "ws")]
-    Ws(crate::transport::ws::WsTransport),
+    Ws(Box<crate::transport::ws::WsTransport>),
 }
 
 impl AnyStream {
@@ -186,7 +186,7 @@ impl AnyListener {
                 let accepted =
                     crate::transport::ws::accept(stream, l.tls_acceptor.as_ref()).await?;
                 Ok(AnyConn::ByteStream {
-                    stream: AnyStream::Ws(accepted.transport),
+                    stream: AnyStream::Ws(Box::new(accepted.transport)),
                     peer_ident: PeerIdent::Socket(addr),
                     leftover: accepted.leftover,
                 })
@@ -282,7 +282,7 @@ pub(super) async fn connect_any(
         .await?;
         let peer_ident = peer_ident_for_endpoint(endpoint);
         return Ok(AnyConn::ByteStream {
-            stream: AnyStream::Ws(connected.transport),
+            stream: AnyStream::Ws(Box::new(connected.transport)),
             peer_ident,
             leftover: connected.leftover,
         });
