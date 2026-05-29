@@ -887,6 +887,34 @@ No heap allocation, no refcounting. Falls back to
 A real user sending small messages from a `&[u8]` buffer gets the
 same benefit. This is the realistic fast path, not a benchmark trick.
 
+### Cell-based send path (replacing atomics and Mutex)
+
+After the recv-side optimizations, the push side became the bottleneck.
+Profiling showed 13.8% on `encoded_queue: Mutex<EncodedQueue>` lock
+and unlock (two atomic CAS operations per message), plus 5.9% on
+`direct_msg_count: AtomicUsize` and `driver_in_select: AtomicBool`.
+All accesses are on a single compio runtime thread. The atomics are
+correct but unnecessary: each costs 5-20 ns vs <1 ns for a plain
+memory write.
+
+Replaced five fields on `DirectIoState` with non-atomic equivalents:
+
+- `encoded_queue: Mutex<EncodedQueue>` -> `EncodedQueueCell` (a
+  `Cell<bool>` borrow flag + `UnsafeCell<EncodedQueue>`, with a RAII
+  guard that clears the flag on drop). `try_borrow_mut()` is a plain
+  bool check instead of an atomic CAS.
+- `direct_msg_count: AtomicUsize` -> `Cell<usize>`
+- `driver_in_select: AtomicBool` -> `Cell<bool>`
+- `handshake_done: AtomicBool` -> `Cell<bool>`
+- `socket_closing: AtomicBool` -> `Cell<bool>`
+
+The safety invariant is the same one that already covers `RecvCache`,
+`LocalStream`, and the `UnsafeCell` fields on `SocketInner`: compio
+is single-threaded, `DirectIoState` never crosses thread boundaries,
+and the existing `unsafe impl Sync` on the `Arc` covers `Cell` fields.
+
+Result: 8 B TCP throughput went from 17M to 22M msg/s.
+
 ### Dead end: Vec for Connection::messages (replacing VecDeque)
 
 Profiling 8 B TCP PULL at ~14M msg/s showed 10% self-time attributed

@@ -352,7 +352,7 @@ impl Socket {
                 if let Some(dio_handle) = &p.direct_io
                     && let Some(dio) = dio_handle.read().expect("dio lock").as_ref()
                 {
-                    dio.socket_closing.store(true, Ordering::Release);
+                    dio.socket_closing.set(true);
                     dio.transmit_ready.notify(usize::MAX);
                 }
             }

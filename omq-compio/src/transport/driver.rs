@@ -203,7 +203,7 @@ impl DriverLoopState {
                 .expect("has_transform but no encoder")
                 .encode(m)?;
             drop(enc);
-            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+            let mut eq = state.encoded_queue.borrow_mut();
             let cr = eq.total_bytes() >= cap;
             for wire in &wires {
                 if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
@@ -221,7 +221,7 @@ impl DriverLoopState {
             self.codec_maybe_dirty = true;
             Ok(cr)
         } else {
-            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+            let mut eq = state.encoded_queue.borrow_mut();
             let cr = eq.total_bytes() >= cap;
             #[cfg(feature = "ws")]
             if state.is_ws {
@@ -251,7 +251,7 @@ impl DriverLoopState {
                             .expect("has_transform but no encoder")
                             .encode(&m)?;
                         drop(enc);
-                        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                        let mut eq = state.encoded_queue.borrow_mut();
                         for wire in &wires {
                             if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
                                 eq.encode_and_push_flat(wire);
@@ -262,7 +262,7 @@ impl DriverLoopState {
                     } else if state.uses_crypto {
                         io.codec.send_message(&m)?;
                     } else {
-                        let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                        let mut eq = state.encoded_queue.borrow_mut();
                         #[cfg(feature = "ws")]
                         if state.is_ws {
                             eq.encode_and_push_flat_ws(&m, state.ws_masked);
@@ -293,7 +293,7 @@ impl DriverLoopState {
         hb_interval: Option<Duration>,
     ) -> Result<()> {
         io.handshake_done = true;
-        state.handshake_done.store(true, Ordering::Relaxed);
+        state.handshake_done.set(true);
         self.deadline = None;
         if let Some(iv) = hb_interval {
             self.hb_next = Some(Instant::now() + iv);
@@ -315,7 +315,7 @@ impl DriverLoopState {
     ) -> Result<()> {
         let mut next = Some(first);
         while let Some(cmd) = next.take() {
-            let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
+            let cap_reached = if state.handshake_done.get() {
                 match cmd {
                     DriverCommand::SendMessage(m) => {
                         self.encode_outbound_message(state, &m, cap).await?
@@ -355,7 +355,7 @@ impl DriverLoopState {
     ) -> Result<()> {
         let mut next = Some(first);
         while let Some(m) = next.take() {
-            let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
+            let cap_reached = if state.handshake_done.get() {
                 self.encode_outbound_message(state, &m, cap).await?
             } else {
                 self.pending_cmds.push_back(DriverCommand::SendMessage(m));
@@ -379,7 +379,7 @@ impl DriverLoopState {
     ) -> Result<()> {
         let mut next = Some(first);
         while let Some(m) = next.take() {
-            let cap_reached = if state.handshake_done.load(Ordering::Relaxed) {
+            let cap_reached = if state.handshake_done.get() {
                 self.encode_outbound_message(state, &m, cap).await?
             } else {
                 self.pending_cmds.push_back(DriverCommand::SendMessage(m));
@@ -442,9 +442,9 @@ pub(crate) async fn run_connection(
         // The flag is set again just before we park in select_biased!
         // so the fast-path sender can tell whether a transmit_ready
         // notification is worth issuing.
-        state.driver_in_select.store(false, Ordering::Relaxed);
+        state.driver_in_select.set(false);
 
-        if !ls.closing && state.socket_closing.load(Ordering::Acquire) {
+        if !ls.closing && state.socket_closing.get() {
             ls.closing = true;
             // Drain inbox in one shot so stale SendMessage commands
             // don't block the close condition via one-at-a-time
@@ -458,7 +458,7 @@ pub(crate) async fn run_connection(
 
         if ls.closing {
             let io = state.lock_io();
-            let eq = state.encoded_queue.lock().expect("encoded_queue");
+            let eq = state.encoded_queue.borrow_mut();
             if io.handshake_done
                 && ls.pending_cmds.is_empty()
                 && !io.codec.has_pending_transmit()
@@ -491,7 +491,7 @@ pub(crate) async fn run_connection(
         }
 
         // 3a) Flush codec buffer.
-        if !state.handshake_done.load(Ordering::Relaxed) || ls.codec_maybe_dirty {
+        if !state.handshake_done.get() || ls.codec_maybe_dirty {
             let flushed = ls.flush_codec_to_wire(&state).await?;
             if flushed {
                 continue;
@@ -541,13 +541,8 @@ pub(crate) async fn run_connection(
         // the store and the actual yield inside select_biased!. After setting
         // the flag, check encoded_queue one last time to close the race where
         // the sender encoded but saw driver_in_select=false and skipped notify.
-        state.driver_in_select.store(true, Ordering::Relaxed);
-        if !state
-            .encoded_queue
-            .lock()
-            .expect("encoded_queue")
-            .is_empty()
-        {
+        state.driver_in_select.set(true);
+        if !state.encoded_queue.borrow_mut().is_empty() {
             continue;
         }
 
@@ -642,7 +637,7 @@ impl DriverLoopState {
         monitor_ctx: Option<&MonitorCtx>,
         hb_interval: Option<Duration>,
     ) -> Result<SmallVec<[Drained; 8]>> {
-        let post_handshake = state.handshake_done.load(Ordering::Relaxed);
+        let post_handshake = state.handshake_done.get();
         let recv_claimed = state.recv_claim.load(Ordering::Acquire) == 1;
         if post_handshake && (!self.codec_has_input || recv_claimed) {
             return Ok(SmallVec::new());
@@ -808,16 +803,14 @@ impl DriverLoopState {
         if written == 0 {
             state
                 .encoded_queue
-                .lock()
-                .expect("encoded_queue")
+                .borrow_mut()
                 .put_back_unwritten(returned, 0);
             return Ok(false);
         }
         if written < total {
             state
                 .encoded_queue
-                .lock()
-                .expect("encoded_queue")
+                .borrow_mut()
                 .put_back_unwritten(returned, written);
         }
         Ok(true)
@@ -826,7 +819,7 @@ impl DriverLoopState {
     async fn flush_encoded_queue(&mut self, state: &DirectIoState) -> Result<bool> {
         self.drain_buf.clear();
         {
-            let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+            let mut eq = state.encoded_queue.borrow_mut();
             eq.drain_into_vec(&mut self.drain_buf, 1024);
         }
         if self.drain_buf.is_empty() {
@@ -838,8 +831,7 @@ impl DriverLoopState {
         if written == 0 {
             state
                 .encoded_queue
-                .lock()
-                .expect("encoded_queue")
+                .borrow_mut()
                 .put_back_unwritten(returned, 0);
             return Ok(false);
         }
@@ -847,19 +839,13 @@ impl DriverLoopState {
         if written < total_drained {
             state
                 .encoded_queue
-                .lock()
-                .expect("encoded_queue")
+                .borrow_mut()
                 .put_back_unwritten(returned, written);
         } else {
             self.drain_buf = returned;
         }
-        if state
-            .encoded_queue
-            .lock()
-            .expect("encoded_queue")
-            .is_empty()
-        {
-            state.direct_msg_count.store(0, Ordering::Relaxed);
+        if state.encoded_queue.borrow_mut().is_empty() {
+            state.direct_msg_count.set(0);
         }
         Ok(true)
     }

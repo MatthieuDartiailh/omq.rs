@@ -183,7 +183,7 @@ def draw_throughput_panel(
     L.append(svg_text(mid_x, y_top - 17, title, size=13, weight="700", fill="#111827"))
 
     # msg/s gridlines (left axis)
-    step_msg = nice_step(msg_max, 10)
+    step_msg = nice_step(msg_max, 12)
     v = step_msg
     while v <= msg_max:
         yy = y_msg(v)
@@ -435,7 +435,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
 
 def main():
-    FIXED_MSG_MAX = 20e6
+    FIXED_MSG_MAX = 25e6
     FIXED_GBS_MAX = 6.0
     FIXED_LAT_MAX = 100.0
     FIXED_INPROC_LAT_MAX = 25.0

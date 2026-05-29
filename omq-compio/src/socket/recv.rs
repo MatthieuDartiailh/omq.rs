@@ -762,12 +762,8 @@ impl Socket {
         io.codec.advance_transmit(total);
         drop(io);
         if !chunks.is_empty() {
-            state
-                .encoded_queue
-                .lock()
-                .expect("encoded_queue")
-                .push_raw(chunks);
-            if state.driver_in_select.load(Ordering::Relaxed) {
+            state.encoded_queue.borrow_mut().push_raw(chunks);
+            if state.driver_in_select.get() {
                 state.transmit_ready.notify(1);
             }
         }
