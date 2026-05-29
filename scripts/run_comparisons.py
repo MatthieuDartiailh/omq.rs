@@ -155,12 +155,16 @@ def spawn_process(binary: str, *args: str) -> subprocess.Popen:
 
 
 def capture_process(binary: str, *args: str) -> str:
-    result = subprocess.run(
-        [binary, *args],
-        capture_output=True, text=True,
-        timeout=30,
-    )
-    return result.stdout
+    try:
+        result = subprocess.run(
+            [binary, *args],
+            capture_output=True, text=True,
+            timeout=30,
+        )
+        return result.stdout
+    except subprocess.TimeoutExpired:
+        print(f"WARNING: timeout: {binary} {' '.join(args)}", file=sys.stderr)
+        return ""
 
 
 def kill_process(proc: subprocess.Popen):
@@ -215,6 +219,9 @@ def run_throughput_cell(
 
     push = spawn_process(binary, "push", addr, str(size))
     time.sleep(0.15)
+    if push.poll() is not None:
+        print(f"WARNING: push died (rc={push.returncode}) for {binary} {addr}", file=sys.stderr)
+        return None
     try:
         output = capture_process(binary, "pull", addr, str(size), str(DURATION))
     finally:
@@ -235,6 +242,9 @@ def run_latency_cell(
 
     rep = spawn_process(binary, "rep", addr, str(size))
     time.sleep(0.2)
+    if rep.poll() is not None:
+        print(f"WARNING: rep died (rc={rep.returncode}) for {binary} {addr}", file=sys.stderr)
+        return None
     try:
         output = capture_process(
             binary, "req", addr, str(size),

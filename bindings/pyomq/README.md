@@ -77,8 +77,8 @@ See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md) fo
 <!-- PROXY_PERF:START -->
 |                    | pyomq     | pyzmq     | ratio     |
 |--------------------|----------:|----------:|----------:|
-| PUSH/PULL msg/s    |   903 k/s |   505 k/s | **1.79×** |
-| REQ/REP rt/s       |  11,508/s |   6,616/s | **1.74×** |
+| PUSH/PULL msg/s    |   877 k/s |   522 k/s | **1.68×** |
+| REQ/REP rt/s       |  11,510/s |   6,363/s | **1.81×** |
 <!-- PROXY_PERF:END -->
 
 pyomq's `proxy()` forwards directly between sockets on the compio thread —
