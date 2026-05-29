@@ -45,14 +45,14 @@ impl Connection {
                 continue;
             }
 
-            // CURVE post-handshake: commands traverse MESSAGE encryption;
-            // the wire COMMAND bit stays set so the receiver demuxes.
+            // CURVE post-handshake: commands traverse MESSAGE encryption.
+            // The inner flags byte carries COMMAND (0x02) for the peer.
             #[cfg(feature = "curve")]
             if matches!(self.state, State::Ready)
                 && let Some(FrameTransform::Curve(tx)) = self.transform.as_mut()
             {
                 let plaintext = body.freeze();
-                let Ok(enc) = tx.encrypt_message(false, &plaintext) else {
+                let Ok(enc) = tx.encrypt_message(false, true, &plaintext) else {
                     continue;
                 };
                 let mut wire = BytesMut::with_capacity(8 + enc.len());
@@ -228,19 +228,16 @@ impl Connection {
         );
     }
 
-    /// CURVE-encrypted part: wrap the plaintext per RFC 26 (`"\x07"
-    /// "MESSAGE" flags(1) nonce(8) box`) and queue it as one ZMTP DATA
-    /// frame. libzmq sends these as data frames (not COMMAND frames);
-    /// the inner plaintext flag byte carries the application-level MORE.
-    /// Caller has already verified `self.transform` is
-    /// `Some(FrameTransform::Curve(_))`.
+    /// CURVE-encrypted data part: wrap the plaintext per RFC 26 and queue
+    /// it as one ZMTP DATA frame. The inner flags byte carries MORE (0x01);
+    /// COMMAND (0x02) is clear since this is application data.
     #[cfg(feature = "curve")]
     fn send_part_curve(&mut self, more: bool, part: &Payload) -> Result<()> {
         let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() else {
             unreachable!("send_part_curve called without curve transform");
         };
         let plaintext = part.as_bytes();
-        let body = tx.encrypt_message(more, &plaintext)?;
+        let body = tx.encrypt_message(more, false, &plaintext)?;
         let mut wire = BytesMut::with_capacity(8 + body.len());
         wire.put_u8(b"MESSAGE".len() as u8);
         wire.put_slice(b"MESSAGE");
