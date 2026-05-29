@@ -676,7 +676,9 @@ impl Socket {
     }
 
     async fn try_direct_recv(&self) -> Result<Option<Message>> {
+        use core::pin::pin;
         use futures::FutureExt;
+        use futures::future::FusedFuture;
 
         if !self.inner().in_rx.is_empty() {
             return Ok(None);
@@ -710,6 +712,9 @@ impl Socket {
             return Ok(None);
         }
 
+        let mut inrx_fut = pin!(self.inner().in_rx.recv_async().fuse());
+        let mut codec_ready_fut = pin!(state.recv_codec_ready.listen().fuse());
+
         loop {
             match accumulate_large_recv(&state).await? {
                 RecvAction::Return(msg) => return Ok(msg),
@@ -722,19 +727,19 @@ impl Socket {
                 RecvAction::Proceed => {}
             }
 
+            if codec_ready_fut.is_terminated() {
+                codec_ready_fut.set(state.recv_codec_ready.listen().fuse());
+            }
+
             let pf = pull_and_feed(&state);
-            let inrx_fut = self.inner().in_rx.recv_async();
-            let codec_ready_fut = state.recv_codec_ready.listen();
             futures::pin_mut!(pf);
-            futures::pin_mut!(inrx_fut);
-            futures::pin_mut!(codec_ready_fut);
             let outcome = futures::select_biased! {
-                frame = inrx_fut.fuse() => {
+                frame = inrx_fut.as_mut() => {
                     let frame = frame.map_err(|_| Error::Closed)?;
                     drop(guard);
                     return self.process_inproc_frame_for_direct(frame);
                 }
-                () = codec_ready_fut.fuse() => PullOutcome::Fed,
+                () = codec_ready_fut.as_mut() => PullOutcome::Fed,
                 outcome = pf.fuse() => outcome,
             };
 
