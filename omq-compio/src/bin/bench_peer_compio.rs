@@ -122,6 +122,13 @@ fn main() {
                 let warmup: usize = args[5].parse().expect("warmup");
                 run_inproc_st_latency(name, size, iterations, warmup).await;
             }
+            Some("latency-mt") => {
+                let ep = parse_ep(&args[2]);
+                let size: usize = args[3].parse().expect("msg_size");
+                let iterations: usize = args[4].parse().expect("iterations");
+                let warmup: usize = args[5].parse().expect("warmup");
+                run_latency_mt(ep, size, iterations, warmup).await;
+            }
             _ => {
                 eprintln!("usage: bench_peer_compio push <endpoint> <size>");
                 eprintln!("       bench_peer_compio pull <endpoint> <size> <duration_secs>");
@@ -134,6 +141,9 @@ fn main() {
                 );
                 eprintln!(
                     "       bench_peer_compio inproc-st-latency <name> <size> <iterations> <warmup>"
+                );
+                eprintln!(
+                    "       bench_peer_compio latency-mt <endpoint> <size> <iterations> <warmup>"
                 );
                 std::process::exit(1);
             }
@@ -410,6 +420,61 @@ async fn run_inproc_st_latency(name: String, size: usize, iterations: usize, war
     .detach();
 
     let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep).await.expect("req connect");
+    compio::time::sleep(Duration::from_millis(200)).await;
+
+    let payload = Bytes::from(vec![b'x'; size]);
+
+    for _ in 0..warmup {
+        req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+    }
+
+    let mut rtts = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+        rtts.push(t0.elapsed().as_nanos() as u64);
+    }
+
+    rtts.sort_unstable();
+    let p50 = percentile(&rtts, 50.0);
+    let p99 = percentile(&rtts, 99.0);
+    let p999 = percentile(&rtts, 99.9);
+    let max = percentile(&rtts, 100.0);
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    std::process::exit(0);
+}
+
+async fn run_latency_mt(ep: Endpoint, size: usize, iterations: usize, warmup: usize) {
+    use std::sync::{Arc, Barrier};
+
+    let ready = Arc::new(Barrier::new(2));
+
+    let rep_ep = ep.clone();
+    let rep_ready = ready.clone();
+    std::thread::spawn(move || {
+        let buf_len = (size + 64).next_power_of_two().max(64 * 1024);
+        let mut proactor = compio::driver::ProactorBuilder::new();
+        proactor.with_omq_buffer_pool_sized(std::num::NonZero::new(64).unwrap(), buf_len);
+        let rt = compio::runtime::RuntimeBuilder::new()
+            .with_proactor(proactor)
+            .build()
+            .expect("rep runtime");
+        rt.block_on(async move {
+            let rep = Socket::new(SocketType::Rep, bench_options(size));
+            rep.bind(rep_ep).await.expect("rep bind");
+            rep_ready.wait();
+            loop {
+                let msg = rep.recv().await.unwrap();
+                rep.send(msg).await.unwrap();
+            }
+        });
+    });
+
+    ready.wait();
+    let req = Socket::new(SocketType::Req, bench_options(size));
     req.connect(ep).await.expect("req connect");
     compio::time::sleep(Duration::from_millis(200)).await;
 

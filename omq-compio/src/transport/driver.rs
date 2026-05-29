@@ -177,7 +177,6 @@ pub(crate) fn build_peer_io(
         let _ = codec.handle_input(leftover);
         let _ = wr; // suppress unused
     }
-    #[expect(clippy::arc_with_non_send_sync)]
     let peer_io = Arc::new(std::sync::Mutex::new(PeerIo {
         codec,
         decoder,
@@ -420,6 +419,10 @@ pub(crate) async fn run_connection(
     snapshot_sink: Box<dyn SnapshotSink>,
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {
+    use core::pin::pin;
+    use futures::FutureExt;
+    use futures::future::{Fuse, FusedFuture};
+
     let peer_io: SharedPeerIo = state.peer_io.clone();
     let hb_interval = options.heartbeat_interval;
     let hb_timeout = options
@@ -436,8 +439,15 @@ pub(crate) async fn run_connection(
         Ordering::Relaxed,
     );
 
+    // Persistent futures: kept alive across loop iterations so their
+    // internal heap state (flume hook, event_listener node) is reused
+    // instead of re-allocated every iteration.
+    let mut cmd_fut = pin!(inbox.recv_async().fuse());
+    let mut transmit_ready_fut = pin!(state.transmit_ready.listen().fuse());
+    let mut eof_fut = pin!(Fuse::terminated());
+    let mut eof_was_active = false;
+
     loop {
-        use futures::FutureExt;
         // Clear the driver_in_select flag at the top of every iteration.
         // The flag is set again just before we park in select_biased!
         // so the fast-path sender can tell whether a transmit_ready
@@ -546,15 +556,24 @@ pub(crate) async fn run_connection(
             continue;
         }
 
+        // Refresh transmit_ready listener only if the previous one
+        // fired (terminated). The surviving listener stays registered
+        // with the Event and catches any notify issued while we were
+        // processing the previous iteration.
+        if transmit_ready_fut.is_terminated() {
+            transmit_ready_fut.set(state.transmit_ready.listen().fuse());
+        }
+
+        // eof listener: only needed when recv_active. Create on
+        // false→true transition; drop on true→false.
+        if recv_active && !eof_was_active {
+            eof_fut.set(state.eof_signal.listen().fuse());
+        } else if !recv_active && eof_was_active {
+            eof_fut.set(Fuse::terminated());
+        }
+        eof_was_active = recv_active;
+
         let stream_arm = pull_stream(&state, &peer_io, recv_active, accumulating);
-        let eof_fut = async {
-            if recv_active {
-                state.eof_signal.listen().await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
-        let cmd_fut = inbox.recv_async();
         let timeout_fut = maybe_sleep_until(ls.deadline);
         let hb_fut = maybe_sleep_until(ls.hb_next);
         let shared_active = shared_msg_rx.as_ref().filter(|_| !ls.shared_closed);
@@ -564,23 +583,13 @@ pub(crate) async fn run_connection(
                 None => std::future::pending::<Option<Message>>().await,
             }
         };
-        // Woken by the fast-path sender when it encodes directly into
-        // the codec buffer while we are parked here. The listener is
-        // created after the previous `wrote_something == false` check,
-        // with no `.await` in between, so no sender task can run in
-        // that window (cooperative runtime). Any `notify` from a
-        // sender that runs inside the select is captured.
-        let transmit_ready_fut = state.transmit_ready.listen();
         futures::pin_mut!(stream_arm);
-        futures::pin_mut!(eof_fut);
-        futures::pin_mut!(cmd_fut);
         futures::pin_mut!(timeout_fut);
         futures::pin_mut!(hb_fut);
         futures::pin_mut!(shared_fut);
-        futures::pin_mut!(transmit_ready_fut);
         let cap = max_batch_bytes();
         futures::select_biased! {
-            () = eof_fut.fuse() => {
+            () = eof_fut.as_mut() => {
                 return Ok(());
             }
             () = timeout_fut.fuse() => {
@@ -606,8 +615,9 @@ pub(crate) async fn run_connection(
                     }
                 }
             }
-            cmd = cmd_fut.fuse() => {
+            cmd = cmd_fut.as_mut() => {
                 let Ok(cmd) = cmd else { return Ok(()) };
+                cmd_fut.set(inbox.recv_async().fuse());
                 ls.stream_rounds = 0;
                 ls.drain_inbox(cmd, &inbox, &state, cap)
                     .await?;
@@ -623,7 +633,7 @@ pub(crate) async fn run_connection(
                 ls.drain_shared(m, shared, &state, cap)
                     .await?;
             }
-            () = transmit_ready_fut.fuse() => {
+            () = transmit_ready_fut.as_mut() => {
                 ls.codec_maybe_dirty = true;
             }
         }

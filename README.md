@@ -5,11 +5,11 @@
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-%3E%3D%201.93-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-> **16.1M msg/s** inproc | **15.5M msg/s** ipc | **15.9M msg/s** tcp
+> **15.2M msg/s** inproc | **23.5M msg/s** ipc | **23.7M msg/s** tcp
 >
-> **2.5 µs** inproc latency | **14.7 µs** ipc | **21.4 µs** tcp
+> **2.3 µs** inproc latency | **28.4 µs** ipc | **36.1 µs** tcp
 >
-> **2-3x** libzmq TCP throughput | **2x** lower TCP latency
+> **~3x** libzmq TCP throughput | **2x** lower TCP latency
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
