@@ -24,7 +24,7 @@ yring = { path = "../yring", version = "0.2.2" }
 compio = { version = "0.19.0-rc.1", features = ["runtime"] }
 bytes = "1.11.0"
 flume = { version = "0.12", default-features = false, features = ["async"] }
-rustc-hash = "2"
+rustc-hash = "2.1.0"
 futures = { version = "0.3", default-features = false, features = ["async-await"] }
 crypto_box = "0.9"
 libc = "0.2"

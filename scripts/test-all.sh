@@ -38,6 +38,17 @@ run() {
 # Usage: par <func> [args...]
 _par_pids=()
 _par_rc=0
+
+_kill_workers() {
+    for pid in "${_par_pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    for pid in "${_par_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    _par_pids=()
+}
+
 par() {
     # Reap any finished workers.
     local new_pids=()
@@ -45,17 +56,13 @@ par() {
         if kill -0 "$pid" 2>/dev/null; then
             new_pids+=("$pid")
         else
-            # set -e is suppressed inside if/else, so capture explicitly.
             wait "$pid" || _par_rc=$?
         fi
     done
     _par_pids=("${new_pids[@]}")
 
-    # Fail fast: drain remaining workers and abort.
     if [[ $_par_rc -ne 0 ]]; then
-        for pid in "${_par_pids[@]}"; do
-            wait "$pid" 2>/dev/null || true
-        done
+        _kill_workers
         exit "$_par_rc"
     fi
 
@@ -64,9 +71,7 @@ par() {
         wait "${_par_pids[0]}" || _par_rc=$?
         _par_pids=("${_par_pids[@]:1}")
         if [[ $_par_rc -ne 0 ]]; then
-            for pid in "${_par_pids[@]}"; do
-                wait "$pid" 2>/dev/null || true
-            done
+            _kill_workers
             exit "$_par_rc"
         fi
     done
@@ -77,12 +82,13 @@ par() {
 
 par_wait() {
     for pid in "${_par_pids[@]}"; do
-        wait "$pid" || _par_rc=$?
+        wait "$pid" || {
+            _par_rc=$?
+            _kill_workers
+            exit "$_par_rc"
+        }
     done
     _par_pids=()
-    if [[ $_par_rc -ne 0 ]]; then
-        exit "$_par_rc"
-    fi
 }
 
 # ---------------------------------------------------------------- #
