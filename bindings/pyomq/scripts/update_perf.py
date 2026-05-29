@@ -2,9 +2,8 @@
 """Measure pyomq vs pyzmq throughput and latency (sync + async).
 
 Run from the pyomq root (bindings/pyomq/) after `maturin develop --release`.
-Generates SVG charts and updates the README tables.
-
-Pass --skip-pyzmq to reuse cached pyzmq numbers and only re-measure pyomq.
+Results are appended to doc/charts/bindings.jsonl (latest run_id wins per impl).
+Generates doc/charts/bindings.svg and updates the proxy table in README.md.
 """
 
 import argparse
@@ -18,29 +17,101 @@ import sys
 import threading
 import time
 
-SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
-LATENCY_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 TARGET_RUNTIME_S = 0.4
 N_ROUNDS = 3
 LATENCY_WARMUP = 1000
 LATENCY_ITERS = 10000
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
-CACHE_FILE = os.path.join(os.path.dirname(__file__), "..", "doc", "charts", ".perf_cache.json")
+JSONL_FILE = os.path.join(os.path.dirname(__file__), "..", "doc", "charts", "bindings.jsonl")
 
-def load_cache():
+
+def load_jsonl():
+    rows = []
     try:
-        with open(CACHE_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        with open(JSONL_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+    except FileNotFoundError:
+        pass
+    return rows
 
 
-def save_cache(data):
-    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    with open(CACHE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+def append_jsonl(rows):
+    os.makedirs(os.path.dirname(JSONL_FILE), exist_ok=True)
+    with open(JSONL_FILE, "a") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
+def save_results(run_id, impl, tp_inproc, tp_tcp, atp_tcp, lat, alat, proxy_pp, proxy_rr):
+    rows = []
+    for i, size in enumerate(SIZES):
+        rows.append({"run_id": run_id, "impl": impl, "kind": "throughput",
+                      "mode": "sync", "transport": "inproc",
+                      "msg_size": size, "msgs_s": tp_inproc[i]})
+        rows.append({"run_id": run_id, "impl": impl, "kind": "throughput",
+                      "mode": "sync", "transport": "tcp",
+                      "msg_size": size, "msgs_s": tp_tcp[i]})
+        rows.append({"run_id": run_id, "impl": impl, "kind": "throughput",
+                      "mode": "async", "transport": "tcp",
+                      "msg_size": size, "msgs_s": atp_tcp[i]})
+        rows.append({"run_id": run_id, "impl": impl, "kind": "latency",
+                      "mode": "sync", "msg_size": size,
+                      "p50_us": lat[i][0], "p99_us": lat[i][1]})
+        rows.append({"run_id": run_id, "impl": impl, "kind": "latency",
+                      "mode": "async", "msg_size": size,
+                      "p50_us": alat[i][0], "p99_us": alat[i][1]})
+    rows.append({"run_id": run_id, "impl": impl, "kind": "proxy",
+                  "pattern": "pushpull", "msgs_s": proxy_pp})
+    rows.append({"run_id": run_id, "impl": impl, "kind": "proxy",
+                  "pattern": "reqrep", "msgs_s": proxy_rr})
+    append_jsonl(rows)
+    print(f"  appended {len(rows)} rows to {JSONL_FILE}")
+
+
+def chart_data_from_jsonl():
+    rows = load_jsonl()
+
+    latest = {}
+    for r in rows:
+        impl = r.get("impl")
+        kind = r.get("kind")
+        mode = r.get("mode", "")
+        transport = r.get("transport", "")
+        size = r.get("msg_size", 0)
+        pattern = r.get("pattern", "")
+        key = (impl, kind, mode, transport, size, pattern)
+        prev = latest.get(key)
+        if prev is None or r.get("run_id", "") >= prev.get("run_id", ""):
+            latest[key] = r
+
+    def get_tp(mode, impl, transport, size):
+        r = latest.get((impl, "throughput", mode, transport, size, ""))
+        return r["msgs_s"] if r else 0.0
+
+    def get_lat(mode, impl, size):
+        r = latest.get((impl, "latency", mode, "", size, ""))
+        return r["p50_us"] if r else 0.0
+
+    sync_omq_tp = [get_tp("sync", "pyomq", "tcp", s) for s in SIZES]
+    sync_pz_tp = [get_tp("sync", "pyzmq", "tcp", s) for s in SIZES]
+    async_omq_tp = [get_tp("async", "pyomq", "tcp", s) for s in SIZES]
+    async_pz_tp = [get_tp("async", "pyzmq", "tcp", s) for s in SIZES]
+    sync_omq_lat = [get_lat("sync", "pyomq", s) for s in SIZES]
+    sync_pz_lat = [get_lat("sync", "pyzmq", s) for s in SIZES]
+    async_omq_lat = [get_lat("async", "pyomq", s) for s in SIZES]
+    async_pz_lat = [get_lat("async", "pyzmq", s) for s in SIZES]
+
+    return {
+        "sync_omq_tp": sync_omq_tp, "sync_pz_tp": sync_pz_tp,
+        "async_omq_tp": async_omq_tp, "async_pz_tp": async_pz_tp,
+        "sync_omq_lat": sync_omq_lat, "sync_pz_lat": sync_pz_lat,
+        "async_omq_lat": async_omq_lat, "async_pz_lat": async_pz_lat,
+    }
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -68,16 +139,6 @@ def fmt_size(size):
 
 def fmt_int(n):
     return f"{n:,.0f}"
-
-
-def fmt_us(v):
-    if v >= 1000:
-        return f"{v / 1000:.1f} ms"
-    if v >= 100:
-        return f"{v:.0f} µs"
-    if v >= 10:
-        return f"{v:.1f} µs"
-    return f"{v:.2f} µs"
 
 
 # ── subprocess runner ────────────────────────────────────────────────
@@ -144,50 +205,30 @@ import sys; sys.stdout.flush(); import os; os._exit(0)
     return result if result is not None else 0.0
 
 
-def run_throughput(cached_pyzmq=None):
-    results = []
-    for idx, size in enumerate(SIZES):
+def run_throughput(lib_name):
+    inproc_results = []
+    tcp_results = []
+    for size in SIZES:
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        _measure_throughput_subprocess("pyomq", "inproc", size)
-        _measure_throughput_subprocess("pyomq", "tcp", size)
+        _measure_throughput_subprocess(lib_name, "inproc", size)
+        _measure_throughput_subprocess(lib_name, "tcp", size)
 
-        inproc_omq = max(
-            _measure_throughput_subprocess("pyomq", "inproc", size)
+        inproc = max(
+            _measure_throughput_subprocess(lib_name, "inproc", size)
             for _ in range(N_ROUNDS)
         )
-        tcp_omq = max(
-            _measure_throughput_subprocess("pyomq", "tcp", size)
+        tcp = max(
+            _measure_throughput_subprocess(lib_name, "tcp", size)
             for _ in range(N_ROUNDS)
         )
+        inproc_results.append(inproc)
+        tcp_results.append(tcp)
+        print(f" inproc {fmt_rate(inproc):>10}  tcp {fmt_rate(tcp):>10}")
 
-        if cached_pyzmq:
-            inproc_pz = cached_pyzmq[idx]["inproc"]
-            tcp_pz = cached_pyzmq[idx]["tcp"]
-        else:
-            _measure_throughput_subprocess("pyzmq", "inproc", size)
-            _measure_throughput_subprocess("pyzmq", "tcp", size)
-            inproc_pz = max(
-                _measure_throughput_subprocess("pyzmq", "inproc", size)
-                for _ in range(N_ROUNDS)
-            )
-            tcp_pz = max(
-                _measure_throughput_subprocess("pyzmq", "tcp", size)
-                for _ in range(N_ROUNDS)
-            )
-
-        inproc_ratio = inproc_omq / inproc_pz if inproc_pz > 0 else 0
-        tcp_ratio = tcp_omq / tcp_pz if tcp_pz > 0 else 0
-
-        results.append((label, inproc_omq, inproc_pz, inproc_ratio,
-                         tcp_omq, tcp_pz, tcp_ratio))
-
-        cached = " (cached)" if cached_pyzmq else ""
-        print(f" inproc {inproc_ratio:.2f}x  tcp {tcp_ratio:.2f}x{cached}")
-
-    return results
+    return inproc_results, tcp_results
 
 
 # ── async PUSH/PULL throughput ───────────────────────────────────────
@@ -275,26 +316,17 @@ asyncio.run(run())
     return result if result is not None else 0.0
 
 
-def run_async_throughput(cached_pyzmq=None):
+def run_async_throughput(lib_name):
     results = []
-    for idx, size in enumerate(SIZES):
+    for size in SIZES:
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        tcp_omq = max(_measure_async_subprocess("pyomq", size)
-                      for _ in range(N_ROUNDS + 1))
-
-        if cached_pyzmq:
-            tcp_pz = cached_pyzmq[idx]["tcp"]
-        else:
-            tcp_pz = max(_measure_async_subprocess("pyzmq", size)
-                         for _ in range(N_ROUNDS + 1))
-
-        ratio = tcp_omq / tcp_pz if tcp_pz > 0 else 0
-        results.append((label, tcp_omq, tcp_pz, ratio))
-        cached = " (cached)" if cached_pyzmq else ""
-        print(f" pyomq {fmt_rate(tcp_omq):>10}  pyzmq {fmt_rate(tcp_pz):>10}  {ratio:.2f}x{cached}")
+        tcp = max(_measure_async_subprocess(lib_name, size)
+                  for _ in range(N_ROUNDS + 1))
+        results.append(tcp)
+        print(f" {fmt_rate(tcp):>10}")
 
     return results
 
@@ -353,36 +385,21 @@ import sys; sys.stdout.flush(); import os; os._exit(0)
     return tuple(result) if result is not None else (999999.0, 999999.0)
 
 
-def run_latency(cached_pyzmq=None):
+def run_latency(lib_name):
     results = []
-    for idx, size in enumerate(LATENCY_SIZES):
+    for size in SIZES:
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        _measure_latency_subprocess("pyomq", size, 200, 200)
+        _measure_latency_subprocess(lib_name, size, 200, 200)
 
-        omq_runs = [_measure_latency_subprocess("pyomq", size, LATENCY_WARMUP, LATENCY_ITERS)
-                     for _ in range(N_ROUNDS)]
-        omq_p50 = min(r[0] for r in omq_runs)
-        omq_p99 = min(r[1] for r in omq_runs)
-
-        if cached_pyzmq:
-            pz_p50 = cached_pyzmq[idx]["p50"]
-            pz_p99 = cached_pyzmq[idx]["p99"]
-        else:
-            _measure_latency_subprocess("pyzmq", size, 200, 200)
-            pz_runs = [_measure_latency_subprocess("pyzmq", size, LATENCY_WARMUP, LATENCY_ITERS)
-                        for _ in range(N_ROUNDS)]
-            pz_p50 = min(r[0] for r in pz_runs)
-            pz_p99 = min(r[1] for r in pz_runs)
-
-        p50_ratio = pz_p50 / omq_p50 if omq_p50 > 0 else 0
-        p99_ratio = pz_p99 / omq_p99 if omq_p99 > 0 else 0
-
-        results.append((label, omq_p50, pz_p50, p50_ratio, omq_p99, pz_p99, p99_ratio))
-        cached = " (cached)" if cached_pyzmq else ""
-        print(f" p50 {p50_ratio:.2f}x  p99 {p99_ratio:.2f}x{cached}")
+        runs = [_measure_latency_subprocess(lib_name, size, LATENCY_WARMUP, LATENCY_ITERS)
+                for _ in range(N_ROUNDS)]
+        p50 = min(r[0] for r in runs)
+        p99 = min(r[1] for r in runs)
+        results.append((p50, p99))
+        print(f" p50 {p50:.1f} µs  p99 {p99:.1f} µs")
 
     return results
 
@@ -449,36 +466,21 @@ asyncio.run(run())
     return tuple(result) if result is not None else (999999.0, 999999.0)
 
 
-def run_async_latency(cached_pyzmq=None):
+def run_async_latency(lib_name):
     results = []
-    for idx, size in enumerate(LATENCY_SIZES):
+    for size in SIZES:
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        _measure_async_latency_subprocess("pyomq", size, 200, 200)
+        _measure_async_latency_subprocess(lib_name, size, 200, 200)
 
-        omq_runs = [_measure_async_latency_subprocess("pyomq", size, LATENCY_WARMUP, LATENCY_ITERS)
-                    for _ in range(N_ROUNDS)]
-        omq_p50 = min(r[0] for r in omq_runs)
-        omq_p99 = min(r[1] for r in omq_runs)
-
-        if cached_pyzmq:
-            pz_p50 = cached_pyzmq[idx]["p50"]
-            pz_p99 = cached_pyzmq[idx]["p99"]
-        else:
-            _measure_async_latency_subprocess("pyzmq", size, 200, 200)
-            pz_runs = [_measure_async_latency_subprocess("pyzmq", size, LATENCY_WARMUP, LATENCY_ITERS)
-                       for _ in range(N_ROUNDS)]
-            pz_p50 = min(r[0] for r in pz_runs)
-            pz_p99 = min(r[1] for r in pz_runs)
-
-        p50_ratio = pz_p50 / omq_p50 if omq_p50 > 0 else 0
-        p99_ratio = pz_p99 / omq_p99 if omq_p99 > 0 else 0
-
-        results.append((label, omq_p50, pz_p50, p50_ratio, omq_p99, pz_p99, p99_ratio))
-        cached = " (cached)" if cached_pyzmq else ""
-        print(f" p50 {p50_ratio:.2f}x  p99 {p99_ratio:.2f}x{cached}")
+        runs = [_measure_async_latency_subprocess(lib_name, size, LATENCY_WARMUP, LATENCY_ITERS)
+                for _ in range(N_ROUNDS)]
+        p50 = min(r[0] for r in runs)
+        p99 = min(r[1] for r in runs)
+        results.append((p50, p99))
+        print(f" p50 {p50:.1f} µs  p99 {p99:.1f} µs")
 
     return results
 
@@ -677,33 +679,32 @@ import sys; sys.stdout.flush(); import os; os._exit(0)
     return result if result is not None else 0.0
 
 
-def run_proxy(cached_pyzmq=None):
-    import pyomq
+def run_proxy(lib_name):
+    if lib_name == "pyomq":
+        import pyomq as lib
+        sys.stdout.write("  PUSH/PULL ...")
+        sys.stdout.flush()
+        pp = max(measure_proxy_pushpull(lib) for _ in range(N_ROUNDS))
+        print(f" {fmt_rate(pp)}")
 
-    sys.stdout.write("  PUSH/PULL ...")
-    sys.stdout.flush()
-    pp_omq = max(measure_proxy_pushpull(pyomq) for _ in range(N_ROUNDS))
-    if cached_pyzmq:
-        pp_pz = cached_pyzmq["pushpull"]
+        sys.stdout.write("  REQ/REP ...")
+        sys.stdout.flush()
+        rr = max(measure_proxy_reqrep(lib) for _ in range(N_ROUNDS))
+        print(f" {fmt_rate(rr)}")
     else:
-        pp_pz = max(_measure_proxy_pyzmq_subprocess("pushpull", 200_000)
-                    for _ in range(N_ROUNDS))
-    pp_ratio = pp_omq / pp_pz if pp_pz > 0 else 0
-    cached = " (cached)" if cached_pyzmq else ""
-    print(f" {pp_ratio:.2f}x{cached}")
+        sys.stdout.write("  PUSH/PULL ...")
+        sys.stdout.flush()
+        pp = max(_measure_proxy_pyzmq_subprocess("pushpull", 200_000)
+                 for _ in range(N_ROUNDS))
+        print(f" {fmt_rate(pp)}")
 
-    sys.stdout.write("  REQ/REP ...")
-    sys.stdout.flush()
-    rr_omq = max(measure_proxy_reqrep(pyomq) for _ in range(N_ROUNDS))
-    if cached_pyzmq:
-        rr_pz = cached_pyzmq["reqrep"]
-    else:
-        rr_pz = max(_measure_proxy_pyzmq_subprocess("reqrep", 10_000)
-                    for _ in range(N_ROUNDS))
-    rr_ratio = rr_omq / rr_pz if rr_pz > 0 else 0
-    print(f" {rr_ratio:.2f}x{cached}")
+        sys.stdout.write("  REQ/REP ...")
+        sys.stdout.flush()
+        rr = max(_measure_proxy_pyzmq_subprocess("reqrep", 10_000)
+                 for _ in range(N_ROUNDS))
+        print(f" {fmt_rate(rr)}")
 
-    return pp_omq, pp_pz, pp_ratio, rr_omq, rr_pz, rr_ratio
+    return pp, rr
 
 
 # ── SVG chart generation ────────────────────────────────────────────
@@ -748,7 +749,7 @@ def _fmt_mbps(val):
     return f"{val:.1f} MB/s"
 
 
-def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
+def gen_combined_chart(data, path):
     n = len(SIZES)
     svg_w, svg_h = 850, 600
     x_left, x_right = 90, 760
@@ -762,19 +763,13 @@ def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
     mid_x = (x_left + x_right) / 2
 
-    sync_omq_tp = [r[4] for r in sync_tp]
-    sync_pz_tp = [r[5] for r in sync_tp]
-    async_omq_tp = [r[1] for r in async_tp]
-    async_pz_tp = [r[2] for r in async_tp]
+    sync_omq_tp = data["sync_omq_tp"]
+    sync_pz_tp = data["sync_pz_tp"]
+    async_omq_tp = data["async_omq_tp"]
+    async_pz_tp = data["async_pz_tp"]
 
-    all_rates = [v for vs in [sync_omq_tp, sync_pz_tp, async_omq_tp, async_pz_tp]
-                 for v in vs if v > 0]
-    msg_max = _nice_ceil(max(all_rates))
-
-    all_mbps = [v * SIZES[i] / 1e6
-                for vs in [sync_omq_tp, sync_pz_tp, async_omq_tp, async_pz_tp]
-                for i, v in enumerate(vs) if v > 0]
-    mbps_max = _nice_ceil(max(all_mbps)) if all_mbps else 1
+    msg_max = 2_000_000
+    mbps_max = 5_000
 
     def y_msg(v):
         frac = v / msg_max if msg_max > 0 else 0
@@ -906,10 +901,10 @@ def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
         f'REQ/REP latency — 2-process, TCP loopback, p50 µs (lower is better)</text>'
     )
 
-    sync_omq_lat = [r[1] for r in sync_lat]
-    sync_pz_lat = [r[2] for r in sync_lat]
-    async_omq_lat = [r[1] for r in async_lat]
-    async_pz_lat = [r[2] for r in async_lat]
+    sync_omq_lat = data["sync_omq_lat"]
+    sync_pz_lat = data["sync_pz_lat"]
+    async_omq_lat = data["async_omq_lat"]
+    async_pz_lat = data["async_pz_lat"]
 
     for v in range(int(lat_step), int(lat_max) + 1, int(lat_step)):
         yy = y_lat(v)
@@ -1007,43 +1002,24 @@ def gen_combined_chart(sync_tp, async_tp, sync_lat, async_lat, path):
 
 # ── README tables ────────────────────────────────────────────────────
 
-def build_throughput_table(results):
-    lines = [
-        "| Size    | inproc pyomq | inproc pyzmq | ratio     "
-        "| tcp pyomq | tcp pyzmq | ratio     |",
-        "|---------|-------------:|-------------:|----------:"
-        "|----------:|----------:|----------:|",
-    ]
-    for label, i_omq, i_pz, i_r, t_omq, t_pz, t_r in results:
-        lines.append(
-            f"| {label:<7} | {fmt_rate(i_omq):>12} | {fmt_rate(i_pz):>12} "
-            f"| **{i_r:.2f}×** "
-            f"| {fmt_rate(t_omq):>9} | {fmt_rate(t_pz):>9} "
-            f"| **{t_r:.2f}×** |"
-        )
-    return "\n".join(lines)
+def build_proxy_table():
+    rows = load_jsonl()
+    latest = {}
+    for r in rows:
+        if r.get("kind") != "proxy":
+            continue
+        key = (r["impl"], r["pattern"])
+        prev = latest.get(key)
+        if prev is None or r.get("run_id", "") >= prev.get("run_id", ""):
+            latest[key] = r
 
+    pp_omq = latest.get(("pyomq", "pushpull"), {}).get("msgs_s", 0)
+    pp_pz = latest.get(("pyzmq", "pushpull"), {}).get("msgs_s", 0)
+    rr_omq = latest.get(("pyomq", "reqrep"), {}).get("msgs_s", 0)
+    rr_pz = latest.get(("pyzmq", "reqrep"), {}).get("msgs_s", 0)
+    pp_ratio = pp_omq / pp_pz if pp_pz > 0 else 0
+    rr_ratio = rr_omq / rr_pz if rr_pz > 0 else 0
 
-def build_latency_table(results):
-    lines = [
-        "| Size    | pyomq p50 | pyzmq p50 | ratio     "
-        "| pyomq p99 | pyzmq p99 | ratio     |",
-        "|---------|----------:|----------:|----------:"
-        "|----------:|----------:|----------:|",
-    ]
-    for label, op50, pp50, r50, op99, pp99, r99 in results:
-        r50s = f"**{r50:.2f}×**" if r50 >= 1.1 else f"{r50:.2f}×"
-        r99s = f"**{r99:.2f}×**" if r99 >= 1.1 else f"{r99:.2f}×"
-        lines.append(
-            f"| {label:<7} | {fmt_us(op50):>9} | {fmt_us(pp50):>9} "
-            f"| {r50s:>9} "
-            f"| {fmt_us(op99):>9} | {fmt_us(pp99):>9} "
-            f"| {r99s:>9} |"
-        )
-    return "\n".join(lines)
-
-
-def build_proxy_table(pp_omq, pp_pz, pp_ratio, rr_omq, rr_pz, rr_ratio):
     return "\n".join([
         "|                    | pyomq     | pyzmq     | ratio     |",
         "|--------------------|----------:|----------:|----------:|",
@@ -1067,83 +1043,60 @@ def update_marker(content, marker, table):
     return new_content
 
 
-def _extract_pyzmq_cache(tp, atp, lat, alat, proxy):
-    return {
-        "throughput": [
-            {"inproc": r[2], "tcp": r[5]} for r in tp
-        ],
-        "async_throughput": [
-            {"tcp": r[2]} for r in atp
-        ],
-        "latency": [
-            {"p50": r[2], "p99": r[5]} for r in lat
-        ],
-        "async_latency": [
-            {"p50": r[2], "p99": r[5]} for r in alat
-        ],
-        "proxy": {
-            "pushpull": proxy[1],
-            "reqrep": proxy[4],
-        },
-    }
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--skip-pyzmq", action="store_true",
-                        help="reuse cached pyzmq numbers (from a previous full run)")
+    parser.add_argument("--scope", choices=["all", "pyomq"],
+                        default="all",
+                        help="all: bench both impls. pyomq: bench pyomq only, "
+                             "chart uses latest pyzmq from JSONL")
+    parser.add_argument("--chart-only", action="store_true",
+                        help="regenerate SVG from existing JSONL, no benchmarking")
     args = parser.parse_args()
 
-    cache = None
-    if args.skip_pyzmq:
-        cache = load_cache()
-        if not cache:
-            print("No cached pyzmq data found. Run a full benchmark first.")
-            sys.exit(1)
-        print("Using cached pyzmq numbers.\n")
+    if args.chart_only:
+        print("Generating chart from existing JSONL...")
+        data = chart_data_from_jsonl()
+        gen_combined_chart(data, os.path.join(CHART_DIR, "bindings.svg"))
+        return
 
-    print("Measuring sync PUSH/PULL throughput...")
-    tp_results = run_throughput(cache.get("throughput") if cache else None)
-    tp_table = build_throughput_table(tp_results)
+    run_id = time.strftime("%Y-%m-%dT%H:%M:%S")
+    impls = ["pyomq", "pyzmq"] if args.scope == "all" else ["pyomq"]
 
-    print("\nMeasuring async PUSH/PULL throughput...")
-    atp_results = run_async_throughput(cache.get("async_throughput") if cache else None)
+    for impl in impls:
+        print(f"\n{'=' * 40}")
+        print(f"Benchmarking {impl}")
+        print(f"{'=' * 40}")
 
-    print("\nMeasuring sync REQ/REP latency (TCP)...")
-    lat_results = run_latency(cache.get("latency") if cache else None)
-    lat_table = build_latency_table(lat_results)
+        print("\nSync PUSH/PULL throughput...")
+        tp_inproc, tp_tcp = run_throughput(impl)
 
-    print("\nMeasuring async REQ/REP latency (TCP)...")
-    alat_results = run_async_latency(cache.get("async_latency") if cache else None)
+        print("\nAsync PUSH/PULL throughput...")
+        atp_tcp = run_async_throughput(impl)
 
-    print("\nMeasuring zmq.proxy() forwarding...")
-    proxy_results = run_proxy(cache.get("proxy") if cache else None)
-    proxy_table = build_proxy_table(*proxy_results)
+        print("\nSync REQ/REP latency (TCP)...")
+        lat = run_latency(impl)
 
-    if not args.skip_pyzmq:
-        save_cache(_extract_pyzmq_cache(tp_results, atp_results,
-                                        lat_results, alat_results, proxy_results))
-        print("\nCached pyzmq results for future --skip-pyzmq runs.")
+        print("\nAsync REQ/REP latency (TCP)...")
+        alat = run_async_latency(impl)
 
-    print()
-    print(tp_table)
-    print()
-    print(lat_table)
-    print()
-    print(proxy_table)
+        print("\nzmq.proxy() forwarding...")
+        proxy_pp, proxy_rr = run_proxy(impl)
 
+        print("\nSaving results...")
+        save_results(run_id, impl, tp_inproc, tp_tcp, atp_tcp, lat, alat,
+                     proxy_pp, proxy_rr)
+
+    proxy_table = build_proxy_table()
     with open(README) as f:
         content = f.read()
-
     content = update_marker(content, "PROXY_PERF", proxy_table)
-
     with open(README, "w") as f:
         f.write(content)
     print(f"\nUpdated {README}")
 
     print("\nGenerating chart...")
-    gen_combined_chart(tp_results, atp_results, lat_results, alat_results,
-                       os.path.join(CHART_DIR, "bindings.svg"))
+    data = chart_data_from_jsonl()
+    gen_combined_chart(data, os.path.join(CHART_DIR, "bindings.svg"))
 
 
 if __name__ == "__main__":

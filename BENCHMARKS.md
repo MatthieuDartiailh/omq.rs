@@ -151,7 +151,7 @@ traversal.
 <!-- END push_pull_fanout_8peer_tokio -->
 
 <p align="center">
-  <img src="doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
+  <img src="doc/charts/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
 </p>
 
 ## REQ/REP latency (single peer)
@@ -529,7 +529,7 @@ python3 scripts/run_comparisons.py --quick-run    # 3 sizes only
 python3 scripts/run_comparisons.py --scope omq    # omq-only refresh
 
 # Charts (SVG, generated from JSONL data):
-python3 scripts/gen_comparison_chart.py          # doc/charts/comparison.svg + comparison_inproc.svg
+python3 scripts/gen_comparison_chart.py          # doc/charts/comparison_tcp.svg + comparison_inproc.svg
 python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism.svg
 
 # Compression charts require a bench run first (writes JSONL):

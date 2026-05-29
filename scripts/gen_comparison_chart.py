@@ -2,8 +2,9 @@
 """Generate comparison SVG charts from benchmarks/comparisons.jsonl.
 
 Produces:
-  doc/charts/comparison.svg        — TCP: throughput + latency (4 impls)
-  doc/charts/comparison_inproc.svg — inproc: throughput + latency (3 impls, no zmq.rs)
+  doc/charts/comparison_tcp.svg    — TCP: throughput + latency (4 impls)
+  doc/charts/comparison_ipc.svg    — IPC: throughput + latency (4 impls)
+  doc/charts/comparison_inproc.svg — inproc: throughput + latency (4 impls)
 """
 
 import json
@@ -141,6 +142,8 @@ def draw_throughput_panel(
     L: list[str], sizes: list[int], xs: list[float], tput: dict,
     impls: list[str], x_left: float, x_right: float, y_top: float, y_bot: float,
     title: str, log_gbs: bool = False,
+    fixed_msg_max: float | None = None,
+    fixed_gbs_max: float | None = None,
 ):
     import math
 
@@ -151,7 +154,7 @@ def draw_throughput_panel(
         tput[s][name][0]
         for s in sizes for name in impls if name in tput.get(s, {})
     ]
-    msg_max = max(all_msgs) * 1.15 if all_msgs else 16e6
+    msg_max = fixed_msg_max if fixed_msg_max else (max(all_msgs) * 1.15 if all_msgs else 16e6)
 
     all_gbs = [
         tput[s][name][1]
@@ -162,9 +165,9 @@ def draw_throughput_panel(
     if log_gbs:
         gbs_min = max(gbs_min, 0.01)
         log_lo = math.floor(math.log10(gbs_min * 0.8))
-        log_hi = math.ceil(math.log10(gbs_max * 1.15))
+        log_hi = math.ceil(math.log10((fixed_gbs_max or gbs_max) * 1.15))
     else:
-        tput_max = gbs_max * 1.15
+        tput_max = fixed_gbs_max if fixed_gbs_max else gbs_max * 1.15
 
     def y_msg(v):
         return y_bot - (v / msg_max) * h
@@ -259,7 +262,7 @@ def draw_throughput_panel(
 def draw_latency_panel(
     L: list[str], sizes: list[int], xs: list[float], lat: dict,
     impls: list[str], x_left: float, x_right: float, y_top: float, y_bot: float,
-    title: str,
+    title: str, fixed_lat_max: float | None = None,
 ):
     h = y_bot - y_top
     mid_x = (x_left + x_right) / 2
@@ -268,7 +271,7 @@ def draw_latency_panel(
         lat[s][name]
         for s in sizes for name in impls if name in lat.get(s, {})
     ]
-    lat_max = max(all_vals) * 1.2 if all_vals else 150.0
+    lat_max = fixed_lat_max if fixed_lat_max else (max(all_vals) * 1.2 if all_vals else 150.0)
 
     def y_lat(v):
         return y_bot - (v / lat_max) * h
@@ -325,7 +328,10 @@ def nice_step(max_val: float, target_lines: int) -> float:
 # ── chart generation ──────────────────────────────────────────────
 
 def generate_chart(data: dict, impls: list[str], transport_label: str,
-                   log_gbs: bool = False) -> str:
+                   log_gbs: bool = False,
+                   fixed_msg_max: float | None = None,
+                   fixed_gbs_max: float | None = None,
+                   fixed_lat_max: float | None = None) -> str:
     sizes = data["sizes"]
     tput = data["tput"]
     lat = data["lat"]
@@ -356,6 +362,8 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
         L, sizes, xs, tput, impls, x_left, x_right, t1_y_top, t1_y_bot,
         f"PUSH/PULL throughput — {transport_label} (higher is better)",
         log_gbs=log_gbs,
+        fixed_msg_max=fixed_msg_max,
+        fixed_gbs_max=fixed_gbs_max,
     )
 
     if has_latency:
@@ -363,6 +371,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
         draw_latency_panel(
             L, sizes, xs, lat, impls, x_left, x_right, t2_y_top, t2_y_bot,
             f"REQ/REP latency — {transport_label} (p50 µs, lower is better)",
+            fixed_lat_max=fixed_lat_max,
         )
         leg_y = t2_y_bot + 60
     else:
@@ -420,24 +429,49 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
 
 def main():
+    FIXED_MSG_MAX = 16e6
+    FIXED_GBS_MAX = 6.0
+    FIXED_LAT_MAX = 100.0
+    FIXED_INPROC_LAT_MAX = 25.0
+
     # TCP chart (4 impls)
     tcp_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs"]
     tcp_data = load_data("tcp", tcp_impls)
 
     if tcp_data["sizes"]:
-        svg = generate_chart(tcp_data, tcp_impls, "TCP loopback, 2-process")
-        out = REPO / "doc" / "charts" / "comparison.svg"
+        svg = generate_chart(tcp_data, tcp_impls, "TCP loopback, 2-process",
+                             fixed_msg_max=FIXED_MSG_MAX,
+                             fixed_gbs_max=FIXED_GBS_MAX,
+                             fixed_lat_max=FIXED_LAT_MAX)
+        out = REPO / "doc" / "charts" / "comparison_tcp.svg"
         out.write_text(svg)
         print(f"Written: {out}", file=sys.stderr)
     else:
         print("No TCP data found", file=sys.stderr)
+
+    # IPC chart (4 impls, same as TCP)
+    ipc_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs"]
+    ipc_data = load_data("ipc", ipc_impls)
+
+    if ipc_data["sizes"]:
+        svg = generate_chart(ipc_data, ipc_impls, "IPC, 2-process",
+                             fixed_msg_max=FIXED_MSG_MAX,
+                             fixed_gbs_max=FIXED_GBS_MAX,
+                             fixed_lat_max=FIXED_LAT_MAX)
+        out = REPO / "doc" / "charts" / "comparison_ipc.svg"
+        out.write_text(svg)
+        print(f"Written: {out}", file=sys.stderr)
+    else:
+        print("No IPC data found", file=sys.stderr)
 
     # Inproc chart (4 impls: libzmq, compio mt+st, tokio; no zmq.rs)
     inproc_impls = ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio"]
     inproc_data = load_data("inproc", inproc_impls)
 
     if inproc_data["sizes"]:
-        svg = generate_chart(inproc_data, inproc_impls, "inproc", log_gbs=True)
+        svg = generate_chart(inproc_data, inproc_impls, "inproc", log_gbs=True,
+                             fixed_msg_max=FIXED_MSG_MAX,
+                             fixed_lat_max=FIXED_INPROC_LAT_MAX)
         out = REPO / "doc" / "charts" / "comparison_inproc.svg"
         out.write_text(svg)
         print(f"Written: {out}", file=sys.stderr)

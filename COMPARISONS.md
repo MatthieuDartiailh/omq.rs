@@ -5,7 +5,7 @@ Hardware: Linux 6.12 (Debian 13) VM, Intel i7-8700B 3.2 GHz 6-core, Rust 1.95.0.
 Compared against libzmq v4.3.5 and zmq.rs (zeromq crate v0.6.0).
 
 <p align="center">
-  <img src="doc/charts/comparison.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
+  <img src="doc/charts/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
 </p>
 
 <p align="center">
