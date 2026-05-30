@@ -129,7 +129,7 @@ pub(crate) async fn bind(
             .ok_or_else(|| Error::InvalidEndpoint(format!("DNS lookup failed for {name}")))?,
         _ => unreachable!(),
     };
-    let listener = TcpListener::bind(addr).await.map_err(Error::Io)?;
+    let listener = super::tcp::reuse_addr_bind(addr)?;
     let local = listener.local_addr().map_err(Error::Io)?;
     Ok(WsListener {
         inner: listener,

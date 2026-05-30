@@ -33,7 +33,7 @@ impl Transport for TcpTransport {
             )));
         };
         let addr = resolve_bind(host, *port).await?;
-        let listener = TokioTcpListener::bind(addr).await?;
+        let listener = reuse_addr_bind(addr)?;
         let local = listener.local_addr()?;
         let bound = Endpoint::Tcp {
             host: Host::Ip(local.ip()),
@@ -77,6 +77,22 @@ impl Listener for TcpListener {
         stream.set_nodelay(true)?;
         Ok((stream, PeerIdent::Socket(peer)))
     }
+}
+
+pub(crate) fn reuse_addr_bind(addr: SocketAddr) -> Result<TokioTcpListener> {
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    sock.set_reuse_address(true)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&addr.into())?;
+    sock.listen(1024)?;
+    Ok(TokioTcpListener::from_std(std::net::TcpListener::from(
+        sock,
+    ))?)
 }
 
 async fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
