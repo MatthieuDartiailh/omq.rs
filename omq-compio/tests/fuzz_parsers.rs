@@ -36,7 +36,7 @@ fn iters() -> usize {
     std::env::var("OMQ_FUZZ_ITERS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2_000_000)
+        .unwrap_or(10_000_000)
 }
 
 fn rng() -> StdRng {

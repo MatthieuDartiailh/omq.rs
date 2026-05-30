@@ -40,12 +40,20 @@ OMQ_SKIP_FUZZ=1 ./scripts/test-all.sh    # skip fuzz for a faster run
 
 ## Fuzz tests
 
-~1M random iterations per suite. Off by default; enable with the
+~10M random iterations per suite. Off by default; enable with the
 `fuzz` feature. Takes a few minutes per backend.
 
 ```sh
 cargo test -p omq-compio --features fuzz
 cargo test -p omq-tokio  --features fuzz
+```
+
+For long runs (e.g. 500M iterations), build with `--release` and set
+`OMQ_FUZZ_ITERS`. Set `OMQ_FUZZ_SEED=<u64>` to reproduce a failure.
+
+```sh
+OMQ_FUZZ_ITERS=500000000 cargo test -p omq-compio --features fuzz --release -- --nocapture
+OMQ_FUZZ_ITERS=500000000 cargo test -p omq-tokio  --features fuzz --release -- --nocapture
 ```
 
 ## Soak tests
@@ -249,6 +257,12 @@ yring ──────────────┤                      │
 `omq-libzmq`, `omq-zeromq`, `pyomq`. Don't skip the small ones.
 
 ## Constraints
+
+**Backend API parity:** `omq-compio` and `omq-tokio` must expose an
+identical public `Socket` API. Adding or changing a method on one
+backend requires the same change on the other. Parity is enforced by
+`tests/coverage_matrix.rs` (both backends) and
+`omq-tokio/tests/interop_compio.rs`.
 
 **interop_compio dep constraint:** `omq-tokio/Cargo.toml`'s compio
 dev-dep must use the same git rev as `omq-compio`'s dep. Different

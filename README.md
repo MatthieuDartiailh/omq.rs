@@ -128,7 +128,7 @@ covered by integration tests on both backends. The full suite:
 
 - **600+ integration tests** across omq-compio and omq-tokio (every
   socket-type x transport x mechanism cell).
-- **Protocol fuzzing** (~1M iterations per suite): hand-rolled fuzz of
+- **Protocol fuzzing** (~10M iterations per suite): hand-rolled fuzz of
   the wire parser and the socket-action state machine.
 - **12 soak test scenarios** per backend: peer churn, reconnect storms,
   PUB/SUB churn, compression, PLAIN / CURVE / BLAKE3ZMQ auth, priority
