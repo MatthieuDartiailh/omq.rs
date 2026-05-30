@@ -226,6 +226,7 @@ impl DirectIoState {
     /// is parked in `select_biased!`. Called after every successful
     /// direct-encode (flat, gather, prefixed, transform, or WebSocket).
     #[inline]
+    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) fn signal_encoded(&self) {
         self.direct_msg_count.set(self.direct_msg_count.get() + 1);
         if self.driver_in_select.get() {
