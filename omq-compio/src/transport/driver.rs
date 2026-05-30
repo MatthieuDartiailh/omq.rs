@@ -199,11 +199,7 @@ impl DriverLoopState {
             let mut eq = state.encoded_queue.borrow_mut();
             let cr = eq.total_bytes() >= cap;
             for wire in &wires {
-                if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                    eq.encode_flat(wire);
-                } else {
-                    eq.encode_gather(wire);
-                }
+                eq.encode_auto(wire);
             }
             Ok(cr)
         } else if state.uses_crypto {
@@ -221,11 +217,7 @@ impl DriverLoopState {
                 eq.encode_ws(m, state.ws_masked);
                 return Ok(cr);
             }
-            if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-                eq.encode_flat(m);
-            } else {
-                eq.encode_gather(m);
-            }
+            eq.encode_auto(m);
             Ok(cr)
         }
     }
@@ -246,11 +238,7 @@ impl DriverLoopState {
                         drop(enc);
                         let mut eq = state.encoded_queue.borrow_mut();
                         for wire in &wires {
-                            if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                                eq.encode_flat(wire);
-                            } else {
-                                eq.encode_gather(wire);
-                            }
+                            eq.encode_auto(wire);
                         }
                     } else if state.uses_crypto {
                         io.codec.send_message(&m)?;
@@ -261,11 +249,7 @@ impl DriverLoopState {
                             eq.encode_ws(&m, state.ws_masked);
                             continue;
                         }
-                        if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-                            eq.encode_flat(&m);
-                        } else {
-                            eq.encode_gather(&m);
-                        }
+                        eq.encode_auto(&m);
                     }
                 }
                 DriverCommand::SendCommand(c) => {

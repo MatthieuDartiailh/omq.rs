@@ -57,11 +57,7 @@ impl DirectIo {
         }
         let chunks = {
             let mut enc = self.encode.lock().unwrap();
-            if msg.byte_len() < super::driver::FLAT_THRESHOLD {
-                enc.eq.encode_flat(msg);
-            } else {
-                enc.eq.encode_gather(msg);
-            }
+            enc.eq.encode_auto(msg);
             let EncodeState {
                 ref mut eq,
                 ref mut drain_buf,

@@ -64,8 +64,6 @@ fn max_batch_bytes() -> usize {
     })
 }
 
-pub(crate) const FLAT_THRESHOLD: usize = 64 * 1024;
-
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
 #[derive(Debug, Clone, Copy, Default)]
@@ -708,24 +706,13 @@ fn encode_msg(
     if let Some((sentinel, threshold)) = passthrough
         && msg.iter().all(|b| b.len() < *threshold)
     {
-        let prefix_len = sentinel.len();
-        if msg.byte_len() + prefix_len * msg.len() < FLAT_THRESHOLD {
-            eq.encode_prefixed_flat(sentinel, msg);
-        } else {
-            eq.encode_prefixed_gather(sentinel, msg);
-        }
+        eq.encode_prefixed_auto(sentinel, msg);
     } else if let Some(enc) = encoder.as_mut() {
         for wire in enc.encode(msg).unwrap_or_default() {
-            if wire.byte_len() < FLAT_THRESHOLD {
-                eq.encode_flat(&wire);
-            } else {
-                eq.encode_gather(&wire);
-            }
+            eq.encode_auto(&wire);
         }
-    } else if msg.byte_len() < FLAT_THRESHOLD {
-        eq.encode_flat(msg);
     } else {
-        eq.encode_gather(msg);
+        eq.encode_auto(msg);
     }
 }
 

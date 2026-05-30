@@ -5,6 +5,8 @@ use bytes::{Bytes, BytesMut};
 use crate::message::Message;
 use crate::proto::frame;
 
+pub const FLAT_THRESHOLD: usize = 64 * 1024;
+
 pub struct EncodedQueue {
     chunks: VecDeque<Bytes>,
     total_bytes: usize,
@@ -75,6 +77,22 @@ impl EncodedQueue {
         let before = self.flat_buf.len();
         frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);
         self.total_bytes += self.flat_buf.len() - before;
+    }
+
+    pub fn encode_auto(&mut self, msg: &Message) {
+        if msg.byte_len() < FLAT_THRESHOLD {
+            self.encode_flat(msg);
+        } else {
+            self.encode_gather(msg);
+        }
+    }
+
+    pub fn encode_prefixed_auto(&mut self, prefix: &Bytes, msg: &Message) {
+        if msg.byte_len() + prefix.len() * msg.len() < FLAT_THRESHOLD {
+            self.encode_prefixed_flat(prefix, msg);
+        } else {
+            self.encode_prefixed_gather(prefix, msg);
+        }
     }
 
     pub fn encode_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
