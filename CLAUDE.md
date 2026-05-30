@@ -57,12 +57,12 @@ only when the lint fires in some feature combinations but not others
 Lints: `missing_debug_implementations` = **deny**,
 `unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
 
-## Cross-library benchmarks and charts
+## Charts, benchmarks, and releasing
 
-```sh
-python3 scripts/run_comparisons.py          # run benchmarks → benchmarks/comparisons.jsonl
-python3 scripts/gen_comparison_chart.py     # JSONL → doc/charts/*.svg
-```
+See [`DEVELOPMENT.md`](DEVELOPMENT.md) for:
+
+- **Updating charts** -- comparison, compression, and pyomq bindings SVGs
+- **Releasing** -- dep graph, semver rules, cascade, publish order, pyomq tag separation
 
 **interop_compio dep constraint:** `omq-tokio/Cargo.toml`'s compio
 dev-dep must use the same git rev as `omq-compio`'s dep. Different

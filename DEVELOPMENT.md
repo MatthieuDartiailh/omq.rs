@@ -123,6 +123,131 @@ Results append to `<crate>/benches/results.jsonl` unless
 Compression benchmarks run separately with bandwidth limiting.
 See [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md) for commands and results.
 
+## Updating charts
+
+After performance-relevant changes, regenerate the charts before
+releasing.
+
+### Cross-library comparison charts
+
+Produces `doc/charts/comparison_{tcp,ipc,inproc}.svg`:
+
+```sh
+python3 scripts/run_comparisons.py --scope omq   # bench omq-compio + omq-tokio only, reuse existing libzmq/zmq.rs baselines
+python3 scripts/gen_comparison_chart.py           # JSONL → doc/charts/comparison_*.svg
+```
+
+Use `--scope all` (default) to rebench all implementations when
+libzmq or zmq.rs baselines are stale.
+
+### Compression chart
+
+Produces `doc/charts/compression_2048.svg`:
+
+```sh
+cargo bench -p omq-compio --bench compression   # → omq-compio/benches/results.jsonl
+python3 scripts/gen_compression_chart.py         # JSONL → doc/charts/compression_*.svg
+```
+
+### pyomq bindings chart
+
+Produces `bindings/pyomq/doc/charts/bindings.svg`:
+
+```sh
+cd bindings/pyomq
+maturin develop --release
+python scripts/update_perf.py --scope pyomq  # bench pyomq only, reuse existing pyzmq baseline
+python scripts/update_perf.py --chart-only   # regenerate SVG from existing JSONL
+```
+
+Use `--scope all` (default) to rebench both pyomq and pyzmq.
+
+## Releasing
+
+### Dependency graph (publish order)
+
+```
+omq-proto ─────────────────────────────────┐
+blume ──────────────┐                      │
+yring ──────────────┤                      │
+                    ├─ omq-compio ─┬─ omq ─┤
+                    │              ├─ omq-libzmq
+                    │              └─ pyomq (maturin, not cargo)
+                    └─ omq-tokio ──┬─ omq
+                                   └─ omq-zeromq
+```
+
+### Steps
+
+1. **Identify changed crates.** For each crate, compare against its
+   last release tag:
+
+   ```sh
+   git log <crate>-v<last>..HEAD --no-merges -- <crate>/src/ <crate>/Cargo.toml
+   ```
+
+2. **Determine semver bump.** Bug fixes only: patch. Anything else
+   (features, perf, refactors): minor. Apply the cascade rule: if
+   any dependency is bumped, bump every dependent too (even if only
+   the dep version changed).
+
+3. **Update each crate:**
+   - Bump `version` in `Cargo.toml`.
+   - Update dep versions in all dependents' `Cargo.toml` files.
+   - Insert a new `## [x.y.z]` section below `## [Unreleased]` in
+     `CHANGELOG.md`. Never modify existing versioned sections.
+   - Update `omq` version in `examples/zguide-*/*/Cargo.toml`.
+   - For pyomq: bump version in both `Cargo.toml` and
+     `pyproject.toml`.
+
+4. **Verify.** `cargo check --workspace` and
+   `cargo clippy --workspace --all-targets`.
+
+5. **Commit and PR.** One commit for the entire release wave. Push
+   to a branch, create a PR, wait for CI, merge.
+
+6. **Tag.** After merge, create annotated tags on the merge commit:
+
+   ```sh
+   for t in omq-proto-v0.X.0 blume-v0.X.0 ...; do
+     git tag -a "$t" -m "$t"
+   done
+   ```
+
+7. **Push tags.** Push workspace tags (everything except pyomq):
+
+   ```sh
+   git push origin omq-proto-v0.X.0 blume-v0.X.0 ...
+   ```
+
+   Push the pyomq tag **separately** so its release workflow
+   triggers independently:
+
+   ```sh
+   git push origin pyomq-v0.X.0
+   ```
+
+8. **Publish to crates.io** in dependency order:
+
+   ```sh
+   cargo publish -p omq-proto
+   cargo publish -p blume
+   cargo publish -p omq-compio
+   cargo publish -p omq-tokio
+   cargo publish -p omq
+   cargo publish -p omq-libzmq
+   cargo publish -p omq-zeromq
+   ```
+
+   Each `cargo publish` waits for the previous crate to propagate
+   before proceeding. pyomq is published by the `release-pyomq.yml`
+   GitHub Actions workflow triggered by the `pyomq-v*` tag.
+
+### Crates to check
+
+`omq-proto`, `blume`, `yring`, `omq-compio`, `omq-tokio`, `omq`,
+`omq-libzmq`, `omq-zeromq`, `pyomq`. Don't skip the small ones.
+
 ## Constraints
 
 **interop_compio dep constraint:** `omq-tokio/Cargo.toml`'s compio
