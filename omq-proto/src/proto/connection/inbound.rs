@@ -16,6 +16,35 @@ use super::FrameTransform;
 use super::blake3zmq_aad;
 use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 
+/// Build a `Message::Inline` from a `ChunkedInputBuf` without zeroing the
+/// full 39-byte array. The caller must ensure `payload_len` bytes are
+/// available in `buf`.
+///
+/// SAFETY: `[MaybeUninit<u8>; N]` has no validity invariant. The transmute
+/// to `[u8; N]` is sound because `MessageInner::Inline` only reads
+/// `data[..len]`, which was initialized by `read_into_uninit`. Copying
+/// uninit tail bytes is defined behavior for `u8`.
+#[inline]
+fn inline_message_from_buf(
+    buf: &mut super::super::chunked_buf::ChunkedInputBuf,
+    payload_len: usize,
+) -> Message {
+    let mut data: [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE] =
+        unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    buf.read_into_uninit(payload_len, &mut data);
+    Message {
+        inner: crate::message::MessageInner::Inline {
+            len: payload_len as u8,
+            data: unsafe {
+                std::mem::transmute::<
+                    [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE],
+                    [u8; crate::message::MAX_INLINE_MESSAGE],
+                >(data)
+            },
+        },
+    }
+}
+
 impl Connection {
     pub fn handle_input(&mut self, src: Bytes) -> Result<()> {
         match self.state {
@@ -107,12 +136,12 @@ impl Connection {
                 "peer sent data frame during handshake".into(),
             ));
         }
-        // During the mechanism handshake we parse name + raw body directly
-        // and hand the body to the mechanism. The codec's `command::decode`
-        // would name-dispatch known names (e.g. "READY") and try to parse a
-        // property list, but mechanisms like CURVE encrypt that body and
-        // ship it under the same wire name -- only the mechanism knows how.
-        let cmd = decode_command_raw(frame.payload.as_bytes())?;
+        self.process_mechanism_command(frame.payload.as_bytes())?;
+        Ok(true)
+    }
+
+    fn process_mechanism_command(&mut self, payload_bytes: Bytes) -> Result<()> {
+        let cmd = decode_command_raw(payload_bytes)?;
         let mut cmds = Vec::new();
         let step = self.mechanism.on_command(cmd, &mut cmds)?;
         self.write_outbound_commands(&cmds);
@@ -126,10 +155,6 @@ impl Connection {
                     self.config.socket_type, peer_type
                 )));
             }
-            // Install the post-handshake frame transform if the mechanism
-            // produced one (CURVE / BLAKE3ZMQ); NULL returns None. The
-            // transform field exists only when an encrypting mechanism
-            // is compiled in.
             #[cfg(any(feature = "curve", feature = "blake3zmq"))]
             {
                 self.transform = self.mechanism.build_transform()?;
@@ -140,7 +165,7 @@ impl Connection {
                 peer_properties: Arc::new(peer_properties),
             });
         }
-        Ok(true)
+        Ok(())
     }
 
     #[inline]
@@ -166,36 +191,8 @@ impl Connection {
                 });
             }
             self.in_buf.advance(hdr.header_len);
-            // SAFETY: `[MaybeUninit<u8>; N]` has no validity invariant —
-            // every bit pattern is valid, including uninitialized memory.
-            // `MaybeUninit::uninit().assume_init()` on an array of
-            // `MaybeUninit` is the standard pattern (see std docs).
-            let mut data: [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE] =
-                unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-            self.in_buf.read_into_uninit(hdr.payload_len, &mut data);
-            // SAFETY: `transmute` from `[MaybeUninit<u8>; 39]` to
-            // `[u8; 39]` is sound because:
-            //  1. Both types have identical size and alignment.
-            //  2. `data[..payload_len]` was initialized by `read_into_uninit`.
-            //  3. `data[payload_len..39]` is uninit, but `MessageInner::Inline`
-            //     only reads `data[..len]` (where `len == payload_len`).
-            //  4. `Clone` copies all 39 bytes — copying uninit `u8` values
-            //     is defined behavior (u8 has no invalid bit patterns).
-            //
-            // Without this, `[0u8; 39]` zeroes the full array on every
-            // message. At 8 B payloads that zeroing costs 13% throughput.
-            let msg = Message {
-                inner: crate::message::MessageInner::Inline {
-                    len: hdr.payload_len as u8,
-                    data: unsafe {
-                        std::mem::transmute::<
-                            [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE],
-                            [u8; crate::message::MAX_INLINE_MESSAGE],
-                        >(data)
-                    },
-                },
-            };
-            self.messages.push_back(msg);
+            self.messages
+                .push_back(inline_message_from_buf(&mut self.in_buf, hdr.payload_len));
             return Ok(true);
         }
         if let Some(max) = self.config.max_message_size
@@ -518,31 +515,7 @@ impl Connection {
                         "peer sent data frame during handshake".into(),
                     ));
                 }
-                let cmd = decode_command_raw(payload.as_bytes())?;
-                let mut cmds = Vec::new();
-                let step = self.mechanism.on_command(cmd, &mut cmds)?;
-                self.write_outbound_commands(&cmds);
-                if let MechanismStep::Complete { peer_properties } = step {
-                    let peer_type = peer_properties.socket_type.ok_or_else(|| {
-                        Error::HandshakeFailed("peer did not declare socket type".into())
-                    })?;
-                    if !is_compatible(self.config.socket_type, peer_type) {
-                        return Err(Error::HandshakeFailed(format!(
-                            "incompatible socket types: ours={:?} peer={:?}",
-                            self.config.socket_type, peer_type
-                        )));
-                    }
-                    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
-                    {
-                        self.transform = self.mechanism.build_transform()?;
-                    }
-                    self.state = State::Ready;
-                    self.events.push_back(Event::HandshakeSucceeded {
-                        peer_minor: self.peer_minor,
-                        peer_properties: Arc::new(peer_properties),
-                    });
-                }
-                Ok(())
+                self.process_mechanism_command(payload.as_bytes())
             }
             State::Ready => self.decode_assembled_frame(flags, payload),
             _ => Err(Error::Protocol(
