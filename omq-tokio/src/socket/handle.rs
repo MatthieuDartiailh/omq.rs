@@ -50,20 +50,30 @@ struct SpscAwareRecv {
     activated: SpscActivated,
     /// Single-peer send fast path ring (None when sender has >1 peer).
     send_ring: Arc<std::sync::RwLock<Option<Arc<InprocSpsc>>>>,
+    /// Batched inproc messages drained from consumers.
+    inproc_cache: std::sync::Mutex<std::collections::VecDeque<Message>>,
 }
 
 impl SpscAwareRecv {
     fn try_drain_consumers(&self) -> Option<Message> {
+        {
+            let mut cache = self.inproc_cache.lock().unwrap();
+            if let Some(msg) = cache.pop_front() {
+                return Some(msg);
+            }
+        }
         let consumers = self.consumers.read().unwrap().clone();
+        let mut cache = self.inproc_cache.lock().unwrap();
         for p in &consumers {
             if let Ok(mut consumer) = p.consumer.try_lock() {
                 consumer.prefetch();
-                if let Some(msg) = consumer.pop() {
-                    return Some(msg);
+                while let Some(msg) = consumer.pop() {
+                    cache.push_back(msg);
                 }
+                consumer.release();
             }
         }
-        None
+        cache.pop_front()
     }
 
     #[expect(clippy::needless_continue)]
@@ -215,6 +225,7 @@ impl Socket {
                     recv_notify,
                     activated: spsc_activated,
                     send_ring,
+                    inproc_cache: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 },
                 monitor,
                 root_cancel: cancel,

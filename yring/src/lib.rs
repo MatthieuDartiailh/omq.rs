@@ -197,7 +197,9 @@ impl<T> Producer<T> {
 impl<T> Consumer<T> {
     /// Pop one item. Zero atomics; reads from the prefetched window.
     /// Returns `None` when the prefetched window is exhausted. Call
-    /// [`prefetch`](Self::prefetch) to load newly flushed items.
+    /// [`prefetch`](Self::prefetch) to load newly flushed items and
+    /// [`release`](Self::release) to publish consumed slots back to the
+    /// producer.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if self.head == self.cached_flush {
@@ -205,9 +207,14 @@ impl<T> Consumer<T> {
         }
         let val = unsafe { (*self.ring.buf[self.head & self.ring.mask].get()).assume_init_read() };
         self.head += 1;
-        // Publish consumed position so producer can reuse slots.
-        self.ring.head.0.store(self.head, Ordering::Release);
         Some(val)
+    }
+
+    /// Publish consumed position so the producer can reuse slots.
+    /// One Release store. Call after draining a batch of pops.
+    #[inline]
+    pub fn release(&mut self) {
+        self.ring.head.0.store(self.head, Ordering::Release);
     }
 
     /// Load all items flushed since the last prefetch. One Acquire load.
@@ -220,13 +227,18 @@ impl<T> Consumer<T> {
         count
     }
 
-    /// Convenience: prefetch + pop. For callers that don't need batching.
+    /// Convenience: prefetch + pop + release. For callers that don't
+    /// need batching.
     #[inline]
     pub fn prefetch_and_pop(&mut self) -> Option<T> {
         if self.head == self.cached_flush {
             self.prefetch();
         }
-        self.pop()
+        let val = self.pop();
+        if val.is_some() {
+            self.release();
+        }
+        val
     }
 
     #[inline]
@@ -246,6 +258,12 @@ impl<T> Consumer<T> {
             .0
             .load(Ordering::Acquire)
             .wrapping_sub(self.head)
+    }
+}
+
+impl<T> Drop for Consumer<T> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -416,6 +434,7 @@ mod tests {
                     assert_eq!(v, received);
                     received += 1;
                 }
+                c.release();
             } else {
                 std::thread::yield_now();
             }

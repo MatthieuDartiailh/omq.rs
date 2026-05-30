@@ -148,6 +148,7 @@ impl<T> AsyncProducer<T> {
 
 impl<T> AsyncConsumer<T> {
     /// Pop one item from the prefetched window. Zero atomics.
+    /// Call [`release`](Self::release) after draining a batch.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if self.head == self.cached_flush {
@@ -157,8 +158,13 @@ impl<T> AsyncConsumer<T> {
             (*self.ring.ring.buf[self.head & self.ring.ring.mask].get()).assume_init_read()
         };
         self.head += 1;
-        self.ring.ring.head.0.store(self.head, Ordering::Release);
         Some(val)
+    }
+
+    /// Publish consumed position so the producer can reuse slots.
+    #[inline]
+    pub fn release(&mut self) {
+        self.ring.ring.head.0.store(self.head, Ordering::Release);
     }
 
     /// Load all items flushed since the last prefetch. One Acquire load.
@@ -170,13 +176,17 @@ impl<T> AsyncConsumer<T> {
         count
     }
 
-    /// Prefetch + pop in one call.
+    /// Prefetch + pop + release in one call.
     #[inline]
     pub fn prefetch_and_pop(&mut self) -> Option<T> {
         if self.head == self.cached_flush {
             self.prefetch();
         }
-        self.pop()
+        let val = self.pop();
+        if val.is_some() {
+            self.release();
+        }
+        val
     }
 
     #[inline]
@@ -221,6 +231,12 @@ impl<T> Stream for AsyncConsumer<T> {
         } else {
             Poll::Pending
         }
+    }
+}
+
+impl<T> Drop for AsyncConsumer<T> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
