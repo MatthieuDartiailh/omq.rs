@@ -40,6 +40,7 @@ fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
     }
 }
 
+#[expect(clippy::unused_async)]
 pub async fn bind(endpoint: &Endpoint) -> Result<(TcpListener, SocketAddr)> {
     let Endpoint::Tcp { host, port } = endpoint else {
         return Err(Error::InvalidEndpoint(format!(
@@ -47,9 +48,24 @@ pub async fn bind(endpoint: &Endpoint) -> Result<(TcpListener, SocketAddr)> {
         )));
     };
     let addr = resolve_bind(host, *port)?;
-    let listener = TcpListener::bind(addr).await.map_err(Error::Io)?;
+    let listener = reuse_addr_bind(addr)?;
     let local = listener.local_addr().map_err(Error::Io)?;
     Ok((listener, local))
+}
+
+pub(crate) fn reuse_addr_bind(addr: SocketAddr) -> Result<TcpListener> {
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+        .map_err(Error::Io)?;
+    sock.set_reuse_address(true).map_err(Error::Io)?;
+    sock.set_nonblocking(true).map_err(Error::Io)?;
+    sock.bind(&addr.into()).map_err(Error::Io)?;
+    sock.listen(1024).map_err(Error::Io)?;
+    TcpListener::from_std(std::net::TcpListener::from(sock)).map_err(Error::Io)
 }
 
 pub async fn connect(endpoint: &Endpoint) -> Result<TcpStream> {

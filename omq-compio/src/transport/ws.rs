@@ -156,6 +156,7 @@ pub(crate) struct WsUpgraded {
     pub leftover: bytes::Bytes,
 }
 
+#[expect(clippy::unused_async)]
 pub(crate) async fn bind(
     endpoint: &Endpoint,
     tls_acceptor: Option<compio_tls::TlsAcceptor>,
@@ -169,7 +170,7 @@ pub(crate) async fn bind(
         }
     };
     let addr = resolve_bind(host, port)?;
-    let listener = TcpListener::bind(addr).await.map_err(Error::Io)?;
+    let listener = super::tcp::reuse_addr_bind(addr)?;
     let local = listener.local_addr().map_err(Error::Io)?;
     Ok(WsListener {
         inner: listener,
