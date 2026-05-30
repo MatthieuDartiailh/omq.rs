@@ -347,43 +347,11 @@ impl Socket {
                 // peer identity (added by wrap_for_transform on recv). The
                 // identity routing strategy normally strips it; DirectIo
                 // bypasses that, so strip it here.
-                {
-                    let guard = self.inner.direct_io.lock().await;
-                    if let Some(dio) = guard.as_ref() {
-                        let peer_id = dio.peer_id;
-                        let mut msg = msg;
-                        let _routing_id = msg.pop_front();
-                        return match dio.send_msg(&msg).await {
-                            Ok(()) => Ok(()),
-                            Err(e) => {
-                                drop(guard);
-                                self.clear_direct_io_slot(peer_id).await;
-                                Err(e)
-                            }
-                        };
-                    }
-                }
-                return self.inner.send_submitter.send(msg).await;
+                return self.send_via_direct_io_or_submitter(msg, true).await;
             }
             SocketType::Router | SocketType::Server => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                {
-                    let guard = self.inner.direct_io.lock().await;
-                    if let Some(dio) = guard.as_ref() {
-                        let peer_id = dio.peer_id;
-                        let mut msg = msg;
-                        let _routing_id = msg.pop_front();
-                        return match dio.send_msg(&msg).await {
-                            Ok(()) => Ok(()),
-                            Err(e) => {
-                                drop(guard);
-                                self.clear_direct_io_slot(peer_id).await;
-                                Err(e)
-                            }
-                        };
-                    }
-                }
-                return self.inner.send_submitter.send(msg).await;
+                return self.send_via_direct_io_or_submitter(msg, true).await;
             }
             _ if is_direct_io_eligible(self.inner.socket_type) => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
@@ -669,20 +637,36 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
     }
 }
 
-fn is_direct_io_eligible(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Req
-            | SocketType::Rep
-            | SocketType::Dealer
-            | SocketType::Router
-            | SocketType::Client
-            | SocketType::Server
-            | SocketType::Pair
-    )
-}
+use crate::routing::is_direct_io_eligible;
 
 impl Socket {
+    /// Try the `DirectIo` fast path, stripping the `routing_id` frame
+    /// when `strip_routing_id` is true (Rep / Router / Server). Falls
+    /// back to the shared `SendSubmitter` when no `DirectIo` is installed.
+    async fn send_via_direct_io_or_submitter(
+        &self,
+        mut msg: Message,
+        strip_routing_id: bool,
+    ) -> Result<()> {
+        let guard = self.inner.direct_io.lock().await;
+        if let Some(dio) = guard.as_ref() {
+            let peer_id = dio.peer_id;
+            if strip_routing_id {
+                let _routing_id = msg.pop_front();
+            }
+            return match dio.send_msg(&msg).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    drop(guard);
+                    self.clear_direct_io_slot(peer_id).await;
+                    Err(e)
+                }
+            };
+        }
+        drop(guard);
+        self.inner.send_submitter.send(msg).await
+    }
+
     async fn send_with_direct_io(&self, msg: Message) -> Result<()> {
         {
             let guard = self.inner.direct_io.lock().await;

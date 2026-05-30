@@ -861,7 +861,7 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
             biased;
             () = cancel.cancelled() => {
                 let mut w = writer.lock().await;
-                drain_on_cancel_ref(
+                drain_on_cancel(
                     inbox, shared_msg_rx, encoder, codec, eq,
                     drain_buf, &mut *w, passthrough,
                 ).await;
@@ -1005,41 +1005,6 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
             },
         }
     }
-}
-
-/// Like `drain_on_cancel` but takes references instead of owned values.
-#[expect(clippy::too_many_arguments)]
-async fn drain_on_cancel_ref<W: AsyncWrite + Unpin>(
-    inbox: &mut mpsc::Receiver<DriverCommand>,
-    shared_msg_rx: Option<&QueueReceiver>,
-    encoder: &mut Option<MessageEncoder>,
-    codec: &mut Connection,
-    eq: &mut EncodedQueue,
-    drain_buf: &mut Vec<Bytes>,
-    writer: &mut W,
-    passthrough: Option<&(Bytes, usize)>,
-) {
-    while let Ok(cmd) = inbox.try_recv() {
-        match cmd {
-            DriverCommand::SendMessage(msg) => {
-                encode_msg(&msg, encoder, codec, eq, passthrough);
-            }
-            DriverCommand::SendCommand(c) => {
-                let _ = codec.send_command(&c);
-            }
-            DriverCommand::Close => break,
-        }
-    }
-    if let Some(rx) = shared_msg_rx {
-        let mut drained = 0usize;
-        while let Some(msg) = rx.try_pop() {
-            encode_msg(&msg, encoder, codec, eq, passthrough);
-            drained += 1;
-        }
-        rx.release_permits(drained);
-    }
-    let _ = flush_encoded_queue(writer, eq, drain_buf).await;
-    drain_writes(writer, codec).await.ok();
 }
 
 #[cfg(test)]

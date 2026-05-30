@@ -745,18 +745,7 @@ impl SocketDriver {
     }
 }
 
-fn is_direct_io_eligible(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Req
-            | SocketType::Rep
-            | SocketType::Dealer
-            | SocketType::Router
-            | SocketType::Client
-            | SocketType::Server
-            | SocketType::Pair
-    )
-}
+use crate::routing::is_direct_io_eligible;
 
 fn can_bypass_actor_recv(t: SocketType) -> bool {
     matches!(
