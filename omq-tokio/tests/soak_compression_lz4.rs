@@ -1,7 +1,7 @@
 #![cfg(all(feature = "soak", feature = "lz4"))]
 //! Soak: lz4 compression transport sustained.
 //!
-//! Same structure as soak_compression (zstd) but exercises the lz4
+//! Same structure as `soak_compression` (zstd) but exercises the lz4
 //! encoder/decoder path. Mixed message sizes, continuous send/recv.
 
 #[global_allocator]
