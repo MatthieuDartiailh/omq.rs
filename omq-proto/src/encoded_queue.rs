@@ -2,9 +2,10 @@ use std::collections::VecDeque;
 
 use bytes::{Bytes, BytesMut};
 
-pub(crate) const FLAT_THRESHOLD: usize = 32 * 1024;
+use crate::message::Message;
+use crate::proto::frame;
 
-pub(crate) struct EncodedQueue {
+pub struct EncodedQueue {
     chunks: VecDeque<Bytes>,
     total_bytes: usize,
     scratch: BytesMut,
@@ -21,7 +22,7 @@ impl std::fmt::Debug for EncodedQueue {
 }
 
 impl EncodedQueue {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             chunks: VecDeque::with_capacity(32),
             total_bytes: 0,
@@ -30,8 +31,12 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.chunks.is_empty() && self.flat_buf.is_empty()
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     fn flush_flat_to_chunks(&mut self) {
@@ -40,71 +45,48 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn total_bytes(&self) -> usize {
-        self.total_bytes
+    pub fn encode_flat(&mut self, msg: &Message) {
+        let before = self.flat_buf.len();
+        frame::encode_message_flat(msg, &mut self.flat_buf);
+        self.total_bytes += self.flat_buf.len() - before;
     }
 
-    pub(crate) fn encode_and_push_flat(&mut self, msg: &omq_proto::message::Message) {
-        let before = self.flat_buf.len();
-        omq_proto::proto::frame::encode_message_flat(msg, &mut self.flat_buf);
-        self.total_bytes += self.flat_buf.len() - before;
+    pub fn encode_gather(&mut self, msg: &Message) {
+        self.flush_flat_to_chunks();
+        let before = self.chunks.len();
+        frame::encode_message_gather(msg, &mut self.chunks, &mut self.scratch);
+        for chunk in self.chunks.iter().skip(before) {
+            self.total_bytes += chunk.len();
+        }
     }
 
     #[cfg(feature = "ws")]
-    pub(crate) fn encode_and_push_flat_ws(
-        &mut self,
-        msg: &omq_proto::message::Message,
-        masked: bool,
-    ) {
+    pub fn encode_ws(&mut self, msg: &Message, masked: bool) {
         let before = self.flat_buf.len();
         if masked {
-            omq_proto::proto::frame::encode_message_flat_ws_masked(msg, &mut self.flat_buf);
+            frame::encode_message_flat_ws_masked(msg, &mut self.flat_buf);
         } else {
-            omq_proto::proto::frame::encode_message_flat_ws(msg, &mut self.flat_buf);
+            frame::encode_message_flat_ws(msg, &mut self.flat_buf);
         }
         self.total_bytes += self.flat_buf.len() - before;
     }
 
-    pub(crate) fn encode_and_push(&mut self, msg: &omq_proto::message::Message) {
-        self.flush_flat_to_chunks();
-        let chunk_count_before = self.chunks.len();
-        omq_proto::proto::frame::encode_message_gather(msg, &mut self.chunks, &mut self.scratch);
-        for chunk in self.chunks.iter().skip(chunk_count_before) {
-            self.total_bytes += chunk.len();
-        }
-    }
-
-    #[cfg_attr(feature = "priority", allow(dead_code))]
-    pub(crate) fn encode_and_push_prefixed_flat(
-        &mut self,
-        prefix: &Bytes,
-        msg: &omq_proto::message::Message,
-    ) {
+    pub fn encode_prefixed_flat(&mut self, prefix: &Bytes, msg: &Message) {
         let before = self.flat_buf.len();
-        omq_proto::proto::frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);
+        frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);
         self.total_bytes += self.flat_buf.len() - before;
     }
 
-    #[cfg_attr(feature = "priority", allow(dead_code))]
-    pub(crate) fn encode_and_push_prefixed(
-        &mut self,
-        prefix: &Bytes,
-        msg: &omq_proto::message::Message,
-    ) {
+    pub fn encode_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
         self.flush_flat_to_chunks();
-        let chunk_count_before = self.chunks.len();
-        omq_proto::proto::frame::encode_message_prefixed_gather(
-            prefix,
-            msg,
-            &mut self.chunks,
-            &mut self.scratch,
-        );
-        for chunk in self.chunks.iter().skip(chunk_count_before) {
+        let before = self.chunks.len();
+        frame::encode_message_prefixed_gather(prefix, msg, &mut self.chunks, &mut self.scratch);
+        for chunk in self.chunks.iter().skip(before) {
             self.total_bytes += chunk.len();
         }
     }
 
-    pub(crate) fn push_raw(&mut self, chunks: Vec<Bytes>) {
+    pub fn push_raw(&mut self, chunks: Vec<Bytes>) {
         self.flush_flat_to_chunks();
         for chunk in chunks {
             self.total_bytes += chunk.len();
@@ -112,7 +94,7 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
+    pub fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         let take = max_chunks.min(self.chunks.len());
         let chunk_bytes: usize = self.chunks.iter().take(take).map(Bytes::len).sum();
         buf.extend(self.chunks.drain(..take));
@@ -125,7 +107,7 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
+    pub fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
         let mut consumed = 0usize;
         let mut to_restore: Vec<Bytes> = Vec::new();
         for chunk in returned {
@@ -145,5 +127,54 @@ impl EncodedQueue {
         for chunk in to_restore.into_iter().rev() {
             self.chunks.push_front(chunk);
         }
+    }
+}
+
+impl Default for EncodedQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_back_partial_write() {
+        let mut eq = EncodedQueue::new();
+        let msg = Message::from(Bytes::from_static(&[0xAB; 100]));
+        eq.encode_gather(&msg);
+        assert!(!eq.is_empty());
+
+        let mut buf = Vec::new();
+        eq.drain_into_vec(&mut buf, 1024);
+        let total: usize = buf.iter().map(Bytes::len).sum();
+        assert!(total > 0);
+
+        eq.put_back_unwritten(buf, 5);
+        assert!(!eq.is_empty());
+
+        let mut buf2 = Vec::new();
+        eq.drain_into_vec(&mut buf2, 1024);
+        let remaining: usize = buf2.iter().map(Bytes::len).sum();
+        assert_eq!(remaining, total - 5);
+    }
+
+    #[test]
+    fn flat_and_gather_ordering() {
+        let mut eq = EncodedQueue::new();
+        let small = Message::from(Bytes::from_static(&[1; 64]));
+        let large = Message::from(Bytes::from(vec![2; 128 * 1024]));
+
+        eq.encode_flat(&small);
+        eq.encode_gather(&large);
+        eq.encode_flat(&small);
+
+        let mut buf = Vec::new();
+        eq.drain_into_vec(&mut buf, 1024);
+
+        assert!(buf[0].len() < 100);
+        assert!(buf.len() >= 3);
     }
 }

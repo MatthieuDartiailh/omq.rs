@@ -12,8 +12,8 @@ use omq_proto::proto::transform::MessageEncoder;
 
 use crate::transport::peer_io::{CancellableRecvStream, PeerIo, SharedPeerIo, WireWriter};
 
-use super::encoded_queue::EncodedQueue;
 use super::inner::{LocalStream, RecvStreamState};
+use omq_proto::encoded_queue::EncodedQueue;
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct DirectIoState {

@@ -10,6 +10,7 @@
 pub mod backoff;
 #[cfg(feature = "priority")]
 pub mod connect_opts;
+pub mod encoded_queue;
 pub mod endpoint;
 pub mod error;
 pub mod message;
@@ -31,6 +32,7 @@ pub use monitor::{
     PeerCommandKind, PeerIdent, PeerInfo,
 };
 pub use options::{KeepAlive, MechanismConfig, OnMute, Options, ReconnectPolicy};
+pub use proto::mechanism::MechanismSetup;
 #[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
 pub use proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]

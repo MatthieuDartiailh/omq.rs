@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
-use super::encoded_queue::EncodedQueue;
+use omq_proto::encoded_queue::EncodedQueue;
 
 type Writer = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -57,7 +57,11 @@ impl DirectIo {
         }
         let chunks = {
             let mut enc = self.encode.lock().unwrap();
-            enc.eq.encode(msg);
+            if msg.byte_len() < super::driver::FLAT_THRESHOLD {
+                enc.eq.encode_flat(msg);
+            } else {
+                enc.eq.encode_gather(msg);
+            }
             let EncodeState {
                 ref mut eq,
                 ref mut drain_buf,

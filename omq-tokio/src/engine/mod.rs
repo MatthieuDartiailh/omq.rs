@@ -9,6 +9,5 @@
 
 pub mod direct_io;
 pub mod driver;
-mod encoded_queue;
 
 pub use driver::{ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut};

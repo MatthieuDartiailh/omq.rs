@@ -133,7 +133,7 @@ fn make_codec(
 ) -> Connection {
     let mut cfg = ConnectionConfig::new(role, socket_type)
         .identity(options.identity.clone())
-        .mechanism(options.mechanism.to_setup());
+        .mechanism(options.mechanism.clone());
     if let Some(n) = options.max_message_size {
         cfg = cfg.max_message_size(n);
     }
@@ -207,9 +207,9 @@ impl DriverLoopState {
             let cr = eq.total_bytes() >= cap;
             for wire in &wires {
                 if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                    eq.encode_and_push_flat(wire);
+                    eq.encode_flat(wire);
                 } else {
-                    eq.encode_and_push(wire);
+                    eq.encode_gather(wire);
                 }
             }
             Ok(cr)
@@ -225,13 +225,13 @@ impl DriverLoopState {
             let cr = eq.total_bytes() >= cap;
             #[cfg(feature = "ws")]
             if state.is_ws {
-                eq.encode_and_push_flat_ws(m, state.ws_masked);
+                eq.encode_ws(m, state.ws_masked);
                 return Ok(cr);
             }
             if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-                eq.encode_and_push_flat(m);
+                eq.encode_flat(m);
             } else {
-                eq.encode_and_push(m);
+                eq.encode_gather(m);
             }
             Ok(cr)
         }
@@ -254,9 +254,9 @@ impl DriverLoopState {
                         let mut eq = state.encoded_queue.borrow_mut();
                         for wire in &wires {
                             if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                                eq.encode_and_push_flat(wire);
+                                eq.encode_flat(wire);
                             } else {
-                                eq.encode_and_push(wire);
+                                eq.encode_gather(wire);
                             }
                         }
                     } else if state.uses_crypto {
@@ -265,13 +265,13 @@ impl DriverLoopState {
                         let mut eq = state.encoded_queue.borrow_mut();
                         #[cfg(feature = "ws")]
                         if state.is_ws {
-                            eq.encode_and_push_flat_ws(&m, state.ws_masked);
+                            eq.encode_ws(&m, state.ws_masked);
                             continue;
                         }
                         if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-                            eq.encode_and_push_flat(&m);
+                            eq.encode_flat(&m);
                         } else {
-                            eq.encode_and_push(&m);
+                            eq.encode_gather(&m);
                         }
                     }
                 }

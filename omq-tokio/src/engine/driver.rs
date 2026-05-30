@@ -18,8 +18,8 @@ use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
 use super::direct_io::{DirectIo, SharedWriter};
-use super::encoded_queue::EncodedQueue;
 use crate::routing::drop_queue::QueueReceiver;
+use omq_proto::encoded_queue::EncodedQueue;
 
 /// Batch-encode messages, then flush `EncodedQueue` + codec.
 macro_rules! batch_encode_flush {
@@ -688,11 +688,11 @@ fn encode_msg(
 ) {
     #[cfg(feature = "ws")]
     if codec.is_ws() && !codec.has_frame_transform() {
-        match codec.ws_role() {
-            Some(omq_proto::proto::connection::WsRole::Server) => eq.encode_ws(msg),
-            Some(omq_proto::proto::connection::WsRole::Client) => eq.encode_ws_masked(msg),
-            Some(_) | None => unreachable!(),
-        }
+        let masked = matches!(
+            codec.ws_role(),
+            Some(omq_proto::proto::connection::WsRole::Client)
+        );
+        eq.encode_ws(msg, masked);
         return;
     }
     if codec.has_frame_transform() {
@@ -716,10 +716,16 @@ fn encode_msg(
         }
     } else if let Some(enc) = encoder.as_mut() {
         for wire in enc.encode(msg).unwrap_or_default() {
-            eq.encode(&wire);
+            if wire.byte_len() < FLAT_THRESHOLD {
+                eq.encode_flat(&wire);
+            } else {
+                eq.encode_gather(&wire);
+            }
         }
+    } else if msg.byte_len() < FLAT_THRESHOLD {
+        eq.encode_flat(msg);
     } else {
-        eq.encode(msg);
+        eq.encode_gather(msg);
     }
 }
 
