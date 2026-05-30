@@ -50,26 +50,7 @@ fn cmd_channel_capacity(options: &Options) -> usize {
     }
 }
 
-/// Socket types for which `Options::conflate(true)` is meaningful.
-/// REQ/REP/ROUTER/SERVER/PEER track per-peer envelope invariants;
-/// PAIR/CHANNEL/CLIENT carry sequence-sensitive state. All of those
-/// are excluded. Matches libzmq's `ZMQ_CONFLATE` semantics.
-pub(super) fn supports_conflate(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Push
-            | SocketType::Pull
-            | SocketType::Pub
-            | SocketType::Sub
-            | SocketType::XPub
-            | SocketType::XSub
-            | SocketType::Radio
-            | SocketType::Dish
-            | SocketType::Dealer
-            | SocketType::Scatter
-            | SocketType::Gather,
-    )
-}
+pub(super) use omq_proto::routing::supports_conflate;
 
 /// Build a fresh empty subscription set for this socket's PUB-side
 /// fan-out filter, or `None` if the socket type doesn't filter.

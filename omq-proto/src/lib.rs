@@ -26,7 +26,7 @@ pub mod type_state;
 pub use connect_opts::{ConnectOpts, DEFAULT_PRIORITY};
 pub use endpoint::{Endpoint, EndpointRole, EndpointSpec, IpcPath};
 pub use error::{Error, Result};
-pub use message::{Frame, FrameFlags, Message, MessageIter};
+pub use message::{Frame, FrameFlags, Message, MessageIter, generated_identity};
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,
     PeerCommandKind, PeerIdent, PeerInfo,

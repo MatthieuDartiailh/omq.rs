@@ -27,7 +27,7 @@ use flume::Receiver;
 use smallvec::SmallVec;
 
 use omq_proto::error::{Error, Result};
-use omq_proto::message::Message;
+use omq_proto::message::{Message, generated_identity};
 use omq_proto::options::Options;
 use omq_proto::proto::command::PeerProperties;
 use omq_proto::proto::connection::{Connection, ConnectionConfig, Role};
@@ -106,13 +106,6 @@ pub enum DriverCommand {
     SendMessage(Message),
     SendCommand(Command),
     Close,
-}
-
-fn generated_identity(connection_id: u64) -> bytes::Bytes {
-    let mut buf = Vec::with_capacity(9);
-    buf.push(0); // libzmq-style leading null marks "auto-generated"
-    buf.extend_from_slice(&connection_id.to_be_bytes());
-    bytes::Bytes::from(buf)
 }
 
 /// Build the [`SharedPeerIo`] handed to the driver and to the direct

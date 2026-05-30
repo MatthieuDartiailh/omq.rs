@@ -287,27 +287,7 @@ pub(crate) fn supports_groups(t: SocketType) -> bool {
     matches!(t, SocketType::Dish)
 }
 
-/// Whether this socket type accepts `Options::conflate(true)`. Per
-/// libzmq's `ZMQ_CONFLATE`: the option is meaningful on patterns
-/// where the queue is just "the next message" (no envelope, no
-/// per-peer ordering invariant). REQ/REP/ROUTER/SERVER/PEER track
-/// envelopes; PAIR/CHANNEL/CLIENT carry sequence-sensitive state.
-pub(crate) fn supports_conflate(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Push
-            | SocketType::Pull
-            | SocketType::Pub
-            | SocketType::Sub
-            | SocketType::XPub
-            | SocketType::XSub
-            | SocketType::Radio
-            | SocketType::Dish
-            | SocketType::Dealer
-            | SocketType::Scatter
-            | SocketType::Gather,
-    )
-}
+pub(crate) use omq_proto::routing::supports_conflate;
 
 /// Resolve queue capacity + drop policy for `options`. When
 /// `conflate` is set, both are forced to (1, `DropOldest`) - that

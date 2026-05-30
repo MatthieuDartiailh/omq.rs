@@ -324,13 +324,4 @@ pub(super) fn peer_ident_socket_addr(ident: &PeerIdent) -> Option<std::net::Sock
     }
 }
 
-/// Synthesize a routing identity when a peer didn't provide one. libzmq's
-/// ROUTER assigns a 5-byte random id; we use the peer's sequence id so it
-/// stays stable for the lifetime of the connection and can't collide
-/// across peers.
-pub(super) fn generated_identity(peer_id: u64) -> bytes::Bytes {
-    let mut buf = Vec::with_capacity(9);
-    buf.push(0); // libzmq-style leading null marks "auto-generated"
-    buf.extend_from_slice(&peer_id.to_be_bytes());
-    bytes::Bytes::from(buf)
-}
+pub(super) use omq_proto::message::generated_identity;

@@ -13,7 +13,7 @@ use futures::{FutureExt, StreamExt};
 use smallvec::SmallVec;
 
 use omq_proto::error::{Error, Result};
-use omq_proto::message::Message;
+use omq_proto::message::{Message, generated_identity};
 use omq_proto::options::Options;
 use omq_proto::proto::connection::{Connection, ConnectionConfig, Role, TransportMode};
 use omq_proto::proto::{Command, Event, SocketType};
@@ -27,13 +27,6 @@ fn ws_io_err(e: impl std::fmt::Display) -> Error {
 }
 
 pub use crate::transport::driver::DriverCommand;
-
-fn generated_identity(connection_id: u64) -> Bytes {
-    let mut buf = Vec::with_capacity(9);
-    buf.push(0);
-    buf.extend_from_slice(&connection_id.to_be_bytes());
-    Bytes::from(buf)
-}
 
 async fn maybe_sleep_until(deadline: Option<Instant>) {
     match deadline {
