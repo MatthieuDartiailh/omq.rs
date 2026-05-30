@@ -941,12 +941,6 @@ bookkeeping with no net gain. Reverted.
 
 ## What remains
 
-**Single-wire-peer bypass on tokio (send-side encode).** The compio
-direct-encode fast path (`try_direct_encode` via sync `try_lock`)
-has no direct equivalent on tokio. DirectIo handles the single-peer
-case; the compio-style shared `EncodedQueue` for multi-peer
-round-robin remains future work.
-
 **Per-peer wire yring for recv.** Replacing the MPMC
 `async_channel` on the recv_direct path with per-peer yring SPSC
 rings (same pattern as inproc) would eliminate the channel
