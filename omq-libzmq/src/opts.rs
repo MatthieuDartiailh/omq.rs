@@ -201,8 +201,8 @@ const ZMQ_BINDTODEVICE: c_int = 92;
 const ZMQ_MULTICAST_LOOP: c_int = 96;
 const ZMQ_ROUTER_NOTIFY: c_int = 97;
 
-const ZMQ_POLLIN: c_int = 1;
-const ZMQ_POLLOUT: c_int = 2;
+const ZMQ_POLLIN: c_int = crate::consts::ZMQ_POLLIN;
+const ZMQ_POLLOUT: c_int = crate::consts::ZMQ_POLLOUT;
 
 const ZMQ_NULL: c_int = 0;
 const ZMQ_PLAIN: c_int = 1;

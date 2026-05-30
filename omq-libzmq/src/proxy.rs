@@ -3,6 +3,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use crate::consts;
 use crate::msg::{
     OmqMsgRepr, zmq_msg_close, zmq_msg_init, zmq_msg_more, zmq_msg_recv, zmq_msg_send,
 };
@@ -10,9 +11,9 @@ use crate::poll::{ZmqPollItem, zmq_poll};
 use crate::send_recv::zmq_recv;
 use crate::socket::OmqSocket;
 
-const ZMQ_POLLIN: libc::c_short = 1;
-const ZMQ_SNDMORE: i32 = 2;
-const ZMQ_DONTWAIT: i32 = 1;
+const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
+const ZMQ_SNDMORE: i32 = consts::ZMQ_SNDMORE;
+const ZMQ_DONTWAIT: i32 = consts::ZMQ_DONTWAIT;
 
 fn forward(from: *mut c_void, to: *mut c_void, capture: *mut c_void) -> libc::c_int {
     let mut msg = std::mem::MaybeUninit::<OmqMsgRepr>::uninit();
