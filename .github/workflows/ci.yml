@@ -3,21 +3,32 @@ name: ci
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'doc/**'
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'doc/**'
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!doc/**'
+
   test:
     name: cargo test (${{ matrix.toolchain }}, ${{ matrix.os }})
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -38,6 +49,8 @@ jobs:
 
   feature-matrix:
     name: feature ${{ matrix.feature }} (${{ matrix.os }})
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -53,6 +66,8 @@ jobs:
 
   facade:
     name: omq facade
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +78,8 @@ jobs:
 
   fmt:
     name: rustfmt
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +89,8 @@ jobs:
 
   clippy:
     name: clippy
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,6 +101,8 @@ jobs:
 
   pyomq:
     name: pyomq + pyzmq interop
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +123,8 @@ jobs:
 
   ruby-interop:
     name: ruby omq interop
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -120,11 +143,11 @@ jobs:
 
   ci-success:
     name: CI success
-    needs: [test, feature-matrix, facade, fmt, clippy, pyomq, ruby-interop]
+    needs: [changes, test, feature-matrix, facade, fmt, clippy, pyomq, ruby-interop]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: check all jobs passed
+      - name: check all jobs passed or were skipped
         run: |
           if [[ '${{ toJSON(needs.*.result) }}' =~ (failure|cancelled) ]]; then
             exit 1
