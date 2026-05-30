@@ -74,10 +74,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         if state.is_ws {
             eq.encode_ws(msg, state.ws_masked);
             drop(eq);
-            state.direct_msg_count.set(state.direct_msg_count.get() + 1);
-            if state.driver_in_select.get() {
-                state.transmit_ready.notify(1);
-            }
+            state.signal_encoded();
             return Ok(true);
         }
         if msg_total < FLAT_THRESHOLD {
@@ -86,10 +83,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             eq.encode_gather(msg);
         }
         drop(eq);
-        state.direct_msg_count.set(state.direct_msg_count.get() + 1);
-        if state.driver_in_select.get() {
-            state.transmit_ready.notify(1);
-        }
+        state.signal_encoded();
         return Ok(true);
     }
 
@@ -111,10 +105,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
             eq.encode_prefixed_gather(sentinel, msg);
         }
         drop(eq);
-        state.direct_msg_count.set(state.direct_msg_count.get() + 1);
-        if state.driver_in_select.get() {
-            state.transmit_ready.notify(1);
-        }
+        state.signal_encoded();
         return Ok(true);
     }
 
@@ -144,10 +135,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         }
     }
     drop(eq);
-    state.direct_msg_count.set(state.direct_msg_count.get() + 1);
-    if state.driver_in_select.get() {
-        state.transmit_ready.notify(1);
-    }
+    state.signal_encoded();
     Ok(true)
 }
 
