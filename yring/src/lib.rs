@@ -53,6 +53,87 @@ impl<T> Ring<T> {
     pub(crate) fn capacity(&self) -> usize {
         self.mask + 1
     }
+
+    #[inline]
+    pub(crate) fn push(&self, tail: &mut usize, cached_head: &mut usize, val: T) -> Result<(), T> {
+        if *tail - *cached_head >= self.capacity() {
+            *cached_head = self.head.0.load(Ordering::Acquire);
+            if *tail - *cached_head >= self.capacity() {
+                return Err(val);
+            }
+        }
+        unsafe {
+            (*self.buf[*tail & self.mask].get()).write(val);
+        }
+        *tail += 1;
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn flush_to(&self, tail: usize, cached_head: &mut usize) -> FlushResult {
+        let prev_flush = self.flush.0.load(Ordering::Relaxed);
+        if tail == prev_flush {
+            return FlushResult::NothingToFlush;
+        }
+        let count = tail - prev_flush;
+        *cached_head = self.head.0.load(Ordering::Acquire);
+        let was_empty = prev_flush == *cached_head;
+        self.flush.0.store(tail, Ordering::Release);
+        FlushResult::Flushed { count, was_empty }
+    }
+
+    #[inline]
+    pub(crate) fn is_full(&self, tail: usize, cached_head: &mut usize) -> bool {
+        if tail - *cached_head >= self.capacity() {
+            *cached_head = self.head.0.load(Ordering::Acquire);
+            tail - *cached_head >= self.capacity()
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub(crate) fn producer_len(&self, tail: usize) -> usize {
+        tail.wrapping_sub(self.head.0.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    pub(crate) fn producer_is_empty(&self, tail: usize) -> bool {
+        tail == self.head.0.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn pop(&self, head: &mut usize, cached_flush: usize) -> Option<T> {
+        if *head == cached_flush {
+            return None;
+        }
+        let val = unsafe { (*self.buf[*head & self.mask].get()).assume_init_read() };
+        *head += 1;
+        Some(val)
+    }
+
+    #[inline]
+    pub(crate) fn release(&self, head: usize) {
+        self.head.0.store(head, Ordering::Release);
+    }
+
+    #[inline]
+    pub(crate) fn prefetch(&self, cached_flush: &mut usize) -> usize {
+        let new_flush = self.flush.0.load(Ordering::Acquire);
+        let count = new_flush.wrapping_sub(*cached_flush);
+        *cached_flush = new_flush;
+        count
+    }
+
+    #[inline]
+    pub(crate) fn consumer_is_empty(&self, head: usize, cached_flush: usize) -> bool {
+        head == cached_flush && self.flush.0.load(Ordering::Acquire) == head
+    }
+
+    #[inline]
+    pub(crate) fn consumer_len(&self, head: usize) -> usize {
+        self.flush.0.load(Ordering::Acquire).wrapping_sub(head)
+    }
 }
 
 impl<T> Drop for Ring<T> {
@@ -133,31 +214,13 @@ impl<T> Producer<T> {
     /// The value is NOT visible to the consumer until [`flush`](Self::flush).
     #[inline]
     pub fn push(&mut self, val: T) -> Result<(), T> {
-        if self.tail - self.cached_head >= self.ring.capacity() {
-            self.cached_head = self.ring.head.0.load(Ordering::Acquire);
-            if self.tail - self.cached_head >= self.ring.capacity() {
-                return Err(val);
-            }
-        }
-        unsafe {
-            (*self.ring.buf[self.tail & self.ring.mask].get()).write(val);
-        }
-        self.tail += 1;
-        Ok(())
+        self.ring.push(&mut self.tail, &mut self.cached_head, val)
     }
 
     /// Make all pushed items visible to the consumer. One Release store.
     #[inline]
     pub fn flush(&mut self) -> FlushResult {
-        let prev_flush = self.ring.flush.0.load(Ordering::Relaxed);
-        if self.tail == prev_flush {
-            return FlushResult::NothingToFlush;
-        }
-        let count = self.tail - prev_flush;
-        self.cached_head = self.ring.head.0.load(Ordering::Acquire);
-        let was_empty = prev_flush == self.cached_head;
-        self.ring.flush.0.store(self.tail, Ordering::Release);
-        FlushResult::Flushed { count, was_empty }
+        self.ring.flush_to(self.tail, &mut self.cached_head)
     }
 
     /// Push + flush in one call (convenience for single-item sends).
@@ -169,12 +232,7 @@ impl<T> Producer<T> {
 
     #[inline]
     pub fn is_full(&mut self) -> bool {
-        if self.tail - self.cached_head >= self.ring.capacity() {
-            self.cached_head = self.ring.head.0.load(Ordering::Acquire);
-            self.tail - self.cached_head >= self.ring.capacity()
-        } else {
-            false
-        }
+        self.ring.is_full(self.tail, &mut self.cached_head)
     }
 
     #[inline]
@@ -184,13 +242,12 @@ impl<T> Producer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.tail
-            .wrapping_sub(self.ring.head.0.load(Ordering::Acquire))
+        self.ring.producer_len(self.tail)
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.tail == self.ring.head.0.load(Ordering::Acquire)
+        self.ring.producer_is_empty(self.tail)
     }
 }
 
@@ -202,29 +259,21 @@ impl<T> Consumer<T> {
     /// producer.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
-        if self.head == self.cached_flush {
-            return None;
-        }
-        let val = unsafe { (*self.ring.buf[self.head & self.ring.mask].get()).assume_init_read() };
-        self.head += 1;
-        Some(val)
+        self.ring.pop(&mut self.head, self.cached_flush)
     }
 
     /// Publish consumed position so the producer can reuse slots.
     /// One Release store. Call after draining a batch of pops.
     #[inline]
     pub fn release(&mut self) {
-        self.ring.head.0.store(self.head, Ordering::Release);
+        self.ring.release(self.head);
     }
 
     /// Load all items flushed since the last prefetch. One Acquire load.
     /// Returns the count of newly available items.
     #[inline]
     pub fn prefetch(&mut self) -> usize {
-        let new_flush = self.ring.flush.0.load(Ordering::Acquire);
-        let count = new_flush.wrapping_sub(self.cached_flush);
-        self.cached_flush = new_flush;
-        count
+        self.ring.prefetch(&mut self.cached_flush)
     }
 
     /// Convenience: prefetch + pop + release. For callers that don't
@@ -243,7 +292,7 @@ impl<T> Consumer<T> {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.head == self.cached_flush && self.ring.flush.0.load(Ordering::Acquire) == self.head
+        self.ring.consumer_is_empty(self.head, self.cached_flush)
     }
 
     #[inline]
@@ -253,11 +302,7 @@ impl<T> Consumer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.ring
-            .flush
-            .0
-            .load(Ordering::Acquire)
-            .wrapping_sub(self.head)
+        self.ring.consumer_len(self.head)
     }
 }
 

@@ -6,7 +6,6 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
 use atomic_waker::AtomicWaker;
@@ -82,34 +81,25 @@ impl<T> AsyncProducer<T> {
     /// Write a value to the ring. Zero atomics. Returns `Err(val)` if full.
     #[inline]
     pub fn push(&mut self, val: T) -> Result<(), T> {
-        if self.tail - self.cached_head >= self.ring.ring.capacity() {
-            self.cached_head = self.ring.ring.head.0.load(Ordering::Acquire);
-            if self.tail - self.cached_head >= self.ring.ring.capacity() {
-                return Err(val);
-            }
-        }
-        unsafe {
-            (*self.ring.ring.buf[self.tail & self.ring.ring.mask].get()).write(val);
-        }
-        self.tail += 1;
-        Ok(())
+        self.ring
+            .ring
+            .push(&mut self.tail, &mut self.cached_head, val)
     }
 
     /// Make all pushed items visible and wake the consumer if the ring was empty.
     #[inline]
     pub fn flush(&mut self) -> FlushResult {
-        let prev_flush = self.ring.ring.flush.0.load(Ordering::Relaxed);
-        if self.tail == prev_flush {
-            return FlushResult::NothingToFlush;
-        }
-        let count = self.tail - prev_flush;
-        self.cached_head = self.ring.ring.head.0.load(Ordering::Acquire);
-        let was_empty = prev_flush == self.cached_head;
-        self.ring.ring.flush.0.store(self.tail, Ordering::Release);
-        if was_empty {
+        let r = self.ring.ring.flush_to(self.tail, &mut self.cached_head);
+        if matches!(
+            r,
+            FlushResult::Flushed {
+                was_empty: true,
+                ..
+            }
+        ) {
             self.ring.waker.0.wake();
         }
-        FlushResult::Flushed { count, was_empty }
+        r
     }
 
     /// Push + flush in one call.
@@ -121,12 +111,7 @@ impl<T> AsyncProducer<T> {
 
     #[inline]
     pub fn is_full(&mut self) -> bool {
-        if self.tail - self.cached_head >= self.ring.ring.capacity() {
-            self.cached_head = self.ring.ring.head.0.load(Ordering::Acquire);
-            self.tail - self.cached_head >= self.ring.ring.capacity()
-        } else {
-            false
-        }
+        self.ring.ring.is_full(self.tail, &mut self.cached_head)
     }
 
     #[inline]
@@ -136,13 +121,12 @@ impl<T> AsyncProducer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.tail
-            .wrapping_sub(self.ring.ring.head.0.load(Ordering::Acquire))
+        self.ring.ring.producer_len(self.tail)
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.tail == self.ring.ring.head.0.load(Ordering::Acquire)
+        self.ring.ring.producer_is_empty(self.tail)
     }
 }
 
@@ -151,29 +135,19 @@ impl<T> AsyncConsumer<T> {
     /// Call [`release`](Self::release) after draining a batch.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
-        if self.head == self.cached_flush {
-            return None;
-        }
-        let val = unsafe {
-            (*self.ring.ring.buf[self.head & self.ring.ring.mask].get()).assume_init_read()
-        };
-        self.head += 1;
-        Some(val)
+        self.ring.ring.pop(&mut self.head, self.cached_flush)
     }
 
     /// Publish consumed position so the producer can reuse slots.
     #[inline]
     pub fn release(&mut self) {
-        self.ring.ring.head.0.store(self.head, Ordering::Release);
+        self.ring.ring.release(self.head);
     }
 
     /// Load all items flushed since the last prefetch. One Acquire load.
     #[inline]
     pub fn prefetch(&mut self) -> usize {
-        let new_flush = self.ring.ring.flush.0.load(Ordering::Acquire);
-        let count = new_flush.wrapping_sub(self.cached_flush);
-        self.cached_flush = new_flush;
-        count
+        self.ring.ring.prefetch(&mut self.cached_flush)
     }
 
     /// Prefetch + pop + release in one call.
@@ -191,8 +165,9 @@ impl<T> AsyncConsumer<T> {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.head == self.cached_flush
-            && self.ring.ring.flush.0.load(Ordering::Acquire) == self.head
+        self.ring
+            .ring
+            .consumer_is_empty(self.head, self.cached_flush)
     }
 
     #[inline]
@@ -202,12 +177,7 @@ impl<T> AsyncConsumer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.ring
-            .ring
-            .flush
-            .0
-            .load(Ordering::Acquire)
-            .wrapping_sub(self.head)
+        self.ring.ring.consumer_len(self.head)
     }
 }
 
