@@ -8,7 +8,8 @@ results to benchmarks/comparisons.jsonl.
 Usage:
   scripts/run_comparisons.py                        # all impls, tcp+inproc+ipc, latency on
   scripts/run_comparisons.py --quick-run            # 3 sizes only
-  scripts/run_comparisons.py --scope omq            # omq-compio + omq-tokio only
+  scripts/run_comparisons.py --impl rzmq            # single impl
+  scripts/run_comparisons.py --impl omq-compio --impl libzmq  # subset
   scripts/run_comparisons.py --transport tcp         # TCP only
   scripts/run_comparisons.py --no-latency           # skip REQ/REP latency
   scripts/run_comparisons.py --update-markdown      # update COMPARISONS.md tables
@@ -35,6 +36,7 @@ TABLE_SIZES = [32, 1024, 4096]
 DURATION = 3
 LATENCY_ITERATIONS = 10_000
 LATENCY_WARMUP = 1_000
+LATENCY_TIMEOUT = 30
 
 
 # ── formatting ────────────────────────────────────────────────────
@@ -154,16 +156,20 @@ def spawn_process(binary: str, *args: str) -> subprocess.Popen:
     )
 
 
-def capture_process(binary: str, *args: str) -> str:
+def capture_process(binary: str, *args: str, timeout: int = 30) -> str:
+    proc = subprocess.Popen(
+        [binary, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
     try:
-        result = subprocess.run(
-            [binary, *args],
-            capture_output=True, text=True,
-            timeout=30,
-        )
-        return result.stdout
+        stdout, _ = proc.communicate(timeout=timeout)
+        return stdout
     except subprocess.TimeoutExpired:
         print(f"WARNING: timeout: {binary} {' '.join(args)}", file=sys.stderr)
+        proc.kill()
+        proc.wait()
         return ""
 
 
@@ -232,11 +238,15 @@ def run_throughput_cell(
 def run_latency_cell(
     binary: str, transport: str, addr: str, size: int,
     inproc_subcmd: str = "inproc-latency",
+    iterations: int = LATENCY_ITERATIONS,
+    warmup: int = LATENCY_WARMUP,
+    timeout: int = LATENCY_TIMEOUT,
 ) -> dict | None:
     if transport == "inproc":
         output = capture_process(
             binary, inproc_subcmd, addr, str(size),
-            str(LATENCY_ITERATIONS), str(LATENCY_WARMUP),
+            str(iterations), str(warmup),
+            timeout=timeout,
         )
         return parse_latency(output)
 
@@ -248,7 +258,8 @@ def run_latency_cell(
     try:
         output = capture_process(
             binary, "req", addr, str(size),
-            str(LATENCY_ITERATIONS), str(LATENCY_WARMUP),
+            str(iterations), str(warmup),
+            timeout=timeout,
         )
     finally:
         kill_process(rep)
@@ -259,10 +270,10 @@ def run_latency_cell(
 
 def addr_for(transport: str, prefix: str, idx: int, base_port: int) -> str:
     if transport == "tcp":
-        offsets = {"c": 0, "t": 100, "z": 200, "q": 300, "s": 400}
+        offsets = {"c": 0, "t": 100, "z": 200, "q": 300, "s": 400, "r": 1000}
         return str(base_port + offsets.get(prefix, 0) + idx)
     if transport == "ws":
-        offsets = {"c": 500, "t": 600, "z": 700, "q": 800, "s": 900}
+        offsets = {"c": 500, "t": 600, "z": 700, "q": 800, "s": 900, "r": 1100}
         return f"ws://127.0.0.1:{base_port + offsets.get(prefix, 500) + idx}/"
     if transport == "ipc":
         return f"ipc://@omq-bench-cmp-{prefix}-{idx}"
@@ -498,30 +509,41 @@ IMPLS = {
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
     },
+    "rzmq": {
+        "prefix": "r",
+        "transports": ["tcp", "inproc", "ipc"],
+        "inproc_tput_subcmd": "inproc",
+        "inproc_lat_subcmd": "inproc-latency",
+    },
 }
 
 
-def build_peers(scope: str, ws_needed: bool):
+def build_peers(impl_names: set[str], ws_needed: bool):
     binaries = {}
     features = ["ws"] if ws_needed else []
 
-    print("==> building omq-compio bench_peer...", file=sys.stderr)
-    cargo_build("omq-compio", "bench_peer_compio", features=features or None)
-    compio_bin = str(ROOT / "target" / "release" / "bench_peer_compio")
-    binaries["omq-compio"] = compio_bin
-    binaries["omq-compio-st"] = compio_bin
+    if "omq-compio" in impl_names or "omq-compio-st" in impl_names:
+        print("==> building omq-compio bench_peer...", file=sys.stderr)
+        cargo_build("omq-compio", "bench_peer_compio", features=features or None)
+        compio_bin = str(ROOT / "target" / "release" / "bench_peer_compio")
+        if "omq-compio" in impl_names:
+            binaries["omq-compio"] = compio_bin
+        if "omq-compio-st" in impl_names:
+            binaries["omq-compio-st"] = compio_bin
 
-    print("==> building omq-tokio bench_peer...", file=sys.stderr)
-    cargo_build("omq-tokio", "bench_peer_tokio", features=features or None)
-    binaries["omq-tokio"] = str(ROOT / "target" / "release" / "bench_peer_tokio")
+    if "omq-tokio" in impl_names:
+        print("==> building omq-tokio bench_peer...", file=sys.stderr)
+        cargo_build("omq-tokio", "bench_peer_tokio", features=features or None)
+        binaries["omq-tokio"] = str(ROOT / "target" / "release" / "bench_peer_tokio")
 
-    if scope == "all":
+    if "libzmq" in impl_names:
         print("==> building libzmq bench_peer...", file=sys.stderr)
         src = ROOT / "scripts" / "libzmq_bench_peer.c"
         out = ROOT / "scripts" / "libzmq_bench_peer"
         gcc_build(src, out)
         binaries["libzmq"] = str(out)
 
+    if "zmq.rs" in impl_names:
         print("==> building zmq.rs bench_peer...", file=sys.stderr)
         zmqrs_dir = ROOT / "scripts" / "zmqrs_bench_peer"
         subprocess.run(
@@ -529,6 +551,15 @@ def build_peers(scope: str, ws_needed: bool):
             cwd=zmqrs_dir, check=True,
         )
         binaries["zmq.rs"] = str(zmqrs_dir / "target" / "release" / "zmqrs_bench_peer")
+
+    if "rzmq" in impl_names:
+        print("==> building rzmq bench_peer...", file=sys.stderr)
+        rzmq_dir = ROOT / "scripts" / "rzmq_bench_peer"
+        subprocess.run(
+            ["cargo", "build", "--release", "-q"],
+            cwd=rzmq_dir, check=True,
+        )
+        binaries["rzmq"] = str(rzmq_dir / "target" / "release" / "rzmq_bench_peer")
 
     return binaries
 
@@ -540,6 +571,9 @@ def run_benchmarks(
     run_latency: bool,
     base_port: int,
     run_id: str,
+    latency_iterations: int = LATENCY_ITERATIONS,
+    latency_warmup: int = LATENCY_WARMUP,
+    latency_timeout: int = LATENCY_TIMEOUT,
 ):
     for transport in transports:
         active = {
@@ -598,7 +632,10 @@ def run_benchmarks(
                     addr = addr_for(transport, prefix, idx + len(sizes), base_port)
                     subcmd = impl_def.get("inproc_lat_subcmd", "inproc-latency")
                     result = run_latency_cell(binary, transport, addr, size,
-                                             inproc_subcmd=subcmd)
+                                             inproc_subcmd=subcmd,
+                                             iterations=latency_iterations,
+                                             warmup=latency_warmup,
+                                             timeout=latency_timeout)
                     cells[name] = result
                     if result:
                         append_jsonl({
@@ -629,8 +666,9 @@ def run_benchmarks(
 def main():
     parser = argparse.ArgumentParser(description="Run comparison benchmarks")
     parser.add_argument(
-        "--scope", choices=["omq", "all"], default="all",
-        help="omq = omq-compio + omq-tokio only; all = include libzmq + zmq.rs",
+        "--impl", action="append", dest="impls",
+        choices=list(IMPLS.keys()),
+        help="implementation(s) to benchmark (default: all)",
     )
     parser.add_argument(
         "--transport", action="append",
@@ -644,6 +682,18 @@ def main():
     parser.add_argument(
         "--no-latency", action="store_true",
         help="skip REQ/REP latency benchmarks (on by default)",
+    )
+    parser.add_argument(
+        "--latency-iterations", type=int, default=LATENCY_ITERATIONS,
+        help=f"measured round-trips per latency cell (default: {LATENCY_ITERATIONS})",
+    )
+    parser.add_argument(
+        "--latency-warmup", type=int, default=LATENCY_WARMUP,
+        help=f"warmup round-trips before measuring (default: {LATENCY_WARMUP})",
+    )
+    parser.add_argument(
+        "--latency-timeout", type=int, default=LATENCY_TIMEOUT,
+        help=f"timeout in seconds for latency subprocess (default: {LATENCY_TIMEOUT})",
     )
     parser.add_argument(
         "--update-markdown", action="store_true",
@@ -665,23 +715,25 @@ def main():
     run_latency = not args.no_latency
     ws_needed = "ws" in transports
 
-    binaries = build_peers(args.scope, ws_needed)
+    impl_names = set(args.impls) if args.impls else set(IMPLS.keys())
 
-    omq_ver = cargo_version("omq-compio")
-    if args.scope == "all":
-        zmq_ver = libzmq_version()
-        zmqrs_ver = cargo_version(
-            "zeromq",
-            manifest=ROOT / "scripts" / "zmqrs_bench_peer" / "Cargo.toml",
-        )
-        print(
-            f"omq {omq_ver} vs libzmq {zmq_ver} vs zmq.rs {zmqrs_ver}",
-            file=sys.stderr,
-        )
-    else:
-        print(f"omq {omq_ver} (omq-only refresh)", file=sys.stderr)
+    binaries = build_peers(impl_names, ws_needed)
 
-    run_benchmarks(binaries, transports, sizes, run_latency, args.base_port, run_id)
+    versions = []
+    if impl_names & {"omq-compio", "omq-compio-st", "omq-tokio"}:
+        versions.append(f"omq {cargo_version('omq-compio')}")
+    if "libzmq" in impl_names:
+        versions.append(f"libzmq {libzmq_version()}")
+    if "zmq.rs" in impl_names:
+        versions.append(f"zmq.rs {cargo_version('zeromq', manifest=ROOT / 'scripts' / 'zmqrs_bench_peer' / 'Cargo.toml')}")
+    if "rzmq" in impl_names:
+        versions.append(f"rzmq {cargo_version('rzmq', manifest=ROOT / 'scripts' / 'rzmq_bench_peer' / 'Cargo.toml')}")
+    print(" vs ".join(versions), file=sys.stderr)
+
+    run_benchmarks(binaries, transports, sizes, run_latency, args.base_port, run_id,
+                   latency_iterations=args.latency_iterations,
+                   latency_warmup=args.latency_warmup,
+                   latency_timeout=args.latency_timeout)
 
     if args.update_markdown:
         update_comparisons_md(transports)
