@@ -32,7 +32,12 @@ pub(crate) struct Ring<T> {
     pub(crate) flush: Padded<AtomicUsize>,
 }
 
+// SAFETY: Ring<T> is Send because all shared mutable state is accessed through
+// atomics (head, flush) and UnsafeCell slots follow the SPSC protocol: the
+// producer writes tail..flush, the consumer reads head..flush, non-overlapping.
 unsafe impl<T: Send> Send for Ring<T> {}
+// SAFETY: Ring<T> is Sync for the same reason: concurrent access is mediated
+// by atomics and the SPSC single-producer/single-consumer invariant.
 unsafe impl<T: Send> Sync for Ring<T> {}
 
 impl<T> Ring<T> {
@@ -134,10 +139,11 @@ impl<T> Ring<T> {
     pub(crate) fn consumer_len(&self, head: usize) -> usize {
         self.flush.0.load(Ordering::Acquire).wrapping_sub(head)
     }
-}
 
-impl<T> Drop for Ring<T> {
-    fn drop(&mut self) {
+    /// Drop all items between head and flush. Must only be called with
+    /// exclusive access (i.e. in a `Drop` impl or when no concurrent
+    /// readers/writers exist).
+    pub(crate) fn drop_remaining(&mut self) {
         let head = *self.head.0.get_mut();
         let flush = *self.flush.0.get_mut();
         for i in head..flush {
@@ -145,6 +151,12 @@ impl<T> Drop for Ring<T> {
                 self.buf[i & self.mask].get_mut().assume_init_drop();
             }
         }
+    }
+}
+
+impl<T> Drop for Ring<T> {
+    fn drop(&mut self) {
+        self.drop_remaining();
     }
 }
 
@@ -172,6 +184,8 @@ impl<T> Producer<T> {
     }
 }
 
+// SAFETY: Producer<T> is Send because it is single-owner (not Sync) and the
+// underlying Ring is Send+Sync. Moving the producer to another thread is safe.
 unsafe impl<T: Send> Send for Producer<T> {}
 
 /// Receiving half. `Send` but not `Sync`.
@@ -189,6 +203,8 @@ impl<T> Consumer<T> {
     }
 }
 
+// SAFETY: Consumer<T> is Send because it is single-owner (not Sync) and the
+// underlying Ring is Send+Sync. Moving the consumer to another thread is safe.
 unsafe impl<T: Send> Send for Consumer<T> {}
 
 /// Create a bounded SPSC ring with the given capacity (rounded up to

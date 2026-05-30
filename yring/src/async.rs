@@ -18,21 +18,17 @@ struct AsyncRing<T> {
     waker: Padded<AtomicWaker>,
 }
 
+// SAFETY: AsyncRing<T> is Send because the inner Ring<T> is Send and
+// AtomicWaker is Send+Sync.
 unsafe impl<T: Send> Send for AsyncRing<T> {}
+// SAFETY: AsyncRing<T> is Sync for the same reasons as Ring<T> (atomics +
+// SPSC protocol for slot access) plus AtomicWaker which is Sync.
 unsafe impl<T: Send> Sync for AsyncRing<T> {}
 
 impl<T> Drop for AsyncRing<T> {
     fn drop(&mut self) {
-        let head = *self.ring.head.0.get_mut();
-        let flush = *self.ring.flush.0.get_mut();
-        for i in head..flush {
-            unsafe {
-                self.ring.buf[i & self.ring.mask]
-                    .get_mut()
-                    .assume_init_drop();
-            }
-        }
-        // Zero out the ring's counters so its own Drop doesn't double-free.
+        self.ring.drop_remaining();
+        // Zero out counters so Ring::Drop is a no-op (no double-free).
         *self.ring.head.0.get_mut() = 0;
         *self.ring.flush.0.get_mut() = 0;
     }
@@ -45,6 +41,8 @@ pub struct AsyncProducer<T> {
     cached_head: usize,
 }
 
+// SAFETY: AsyncProducer<T> is Send because it is single-owner (not Sync) and
+// the underlying AsyncRing is Send+Sync.
 unsafe impl<T: Send> Send for AsyncProducer<T> {}
 
 /// Async receiving half. Implements [`Stream`].
@@ -54,6 +52,8 @@ pub struct AsyncConsumer<T> {
     cached_flush: usize,
 }
 
+// SAFETY: AsyncConsumer<T> is Send because it is single-owner (not Sync) and
+// the underlying AsyncRing is Send+Sync.
 unsafe impl<T: Send> Send for AsyncConsumer<T> {}
 
 /// Create an async bounded SPSC ring with the given capacity (rounded up to
