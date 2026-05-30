@@ -20,6 +20,7 @@ COLORS = {
     "omq-compio-st": "#8b5cf6",
     "omq-tokio": "#f97316",
     "zmq.rs": "#2563eb",
+    "rzmq": "#10b981",
 }
 
 LABELS = {
@@ -28,6 +29,7 @@ LABELS = {
     "omq-compio-st": "omq-compio (ST)",
     "omq-tokio": "omq-tokio",
     "zmq.rs": "zmq.rs v0.6.0",
+    "rzmq": "rzmq v0.5.15",
 }
 
 
@@ -240,7 +242,7 @@ def draw_throughput_panel(
     L.append(svg_text(40, mid_y, "msg/s", weight="600", rotate=-90))
 
     # dashed msg/s lines
-    draw_order = [name for name in ["zmq.rs", "libzmq", "omq-tokio", "omq-compio-st", "omq-compio"]
+    draw_order = [name for name in ["rzmq", "zmq.rs", "libzmq", "omq-tokio", "omq-compio-st", "omq-compio"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -305,7 +307,7 @@ def draw_latency_panel(
     mid_y = (y_top + y_bot) / 2
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
-    draw_order = [name for name in ["libzmq", "omq-tokio", "zmq.rs", "omq-compio-st", "omq-compio"]
+    draw_order = [name for name in ["libzmq", "omq-tokio", "rzmq", "zmq.rs", "omq-compio-st", "omq-compio"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -441,7 +443,7 @@ def main():
     FIXED_INPROC_LAT_MAX = 25.0
 
     # TCP chart (4 impls)
-    tcp_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs"]
+    tcp_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
     tcp_data = load_data("tcp", tcp_impls)
 
     if tcp_data["sizes"]:
@@ -456,7 +458,7 @@ def main():
         print("No TCP data found", file=sys.stderr)
 
     # IPC chart (4 impls, same as TCP)
-    ipc_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs"]
+    ipc_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
     ipc_data = load_data("ipc", ipc_impls)
 
     if ipc_data["sizes"]:
@@ -471,7 +473,7 @@ def main():
         print("No IPC data found", file=sys.stderr)
 
     # Inproc chart (4 impls: libzmq, compio mt+st, tokio; no zmq.rs)
-    inproc_impls = ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio"]
+    inproc_impls = ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio", "rzmq"]
     inproc_data = load_data("inproc", inproc_impls)
 
     if inproc_data["sizes"]:
