@@ -1,18 +1,16 @@
 //! Pure-Rust ZeroMQ. Wire-compatible with libzmq.
 //!
 //! `omq` is a thin facade that re-exports a backend chosen at build
-//! time. The default `compio-backend` feature pulls in
-//! [`omq-compio`](https://crates.io/crates/omq-compio), a
-//! single-thread io_uring (Linux), IOCP (Windows), or kqueue (macOS)
-//! runtime; the alternative
-//! `tokio-backend` feature swaps in
+//! time. The default `tokio-backend` feature pulls in
 //! [`omq-tokio`](https://crates.io/crates/omq-tokio), a multi-thread
-//! mio/tokio runtime. The two are mutually exclusive — enabling
-//! both is a compile error. The public `Socket` / `Endpoint` /
-//! `Options` / `Message` API is identical either way, verified in
-//! lockstep by per-backend `coverage_matrix` test suites plus a
-//! cross-runtime `interop_compio` ZMTP-on-the-wire test in the
-//! repository.
+//! mio/tokio runtime; the alternative `compio-backend` feature swaps in
+//! [`omq-compio`](https://crates.io/crates/omq-compio), a
+//! single-thread io_uring (Linux) or IOCP (Windows) runtime. The two
+//! are mutually exclusive. Enabling both is a compile error. The public
+//! `Socket` / `Endpoint` / `Options` / `Message` API is identical
+//! either way, verified in lockstep by per-backend `coverage_matrix`
+//! test suites plus a cross-runtime `interop_compio` ZMTP-on-the-wire
+//! test in the repository.
 //!
 //! # Example
 //!
@@ -35,28 +33,29 @@
 //! # Picking a backend
 //!
 //! ```toml
-//! # Default: compio (io_uring on Linux, IOCP on Windows, kqueue on
-//! # macOS). Single-thread by design — instantiate one runtime per
-//! # core for thread-per-core.
+//! # Default: tokio (multi-thread).
 //! [dependencies]
 //! omq = "0"
 //!
-//! # Alternative: tokio (multi-thread by default).
+//! # Alternative: compio (single-thread, io_uring on Linux, IOCP on
+//! # Windows). Instantiate one runtime per core for thread-per-core.
 //! [dependencies]
-//! omq = { version = "0", default-features = false, features = ["tokio-backend"] }
+//! omq = { version = "0", default-features = false, features = ["compio-backend"] }
 //! ```
 //!
 //! # Cargo features
 //!
 //! All optional, all opt-in:
 //!
-//! - `compio-backend` — (default) compio runtime backend.
-//! - `tokio-backend` — tokio runtime backend (mutually exclusive with compio).
-//! - `curve` — CURVE encrypted-handshake mechanism (RFC 26).
-//! - `blake3zmq` — omq-native AEAD (X25519 + BLAKE3 + ChaCha20).
-//! - `lz4` — `lz4+tcp://` compression transport.
-//! - `zstd` — `zstd+tcp://` compression transport.
-//! - `priority` — strict per-pipe priority on `Socket::connect_with`.
+//! - `tokio-backend` (default) -- tokio runtime backend.
+//! - `compio-backend` -- compio runtime backend (mutually exclusive with tokio).
+//! - `curve` -- CURVE encrypted-handshake mechanism (RFC 26).
+//! - `blake3zmq` -- omq-native AEAD (X25519 + BLAKE3 + ChaCha20).
+//! - `plain` -- PLAIN authentication mechanism (RFC 24).
+//! - `lz4` -- `lz4+tcp://` compression transport.
+//! - `zstd` -- `zstd+tcp://` compression transport.
+//! - `ws` -- WebSocket transport (`ws://`, `wss://`).
+//! - `priority` -- strict per-pipe priority on `Socket::connect_with`.
 //!
 //! See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md)
 //! for throughput / latency tables.
@@ -76,7 +75,6 @@ compile_error!(
 );
 
 #[cfg(feature = "compio-backend")]
-#[allow(ambiguous_glob_reexports)]
 pub use omq_compio::*;
 
 #[cfg(feature = "tokio-backend")]

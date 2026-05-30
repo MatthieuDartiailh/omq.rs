@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Pure Rust ØMQ/ZeroMQ. Facade over omq-tokio (default) or omq-compio. Wire-compatible with libzmq."
 readme = "README.md"
-keywords = ["zeromq", "zmq", "messaging", "networking", "async"]
+keywords = ["zeromq", "high-performance", "messaging", "ipc", "async"]
 categories = ["network-programming", "asynchronous"]
 
 [lints]

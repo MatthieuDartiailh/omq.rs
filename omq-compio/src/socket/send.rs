@@ -21,8 +21,6 @@ use omq_proto::proto::SocketType;
 use omq_proto::routing::{SendCategory, send_category};
 
 #[cfg(not(feature = "priority"))]
-use crate::socket::encoded_queue::FLAT_THRESHOLD;
-#[cfg(not(feature = "priority"))]
 use crate::socket::inner::{CachedPeerRoute, DirectIoState};
 #[cfg(not(feature = "priority"))]
 use crate::transport::driver::DriverCommand;
@@ -69,27 +67,16 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
             return Ok(false);
         }
-        let msg_total = msg.byte_len();
         #[cfg(feature = "ws")]
         if state.is_ws {
-            eq.encode_and_push_flat_ws(msg, state.ws_masked);
+            eq.encode_ws(msg, state.ws_masked);
             drop(eq);
-            state.direct_msg_count.set(state.direct_msg_count.get() + 1);
-            if state.driver_in_select.get() {
-                state.transmit_ready.notify(1);
-            }
+            state.signal_encoded();
             return Ok(true);
         }
-        if msg_total < FLAT_THRESHOLD {
-            eq.encode_and_push_flat(msg);
-        } else {
-            eq.encode_and_push(msg);
-        }
+        eq.encode_auto(msg);
         drop(eq);
-        state.direct_msg_count.set(state.direct_msg_count.get() + 1);
-        if state.driver_in_select.get() {
-            state.transmit_ready.notify(1);
-        }
+        state.signal_encoded();
         return Ok(true);
     }
 
@@ -103,18 +90,9 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
             return Ok(false);
         }
-        let prefix_len = sentinel.len();
-        let msg_total: usize = msg.byte_len() + prefix_len * msg.len();
-        if msg_total < FLAT_THRESHOLD {
-            eq.encode_and_push_prefixed_flat(sentinel, msg);
-        } else {
-            eq.encode_and_push_prefixed(sentinel, msg);
-        }
+        eq.encode_prefixed_auto(sentinel, msg);
         drop(eq);
-        state.direct_msg_count.set(state.direct_msg_count.get() + 1);
-        if state.driver_in_select.get() {
-            state.transmit_ready.notify(1);
-        }
+        state.signal_encoded();
         return Ok(true);
     }
 
@@ -137,17 +115,10 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
         return Ok(false);
     }
     for wire in &wires {
-        if wire.byte_len() < FLAT_THRESHOLD {
-            eq.encode_and_push_flat(wire);
-        } else {
-            eq.encode_and_push(wire);
-        }
+        eq.encode_auto(wire);
     }
     drop(eq);
-    state.direct_msg_count.set(state.direct_msg_count.get() + 1);
-    if state.driver_in_select.get() {
-        state.transmit_ready.notify(1);
-    }
+    state.signal_encoded();
     Ok(true)
 }
 

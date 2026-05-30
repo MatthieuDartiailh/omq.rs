@@ -220,7 +220,7 @@ fn curve_handshake_and_message_roundtrip() {
     let mut server = Connection::new(
         ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
             MechanismSetup::CurveServer {
-                keypair: server_kp,
+                our_keypair: server_kp,
                 cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
                 authenticator: None,
             },
@@ -229,7 +229,7 @@ fn curve_handshake_and_message_roundtrip() {
     let mut client = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
             MechanismSetup::CurveClient {
-                keypair: client_kp,
+                our_keypair: client_kp,
                 server_public: server_pub,
             },
         ),
@@ -292,7 +292,7 @@ fn curve_command_demux() {
     let mut pub_conn = Connection::new(
         ConnectionConfig::new(Role::Server, SocketType::Pub).mechanism(
             MechanismSetup::CurveServer {
-                keypair: server_kp,
+                our_keypair: server_kp,
                 cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
                 authenticator: None,
             },
@@ -301,7 +301,7 @@ fn curve_command_demux() {
     let mut sub_conn = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Sub).mechanism(
             MechanismSetup::CurveClient {
-                keypair: client_kp,
+                our_keypair: client_kp,
                 server_public: server_pub,
             },
         ),
@@ -544,7 +544,7 @@ fn supply_payload_through_curve() {
     let mut server = Connection::new(
         ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
             MechanismSetup::CurveServer {
-                keypair: server_kp,
+                our_keypair: server_kp,
                 cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
                 authenticator: None,
             },
@@ -553,7 +553,7 @@ fn supply_payload_through_curve() {
     let mut client = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
             MechanismSetup::CurveClient {
-                keypair: client_kp,
+                our_keypair: client_kp,
                 server_public: server_pub,
             },
         ),
@@ -595,7 +595,7 @@ fn supply_payload_through_blake3zmq() {
     let mut server = Connection::new(
         ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
             MechanismSetup::Blake3ZmqServer {
-                keypair: server_kp,
+                our_keypair: server_kp,
                 cookie_keyring: std::sync::Arc::new(
                     omq_proto::proto::mechanism::blake3zmq::CookieKeyring::new(),
                 ),
@@ -606,7 +606,7 @@ fn supply_payload_through_blake3zmq() {
     let mut client = Connection::new(
         ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
             MechanismSetup::Blake3ZmqClient {
-                keypair: client_kp,
+                our_keypair: client_kp,
                 server_public: server_pub,
             },
         ),

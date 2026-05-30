@@ -3,11 +3,12 @@
 use std::ffi::c_int;
 use std::sync::Arc;
 
+use crate::consts;
 use crate::socket::OmqSocket;
 
-const ZMQ_POLLIN: libc::c_short = 1;
-const ZMQ_POLLOUT: libc::c_short = 2;
-const ZMQ_POLLERR: libc::c_short = 4;
+const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
+const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
+const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_short;
 
 /// `zmq_pollitem_t` layout compatible with libzmq.
 #[repr(C)]

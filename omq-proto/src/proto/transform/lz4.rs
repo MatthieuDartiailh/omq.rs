@@ -102,7 +102,6 @@ pub struct Lz4Encoder {
 
 // LZ4 streams are pure data; no thread-locals or globals are touched.
 unsafe impl Send for Lz4Encoder {}
-unsafe impl Sync for Lz4Encoder {}
 
 impl Drop for Lz4Encoder {
     fn drop(&mut self) {

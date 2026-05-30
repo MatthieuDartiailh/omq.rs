@@ -351,23 +351,28 @@ impl Socket {
 
             let recv_state = unsafe { &mut *self.inner().inproc_recv.get() };
             if !recv_state.consumers.is_empty() {
+                let cache = self.inner().recv_cache.get();
+                let max = self.inner().options.max_message_size;
                 let n = recv_state.consumers.len();
                 let start = recv_state.fq_index;
                 for i in 0..n {
                     let idx = (start + i) % n;
-                    if let Some(msg) = recv_state.consumers[idx].prefetch_and_pop() {
-                        recv_state.fq_index = idx + 1;
-                        if self
-                            .inner()
-                            .options
-                            .max_message_size
-                            .is_some_and(|max| msg.byte_len() > max)
-                        {
+                    let c = &mut recv_state.consumers[idx];
+                    c.prefetch();
+                    while let Some(msg) = c.pop() {
+                        if max.is_some_and(|m| msg.byte_len() > m) {
                             continue;
                         }
-                        self.inner().inproc_parked.store(false, Ordering::Release);
-                        return Ok(msg);
+                        cache.push_back(msg);
                     }
+                    c.release();
+                    if !cache.is_empty() {
+                        recv_state.fq_index = idx + 1;
+                    }
+                }
+                if let Some(msg) = cache.pop_front() {
+                    self.inner().inproc_parked.store(false, Ordering::Release);
+                    return Ok(msg);
                 }
             }
 
@@ -515,12 +520,20 @@ impl Socket {
             }
         }
         let recv_state = unsafe { &mut *inner.inproc_recv.get() };
-        let max = inner.options.max_message_size;
-        for c in &mut recv_state.consumers {
-            if let Some(msg) = c.prefetch_and_pop() {
-                if max.is_some_and(|m| msg.byte_len() > m) {
-                    continue;
+        if !recv_state.consumers.is_empty() {
+            let cache = inner.recv_cache.get();
+            let max = inner.options.max_message_size;
+            for c in &mut recv_state.consumers {
+                c.prefetch();
+                while let Some(msg) = c.pop() {
+                    if max.is_some_and(|m| msg.byte_len() > m) {
+                        continue;
+                    }
+                    cache.push_back(msg);
                 }
+                c.release();
+            }
+            if let Some(msg) = cache.pop_front() {
                 return Ok(msg);
             }
         }

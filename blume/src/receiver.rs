@@ -1,6 +1,7 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::error::{RecvError, TryRecvError};
 use crate::shared::Shared;
@@ -8,27 +9,27 @@ use crate::shared::Shared;
 /// Receiving half of a blume channel. Not cloneable (single consumer).
 pub struct Receiver<T> {
     pub(crate) shared: Arc<Shared<T>>,
-    cache: Mutex<VecDeque<T>>,
+    cache: RefCell<VecDeque<T>>,
 }
 
 impl<T> Receiver<T> {
     pub(crate) fn new(shared: Arc<Shared<T>>) -> Self {
         Self {
             shared,
-            cache: Mutex::new(VecDeque::new()),
+            cache: RefCell::new(VecDeque::new()),
         }
     }
 
     /// Try to receive one value without blocking.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        let mut cache = self.cache.lock().expect("blume: poisoned");
+        let mut cache = self.cache.borrow_mut();
         self.shared.try_recv_one(&mut cache)
     }
 
     /// Receive one value, waiting asynchronously until available.
     pub async fn recv_async(&self) -> Result<T, RecvError> {
         {
-            let mut cache = self.cache.lock().expect("blume: poisoned");
+            let mut cache = self.cache.borrow_mut();
             match self.shared.try_recv_one(&mut cache) {
                 Ok(val) => return Ok(val),
                 Err(TryRecvError::Disconnected) => return Err(RecvError),
@@ -40,7 +41,7 @@ impl<T> Receiver<T> {
             let listener = self.shared.recv_event.listen();
 
             {
-                let mut cache = self.cache.lock().expect("blume: poisoned");
+                let mut cache = self.cache.borrow_mut();
                 match self.shared.try_recv_one(&mut cache) {
                     Ok(val) => return Ok(val),
                     Err(TryRecvError::Disconnected) => return Err(RecvError),
@@ -53,16 +54,18 @@ impl<T> Receiver<T> {
     }
 
     /// Drain all pending values into `out` in one swap. Waits if empty.
+    /// Returns the number of newly drained items.
     pub async fn recv_batch(&self, out: &mut Vec<T>) -> Result<usize, RecvError> {
+        let before = out.len();
         {
-            let mut cache = self.cache.lock().expect("blume: poisoned");
+            let mut cache = self.cache.borrow_mut();
             if Self::drain_cache_into(&mut cache, out) > 0 {
-                return Ok(out.len());
+                return Ok(out.len() - before);
             }
             match self.shared.try_drain(&mut cache) {
                 Ok(true) => {
                     Self::drain_cache_into(&mut cache, out);
-                    return Ok(out.len());
+                    return Ok(out.len() - before);
                 }
                 Ok(false) => {}
                 Err(RecvError) => return Err(RecvError),
@@ -73,11 +76,11 @@ impl<T> Receiver<T> {
             let listener = self.shared.recv_event.listen();
 
             {
-                let mut cache = self.cache.lock().expect("blume: poisoned");
+                let mut cache = self.cache.borrow_mut();
                 match self.shared.try_drain(&mut cache) {
                     Ok(true) => {
                         Self::drain_cache_into(&mut cache, out);
-                        return Ok(out.len());
+                        return Ok(out.len() - before);
                     }
                     Ok(false) => {}
                     Err(RecvError) => return Err(RecvError),
@@ -90,7 +93,7 @@ impl<T> Receiver<T> {
 
     /// Whether both the local cache and the shared queue are empty.
     pub fn is_empty(&self) -> bool {
-        let cache = self.cache.lock().expect("blume: poisoned");
+        let cache = self.cache.borrow();
         cache.is_empty() && self.shared.is_send_empty()
     }
 

@@ -74,7 +74,11 @@ fn recv_batch_appends_to_existing_vec() {
         tx.try_send(10).unwrap();
         tx.try_send(20).unwrap();
         let mut out = vec![99];
-        rx.recv_batch(&mut out).await.unwrap();
+        let n = rx.recv_batch(&mut out).await.unwrap();
+        assert_eq!(
+            n, 2,
+            "return value must be newly drained count, not total vec length"
+        );
         assert_eq!(out, vec![99, 10, 20]);
     });
 }

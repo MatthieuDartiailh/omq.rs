@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Sans-I/O ZMTP codec, message types, and routing logic. Backend-agnostic core for omq-tokio / omq-compio."
 readme = "README.md"
-keywords = ["zeromq", "zmq", "protocol", "codec", "sans-io"]
+keywords = ["zeromq", "high-performance", "protocol", "codec", "sans-io"]
 categories = ["network-programming", "parser-implementations"]
 
 [lints]

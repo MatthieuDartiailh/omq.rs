@@ -32,7 +32,12 @@ pub(crate) struct Ring<T> {
     pub(crate) flush: Padded<AtomicUsize>,
 }
 
+// SAFETY: Ring<T> is Send because all shared mutable state is accessed through
+// atomics (head, flush) and UnsafeCell slots follow the SPSC protocol: the
+// producer writes tail..flush, the consumer reads head..flush, non-overlapping.
 unsafe impl<T: Send> Send for Ring<T> {}
+// SAFETY: Ring<T> is Sync for the same reason: concurrent access is mediated
+// by atomics and the SPSC single-producer/single-consumer invariant.
 unsafe impl<T: Send> Sync for Ring<T> {}
 
 impl<T> Ring<T> {
@@ -53,10 +58,92 @@ impl<T> Ring<T> {
     pub(crate) fn capacity(&self) -> usize {
         self.mask + 1
     }
-}
 
-impl<T> Drop for Ring<T> {
-    fn drop(&mut self) {
+    #[inline]
+    pub(crate) fn push(&self, tail: &mut usize, cached_head: &mut usize, val: T) -> Result<(), T> {
+        if *tail - *cached_head >= self.capacity() {
+            *cached_head = self.head.0.load(Ordering::Acquire);
+            if *tail - *cached_head >= self.capacity() {
+                return Err(val);
+            }
+        }
+        unsafe {
+            (*self.buf[*tail & self.mask].get()).write(val);
+        }
+        *tail += 1;
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn flush_to(&self, tail: usize, cached_head: &mut usize) -> FlushResult {
+        let prev_flush = self.flush.0.load(Ordering::Relaxed);
+        if tail == prev_flush {
+            return FlushResult::NothingToFlush;
+        }
+        let count = tail - prev_flush;
+        *cached_head = self.head.0.load(Ordering::Acquire);
+        let was_empty = prev_flush == *cached_head;
+        self.flush.0.store(tail, Ordering::Release);
+        FlushResult::Flushed { count, was_empty }
+    }
+
+    #[inline]
+    pub(crate) fn is_full(&self, tail: usize, cached_head: &mut usize) -> bool {
+        if tail - *cached_head >= self.capacity() {
+            *cached_head = self.head.0.load(Ordering::Acquire);
+            tail - *cached_head >= self.capacity()
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub(crate) fn producer_len(&self, tail: usize) -> usize {
+        tail.wrapping_sub(self.head.0.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    pub(crate) fn producer_is_empty(&self, tail: usize) -> bool {
+        tail == self.head.0.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn pop(&self, head: &mut usize, cached_flush: usize) -> Option<T> {
+        if *head == cached_flush {
+            return None;
+        }
+        let val = unsafe { (*self.buf[*head & self.mask].get()).assume_init_read() };
+        *head += 1;
+        Some(val)
+    }
+
+    #[inline]
+    pub(crate) fn release(&self, head: usize) {
+        self.head.0.store(head, Ordering::Release);
+    }
+
+    #[inline]
+    pub(crate) fn prefetch(&self, cached_flush: &mut usize) -> usize {
+        let new_flush = self.flush.0.load(Ordering::Acquire);
+        let count = new_flush.wrapping_sub(*cached_flush);
+        *cached_flush = new_flush;
+        count
+    }
+
+    #[inline]
+    pub(crate) fn consumer_is_empty(&self, head: usize, cached_flush: usize) -> bool {
+        head == cached_flush && self.flush.0.load(Ordering::Acquire) == head
+    }
+
+    #[inline]
+    pub(crate) fn consumer_len(&self, head: usize) -> usize {
+        self.flush.0.load(Ordering::Acquire).wrapping_sub(head)
+    }
+
+    /// Drop all items between head and flush. Must only be called with
+    /// exclusive access (i.e. in a `Drop` impl or when no concurrent
+    /// readers/writers exist).
+    pub(crate) fn drop_remaining(&mut self) {
         let head = *self.head.0.get_mut();
         let flush = *self.flush.0.get_mut();
         for i in head..flush {
@@ -64,6 +151,12 @@ impl<T> Drop for Ring<T> {
                 self.buf[i & self.mask].get_mut().assume_init_drop();
             }
         }
+    }
+}
+
+impl<T> Drop for Ring<T> {
+    fn drop(&mut self) {
+        self.drop_remaining();
     }
 }
 
@@ -91,6 +184,8 @@ impl<T> Producer<T> {
     }
 }
 
+// SAFETY: Producer<T> is Send because it is single-owner (not Sync) and the
+// underlying Ring is Send+Sync. Moving the producer to another thread is safe.
 unsafe impl<T: Send> Send for Producer<T> {}
 
 /// Receiving half. `Send` but not `Sync`.
@@ -108,6 +203,8 @@ impl<T> Consumer<T> {
     }
 }
 
+// SAFETY: Consumer<T> is Send because it is single-owner (not Sync) and the
+// underlying Ring is Send+Sync. Moving the consumer to another thread is safe.
 unsafe impl<T: Send> Send for Consumer<T> {}
 
 /// Create a bounded SPSC ring with the given capacity (rounded up to
@@ -133,31 +230,13 @@ impl<T> Producer<T> {
     /// The value is NOT visible to the consumer until [`flush`](Self::flush).
     #[inline]
     pub fn push(&mut self, val: T) -> Result<(), T> {
-        if self.tail - self.cached_head >= self.ring.capacity() {
-            self.cached_head = self.ring.head.0.load(Ordering::Acquire);
-            if self.tail - self.cached_head >= self.ring.capacity() {
-                return Err(val);
-            }
-        }
-        unsafe {
-            (*self.ring.buf[self.tail & self.ring.mask].get()).write(val);
-        }
-        self.tail += 1;
-        Ok(())
+        self.ring.push(&mut self.tail, &mut self.cached_head, val)
     }
 
     /// Make all pushed items visible to the consumer. One Release store.
     #[inline]
     pub fn flush(&mut self) -> FlushResult {
-        let prev_flush = self.ring.flush.0.load(Ordering::Relaxed);
-        if self.tail == prev_flush {
-            return FlushResult::NothingToFlush;
-        }
-        let count = self.tail - prev_flush;
-        self.cached_head = self.ring.head.0.load(Ordering::Acquire);
-        let was_empty = prev_flush == self.cached_head;
-        self.ring.flush.0.store(self.tail, Ordering::Release);
-        FlushResult::Flushed { count, was_empty }
+        self.ring.flush_to(self.tail, &mut self.cached_head)
     }
 
     /// Push + flush in one call (convenience for single-item sends).
@@ -169,12 +248,7 @@ impl<T> Producer<T> {
 
     #[inline]
     pub fn is_full(&mut self) -> bool {
-        if self.tail - self.cached_head >= self.ring.capacity() {
-            self.cached_head = self.ring.head.0.load(Ordering::Acquire);
-            self.tail - self.cached_head >= self.ring.capacity()
-        } else {
-            false
-        }
+        self.ring.is_full(self.tail, &mut self.cached_head)
     }
 
     #[inline]
@@ -184,54 +258,57 @@ impl<T> Producer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.tail
-            .wrapping_sub(self.ring.head.0.load(Ordering::Acquire))
+        self.ring.producer_len(self.tail)
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.tail == self.ring.head.0.load(Ordering::Acquire)
+        self.ring.producer_is_empty(self.tail)
     }
 }
 
 impl<T> Consumer<T> {
     /// Pop one item. Zero atomics; reads from the prefetched window.
     /// Returns `None` when the prefetched window is exhausted. Call
-    /// [`prefetch`](Self::prefetch) to load newly flushed items.
+    /// [`prefetch`](Self::prefetch) to load newly flushed items and
+    /// [`release`](Self::release) to publish consumed slots back to the
+    /// producer.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
-        if self.head == self.cached_flush {
-            return None;
-        }
-        let val = unsafe { (*self.ring.buf[self.head & self.ring.mask].get()).assume_init_read() };
-        self.head += 1;
-        // Publish consumed position so producer can reuse slots.
-        self.ring.head.0.store(self.head, Ordering::Release);
-        Some(val)
+        self.ring.pop(&mut self.head, self.cached_flush)
+    }
+
+    /// Publish consumed position so the producer can reuse slots.
+    /// One Release store. Call after draining a batch of pops.
+    #[inline]
+    pub fn release(&mut self) {
+        self.ring.release(self.head);
     }
 
     /// Load all items flushed since the last prefetch. One Acquire load.
     /// Returns the count of newly available items.
     #[inline]
     pub fn prefetch(&mut self) -> usize {
-        let new_flush = self.ring.flush.0.load(Ordering::Acquire);
-        let count = new_flush.wrapping_sub(self.cached_flush);
-        self.cached_flush = new_flush;
-        count
+        self.ring.prefetch(&mut self.cached_flush)
     }
 
-    /// Convenience: prefetch + pop. For callers that don't need batching.
+    /// Convenience: prefetch + pop + release. For callers that don't
+    /// need batching.
     #[inline]
     pub fn prefetch_and_pop(&mut self) -> Option<T> {
         if self.head == self.cached_flush {
             self.prefetch();
         }
-        self.pop()
+        let val = self.pop();
+        if val.is_some() {
+            self.release();
+        }
+        val
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.head == self.cached_flush && self.ring.flush.0.load(Ordering::Acquire) == self.head
+        self.ring.consumer_is_empty(self.head, self.cached_flush)
     }
 
     #[inline]
@@ -241,11 +318,13 @@ impl<T> Consumer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.ring
-            .flush
-            .0
-            .load(Ordering::Acquire)
-            .wrapping_sub(self.head)
+        self.ring.consumer_len(self.head)
+    }
+}
+
+impl<T> Drop for Consumer<T> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -416,6 +495,7 @@ mod tests {
                     assert_eq!(v, received);
                     received += 1;
                 }
+                c.release();
             } else {
                 std::thread::yield_now();
             }

@@ -8,12 +8,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use flume::{RecvTimeoutError, TryRecvError};
 
+use crate::consts::{ZMQ_DONTWAIT, ZMQ_SNDMORE};
 use crate::error::{ETERM, fail};
 use crate::socket::OmqSocket;
-
-// ZMQ send/recv flags.
-const ZMQ_DONTWAIT: c_int = 1;
-const ZMQ_SNDMORE: c_int = 2;
 
 /// Core send dispatch. Takes ownership of an already-constructed [`Bytes`].
 ///

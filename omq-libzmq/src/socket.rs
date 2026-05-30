@@ -13,6 +13,8 @@ use bytes::Bytes;
 use omq_compio::SocketType;
 use omq_compio::endpoint::{Endpoint, Host};
 
+use std::os::raw::c_char;
+
 use crate::context::{OmqContext, REG, next_socket_id};
 use crate::error::{ETERM, fail, map_omq_err, set_errno};
 use crate::opts::SocketOverlay;
@@ -484,21 +486,72 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     0
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
+/// Validate `sock_ptr` and `addr`, parse `addr` as a `CStr` and then as an
+/// `Endpoint`. Returns the socket reference, owned address string, and
+/// parsed endpoint on success. Also checks the context terminated flag.
+///
+/// # Safety
+///
+/// `sock_ptr` must be a valid `*mut Arc<OmqSocket>` or null (returns EFAULT).
+/// `addr` must be a valid C string pointer or null (returns EFAULT).
+unsafe fn parse_endpoint_args(
+    sock_ptr: *mut c_void,
+    addr: *const c_char,
+) -> Result<(&'static Arc<OmqSocket>, String, Endpoint), c_int> {
     if sock_ptr.is_null() || addr.is_null() {
-        return fail(libc::EFAULT);
+        return Err(libc::EFAULT);
     }
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
     if sock.ctx.terminated.load(Ordering::Acquire) {
-        return fail(ETERM);
+        return Err(ETERM);
     }
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
-        return fail(libc::EINVAL);
+        return Err(libc::EINVAL);
     };
     let addr_str = addr_str.to_owned();
-    let Ok(mut endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
-        return fail(libc::EINVAL);
+    let Ok(endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
+        return Err(libc::EINVAL);
+    };
+    Ok((sock, addr_str, endpoint))
+}
+
+/// Validate `sock_ptr` and `cstr`, parse `cstr` as a UTF-8 `CStr`.
+/// Does **not** parse an endpoint or check the terminated flag (join/leave
+/// operate on group names, not transport addresses).
+///
+/// # Safety
+///
+/// `sock_ptr` must be a valid `*mut Arc<OmqSocket>` or null.
+/// `cstr` must be a valid C string pointer or null.
+unsafe fn parse_group_args(
+    sock_ptr: *mut c_void,
+    cstr: *const c_char,
+) -> Result<(&'static Arc<OmqSocket>, Bytes), c_int> {
+    if sock_ptr.is_null() || cstr.is_null() {
+        return Err(libc::EFAULT);
+    }
+    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    let Ok(g) = unsafe { CStr::from_ptr(cstr) }.to_str() else {
+        return Err(libc::EINVAL);
+    };
+    Ok((sock, Bytes::copy_from_slice(g.as_bytes())))
+}
+
+/// Map the two-level `Result<Result<T, omq Error>, ()>` returned by
+/// `with_socket` to a C return code (0 on success).
+fn result_to_rc<T>(result: &Result<Result<T, omq_compio::error::Error>, ()>) -> c_int {
+    match result {
+        Ok(Ok(_)) => 0,
+        Ok(Err(e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
+    let (sock, addr_str, mut endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
+        Ok(t) => t,
+        Err(e) => return fail(e),
     };
 
     // ZMQ_IPV6: rewrite wildcard bind to IPv6 unspecified (dual-stack).
@@ -529,19 +582,9 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
-    if sock_ptr.is_null() || addr.is_null() {
-        return fail(libc::EFAULT);
-    }
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock.ctx.terminated.load(Ordering::Acquire) {
-        return fail(ETERM);
-    }
-    let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
-        return fail(libc::EINVAL);
-    };
-    let addr_str = addr_str.to_owned();
-    let Ok(endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
-        return fail(libc::EINVAL);
+    let (sock, addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
+        Ok(t) => t,
+        Err(e) => return fail(e),
     };
 
     ensure_materialized(sock);
@@ -565,100 +608,56 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
-    if sock_ptr.is_null() || addr.is_null() {
-        return fail(libc::EFAULT);
-    }
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock.ctx.terminated.load(Ordering::Acquire) {
-        return fail(ETERM);
-    }
-    let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
-        return fail(libc::EINVAL);
-    };
-    let addr_str = addr_str.to_owned();
-    let Ok(endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
-        return fail(libc::EINVAL);
+    let (sock, _addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
+        Ok(t) => t,
+        Err(e) => return fail(e),
     };
 
     let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
         s.unbind(endpoint).await
     });
 
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
-    }
+    result_to_rc(&result)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
-    if sock_ptr.is_null() || addr.is_null() {
-        return fail(libc::EFAULT);
-    }
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock.ctx.terminated.load(Ordering::Acquire) {
-        return fail(ETERM);
-    }
-    let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
-        return fail(libc::EINVAL);
-    };
-    let addr_str = addr_str.to_owned();
-    let Ok(endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
-        return fail(libc::EINVAL);
+    let (sock, _addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
+        Ok(t) => t,
+        Err(e) => return fail(e),
     };
 
     let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
         s.disconnect(endpoint).await
     });
 
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
-    }
+    result_to_rc(&result)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
-    if sock_ptr.is_null() || group.is_null() {
-        return fail(libc::EFAULT);
-    }
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    let Ok(g) = unsafe { CStr::from_ptr(group) }.to_str() else {
-        return fail(libc::EINVAL);
+    let (sock, g) = match unsafe { parse_group_args(sock_ptr, group) } {
+        Ok(t) => t,
+        Err(e) => return fail(e),
     };
-    let g = Bytes::copy_from_slice(g.as_bytes());
     ensure_materialized(sock);
     let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
         s.join(g).await
     });
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
-    }
+    result_to_rc(&result)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
-    if sock_ptr.is_null() || group.is_null() {
-        return fail(libc::EFAULT);
-    }
-    let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    let Ok(g) = unsafe { CStr::from_ptr(group) }.to_str() else {
-        return fail(libc::EINVAL);
+    let (sock, g) = match unsafe { parse_group_args(sock_ptr, group) } {
+        Ok(t) => t,
+        Err(e) => return fail(e),
     };
-    let g = Bytes::copy_from_slice(g.as_bytes());
     ensure_materialized(sock);
     let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
         s.leave(g).await
     });
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(ref e)) => fail(map_omq_err(e)),
-        Err(()) => fail(ETERM),
-    }
+    result_to_rc(&result)
 }
 
 /// Start monitoring events on `sock`, publishing them as two-frame messages

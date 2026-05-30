@@ -12,8 +12,8 @@ use omq_proto::proto::transform::MessageEncoder;
 
 use crate::transport::peer_io::{CancellableRecvStream, PeerIo, SharedPeerIo, WireWriter};
 
-use super::encoded_queue::EncodedQueue;
 use super::inner::{LocalStream, RecvStreamState};
+use omq_proto::encoded_queue::EncodedQueue;
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct DirectIoState {
@@ -222,6 +222,18 @@ pub(crate) async fn one_shot_recv_and_feed(
 }
 
 impl DirectIoState {
+    /// Bump the direct-encode message counter and wake the driver if it
+    /// is parked in `select_biased!`. Called after every successful
+    /// direct-encode (flat, gather, prefixed, transform, or WebSocket).
+    #[inline]
+    #[cfg_attr(feature = "priority", allow(dead_code))]
+    pub(crate) fn signal_encoded(&self) {
+        self.direct_msg_count.set(self.direct_msg_count.get() + 1);
+        if self.driver_in_select.get() {
+            self.transmit_ready.notify(1);
+        }
+    }
+
     #[inline]
     pub(crate) fn signal_eof(&self) {
         self.eof_signal.notify(usize::MAX);

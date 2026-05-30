@@ -1270,7 +1270,7 @@ mod mech_fuzz {
             let kp = CurveKeypair::generate();
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
                 MechanismSetup::CurveServer {
-                    keypair: kp,
+                    our_keypair: kp,
                     cookie_keyring: keyring.clone(),
                     authenticator: None,
                 },
@@ -1296,7 +1296,7 @@ mod mech_fuzz {
             let kp = CurveKeypair::generate();
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
                 MechanismSetup::CurveServer {
-                    keypair: kp,
+                    our_keypair: kp,
                     cookie_keyring: keyring.clone(),
                     authenticator: None,
                 },
@@ -1331,7 +1331,7 @@ mod mech_fuzz {
             let kp = Blake3ZmqKeypair::generate();
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
                 MechanismSetup::Blake3ZmqServer {
-                    keypair: kp,
+                    our_keypair: kp,
                     cookie_keyring: keyring.clone(),
                     authenticator: None,
                 },
@@ -1359,7 +1359,7 @@ mod mech_fuzz {
             let kp = Blake3ZmqKeypair::generate();
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
                 MechanismSetup::Blake3ZmqServer {
-                    keypair: kp,
+                    our_keypair: kp,
                     cookie_keyring: keyring.clone(),
                     authenticator: None,
                 },

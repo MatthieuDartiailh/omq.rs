@@ -19,8 +19,7 @@ cargo add omq --no-default-features --features compio-backend
 ## Usage
 
 ```rust
-use omq::Socket;
-use omq::prelude::*;
+use omq::{Message, Options, Socket, SocketType};
 
 let push = Socket::new(SocketType::Push, Options::default());
 push.bind("tcp://127.0.0.1:5555".parse()?).await?;

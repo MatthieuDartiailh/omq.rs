@@ -683,6 +683,19 @@ impl From<Payload> for Message {
     }
 }
 
+/// Synthesize a 9-byte routing identity for a peer that did not provide one.
+///
+/// The leading null byte marks the identity as auto-generated (libzmq
+/// convention). The remaining 8 bytes are the connection/peer sequence
+/// ID in big-endian order, so the identity stays stable for the
+/// lifetime of the connection and cannot collide across peers.
+pub fn generated_identity(id: u64) -> Bytes {
+    let mut buf = Vec::with_capacity(9);
+    buf.push(0);
+    buf.extend_from_slice(&id.to_be_bytes());
+    Bytes::from(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

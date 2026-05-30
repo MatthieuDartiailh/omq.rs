@@ -23,6 +23,8 @@ fn get_port(ep: &Endpoint) -> u16 {
 
 #[tokio::test]
 async fn ws_push_to_multiple_pulls() {
+    const N: usize = 30;
+
     let push = Socket::new(SocketType::Push, Options::default());
     let bound = push.bind(ws_endpoint(0)).await.unwrap();
     let port = get_port(&bound);
@@ -36,7 +38,6 @@ async fn ws_push_to_multiple_pulls() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    const N: usize = 30;
     for i in 0..N {
         push.send(Message::single(format!("m{i}"))).await.unwrap();
     }

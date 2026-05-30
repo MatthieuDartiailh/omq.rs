@@ -27,7 +27,7 @@ use flume::Receiver;
 use smallvec::SmallVec;
 
 use omq_proto::error::{Error, Result};
-use omq_proto::message::Message;
+use omq_proto::message::{Message, generated_identity};
 use omq_proto::options::Options;
 use omq_proto::proto::command::PeerProperties;
 use omq_proto::proto::connection::{Connection, ConnectionConfig, Role};
@@ -108,13 +108,6 @@ pub enum DriverCommand {
     Close,
 }
 
-fn generated_identity(connection_id: u64) -> bytes::Bytes {
-    let mut buf = Vec::with_capacity(9);
-    buf.push(0); // libzmq-style leading null marks "auto-generated"
-    buf.extend_from_slice(&connection_id.to_be_bytes());
-    bytes::Bytes::from(buf)
-}
-
 /// Build the [`SharedPeerIo`] handed to the driver and to the direct
 /// send/recv fast paths. Constructs the codec; the reader half arrives
 /// wrapped in a concrete [`WireReader`] enum so per-call dispatch is a
@@ -133,7 +126,7 @@ fn make_codec(
 ) -> Connection {
     let mut cfg = ConnectionConfig::new(role, socket_type)
         .identity(options.identity.clone())
-        .mechanism(options.mechanism.to_setup());
+        .mechanism(options.mechanism.clone());
     if let Some(n) = options.max_message_size {
         cfg = cfg.max_message_size(n);
     }
@@ -206,11 +199,7 @@ impl DriverLoopState {
             let mut eq = state.encoded_queue.borrow_mut();
             let cr = eq.total_bytes() >= cap;
             for wire in &wires {
-                if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                    eq.encode_and_push_flat(wire);
-                } else {
-                    eq.encode_and_push(wire);
-                }
+                eq.encode_auto(wire);
             }
             Ok(cr)
         } else if state.uses_crypto {
@@ -225,14 +214,10 @@ impl DriverLoopState {
             let cr = eq.total_bytes() >= cap;
             #[cfg(feature = "ws")]
             if state.is_ws {
-                eq.encode_and_push_flat_ws(m, state.ws_masked);
+                eq.encode_ws(m, state.ws_masked);
                 return Ok(cr);
             }
-            if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-                eq.encode_and_push_flat(m);
-            } else {
-                eq.encode_and_push(m);
-            }
+            eq.encode_auto(m);
             Ok(cr)
         }
     }
@@ -253,11 +238,7 @@ impl DriverLoopState {
                         drop(enc);
                         let mut eq = state.encoded_queue.borrow_mut();
                         for wire in &wires {
-                            if wire.byte_len() < crate::socket::FLAT_THRESHOLD {
-                                eq.encode_and_push_flat(wire);
-                            } else {
-                                eq.encode_and_push(wire);
-                            }
+                            eq.encode_auto(wire);
                         }
                     } else if state.uses_crypto {
                         io.codec.send_message(&m)?;
@@ -265,14 +246,10 @@ impl DriverLoopState {
                         let mut eq = state.encoded_queue.borrow_mut();
                         #[cfg(feature = "ws")]
                         if state.is_ws {
-                            eq.encode_and_push_flat_ws(&m, state.ws_masked);
+                            eq.encode_ws(&m, state.ws_masked);
                             continue;
                         }
-                        if m.byte_len() < crate::socket::FLAT_THRESHOLD {
-                            eq.encode_and_push_flat(&m);
-                        } else {
-                            eq.encode_and_push(&m);
-                        }
+                        eq.encode_auto(&m);
                     }
                 }
                 DriverCommand::SendCommand(c) => {

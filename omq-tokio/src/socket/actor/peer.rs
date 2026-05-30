@@ -244,7 +244,7 @@ impl SocketDriver {
         };
         let mut cfg = ConnectionConfig::new(role, self.socket_type)
             .identity(self.options.identity.clone())
-            .mechanism(self.options.mechanism.to_setup());
+            .mechanism(self.options.mechanism.clone());
         if let Some(n) = self.options.max_message_size {
             cfg = cfg.max_message_size(n);
         }
@@ -745,18 +745,7 @@ impl SocketDriver {
     }
 }
 
-fn is_direct_io_eligible(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Req
-            | SocketType::Rep
-            | SocketType::Dealer
-            | SocketType::Router
-            | SocketType::Client
-            | SocketType::Server
-            | SocketType::Pair
-    )
-}
+use crate::routing::is_direct_io_eligible;
 
 fn can_bypass_actor_recv(t: SocketType) -> bool {
     matches!(

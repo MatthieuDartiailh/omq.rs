@@ -9,7 +9,7 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use super::{Authenticator, MechanismPeerInfo, MechanismStep};
+use super::{Authenticator, MechanismPeerInfo, MechanismStep, try_error_command};
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
 use crate::proto::greeting::MechanismName;
@@ -81,19 +81,8 @@ impl PlainMechanism {
         cmd: Command,
         out: &mut Vec<Command>,
     ) -> Result<MechanismStep> {
-        if let Command::Unknown { ref name, ref body } = cmd
-            && name.as_ref() == b"ERROR"
-        {
-            let reason = if body.is_empty() {
-                String::new()
-            } else {
-                let reason_len = body[0] as usize;
-                let end = (1 + reason_len).min(body.len());
-                String::from_utf8_lossy(&body[1..end]).into_owned()
-            };
-            return Err(Error::HandshakeFailed(format!(
-                "PLAIN peer sent ERROR: {reason}"
-            )));
+        if let Some(err) = try_error_command(&cmd, "PLAIN") {
+            return Err(err);
         }
         match self {
             Self::Client(c) => c.on_command(cmd, out),

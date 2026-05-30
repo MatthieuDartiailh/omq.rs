@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 
 use bytes::{Bytes, BytesMut};
-use omq_proto::message::Message;
-use omq_proto::proto::frame;
 
-use super::driver::FLAT_THRESHOLD;
+use crate::message::Message;
+use crate::proto::frame;
 
-pub(crate) struct EncodedQueue {
+pub const FLAT_THRESHOLD: usize = 64 * 1024;
+
+pub struct EncodedQueue {
     chunks: VecDeque<Bytes>,
     total_bytes: usize,
     scratch: BytesMut,
@@ -23,7 +24,7 @@ impl std::fmt::Debug for EncodedQueue {
 }
 
 impl EncodedQueue {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             chunks: VecDeque::with_capacity(32),
             total_bytes: 0,
@@ -32,8 +33,12 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.chunks.is_empty() && self.flat_buf.is_empty()
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     fn flush_flat_to_chunks(&mut self) {
@@ -42,13 +47,13 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn encode_flat(&mut self, msg: &Message) {
+    pub fn encode_flat(&mut self, msg: &Message) {
         let before = self.flat_buf.len();
         frame::encode_message_flat(msg, &mut self.flat_buf);
         self.total_bytes += self.flat_buf.len() - before;
     }
 
-    pub(crate) fn encode_gather(&mut self, msg: &Message) {
+    pub fn encode_gather(&mut self, msg: &Message) {
         self.flush_flat_to_chunks();
         let before = self.chunks.len();
         frame::encode_message_gather(msg, &mut self.chunks, &mut self.scratch);
@@ -57,7 +62,24 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn encode(&mut self, msg: &Message) {
+    #[cfg(feature = "ws")]
+    pub fn encode_ws(&mut self, msg: &Message, masked: bool) {
+        let before = self.flat_buf.len();
+        if masked {
+            frame::encode_message_flat_ws_masked(msg, &mut self.flat_buf);
+        } else {
+            frame::encode_message_flat_ws(msg, &mut self.flat_buf);
+        }
+        self.total_bytes += self.flat_buf.len() - before;
+    }
+
+    pub fn encode_prefixed_flat(&mut self, prefix: &Bytes, msg: &Message) {
+        let before = self.flat_buf.len();
+        frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);
+        self.total_bytes += self.flat_buf.len() - before;
+    }
+
+    pub fn encode_auto(&mut self, msg: &Message) {
         if msg.byte_len() < FLAT_THRESHOLD {
             self.encode_flat(msg);
         } else {
@@ -65,27 +87,15 @@ impl EncodedQueue {
         }
     }
 
-    #[cfg(feature = "ws")]
-    pub(crate) fn encode_ws(&mut self, msg: &Message) {
-        let before = self.flat_buf.len();
-        frame::encode_message_flat_ws(msg, &mut self.flat_buf);
-        self.total_bytes += self.flat_buf.len() - before;
+    pub fn encode_prefixed_auto(&mut self, prefix: &Bytes, msg: &Message) {
+        if msg.byte_len() + prefix.len() * msg.len() < FLAT_THRESHOLD {
+            self.encode_prefixed_flat(prefix, msg);
+        } else {
+            self.encode_prefixed_gather(prefix, msg);
+        }
     }
 
-    #[cfg(feature = "ws")]
-    pub(crate) fn encode_ws_masked(&mut self, msg: &Message) {
-        let before = self.flat_buf.len();
-        frame::encode_message_flat_ws_masked(msg, &mut self.flat_buf);
-        self.total_bytes += self.flat_buf.len() - before;
-    }
-
-    pub(crate) fn encode_prefixed_flat(&mut self, prefix: &Bytes, msg: &Message) {
-        let before = self.flat_buf.len();
-        frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);
-        self.total_bytes += self.flat_buf.len() - before;
-    }
-
-    pub(crate) fn encode_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
+    pub fn encode_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
         self.flush_flat_to_chunks();
         let before = self.chunks.len();
         frame::encode_message_prefixed_gather(prefix, msg, &mut self.chunks, &mut self.scratch);
@@ -94,7 +104,15 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
+    pub fn push_raw(&mut self, chunks: Vec<Bytes>) {
+        self.flush_flat_to_chunks();
+        for chunk in chunks {
+            self.total_bytes += chunk.len();
+            self.chunks.push_back(chunk);
+        }
+    }
+
+    pub fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         let take = max_chunks.min(self.chunks.len());
         let chunk_bytes: usize = self.chunks.iter().take(take).map(Bytes::len).sum();
         buf.extend(self.chunks.drain(..take));
@@ -107,7 +125,7 @@ impl EncodedQueue {
         }
     }
 
-    pub(crate) fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
+    pub fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
         let mut consumed = 0usize;
         let mut to_restore: Vec<Bytes> = Vec::new();
         for chunk in returned {
@@ -130,6 +148,12 @@ impl EncodedQueue {
     }
 }
 
+impl Default for EncodedQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +170,6 @@ mod tests {
         let total: usize = buf.iter().map(Bytes::len).sum();
         assert!(total > 0);
 
-        // Simulate partial write of 5 bytes.
         eq.put_back_unwritten(buf, 5);
         assert!(!eq.is_empty());
 
@@ -169,11 +192,7 @@ mod tests {
         let mut buf = Vec::new();
         eq.drain_into_vec(&mut buf, 1024);
 
-        // First chunk should be the flat_buf containing the small message
-        // (flushed by encode_gather before the large message).
         assert!(buf[0].len() < 100);
-        // Then header + payload for the large message, then the second
-        // small message as a trailing flat chunk.
         assert!(buf.len() >= 3);
     }
 }

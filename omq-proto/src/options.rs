@@ -13,7 +13,7 @@ use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]
 use crate::proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey};
 #[cfg(feature = "curve")]
-use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey};
+use crate::proto::mechanism::{CurveKeypair, CurvePublicKey};
 /// Upper bound for `Options::compression_dict`. Both transports
 /// cap at 8 KiB. Inlined as a const so the `compression_dict`
 /// setter works regardless of which compression features are enabled.
@@ -80,7 +80,7 @@ pub struct Options {
     pub send_buffer_size: Option<usize>,
 
     /// Active security mechanism. Defaults to `Null` (no encryption).
-    pub mechanism: MechanismConfig,
+    pub mechanism: MechanismSetup,
 
     /// Outbound compression dictionary. Used by `lz4+tcp://` (and, when it
     /// lands, `zstd+tcp://`); ignored on plain transports. The dict is
@@ -166,174 +166,8 @@ pub struct WssTls {
     pub accept_invalid_certs: bool,
 }
 
-/// Security-mechanism configuration. NULL is the default; CURVE is
-/// available behind the opt-in `curve` feature; BLAKE3ZMQ behind
-/// the opt-in `blake3zmq` feature.
-#[derive(Clone, Debug, Default)]
-#[non_exhaustive]
-pub enum MechanismConfig {
-    /// NULL: no encryption, no peer authentication.
-    #[default]
-    Null,
-    /// CURVE server side: this socket accepts incoming CURVE clients
-    /// authenticated against `our_keypair.public`. `authenticator`
-    /// (if set) is invoked after vouch verification with the peer's
-    /// long-term public key. The cookie keyring is shared across all
-    /// server-side connections so its rotation timeline stays global.
-    #[cfg(feature = "curve")]
-    CurveServer {
-        our_keypair: CurveKeypair,
-        cookie_keyring: std::sync::Arc<crate::proto::mechanism::CurveCookieKeyring>,
-        authenticator: Option<Authenticator>,
-    },
-    /// CURVE client side: this socket connects to a server identified by
-    /// `server_public`, authenticating with `our_keypair`.
-    #[cfg(feature = "curve")]
-    CurveClient {
-        our_keypair: CurveKeypair,
-        server_public: CurvePublicKey,
-    },
-    /// BLAKE3ZMQ server side. Non-standard, omq-to-omq only. Available
-    /// behind the `blake3zmq` feature. The cookie keyring is shared
-    /// across every server-side connection on this Socket so its
-    /// 30-second rotation timeline (RFC §9.2) doesn't reset per
-    /// connection.
-    #[cfg(feature = "blake3zmq")]
-    Blake3ZmqServer {
-        our_keypair: Blake3ZmqKeypair,
-        cookie_keyring: std::sync::Arc<crate::proto::mechanism::blake3zmq::CookieKeyring>,
-        authenticator: Option<Authenticator>,
-    },
-    /// BLAKE3ZMQ client side. Available behind the `blake3zmq` feature.
-    #[cfg(feature = "blake3zmq")]
-    Blake3ZmqClient {
-        our_keypair: Blake3ZmqKeypair,
-        server_public: Blake3ZmqPublicKey,
-    },
-    /// PLAIN server side (RFC 24): authenticates incoming clients by
-    /// username + password. No encryption. The authenticator is
-    /// required — PLAIN without auth serves no purpose.
-    #[cfg(feature = "plain")]
-    PlainServer { authenticator: Authenticator },
-    /// PLAIN client side: sends username + password to the server.
-    #[cfg(feature = "plain")]
-    PlainClient { username: String, password: String },
-}
-
-impl MechanismConfig {
-    /// Wire-level mechanism name advertised in the greeting.
-    pub fn wire_name(&self) -> &'static [u8] {
-        match self {
-            Self::Null => b"NULL",
-            #[cfg(feature = "curve")]
-            Self::CurveServer { .. } | Self::CurveClient { .. } => b"CURVE",
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => b"BLAKE3",
-            #[cfg(feature = "plain")]
-            Self::PlainServer { .. } | Self::PlainClient { .. } => b"PLAIN",
-        }
-    }
-
-    /// Access the BLAKE3ZMQ server's cookie keyring so callers can
-    /// configure its rotation interval or share it across multiple
-    /// Sockets. `None` for non-BLAKE3ZMQ-server configs.
-    #[cfg(feature = "blake3zmq")]
-    pub fn blake3zmq_cookie_keyring(
-        &self,
-    ) -> Option<&std::sync::Arc<crate::proto::mechanism::blake3zmq::CookieKeyring>> {
-        match self {
-            Self::Blake3ZmqServer { cookie_keyring, .. } => Some(cookie_keyring),
-            _ => None,
-        }
-    }
-
-    /// Whether this config selects the CURVE mechanism (server or client).
-    #[cfg(feature = "curve")]
-    pub fn is_curve(&self) -> bool {
-        matches!(self, Self::CurveServer { .. } | Self::CurveClient { .. })
-    }
-
-    /// The CURVE secret key, if this config selects CURVE. `None` otherwise.
-    #[cfg(feature = "curve")]
-    pub fn curve_secret(&self) -> Option<&CurveSecretKey> {
-        match self {
-            Self::CurveServer { our_keypair, .. } | Self::CurveClient { our_keypair, .. } => {
-                Some(&our_keypair.secret)
-            }
-            Self::Null => None,
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => None,
-            #[cfg(feature = "plain")]
-            Self::PlainServer { .. } | Self::PlainClient { .. } => None,
-        }
-    }
-
-    /// Access the CURVE server's cookie keyring so callers can
-    /// configure its rotation interval or share it across multiple
-    /// Sockets. `None` for non-CURVE-server configs.
-    #[cfg(feature = "curve")]
-    pub fn curve_cookie_keyring(
-        &self,
-    ) -> Option<&std::sync::Arc<crate::proto::mechanism::CurveCookieKeyring>> {
-        match self {
-            Self::CurveServer { cookie_keyring, .. } => Some(cookie_keyring),
-            _ => None,
-        }
-    }
-
-    /// Translate to the codec-layer [`MechanismSetup`] consumed by
-    /// `Connection::new`.
-    pub fn to_setup(&self) -> MechanismSetup {
-        match self {
-            Self::Null => MechanismSetup::Null,
-            #[cfg(feature = "curve")]
-            Self::CurveServer {
-                our_keypair,
-                cookie_keyring,
-                authenticator,
-            } => MechanismSetup::CurveServer {
-                keypair: our_keypair.clone(),
-                cookie_keyring: cookie_keyring.clone(),
-                authenticator: authenticator.clone(),
-            },
-            #[cfg(feature = "curve")]
-            Self::CurveClient {
-                our_keypair,
-                server_public,
-            } => MechanismSetup::CurveClient {
-                keypair: our_keypair.clone(),
-                server_public: *server_public,
-            },
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer {
-                our_keypair,
-                cookie_keyring,
-                authenticator,
-            } => MechanismSetup::Blake3ZmqServer {
-                keypair: our_keypair.clone(),
-                cookie_keyring: cookie_keyring.clone(),
-                authenticator: authenticator.clone(),
-            },
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqClient {
-                our_keypair,
-                server_public,
-            } => MechanismSetup::Blake3ZmqClient {
-                keypair: our_keypair.clone(),
-                server_public: *server_public,
-            },
-            #[cfg(feature = "plain")]
-            Self::PlainServer { authenticator } => MechanismSetup::PlainServer {
-                authenticator: authenticator.clone(),
-            },
-            #[cfg(feature = "plain")]
-            Self::PlainClient { username, password } => MechanismSetup::PlainClient {
-                username: username.clone(),
-                password: password.clone(),
-            },
-        }
-    }
-}
+/// Backward-compatible alias. [`MechanismSetup`] is the canonical type.
+pub type MechanismConfig = MechanismSetup;
 
 impl Default for Options {
     fn default() -> Self {
@@ -354,7 +188,7 @@ impl Default for Options {
             tcp_keepalive: KeepAlive::default(),
             recv_buffer_size: None,
             send_buffer_size: None,
-            mechanism: MechanismConfig::Null,
+            mechanism: MechanismSetup::Null,
             compression_dict: None,
             compression_auto_train: true,
             compression_level: -3,
@@ -394,7 +228,7 @@ impl Options {
             )));
         }
         #[cfg(feature = "plain")]
-        if let MechanismConfig::PlainClient {
+        if let MechanismSetup::PlainClient {
             ref username,
             ref password,
         } = self.mechanism
@@ -553,13 +387,13 @@ impl Options {
     /// keypair. Incoming clients must present the matching server public
     /// key during their handshake. A fresh cookie keyring with the
     /// default rotation interval (~30 s) is created. Reach in via
-    /// [`MechanismConfig::curve_cookie_keyring`] to configure or share
+    /// [`MechanismSetup::curve_cookie_keyring`] to configure or share
     /// it. Use [`Self::authenticator`] to add a per-client admission
     /// callback.
     #[cfg(feature = "curve")]
     #[must_use]
     pub fn curve_server(mut self, our_keypair: CurveKeypair) -> Self {
-        self.mechanism = MechanismConfig::CurveServer {
+        self.mechanism = MechanismSetup::CurveServer {
             our_keypair,
             cookie_keyring: std::sync::Arc::new(crate::proto::mechanism::CurveCookieKeyring::new()),
             authenticator: None,
@@ -575,7 +409,7 @@ impl Options {
         our_keypair: CurveKeypair,
         server_public: CurvePublicKey,
     ) -> Self {
-        self.mechanism = MechanismConfig::CurveClient {
+        self.mechanism = MechanismSetup::CurveClient {
             our_keypair,
             server_public,
         };
@@ -586,13 +420,13 @@ impl Options {
     /// omq-to-omq only - peers must also be `blake3zmq`-built.
     /// A fresh cookie keyring with the default rotation interval
     /// (~30 s) is created. Reach in via
-    /// [`MechanismConfig::blake3zmq_cookie_keyring`] to configure or
+    /// [`MechanismSetup::blake3zmq_cookie_keyring`] to configure or
     /// share it. Use [`Self::blake3zmq_authenticator`] to add a
     /// per-client admission callback.
     #[cfg(feature = "blake3zmq")]
     #[must_use]
     pub fn blake3zmq_server(mut self, our_keypair: Blake3ZmqKeypair) -> Self {
-        self.mechanism = MechanismConfig::Blake3ZmqServer {
+        self.mechanism = MechanismSetup::Blake3ZmqServer {
             our_keypair,
             cookie_keyring: std::sync::Arc::new(
                 crate::proto::mechanism::blake3zmq::CookieKeyring::new(),
@@ -623,11 +457,11 @@ impl Options {
         let auth = Authenticator::new(f);
         match &mut self.mechanism {
             #[cfg(feature = "curve")]
-            MechanismConfig::CurveServer { authenticator, .. } => {
+            MechanismSetup::CurveServer { authenticator, .. } => {
                 *authenticator = Some(auth);
             }
             #[cfg(feature = "blake3zmq")]
-            MechanismConfig::Blake3ZmqServer { authenticator, .. } => {
+            MechanismSetup::Blake3ZmqServer { authenticator, .. } => {
                 *authenticator = Some(auth);
             }
             _ => panic!("authenticator requires a server-side encrypting mechanism"),
@@ -645,7 +479,7 @@ impl Options {
     where
         F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
     {
-        self.mechanism = MechanismConfig::PlainServer {
+        self.mechanism = MechanismSetup::PlainServer {
             authenticator: Authenticator::new(f),
         };
         self
@@ -660,7 +494,7 @@ impl Options {
         username: impl Into<String>,
         password: impl Into<String>,
     ) -> Self {
-        self.mechanism = MechanismConfig::PlainClient {
+        self.mechanism = MechanismSetup::PlainClient {
             username: username.into(),
             password: password.into(),
         };
@@ -676,7 +510,7 @@ impl Options {
         our_keypair: Blake3ZmqKeypair,
         server_public: Blake3ZmqPublicKey,
     ) -> Self {
-        self.mechanism = MechanismConfig::Blake3ZmqClient {
+        self.mechanism = MechanismSetup::Blake3ZmqClient {
             our_keypair,
             server_public,
         };

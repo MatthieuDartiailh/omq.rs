@@ -1,6 +1,7 @@
 //! omq-libzmq -- libzmq-compatible C interface backed by omq-compio.
 #![expect(clippy::not_unsafe_ptr_arg_deref)]
 
+mod consts;
 mod context;
 pub mod curve;
 mod error;

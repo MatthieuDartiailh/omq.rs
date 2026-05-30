@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 description = "compio backend for omq: thread-per-core io_uring/IOCP socket driver. Built on omq-proto."
 readme = "README.md"
-keywords = ["zeromq", "zmq", "io-uring", "compio", "async"]
+keywords = ["zeromq", "high-performance", "io-uring", "compio", "async"]
 categories = ["network-programming", "asynchronous"]
 
 [lib]

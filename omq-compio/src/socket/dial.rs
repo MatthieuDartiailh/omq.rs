@@ -20,6 +20,7 @@ use omq_proto::subscription::SubscriptionSet;
 
 use crate::monitor::{MonitorEvent, PeerIdent, PeerInfo};
 use crate::transport::driver::DriverCommand;
+use crate::transport::peer_io::WireWriter;
 use crate::transport::{ipc as ipc_transport, tcp as tcp_transport};
 
 use super::inner::{
@@ -164,6 +165,114 @@ async fn install_and_run(
     let _ = driver_join.await;
 }
 
+// ---- Transport-specific connect result ------------------------------------
+
+/// Everything the generic supervisor needs after a successful connect.
+struct ConnectedPeer {
+    writer: WireWriter,
+    reader: crate::transport::peer_io::WireReader,
+    peer_addr: Option<std::net::SocketAddr>,
+    peer_ident: PeerIdent,
+    has_transform: bool,
+    transform_passthrough: Option<(Bytes, usize)>,
+    encoder: Option<omq_proto::proto::transform::MessageEncoder>,
+    decoder: Option<omq_proto::proto::transform::MessageDecoder>,
+}
+
+/// Generic dial supervisor. The `connect_fn` closure performs the
+/// transport-specific connect, applies socket options, and returns a
+/// `ConnectedPeer`. Everything else (backoff, codec, `DirectIoState`,
+/// install, reconnect policy) is shared.
+#[expect(clippy::too_many_arguments)]
+async fn dial_supervisor<F, Fut>(
+    inner: Arc<SocketInner>,
+    endpoint: Endpoint,
+    role: omq_proto::proto::connection::Role,
+    policy: ReconnectPolicy,
+    handle: WirePeerHandle,
+    direct_io_handle: DirectIoHandle,
+    info_holder: Arc<RwLock<Option<PeerInfo>>>,
+    peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
+    peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
+    #[cfg(feature = "priority")] priority: u8,
+    connect_fn: F,
+) where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<ConnectedPeer, omq_proto::error::Error>>,
+{
+    let mut slot_idx: Option<usize> = None;
+    loop {
+        let Some(peer) =
+            dial_with_backoff(&inner, &endpoint, policy, slot_idx.is_none(), &connect_fn).await
+        else {
+            break;
+        };
+
+        let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+        inner
+            .monitor
+            .connected(endpoint.clone(), peer.peer_ident, conn_id);
+
+        let (_cmd_tx, cmd_rx) =
+            reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
+
+        let uses_crypto = !matches!(inner.options.mechanism, omq_proto::MechanismSetup::Null);
+        let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
+            role,
+            inner.socket_type,
+            &inner.options,
+            peer.reader,
+            peer.decoder,
+            #[cfg(feature = "ws")]
+            None,
+            #[cfg(feature = "ws")]
+            None,
+        ) else {
+            continue;
+        };
+        let state = DirectIoState::new(
+            peer_io,
+            peer.writer,
+            recv_stream,
+            peer.has_transform,
+            peer.transform_passthrough,
+            peer.encoder,
+            uses_crypto,
+            inner.options.large_message_threshold.unwrap_or(0),
+            #[cfg(feature = "ws")]
+            false,
+            #[cfg(feature = "ws")]
+            false,
+        );
+        install_and_run(
+            &inner,
+            state,
+            &direct_io_handle,
+            &handle,
+            cmd_rx,
+            &mut slot_idx,
+            &endpoint,
+            conn_id,
+            &info_holder,
+            peer.peer_addr,
+            peer_sub.as_ref(),
+            peer_groups.as_ref(),
+            #[cfg(feature = "priority")]
+            priority,
+        )
+        .await;
+
+        if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
+            break;
+        }
+    }
+    if let Some(idx) = slot_idx {
+        inner.release_slot(idx);
+    }
+}
+
+// ---- TCP ------------------------------------------------------------------
+
 /// Spawn the TCP dial supervisor and register the dialer entry.
 /// Returns immediately. See [`super::Socket::connect`] for the
 /// public-facing semantics.
@@ -180,20 +289,16 @@ pub(super) fn connect_tcp_with_reconnect(
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
     let peer_groups = radio_side_peer_groups(inner.socket_type);
-    // Placeholder sender - replaced before any driver runs.
-    // bounded(1) with the rx dropped immediately means anything
-    // that races a send before the dialer installs a real sender
-    // hits the buffered slot then errors. In practice send()
-    // blocks on on_peer_ready until the peer slot lands.
     let handle: WirePeerHandle = Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
     #[expect(clippy::arc_with_non_send_sync)]
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
     let dialer_endpoint = wrapper.clone();
 
-    let dialer_task = compio::runtime::spawn(dial_supervisor_tcp(
+    let opts = inner.options.clone();
+    let connect_endpoint = wrapper.clone();
+    let dialer_task = compio::runtime::spawn(dial_supervisor(
         inner.clone(),
         wrapper,
-        plain_tcp,
         role,
         policy,
         handle,
@@ -203,6 +308,52 @@ pub(super) fn connect_tcp_with_reconnect(
         peer_groups,
         #[cfg(feature = "priority")]
         priority,
+        move || {
+            let plain_tcp = plain_tcp.clone();
+            let opts = opts.clone();
+            let connect_endpoint = connect_endpoint.clone();
+            async move {
+                let stream = tcp_transport::connect(&plain_tcp).await?;
+                let Ok(poll_fd) = stream.to_poll_fd() else {
+                    return Err(omq_proto::error::Error::Io(std::io::Error::other(
+                        "to_poll_fd failed",
+                    )));
+                };
+                let _ = opts.tcp_keepalive.apply(&poll_fd);
+                let _ = opts.apply_socket_buffers(&poll_fd);
+                let peer_addr = stream.peer_addr().ok();
+                let peer_ident = peer_addr.map_or_else(
+                    || PeerIdent::Path(format!("{connect_endpoint}")),
+                    PeerIdent::Socket,
+                );
+                let (encoder, decoder, has_transform, transform_passthrough) =
+                    match omq_proto::proto::transform::MessageEncoder::for_endpoint(
+                        &connect_endpoint,
+                        &opts,
+                    ) {
+                        Some((enc, dec)) => {
+                            let pt = enc.passthrough_info();
+                            (Some(enc), Some(dec), true, pt)
+                        }
+                        None => (None, None, false, None),
+                    };
+                let read_clone = stream.clone();
+                let read_fd = compio::runtime::fd::AsyncFd::new(read_clone).map_err(|e| {
+                    omq_proto::error::Error::Io(std::io::Error::other(e.to_string()))
+                })?;
+                let (_, writer) = stream.into_split();
+                Ok(ConnectedPeer {
+                    writer: writer.into(),
+                    reader: read_fd.into(),
+                    peer_addr,
+                    peer_ident,
+                    has_transform,
+                    transform_passthrough,
+                    encoder,
+                    decoder,
+                })
+            }
+        },
     ));
 
     inner
@@ -215,123 +366,7 @@ pub(super) fn connect_tcp_with_reconnect(
         });
 }
 
-#[expect(clippy::too_many_arguments)]
-async fn dial_supervisor_tcp(
-    inner: Arc<SocketInner>,
-    wrapper: Endpoint,
-    plain: Endpoint,
-    role: omq_proto::proto::connection::Role,
-    policy: ReconnectPolicy,
-    handle: WirePeerHandle,
-    direct_io_handle: DirectIoHandle,
-    info_holder: Arc<RwLock<Option<PeerInfo>>>,
-    peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
-    #[cfg(feature = "priority")] priority: u8,
-) {
-    let mut slot_idx: Option<usize> = None;
-    loop {
-        let Some(stream) = dial_with_backoff(&inner, &wrapper, policy, slot_idx.is_none(), || {
-            tcp_transport::connect(&plain)
-        })
-        .await
-        else {
-            break;
-        };
-        // Apply per-socket TCP keepalive policy, if any. compio's
-        // TcpStream doesn't expose AsFd directly; `to_poll_fd()` does
-        // and shares the fd, so the original stream stays intact.
-        // We also keep the `PollFd` for the driver's read-readiness
-        // wait (avoids a dedicated read task).
-        let Ok(poll_fd) = stream.to_poll_fd() else {
-            continue;
-        };
-        let _ = inner.options.tcp_keepalive.apply(&poll_fd);
-        let _ = inner.options.apply_socket_buffers(&poll_fd);
-        let peer_addr = stream.peer_addr().ok();
-        let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        inner.monitor.connected(
-            wrapper.clone(),
-            peer_addr.map_or_else(|| PeerIdent::Path(format!("{wrapper}")), PeerIdent::Socket),
-            conn_id,
-        );
-
-        let (_cmd_tx, cmd_rx) =
-            reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
-
-        let (encoder, decoder, has_transform, transform_passthrough) =
-            match omq_proto::proto::transform::MessageEncoder::for_endpoint(
-                &wrapper,
-                &inner.options,
-            ) {
-                Some((enc, dec)) => {
-                    let pt = enc.passthrough_info();
-                    (Some(enc), Some(dec), true, pt)
-                }
-                None => (None, None, false, None),
-            };
-        let uses_crypto = !matches!(
-            inner.options.mechanism,
-            omq_proto::options::MechanismConfig::Null
-        );
-        let read_clone = stream.clone();
-        let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
-            continue;
-        };
-        let (_, writer) = stream.into_split();
-        let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
-            role,
-            inner.socket_type,
-            &inner.options,
-            read_fd.into(),
-            decoder,
-            #[cfg(feature = "ws")]
-            None,
-            #[cfg(feature = "ws")]
-            None,
-        ) else {
-            continue;
-        };
-        let state = DirectIoState::new(
-            peer_io,
-            writer.into(),
-            recv_stream,
-            has_transform,
-            transform_passthrough,
-            encoder,
-            uses_crypto,
-            inner.options.large_message_threshold.unwrap_or(0),
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
-        );
-        install_and_run(
-            &inner,
-            state,
-            &direct_io_handle,
-            &handle,
-            cmd_rx,
-            &mut slot_idx,
-            &wrapper,
-            conn_id,
-            &info_holder,
-            peer_addr,
-            peer_sub.as_ref(),
-            peer_groups.as_ref(),
-            #[cfg(feature = "priority")]
-            priority,
-        )
-        .await;
-
-        if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
-            break;
-        }
-    }
-    if let Some(idx) = slot_idx {
-        inner.release_slot(idx);
-    }
-}
+// ---- IPC ------------------------------------------------------------------
 
 /// IPC counterpart to [`connect_tcp_with_reconnect`]. Same shape;
 /// only the dial function differs.
@@ -350,7 +385,13 @@ pub(super) fn connect_ipc_with_reconnect(
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
     let dialer_endpoint = endpoint.clone();
 
-    let dialer_task = compio::runtime::spawn(dial_supervisor_ipc(
+    let ep_ident = match &endpoint {
+        Endpoint::Ipc(p) => format!("{p}"),
+        _ => String::new(),
+    };
+    let opts = inner.options.clone();
+    let connect_endpoint = endpoint.clone();
+    let dialer_task = compio::runtime::spawn(dial_supervisor(
         inner.clone(),
         endpoint,
         role,
@@ -362,6 +403,32 @@ pub(super) fn connect_ipc_with_reconnect(
         peer_groups,
         #[cfg(feature = "priority")]
         priority,
+        move || {
+            let connect_endpoint = connect_endpoint.clone();
+            let opts = opts.clone();
+            let ep_ident = ep_ident.clone();
+            async move {
+                let stream = ipc_transport::connect(&connect_endpoint).await?;
+                if let Ok(poll_fd) = stream.to_poll_fd() {
+                    let _ = opts.apply_socket_buffers(&poll_fd);
+                }
+                let read_clone = stream.clone();
+                let read_fd = compio::runtime::fd::AsyncFd::new(read_clone).map_err(|e| {
+                    omq_proto::error::Error::Io(std::io::Error::other(e.to_string()))
+                })?;
+                let (_, writer) = stream.into_split();
+                Ok(ConnectedPeer {
+                    writer: writer.into(),
+                    reader: read_fd.into(),
+                    peer_addr: None,
+                    peer_ident: PeerIdent::Path(ep_ident),
+                    has_transform: false,
+                    transform_passthrough: None,
+                    encoder: None,
+                    decoder: None,
+                })
+            }
+        },
     ));
 
     inner
@@ -372,105 +439,4 @@ pub(super) fn connect_ipc_with_reconnect(
             endpoint: dialer_endpoint,
             _task: dialer_task,
         });
-}
-
-#[expect(clippy::too_many_arguments)]
-async fn dial_supervisor_ipc(
-    inner: Arc<SocketInner>,
-    endpoint: Endpoint,
-    role: omq_proto::proto::connection::Role,
-    policy: ReconnectPolicy,
-    handle: WirePeerHandle,
-    direct_io_handle: DirectIoHandle,
-    info_holder: Arc<RwLock<Option<PeerInfo>>>,
-    peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
-    #[cfg(feature = "priority")] priority: u8,
-) {
-    let ep_ident = match &endpoint {
-        Endpoint::Ipc(p) => format!("{p}"),
-        _ => String::new(),
-    };
-    let mut slot_idx: Option<usize> = None;
-    loop {
-        let Some(stream) = dial_with_backoff(&inner, &endpoint, policy, slot_idx.is_none(), || {
-            ipc_transport::connect(&endpoint)
-        })
-        .await
-        else {
-            break;
-        };
-        if let Ok(poll_fd) = stream.to_poll_fd() {
-            let _ = inner.options.apply_socket_buffers(&poll_fd);
-        }
-        let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        inner
-            .monitor
-            .connected(endpoint.clone(), PeerIdent::Path(ep_ident.clone()), conn_id);
-
-        let (_cmd_tx, cmd_rx) =
-            reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
-
-        let uses_crypto = !matches!(
-            inner.options.mechanism,
-            omq_proto::options::MechanismConfig::Null
-        );
-        let read_clone = stream.clone();
-        let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
-            continue;
-        };
-        let (_, writer) = stream.into_split();
-        let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
-            role,
-            inner.socket_type,
-            &inner.options,
-            read_fd.into(),
-            None,
-            #[cfg(feature = "ws")]
-            None,
-            #[cfg(feature = "ws")]
-            None,
-        ) else {
-            continue;
-        };
-        let state = DirectIoState::new(
-            peer_io,
-            writer.into(),
-            recv_stream,
-            false,
-            None,
-            None,
-            uses_crypto,
-            inner.options.large_message_threshold.unwrap_or(0),
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
-        );
-
-        install_and_run(
-            &inner,
-            state,
-            &direct_io_handle,
-            &handle,
-            cmd_rx,
-            &mut slot_idx,
-            &endpoint,
-            conn_id,
-            &info_holder,
-            None,
-            peer_sub.as_ref(),
-            peer_groups.as_ref(),
-            #[cfg(feature = "priority")]
-            priority,
-        )
-        .await;
-
-        if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
-            break;
-        }
-    }
-    if let Some(idx) = slot_idx {
-        inner.release_slot(idx);
-    }
 }

@@ -70,9 +70,14 @@ pub fn hash(input: &[u8]) -> Hash {
 }
 
 /// `KDF(ctx, ikm)` - `BLAKE3-derive-key(ctx, ikm)` truncated to 32
-/// bytes (the natural output size).
-pub fn kdf(context: &str, ikm: &[u8]) -> Hash {
-    blake3::derive_key(context, ikm)
+/// bytes (the natural output size). Accepts multiple input slices to
+/// avoid heap-allocating a concatenation buffer.
+pub fn kdf(context: &str, ikm: &[&[u8]]) -> Hash {
+    let mut h = blake3::Hasher::new_derive_key(context);
+    for part in ikm {
+        h.update(part);
+    }
+    *h.finalize().as_bytes()
 }
 
 /// `KDF24(ctx, ikm)` - `BLAKE3-derive-key(ctx, ikm)` truncated to 24
@@ -81,11 +86,14 @@ pub fn kdf(context: &str, ikm: &[u8]) -> Hash {
 /// The output is the first 24 bytes of the same XOF stream that `kdf`
 /// returns 32 bytes from. Callers MUST use a distinct context string
 /// for key vs. nonce derivation (e.g. `"VOUCH key"` / `"VOUCH nonce"`)
-/// to avoid leaking a key prefix as the nonce.
-pub fn kdf24(context: &str, ikm: &[u8]) -> Nonce24 {
+/// to avoid leaking a key prefix as the nonce. Accepts multiple input
+/// slices to avoid heap-allocating a concatenation buffer.
+pub fn kdf24(context: &str, ikm: &[&[u8]]) -> Nonce24 {
     let mut out = [0u8; 24];
     let mut h = blake3::Hasher::new_derive_key(context);
-    h.update(ikm);
+    for part in ikm {
+        h.update(part);
+    }
     h.finalize_xof().fill(&mut out);
     out
 }
@@ -160,7 +168,7 @@ mod tests {
     #[test]
     fn kdf_distinct_contexts_diverge() {
         let ikm = b"input key material";
-        assert_ne!(kdf("ctx-a", ikm), kdf("ctx-b", ikm));
+        assert_ne!(kdf("ctx-a", &[ikm]), kdf("ctx-b", &[ikm]));
     }
 
     #[test]
@@ -169,8 +177,8 @@ mod tests {
         // outputs the first 32 bytes of (both with the same context +
         // ikm). The 24-byte and 32-byte outputs share a prefix.
         let ikm = b"some shared input";
-        let k32 = kdf("ctx", ikm);
-        let k24 = kdf24("ctx", ikm);
+        let k32 = kdf("ctx", &[ikm]);
+        let k24 = kdf24("ctx", &[ikm]);
         assert_eq!(&k32[..24], &k24[..]);
     }
 

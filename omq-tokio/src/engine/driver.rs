@@ -18,8 +18,8 @@ use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
 use omq_proto::proto::{Command, Connection, Event};
 
 use super::direct_io::{DirectIo, SharedWriter};
-use super::encoded_queue::EncodedQueue;
 use crate::routing::drop_queue::QueueReceiver;
+use omq_proto::encoded_queue::EncodedQueue;
 
 /// Batch-encode messages, then flush `EncodedQueue` + codec.
 macro_rules! batch_encode_flush {
@@ -63,8 +63,6 @@ fn max_batch_bytes() -> usize {
             .unwrap_or(1024 * 1024)
     })
 }
-
-pub(crate) const FLAT_THRESHOLD: usize = 64 * 1024;
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
@@ -688,11 +686,11 @@ fn encode_msg(
 ) {
     #[cfg(feature = "ws")]
     if codec.is_ws() && !codec.has_frame_transform() {
-        match codec.ws_role() {
-            Some(omq_proto::proto::connection::WsRole::Server) => eq.encode_ws(msg),
-            Some(omq_proto::proto::connection::WsRole::Client) => eq.encode_ws_masked(msg),
-            Some(_) | None => unreachable!(),
-        }
+        let masked = matches!(
+            codec.ws_role(),
+            Some(omq_proto::proto::connection::WsRole::Client)
+        );
+        eq.encode_ws(msg, masked);
         return;
     }
     if codec.has_frame_transform() {
@@ -708,18 +706,13 @@ fn encode_msg(
     if let Some((sentinel, threshold)) = passthrough
         && msg.iter().all(|b| b.len() < *threshold)
     {
-        let prefix_len = sentinel.len();
-        if msg.byte_len() + prefix_len * msg.len() < FLAT_THRESHOLD {
-            eq.encode_prefixed_flat(sentinel, msg);
-        } else {
-            eq.encode_prefixed_gather(sentinel, msg);
-        }
+        eq.encode_prefixed_auto(sentinel, msg);
     } else if let Some(enc) = encoder.as_mut() {
         for wire in enc.encode(msg).unwrap_or_default() {
-            eq.encode(&wire);
+            eq.encode_auto(&wire);
         }
     } else {
-        eq.encode(msg);
+        eq.encode_auto(msg);
     }
 }
 
@@ -855,7 +848,7 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
             biased;
             () = cancel.cancelled() => {
                 let mut w = writer.lock().await;
-                drain_on_cancel_ref(
+                drain_on_cancel(
                     inbox, shared_msg_rx, encoder, codec, eq,
                     drain_buf, &mut *w, passthrough,
                 ).await;
@@ -999,41 +992,6 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
             },
         }
     }
-}
-
-/// Like `drain_on_cancel` but takes references instead of owned values.
-#[expect(clippy::too_many_arguments)]
-async fn drain_on_cancel_ref<W: AsyncWrite + Unpin>(
-    inbox: &mut mpsc::Receiver<DriverCommand>,
-    shared_msg_rx: Option<&QueueReceiver>,
-    encoder: &mut Option<MessageEncoder>,
-    codec: &mut Connection,
-    eq: &mut EncodedQueue,
-    drain_buf: &mut Vec<Bytes>,
-    writer: &mut W,
-    passthrough: Option<&(Bytes, usize)>,
-) {
-    while let Ok(cmd) = inbox.try_recv() {
-        match cmd {
-            DriverCommand::SendMessage(msg) => {
-                encode_msg(&msg, encoder, codec, eq, passthrough);
-            }
-            DriverCommand::SendCommand(c) => {
-                let _ = codec.send_command(&c);
-            }
-            DriverCommand::Close => break,
-        }
-    }
-    if let Some(rx) = shared_msg_rx {
-        let mut drained = 0usize;
-        while let Some(msg) = rx.try_pop() {
-            encode_msg(&msg, encoder, codec, eq, passthrough);
-            drained += 1;
-        }
-        rx.release_permits(drained);
-    }
-    let _ = flush_encoded_queue(writer, eq, drain_buf).await;
-    drain_writes(writer, codec).await.ok();
 }
 
 #[cfg(test)]

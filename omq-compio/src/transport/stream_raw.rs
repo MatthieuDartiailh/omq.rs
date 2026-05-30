@@ -101,11 +101,4 @@ pub(crate) async fn run(
     let _ = in_tx.send_async(notification(&identity)).await;
 }
 
-/// Generate a 9-byte auto identity from a connection ID. Leading null
-/// byte marks it as auto-generated (libzmq convention).
-pub(crate) fn generated_identity(connection_id: u64) -> Bytes {
-    let mut buf = Vec::with_capacity(9);
-    buf.push(0);
-    buf.extend_from_slice(&connection_id.to_be_bytes());
-    Bytes::from(buf)
-}
+pub(crate) use omq_proto::message::generated_identity;

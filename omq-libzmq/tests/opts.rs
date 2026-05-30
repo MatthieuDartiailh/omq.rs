@@ -648,3 +648,28 @@ fn ipv6_req_rep() {
     zmq_close(rep);
     zmq_ctx_term(ctx);
 }
+
+/// Non-UTF-8 bytes in a Z85 key slot must not cause UB.
+///
+/// Before the fix, `read_key` called `from_utf8_unchecked` on the raw
+/// C input, which is undefined behavior if the bytes are not valid UTF-8.
+/// The fix uses `from_utf8`, returning a zeroed key on invalid input.
+#[test]
+fn curve_key_non_utf8_does_not_crash() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_REQ);
+
+    // 40 bytes with invalid UTF-8 (0xFF is never valid).
+    let bad_z85 = [0xFFu8; 40];
+    set_bytes(s, ZMQ_CURVE_SERVERKEY, &bad_z85);
+
+    // The key should remain zeroed (Z85 decode fails on non-UTF-8).
+    let mut out = [0xAA_u8; 32];
+    let mut sz = 32usize;
+    zmq_getsockopt(s, ZMQ_CURVE_SERVERKEY, out.as_mut_ptr().cast(), &mut sz);
+    assert_eq!(sz, 32);
+    assert_eq!(out, [0u8; 32]);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}

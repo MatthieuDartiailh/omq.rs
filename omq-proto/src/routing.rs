@@ -57,6 +57,29 @@ pub const fn send_category(t: SocketType) -> SendCategory {
     }
 }
 
+/// Whether this socket type accepts `Options::conflate(true)`.
+///
+/// Per libzmq's `ZMQ_CONFLATE`: the option is meaningful on patterns
+/// where the queue is just "the next message" (no envelope, no
+/// per-peer ordering invariant). REQ/REP/ROUTER/SERVER/PEER track
+/// envelopes; PAIR/CHANNEL/CLIENT carry sequence-sensitive state.
+pub const fn supports_conflate(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Push
+            | SocketType::Pull
+            | SocketType::Pub
+            | SocketType::Sub
+            | SocketType::XPub
+            | SocketType::XSub
+            | SocketType::Radio
+            | SocketType::Dish
+            | SocketType::Dealer
+            | SocketType::Scatter
+            | SocketType::Gather,
+    )
+}
+
 /// Categorize a socket type's recv routing.
 pub const fn recv_category(t: SocketType) -> RecvCategory {
     match t {

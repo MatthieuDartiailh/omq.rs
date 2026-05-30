@@ -31,50 +31,57 @@ pub mod plain;
 #[cfg(feature = "plain")]
 pub(crate) use plain::PlainMechanism;
 
-/// Mechanism setup passed to [`Connection::new`]. Equivalent in shape to
-/// `options::MechanismConfig` but lives at this layer so the codec can
-/// stay independent of `Options`.
+/// Security-mechanism configuration passed to [`Connection::new`] and
+/// stored in [`Options`](crate::options::Options). NULL is the default;
+/// CURVE is available behind the `curve` feature; BLAKE3ZMQ behind
+/// `blake3zmq`.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub enum MechanismSetup {
+    /// NULL: no encryption, no peer authentication.
     #[default]
     Null,
+    /// CURVE server side: this socket accepts incoming CURVE clients
+    /// authenticated against `our_keypair.public`. `authenticator`
+    /// (if set) is invoked after vouch verification with the peer's
+    /// long-term public key. The cookie keyring is shared across all
+    /// server-side connections so its rotation timeline stays global.
     #[cfg(feature = "curve")]
     CurveServer {
-        keypair: CurveKeypair,
-        /// Shared cookie keyring for periodic rotation. Concurrent
-        /// server-side handshakes share the rotation timeline; the
-        /// server is stateless between WELCOME and INITIATE.
+        our_keypair: CurveKeypair,
         cookie_keyring: std::sync::Arc<CurveCookieKeyring>,
-        /// Optional callback invoked after vouch verification with the
-        /// peer's long-term public key. `None` accepts every
-        /// cryptographically-valid client.
         authenticator: Option<Authenticator>,
     },
+    /// CURVE client side: this socket connects to a server identified by
+    /// `server_public`, authenticating with `our_keypair`.
     #[cfg(feature = "curve")]
     CurveClient {
-        keypair: CurveKeypair,
+        our_keypair: CurveKeypair,
         server_public: CurvePublicKey,
     },
+    /// BLAKE3ZMQ server side. Non-standard, omq-to-omq only. Available
+    /// behind the `blake3zmq` feature. The cookie keyring is shared
+    /// across every server-side connection on this Socket so its
+    /// 30-second rotation timeline (RFC section 9.2) doesn't reset per
+    /// connection.
     #[cfg(feature = "blake3zmq")]
     Blake3ZmqServer {
-        keypair: Blake3ZmqKeypair,
-        /// Shared cookie keyring for periodic rotation per RFC §9.2.
-        /// `SocketDriver` attaches a per-Socket keyring so concurrent
-        /// server-side handshakes share the rotation timeline.
+        our_keypair: Blake3ZmqKeypair,
         cookie_keyring: std::sync::Arc<blake3zmq::CookieKeyring>,
-        /// Optional authenticator: callback invoked after vouch
-        /// verification to admit or reject the client by long-term
-        /// public key. `None` accepts every cryptographically-valid
-        /// client (server-only mode).
         authenticator: Option<Authenticator>,
     },
+    /// BLAKE3ZMQ client side. Available behind the `blake3zmq` feature.
     #[cfg(feature = "blake3zmq")]
     Blake3ZmqClient {
-        keypair: Blake3ZmqKeypair,
+        our_keypair: Blake3ZmqKeypair,
         server_public: Blake3ZmqPublicKey,
     },
+    /// PLAIN server side (RFC 24): authenticates incoming clients by
+    /// username + password. No encryption. The authenticator is
+    /// required. PLAIN without auth serves no purpose.
     #[cfg(feature = "plain")]
     PlainServer { authenticator: Authenticator },
+    /// PLAIN client side: sends username + password to the server.
     #[cfg(feature = "plain")]
     PlainClient { username: String, password: String },
 }
@@ -93,41 +100,85 @@ impl MechanismSetup {
         }
     }
 
+    /// Access the BLAKE3ZMQ server's cookie keyring so callers can
+    /// configure its rotation interval or share it across multiple
+    /// Sockets. `None` for non-BLAKE3ZMQ-server configs.
+    #[cfg(feature = "blake3zmq")]
+    pub fn blake3zmq_cookie_keyring(&self) -> Option<&std::sync::Arc<blake3zmq::CookieKeyring>> {
+        match self {
+            Self::Blake3ZmqServer { cookie_keyring, .. } => Some(cookie_keyring),
+            _ => None,
+        }
+    }
+
+    /// Whether this config selects the CURVE mechanism (server or client).
+    #[cfg(feature = "curve")]
+    pub fn is_curve(&self) -> bool {
+        matches!(self, Self::CurveServer { .. } | Self::CurveClient { .. })
+    }
+
+    /// The CURVE secret key, if this config selects CURVE. `None` otherwise.
+    #[cfg(feature = "curve")]
+    pub fn curve_secret(&self) -> Option<&CurveSecretKey> {
+        match self {
+            Self::CurveServer { our_keypair, .. } | Self::CurveClient { our_keypair, .. } => {
+                Some(&our_keypair.secret)
+            }
+            Self::Null => None,
+            #[cfg(feature = "blake3zmq")]
+            Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => None,
+            #[cfg(feature = "plain")]
+            Self::PlainServer { .. } | Self::PlainClient { .. } => None,
+        }
+    }
+
+    /// Access the CURVE server's cookie keyring so callers can
+    /// configure its rotation interval or share it across multiple
+    /// Sockets. `None` for non-CURVE-server configs.
+    #[cfg(feature = "curve")]
+    pub fn curve_cookie_keyring(&self) -> Option<&std::sync::Arc<CurveCookieKeyring>> {
+        match self {
+            Self::CurveServer { cookie_keyring, .. } => Some(cookie_keyring),
+            _ => None,
+        }
+    }
+
     pub(crate) fn build(self) -> SecurityMechanism {
         match self {
             Self::Null => SecurityMechanism::Null(NullMechanism::new()),
             #[cfg(feature = "curve")]
             Self::CurveServer {
-                keypair,
+                our_keypair,
                 cookie_keyring,
                 authenticator,
             } => SecurityMechanism::Curve(CurveMechanism::new_server(
-                keypair,
+                our_keypair,
                 cookie_keyring,
                 authenticator,
             )),
             #[cfg(feature = "curve")]
             Self::CurveClient {
-                keypair,
+                our_keypair,
                 server_public,
-            } => SecurityMechanism::Curve(CurveMechanism::new_client(keypair, server_public)),
+            } => SecurityMechanism::Curve(CurveMechanism::new_client(our_keypair, server_public)),
             #[cfg(feature = "blake3zmq")]
             Self::Blake3ZmqServer {
-                keypair,
+                our_keypair,
                 cookie_keyring,
                 authenticator,
             } => SecurityMechanism::Blake3Zmq(Blake3ZmqMechanism::new_server(
-                keypair,
+                our_keypair,
                 cookie_keyring,
                 authenticator,
             )),
             #[cfg(feature = "blake3zmq")]
             Self::Blake3ZmqClient {
-                keypair,
+                our_keypair,
                 server_public,
-            } => {
-                SecurityMechanism::Blake3Zmq(Blake3ZmqMechanism::new_client(keypair, server_public))
-            }
+            } => SecurityMechanism::Blake3Zmq(Blake3ZmqMechanism::new_client(
+                our_keypair,
+                server_public,
+            )),
             #[cfg(feature = "plain")]
             Self::PlainServer { authenticator } => {
                 SecurityMechanism::Plain(PlainMechanism::new_server(authenticator))
@@ -145,6 +196,28 @@ use std::sync::Arc;
 use super::command::{Command, PeerProperties};
 use super::greeting::MechanismName;
 use crate::error::{Error, Result};
+
+/// If `cmd` is an `ERROR` command, parse the length-prefixed reason
+/// string and return a `HandshakeFailed` error. Returns `None` for
+/// any other command.
+fn try_error_command(cmd: &Command, mechanism: &str) -> Option<Error> {
+    let Command::Unknown { ref name, ref body } = *cmd else {
+        return None;
+    };
+    if name.as_ref() != b"ERROR" {
+        return None;
+    }
+    let reason = if body.is_empty() {
+        String::new()
+    } else {
+        let reason_len = body[0] as usize;
+        let end = (1 + reason_len).min(body.len());
+        String::from_utf8_lossy(&body[1..end]).into_owned()
+    };
+    Some(Error::HandshakeFailed(format!(
+        "{mechanism} peer sent ERROR: {reason}"
+    )))
+}
 
 /// Information passed to an [`Authenticator`] callback after a
 /// security mechanism has cryptographically verified the peer.
@@ -167,7 +240,7 @@ pub struct MechanismPeerInfo {
 /// mechanism (CURVE, BLAKE3ZMQ). Invoked once per handshake after
 /// vouch verification, before READY is sent. Returning `false`
 /// rejects the client; the handshake aborts. `Arc`-wrapped so the
-/// closure can be cloned through `MechanismConfig`.
+/// closure can be cloned through `MechanismSetup`.
 #[derive(Clone)]
 pub struct Authenticator(
     #[cfg_attr(
@@ -368,19 +441,8 @@ impl NullMechanism {
     }
 
     fn on_command(&mut self, cmd: Command, _out: &mut Vec<Command>) -> Result<MechanismStep> {
-        if let Command::Unknown { ref name, ref body } = cmd
-            && name.as_ref() == b"ERROR"
-        {
-            let reason = if body.is_empty() {
-                String::new()
-            } else {
-                let reason_len = body[0] as usize;
-                let end = (1 + reason_len).min(body.len());
-                String::from_utf8_lossy(&body[1..end]).into_owned()
-            };
-            return Err(Error::HandshakeFailed(format!(
-                "NULL peer sent ERROR: {reason}"
-            )));
+        if let Some(err) = try_error_command(&cmd, "NULL") {
+            return Err(err);
         }
         match (self.state, cmd) {
             (NullState::AwaitingReady, Command::Ready(props)) => {

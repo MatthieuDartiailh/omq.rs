@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Bounded SPSC ring with ypipe-style batched flush/prefetch"
 readme = "README.md"
-keywords = ["spsc", "ring-buffer", "lock-free", "ypipe", "batching"]
+keywords = ["spsc", "ring-buffer", "lock-free", "zero-copy", "batching"]
 categories = ["concurrency", "data-structures"]
 
 [features]

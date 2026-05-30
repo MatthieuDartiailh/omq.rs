@@ -16,10 +16,10 @@ task -- and every type below is designed around that invariant.
 |------|------|------|
 | `Socket` | `socket/handle.rs` | Public handle; `Clone + Send + Sync`; all `&self` methods |
 | `SocketInner` | `socket/inner.rs` | Arc'd shared state: peers, recv queue, send queue, monitor |
-| `PeerSlot` | `socket/inner.rs` | One connected peer: outbound channel, DirectIoState, info |
-| `PeerOut` | `socket/inner.rs` | `Inproc { sender, identity }` or `Wire(WirePeerHandle)` |
-| `DirectIoState` | `socket/inner.rs` | Per-wire-peer I/O machinery: codec, writer, fast-path state |
-| `EncodedQueue` | `socket/inner.rs` | Zero-copy ZMTP encoder; bypasses codec mutex on hot path |
+| `PeerSlot` | `socket/peer.rs` | One connected peer: outbound channel, DirectIoState, info |
+| `PeerOut` | `socket/peer.rs` | `Inproc { sender, identity }` or `Wire(WirePeerHandle)` |
+| `DirectIoState` | `socket/direct_io.rs` | Per-wire-peer I/O machinery: codec, writer, fast-path state |
+| `EncodedQueue` | `socket/encoded_queue.rs` | Zero-copy ZMTP encoder; bypasses codec mutex on hot path |
 | `PeerIo` | `transport/peer_io.rs` | Codec + decoder + reader behind one sync mutex |
 | `RecvStream` | `transport/peer_io.rs` | Pinned multi-shot recv stream yielding `BufferRef` |
 | `WireReader` / `WireWriter` | `transport/peer_io.rs` | Enum over TCP / IPC; static dispatch, no `Box<dyn>` |
@@ -109,11 +109,13 @@ DirectIoState {
   writer: async_lock::Mutex<WireWriter>,
 
   // Fast-path send bypass (NULL mechanism, and also transform path)
-  encoded_queue: Mutex<EncodedQueue>,
+  encoded_queue: EncodedQueueCell, // Cell-based borrow flag + UnsafeCell<EncodedQueue>
   encoder: async_lock::Mutex<Option<MessageEncoder>>,  // lz4 / zstd send side
   has_transform: bool,             // selects encoder path over passthrough
   transform_passthrough: Option<(Bytes, usize)>,  // sentinel + threshold for bypass
-  driver_in_select: AtomicBool,    // driver is parked; notify to wake
+  driver_in_select: Cell<bool>,    // driver is parked; notify to wake
+  direct_msg_count: Cell<usize>,   // HWM tracking for direct-encode path
+  socket_closing: Cell<bool>,      // graceful close signal
   transmit_ready: Event,           // sender -> driver wakeup signal
 
   // Recv-direct arbitration
@@ -128,7 +130,7 @@ DirectIoState {
   large_message_threshold: usize,  // from Options; 0 = disabled
 
   // Misc
-  handshake_done: AtomicBool,
+  handshake_done: Cell<bool>,
   last_input_nanos: AtomicU64,     // heartbeat input timestamp
   hb_epoch: Instant,               // monotonic origin for hb math
 }
@@ -167,8 +169,10 @@ like uncompressed messages.
 
 When `has_transform == false` (NULL mechanism, no compression),
 `Socket::send` encodes ZMTP frames directly into an `EncodedQueue`
-under a **sync** `Mutex`. The driver drains the queue and calls
-`write_vectored` (or `write_all` for the flat region) in step 3b.
+via `EncodedQueueCell` (a `Cell<bool>` borrow flag +
+`UnsafeCell<EncodedQueue>`, with a RAII guard). The driver drains the
+queue and calls `write_vectored` (or `write_all` for the flat region)
+in step 3b.
 
 ```
 EncodedQueue {
@@ -208,8 +212,8 @@ The driver flushes via `drain_into_vec(&mut reused_vec)` (same
 write, `put_back_unwritten` slices the last partially-written `Bytes`
 and prepends unwritten chunks to the front.
 
-**Why this matters for small messages:** the sync `Mutex::try_lock` is
-much cheaper than an async mutex acquisition; frame encoding is inlined
+**Why this matters for small messages:** the `Cell`-based borrow check is
+a plain bool test (no atomic CAS); frame encoding is inlined
 without going through the codec's transmit buffer (no
 `clone_transmit_chunks` + `advance_transmit`); and packing N small
 frames into one `BytesMut` region cuts the iovec count from 2N to 1,
@@ -357,7 +361,7 @@ loop {
   //   if wrote: continue
 
   // Step 3b: flush EncodedQueue
-  //   encoded_queue.drain_into_vec(&mut drain_buf) [sync Mutex]  <- same Vec reused
+  //   encoded_queue.drain_into_vec(&mut drain_buf) [Cell borrow]  <- same Vec reused
   //   writer.write_vectored [writer lock]
   //   if partial: put_back_unwritten
   //   if wrote: continue
@@ -439,8 +443,8 @@ Two race-recheck signals harden the boundary:
 ### `try_direct_encode` (single wire peer, no transform)
 
 ```
-1. Check handshake_done (atomic load, no lock)
-2. encoded_queue.try_lock() -- if busy (driver flushing), return false
+1. Check handshake_done (Cell read)
+2. encoded_queue.try_borrow_mut() -- if busy (driver flushing), return false
 3. Check total_bytes < 512 KB cap
 4. if msg.byte_len() < FLAT_THRESHOLD: encode_flat(msg) -> flat_buf (copy, 0 Arc bumps)
    else: encode_and_push(msg) -> chunks (header Bytes + Arc-bump payload)
@@ -457,10 +461,10 @@ queue.
 
 ```
 1. encoder.try_lock() -- if busy (driver is mid-handshake drain), return false
-2. Check handshake_done (atomic load)
+2. Check handshake_done (Cell read)
 3. encoder.encode(msg) -> TransformedOut (SmallVec of wire messages)
 4. Drop encoder lock
-5. encoded_queue.try_lock() -- if busy, return false
+5. encoded_queue.try_borrow_mut() -- if busy, return false
 6. Check total_bytes < 512 KB cap
 7. For each wire message: encode_flat (< FLAT_THRESHOLD) or encode_and_push
 8. Drop encoded_queue lock
@@ -702,11 +706,11 @@ during the OneShot `read_until` if the future is dropped.
 Within one runtime the scheduler is cooperative -- no preemption, no
 context switch inside a task. This means:
 
-- `driver_in_select` is written and read without barriers in practice,
-  though `Relaxed` atomics are used for correctness across executor
-  cores.
-- `Mutex::try_lock` on `encoded_queue` almost never fails on a
-  single-core runtime because the driver cannot preempt the sender.
+- `driver_in_select`, `handshake_done`, `direct_msg_count`, and
+  `socket_closing` are plain `Cell` fields (no atomic overhead).
+- `encoded_queue` uses a `Cell<bool>` borrow flag; `try_borrow_mut()`
+  is a plain bool check, never fails on a single-core runtime because
+  the driver cannot preempt the sender.
 - All lock acquisitions are brief; none are held across yields.
 
 For multi-core deployments, instantiate one `compio::runtime::Runtime`

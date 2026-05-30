@@ -234,10 +234,10 @@ impl Endpoint {
 /// config doesn't do what they think it does.
 pub fn reject_encrypted_inproc(
     endpoint: &Endpoint,
-    mechanism: &crate::options::MechanismConfig,
+    mechanism: &crate::proto::mechanism::MechanismSetup,
 ) -> crate::error::Result<()> {
     if matches!(endpoint, Endpoint::Inproc { .. })
-        && !matches!(mechanism, crate::options::MechanismConfig::Null)
+        && !matches!(mechanism, crate::proto::mechanism::MechanismSetup::Null)
     {
         return Err(crate::error::Error::InvalidEndpoint(
             "encrypting mechanisms (CURVE / BLAKE3ZMQ) are not supported on \

@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Tokio backend for omq: TCP / IPC / inproc / UDP transports + tokio-runtime socket driver. Built on omq-proto."
 readme = "README.md"
-keywords = ["zeromq", "zmq", "tokio", "async", "networking"]
+keywords = ["zeromq", "high-performance", "tokio", "async", "ipc"]
 categories = ["network-programming", "asynchronous"]
 
 [lints]

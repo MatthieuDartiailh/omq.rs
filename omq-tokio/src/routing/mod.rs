@@ -287,25 +287,20 @@ pub(crate) fn supports_groups(t: SocketType) -> bool {
     matches!(t, SocketType::Dish)
 }
 
-/// Whether this socket type accepts `Options::conflate(true)`. Per
-/// libzmq's `ZMQ_CONFLATE`: the option is meaningful on patterns
-/// where the queue is just "the next message" (no envelope, no
-/// per-peer ordering invariant). REQ/REP/ROUTER/SERVER/PEER track
-/// envelopes; PAIR/CHANNEL/CLIENT carry sequence-sensitive state.
-pub(crate) fn supports_conflate(t: SocketType) -> bool {
+pub(crate) use omq_proto::routing::supports_conflate;
+
+/// Whether this socket type is eligible for the direct I/O send bypass
+/// (stream + codec handed off to the `Socket` handle after handshake).
+pub(crate) fn is_direct_io_eligible(t: SocketType) -> bool {
     matches!(
         t,
-        SocketType::Push
-            | SocketType::Pull
-            | SocketType::Pub
-            | SocketType::Sub
-            | SocketType::XPub
-            | SocketType::XSub
-            | SocketType::Radio
-            | SocketType::Dish
+        SocketType::Req
+            | SocketType::Rep
             | SocketType::Dealer
-            | SocketType::Scatter
-            | SocketType::Gather,
+            | SocketType::Router
+            | SocketType::Client
+            | SocketType::Server
+            | SocketType::Pair
     )
 }
 

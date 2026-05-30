@@ -352,7 +352,7 @@ struct TransportConfig {
 
 fn transport_crypto_config(
     endpoint: &Endpoint,
-    mechanism: &omq_proto::options::MechanismConfig,
+    mechanism: &omq_proto::MechanismSetup,
     role: omq_proto::proto::connection::Role,
 ) -> TransportConfig {
     #[cfg(feature = "ws")]
@@ -365,7 +365,7 @@ fn transport_crypto_config(
                 omq_proto::proto::connection::WsRole::Client
             }
         };
-        let actual_crypto = !matches!(mechanism, omq_proto::options::MechanismConfig::Null);
+        let actual_crypto = !matches!(mechanism, omq_proto::MechanismSetup::Null);
         return TransportConfig {
             uses_crypto: actual_crypto,
             ws_role: Some(ws_role),
@@ -373,7 +373,7 @@ fn transport_crypto_config(
     }
     let _ = (endpoint, role);
     TransportConfig {
-        uses_crypto: !matches!(mechanism, omq_proto::options::MechanismConfig::Null),
+        uses_crypto: !matches!(mechanism, omq_proto::MechanismSetup::Null),
         #[cfg(feature = "ws")]
         ws_role: None,
     }

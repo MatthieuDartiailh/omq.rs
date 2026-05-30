@@ -153,8 +153,8 @@ backends. Users see only `Message`. Public API: `Deref<[u8]>`
 | Runtime | Single-thread, cooperative | Multi-thread, work-stealing |
 | Linux I/O | io_uring | epoll (mio) |
 | Other platforms | macOS kqueue, Windows IOCP | macOS/BSD kqueue, Windows IOCP |
-| Hot-path send | Per-peer `EncodedQueue` under sync `try_lock` | Direct push into per-driver flume queue |
-| Hot-path recv | Inline `read` on the FD via `PollFd::read_ready` | Connection driver pushes straight into user `recv_tx` |
+| Hot-path send | Per-peer `EncodedQueue` under sync `try_lock` | Single-peer: `DirectIo` encodes into `EncodedQueue` and writes inline; multi-peer: flume queue to driver |
+| Hot-path recv | `RecvMulti` (multi-shot recv from io_uring `BUF_RING`) fed to codec inline | Connection driver pushes straight into user `recv_tx` |
 | Fan-in scaling | One runtime per worker thread (manual) | Free across cores via runtime |
 | Strengths | Small-message wire throughput, low syscall cost, low jitter | Multi-peer fan-in, no per-thread setup, ecosystem fit |
 
@@ -252,7 +252,7 @@ behind).
 | file | what |
 |------|------|
 | `src/message.rs` | `Payload` + `Message` enums, inline/single/multi variants |
-| `src/proto/connection.rs` | `Connection` -- the sans-I/O ZMTP codec + state machine |
+| `src/proto/connection/` | `Connection` -- the sans-I/O ZMTP codec + state machine (inbound, outbound, mod) |
 | `src/proto/frame.rs` | ZMTP frame encoding/decoding, `send_message_flat` |
 | `src/proto/greeting.rs` | ZMTP greeting state machine |
 | `src/proto/command.rs` | ZMTP commands (SUBSCRIBE, PING, etc.) |
@@ -270,8 +270,11 @@ behind).
 | file | what |
 |------|------|
 | `src/socket/handle.rs` | Public `Socket` handle -- send/recv/connect/bind/close |
-| `src/socket/inner.rs` | `SocketInner`, `EncodedQueue`, `DirectIoState` |
+| `src/socket/inner.rs` | `SocketInner` -- shared socket state, peer slots |
+| `src/socket/direct_io.rs` | `DirectIoState` -- per-wire-peer fast-path state |
+| `src/socket/encoded_queue.rs` | `EncodedQueue` -- flat-buf + gather-write encoder |
 | `src/socket/send.rs` | Send strategies (round-robin, fan-out, identity, priority) |
+| `src/socket/recv.rs` | Recv path, direct-recv claim arbitration |
 | `src/socket/dial.rs` | TCP/IPC dial supervisors with reconnect |
 | `src/socket/install.rs` | Peer slot installation, wire driver spawning |
 | `src/transport/driver.rs` | Per-connection driver loop (`run_connection`) |
@@ -291,12 +294,17 @@ behind).
 | `src/socket/handle.rs` | Public `Socket` handle |
 | `src/socket/dispatch.rs` | Send-side dispatch (actor bypass for non-REQ/REP) |
 | `src/engine/driver.rs` | Per-connection `ConnectionDriver` |
+| `src/engine/direct_io.rs` | Single-peer `DirectIo` send bypass with `EncodedQueue` |
+| `src/engine/encoded_queue.rs` | `EncodedQueue` -- flat-buf + gather-write encoder |
 | `src/routing/mod.rs` | `SendStrategy`/`RecvStrategy` dispatch |
 | `src/routing/round_robin.rs` | Round-robin + priority submitter |
 | `src/routing/fan_out.rs` | PUB/XPUB/RADIO fan-out with subscription filter |
 | `src/routing/identity.rs` | ROUTER/REP/SERVER identity routing |
 | `src/routing/fair_queue.rs` | PULL/SUB fair-queue recv |
 | `src/transport/tcp.rs` | TCP bind/connect with reconnect |
+| `src/transport/ipc.rs` | IPC bind/connect |
+| `src/transport/inproc.rs` | In-process transport (yring SPSC for eligible cross-thread pairs) |
+| `src/transport/udp.rs` | UDP datagram transport (RADIO/DISH) |
 | `src/transport/ws.rs` | WS bind/connect/accept + WS connection driver (feature `ws`) |
 
 ## Adding a new socket type / transport / mechanism

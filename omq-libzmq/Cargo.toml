@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 description = "libzmq-compatible C interface backed by omq (omq-compio)."
 readme = "README.md"
-keywords = ["zeromq", "zmq", "ffi", "libzmq", "c-api"]
+keywords = ["zeromq", "high-performance", "ffi", "libzmq", "c-api"]
 categories = ["network-programming", "api-bindings"]
 
 [lib]
