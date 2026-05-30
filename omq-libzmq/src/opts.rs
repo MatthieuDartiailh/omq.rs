@@ -5,7 +5,8 @@ use std::ffi::c_int;
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_compio::options::{KeepAlive, MechanismConfig, ReconnectPolicy};
+use omq_compio::MechanismSetup;
+use omq_compio::options::{KeepAlive, ReconnectPolicy};
 
 #[derive(Clone, Debug, Default)]
 #[expect(clippy::struct_excessive_bools)]
@@ -77,11 +78,11 @@ impl SocketOverlay {
             (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
         };
         let mechanism = match &self.mechanism {
-            MechanismOverlay::Null => MechanismConfig::Null,
-            MechanismOverlay::PlainServer => MechanismConfig::PlainServer {
+            MechanismOverlay::Null => MechanismSetup::Null,
+            MechanismOverlay::PlainServer => MechanismSetup::PlainServer {
                 authenticator: omq_compio::Authenticator::new(|_| true),
             },
-            MechanismOverlay::PlainClient { username, password } => MechanismConfig::PlainClient {
+            MechanismOverlay::PlainClient { username, password } => MechanismSetup::PlainClient {
                 username: username.clone(),
                 password: password.clone(),
             },
@@ -90,7 +91,7 @@ impl SocketOverlay {
                 let crypto_sec = crypto_box::SecretKey::from(*secret_key);
                 let crypto_pub = crypto_sec.public_key();
                 let pubk = omq_compio::CurvePublicKey::from_bytes(*crypto_pub.as_bytes());
-                MechanismConfig::CurveServer {
+                MechanismSetup::CurveServer {
                     our_keypair: omq_compio::CurveKeypair {
                         secret: sec,
                         public: pubk,
@@ -103,7 +104,7 @@ impl SocketOverlay {
                 public_key,
                 secret_key,
                 server_key,
-            } => MechanismConfig::CurveClient {
+            } => MechanismSetup::CurveClient {
                 our_keypair: omq_compio::CurveKeypair {
                     secret: omq_compio::CurveSecretKey::from_bytes(*secret_key),
                     public: omq_compio::CurvePublicKey::from_bytes(*public_key),

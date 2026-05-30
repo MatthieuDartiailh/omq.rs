@@ -244,7 +244,7 @@ impl SocketDriver {
         };
         let mut cfg = ConnectionConfig::new(role, self.socket_type)
             .identity(self.options.identity.clone())
-            .mechanism(self.options.mechanism.to_setup());
+            .mechanism(self.options.mechanism.clone());
         if let Some(n) = self.options.max_message_size {
             cfg = cfg.max_message_size(n);
         }

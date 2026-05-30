@@ -80,13 +80,13 @@ impl tokio::io::AsyncWrite for WsTransport {
 
 fn mechanism_subprotocol(
     #[cfg_attr(not(feature = "plain"), expect(unused_variables))]
-    mechanism: &omq_proto::options::MechanismConfig,
+    mechanism: &omq_proto::MechanismSetup,
 ) -> &'static str {
     #[cfg(feature = "plain")]
     {
-        use omq_proto::options::MechanismConfig;
+        use omq_proto::MechanismSetup;
         match mechanism {
-            MechanismConfig::PlainClient { .. } | MechanismConfig::PlainServer { .. } => {
+            MechanismSetup::PlainClient { .. } | MechanismSetup::PlainServer { .. } => {
                 return "ZWS2.0/PLAIN";
             }
             _ => {}
@@ -218,7 +218,7 @@ pub(crate) async fn connect(
     path: &str,
     tls: bool,
     accept_invalid_certs: bool,
-    mechanism: &omq_proto::options::MechanismConfig,
+    mechanism: &omq_proto::MechanismSetup,
 ) -> Result<WsConnected> {
     let addr = match host {
         omq_proto::endpoint::Host::Wildcard => {

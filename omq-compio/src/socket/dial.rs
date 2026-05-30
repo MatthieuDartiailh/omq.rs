@@ -270,10 +270,7 @@ async fn dial_supervisor_tcp(
                 }
                 None => (None, None, false, None),
             };
-        let uses_crypto = !matches!(
-            inner.options.mechanism,
-            omq_proto::options::MechanismConfig::Null
-        );
+        let uses_crypto = !matches!(inner.options.mechanism, omq_proto::MechanismSetup::Null);
         let read_clone = stream.clone();
         let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
             continue;
@@ -411,10 +408,7 @@ async fn dial_supervisor_ipc(
         let (_cmd_tx, cmd_rx) =
             reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
 
-        let uses_crypto = !matches!(
-            inner.options.mechanism,
-            omq_proto::options::MechanismConfig::Null
-        );
+        let uses_crypto = !matches!(inner.options.mechanism, omq_proto::MechanismSetup::Null);
         let read_clone = stream.clone();
         let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
             continue;

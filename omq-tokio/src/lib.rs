@@ -27,8 +27,8 @@ pub use omq_proto::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 pub use omq_proto::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, IpcPath, KeepAlive,
-    MechanismConfig, Message, MessageIter, OnMute, Options, ReconnectPolicy, Result, SocketType,
-    is_compatible,
+    MechanismConfig, MechanismSetup, Message, MessageIter, OnMute, Options, ReconnectPolicy,
+    Result, SocketType, is_compatible,
 };
 
 // Sub-modules of omq_proto are re-exported under their original

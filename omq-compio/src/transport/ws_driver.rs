@@ -134,7 +134,7 @@ pub(crate) async fn run_ws_connection(
 ) -> Result<()> {
     let mut cfg = ConnectionConfig::new(role, socket_type)
         .identity(options.identity.clone())
-        .mechanism(options.mechanism.to_setup())
+        .mechanism(options.mechanism.clone())
         .transport_mode(TransportMode::WebSocket);
     if let Some(n) = options.max_message_size {
         cfg = cfg.max_message_size(n);

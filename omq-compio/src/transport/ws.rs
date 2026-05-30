@@ -9,17 +9,17 @@ use std::net::SocketAddr;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 
+use omq_proto::MechanismSetup;
 use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::error::{Error, Result};
-use omq_proto::options::MechanismConfig;
 use omq_proto::proto::ws_handshake;
 
 fn mechanism_subprotocol(
-    #[cfg_attr(not(feature = "plain"), expect(unused_variables))] mechanism: &MechanismConfig,
+    #[cfg_attr(not(feature = "plain"), expect(unused_variables))] mechanism: &MechanismSetup,
 ) -> &'static str {
     #[cfg(feature = "plain")]
     match mechanism {
-        MechanismConfig::PlainClient { .. } | MechanismConfig::PlainServer { .. } => {
+        MechanismSetup::PlainClient { .. } | MechanismSetup::PlainServer { .. } => {
             return "ZWS2.0/PLAIN";
         }
         _ => {}
@@ -296,7 +296,7 @@ pub(crate) async fn accept(
 
 pub(crate) async fn connect(
     endpoint: &Endpoint,
-    mechanism: &MechanismConfig,
+    mechanism: &MechanismSetup,
     accept_invalid_certs: bool,
 ) -> Result<WsUpgraded> {
     let (host, port, path, tls) = match endpoint {

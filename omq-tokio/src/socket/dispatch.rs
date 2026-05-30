@@ -249,7 +249,7 @@ pub(super) async fn connect_any(
     snapshot: &InprocPeerSnapshot,
     recv_notify: &std::sync::Arc<tokio::sync::Notify>,
     #[cfg(feature = "ws")] accept_invalid_certs: bool,
-    #[cfg(feature = "ws")] mechanism: &omq_proto::options::MechanismConfig,
+    #[cfg(feature = "ws")] mechanism: &omq_proto::MechanismSetup,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
         let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
