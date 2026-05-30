@@ -216,9 +216,18 @@ impl<T> Stream for AsyncConsumer<T> {
         // Re-check after registering to avoid lost wakes.
         if let Some(val) = this.prefetch_and_pop() {
             Poll::Ready(Some(val))
+        } else if Arc::strong_count(&this.ring) == 1 {
+            Poll::Ready(None)
         } else {
             Poll::Pending
         }
+    }
+}
+
+impl<T> Drop for AsyncProducer<T> {
+    fn drop(&mut self) {
+        self.flush();
+        self.ring.waker.0.wake();
     }
 }
 

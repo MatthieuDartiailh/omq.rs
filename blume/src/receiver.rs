@@ -53,16 +53,18 @@ impl<T> Receiver<T> {
     }
 
     /// Drain all pending values into `out` in one swap. Waits if empty.
+    /// Returns the number of newly drained items.
     pub async fn recv_batch(&self, out: &mut Vec<T>) -> Result<usize, RecvError> {
+        let before = out.len();
         {
             let mut cache = self.cache.lock().expect("blume: poisoned");
             if Self::drain_cache_into(&mut cache, out) > 0 {
-                return Ok(out.len());
+                return Ok(out.len() - before);
             }
             match self.shared.try_drain(&mut cache) {
                 Ok(true) => {
                     Self::drain_cache_into(&mut cache, out);
-                    return Ok(out.len());
+                    return Ok(out.len() - before);
                 }
                 Ok(false) => {}
                 Err(RecvError) => return Err(RecvError),
@@ -77,7 +79,7 @@ impl<T> Receiver<T> {
                 match self.shared.try_drain(&mut cache) {
                     Ok(true) => {
                         Self::drain_cache_into(&mut cache, out);
-                        return Ok(out.len());
+                        return Ok(out.len() - before);
                     }
                     Ok(false) => {}
                     Err(RecvError) => return Err(RecvError),

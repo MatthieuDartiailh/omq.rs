@@ -3,33 +3,43 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use crate::msg::{
+    OmqMsgRepr, zmq_msg_close, zmq_msg_init, zmq_msg_more, zmq_msg_recv, zmq_msg_send,
+};
 use crate::poll::{ZmqPollItem, zmq_poll};
-use crate::send_recv::{zmq_recv, zmq_send};
+use crate::send_recv::zmq_recv;
 use crate::socket::OmqSocket;
 
 const ZMQ_POLLIN: libc::c_short = 1;
 const ZMQ_SNDMORE: i32 = 2;
-const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_DONTWAIT: i32 = 1;
 
-#[expect(clippy::large_stack_arrays)]
 fn forward(from: *mut c_void, to: *mut c_void, capture: *mut c_void) -> libc::c_int {
-    let mut buf = [0u8; 65536];
+    let mut msg = std::mem::MaybeUninit::<OmqMsgRepr>::uninit();
     loop {
-        let rc = zmq_recv(from, buf.as_mut_ptr().cast(), buf.len(), 0);
+        zmq_msg_init(msg.as_mut_ptr());
+        let rc = zmq_msg_recv(msg.as_mut_ptr(), from, 0);
         if rc < 0 {
+            zmq_msg_close(msg.as_mut_ptr());
             return -1;
         }
-        let len = rc as usize;
-        let more = getsockopt_rcvmore(from);
+        let more = zmq_msg_more(msg.as_ptr()) != 0;
         let flags = if more { ZMQ_SNDMORE } else { 0 };
 
         if !capture.is_null() {
-            zmq_send(capture, buf[..len].as_ptr().cast(), len, flags);
+            let mut copy = std::mem::MaybeUninit::<OmqMsgRepr>::uninit();
+            zmq_msg_init(copy.as_mut_ptr());
+            crate::msg::zmq_msg_copy(copy.as_mut_ptr(), msg.as_ptr());
+            // zmq_msg_send closes the msg on success; close on failure.
+            if zmq_msg_send(copy.as_mut_ptr(), capture, flags) < 0 {
+                zmq_msg_close(copy.as_mut_ptr());
+            }
         }
 
-        let rc = zmq_send(to, buf[..len].as_ptr().cast(), len, flags);
+        // zmq_msg_send closes the msg on success.
+        let rc = zmq_msg_send(msg.as_mut_ptr(), to, flags);
         if rc < 0 {
+            zmq_msg_close(msg.as_mut_ptr());
             return -1;
         }
         if !more {
@@ -37,14 +47,6 @@ fn forward(from: *mut c_void, to: *mut c_void, capture: *mut c_void) -> libc::c_
         }
     }
     0
-}
-
-#[expect(clippy::borrow_as_ptr)]
-fn getsockopt_rcvmore(sock: *mut c_void) -> bool {
-    let mut v: i32 = 0;
-    let mut sz = std::mem::size_of::<i32>();
-    crate::opts::zmq_getsockopt(sock, ZMQ_RCVMORE, (&mut v as *mut i32).cast(), &mut sz);
-    v != 0
 }
 
 #[unsafe(no_mangle)]

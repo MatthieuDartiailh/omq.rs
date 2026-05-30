@@ -924,8 +924,9 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> [u8; 32] {
         let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 32) };
         key.copy_from_slice(slice);
     } else if optvallen >= 40 {
-        let s = unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(optval.cast::<u8>(), 40))
+        let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 40) };
+        let Ok(s) = std::str::from_utf8(slice) else {
+            return key;
         };
         if let Ok(decoded) = omq_compio::proto::z85::decode(s)
             && decoded.len() == 32
