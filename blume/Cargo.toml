@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Batching MPSC channel for cross-core message passing"
 readme = "README.md"
-keywords = ["mpsc", "channel", "batching", "async"]
+keywords = ["mpsc", "channel", "batching", "async", "lock-free"]
 categories = ["concurrency", "data-structures"]
 
 [lints]

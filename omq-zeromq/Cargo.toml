@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Drop-in zeromq crate replacement backed by omq-tokio"
 readme = "README.md"
-keywords = ["zeromq", "zmq", "drop-in", "async"]
+keywords = ["zeromq", "high-performance", "drop-in", "async"]
 categories = ["network-programming", "asynchronous"]
 
 [lib]
