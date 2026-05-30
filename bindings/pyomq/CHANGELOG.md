@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-30
+
+### Added
+
+- Expose `on_mute`, `compression_level`, `compression_dict`, `compression_auto_train` options.
+
+### Changed
+
+- *(deps)* Bump `omq-compio` to 0.12.0, `omq-proto` to 0.15.0.
+
+## [0.10.3] - 2026-05-25
+
+### Fixed
+
+- Cancel pump tasks before destroying socket.
+
 ## [0.10.2] - 2026-05-25
 
 ### Fixed

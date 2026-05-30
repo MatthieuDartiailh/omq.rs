@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-30
+
+### Fixed
+
+- `close()` with `priority` feature: drain `pre_connect_buf` before teardown and re-snapshot wire peers inside the close loop so newly connected peers are detected.
+- `close()` resource leak under sustained traffic.
+- Fall back to one-shot on multishot recv stream `None` during accumulation.
+- Enforce send HWM on direct-encode path.
+
+### Performance
+
+- Replace send-path atomics with `Cell` (17M to 22M msg/s).
+- Optimize 8 B TCP recv (14M to 17M msg/s).
+- Persist futures across driver/recv select iterations.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.15.0, `blume` to 0.3.0. Tighten `rustc-hash` to 2.1.0, `concurrent-queue` to 2.5.0.
+
 ## [0.11.0] - 2026-05-25
 
 ### Fixed

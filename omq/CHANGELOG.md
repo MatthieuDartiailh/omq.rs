@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-30
+
+### Changed
+
+- Default backend is now `tokio-backend`.
+- *(deps)* Bump `omq-compio` to 0.12.0, `omq-tokio` to 0.13.0.
+
+## [0.12.1] - 2026-05-25
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.12.1.
+
 ## [0.12.0] - 2026-05-25
 
 ### Changed

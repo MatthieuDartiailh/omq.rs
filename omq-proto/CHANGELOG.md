@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-05-30
+
+### Added
+
+- Configurable compression thresholds (`compression_level`, `compression_auto_train`).
+
+### Fixed
+
+- CURVE mechanism: carry the COMMAND flag in the encrypted inner byte.
+- RFC 23 compliance violations in ZMTP greeting and property parsing.
+
+### Performance
+
+- Optimize 8 B TCP recv codec path.
+
+### Changed
+
+- *(deps)* Tighten `thiserror` to 2.0.18, `zeroize` to 1.8.0.
+
 ## [0.14.0] - 2026-05-25
 
 ### Added

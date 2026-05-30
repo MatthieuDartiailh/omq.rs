@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-30
+
+### Added
+
+- `Receiver::close()` method to signal sender disconnection.
+
 ## [0.2.4] - 2026-05-25
 
 ### Changed

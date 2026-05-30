@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-30
+
+### Added
+
+- Direct I/O bypass for single-peer connections.
+
+### Fixed
+
+- DirectIo misrouting when multiple peers connect.
+
+### Changed
+
+- Refactor direct I/O to keep driver alive after handoff.
+- *(deps)* Bump `omq-proto` to 0.15.0. Tighten `concurrent-queue` to 2.5.0, `rustc-hash` to 2.1.0, `thiserror` to 2.0.18, `tokio` to 1.52.0.
+
 ## [0.12.0] - 2026-05-25
 
 ### Added
