@@ -197,6 +197,28 @@ use super::command::{Command, PeerProperties};
 use super::greeting::MechanismName;
 use crate::error::{Error, Result};
 
+/// If `cmd` is an `ERROR` command, parse the length-prefixed reason
+/// string and return a `HandshakeFailed` error. Returns `None` for
+/// any other command.
+fn try_error_command(cmd: &Command, mechanism: &str) -> Option<Error> {
+    let Command::Unknown { ref name, ref body } = *cmd else {
+        return None;
+    };
+    if name.as_ref() != b"ERROR" {
+        return None;
+    }
+    let reason = if body.is_empty() {
+        String::new()
+    } else {
+        let reason_len = body[0] as usize;
+        let end = (1 + reason_len).min(body.len());
+        String::from_utf8_lossy(&body[1..end]).into_owned()
+    };
+    Some(Error::HandshakeFailed(format!(
+        "{mechanism} peer sent ERROR: {reason}"
+    )))
+}
+
 /// Information passed to an [`Authenticator`] callback after a
 /// security mechanism has cryptographically verified the peer.
 #[derive(Debug, Clone)]
@@ -419,19 +441,8 @@ impl NullMechanism {
     }
 
     fn on_command(&mut self, cmd: Command, _out: &mut Vec<Command>) -> Result<MechanismStep> {
-        if let Command::Unknown { ref name, ref body } = cmd
-            && name.as_ref() == b"ERROR"
-        {
-            let reason = if body.is_empty() {
-                String::new()
-            } else {
-                let reason_len = body[0] as usize;
-                let end = (1 + reason_len).min(body.len());
-                String::from_utf8_lossy(&body[1..end]).into_owned()
-            };
-            return Err(Error::HandshakeFailed(format!(
-                "NULL peer sent ERROR: {reason}"
-            )));
+        if let Some(err) = try_error_command(&cmd, "NULL") {
+            return Err(err);
         }
         match (self.state, cmd) {
             (NullState::AwaitingReady, Command::Ready(props)) => {
