@@ -242,7 +242,7 @@ pub(crate) struct CurveClient {
     our_props: PeerProperties,
     out_counter: u64,
     received_cookie: Vec<u8>,
-    state: CurveClientState,
+    state: Option<CurveClientState>,
 }
 
 enum CurveClientState {
@@ -290,10 +290,10 @@ impl CurveClient {
             our_props: PeerProperties::default(),
             out_counter: 0,
             received_cookie: Vec::new(),
-            state: CurveClientState::Init {
+            state: Some(CurveClientState::Init {
                 our_eph_secret,
                 our_eph_public,
-            },
+            }),
         }
     }
 
@@ -315,21 +315,14 @@ impl CurveClient {
         let CurveClientState::Init {
             our_eph_secret,
             our_eph_public,
-        } = std::mem::replace(
-            &mut self.state,
-            // Temporary; overwritten immediately below.
-            CurveClientState::Done {
-                our_eph_secret: SecretKey::generate(&mut OsRng),
-                peer_eph_public: PublicKey::from_bytes([0; 32]),
-            },
-        )
+        } = self.state.take().unwrap()
         else {
             unreachable!();
         };
-        self.state = CurveClientState::AwaitingWelcome {
+        self.state = Some(CurveClientState::AwaitingWelcome {
             our_eph_secret,
             our_eph_public,
-        };
+        });
         Ok(())
     }
 
@@ -341,7 +334,7 @@ impl CurveClient {
             )));
         };
         match name.as_ref() {
-            b"WELCOME" if matches!(self.state, CurveClientState::AwaitingWelcome { .. }) => {
+            b"WELCOME" if matches!(self.state, Some(CurveClientState::AwaitingWelcome { .. })) => {
                 self.process_welcome(&body)?;
                 let initiate = self.build_initiate()?;
                 out.push(Command::Unknown {
@@ -350,7 +343,7 @@ impl CurveClient {
                 });
                 Ok(MechanismStep::Continue)
             }
-            b"READY" if matches!(self.state, CurveClientState::AwaitingReady { .. }) => {
+            b"READY" if matches!(self.state, Some(CurveClientState::AwaitingReady { .. })) => {
                 let peer_props = self.parse_ready(&body)?;
                 Ok(MechanismStep::Complete {
                     peer_properties: peer_props,
@@ -365,7 +358,7 @@ impl CurveClient {
     }
 
     fn eph_secret(&self) -> &SecretKey {
-        match &self.state {
+        match self.state.as_ref().unwrap() {
             CurveClientState::Init { our_eph_secret, .. }
             | CurveClientState::AwaitingWelcome { our_eph_secret, .. }
             | CurveClientState::AwaitingReady { our_eph_secret, .. }
@@ -374,7 +367,7 @@ impl CurveClient {
     }
 
     fn eph_public(&self) -> &PublicKey {
-        match &self.state {
+        match self.state.as_ref().unwrap() {
             CurveClientState::Init { our_eph_public, .. }
             | CurveClientState::AwaitingWelcome { our_eph_public, .. } => our_eph_public,
             CurveClientState::AwaitingReady { .. } | CurveClientState::Done { .. } => {
@@ -427,19 +420,14 @@ impl CurveClient {
         let peer_eph_public = PublicKey::from_bytes(sp_bytes);
 
         // Transition: AwaitingWelcome -> AwaitingReady, moving ephemeral secret
-        let CurveClientState::AwaitingWelcome { our_eph_secret, .. } = std::mem::replace(
-            &mut self.state,
-            CurveClientState::Done {
-                our_eph_secret: SecretKey::generate(&mut OsRng),
-                peer_eph_public: PublicKey::from_bytes([0; 32]),
-            },
-        ) else {
+        let CurveClientState::AwaitingWelcome { our_eph_secret, .. } = self.state.take().unwrap()
+        else {
             unreachable!();
         };
-        self.state = CurveClientState::AwaitingReady {
+        self.state = Some(CurveClientState::AwaitingReady {
             our_eph_secret,
             peer_eph_public,
-        };
+        });
         // Stash cookie for build_initiate.
         self.received_cookie = cookie;
         Ok(())
@@ -448,10 +436,10 @@ impl CurveClient {
     fn build_initiate(&mut self) -> Result<Bytes> {
         let counter = self.next_out_counter();
 
-        let CurveClientState::AwaitingReady {
+        let Some(CurveClientState::AwaitingReady {
             ref our_eph_secret,
             ref peer_eph_public,
-        } = self.state
+        }) = self.state
         else {
             unreachable!();
         };
@@ -499,10 +487,10 @@ impl CurveClient {
         }
         let counter = u64::from_be_bytes(body[..8].try_into().unwrap());
         let ready_box = &body[8..];
-        let CurveClientState::AwaitingReady {
+        let Some(CurveClientState::AwaitingReady {
             ref our_eph_secret,
             ref peer_eph_public,
-        } = self.state
+        }) = self.state
         else {
             unreachable!();
         };
@@ -516,28 +504,22 @@ impl CurveClient {
         let CurveClientState::AwaitingReady {
             our_eph_secret,
             peer_eph_public,
-        } = std::mem::replace(
-            &mut self.state,
-            CurveClientState::Done {
-                our_eph_secret: SecretKey::generate(&mut OsRng),
-                peer_eph_public: PublicKey::from_bytes([0; 32]),
-            },
-        )
+        } = self.state.take().unwrap()
         else {
             unreachable!();
         };
-        self.state = CurveClientState::Done {
+        self.state = Some(CurveClientState::Done {
             our_eph_secret,
             peer_eph_public,
-        };
+        });
         Ok(props)
     }
 
     fn build_transform(&self) -> Result<CurveTransform> {
-        let CurveClientState::Done {
+        let Some(CurveClientState::Done {
             ref our_eph_secret,
             ref peer_eph_public,
-        } = self.state
+        }) = self.state
         else {
             return Err(Error::HandshakeFailed(
                 "CURVE transform requested before handshake complete".into(),
