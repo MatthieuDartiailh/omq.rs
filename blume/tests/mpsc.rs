@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::thread;
 
 #[test]
@@ -100,7 +99,6 @@ fn batch_recv_cross_thread() {
 fn bounded_backpressure_cross_thread() {
     let (tx, rx) = blume::bounded::<usize>(16);
     let total = 10_000;
-    let rx = Arc::new(rx);
 
     let sender = thread::spawn(move || {
         for i in 0..total {
