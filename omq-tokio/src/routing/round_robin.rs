@@ -33,8 +33,10 @@
 //! how the test suite synchronises on this.
 
 #[cfg(feature = "priority")]
+use std::collections::VecDeque;
+#[cfg(feature = "priority")]
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -47,6 +49,8 @@ use crate::engine::DriverHandle;
 use omq_proto::error::Error;
 use omq_proto::error::Result;
 use omq_proto::message::Message;
+#[cfg(feature = "priority")]
+use omq_proto::options::OnMute;
 use omq_proto::options::Options;
 
 #[cfg(not(feature = "priority"))]
@@ -152,11 +156,21 @@ struct PriorityPeer {
 }
 
 #[cfg(feature = "priority")]
+enum PriorityOutcome {
+    Sent,
+    AwaitOn(DriverHandle),
+    NoLivePeers,
+}
+
+#[cfg(feature = "priority")]
 #[derive(Clone)]
 pub(crate) struct Submitter {
     peers: Arc<RwLock<Arc<Vec<PriorityPeer>>>>,
     rr_index: Arc<AtomicUsize>,
     on_change: Arc<tokio::sync::Notify>,
+    staging: Arc<Mutex<VecDeque<Message>>>,
+    hwm: usize,
+    on_mute: OnMute,
 }
 
 #[cfg(feature = "priority")]
@@ -168,80 +182,114 @@ impl std::fmt::Debug for Submitter {
 
 #[cfg(feature = "priority")]
 impl Submitter {
-    /// Walk peers in priority order; `try_send` on each peer's driver
-    /// inbox. Returns Ok on first success.
-    ///
-    /// **Strict precedence:** within each tier, attempt every peer
-    /// (round-robin start). On any `Ok`, return `Sent`. If every peer
-    /// in this tier is `Full` (queues saturated, peers alive), back-
-    /// pressure on the first `Full` peer in this tier — never fall
-    /// through to a lower-priority tier when the higher tier is alive
-    /// but back-pressured. Only when every peer in a tier is `Closed`
-    /// do we advance to the next tier. If every peer at every tier is
-    /// `Closed` (or no peers at all), wait for a peer-set change
-    /// notification and retry.
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
+        self.drain_staging().await;
+
         loop {
-            let snapshot = self.peers.read().expect("peers lock").clone();
-            if snapshot.is_empty() {
-                let waiter = self.on_change.notified();
-                if !self.peers.read().expect("peers lock").is_empty() {
+            match self.try_send_priority_walk(&msg) {
+                PriorityOutcome::Sent => return Ok(()),
+                PriorityOutcome::AwaitOn(h) => {
+                    return h
+                        .inbox
+                        .send(DriverCommand::SendMessage(msg))
+                        .await
+                        .map_err(|_| Error::Closed);
+                }
+                PriorityOutcome::NoLivePeers => {
+                    let staged = {
+                        let mut buf = self.staging.lock().expect("staging lock");
+                        if buf.len() < self.hwm {
+                            buf.push_back(msg);
+                            return Ok(());
+                        }
+                        match self.on_mute {
+                            OnMute::DropNewest => return Ok(()),
+                            OnMute::DropOldest => {
+                                let _ = buf.pop_front();
+                                buf.push_back(msg);
+                                return Ok(());
+                            }
+                            OnMute::Block => false,
+                            _ => unreachable!(),
+                        }
+                    };
+                    if !staged {
+                        let waiter = self.on_change.notified();
+                        if self.has_live_peer() {
+                            continue;
+                        }
+                        waiter.await;
+                        self.drain_staging().await;
+                    }
+                }
+            }
+        }
+    }
+
+    fn try_send_priority_walk(&self, msg: &Message) -> PriorityOutcome {
+        let snapshot = self.peers.read().expect("peers lock").clone();
+        if snapshot.is_empty() {
+            return PriorityOutcome::NoLivePeers;
+        }
+        let rr = self.rr_index.fetch_add(1, Ordering::Relaxed);
+        let mut tier_back_pressure: Option<DriverHandle> = None;
+        let mut i = 0;
+        while i < snapshot.len() {
+            let prio = snapshot[i].priority;
+            let mut j = i;
+            while j < snapshot.len() && snapshot[j].priority == prio {
+                j += 1;
+            }
+            let tier_size = j - i;
+            let offset = rr % tier_size;
+            let mut tier_full: Option<DriverHandle> = None;
+            let mut tier_has_alive = false;
+            for k in 0..tier_size {
+                let peer = &snapshot[i + (offset + k) % tier_size];
+                if peer.handle.cancel.is_cancelled() {
                     continue;
                 }
-                waiter.await;
-                continue;
-            }
-            let rr = self.rr_index.fetch_add(1, Ordering::Relaxed);
-            let mut tier_back_pressure: Option<DriverHandle> = None;
-            let mut i = 0;
-            while i < snapshot.len() {
-                let prio = snapshot[i].priority;
-                let mut j = i;
-                while j < snapshot.len() && snapshot[j].priority == prio {
-                    j += 1;
-                }
-                let tier_size = j - i;
-                let offset = rr % tier_size;
-                let mut tier_full: Option<DriverHandle> = None;
-                let mut tier_has_alive = false;
-                for k in 0..tier_size {
-                    let peer = &snapshot[i + (offset + k) % tier_size];
-                    if peer.handle.cancel.is_cancelled() {
-                        continue;
-                    }
-                    match peer
-                        .handle
-                        .inbox
-                        .try_send(DriverCommand::SendMessage(msg.clone()))
-                    {
-                        Ok(()) => return Ok(()),
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tier_has_alive = true;
-                            if tier_full.is_none() {
-                                tier_full = Some(peer.handle.clone());
-                            }
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
-                    }
-                }
-                if tier_has_alive {
-                    tier_back_pressure = tier_full;
-                    break;
-                }
-                i = j;
-            }
-            if let Some(h) = tier_back_pressure {
-                return h
+                match peer
+                    .handle
                     .inbox
-                    .send(DriverCommand::SendMessage(msg))
-                    .await
-                    .map_err(|_| Error::Closed);
+                    .try_send(DriverCommand::SendMessage(msg.clone()))
+                {
+                    Ok(()) => return PriorityOutcome::Sent,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tier_has_alive = true;
+                        if tier_full.is_none() {
+                            tier_full = Some(peer.handle.clone());
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+                }
             }
-            let waiter = self.on_change.notified();
-            if self.has_live_peer() {
-                continue;
+            if tier_has_alive {
+                tier_back_pressure = tier_full;
+                break;
             }
-            waiter.await;
+            i = j;
+        }
+        match tier_back_pressure {
+            Some(h) => PriorityOutcome::AwaitOn(h),
+            None => PriorityOutcome::NoLivePeers,
+        }
+    }
+
+    async fn drain_staging(&self) {
+        loop {
+            let queued = self.staging.lock().expect("staging lock").pop_front();
+            let Some(msg) = queued else { return };
+            match self.try_send_priority_walk(&msg) {
+                PriorityOutcome::Sent => {}
+                PriorityOutcome::AwaitOn(h) => {
+                    let _ = h.inbox.send(DriverCommand::SendMessage(msg)).await;
+                }
+                PriorityOutcome::NoLivePeers => {
+                    self.staging.lock().expect("staging lock").push_front(msg);
+                    return;
+                }
+            }
         }
     }
 
@@ -260,16 +308,23 @@ pub(crate) struct RoundRobinSend {
     peers: Arc<RwLock<Arc<Vec<PriorityPeer>>>>,
     rr_index: Arc<AtomicUsize>,
     on_change: Arc<tokio::sync::Notify>,
+    staging: Arc<Mutex<VecDeque<Message>>>,
+    hwm: usize,
+    on_mute: OnMute,
     root_cancel: CancellationToken,
 }
 
 #[cfg(feature = "priority")]
 impl RoundRobinSend {
-    pub(crate) fn new(_options: &Options) -> Self {
+    pub(crate) fn new(options: &Options) -> Self {
+        let (hwm, on_mute) = super::effective_queue_params(options);
         Self {
             peers: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             rr_index: Arc::new(AtomicUsize::new(0)),
             on_change: Arc::new(tokio::sync::Notify::new()),
+            staging: Arc::new(Mutex::new(VecDeque::new())),
+            hwm,
+            on_mute,
             root_cancel: CancellationToken::new(),
         }
     }
@@ -279,6 +334,7 @@ impl RoundRobinSend {
         self.connection_added_with_priority(peer_id, handle, omq_proto::DEFAULT_PRIORITY);
     }
 
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn connection_added_with_priority(
         &mut self,
         peer_id: u64,
@@ -290,11 +346,30 @@ impl RoundRobinSend {
         new_peers.push(PriorityPeer {
             peer_id,
             priority,
-            handle,
+            handle: handle.clone(),
         });
         new_peers.sort_by_key(|p| p.priority);
         *guard = Arc::new(new_peers);
         drop(guard);
+
+        let mut buf = self.staging.lock().expect("staging lock");
+        while let Some(msg) = buf.pop_front() {
+            match handle.inbox.try_send(DriverCommand::SendMessage(msg)) {
+                Ok(()) => {}
+                Err(
+                    tokio::sync::mpsc::error::TrySendError::Full(cmd)
+                    | tokio::sync::mpsc::error::TrySendError::Closed(cmd),
+                ) => {
+                    let DriverCommand::SendMessage(msg) = cmd else {
+                        unreachable!()
+                    };
+                    buf.push_front(msg);
+                    break;
+                }
+            }
+        }
+        drop(buf);
+
         self.on_change.notify_waiters();
     }
 
@@ -315,6 +390,9 @@ impl RoundRobinSend {
             peers: self.peers.clone(),
             rr_index: self.rr_index.clone(),
             on_change: self.on_change.clone(),
+            staging: self.staging.clone(),
+            hwm: self.hwm,
+            on_mute: self.on_mute,
         }
     }
 
@@ -322,13 +400,7 @@ impl RoundRobinSend {
         self.root_cancel.cancel();
     }
 
-    /// In priority mode the "queue" lives in the per-peer driver
-    /// inboxes - `is_drained` tells the socket driver "all sends have
-    /// been dispatched"; once we've handed each `SendMessage` off to
-    /// an inbox via `try_send/send`, it's the connection driver's job
-    /// to flush, not ours.
-    #[expect(clippy::unused_self)]
     pub(crate) fn is_drained(&self) -> bool {
-        true
+        self.staging.lock().expect("staging lock").is_empty()
     }
 }

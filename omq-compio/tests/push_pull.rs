@@ -216,7 +216,6 @@ async fn push_pull_under_backpressure_delivers_everything() {
 }
 
 #[compio::test]
-#[ignore = "pre-peer queueing not implemented: PUSH uses per-peer queues, so send blocks until a peer arrives. libzmq buffers up to HWM in a socket-wide queue."]
 async fn push_send_before_peer_connects_queues() {
     let ep = inproc_ep("pp-before-peer");
 

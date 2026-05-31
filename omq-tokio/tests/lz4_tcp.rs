@@ -15,6 +15,21 @@ use rand::Rng;
 
 /// Bind an `lz4+tcp://` Pull socket to an ephemeral port and return both
 /// the socket and the discovered loopback endpoint.
+async fn wait_for_handshake(sock: &Socket) {
+    let mut mon = sock.monitor();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match mon.recv().await {
+                Ok(MonitorEvent::HandshakeSucceeded { .. }) => return,
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before handshake: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("handshake did not arrive within 5s");
+}
+
 async fn pull_on_loopback() -> (Socket, Endpoint) {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let mut mon = pull.monitor();
@@ -241,6 +256,7 @@ async fn many_messages_in_a_row() {
     let (pull, ep) = pull_on_loopback().await;
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep).await.unwrap();
+    wait_for_handshake(&pull).await;
 
     for i in 0..N {
         push.send(Message::single(format!("m-{i}"))).await.unwrap();
