@@ -99,27 +99,17 @@ jobs:
       - run: cargo test -p omq
       - run: cargo test -p omq --no-default-features --features tokio-backend
 
-  fmt:
-    name: rustfmt
+  lint:
+    name: fmt + clippy
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: { components: rustfmt }
-      - run: cargo fmt --all --check
-
-  clippy:
-    name: clippy
-    needs: [changes]
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: clippy }
+        with: { components: rustfmt, clippy }
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets
 
   interop:
@@ -154,7 +144,7 @@ jobs:
 
   ci-success:
     name: CI success
-    needs: [changes, test, encryption, compression, priority, facade, fmt, clippy, interop]
+    needs: [changes, test, encryption, compression, priority, facade, lint, interop]
     runs-on: ubuntu-latest
     if: always()
     steps:
