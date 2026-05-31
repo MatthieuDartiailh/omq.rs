@@ -148,13 +148,15 @@ python3 scripts/gen_comparison_chart.py           # JSONL → doc/charts/compari
 Use `--scope all` (default) to rebench all implementations when
 libzmq or zmq.rs baselines are stale.
 
-### Compression chart
+### Compression charts
 
-Produces `doc/charts/compression_2048.svg`:
+Produces `doc/charts/compression/compio_2048.svg` and `doc/charts/compression/tokio_2048.svg`:
 
 ```sh
-cargo bench -p omq-compio --bench compression   # → omq-compio/benches/results.jsonl
-python3 scripts/gen_compression_chart.py         # JSONL → doc/charts/compression_*.svg
+cargo bench -p omq-compio --bench compression --features lz4,zstd  # → omq-compio/benches/results_compression.jsonl
+cargo bench -p omq-tokio  --bench compression --features lz4,zstd  # → omq-tokio/benches/results_compression.jsonl
+python3 scripts/gen_compression_chart.py --backend compio           # JSONL → doc/charts/compression/compio_*.svg
+python3 scripts/gen_compression_chart.py --backend tokio            # JSONL → doc/charts/compression/tokio_*.svg
 ```
 
 ### pyomq bindings chart

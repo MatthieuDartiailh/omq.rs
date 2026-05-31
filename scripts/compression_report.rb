@@ -8,16 +8,16 @@
 #   effective_msgs_s = min(cpu_msgs_s, link_bytes_s / wire_bytes)
 #
 #   cargo bench -p omq-compio --features lz4,zstd --bench compression
+#   cargo bench -p omq-tokio  --features lz4,zstd --bench compression
 #   ruby scripts/compression_report.rb --link 100m
-#   ruby scripts/compression_report.rb --link 1g
-#   ruby scripts/compression_report.rb --link 10m
+#   ruby scripts/compression_report.rb --link 100m --backend tokio
 
 require 'optparse'
 require_relative 'lib/bench_helpers'
 
 ROOT = File.expand_path('..', __dir__)
 COMPRESSION_PATH = File.join(ROOT, 'BENCHMARKS_COMPRESSION.md')
-JSONL_PATH = File.join(ROOT, 'omq-compio', 'benches', 'results_compression.jsonl')
+DEFAULT_BACKEND = 'compio'
 
 LINK_BYTES_S = {
   '1g'   => 1_000_000_000.0 / 8,
@@ -25,17 +25,19 @@ LINK_BYTES_S = {
   '10m'  => 10_000_000.0 / 8,
 }.freeze
 
-options = { link: nil, prefix: nil }
+options = { link: nil, prefix: nil, backend: DEFAULT_BACKEND }
 OptionParser.new do |o|
-  o.banner = 'Usage: ruby scripts/compression_report.rb --link 10m|100m|1g [--run-prefix PREFIX]'
+  o.banner = 'Usage: ruby scripts/compression_report.rb --link 10m|100m|1g [--backend compio|tokio]'
   o.on('--link LINK', '10m, 100m, or 1g: which section to update') { |v| options[:link] = v }
+  o.on('--backend BACKEND', 'compio or tokio (default: compio)') { |v| options[:backend] = v }
   o.on('--run-prefix PREFIX', 'Select rows by run ID prefix') { |v| options[:prefix] = v }
 end.parse!
 
 abort 'Error: --link is required (10m, 100m, or 1g)' unless options[:link]
 abort "Error: --link must be one of: #{LINK_BYTES_S.keys.join(', ')}" unless LINK_BYTES_S.key?(options[:link])
 
-rows = BenchHelpers.load_jsonl(JSONL_PATH).select do |r|
+jsonl_path = File.join(ROOT, "omq-#{options[:backend]}", 'benches', 'results_compression.jsonl')
+rows = BenchHelpers.load_jsonl(jsonl_path).select do |r|
   %i[compression_json compression_json_dict].include?(r[:pattern].to_sym)
 end
 

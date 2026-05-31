@@ -126,6 +126,12 @@ pub struct Options {
     /// transports.
     pub max_recv_dict_size: Option<usize>,
 
+    /// Minimum message size (bytes) before compression is offloaded to
+    /// a background thread (tokio backend only). Messages smaller than
+    /// this are compressed inline on the driver task. `None` disables
+    /// offloading entirely. Default: `Some(8192)`.
+    pub compression_offload_threshold: Option<usize>,
+
     /// Switch the recv path to a sized one-shot read for any inbound
     /// frame whose wire payload is at least this many bytes.
     ///
@@ -195,6 +201,7 @@ impl Default for Options {
             compression_threshold: None,
             compression_dict_capacity: None,
             max_recv_dict_size: None,
+            compression_offload_threshold: Some(8192),
             large_message_threshold: Some(128 * 1024),
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
@@ -574,6 +581,14 @@ impl Options {
     #[must_use]
     pub fn max_recv_dict_size(mut self, max: usize) -> Self {
         self.max_recv_dict_size = Some(max);
+        self
+    }
+
+    /// Minimum message size before compression is offloaded to a
+    /// background thread (tokio backend only). `None` disables offloading.
+    #[must_use]
+    pub fn compression_offload_threshold(mut self, threshold: Option<usize>) -> Self {
+        self.compression_offload_threshold = threshold;
         self
     }
 }

@@ -243,6 +243,40 @@ impl ZstdEncoder {
         self
     }
 
+    /// True when this encoder has completed any one-time setup (dict
+    /// shipping, auto-train) and offloading encode work is safe.
+    pub fn can_offload(&self) -> bool {
+        let dict_ready = self.send_dict.is_none() || self.send_dict_shipped;
+        let train_done = self.train.is_none();
+        dict_ready && train_done
+    }
+
+    /// Build an offload encoder from a borrowed [`CCtx`]. The returned
+    /// encoder shares this encoder's config (dict, level, thresholds)
+    /// but has `send_dict_shipped = true` and no auto-train state.
+    /// Call [`take_cctx`] on the result to reclaim the `CCtx` for the pool.
+    #[must_use]
+    pub fn with_borrowed_cctx(&self, cctx: CCtx<'static>) -> Self {
+        Self {
+            send_dict: self.send_dict.clone(),
+            send_dict_shipped: true,
+            max_message_size: self.max_message_size,
+            level: self.level,
+            cctx,
+            cctx_configured: false,
+            train: None,
+            out_buf: Vec::new(),
+            threshold_override: self.threshold_override,
+            dict_capacity: self.dict_capacity,
+        }
+    }
+
+    /// Consume this encoder and return the raw `CCtx` for pool return.
+    #[must_use]
+    pub fn take_cctx(self) -> CCtx<'static> {
+        self.cctx
+    }
+
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
         for part in &msg.parts_payload() {
             self.maybe_train(&part.as_bytes());

@@ -80,6 +80,46 @@ unsafe extern "C" {
     fn LZ4_resetStream(stream: *mut lz4_sys::LZ4StreamEncode);
 }
 
+/// Owning wrapper around an LZ4 compression stream. The raw stream is
+/// mutable working state (hash tables, history); the dict and level
+/// are applied per-encode, so a bare stream is codec-agnostic and
+/// reusable across connections.
+pub struct Lz4Stream(*mut lz4_sys::LZ4StreamEncode);
+
+impl std::fmt::Debug for Lz4Stream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lz4Stream").finish_non_exhaustive()
+    }
+}
+
+unsafe impl Send for Lz4Stream {}
+
+impl Default for Lz4Stream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Lz4Stream {
+    pub fn new() -> Self {
+        Self(unsafe { lz4_sys::LZ4_createStream() })
+    }
+
+    fn into_raw(self) -> *mut lz4_sys::LZ4StreamEncode {
+        let ptr = self.0;
+        std::mem::forget(self);
+        ptr
+    }
+}
+
+impl Drop for Lz4Stream {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { lz4_sys::LZ4_freeStream(self.0) };
+        }
+    }
+}
+
 /// Send-side per-connection LZ4 state.
 pub struct Lz4Encoder {
     /// Outbound dict, validated at construction. Shipped on the first
@@ -206,6 +246,38 @@ impl Lz4Encoder {
         } else {
             None
         }
+    }
+
+    /// True when this encoder has completed any one-time setup (dict
+    /// shipping) and offloading encode work to a background thread is safe.
+    pub fn can_offload(&self) -> bool {
+        self.send_dict.is_none() || self.send_dict_shipped
+    }
+
+    /// Build an offload encoder from a borrowed [`Lz4Stream`]. The
+    /// returned encoder shares this encoder's config (dict, thresholds)
+    /// but has `send_dict_shipped = true` so it never re-ships the dict.
+    /// Call [`take_stream`] on the result to reclaim the stream for the
+    /// pool after encoding.
+    #[must_use]
+    pub fn with_borrowed_stream(&self, stream: Lz4Stream) -> Self {
+        Self {
+            send_dict: self.send_dict.clone(),
+            send_dict_shipped: true,
+            max_message_size: self.max_message_size,
+            block_size: self.block_size,
+            out_buf: Vec::new(),
+            stream: stream.into_raw(),
+            threshold_override: self.threshold_override,
+        }
+    }
+
+    /// Consume this encoder and return the raw stream for pool return.
+    #[must_use]
+    pub fn take_stream(mut self) -> Lz4Stream {
+        let ptr = self.stream;
+        self.stream = std::ptr::null_mut();
+        Lz4Stream(ptr)
     }
 
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {

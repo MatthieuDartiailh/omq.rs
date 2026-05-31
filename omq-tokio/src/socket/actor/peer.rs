@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{
     AnyConn, AnyStream, ConnectionConfig, ConnectionDriver, DisconnectReason, DriverConfig,
     DriverHandle, Duration, Endpoint, InboundFrame, InprocConn, InprocPeerSnapshot, InternalEvent,
@@ -291,7 +293,19 @@ impl SocketDriver {
             driver_cfg,
         );
         let driver = match has_encoder {
-            Some((enc, dec)) => driver.with_encoder(enc).with_decoder(dec),
+            Some((enc, dec)) => {
+                let mut d = driver.with_encoder(enc).with_decoder(dec);
+                if let Some(threshold) = self.options.compression_offload_threshold {
+                    let pool = self
+                        .compression_pool
+                        .get_or_insert_with(|| {
+                            Arc::new(crate::engine::compression_pool::CompressionPool::new())
+                        })
+                        .clone();
+                    d = d.with_compression_pool(pool, threshold);
+                }
+                d
+            }
             None => driver,
         };
         #[cfg(not(feature = "priority"))]

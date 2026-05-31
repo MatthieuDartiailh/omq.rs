@@ -12,31 +12,68 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, split};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use futures::stream::FuturesOrdered;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
-use omq_proto::proto::transform::{MessageDecoder, MessageEncoder};
+use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut};
 use omq_proto::proto::{Command, Connection, Event};
 
+use super::compression_pool::{CompressionPool, RawCtx};
 use super::direct_io::{DirectIo, SharedWriter};
 use crate::routing::drop_queue::QueueReceiver;
 use omq_proto::encoded_queue::EncodedQueue;
 
-/// Batch-encode messages, then flush `EncodedQueue` + codec.
+/// Batch-encode messages, then flush. Two modes:
+///
+/// **Direct** (no encoder or offloading disabled): encode each message
+/// into `EncodedQueue` inline, flush once via `write_vectored`.
+///
+/// **Pipelined** (encoder present, offloading enabled): each message
+/// enters `FuturesOrdered` as either `spawn_blocking` (large) or
+/// `ready()` (small). After the batch loop, drain completed futures
+/// front-to-back into EQ and flush.
 macro_rules! batch_encode_flush {
     ($first:expr, $try_recv:expr, $encoder:expr, $codec:expr,
-     $eq:expr, $drain_buf:expr, $writer:expr, $passthrough:expr) => {{
-        encode_msg(&$first, $encoder, $codec, $eq, $passthrough);
+     $eq:expr, $drain_buf:expr, $writer:expr, $passthrough:expr,
+     $pool:expr, $threshold:expr, $pipeline:expr) => {{
+        let use_pipeline = $threshold > 0
+            && ($encoder).as_ref().is_some_and(|e| e.can_offload())
+            && ($pool).is_some();
+        if use_pipeline {
+            submit_to_pipeline(
+                &$first,
+                ($encoder).as_mut().unwrap(),
+                ($pool).as_ref().unwrap(),
+                $threshold,
+                $pipeline,
+            );
+        } else {
+            encode_msg(&$first, $encoder, $codec, $eq, $passthrough);
+        }
         let mut count = 1usize;
         let mut bytes = $first.byte_len();
         while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
             match $try_recv {
                 Some(next) => {
                     bytes += next.byte_len();
-                    encode_msg(&next, $encoder, $codec, $eq, $passthrough);
+                    if use_pipeline {
+                        submit_to_pipeline(
+                            &next,
+                            ($encoder).as_mut().unwrap(),
+                            ($pool).as_ref().unwrap(),
+                            $threshold,
+                            $pipeline,
+                        );
+                    } else {
+                        encode_msg(&next, $encoder, $codec, $eq, $passthrough);
+                    }
                     count += 1;
                 }
                 None => break,
             }
+        }
+        if use_pipeline {
+            drain_pipeline($pipeline, ($pool).as_ref(), $eq).await?;
         }
         flush_encoded_queue($writer, $eq, $drain_buf).await?;
         while $codec.has_pending_transmit() {
@@ -151,6 +188,11 @@ where
     /// does I/O directly on the user task, eliminating all data-path
     /// cross-task wakeups.
     direct_io_tx: Option<futures::channel::oneshot::Sender<DirectIo>>,
+    /// Shared pool of raw compression contexts for offloading large-message
+    /// compression to blocking threads.
+    compression_pool: Option<Arc<CompressionPool>>,
+    /// Minimum message `byte_len` to trigger compression offloading.
+    offload_threshold: usize,
 }
 
 impl<T> ConnectionDriver<T>
@@ -198,6 +240,8 @@ where
             shared_msg_rx: None,
             recv_direct: None,
             direct_io_tx: None,
+            compression_pool: None,
+            offload_threshold: 0,
         }
     }
 
@@ -212,6 +256,18 @@ where
     #[must_use]
     pub fn with_decoder(mut self, decoder: MessageDecoder) -> Self {
         self.decoder = Some(decoder);
+        self
+    }
+
+    /// Install the compression offload pool and threshold.
+    #[must_use]
+    pub(crate) fn with_compression_pool(
+        mut self,
+        pool: Arc<CompressionPool>,
+        threshold: usize,
+    ) -> Self {
+        self.compression_pool = Some(pool);
+        self.offload_threshold = threshold;
         self
     }
 
@@ -279,8 +335,11 @@ where
             shared_msg_rx,
             recv_direct,
             mut direct_io_tx,
+            compression_pool,
+            offload_threshold,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
+        let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
         let mut eq = EncodedQueue::new();
@@ -494,6 +553,18 @@ where
                     ).await?;
                 }
 
+                // Drain completed offloaded compressions and flush.
+                Some((raw, frames)) = async {
+                    use futures::StreamExt;
+                    offload_pipeline.next().await
+                }, if !offload_pipeline.is_empty() => {
+                    drain_offload_result(raw, frames, compression_pool.as_ref(), &mut eq)?;
+                    flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
+                    while codec.has_pending_transmit() {
+                        flush_once(&mut writer, &mut codec).await?;
+                    }
+                }
+
                 res = async {
                     flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
                     flush_once(&mut writer, &mut codec).await
@@ -523,7 +594,10 @@ where
                             &mut eq,
                             &mut drain_buf,
                             &mut writer,
-                            passthrough.as_ref()
+                            passthrough.as_ref(),
+                            &compression_pool,
+                            offload_threshold,
+                            &mut offload_pipeline
                         );
                         if closing {
                             drain_writes(&mut writer, &mut codec).await.ok();
@@ -562,7 +636,10 @@ where
                                 &mut eq,
                                 &mut drain_buf,
                                 &mut writer,
-                                passthrough.as_ref()
+                                passthrough.as_ref(),
+                                &compression_pool,
+                                offload_threshold,
+                                &mut offload_pipeline
                             );
                             if let Some(ref rx) = shared_msg_rx {
                                 rx.release_permits(count);
@@ -663,6 +740,98 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
         }
         *last_input = Instant::now();
         codec.supply_payload(buf.freeze())?;
+    }
+    Ok(())
+}
+
+type OffloadPipeline = FuturesOrdered<
+    std::pin::Pin<Box<dyn std::future::Future<Output = (RawCtx, Result<TransformedOut>)> + Send>>,
+>;
+
+/// Submit one message to the offload pipeline. Large messages (above
+/// `threshold`) get `spawn_blocking`; small messages are encoded inline
+/// on the driver thread and wrapped in `ready()`.
+#[allow(unused_variables)]
+fn submit_to_pipeline(
+    msg: &Message,
+    encoder: &mut MessageEncoder,
+    pool: &Arc<CompressionPool>,
+    threshold: usize,
+    pipeline: &mut OffloadPipeline,
+) {
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    if msg.byte_len() >= threshold
+        && let Some(raw) = pool.try_take(encoder)
+    {
+        let msg = msg.clone();
+        let mut offload_enc = build_offload_encoder(encoder, raw);
+        let handle = tokio::task::spawn_blocking(move || {
+            let result = offload_enc.encode(&msg);
+            let raw = reclaim_raw_ctx(offload_enc);
+            (raw, result)
+        });
+        pipeline.push_back(Box::pin(async move {
+            handle.await.expect("offload task panicked")
+        }));
+        return;
+    }
+    let frames = encoder.encode(msg).unwrap_or_default();
+    pipeline.push_back(Box::pin(futures::future::ready((
+        RawCtx::Inline,
+        Ok(frames),
+    ))));
+}
+
+/// Drain all completed futures from the pipeline into `EncodedQueue`.
+async fn drain_pipeline(
+    pipeline: &mut OffloadPipeline,
+    pool: Option<&Arc<CompressionPool>>,
+    eq: &mut EncodedQueue,
+) -> Result<()> {
+    use futures::StreamExt;
+    while let Some((raw, frames)) = pipeline.next().await {
+        drain_offload_result(raw, frames, pool, eq)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "lz4", feature = "zstd"))]
+fn build_offload_encoder(primary: &MessageEncoder, raw: RawCtx) -> MessageEncoder {
+    match (primary, raw) {
+        #[cfg(feature = "lz4")]
+        (MessageEncoder::Lz4(enc), RawCtx::Lz4(stream)) => {
+            MessageEncoder::Lz4(enc.with_borrowed_stream(stream))
+        }
+        #[cfg(feature = "zstd")]
+        (MessageEncoder::Zstd(enc), RawCtx::Zstd(cctx)) => {
+            MessageEncoder::Zstd(enc.with_borrowed_cctx(cctx))
+        }
+        _ => unreachable!("encoder/ctx variant mismatch"),
+    }
+}
+
+#[cfg(any(feature = "lz4", feature = "zstd"))]
+fn reclaim_raw_ctx(enc: MessageEncoder) -> RawCtx {
+    match enc {
+        #[cfg(feature = "lz4")]
+        MessageEncoder::Lz4(e) => RawCtx::Lz4(e.take_stream()),
+        #[cfg(feature = "zstd")]
+        MessageEncoder::Zstd(e) => RawCtx::Zstd(e.take_cctx()),
+    }
+}
+
+/// Write completed offloaded frames into the `EncodedQueue`.
+fn drain_offload_result(
+    raw: RawCtx,
+    frames: Result<TransformedOut>,
+    pool: Option<&Arc<CompressionPool>>,
+    eq: &mut EncodedQueue,
+) -> Result<()> {
+    if let Some(pool) = pool {
+        pool.put(raw);
+    }
+    for wire in frames? {
+        eq.encode_auto(&wire);
     }
     Ok(())
 }

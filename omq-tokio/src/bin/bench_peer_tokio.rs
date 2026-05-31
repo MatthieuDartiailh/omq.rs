@@ -20,6 +20,7 @@
 //! Req: connects, runs warmup + measured round-trips, prints:
 //!         \<`p50_us`\> \<`p99_us`\> \<`p999_us`\> \<`max_us`\> \<iterations\>
 
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -95,6 +96,19 @@ async fn main() {
             let warmup: usize = args[5].parse().expect("warmup");
             run_req(ep, size, iterations, warmup).await;
         }
+        Some("wire-size") => {
+            let ep = parse_ep(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            println!("{}", wire_size(&ep, size));
+        }
+        #[cfg(feature = "zstd")]
+        Some("train-dict") => {
+            let path = &args[2];
+            let capacity: usize = args.get(3).map_or(2048, |s| s.parse().expect("capacity"));
+            let dict = train_json_dict(capacity);
+            std::fs::write(path, &dict).expect("write dict file");
+            eprintln!("Trained {} byte dict -> {path}", dict.len());
+        }
         Some("inproc-latency") => {
             let name = args[2].clone();
             let size: usize = args[3].parse().expect("msg_size");
@@ -121,13 +135,17 @@ fn bench_options(msg_size: usize) -> Options {
         let buf = msg_size * 2;
         o = o.recv_buffer_size(buf).send_buffer_size(buf);
     }
+    if let Ok(path) = std::env::var("OMQ_BENCH_DICT_FILE") {
+        let dict = Bytes::from(std::fs::read(&path).expect("read dict file"));
+        o = o.compression_dict(dict);
+    }
     o
 }
 
 async fn run_push(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options(size));
     push.bind(ep).await.expect("push bind");
-    let payload = Bytes::from(vec![b'x'; size]);
+    let payload = bench_payload(size);
     loop {
         push.send(Message::single(payload.clone())).await.unwrap();
     }
@@ -325,4 +343,94 @@ fn percentile(sorted: &[u64], p: f64) -> f64 {
     }
     let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
     sorted[idx] as f64 / 1_000.0
+}
+
+fn bench_payload(size: usize) -> Bytes {
+    if std::env::var("OMQ_BENCH_PAYLOAD").as_deref() == Ok("json") {
+        json_payload(size)
+    } else {
+        Bytes::from(vec![b'x'; size])
+    }
+}
+
+fn json_payload(target_bytes: usize) -> Bytes {
+    const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR"];
+    const SERVICES: &[&str] = &[
+        "api-gateway",
+        "auth-svc",
+        "order-svc",
+        "payment-svc",
+        "notify-svc",
+    ];
+    const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
+    const PATHS: &[&str] = &[
+        "/v1/widgets",
+        "/v1/users",
+        "/v1/orders",
+        "/v2/events",
+        "/v1/health",
+    ];
+    const REGIONS: &[&str] = &[
+        "us-east-1",
+        "us-west-2",
+        "eu-west-1",
+        "ap-south-1",
+        "eu-central-1",
+    ];
+    const STATUSES: &[u16] = &[200, 201, 204, 400, 404, 500, 502, 503];
+    const MSGS: &[&str] = &[
+        "request handled successfully",
+        "resource created",
+        "cache miss, fetched from origin",
+        "rate limit approaching threshold",
+        "upstream timeout, retrying",
+    ];
+
+    let mut out = String::with_capacity(target_bytes + 512);
+    let mut counter: u32 = 0;
+    while out.len() < target_bytes {
+        let h = counter.wrapping_mul(0x9E37_79B1) as usize;
+        let id = format!("{h:08x}");
+        let level = LEVELS[h % LEVELS.len()];
+        let service = SERVICES[(h >> 4) % SERVICES.len()];
+        let method = METHODS[(h >> 8) % METHODS.len()];
+        let path = PATHS[(h >> 12) % PATHS.len()];
+        let region = REGIONS[(h >> 16) % REGIONS.len()];
+        let status = STATUSES[(h >> 20) % STATUSES.len()];
+        let latency = (h % 500) as u32 + 1;
+        let msg = MSGS[(h >> 24) % MSGS.len()];
+        let _ = write!(
+            out,
+            r#"{{"ts":"2026-04-27T12:34:56.{id}Z","level":"{level}","service":"{service}","trace_id":"{id}","span_id":"{id}","user_id":"u-{id}","method":"{method}","path":"{path}/{id}","status":{status},"latency_ms":{latency},"region":"{region}","host":"{service}-{id}.svc.cluster.local","msg":"{msg}"}}{nl}"#,
+            nl = '\n',
+        );
+        counter = counter.wrapping_add(1);
+    }
+    out.truncate(target_bytes);
+    Bytes::from(out)
+}
+
+#[cfg(feature = "zstd")]
+fn train_json_dict(capacity: usize) -> Vec<u8> {
+    let mut samples: Vec<Vec<u8>> = Vec::with_capacity(200);
+    for i in 0..200 {
+        let s = json_payload(64 + (i * 10) % (2048 - 64));
+        samples.push(s.to_vec());
+    }
+    let refs: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+    omq_proto::proto::transform::train_zdict(&refs, capacity)
+        .expect("dict training failed")
+        .to_vec()
+}
+
+fn wire_size(ep: &Endpoint, size: usize) -> usize {
+    use omq_proto::proto::transform::MessageEncoder;
+    let options = bench_options(size);
+    let Some((mut enc, _dec)) = MessageEncoder::for_endpoint(ep, &options) else {
+        return size;
+    };
+    let payload = json_payload(size);
+    let msg = Message::single(payload.clone());
+    let frames = enc.encode(&msg).unwrap();
+    frames.last().map_or(size, Message::byte_len)
 }
