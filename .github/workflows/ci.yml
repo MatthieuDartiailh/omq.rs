@@ -47,22 +47,45 @@ jobs:
       - name: workspace tests (default features)
         run: cargo test --workspace
 
-  feature-matrix:
-    name: feature ${{ matrix.feature }} (${{ matrix.os }})
+  encryption:
+    name: encryption (curve + blake3zmq)
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        feature: [curve, blake3zmq, lz4, zstd, priority]
-        os: [ubuntu-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p omq-tokio  --features ${{ matrix.feature }}
-      - run: cargo test -p omq-compio --features ${{ matrix.feature }}
+      - run: cargo test -p omq-tokio  --features curve
+      - run: cargo test -p omq-compio --features curve
+      - run: cargo test -p omq-tokio  --features blake3zmq
+      - run: cargo test -p omq-compio --features blake3zmq
+
+  compression:
+    name: compression (lz4 + zstd)
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p omq-tokio  --features lz4
+      - run: cargo test -p omq-compio --features lz4
+      - run: cargo test -p omq-tokio  --features zstd
+      - run: cargo test -p omq-compio --features zstd
+
+  priority:
+    name: priority
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p omq-tokio  --features priority
+      - run: cargo test -p omq-compio --features priority
 
   facade:
     name: omq facade
@@ -99,8 +122,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets
 
-  pyomq:
-    name: pyomq + pyzmq interop
+  interop:
+    name: interop (ruby + pyomq)
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -108,6 +131,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: "4.0" }
+      - name: install omq-cli
+        run: gem install omq-cli
+      - name: rust ↔ ruby interop (tokio)
+        run: cargo test -p omq-tokio  --test interop_ruby
+      - name: rust ↔ ruby interop (compio)
+        run: cargo test -p omq-compio --test interop_ruby
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
       - name: create virtualenv and install python deps
@@ -121,29 +152,9 @@ jobs:
         working-directory: bindings/pyomq
         run: ../../.venv/bin/pytest -v -k "not test_perf"
 
-  ruby-interop:
-    name: ruby omq interop
-    needs: [changes]
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: ruby/setup-ruby@v1
-        with: { ruby-version: "4.0" }
-      - name: install omq-cli
-        run: gem install omq-cli
-      - name: verify omq version
-        run: omq --version
-      - name: rust ↔ ruby interop (tokio)
-        run: cargo test -p omq-tokio  --test interop_ruby
-      - name: rust ↔ ruby interop (compio)
-        run: cargo test -p omq-compio --test interop_ruby
-
   ci-success:
     name: CI success
-    needs: [changes, test, feature-matrix, facade, fmt, clippy, pyomq, ruby-interop]
+    needs: [changes, test, encryption, compression, priority, facade, fmt, clippy, interop]
     runs-on: ubuntu-latest
     if: always()
     steps:
