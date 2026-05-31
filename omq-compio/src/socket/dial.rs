@@ -103,6 +103,14 @@ async fn install_and_run(
     #[cfg(feature = "priority")] priority: u8,
 ) {
     *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
+    // SAFETY: single-threaded compio runtime.
+    unsafe {
+        *inner.direct_recv_io.get() = None;
+        #[cfg(not(feature = "priority"))]
+        {
+            *inner.direct_send_io.get() = None;
+        }
+    }
     inner
         .peers_gen
         .fetch_add(1, std::sync::atomic::Ordering::Release);
