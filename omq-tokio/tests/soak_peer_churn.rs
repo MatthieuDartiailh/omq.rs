@@ -44,9 +44,11 @@ fn soak_peer_churn() {
             }
 
             for _ in 0..100 {
+                let len = rng.random_range(1..=8192);
+                let payload = vec![0xABu8; len];
                 if let Ok(Ok(())) = tokio::time::timeout(
                     Duration::from_millis(1),
-                    push.send(Message::single("soak")),
+                    push.send(Message::single(payload)),
                 )
                 .await
                 {
