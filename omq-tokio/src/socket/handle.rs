@@ -152,6 +152,7 @@ struct Inner {
     /// user task, eliminating the send-path cross-task wakeup. Recv
     /// stays on the driver (which continues running after handoff).
     direct_io: DirectIoSlot,
+    last_bound_endpoint: RwLock<Option<Endpoint>>,
 }
 
 impl Socket {
@@ -233,6 +234,7 @@ impl Socket {
                 type_state,
                 req_awaiting_reply,
                 direct_io,
+                last_bound_endpoint: RwLock::new(None),
             }),
         }
     }
@@ -259,7 +261,14 @@ impl Socket {
             .send(SocketCommand::Bind { endpoint, ack })
             .await
             .map_err(|_| Error::Closed)?;
-        rx.await.map_err(|_| Error::Closed)?
+        let resolved = rx.await.map_err(|_| Error::Closed)??;
+        *self.inner.last_bound_endpoint.write().unwrap() = Some(resolved.clone());
+        Ok(resolved)
+    }
+
+    /// Return the most recently bound endpoint, if any.
+    pub fn last_bound_endpoint(&self) -> Option<Endpoint> {
+        self.inner.last_bound_endpoint.read().unwrap().clone()
     }
 
     /// Queue a connect attempt. Returns immediately; the background reconnect
