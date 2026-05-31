@@ -8,6 +8,7 @@ Produces:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -335,11 +336,28 @@ def nice_step(max_val: float, target_lines: int) -> float:
 
 # ── chart generation ──────────────────────────────────────────────
 
+def detect_hardware() -> str | None:
+    try:
+        cpu = None
+        for line in open("/proc/cpuinfo"):
+            if line.startswith("model name"):
+                cpu = line.split(":", 1)[1].strip()
+                cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
+                break
+        cores = os.cpu_count()
+        if cpu and cores:
+            return f"{cpu}, {cores} cores"
+    except OSError:
+        pass
+    return None
+
+
 def generate_chart(data: dict, impls: list[str], transport_label: str,
                    log_gbs: bool = False,
                    fixed_msg_max: float | None = None,
                    fixed_gbs_max: float | None = None,
-                   fixed_lat_max: float | None = None) -> str:
+                   fixed_lat_max: float | None = None,
+                   hw_label: str | None = None) -> str:
     sizes = data["sizes"]
     tput = data["tput"]
     lat = data["lat"]
@@ -351,11 +369,15 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
     has_latency = any(s in lat and any(name in lat[s] for name in impls) for s in sizes)
 
-    svg_w, svg_h = 850, 665 if has_latency else 365
+    hw_offset = 14 if hw_label else 0
+    svg_w = 850
+    svg_h = (665 if has_latency else 400) + hw_offset
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
+    mid_x = (x_left + x_right) / 2
 
-    t1_y_top, t1_y_bot = 35, 270
+    t1_y_top = 35 + hw_offset
+    t1_y_bot = (330 if has_latency else 305) + hw_offset
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
 
@@ -373,9 +395,15 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
         fixed_msg_max=fixed_msg_max,
         fixed_gbs_max=fixed_gbs_max,
     )
+    if hw_label:
+        L.append(
+            f'  <text x="{mid_x}" y="{t1_y_top - 3}" text-anchor="middle"'
+            f' fill="#9ca3af" font-size="10">{hw_label}</text>'
+        )
 
     if has_latency:
-        t2_y_top, t2_y_bot = 350, 540
+        t2_y_top = t1_y_bot + 80
+        t2_y_bot = t2_y_top + 160
         draw_latency_panel(
             L, sizes, xs, lat, impls, x_left, x_right, t2_y_top, t2_y_bot,
             f"REQ/REP latency — {transport_label} (p50 µs, lower is better)",
@@ -441,6 +469,7 @@ def main():
     FIXED_GBS_MAX = 6.0
     FIXED_LAT_MAX = 100.0
     FIXED_INPROC_LAT_MAX = 25.0
+    hw = detect_hardware()
 
     # TCP chart (4 impls)
     tcp_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
@@ -450,7 +479,8 @@ def main():
         svg = generate_chart(tcp_data, tcp_impls, "TCP loopback, 2-process",
                              fixed_msg_max=FIXED_MSG_MAX,
                              fixed_gbs_max=FIXED_GBS_MAX,
-                             fixed_lat_max=FIXED_LAT_MAX)
+                             fixed_lat_max=FIXED_LAT_MAX,
+                             hw_label=hw)
         out = REPO / "doc" / "charts" / "comparison_tcp.svg"
         out.write_text(svg)
         print(f"Written: {out}", file=sys.stderr)
@@ -465,7 +495,8 @@ def main():
         svg = generate_chart(ipc_data, ipc_impls, "IPC, 2-process",
                              fixed_msg_max=FIXED_MSG_MAX,
                              fixed_gbs_max=FIXED_GBS_MAX,
-                             fixed_lat_max=FIXED_LAT_MAX)
+                             fixed_lat_max=FIXED_LAT_MAX,
+                             hw_label=hw)
         out = REPO / "doc" / "charts" / "comparison_ipc.svg"
         out.write_text(svg)
         print(f"Written: {out}", file=sys.stderr)
@@ -479,7 +510,8 @@ def main():
     if inproc_data["sizes"]:
         svg = generate_chart(inproc_data, inproc_impls, "inproc", log_gbs=True,
                              fixed_msg_max=FIXED_MSG_MAX,
-                             fixed_lat_max=FIXED_INPROC_LAT_MAX)
+                             fixed_lat_max=FIXED_INPROC_LAT_MAX,
+                             hw_label=hw)
         out = REPO / "doc" / "charts" / "comparison_inproc.svg"
         out.write_text(svg)
         print(f"Written: {out}", file=sys.stderr)

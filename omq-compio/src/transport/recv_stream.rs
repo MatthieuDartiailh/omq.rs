@@ -126,7 +126,10 @@ pub(super) async fn pull_stream(
             )
             .await;
             match buf {
-                None => StreamArmOutcome::Eof,
+                None => {
+                    *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                    StreamArmOutcome::Fed
+                }
                 Some(Err(e)) => StreamArmOutcome::Err(e),
                 Some(Ok(buf)) => {
                     if buf.is_empty() {

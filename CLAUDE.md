@@ -81,6 +81,11 @@ revs link two `compio-runtime` instances -> TLS mismatch panic.
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |
 
+## ZMQ fundamentals
+
+Connect-before-bind always works. ZMTP reconnects automatically.
+Never suggest connection ordering as a cause for failures or hangs.
+
 ## Architecture and internals
 
 Three-layer split: codec (omq-proto) is sans-I/O, backends own the
