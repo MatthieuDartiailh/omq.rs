@@ -10,7 +10,6 @@
 //! Avoids fixed Ruby-boot sleeps so the suite stays fast.
 
 use std::io::Write;
-use std::net::TcpListener as StdTcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -94,26 +93,19 @@ struct Transport {
     cli: String,
 }
 
-/// Ephemeral TCP transport with a pre-reserved port. Used only when
-/// Ruby binds (REQ/REP test). Rust-bind tests use `bind_tcp` instead
-/// to avoid the bind-drop-rebind TOCTOU race.
 fn tcp_transport() -> Transport {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
     Transport {
         rust: Endpoint::Tcp {
             host: Host::Ip("127.0.0.1".parse().unwrap()),
-            port,
+            port: 0,
         },
-        cli: format!("tcp://127.0.0.1:{port}"),
+        cli: String::new(),
     }
 }
 
 /// Bind the Rust socket and return the CLI endpoint string. For TCP,
-/// binds port 0 and reads the kernel-assigned port from the monitor
-/// to avoid the TOCTOU race in `tcp_transport()`. For IPC, binds
-/// directly and returns `t.cli`.
+/// binds port 0 and reads the kernel-assigned port from the monitor.
+/// For IPC, binds directly and returns `t.cli`.
 async fn bind_tcp_or_ipc(sock: &Socket, t: &Transport) -> String {
     if matches!(&t.rust, Endpoint::Tcp { .. }) {
         let mut mon = sock.monitor();
@@ -288,17 +280,18 @@ async fn ruby_push_to_rust_pull_ipc() {
 // ---------------------------------------------------------------------
 
 async fn rust_req_to_ruby_rep(t: Transport) {
+    let req = Socket::new(SocketType::Req, Options::default());
+    let cli = bind_tcp_or_ipc(&req, &t).await;
+
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["rep", "-b", &t.cli, "--echo", "-n", "3"])
+            .args(["rep", "-c", &cli, "--echo", "-n", "3"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn omq rep"),
     );
 
-    let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(t.rust.clone()).await.unwrap();
     wait_for_handshake(&req).await;
 
     for i in 0..3 {

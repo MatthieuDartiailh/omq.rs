@@ -19,6 +19,21 @@ fn make_test_dict(seed: &[u8]) -> Bytes {
     train_zdict(&samples, 8 * 1024).expect("train_zdict")
 }
 
+async fn wait_for_handshake(sock: &Socket) {
+    let mut mon = sock.monitor();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match mon.recv().await {
+                Ok(MonitorEvent::HandshakeSucceeded { .. }) => return,
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before handshake: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("handshake did not arrive within 5s");
+}
+
 async fn pull_on_loopback() -> (Socket, Endpoint) {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let mut mon = pull.monitor();
@@ -238,6 +253,7 @@ async fn many_messages_in_a_row() {
     let (pull, ep) = pull_on_loopback().await;
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep).await.unwrap();
+    wait_for_handshake(&pull).await;
 
     for i in 0..N {
         push.send(Message::single(format!("m-{i}"))).await.unwrap();
@@ -315,6 +331,7 @@ async fn auto_train_survives_reconnect() {
             Options::default().linger(Duration::from_secs(4)),
         );
         push.connect(ep.clone()).await.unwrap();
+        wait_for_handshake(&pull).await;
         for i in 0..FIRST {
             push.send(Message::single(make_payload(i))).await.unwrap();
         }
@@ -330,6 +347,7 @@ async fn auto_train_survives_reconnect() {
             Options::default().linger(Duration::from_secs(2)),
         );
         push.connect(ep.clone()).await.unwrap();
+        wait_for_handshake(&pull).await;
         for i in 0..SECOND {
             push.send(Message::single(make_payload(i))).await.unwrap();
         }

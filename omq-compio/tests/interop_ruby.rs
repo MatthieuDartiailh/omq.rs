@@ -7,7 +7,6 @@
 //! compio runtime can keep driving the Rust socket while Ruby runs.
 
 use std::io::Write;
-use std::net::TcpListener as StdTcpListener;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::Duration;
 
@@ -89,25 +88,6 @@ async fn wait_status(mut child: Child) -> ExitStatus {
     await_blocking(move || child.wait().expect("wait")).await
 }
 
-#[derive(Clone, Debug)]
-struct Transport {
-    rust: Endpoint,
-    cli: String,
-}
-
-fn tcp_transport() -> Transport {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    Transport {
-        rust: Endpoint::Tcp {
-            host: Host::Ip("127.0.0.1".parse().unwrap()),
-            port,
-        },
-        cli: format!("tcp://127.0.0.1:{port}"),
-    }
-}
-
 fn tcp_endpoint_port_zero() -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip("127.0.0.1".parse().unwrap()),
@@ -123,7 +103,7 @@ fn cli_addr(sock: &Socket) -> String {
     }
 }
 
-fn ipc_transport(name: &str) -> Transport {
+fn ipc_endpoint(name: &str) -> Endpoint {
     let path = std::env::temp_dir().join(format!(
         "omq-compio-interop-{name}-{}-{}.sock",
         std::process::id(),
@@ -133,11 +113,7 @@ fn ipc_transport(name: &str) -> Transport {
             .as_nanos()
     ));
     let _ = std::fs::remove_file(&path);
-    let cli = format!("ipc://{}", path.display());
-    Transport {
-        rust: Endpoint::Ipc(IpcPath::Filesystem(path)),
-        cli,
-    }
+    Endpoint::Ipc(IpcPath::Filesystem(path))
 }
 
 async fn wait_for_handshake(sock: &Socket) {
@@ -204,7 +180,7 @@ async fn rust_push_to_ruby_pull_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_push_to_ruby_pull(ipc_transport("push-pull").rust).await;
+    rust_push_to_ruby_pull(ipc_endpoint("push-pull")).await;
 }
 
 async fn ruby_push_to_rust_pull(ep: Endpoint) {
@@ -256,25 +232,27 @@ async fn ruby_push_to_rust_pull_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    ruby_push_to_rust_pull(ipc_transport("push-pull-rev").rust).await;
+    ruby_push_to_rust_pull(ipc_endpoint("push-pull-rev")).await;
 }
 
 // =====================================================================
 // REQ / REP
 // =====================================================================
 
-async fn rust_req_to_ruby_rep(t: Transport) {
+async fn rust_req_to_ruby_rep(ep: Endpoint) {
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.bind(ep).await.unwrap();
+    let cli = cli_addr(&req);
+
     let mut guard = ChildGuard::new(
         Command::new("omq")
-            .args(["rep", "-b", &t.cli, "--echo", "-n", "3"])
+            .args(["rep", "-c", &cli, "--echo", "-n", "3"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn omq rep"),
     );
 
-    let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(t.rust).await.unwrap();
     wait_for_handshake(&req).await;
 
     for i in 0..3 {
@@ -296,7 +274,7 @@ async fn rust_req_to_ruby_rep_tcp() {
     if skip_if_no_omq() {
         return;
     }
-    rust_req_to_ruby_rep(tcp_transport()).await;
+    rust_req_to_ruby_rep(tcp_endpoint_port_zero()).await;
 }
 
 #[compio::test]
@@ -304,7 +282,7 @@ async fn rust_req_to_ruby_rep_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_req_to_ruby_rep(ipc_transport("req-rep")).await;
+    rust_req_to_ruby_rep(ipc_endpoint("req-rep")).await;
 }
 
 // =====================================================================
@@ -361,7 +339,7 @@ async fn rust_pub_to_ruby_sub_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_pub_to_ruby_sub(ipc_transport("pub-sub").rust).await;
+    rust_pub_to_ruby_sub(ipc_endpoint("pub-sub")).await;
 }
 
 // =====================================================================
@@ -417,7 +395,7 @@ async fn rust_router_sees_ruby_dealer_identity_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_router_sees_ruby_dealer_identity(ipc_transport("router-dealer").rust).await;
+    rust_router_sees_ruby_dealer_identity(ipc_endpoint("router-dealer")).await;
 }
 
 // =====================================================================
@@ -477,5 +455,5 @@ async fn rust_radio_to_ruby_dish_ipc() {
     if skip_if_no_omq() {
         return;
     }
-    rust_radio_to_ruby_dish(ipc_transport("radio-dish").rust).await;
+    rust_radio_to_ruby_dish(ipc_endpoint("radio-dish")).await;
 }
