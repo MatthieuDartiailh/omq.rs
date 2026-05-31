@@ -43,7 +43,7 @@ flume = { version = "0.12", default-features = false, features = ["async"] }
 rustc-hash = "2.1.0"
 concurrent-queue = "2.5.0"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-compio = { version = "0.19.0-rc.1", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync", "async-fd"] }
+compio = { git = "https://github.com/compio-rs/compio.git", tag = "v0.19.0-rc.2", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync", "async-fd"] }
 slab = "0.4"
 event-listener = "5.4.0"
 async-lock = "3.4.0"
@@ -54,7 +54,7 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = { version = "2", optional = true }
 rustls-pki-types = { version = "1", optional = true }
-compio-tls = { version = "0.10.0-rc.2", optional = true, default-features = false, features = ["rustls"] }
+compio-tls = { git = "https://github.com/compio-rs/compio.git", tag = "v0.19.0-rc.2", optional = true, default-features = false, features = ["rustls"] }
 
 
 [dev-dependencies]
