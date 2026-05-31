@@ -10,16 +10,18 @@ would be at its link speed: effective_msgs_s = min(cpu_msgs_s, link_bytes_s / wi
 
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
 
 LINK_SPEEDS = [
+    ("10g",  10_000_000_000 / 8),
     ("1g",   1_000_000_000 / 8),
     ("100m", 100_000_000 / 8),
     ("10m",  10_000_000 / 8),
 ]
-LINK_LABELS = {"1g": "1 Gbps", "100m": "100 Mbps", "10m": "10 Mbps"}
+LINK_LABELS = {"10g": "10 Gbps", "1g": "1 Gbps", "100m": "100 Mbps", "10m": "10 Mbps"}
 
 COLORS = {
     "tcp":            "#eab308",
@@ -193,6 +195,7 @@ def generate_svg(
     msgs_ranges: dict[str, tuple[float, float]] | None = None,
     dict_size_label: str | None = None,
     backend: str = "compio",
+    hw_label: str | None = None,
 ) -> str:
     links = [label for label, _ in LINK_SPEEDS if label in panels]
     if not links:
@@ -204,7 +207,7 @@ def generate_svg(
     plot_w = x_right - x_left
     panel_h = 220
     panel_gap = 70
-    top_margin = 30
+    top_margin = 44 if hw_label else 30
     x_label_space = 20
     legend_h = 50
 
@@ -234,6 +237,11 @@ def generate_svg(
         f'Compression transports: structured JSON, PUSH/PULL, {THREAD_MODELS[backend]} (omq-{backend})'
         f'{f" — dict {dict_size_label}" if dict_size_label else ""}</text>'
     )
+    if hw_label:
+        L.append(
+            f'  <text x="{mid_x}" y="30" text-anchor="middle" fill="#9ca3af"'
+            f' font-size="10">{hw_label}</text>'
+        )
 
     last_x_label_y = 0
 
@@ -262,6 +270,9 @@ def generate_svg(
             virt_min = min(all_virt_mb) if all_virt_mb else 1
             virt_max = max(all_virt_mb) if all_virt_mb else 100
         tp_min, tp_max, tp_ticks = _log_ticks(max(virt_min, 1), max(virt_max, 10))
+        if tput_ranges and link in tput_ranges:
+            tp_max = math.log10(tput_ranges[link][1])
+            tp_ticks = [t for t in tp_ticks if t <= tput_ranges[link][1]]
 
         def y_msg(v, _bot=y_bot, _h=plot_h, _lmin=axis_min, _lmax=axis_max):
             if v <= 0:
@@ -420,8 +431,25 @@ def generate_svg(
 
 THREAD_MODELS = {
     "compio": "2-thread",
-    "tokio": "multi-thread",
+    "tokio": "2-process",
 }
+
+
+def detect_hardware() -> str | None:
+    """Read CPU model and core count from /proc."""
+    try:
+        cpu = None
+        for line in open("/proc/cpuinfo"):
+            if line.startswith("model name"):
+                cpu = line.split(":", 1)[1].strip()
+                cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
+                break
+        cores = os.cpu_count()
+        if cpu and cores:
+            return f"{cpu}, {cores} cores"
+    except OSError:
+        pass
+    return None
 
 
 def main():
@@ -431,12 +459,16 @@ def main():
                         help="which backend's results to chart (default: compio)")
     parser.add_argument("--dict-size", type=int, default=None,
                         help="filter dict rows to this dict_size (bytes)")
+    parser.add_argument("--tput-10g", type=str, default=None,
+                        help="throughput range for 10 Gbps panel (min,max MB/s)")
     parser.add_argument("--tput-1g", type=str, default=None,
                         help="throughput range for 1 Gbps panel (min,max MB/s)")
     parser.add_argument("--tput-100m", type=str, default=None,
                         help="throughput range for 100 Mbps panel (min,max MB/s)")
     parser.add_argument("--tput-10m", type=str, default=None,
                         help="throughput range for 10 Mbps panel (min,max MB/s)")
+    parser.add_argument("--msgs-10g", type=str, default=None,
+                        help="msg/s range for 10 Gbps panel (min,max)")
     parser.add_argument("--msgs-1g", type=str, default=None,
                         help="msg/s range for 1 Gbps panel (min,max)")
     parser.add_argument("--msgs-100m", type=str, default=None,
@@ -465,15 +497,18 @@ def main():
             return (float(lo), float(hi))
         return default
 
-    default_tput = {"1g": (10, 2000), "100m": (1, 400), "10m": (1, 40)}
-    default_msgs = {"1g": (100, 20_000_000), "100m": (10, 2_000_000), "10m": (1, 200_000)}
+    default_tput = {"10g": (10, 4000), "1g": (5, 2000), "100m": (1, 400), "10m": (1, 40)}
+    default_msgs = {"10g": (1000, 20_000_000), "1g": (100, 20_000_000),
+                    "100m": (10, 2_000_000), "10m": (1, 200_000)}
 
     tput_ranges = {
+        "10g": parse_range(args.tput_10g, default_tput["10g"]),
         "1g": parse_range(args.tput_1g, default_tput["1g"]),
         "100m": parse_range(args.tput_100m, default_tput["100m"]),
         "10m": parse_range(args.tput_10m, default_tput["10m"]),
     }
     msgs_ranges = {
+        "10g": parse_range(args.msgs_10g, default_msgs["10g"]),
         "1g": parse_range(args.msgs_1g, default_msgs["1g"]),
         "100m": parse_range(args.msgs_100m, default_msgs["100m"]),
         "10m": parse_range(args.msgs_10m, default_msgs["10m"]),
@@ -486,7 +521,7 @@ def main():
         dict_size_label = f"{ds} B"
 
     svg = generate_svg(panels, tput_ranges, msgs_ranges, dict_size_label,
-                       backend=args.backend)
+                       backend=args.backend, hw_label=detect_hardware())
     output = repo / "doc" / "charts" / "compression" / f"{args.backend}_{ds}.svg"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(svg)

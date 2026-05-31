@@ -26,9 +26,11 @@ pub mod lz4;
 pub mod zstd;
 
 #[cfg(feature = "lz4")]
-pub use lz4::{Lz4Decoder, Lz4Encoder};
+pub use lz4::{Lz4Decoder, Lz4Encoder, Lz4Stream};
 #[cfg(feature = "zstd")]
 pub use zstd::{ZstdDecoder, ZstdEncoder, train_zdict};
+#[cfg(feature = "zstd")]
+pub use zstd_safe::CCtx as ZstdCCtx;
 
 use smallvec::SmallVec;
 
@@ -153,6 +155,19 @@ impl MessageEncoder {
                 let _ = msg;
                 unreachable!("MessageEncoder is uninhabited without lz4/zstd features")
             }
+        }
+    }
+
+    /// True when dict shipping and auto-train are complete and
+    /// compression can be offloaded to a background thread.
+    pub fn can_offload(&self) -> bool {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(t) => t.can_offload(),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.can_offload(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!(),
         }
     }
 }

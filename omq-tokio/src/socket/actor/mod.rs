@@ -224,6 +224,7 @@ pub(crate) struct SocketDriver {
     direct_io_pending: super::handle::DirectIoPending,
     pending_direct_io_rx:
         Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
+    compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
 }
 
 impl SocketDriver {
@@ -283,6 +284,7 @@ impl SocketDriver {
             direct_io,
             direct_io_pending,
             pending_direct_io_rx: None,
+            compression_pool: None,
         }
     }
 
