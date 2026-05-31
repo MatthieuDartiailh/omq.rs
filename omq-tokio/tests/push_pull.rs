@@ -221,7 +221,6 @@ async fn push_pull_under_backpressure_delivers_everything() {
 }
 
 #[tokio::test]
-#[ignore = "pre-peer queueing not implemented: PUSH uses per-peer queues, so send blocks until a peer arrives. libzmq buffers up to HWM in a socket-wide queue."]
 async fn push_send_before_peer_connects_queues() {
     // Publish messages before any PULL exists; they should accumulate in the
     // socket's shared queue and flush once a peer comes online.
