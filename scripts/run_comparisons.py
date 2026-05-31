@@ -33,10 +33,10 @@ FULL_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768
 QUICK_SIZES = [32, 1024, 4096]
 TABLE_SIZES = [32, 1024, 4096]
 
-DURATION = 3
-LATENCY_ITERATIONS = 10_000
-LATENCY_WARMUP = 1_000
-LATENCY_TIMEOUT = 30
+DURATION = 2
+LATENCY_ITERATIONS = 5_000
+LATENCY_WARMUP = 500
+LATENCY_TIMEOUT = 15
 
 
 # ── formatting ────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ def spawn_process(binary: str, *args: str) -> subprocess.Popen:
     )
 
 
-def capture_process(binary: str, *args: str, timeout: int = 30) -> str:
+def capture_process(binary: str, *args: str, timeout: int = 15) -> str:
     proc = subprocess.Popen(
         [binary, *args],
         stdout=subprocess.PIPE,
