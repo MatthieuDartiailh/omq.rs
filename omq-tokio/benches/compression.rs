@@ -1,0 +1,497 @@
+//! Compression-transport throughput on realistic JSON-shaped payloads.
+//!
+//! Requires the `lz4` and `zstd` features; without them the bench
+//! has nothing to compare against the plain `tcp` baseline.
+//!
+//! `tcp` / `lz4+tcp` / `zstd+tcp`, single peer, sending small JSON
+//! records that mimic typical eventing / log shipping traffic.
+//! Reports **virtual** throughput (uncompressed bytes/sec) - what the
+//! application sees - which is what compression actually buys you.
+
+#[cfg(not(all(feature = "lz4", feature = "zstd")))]
+fn main() {
+    eprintln!("compression bench requires `--features lz4 zstd`");
+}
+
+#[cfg(all(feature = "lz4", feature = "zstd"))]
+#[path = "common/mod.rs"]
+mod common;
+
+#[cfg(all(feature = "lz4", feature = "zstd"))]
+fn main() {
+    inner::tokio_main();
+}
+
+#[cfg(all(feature = "lz4", feature = "zstd"))]
+mod inner {
+    use super::common;
+    use bytes::Bytes;
+    use omq_tokio::{Message, Options, Socket, SocketType};
+
+    const PATTERN: &str = "compression_json";
+    const PEER_COUNTS: &[usize] = &[1];
+    const SUPPORTED_TRANSPORTS: &[&str] = &["tcp", "lz4+tcp", "zstd+tcp"];
+    const DEFAULT_DICT_SIZES: &[usize] = &[2048];
+
+    fn zstd_level() -> i32 {
+        std::env::var("OMQ_BENCH_ZSTD_LEVEL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(omq_proto::proto::transform::zstd::DEFAULT_LEVEL)
+    }
+
+    fn send_hwm() -> Option<u32> {
+        std::env::var("OMQ_BENCH_SEND_HWM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+    }
+
+    fn compression_threshold() -> Option<usize> {
+        std::env::var("OMQ_BENCH_COMPRESSION_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+    }
+
+    fn active_transports() -> Vec<String> {
+        if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
+            return s.split(',').map(|t| t.trim().to_string()).collect();
+        }
+        SUPPORTED_TRANSPORTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    }
+
+    fn dict_sizes() -> Vec<usize> {
+        if let Ok(s) = std::env::var("OMQ_BENCH_DICT_SIZES") {
+            return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        }
+        DEFAULT_DICT_SIZES.to_vec()
+    }
+
+    fn compression_sizes() -> Vec<usize> {
+        if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
+            return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        }
+        common::CHART_SIZES.to_vec()
+    }
+
+    pub(super) fn tokio_main() {
+        let rt = common::build_runtime();
+        rt.block_on(async {
+            let transports = active_transports();
+            if transports.is_empty() {
+                return;
+            }
+
+            common::print_header("PUSH/PULL - JSON payloads (virtual throughput)");
+            println!();
+
+            let peer_counts = common::peers_override();
+            let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
+            let sizes = compression_sizes();
+
+            let dict = train_zstd_dict();
+
+            let mut seq = 0usize;
+            for transport in &transports {
+                let transport = transport.as_str();
+                for &peers in peer_counts {
+                    common::print_subheader(transport, peers);
+                    for &approx_size in &sizes {
+                        seq += 1;
+                        let payload = json_payload(approx_size);
+                        let actual = payload.len();
+                        let dict = if transport == "zstd+tcp" {
+                            Some(&dict)
+                        } else {
+                            None
+                        };
+                        let wire_bytes_per_msg = wire_size(transport, &payload, dict);
+                        let cell =
+                            run_cell(transport, peers, payload.clone(), seq, dict.cloned()).await;
+                        let wire_mbps = (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
+                        let cpu_pct = if cell.elapsed.as_nanos() > 0 {
+                            cell.cpu_time.as_secs_f64() / cell.elapsed.as_secs_f64() * 100.0
+                        } else {
+                            0.0
+                        };
+                        println!(
+                            "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, cpu {:.0}%, n={})",
+                            format!("{approx_size}B"),
+                            cell.msgs_s,
+                            wire_mbps,
+                            cell.mbps,
+                            cell.elapsed.as_secs_f64(),
+                            cpu_pct,
+                            cell.n,
+                        );
+                        append_compression_jsonl(
+                            PATTERN,
+                            transport,
+                            peers,
+                            actual,
+                            wire_bytes_per_msg,
+                            cell,
+                        );
+                    }
+                    println!();
+                }
+            }
+
+            run_dict_benches(peer_counts, &sizes, &mut seq).await;
+        });
+    }
+
+    async fn run_dict_benches(peer_counts: &[usize], sizes: &[usize], seq: &mut usize) {
+        let dict_sizes = dict_sizes();
+        for &dict_cap in &dict_sizes {
+            let small_dict = train_zstd_dict_sized(dict_cap);
+            let dict_label = if dict_cap >= 1024 {
+                format!("{}K", dict_cap / 1024)
+            } else {
+                format!("{dict_cap}B")
+            };
+            let actual_len = small_dict.len();
+
+            for transport in &["zstd+tcp", "lz4+tcp"] {
+                println!("--- {transport} with {dict_label} dict (actual {actual_len}B) ---");
+                for &peers in peer_counts {
+                    common::print_subheader(transport, peers);
+                    for &approx_size in sizes {
+                        *seq += 1;
+                        let payload = json_payload(approx_size);
+                        let actual = payload.len();
+                        let wire_bytes_per_msg = wire_size(transport, &payload, Some(&small_dict));
+                        let cell = run_cell(
+                            transport,
+                            peers,
+                            payload.clone(),
+                            *seq,
+                            Some(small_dict.clone()),
+                        )
+                        .await;
+                        let wire_mbps = (cell.msgs_s * wire_bytes_per_msg as f64) / 1_000_000.0;
+                        let cpu_pct = if cell.elapsed.as_nanos() > 0 {
+                            cell.cpu_time.as_secs_f64() / cell.elapsed.as_secs_f64() * 100.0
+                        } else {
+                            0.0
+                        };
+                        println!(
+                            "  ~{:>6}  {:>9.0} msg/s  {:>9.1} wireMB/s  {:>9.1} virtMB/s  ({:.2}s, cpu {:.0}%, n={})",
+                            format!("{approx_size}B"),
+                            cell.msgs_s,
+                            wire_mbps,
+                            cell.mbps,
+                            cell.elapsed.as_secs_f64(),
+                            cpu_pct,
+                            cell.n,
+                        );
+                        append_compression_jsonl_dict(
+                            "compression_json_dict",
+                            transport,
+                            peers,
+                            actual,
+                            wire_bytes_per_msg,
+                            cell,
+                            Some(dict_cap),
+                        );
+                    }
+                    println!();
+                }
+            }
+        }
+    }
+
+    fn append_compression_jsonl(
+        pattern: &str,
+        transport: &str,
+        peers: usize,
+        msg_size: usize,
+        wire_bytes: usize,
+        c: common::Cell,
+    ) {
+        append_compression_jsonl_dict(pattern, transport, peers, msg_size, wire_bytes, c, None);
+    }
+
+    fn append_compression_jsonl_dict(
+        pattern: &str,
+        transport: &str,
+        peers: usize,
+        msg_size: usize,
+        wire_bytes: usize,
+        c: common::Cell,
+        dict_size: Option<usize>,
+    ) {
+        if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
+            return;
+        }
+        let path = common::compression_results_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let dict_field = match dict_size {
+            Some(ds) => format!(r#","dict_size":{ds}"#),
+            None => String::new(),
+        };
+        let row = format!(
+            r#"{{"run_id":"{run}","pattern":"{pattern}","transport":"{transport}","peers":{peers},"msg_size":{msg_size},"wire_bytes":{wire_bytes},"msg_count":{n},"elapsed":{el},"cpu_time":{cpu},"mbps":{mbps},"msgs_s":{msgs_s}{dict_field}}}"#,
+            run = common::run_id(),
+            n = c.n,
+            el = c.elapsed.as_secs_f64(),
+            cpu = c.cpu_time.as_secs_f64(),
+            mbps = c.mbps,
+            msgs_s = c.msgs_s,
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write as _;
+            let _ = writeln!(f, "{row}");
+        }
+    }
+
+    fn wire_size(transport: &str, plain: &Bytes, dict: Option<&Bytes>) -> usize {
+        use omq_proto::proto::transform::lz4::Lz4Encoder;
+        use omq_proto::proto::transform::zstd::ZstdEncoder;
+        let m = omq_tokio::Message::single(plain.clone());
+        let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
+            out.last().map_or(plain.len(), omq_tokio::Message::byte_len)
+        };
+        match transport {
+            "lz4+tcp" => {
+                let mut t = match dict {
+                    Some(d) => Lz4Encoder::with_send_dict(d.clone()).unwrap(),
+                    None => Lz4Encoder::new(),
+                };
+                if let Some(th) = compression_threshold() {
+                    t = t.with_threshold(th);
+                }
+                encoded_len(t.encode(&m).unwrap())
+            }
+            "zstd+tcp" => {
+                let mut t = match dict {
+                    Some(d) => ZstdEncoder::with_send_dict(d.clone()).unwrap(),
+                    None => ZstdEncoder::new(),
+                }
+                .with_level(zstd_level());
+                if let Some(th) = compression_threshold() {
+                    t = t.with_threshold(th);
+                }
+                encoded_len(t.encode(&m).unwrap())
+            }
+            _ => plain.len(),
+        }
+    }
+
+    fn train_zstd_dict_sized(max_bytes: usize) -> Bytes {
+        let mut samples_buf: Vec<u8> = Vec::with_capacity(200 * 512);
+        let mut sizes: Vec<usize> = Vec::with_capacity(200);
+        for i in 0..200 {
+            let s = json_payload(64 + (i * 10) % (2048 - 64));
+            sizes.push(s.len());
+            samples_buf.extend_from_slice(&s);
+        }
+        let mut dict_buf = vec![0u8; max_bytes];
+        let n = zstd_safe::train_from_buffer(&mut dict_buf, &samples_buf, &sizes)
+            .expect("zstd train_from_buffer");
+        dict_buf.truncate(n);
+        Bytes::from(dict_buf)
+    }
+
+    fn train_zstd_dict() -> Bytes {
+        train_zstd_dict_sized(omq_proto::proto::transform::zstd::DEFAULT_DICT_CAPACITY)
+    }
+
+    fn recv_opts(dict: Option<&Bytes>, level: i32) -> Options {
+        let mut opts = match dict {
+            Some(d) => Options::default().compression_dict(d.clone()),
+            None => Options::default(),
+        }
+        .compression_level(level);
+        if let Some(t) = compression_threshold() {
+            opts = opts.compression_threshold(t);
+        }
+        opts
+    }
+
+    fn push_opts(dict: Option<&Bytes>, level: i32) -> Options {
+        let mut opts = recv_opts(dict, level);
+        if let Some(hwm) = send_hwm() {
+            opts = opts.send_hwm(hwm);
+        }
+        opts
+    }
+
+    async fn run_cell(
+        transport: &str,
+        peers: usize,
+        payload: Bytes,
+        seq: usize,
+        dict: Option<Bytes>,
+    ) -> common::Cell {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let ep = common::endpoint(transport, seq);
+        let level = zstd_level();
+        let pull_count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let label = format!("{transport} ~{}B {peers}p", payload.len());
+
+        let pull = Socket::new(SocketType::Pull, recv_opts(dict.as_ref(), level));
+        pull.bind(ep.clone()).await.expect("bind PULL");
+
+        let mut pushes: Vec<Socket> = Vec::with_capacity(peers);
+        for _ in 0..peers {
+            let p = Socket::new(SocketType::Push, push_opts(dict.as_ref(), level));
+            p.connect(ep.clone()).await.expect("connect PUSH");
+            pushes.push(p);
+        }
+        let refs: Vec<&Socket> = pushes.iter().collect();
+        common::wait_connected(&refs).await;
+
+        let pull = Arc::new(pull);
+        let pushes = Arc::new(pushes);
+
+        let pull_handle = spawn_recv_loop(pull.clone(), pull_count.clone(), stop.clone());
+
+        let inline = payload.len() <= omq_proto::message::MAX_INLINE_MESSAGE;
+        let burst = |k: usize| {
+            let pushes = pushes.clone();
+            let payload = payload.clone();
+            let pull_count = pull_count.clone();
+            async move {
+                let per = (k / pushes.len()).max(1);
+                let target = pull_count.load(Ordering::Relaxed) + per * pushes.len();
+                let mut handles = Vec::with_capacity(pushes.len());
+                for i in 0..pushes.len() {
+                    let p = pushes.clone();
+                    let payload = payload.clone();
+                    handles.push(tokio::spawn(async move {
+                        if inline {
+                            for _ in 0..per {
+                                p[i].send(Message::from_slice(&payload)).await.unwrap();
+                            }
+                        } else {
+                            let msg = Message::single(payload);
+                            for _ in 0..per {
+                                p[i].send(msg.clone()).await.unwrap();
+                            }
+                        }
+                    }));
+                }
+                for h in handles {
+                    let _ = h.await;
+                }
+                while pull_count.load(Ordering::Relaxed) < target {
+                    tokio::time::sleep(std::time::Duration::from_micros(50)).await;
+                }
+            }
+        };
+
+        let cell = common::with_timeout(
+            &label,
+            common::measure_min_of(payload.len(), pushes.len(), burst),
+        )
+        .await;
+
+        stop.store(true, Ordering::Relaxed);
+        pull_handle.abort();
+        let _ = pull_handle.await;
+
+        if let Ok(pushes) = Arc::try_unwrap(pushes) {
+            for p in pushes {
+                let _ = p.close().await;
+            }
+        }
+        if let Ok(pull) = Arc::try_unwrap(pull) {
+            let _ = pull.close().await;
+        }
+
+        cell
+    }
+
+    fn spawn_recv_loop(
+        pull: std::sync::Arc<Socket>,
+        pull_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        use std::sync::atomic::Ordering;
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(Ok(_)) =
+                    tokio::time::timeout(std::time::Duration::from_millis(20), pull.recv()).await
+                {
+                    pull_count.fetch_add(1, Ordering::Relaxed);
+                    let mut drained = 0u64;
+                    while pull.try_recv().is_ok() {
+                        drained += 1;
+                    }
+                    pull_count.fetch_add(drained as usize, Ordering::Relaxed);
+                }
+            }
+        })
+    }
+
+    fn json_payload(target_bytes: usize) -> Bytes {
+        const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR"];
+        const SERVICES: &[&str] = &[
+            "api-gateway",
+            "auth-svc",
+            "order-svc",
+            "payment-svc",
+            "notify-svc",
+        ];
+        const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
+        const PATHS: &[&str] = &[
+            "/v1/widgets",
+            "/v1/users",
+            "/v1/orders",
+            "/v2/events",
+            "/v1/health",
+        ];
+        const REGIONS: &[&str] = &[
+            "us-east-1",
+            "us-west-2",
+            "eu-west-1",
+            "ap-south-1",
+            "eu-central-1",
+        ];
+        const STATUSES: &[u16] = &[200, 201, 204, 400, 404, 500, 502, 503];
+        const MSGS: &[&str] = &[
+            "request handled successfully",
+            "resource created",
+            "cache miss, fetched from origin",
+            "rate limit approaching threshold",
+            "upstream timeout, retrying",
+        ];
+
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(target_bytes + 512);
+        let mut counter: u32 = 0;
+        while out.len() < target_bytes {
+            let h = counter.wrapping_mul(0x9E37_79B1) as usize;
+            let id = format!("{h:08x}");
+            let level = LEVELS[h % LEVELS.len()];
+            let service = SERVICES[(h >> 4) % SERVICES.len()];
+            let method = METHODS[(h >> 8) % METHODS.len()];
+            let path = PATHS[(h >> 12) % PATHS.len()];
+            let region = REGIONS[(h >> 16) % REGIONS.len()];
+            let status = STATUSES[(h >> 20) % STATUSES.len()];
+            let latency = (h % 500) as u32 + 1;
+            let msg = MSGS[(h >> 24) % MSGS.len()];
+            let _ = write!(
+                out,
+                r#"{{"ts":"2026-04-27T12:34:56.{id}Z","level":"{level}","service":"{service}","trace_id":"{id}","span_id":"{id}","user_id":"u-{id}","method":"{method}","path":"{path}/{id}","status":{status},"latency_ms":{latency},"region":"{region}","host":"{service}-{id}.svc.cluster.local","msg":"{msg}"}}{nl}"#,
+                nl = '\n',
+            );
+            counter = counter.wrapping_add(1);
+        }
+        out.truncate(target_bytes);
+        Bytes::from(out)
+    }
+}

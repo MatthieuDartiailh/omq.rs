@@ -55,7 +55,10 @@ measured compression ratio and CPU-limited throughput.
 </details>
 
 <p align="center">
-  <img src="doc/charts/compression_2048.svg" alt="Compression throughput at 1 Gbps, 100 Mbps, and 10 Mbps" width="850">
+  <img src="doc/charts/compression/compio_2048.svg" alt="Compression throughput: omq-compio" width="850">
+</p>
+<p align="center">
+  <img src="doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
 </p>
 
 ## Throughput tables
@@ -215,9 +218,11 @@ bucket burst and loop back before the qdisc can shape them).
 
 ```sh
 cargo bench -p omq-compio --features lz4,zstd --bench compression
+cargo bench -p omq-tokio  --features lz4,zstd --bench compression
 
-# Generate chart and tables
-python3 scripts/gen_compression_chart.py
+# Generate charts and tables
+python3 scripts/gen_compression_chart.py --backend compio
+python3 scripts/gen_compression_chart.py --backend tokio
 ruby scripts/compression_report.rb --link 1g
 ruby scripts/compression_report.rb --link 100m
 ruby scripts/compression_report.rb --link 10m

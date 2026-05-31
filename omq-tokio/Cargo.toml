@@ -61,6 +61,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # thread while the tokio backend runs in the test's own runtime.
 omq-compio = { path = "../omq-compio", default-features = false, features = ["ws"] }
 compio = { git = "https://github.com/compio-rs/compio.git", tag = "v0.19.0-rc.2", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync"] }
+zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"] }
 
 [[bin]]
 name = "bench_peer_tokio"
@@ -100,6 +101,10 @@ harness = false
 
 [[bench]]
 name = "client_server_latency"
+harness = false
+
+[[bench]]
+name = "compression"
 harness = false
 
 [package.metadata.docs.rs]

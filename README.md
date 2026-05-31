@@ -30,7 +30,10 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 <details>
 <summary>Compression transport throughput (lz4 / zstd, dict 2 KiB)</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression_2048.svg" alt="Compression throughput at 1 Gbps, 100 Mbps, and 10 Mbps" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/compio_2048.svg" alt="Compression throughput: omq-compio" width="850">
 </p>
 </details>
 
