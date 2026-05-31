@@ -136,6 +136,15 @@ pub fn is_bound(name: &str) -> bool {
         .contains_key(name)
 }
 
+/// Explicitly remove `name` from the registry. Used by `signal_close()`
+/// to free inproc names without waiting for the accept task to be
+/// cancelled and its `InprocListener` to be dropped.
+pub fn force_unbind(name: &str) {
+    if let Ok(mut reg) = REGISTRY.lock() {
+        reg.bound.remove(name);
+    }
+}
+
 /// Default per-socket inbound capacity (whole messages).
 pub const DEFAULT_INPROC_HWM: usize = 1024;
 

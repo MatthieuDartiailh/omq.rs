@@ -28,7 +28,7 @@ omq-proto = { path = "../../omq-proto", default-features = false }
 omq-compio = { path = "../../omq-compio", default-features = false }
 # We need direct access to compio's runtime spawn / Runtime to host the
 # Socket registry on the compio thread.
-compio = { version = "0.19.0-rc.1", features = ["macros", "runtime", "io-uring", "time", "io", "async-fd"] }
+compio = { git = "https://github.com/compio-rs/compio.git", tag = "v0.19.0-rc.2", features = ["macros", "runtime", "io-uring", "time", "io", "async-fd"] }
 
 bytes = "1"
 libc = "0.2"

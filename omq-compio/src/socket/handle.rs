@@ -294,8 +294,17 @@ impl Socket {
     }
 
     /// Set the closed flag without draining or awaiting linger.
+    /// Also releases inproc names from the global registry so
+    /// rebinding succeeds even when the socket outlives this call.
     pub fn signal_close(&self) {
         self.inner.closed.store(true, Ordering::SeqCst);
+        let listeners = self.inner.listeners.write().expect("listeners lock");
+        for entry in listeners.iter() {
+            if let Endpoint::Inproc { name } = &entry.endpoint {
+                crate::transport::inproc::force_unbind(name);
+            }
+        }
+        drop(listeners);
     }
 
     /// Graceful close: stop accepting, drain pending sends up to linger, then shut down.

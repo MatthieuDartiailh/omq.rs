@@ -22,6 +22,7 @@ def _measure_pyomq(endpoint: str, size: int, n_target_per_s: int = 200_000) -> f
     ctx = pyomq.Context()
     pull = ctx.socket(pyomq.PULL)
     push = ctx.socket(pyomq.PUSH)
+    pull.setsockopt(pyomq.RCVTIMEO, 10_000)
     pull.bind(endpoint)
     push.connect(endpoint)
 
@@ -51,6 +52,7 @@ def _measure_pyzmq(endpoint: str, size: int, n_target_per_s: int = 200_000) -> f
     ctx = zmq_pyzmq.Context.instance()
     pull = ctx.socket(zmq_pyzmq.PULL)
     push = ctx.socket(zmq_pyzmq.PUSH)
+    pull.setsockopt(zmq_pyzmq.RCVTIMEO, 10_000)
     pull.bind(endpoint)
     push.connect(endpoint)
 
