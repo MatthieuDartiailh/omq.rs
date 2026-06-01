@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use omq_compio::endpoint::Host;
 use omq_compio::options::ReconnectPolicy;
-use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Message, OnMute, Options, Socket, SocketType};
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -219,4 +219,59 @@ async fn exponential_backoff_retry_in_grows() {
             delays[i - 1]
         );
     }
+}
+
+#[compio::test]
+async fn push_hwm_drains_after_reconnect() {
+    let pull1 = Socket::new(SocketType::Pull, Options::default());
+    let ep = pull1.bind(tcp_ep(0)).await.unwrap();
+
+    let push = Socket::new(
+        SocketType::Push,
+        Options::default()
+            .send_hwm(4)
+            .on_mute(OnMute::DropNewest)
+            .reconnect(ReconnectPolicy::Fixed(Duration::from_millis(30))),
+    );
+    push.connect(ep.clone()).await.unwrap();
+    compio::time::sleep(Duration::from_millis(100)).await;
+
+    push.send(Message::single("warmup")).await.unwrap();
+    compio::time::timeout(Duration::from_secs(2), pull1.recv())
+        .await
+        .expect("warmup timed out")
+        .unwrap();
+
+    pull1.close().await.unwrap();
+    compio::time::sleep(Duration::from_millis(100)).await;
+
+    for i in 0..10 {
+        let _ = compio::time::timeout(
+            Duration::from_millis(50),
+            push.send(Message::single(format!("q{i}"))),
+        )
+        .await;
+    }
+
+    let pull2 = Socket::new(SocketType::Pull, Options::default());
+    let mut bound = false;
+    for _ in 0..40 {
+        if pull2.bind(ep.clone()).await.is_ok() {
+            bound = true;
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(bound, "pull2 failed to rebind");
+
+    push.send(Message::single("final")).await.unwrap();
+
+    let mut count = 0;
+    while let Ok(Ok(_)) = compio::time::timeout(Duration::from_secs(2), pull2.recv()).await {
+        count += 1;
+        if count > 10 {
+            break;
+        }
+    }
+    assert!(count >= 1, "expected at least 1 message, got {count}");
 }

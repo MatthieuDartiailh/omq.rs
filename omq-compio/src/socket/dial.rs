@@ -270,6 +270,18 @@ async fn dial_supervisor<F, Fut>(
         )
         .await;
 
+        // Driver exited (peer disconnected). Clear stale identity
+        // entries so send_identity_routed doesn't route into the dead
+        // channel. Without this, PEER/ROUTER/SERVER sends get
+        // Err(Closed) instead of silently dropping until reconnect.
+        if let Some(idx) = slot_idx {
+            inner
+                .identity_to_slot
+                .write()
+                .expect("identity table")
+                .retain(|_, &mut v| v != idx);
+        }
+
         if inner.closed.load(Ordering::SeqCst) || matches!(policy, ReconnectPolicy::Disabled) {
             break;
         }
