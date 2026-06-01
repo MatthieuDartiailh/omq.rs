@@ -22,33 +22,11 @@ impl Socket {
     /// supervisor handles the initial connect and any retries per the
     /// configured [`ReconnectPolicy`](omq_proto::ReconnectPolicy).
     pub async fn connect(&self, endpoint: Endpoint) -> Result<()> {
-        self.connect_inner(
-            endpoint,
-            #[cfg(feature = "priority")]
-            omq_proto::DEFAULT_PRIORITY,
-        )
-        .await
-    }
-
-    /// Like [`connect`], but applies the per-pipe options in `opts` to
-    /// the new endpoint. Currently the only knob is `priority`
-    /// (1..=255, lower number = higher priority; default 128).
-    /// Strict semantics - see `omq_proto::ConnectOpts`.
-    #[cfg(feature = "priority")]
-    pub async fn connect_with(
-        &self,
-        endpoint: Endpoint,
-        opts: omq_proto::ConnectOpts,
-    ) -> Result<()> {
-        self.connect_inner(endpoint, opts.priority.get()).await
+        self.connect_inner(endpoint).await
     }
 
     #[expect(clippy::too_many_lines)]
-    async fn connect_inner(
-        &self,
-        endpoint: Endpoint,
-        #[cfg(feature = "priority")] priority: u8,
-    ) -> Result<()> {
+    async fn connect_inner(&self, endpoint: Endpoint) -> Result<()> {
         reject_encrypted_inproc(&endpoint, &self.inner().options.mechanism)?;
         if self.inner().socket_type == SocketType::Stream {
             if !endpoint.is_tcp_family() {
@@ -68,13 +46,7 @@ impl Socket {
             {
                 tcp_transport::resolve_name(name, *port)?;
             }
-            connect_tcp_with_reconnect(
-                self.inner(),
-                endpoint,
-                Role::Client,
-                #[cfg(feature = "priority")]
-                priority,
-            );
+            connect_tcp_with_reconnect(self.inner(), endpoint, Role::Client);
             return Ok(());
         }
         #[cfg(feature = "ws")]
@@ -133,31 +105,16 @@ impl Socket {
 
                 if inproc::is_bound(&name) {
                     let conn = inproc::connect(&name, snapshot, in_tx, recv_event, parked).await?;
-                    finish_inproc_connect(
-                        self.inner(),
-                        name,
-                        conn,
-                        #[cfg(feature = "priority")]
-                        priority,
-                    );
+                    finish_inproc_connect(self.inner(), name, conn);
                 } else {
                     let inner = self.inner().clone();
-                    #[cfg(feature = "priority")]
-                    #[expect(clippy::redundant_locals)]
-                    let priority = priority;
                     compio::runtime::spawn(async move {
                         let Ok(conn) =
                             inproc::connect(&name, snapshot, in_tx, recv_event, parked).await
                         else {
                             return;
                         };
-                        finish_inproc_connect(
-                            &inner,
-                            name,
-                            conn,
-                            #[cfg(feature = "priority")]
-                            priority,
-                        );
+                        finish_inproc_connect(&inner, name, conn);
                     })
                     .detach();
                 }
@@ -165,13 +122,7 @@ impl Socket {
             }
             Endpoint::Ipc(_) => {
                 use omq_proto::proto::connection::Role;
-                connect_ipc_with_reconnect(
-                    self.inner(),
-                    endpoint,
-                    Role::Client,
-                    #[cfg(feature = "priority")]
-                    priority,
-                );
+                connect_ipc_with_reconnect(self.inner(), endpoint, Role::Client);
                 Ok(())
             }
             Endpoint::Udp { .. } => self.connect_udp(endpoint).await,
@@ -213,8 +164,6 @@ impl Socket {
                 info: Arc::new(RwLock::new(None)),
                 peer_sub: None,
                 peer_groups: None,
-                #[cfg(feature = "priority")]
-                priority: omq_proto::DEFAULT_PRIORITY,
             },
             Some(&identity),
         );
@@ -256,23 +205,11 @@ impl Socket {
     }
 }
 
-fn finish_inproc_connect(
-    inner: &Arc<SocketInner>,
-    name: String,
-    conn: inproc::InprocConn,
-    #[cfg(feature = "priority")] priority: u8,
-) {
+fn finish_inproc_connect(inner: &Arc<SocketInner>, name: String, conn: inproc::InprocConn) {
     let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
     let ep = Endpoint::Inproc { name: name.clone() };
     inner
         .monitor
         .connected(ep.clone(), PeerIdent::Inproc(name), conn_id);
-    install_inproc_peer(
-        inner,
-        conn,
-        ep,
-        conn_id,
-        #[cfg(feature = "priority")]
-        priority,
-    );
+    install_inproc_peer(inner, conn, ep, conn_id);
 }

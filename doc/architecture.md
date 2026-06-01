@@ -102,11 +102,6 @@ Round-robin patterns (`PUSH`, `DEALER`, `REQ`, `PAIR`, `CLIENT`,
 filters. Identity-routed patterns (`ROUTER`, `REP`, `SERVER`, `PEER`)
 look up the peer by destination identity and bypass the shared queue.
 
-The optional `priority` Cargo feature swaps round-robin work-stealing
-for strict per-pipe priority tiers (nanomsg-style 1..=255, lower =
-higher priority). Higher tiers ship first; lower tiers run only when
-higher are blocked or disconnected.
-
 ## Message and Payload types
 
 Both are custom enums (not SmallVecs) tuned for the common decode
@@ -273,7 +268,7 @@ behind).
 | `src/socket/inner.rs` | `SocketInner` -- shared socket state, peer slots |
 | `src/socket/direct_io.rs` | `DirectIoState` -- per-wire-peer fast-path state |
 | `src/socket/encoded_queue.rs` | `EncodedQueue` -- flat-buf + gather-write encoder |
-| `src/socket/send.rs` | Send strategies (round-robin, fan-out, identity, priority) |
+| `src/socket/send.rs` | Send strategies (round-robin, fan-out, identity) |
 | `src/socket/recv.rs` | Recv path, direct-recv claim arbitration |
 | `src/socket/dial.rs` | TCP/IPC dial supervisors with reconnect |
 | `src/socket/install.rs` | Peer slot installation, wire driver spawning |
@@ -297,7 +292,7 @@ behind).
 | `src/engine/direct_io.rs` | Single-peer `DirectIo` send bypass with `EncodedQueue` |
 | `src/engine/encoded_queue.rs` | `EncodedQueue` -- flat-buf + gather-write encoder |
 | `src/routing/mod.rs` | `SendStrategy`/`RecvStrategy` dispatch |
-| `src/routing/round_robin.rs` | Round-robin + priority submitter |
+| `src/routing/round_robin.rs` | Round-robin submitter |
 | `src/routing/fan_out.rs` | PUB/XPUB/RADIO fan-out with subscription filter |
 | `src/routing/identity.rs` | ROUTER/REP/SERVER identity routing |
 | `src/routing/fair_queue.rs` | PULL/SUB fair-queue recv |

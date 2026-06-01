@@ -72,14 +72,7 @@ impl Socket {
                     PeerIdent::Inproc(name_for_ident.clone()),
                     conn_id,
                 );
-                install_inproc_peer(
-                    &inner,
-                    conn,
-                    ep_for_task.clone(),
-                    conn_id,
-                    #[cfg(feature = "priority")]
-                    omq_proto::DEFAULT_PRIORITY,
-                );
+                install_inproc_peer(&inner, conn, ep_for_task.clone(), conn_id);
             }
         });
         let ret = resolved.clone();
@@ -231,8 +224,6 @@ impl Socket {
                         info: Arc::new(RwLock::new(None)),
                         peer_sub: None,
                         peer_groups: None,
-                        #[cfg(feature = "priority")]
-                        priority: omq_proto::DEFAULT_PRIORITY,
                     },
                     Some(&identity),
                 );

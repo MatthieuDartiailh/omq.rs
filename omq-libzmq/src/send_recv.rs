@@ -55,13 +55,18 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
 
     // If SNDMORE: buffer and return immediately.
     if flags & ZMQ_SNDMORE != 0 {
-        sock.send_accum.lock().unwrap().push(bytes);
+        let Ok(mut accum) = sock.send_accum.lock() else {
+            return fail(ETERM);
+        };
+        accum.push(bytes);
         return len as c_int;
     }
 
     // Drain accumulated parts + current frame into one message.
     let msg = {
-        let mut accum = sock.send_accum.lock().unwrap();
+        let Ok(mut accum) = sock.send_accum.lock() else {
+            return fail(ETERM);
+        };
         if accum.is_empty() {
             omq_compio::Message::single(bytes)
         } else {
@@ -80,7 +85,9 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
         };
     }
 
-    let send_tx = sock.send_tx.get().expect("socket not connected");
+    let Some(send_tx) = sock.send_tx.get() else {
+        return fail(ETERM);
+    };
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
 
@@ -185,7 +192,9 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     // Drain leftover frames from a partially-consumed multipart message.
     // drain_nonempty lets us skip the Mutex acquire on the common single-frame path.
     if sock.drain_nonempty.load(Ordering::Relaxed) {
-        let mut drain = sock.recv_drain.lock().unwrap();
+        let Ok(mut drain) = sock.recv_drain.lock() else {
+            return Err(ETERM);
+        };
         if let Some(frame) = drain.pop_front() {
             let more = !drain.is_empty();
             if !more {
@@ -215,10 +224,12 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
                 std::thread::yield_now();
             }
         };
-        return Ok(decompose_message(sock, &msg));
+        return decompose_message(sock, &msg);
     }
 
-    let rx = sock.recv_rx.get().expect("socket not connected");
+    let Some(rx) = sock.recv_rx.get() else {
+        return Err(ETERM);
+    };
 
     let msg = if dontwait {
         match rx.try_recv() {
@@ -240,12 +251,12 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         }
     };
 
-    Ok(decompose_message(sock, &msg))
+    decompose_message(sock, &msg)
 }
 
 /// Extract the first frame from a `Message` and stash remaining parts
 /// in `recv_drain` for subsequent `RCVMORE` calls.
-fn decompose_message(sock: &OmqSocket, msg: &omq_compio::Message) -> (Bytes, bool) {
+fn decompose_message(sock: &OmqSocket, msg: &omq_compio::Message) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
     let dish = sock.socket_type == omq_compio::SocketType::Dish;
@@ -253,7 +264,7 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_compio::Message) -> (Bytes, boo
 
     if nparts <= 1 && !dish {
         let head = msg.part_bytes(0).unwrap_or_default();
-        return (head, false);
+        return Ok((head, false));
     }
 
     let start = usize::from(dish && nparts >= 2);
@@ -262,7 +273,9 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_compio::Message) -> (Bytes, boo
     let remaining = start + 1;
     if remaining < nparts {
         sock.drain_nonempty.store(true, Ordering::Relaxed);
-        let mut drain = sock.recv_drain.lock().unwrap();
+        let Ok(mut drain) = sock.recv_drain.lock() else {
+            return Err(ETERM);
+        };
         for i in remaining..nparts {
             if let Some(b) = msg.part_bytes(i) {
                 drain.push_back(b);
@@ -270,7 +283,7 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_compio::Message) -> (Bytes, boo
         }
     }
 
-    (head, remaining < nparts)
+    Ok((head, remaining < nparts))
 }
 
 /// Copy `src` into the caller-supplied buffer (truncate if needed).

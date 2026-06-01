@@ -101,6 +101,36 @@ fn max_batch_bytes() -> usize {
     })
 }
 
+/// Heartbeat settings derived from [`DriverConfig`] at driver start.
+/// Bundled to avoid passing three loose scalars.
+struct HeartbeatConfig {
+    interval: Option<Duration>,
+    timeout: Duration,
+    ttl_deciseconds: u16,
+}
+
+/// Shared mutable state passed from [`ConnectionDriver::run_inner_body`]
+/// to [`run_direct_io_continuation`]. Destructured immediately by the
+/// callee so `tokio::select!` can borrow individual fields.
+struct DriverState<'a, R> {
+    reader: &'a mut R,
+    codec: &'a mut Connection,
+    read_buf: &'a mut BytesMut,
+    eq: &'a mut EncodedQueue,
+    drain_buf: &'a mut Vec<Bytes>,
+    inbox: &'a mut mpsc::Receiver<DriverCommand>,
+    peer_out: &'a mpsc::Sender<(u64, PeerOut)>,
+    peer_id: u64,
+    cancel: &'a CancellationToken,
+    config: &'a DriverConfig,
+    encoder: &'a mut Option<MessageEncoder>,
+    decoder: Option<&'a mut MessageDecoder>,
+    shared_msg_rx: Option<&'a QueueReceiver>,
+    recv_direct: Option<&'a async_channel::Sender<Message>>,
+    last_input: &'a mut Instant,
+    passthrough: Option<&'a (Bytes, usize)>,
+}
+
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
 #[derive(Debug, Clone, Copy, Default)]
@@ -174,8 +204,7 @@ where
     decoder: Option<MessageDecoder>,
     /// Shared round-robin send queue. When set, the driver reads outbound
     /// messages directly from this queue (bypassing the pump task
-    /// hop through `inbox`). `None` for non-round-robin socket types and
-    /// for the `priority` feature path.
+    /// hop through `inbox`). `None` for non-round-robin socket types.
     shared_msg_rx: Option<QueueReceiver>,
     /// Direct recv channel. When set, inbound `Event::Message` frames are
     /// pushed straight into the user-facing recv channel without going through
@@ -273,7 +302,6 @@ where
 
     /// Provide the shared round-robin send queue. The driver polls this
     /// directly after handshake, eliminating the pump-task intermediary.
-    #[cfg(not(feature = "priority"))]
     #[must_use]
     pub(crate) fn with_shared_rx(mut self, rx: QueueReceiver) -> Self {
         self.shared_msg_rx = Some(rx);
@@ -363,7 +391,6 @@ where
             // Clear the handshake deadline once we're past it.
             if handshake_deadline.is_some() && codec.is_ready() {
                 handshake_deadline = None;
-                if direct_io_tx.is_some() {}
             }
 
             // 1a. Drain control-plane events (handshake, commands) first
@@ -390,23 +417,8 @@ where
                 };
                 if direct_io_armed {
                     direct_io_msgs.push_back(m);
-                } else {
-                    match recv_direct.as_ref() {
-                        Some(tx) => {
-                            if tx.send(m).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                        None => {
-                            if peer_out
-                                .send((peer_id, PeerOut::Event(Event::Message(m))))
-                                .await
-                                .is_err()
-                            {
-                                return Ok(());
-                            }
-                        }
-                    }
+                } else if !route_message(m, recv_direct.as_ref(), &peer_out, peer_id).await {
+                    return Ok(());
                 }
             }
 
@@ -458,45 +470,36 @@ where
 
                 // Route any messages decoded during the handoff window.
                 for m in direct_io_msgs.drain(..) {
-                    match recv_direct.as_ref() {
-                        Some(tx) => {
-                            if tx.send(m).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                        None => {
-                            if peer_out
-                                .send((peer_id, PeerOut::Event(Event::Message(m))))
-                                .await
-                                .is_err()
-                            {
-                                return Ok(());
-                            }
-                        }
+                    if !route_message(m, recv_direct.as_ref(), &peer_out, peer_id).await {
+                        return Ok(());
                     }
                 }
 
                 return run_direct_io_continuation(
-                    &mut reader,
+                    DriverState {
+                        reader: &mut reader,
+                        codec: &mut codec,
+                        read_buf: &mut read_buf,
+                        eq: &mut eq,
+                        drain_buf: &mut drain_buf,
+                        inbox: &mut inbox,
+                        peer_out: &peer_out,
+                        peer_id,
+                        cancel: &cancel,
+                        config: &config,
+                        encoder: &mut encoder,
+                        decoder: decoder.as_mut(),
+                        shared_msg_rx: shared_msg_rx.as_ref(),
+                        recv_direct: recv_direct.as_ref(),
+                        last_input: &mut last_input,
+                        passthrough: passthrough.as_ref(),
+                    },
+                    HeartbeatConfig {
+                        interval: hb_interval,
+                        timeout: hb_timeout,
+                        ttl_deciseconds: hb_ttl_deciseconds,
+                    },
                     shared_writer,
-                    &mut codec,
-                    &mut read_buf,
-                    &mut eq,
-                    &mut drain_buf,
-                    &mut inbox,
-                    &peer_out,
-                    peer_id,
-                    &cancel,
-                    &config,
-                    &mut encoder,
-                    decoder.as_mut(),
-                    shared_msg_rx.as_ref(),
-                    recv_direct.as_ref(),
-                    &mut last_input,
-                    hb_interval,
-                    hb_timeout,
-                    hb_ttl_deciseconds,
-                    passthrough.as_ref(),
                     &dio_dead,
                 )
                 .await;
@@ -866,6 +869,23 @@ fn encode_msg(
     Ok(())
 }
 
+/// Route a decoded message to `recv_direct` or through the actor.
+/// Returns `true` if sent, `false` if the receiving channel closed.
+async fn route_message(
+    m: Message,
+    recv_direct: Option<&async_channel::Sender<Message>>,
+    peer_out: &mpsc::Sender<(u64, PeerOut)>,
+    peer_id: u64,
+) -> bool {
+    match recv_direct {
+        Some(tx) => tx.send(m).await.is_ok(),
+        None => peer_out
+            .send((peer_id, PeerOut::Event(Event::Message(m))))
+            .await
+            .is_ok(),
+    }
+}
+
 /// Flush the `EncodedQueue` to the writer. Drains chunks into a
 /// reusable `Vec<Bytes>`, builds `IoSlice` refs, and does one
 /// `write_vectored`. On partial write, unwritten chunks are restored
@@ -934,30 +954,36 @@ where
 /// Post-handoff continuation: the driver keeps reading from the wire,
 /// routing messages, handling heartbeat, and writing via the shared
 /// writer. `DirectIo` handles user sends on the caller's task.
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
-    reader: &mut R,
+    state: DriverState<'_, R>,
+    hb: HeartbeatConfig,
     writer: SharedWriter,
-    codec: &mut Connection,
-    read_buf: &mut BytesMut,
-    eq: &mut EncodedQueue,
-    drain_buf: &mut Vec<Bytes>,
-    inbox: &mut mpsc::Receiver<DriverCommand>,
-    peer_out: &mpsc::Sender<(u64, PeerOut)>,
-    peer_id: u64,
-    cancel: &CancellationToken,
-    config: &DriverConfig,
-    encoder: &mut Option<MessageEncoder>,
-    mut decoder: Option<&mut MessageDecoder>,
-    shared_msg_rx: Option<&QueueReceiver>,
-    recv_direct: Option<&async_channel::Sender<Message>>,
-    last_input: &mut Instant,
-    hb_interval: Option<Duration>,
-    hb_timeout: Duration,
-    hb_ttl_deciseconds: u16,
-    passthrough: Option<&(Bytes, usize)>,
     dio_dead: &AtomicBool,
 ) -> Result<()> {
+    let DriverState {
+        reader,
+        codec,
+        read_buf,
+        eq,
+        drain_buf,
+        inbox,
+        peer_out,
+        peer_id,
+        cancel,
+        config,
+        encoder,
+        mut decoder,
+        shared_msg_rx,
+        recv_direct,
+        last_input,
+        passthrough,
+    } = state;
+    let HeartbeatConfig {
+        interval: hb_interval,
+        timeout: hb_timeout,
+        ttl_deciseconds: hb_ttl_deciseconds,
+    } = hb;
     let hb_enabled = hb_interval.is_some();
 
     loop {
@@ -974,21 +1000,8 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
                 },
                 None => m,
             };
-            match recv_direct {
-                Some(tx) => {
-                    if tx.send(m).await.is_err() {
-                        return Ok(());
-                    }
-                }
-                None => {
-                    if peer_out
-                        .send((peer_id, PeerOut::Event(Event::Message(m))))
-                        .await
-                        .is_err()
-                    {
-                        return Ok(());
-                    }
-                }
+            if !route_message(m, recv_direct, peer_out, peer_id).await {
+                return Ok(());
             }
         }
 

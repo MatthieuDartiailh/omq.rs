@@ -23,7 +23,6 @@ async fn client_server_basic_roundtrip() {
         Options::default().identity(bytes::Bytes::from_static(b"cli1")),
     );
     client.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     client.send(Message::single("ping")).await.unwrap();
 
@@ -77,7 +76,6 @@ async fn scatter_gather_single_frame_roundtrip() {
 
     let scatter = Socket::new(SocketType::Scatter, Options::default());
     scatter.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..3 {
         scatter
@@ -110,7 +108,6 @@ async fn channel_pair_one_to_one() {
     a.bind(ep.clone()).await.unwrap();
     let b = Socket::new(SocketType::Channel, Options::default());
     b.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     a.send(Message::single("hi")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_millis(500), b.recv())
@@ -149,7 +146,6 @@ async fn peer_bidirectional_identity_routing() {
         Options::default().identity(bytes::Bytes::from_static(b"peer-b")),
     );
     b.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // PEER is multi-part-capable; first frame is routing identity.
     b.send(Message::multipart(["peer-a", "hello a"]))
@@ -188,7 +184,6 @@ async fn client_server_multiple_clients() {
         c.connect(ep.clone()).await.unwrap();
         clients.push(c);
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     for (i, c) in clients.iter().enumerate() {
         c.send(Message::single(format!("from-{i}"))).await.unwrap();
@@ -234,7 +229,6 @@ async fn scatter_gather_multiple_scatterers() {
         s.connect(ep.clone()).await.unwrap();
         scatterers.push(s);
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     for (i, s) in scatterers.iter().enumerate() {
         for j in 0..5 {
@@ -265,7 +259,6 @@ async fn scatter_gather_multiple_gatherers() {
     for g in &gatherers {
         g.connect(ep.clone()).await.unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..30 {
         scatter
@@ -290,7 +283,6 @@ async fn channel_multiple_messages() {
     a.bind(ep.clone()).await.unwrap();
     let b = Socket::new(SocketType::Channel, Options::default());
     b.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..20 {
         a.send(Message::single(format!("a-{i}"))).await.unwrap();
@@ -328,7 +320,6 @@ async fn peer_three_way() {
     );
     c.connect(ep_a).await.unwrap();
     c.connect(ep_b).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // C -> A
     c.send(Message::multipart(["A", "hello from C"]))

@@ -9,7 +9,6 @@
 #![allow(clippy::match_wild_err_arm)]
 
 use std::io::Read;
-use std::net::TcpListener as StdTcpListener;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -36,17 +35,26 @@ fn skip_if_no_pyzmq_curve() -> bool {
     false
 }
 
-fn free_tcp_port() -> u16 {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 fn loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip("127.0.0.1".parse().unwrap()),
         port,
+    }
+}
+
+/// Bind a socket to an ephemeral loopback port and return the
+/// kernel-assigned port number, read from the monitor stream.
+async fn bind_loopback(sock: &Socket) -> u16 {
+    let mut mon = sock.monitor();
+    sock.bind(loopback(0)).await.unwrap();
+    loop {
+        match mon.recv().await {
+            Ok(MonitorEvent::Listening {
+                endpoint: Endpoint::Tcp { port, .. },
+            }) => return port,
+            Ok(_) => {}
+            other => panic!("expected Listening, got {other:?}"),
+        }
     }
 }
 
@@ -92,9 +100,8 @@ async fn rust_curve_pull_from_pyzmq_push() {
     let client_pub_z85 = client_kp.public.to_z85();
     let client_sec_z85 = client_kp.secret.to_z85();
 
-    let port = free_tcp_port();
     let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
-    pull.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pull).await;
 
     // pyzmq PUSH client: 5 messages, then close.
     let script = r#"
@@ -164,10 +171,8 @@ async fn rust_curve_push_to_pyzmq_pull() {
     let server_sec_z85 = server_kp.secret.to_z85();
     let server_pub_for_client = server_kp.public;
 
-    let port = free_tcp_port();
-
-    // pyzmq PULL server: bind, recv 5 msgs, print each on its own line,
-    // then close. Rust will then read its stdout to assert framing.
+    // pyzmq PULL server: bind to an ephemeral port, print the port as
+    // the first stdout line, recv 5 msgs, print each, then close.
     let script = r#"
 import os, sys, zmq
 ctx = zmq.Context.instance()
@@ -175,8 +180,8 @@ s = ctx.socket(zmq.PULL)
 s.curve_server = True
 s.curve_secretkey = os.environ['SRV_SEC'].encode()
 s.curve_publickey = os.environ['SRV_PUB'].encode()
-s.bind(f"tcp://127.0.0.1:{os.environ['PORT']}")
-sys.stdout.write("READY\n"); sys.stdout.flush()
+port = s.bind_to_random_port("tcp://127.0.0.1")
+sys.stdout.write(f"{port}\n"); sys.stdout.flush()
 for _ in range(5):
     sys.stdout.write(s.recv().decode() + "\n"); sys.stdout.flush()
 s.close(linger=0)
@@ -185,7 +190,6 @@ ctx.term()
 
     let mut child = Command::new("python3")
         .args(["-c", script])
-        .env("PORT", port.to_string())
         .env("SRV_PUB", &server_pub_z85)
         .env("SRV_SEC", &server_sec_z85)
         .stdout(Stdio::piped())
@@ -193,16 +197,16 @@ ctx.term()
         .spawn()
         .expect("spawn python3 pull");
 
-    // Read READY line so we know the bind landed before we connect.
+    // First stdout line is the ephemeral port.
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
     let reader = tokio::task::spawn_blocking(move || {
         use std::io::{BufRead, BufReader};
         let mut r = BufReader::new(stdout);
         let mut first = String::new();
         r.read_line(&mut first).ok();
-        let _ = ready_tx.send(first.trim() == "READY");
+        let _ = port_tx.send(first.trim().to_string());
         let mut lines = Vec::new();
         for _ in 0..5 {
             let mut buf = String::new();
@@ -213,11 +217,12 @@ ctx.term()
         }
         lines
     });
-    let ready = tokio::time::timeout(Duration::from_secs(5), ready_rx)
+    let port: u16 = tokio::time::timeout(Duration::from_secs(5), port_rx)
         .await
         .expect("python bind timed out")
-        .unwrap();
-    assert!(ready, "python pull did not signal READY");
+        .unwrap()
+        .parse()
+        .expect("python did not print a valid port");
 
     let push = Socket::new(
         SocketType::Push,
@@ -265,9 +270,8 @@ async fn rust_curve_pull_rejects_null_pyzmq_push() {
     }
 
     let server_kp = CurveKeypair::generate();
-    let port = free_tcp_port();
     let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
-    pull.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pull).await;
 
     let script = r#"
 import os, zmq
@@ -321,9 +325,8 @@ async fn rust_curve_pub_to_pyzmq_sub() {
     let client_pub_z85 = client_kp.public.to_z85();
     let client_sec_z85 = client_kp.secret.to_z85();
 
-    let port = free_tcp_port();
     let pub_sock = Socket::new(SocketType::Pub, Options::default().curve_server(server_kp));
-    pub_sock.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pub_sock).await;
 
     // pyzmq SUB client: subscribe(""), receive 3 messages, print each.
     let script = r#"
@@ -393,11 +396,9 @@ async fn pyzmq_curve_pub_to_rust_sub() {
     let server_sec_z85 = server_kp.secret.to_z85();
     let server_pub_for_client = server_kp.public;
 
-    let port = free_tcp_port();
-
-    // pyzmq PUB server: bind, wait for READY signal on stdin, then
-    // publish 60 messages with 50ms spacing (enough for the SUB's
-    // subscription to propagate).
+    // pyzmq PUB server: bind to an ephemeral port, print the port as
+    // the first stdout line, then publish 60 messages with 50ms spacing
+    // (enough for the SUB's subscription to propagate).
     let script = r#"
 import os, sys, zmq, time
 ctx = zmq.Context.instance()
@@ -405,8 +406,8 @@ s = ctx.socket(zmq.PUB)
 s.curve_server = True
 s.curve_secretkey = os.environ['SRV_SEC'].encode()
 s.curve_publickey = os.environ['SRV_PUB'].encode()
-s.bind(f"tcp://127.0.0.1:{os.environ['PORT']}")
-sys.stdout.write("READY\n"); sys.stdout.flush()
+port = s.bind_to_random_port("tcp://127.0.0.1")
+sys.stdout.write(f"{port}\n"); sys.stdout.flush()
 for i in range(60):
     s.send(f"msg-{i}".encode())
     time.sleep(0.05)
@@ -416,7 +417,6 @@ ctx.term()
 
     let mut child = Command::new("python3")
         .args(["-c", script])
-        .env("PORT", port.to_string())
         .env("SRV_PUB", &server_pub_z85)
         .env("SRV_SEC", &server_sec_z85)
         .stdout(Stdio::piped())
@@ -426,19 +426,20 @@ ctx.term()
 
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
     tokio::task::spawn_blocking(move || {
         use std::io::{BufRead, BufReader};
         let mut r = BufReader::new(stdout);
         let mut first = String::new();
         r.read_line(&mut first).ok();
-        let _ = ready_tx.send(first.trim() == "READY");
+        let _ = port_tx.send(first.trim().to_string());
     });
-    let ready = tokio::time::timeout(Duration::from_secs(5), ready_rx)
+    let port: u16 = tokio::time::timeout(Duration::from_secs(5), port_rx)
         .await
         .expect("python bind timed out")
-        .unwrap();
-    assert!(ready, "python pub did not signal READY");
+        .unwrap()
+        .parse()
+        .expect("python did not print a valid port");
 
     let sub = Socket::new(
         SocketType::Sub,

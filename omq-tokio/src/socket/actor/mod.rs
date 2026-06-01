@@ -58,8 +58,6 @@ pub(crate) enum SocketCommand {
     Connect {
         endpoint: Endpoint,
         ack: oneshot::Sender<Result<()>>,
-        #[cfg(feature = "priority")]
-        priority: u8,
     },
     Send {
         msg: Message,
@@ -118,8 +116,6 @@ enum InternalEvent {
     Connected {
         conn: AnyConn,
         endpoint: Endpoint,
-        #[cfg(feature = "priority")]
-        priority: u8,
     },
     ConnectGaveUp,
     ConnectDelayed {
@@ -152,11 +148,6 @@ struct PeerEntry {
     /// True for dialer-initiated connections; false for listener-accepted.
     /// Used to decide whether to restart the dial after a mid-session drop.
     is_client: bool,
-    /// Per-pipe priority from `connect_with`. Defaults to
-    /// `omq_proto::DEFAULT_PRIORITY` for accepted peers and for
-    /// `connect()` (without `_with`).
-    #[cfg(feature = "priority")]
-    priority: u8,
     direct_io_rx: Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
 }
 
@@ -359,12 +350,7 @@ impl SocketDriver {
                 let res = self.bind(endpoint).await;
                 let _ = ack.send(res);
             }
-            SocketCommand::Connect {
-                endpoint,
-                ack,
-                #[cfg(feature = "priority")]
-                priority,
-            } => {
+            SocketCommand::Connect { endpoint, ack } => {
                 if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
                     let _ = ack.send(Err(Error::Protocol(
                         "STREAM sockets only support tcp:// endpoints".into(),
@@ -375,11 +361,7 @@ impl SocketDriver {
                 } else if let Err(e) = reject_encrypted_inproc(&endpoint, &self.options.mechanism) {
                     let _ = ack.send(Err(e));
                 } else {
-                    self.start_dial(
-                        endpoint,
-                        #[cfg(feature = "priority")]
-                        priority,
-                    );
+                    self.start_dial(endpoint);
                     let _ = ack.send(Ok(()));
                 }
             }

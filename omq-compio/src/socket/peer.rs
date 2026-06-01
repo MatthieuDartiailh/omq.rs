@@ -34,8 +34,6 @@ pub(super) struct PeerSlot {
     pub(super) info: Arc<RwLock<Option<PeerInfo>>>,
     pub(super) peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
     pub(super) peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<bytes::Bytes>>>>,
-    #[cfg(feature = "priority")]
-    pub(super) priority: u8,
 }
 
 impl PeerOut {
@@ -77,35 +75,6 @@ impl PeerOut {
                     .map_err(|e| match e {
                         flume::TrySendError::Full(_) => Error::WouldBlock,
                         flume::TrySendError::Disconnected(_) => Error::Closed,
-                    })
-            }
-        }
-    }
-
-    #[cfg(feature = "priority")]
-    pub(super) fn try_send(
-        &self,
-        msg: &Message,
-    ) -> std::result::Result<(), blume::TrySendError<()>> {
-        match self {
-            Self::Inproc {
-                sender,
-                our_identity,
-            } => {
-                let frame = InboundFrame::message_from(our_identity.clone(), msg.clone());
-                sender.try_send(frame).map_err(|e| match e {
-                    blume::TrySendError::Full(_) => blume::TrySendError::Full(()),
-                    blume::TrySendError::Disconnected(_) => blume::TrySendError::Disconnected(()),
-                })
-            }
-            Self::Wire(handle) => {
-                let tx = handle.read().expect("wire peer handle lock").clone();
-                tx.try_send(DriverCommand::SendMessage(msg.clone()))
-                    .map_err(|e| match e {
-                        flume::TrySendError::Full(_) => blume::TrySendError::Full(()),
-                        flume::TrySendError::Disconnected(_) => {
-                            blume::TrySendError::Disconnected(())
-                        }
                     })
             }
         }

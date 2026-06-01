@@ -1,5 +1,7 @@
 //! IPC (Unix domain socket) end-to-end tests.
 
+mod test_support;
+
 use std::time::Duration;
 
 use omq_tokio::options::ReconnectPolicy;
@@ -36,7 +38,7 @@ async fn ipc_req_rep_roundtrip() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&req).await;
 
     req.send(Message::single("ping")).await.unwrap();
     let got = rep.recv().await.unwrap();
@@ -90,11 +92,9 @@ async fn ipc_connect_before_bind() {
     );
     push.connect(ep.clone()).await.unwrap();
 
-    // Let the dialer hit ENOENT a few times before binding.
-    tokio::time::sleep(Duration::from_millis(60)).await;
-
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&pull).await;
 
     push.send(Message::single("late-bind")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())

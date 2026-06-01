@@ -170,7 +170,7 @@ pub(crate) fn build_peer_io(
         let _ = codec.handle_input(leftover);
         let _ = wr; // suppress unused
     }
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[expect(clippy::arc_with_non_send_sync)]
     let peer_io = Arc::new(std::sync::Mutex::new(PeerIo {
         codec,
         decoder,
@@ -322,7 +322,6 @@ impl DriverLoopState {
         Ok(())
     }
 
-    #[cfg(not(feature = "priority"))]
     async fn drain_shared(
         &mut self,
         first: Message,
@@ -342,30 +341,6 @@ impl DriverLoopState {
                 break;
             }
             next = shared.try_recv();
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "priority")]
-    async fn drain_shared(
-        &mut self,
-        first: Message,
-        shared: &Receiver<Message>,
-        state: &DirectIoState,
-        cap: usize,
-    ) -> Result<()> {
-        let mut next = Some(first);
-        while let Some(m) = next.take() {
-            let cap_reached = if state.handshake_done.get() {
-                self.encode_outbound_message(state, &m, cap).await?
-            } else {
-                self.pending_cmds.push_back(DriverCommand::SendMessage(m));
-                false
-            };
-            if cap_reached {
-                break;
-            }
-            next = shared.try_recv().ok();
         }
         Ok(())
     }
@@ -389,10 +364,7 @@ pub(crate) async fn run_connection(
     socket_type: SocketType,
     options: Options,
     inbox: Receiver<DriverCommand>,
-    #[cfg(not(feature = "priority"))] shared_msg_rx: Option<
-        crate::socket::shared_queue::SharedQueueReceiver,
-    >,
-    #[cfg(feature = "priority")] shared_msg_rx: Option<Receiver<Message>>,
+    shared_msg_rx: Option<crate::socket::shared_queue::SharedQueueReceiver>,
     peer_in_tx: blume::Sender<InboundFrame>,
     snapshot_sink: Box<dyn SnapshotSink>,
     monitor_ctx: Option<MonitorCtx>,

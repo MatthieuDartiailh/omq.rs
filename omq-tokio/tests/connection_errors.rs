@@ -2,6 +2,8 @@
 //! client disconnects (pre-handshake and mid-session) and continue to
 //! accept and serve new connections normally.
 
+mod test_support;
+
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -41,7 +43,7 @@ async fn server_survives_pre_handshake_drop() {
     // Legitimate client: full ZMTP session must work.
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake(&push).await;
 
     push.send(Message::single("alive")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
@@ -63,7 +65,7 @@ async fn server_survives_mid_session_abrupt_drop() {
     {
         let push1 = Socket::new(SocketType::Push, Options::default());
         push1.connect(ep.clone()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        test_support::wait_for_handshake(&push1).await;
         push1.send(Message::single("first")).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_millis(300), pull.recv()).await;
         // push1 drops here — abrupt half-close.
@@ -73,7 +75,7 @@ async fn server_survives_mid_session_abrupt_drop() {
     // Second client: server must still be healthy.
     let push2 = Socket::new(SocketType::Push, Options::default());
     push2.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&push2).await;
     push2.send(Message::single("second")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
         .await
@@ -103,7 +105,7 @@ async fn reconnect_after_ipc_peer_restarts() {
         },
     );
     push.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake(&push).await;
 
     push.send(Message::single("before")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), pull1.recv())

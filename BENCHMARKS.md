@@ -435,41 +435,6 @@ See [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md) for bandwidth-limited
 and compression ratio tables. Those benchmarks use structured JSON payloads
 over `tc`-rate-limited loopback and are run separately from the tables above.
 
-## PUSH/PULL throughput, priority routing (single peer)
-
-Same topology as the single-peer table but with `priority` feature (strict
-per-pipe queues). Run with `bench_run.rb --with-priority` to update.
-
-**omq-compio:**
-
-<!-- BEGIN push_pull_priority_compio -->
-| Size | inproc | ipc | tcp |
-|---|---|---|---|
-| 32 B | 4.47M | 4.13M | 4.18M |
-| 128 B | 4.14M | 3.70M | 3.65M |
-| 512 B | 4.19M | 2.99M | 2.95M |
-| 2 KiB | 4.08M | 1.74M | 1.58M |
-| 8 KiB | 4.17M | 669k | 575k |
-| 32 KiB | 4.17M | 176k | 162k |
-| 128 KiB | 4.19M | 59.6k | 61.2k |
-
-<!-- END push_pull_priority_compio -->
-
-**omq-tokio:**
-
-<!-- BEGIN push_pull_priority_tokio -->
-| Size | inproc | ipc | tcp |
-|---|---|---|---|
-| 32 B | 3.49M | 4.01M | 3.83M |
-| 128 B | 4.30M | 3.26M | 3.17M |
-| 512 B | 3.46M | 2.81M | 2.50M |
-| 2 KiB | 4.23M | 1.17M | 1.51M |
-| 8 KiB | 3.93M | 522k | 461k |
-| 32 KiB | 4.16M | 115k | 167k |
-| 128 KiB | 3.80M | 35.1k | 43.7k |
-
-<!-- END push_pull_priority_tokio -->
-
 ## Mechanism overhead (PUSH/PULL over TCP)
 
 End-to-end throughput with NULL (no crypto), CURVE (XSalsa20-Poly1305), and
@@ -513,7 +478,6 @@ cargo bench -p omq-compio --bench req_rep
 # Convenience:
 ./scripts/bench_run.rb [--all-features] [--all-sizes]    # adds results to JSONL
 ./scripts/bench_run.rb --chart-sizes                     # dense ×2 sweep for charts
-./scripts/bench_run.rb --with-priority [--all-sizes]     # priority feature only
 ./scripts/bench_report.rb [--update-benchmarks]          # regenerates tables
 
 # WebSocket transport (requires ws feature):

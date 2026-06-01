@@ -8,6 +8,8 @@
 //!   REP server.
 //! - REP survives a client disconnect mid-cycle and serves the next client.
 
+mod test_support;
+
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -25,10 +27,6 @@ fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
-async fn wait_ready() {
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
 #[tokio::test]
 async fn req_rep_basic_roundtrip() {
     let ep = inproc_ep("rr-basic");
@@ -37,7 +35,6 @@ async fn req_rep_basic_roundtrip() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    wait_ready().await;
 
     req.send(Message::single("hello")).await.unwrap();
 
@@ -62,7 +59,6 @@ async fn req_rejects_double_send() {
     rep.bind(ep.clone()).await.unwrap();
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    wait_ready().await;
 
     req.send(Message::single("one")).await.unwrap();
     let second = req.send(Message::single("two")).await;
@@ -86,7 +82,6 @@ async fn req_rep_multiple_rounds() {
     rep.bind(ep.clone()).await.unwrap();
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    wait_ready().await;
 
     for i in 0..5 {
         req.send(Message::single(format!("q-{i}"))).await.unwrap();
@@ -112,7 +107,6 @@ async fn dealer_to_rep_envelope() {
         Options::default().identity(bytes::Bytes::from_static(b"cli")),
     );
     dealer.connect(ep).await.unwrap();
-    wait_ready().await;
 
     // Emulate a REQ-style send: empty delim + body.
     dealer
@@ -148,7 +142,7 @@ async fn rep_survives_client_disconnect_mid_cycle() {
     {
         let req1 = Socket::new(SocketType::Req, Options::default());
         req1.connect(ep.clone()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        test_support::wait_for_handshake(&req1).await;
         req1.send(Message::single("drop-me")).await.unwrap();
 
         // Let REP receive the request (stale envelope now held).
@@ -162,7 +156,7 @@ async fn rep_survives_client_disconnect_mid_cycle() {
     // Second client: full roundtrip must succeed.
     let req2 = Socket::new(SocketType::Req, Options::default());
     req2.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&req2).await;
 
     req2.send(Message::single("real")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_millis(500), rep.recv())
@@ -191,7 +185,7 @@ async fn req_rep_1000_cycles_tcp() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&req).await;
 
     let rep_task = tokio::spawn(async move {
         for _ in 0..CYCLES {
@@ -227,7 +221,7 @@ async fn three_req_to_one_rep_direct_io_routing() {
         req.connect(ep.clone()).await.unwrap();
         reqs.push(req);
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    test_support::wait_for_handshake(&rep).await;
 
     for (i, req) in reqs.iter().enumerate() {
         req.send(Message::single(format!("from-{i}")))

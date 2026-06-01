@@ -1,6 +1,8 @@
 //! Reconnect/backoff: dialer reconnects when a listener appears late,
 //! restarts mid-session, or drops abruptly while sends are in-flight.
 
+mod test_support;
+
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -150,8 +152,8 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
     // Wait for the second handshake on the push side. Without this, a `send`
     // racing the disconnect can be committed to the dying peer's queue and
     // lost (ZMQ semantic: messages queued for a vanished peer are dropped on
-    // the floor; non-priority mode happens to survive because its shared
-    // queue spans drivers, but the priority path's per-peer inbox does not).
+    // the floor; the shared queue spans drivers, so some survive, but this
+    // is not guaranteed).
     // Synchronising on the new HandshakeSucceeded means the next send routes
     // to the live peer, exercising "reconnects and resumes delivery" without
     // depending on in-flight survival.
@@ -252,7 +254,7 @@ async fn push_hwm_drains_after_reconnect() {
             .reconnect(ReconnectPolicy::Fixed(Duration::from_millis(30))),
     );
     push.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake(&push).await;
 
     push.send(Message::single("warmup")).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), pull1.recv())

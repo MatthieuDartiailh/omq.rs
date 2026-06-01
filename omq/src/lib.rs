@@ -55,7 +55,6 @@
 //! - `lz4` -- `lz4+tcp://` compression transport.
 //! - `zstd` -- `zstd+tcp://` compression transport.
 //! - `ws` -- WebSocket transport (`ws://`, `wss://`).
-//! - `priority` -- strict per-pipe priority on `Socket::connect_with`.
 //!
 //! See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md)
 //! for throughput / latency tables.

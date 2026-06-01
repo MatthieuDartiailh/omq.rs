@@ -2,6 +2,8 @@
 
 #![cfg(feature = "blake3zmq")]
 
+mod test_support;
+
 use std::time::Duration;
 
 use omq_compio::{Blake3ZmqKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
@@ -101,7 +103,7 @@ async fn blake3zmq_dealer_router() {
             .blake3zmq_client(client_kp, server_pub),
     );
     dealer.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&dealer).await;
 
     dealer.send(Message::single("hi")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(5), router.recv())

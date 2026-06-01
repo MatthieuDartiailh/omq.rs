@@ -6,6 +6,13 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Removed
+
+- `priority` feature: per-pipe priority tiers. The feature was unused by
+  any downstream consumer and doubled the routing architecture (145 cfg
+  markers across 32 files). Can be re-introduced with a cleaner design
+  (e.g. a trait-based routing strategy) if demand materializes.
+
 ### omq 0.12.2
 
 - Breaking: `tokio-backend` is now the default Cargo feature (was `compio-backend`). Users who relied on the default must either add `--no-default-features --features compio-backend` or leave their `Cargo.toml` as-is (no change needed for tokio users).

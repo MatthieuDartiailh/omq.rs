@@ -1,3 +1,9 @@
+// Safety: all `UnsafeCell` dereferences in this module (`direct_recv_io`,
+// `inproc_recv`, `recv_cache`) rely on compio's cooperative single-threaded
+// runtime. Every access happens on the runtime thread that created the
+// socket. The `Socket` API contract requires no concurrent send/recv on
+// the same handle, so there is no data race.
+
 use std::sync::{Arc, atomic::Ordering};
 
 use bytes::Bytes;

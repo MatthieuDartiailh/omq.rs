@@ -88,7 +88,6 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4-sys` |
 | `zstd`            | `zstd+tcp://` compression transport ([RFC](https://github.com/paddor/omq-zstd/blob/main/RFC.md)) | `zstd-safe` (vends `libzstd`; needs `cc`) |
 | `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
-| `priority`        | Strict per-pipe priority on `Socket::connect_with`| -                                |
 
 > [!WARNING]
 > **BLAKE3ZMQ has not been independently security audited.** It's an
@@ -107,7 +106,6 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
 | **Zero-copy send and recv** | Send: `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
 | **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |
-| **Strict per-pipe priority** | nanomsg-style 1-255 tiers with `Socket::connect_with` (`priority` feature). |
 | **zstd dictionary auto-training** | Trains from first 1k messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |
 | **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
 
@@ -138,8 +136,8 @@ covered by integration tests on both backends. The full suite:
 - **Protocol fuzzing** (~10M iterations per suite): hand-rolled fuzz of
   the wire parser and the socket-action state machine.
 - **12 soak test scenarios** per backend: peer churn, reconnect storms,
-  PUB/SUB churn, compression, PLAIN / CURVE / BLAKE3ZMQ auth, priority
-  routing, large-message throughput, multi-socket. Each scenario samples
+  PUB/SUB churn, compression, PLAIN / CURVE / BLAKE3ZMQ auth
+  large-message throughput, multi-socket. Each scenario samples
   RSS and file-descriptor counts to detect leaks.
 - **Cross-runtime interop**: omq-compio <-> omq-tokio over TCP.
 - **Wire interop** with libzmq (C), pyzmq, and

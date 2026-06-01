@@ -12,8 +12,6 @@
 //! Status: beachhead. PUSH/PULL on inproc + TCP, send-batching,
 //! gather writes via compio's `Vec<Bytes>` `IoVectoredBuf` path.
 
-#[cfg(feature = "priority")]
-pub use omq_proto::ConnectOpts;
 #[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
 pub use omq_proto::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]

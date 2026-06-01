@@ -48,9 +48,6 @@ async fn push_pull_multi_peer_distributes() {
         p.connect(ep.clone()).await.unwrap();
     }
 
-    // Give handshakes a moment to complete across all three pulls.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     for i in 0..N {
         push.send(Message::single(format!("msg-{i}")))
             .await
@@ -110,7 +107,6 @@ async fn push_pull_slow_peer_does_not_block_fast() {
     let slow = Socket::new(SocketType::Pull, Options::default());
     fast.connect(ep.clone()).await.unwrap();
     slow.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..N {
         push.send(Message::single(format!("m-{i}"))).await.unwrap();
@@ -174,7 +170,6 @@ async fn push_pull_under_backpressure_delivers_everything() {
     let slow = Socket::new(SocketType::Pull, Options::default().recv_hwm(32));
     fast.connect(ep.clone()).await.unwrap();
     slow.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let payload = vec![b'x'; 512];
     for i in 0..N {

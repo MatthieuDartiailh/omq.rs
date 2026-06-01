@@ -6,7 +6,6 @@
 #![cfg(feature = "plain")]
 
 use std::io::Read;
-use std::net::TcpListener as StdTcpListener;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -30,17 +29,24 @@ fn skip_if_no_pyzmq() -> bool {
     false
 }
 
-fn free_tcp_port() -> u16 {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 fn loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip("127.0.0.1".parse().unwrap()),
         port,
+    }
+}
+
+async fn bind_loopback(sock: &Socket) -> u16 {
+    let mut mon = sock.monitor();
+    sock.bind(loopback(0)).await.unwrap();
+    loop {
+        match mon.recv().await {
+            Ok(MonitorEvent::Listening {
+                endpoint: Endpoint::Tcp { port, .. },
+            }) => return port,
+            Ok(_) => {}
+            other => panic!("expected Listening, got {other:?}"),
+        }
     }
 }
 
@@ -72,14 +78,13 @@ async fn rust_plain_pull_from_pyzmq_push() {
         return;
     }
 
-    let port = free_tcp_port();
     let pull = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(|peer| {
             peer.username.as_deref() == Some("alice") && peer.password.as_deref() == Some("s3cret")
         }),
     );
-    pull.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pull).await;
 
     let script = r#"
 import os, zmq
@@ -135,10 +140,8 @@ async fn rust_plain_push_to_pyzmq_pull() {
         return;
     }
 
-    let port = free_tcp_port();
-
     let script = r#"
-import os, sys, zmq, zmq.auth.thread
+import sys, zmq, zmq.auth.thread
 ctx = zmq.Context.instance()
 auth = zmq.auth.thread.ThreadAuthenticator(ctx)
 auth.start()
@@ -147,8 +150,8 @@ auth.configure_plain(domain="global", passwords={"alice": "s3cret"})
 s = ctx.socket(zmq.PULL)
 s.zap_domain = b"global"
 s.plain_server = True
-s.bind(f"tcp://127.0.0.1:{os.environ['PORT']}")
-sys.stdout.write("READY\n"); sys.stdout.flush()
+port = s.bind_to_random_port("tcp://127.0.0.1")
+sys.stdout.write(f"{port}\n"); sys.stdout.flush()
 for _ in range(5):
     sys.stdout.write(s.recv().decode() + "\n"); sys.stdout.flush()
 s.close(linger=0)
@@ -158,7 +161,6 @@ ctx.term()
 
     let mut child = Command::new("python3")
         .args(["-c", script])
-        .env("PORT", port.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -166,13 +168,13 @@ ctx.term()
 
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<u16>();
     let reader = tokio::task::spawn_blocking(move || {
         use std::io::{BufRead, BufReader};
         let mut r = BufReader::new(stdout);
         let mut first = String::new();
         r.read_line(&mut first).ok();
-        let _ = ready_tx.send(first.trim() == "READY");
+        let _ = ready_tx.send(first.trim().parse::<u16>().expect("port from python"));
         let mut lines = Vec::new();
         for _ in 0..5 {
             let mut buf = String::new();
@@ -183,11 +185,10 @@ ctx.term()
         }
         lines
     });
-    let ready = tokio::time::timeout(Duration::from_secs(5), ready_rx)
+    let port = tokio::time::timeout(Duration::from_secs(5), ready_rx)
         .await
         .expect("python bind timed out")
         .unwrap();
-    assert!(ready, "python pull did not signal READY");
 
     let push = Socket::new(
         SocketType::Push,
@@ -229,14 +230,13 @@ async fn rust_plain_pull_rejects_wrong_pyzmq_credentials() {
         return;
     }
 
-    let port = free_tcp_port();
     let pull = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(|peer| {
             peer.username.as_deref() == Some("alice") && peer.password.as_deref() == Some("s3cret")
         }),
     );
-    pull.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pull).await;
 
     let script = r#"
 import os, zmq
@@ -277,9 +277,8 @@ async fn rust_plain_pull_rejects_null_pyzmq_push() {
         return;
     }
 
-    let port = free_tcp_port();
     let pull = Socket::new(SocketType::Pull, Options::default().plain_server(|_| true));
-    pull.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pull).await;
 
     let script = r#"
 import os, zmq

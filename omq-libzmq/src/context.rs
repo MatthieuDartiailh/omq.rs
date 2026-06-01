@@ -66,7 +66,7 @@ fn build_compio_runtime() -> std::io::Result<compio::runtime::Runtime> {
 
 impl OmqContext {
     #[expect(clippy::arc_with_non_send_sync)]
-    fn new(n_io_threads: usize) -> Arc<Self> {
+    fn new(n_io_threads: usize) -> Option<Arc<Self>> {
         let n = n_io_threads.max(1);
         let terminated = Arc::new(AtomicBool::new(false));
         let mut io_threads = Vec::with_capacity(n);
@@ -83,13 +83,13 @@ impl OmqContext {
                         }
                     });
                 })
-                .expect("omq-libzmq: spawn io thread");
+                .ok()?;
             io_threads.push(IoThread {
                 submit: tx,
                 handle: Some(handle),
             });
         }
-        Arc::new(Self {
+        Some(Arc::new(Self {
             io_threads,
             next_thread: AtomicUsize::new(0),
             terminated,
@@ -99,7 +99,7 @@ impl OmqContext {
             max_msg_size: AtomicI64::new(-1),
             inproc_binds: Mutex::new(FxHashMap::default()),
             inproc_waiting: Mutex::new(FxHashMap::default()),
-        })
+        }))
     }
 
     pub(crate) fn assign_thread(&self) -> usize {
@@ -141,7 +141,10 @@ impl std::fmt::Debug for OmqContext {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_new() -> *mut libc::c_void {
-    let arc = OmqContext::new(1);
+    let Some(arc) = OmqContext::new(1) else {
+        crate::error::set_errno(libc::EAGAIN);
+        return std::ptr::null_mut();
+    };
     Box::into_raw(Box::new(arc)).cast()
 }
 
@@ -175,10 +178,15 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     // Wait until all sockets are closed.
     {
         let (lock, cvar) = &arc.socket_notify;
-        let guard = lock.lock().unwrap();
-        let _guard = cvar
+        let Ok(guard) = lock.lock() else {
+            return crate::error::fail(crate::error::ETERM);
+        };
+        if cvar
             .wait_while(guard, |()| arc.socket_count.load(Ordering::Acquire) > 0)
-            .unwrap();
+            .is_err()
+        {
+            return crate::error::fail(crate::error::ETERM);
+        }
     }
 
     // Drop the submit channels so each io-thread's recv_async returns Err.

@@ -30,7 +30,7 @@ OptionParser.new do |o|
   o.on('--backend BACKEND',  'Run only "compio" or "tokio"')         { |v| options[:backends]  = [v] }
   o.on('--bench TARGET',     'Run only this bench target (by name)') { |v| options[:bench]     = v }
   o.on('--features FEATS',   'Extra cargo --features value')               { |v| options[:features]       = v }
-  o.on('--all-features',     'Enable lz4,zstd,curve,blake3zmq,ws (not priority; use --with-priority)') {
+  o.on('--all-features',     'Enable lz4,zstd,curve,blake3zmq,ws') {
     options[:features] = 'lz4 zstd curve blake3zmq ws'
   }
   o.on('--all-sizes',        'Full 32 B–128 KiB size sweep (×4 steps, default: 128 B/2 KiB/8 KiB)') {
@@ -38,10 +38,6 @@ OptionParser.new do |o|
   }
   o.on('--chart-sizes',      'Dense 8 B–256 KiB sweep (×2 steps, for charts)') {
     options[:chart_sizes] = true
-  }
-  o.on('--with-priority',    'Run push_pull with priority feature only (→ results_priority.jsonl)') {
-    options[:with_priority] = true
-    options[:skip_main] = true
   }
   o.on('--id RUN_ID',        'Override run ID (default: timestamp)')       { |v| options[:id]             = v }
 end.parse!
@@ -81,18 +77,6 @@ unless options[:skip_main]
       system(env, *cmd, chdir: ROOT) || abort("#{label} bench failed")
     end
   end
-end
-
-if options[:with_priority]
-  ENV['OMQ_BENCH_RESULTS_SUFFIX'] = 'priority'
-  options[:backends].each do |backend|
-    crate = "omq-#{backend}"
-    feat  = [options[:features], 'priority'].compact.join(' ')
-    cmd   = %w[cargo bench -p] + [crate, '--features', feat, '--bench', 'push_pull']
-    puts "\n--- #{crate} (priority) ---"
-    system(*cmd, chdir: ROOT) || abort("#{crate} priority bench failed")
-  end
-  ENV.delete('OMQ_BENCH_RESULTS_SUFFIX')
 end
 
 feats = options[:features] || ''

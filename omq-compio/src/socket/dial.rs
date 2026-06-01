@@ -69,15 +69,6 @@ fn reset_peer_channel(
 ) -> (flume::Sender<DriverCommand>, flume::Receiver<DriverCommand>) {
     let cap = cmd_channel_capacity(&inner.options);
     let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
-    #[cfg(feature = "priority")]
-    if super::inner::is_round_robin_send(inner.socket_type) {
-        let mut buf = inner.pre_connect_buf.lock().expect("pre_connect_buf");
-        while let Some(msg) = buf.pop_front() {
-            if cmd_tx.try_send(DriverCommand::SendMessage(msg)).is_err() {
-                break;
-            }
-        }
-    }
     *handle.write().expect("wire peer handle lock") = cmd_tx.clone();
     *info_holder.write().expect("peer_info lock") = None;
     if let Some(set) = peer_sub {
@@ -100,16 +91,12 @@ async fn install_and_run(
     peer_addr: Option<std::net::SocketAddr>,
     peer_sub: Option<&Arc<RwLock<SubscriptionSet>>>,
     peer_groups: Option<&Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
-    #[cfg(feature = "priority")] priority: u8,
 ) {
     *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
     // SAFETY: single-threaded compio runtime.
     unsafe {
         *inner.direct_recv_io.get() = None;
-        #[cfg(not(feature = "priority"))]
-        {
-            *inner.direct_send_io.get() = None;
-        }
+        *inner.direct_send_io.get() = None;
     }
     inner
         .peers_gen
@@ -141,8 +128,6 @@ async fn install_and_run(
             info: info_holder.clone(),
             peer_sub: peer_sub.cloned(),
             peer_groups: peer_groups.cloned(),
-            #[cfg(feature = "priority")]
-            priority,
         });
         {
             let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
@@ -202,7 +187,6 @@ async fn dial_supervisor<F, Fut>(
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
     peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
-    #[cfg(feature = "priority")] priority: u8,
     connect_fn: F,
 ) where
     F: Fn() -> Fut,
@@ -265,8 +249,6 @@ async fn dial_supervisor<F, Fut>(
             peer.peer_addr,
             peer_sub.as_ref(),
             peer_groups.as_ref(),
-            #[cfg(feature = "priority")]
-            priority,
         )
         .await;
 
@@ -301,7 +283,6 @@ pub(super) fn connect_tcp_with_reconnect(
     inner: &Arc<SocketInner>,
     endpoint: Endpoint,
     role: omq_proto::proto::connection::Role,
-    #[cfg(feature = "priority")] priority: u8,
 ) {
     let wrapper = endpoint.clone();
     let plain_tcp = endpoint.underlying_tcp();
@@ -326,8 +307,6 @@ pub(super) fn connect_tcp_with_reconnect(
         info_holder,
         peer_sub,
         peer_groups,
-        #[cfg(feature = "priority")]
-        priority,
         move || {
             let plain_tcp = plain_tcp.clone();
             let opts = opts.clone();
@@ -394,7 +373,6 @@ pub(super) fn connect_ipc_with_reconnect(
     inner: &Arc<SocketInner>,
     endpoint: Endpoint,
     role: omq_proto::proto::connection::Role,
-    #[cfg(feature = "priority")] priority: u8,
 ) {
     let policy = inner.options.reconnect;
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
@@ -421,8 +399,6 @@ pub(super) fn connect_ipc_with_reconnect(
         info_holder,
         peer_sub,
         peer_groups,
-        #[cfg(feature = "priority")]
-        priority,
         move || {
             let connect_endpoint = connect_endpoint.clone();
             let opts = opts.clone();

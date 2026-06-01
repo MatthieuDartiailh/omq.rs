@@ -141,10 +141,8 @@ impl LocalStream {
 /// on every send/recv when the peer set hasn't changed.
 pub(super) struct CachedPeerRoute {
     pub(super) generation: u64,
-    #[cfg(not(feature = "priority"))]
     pub(super) out: PeerOut,
     pub(super) direct: Option<Arc<DirectIoState>>,
-    #[cfg(not(feature = "priority"))]
     pub(super) slot_idx: usize,
 }
 
@@ -192,12 +190,10 @@ pub(super) struct SocketInner {
     /// Total outbound peer count. Used by the multi-peer wire fast
     /// path to distinguish single-peer (direct encode) from multi-peer
     /// (shared queue) without locking `out_peers`.
-    #[cfg(not(feature = "priority"))]
     pub(super) out_peer_count: AtomicUsize,
     /// Count of inproc outbound peers. When zero, multi-peer wire
-    /// sends skip `select_peer` entirely — all peers drain from the
+    /// sends skip `select_peer` entirely: all peers drain from the
     /// shared queue via their drivers.
-    #[cfg(not(feature = "priority"))]
     pub(super) inproc_out_count: AtomicUsize,
     /// Cached route for the common single-peer case. Invalidated
     /// when `peers_gen` advances past the stored generation.
@@ -229,7 +225,6 @@ pub(super) struct SocketInner {
     /// Set on the first successful direct-encode; invalidated when
     /// `peers_gen` advances past the stored generation. `UnsafeCell` is
     /// sound because compio is single-threaded.
-    #[cfg(not(feature = "priority"))]
     pub(super) direct_send_io: UnsafeCell<Option<(Arc<DirectIoState>, u64)>>,
     pub(super) on_peer_ready: Event,
     pub(super) subscriptions: RwLock<SubscriptionSet>,
@@ -269,14 +264,8 @@ pub(super) struct SocketInner {
     /// `None` for non-round-robin socket types (PUB/XPUB/RADIO/
     /// ROUTER use per-peer queues; XSUB uses fan-out; SUB/PULL/DISH
     /// don't send).
-    #[cfg(not(feature = "priority"))]
     pub(super) shared_send_tx: RwLock<Option<super::shared_queue::SharedQueueSender>>,
-    #[cfg(not(feature = "priority"))]
     pub(super) shared_send_rx: Option<super::shared_queue::SharedQueueReceiver>,
-    #[cfg(feature = "priority")]
-    pub(super) shared_send_tx: RwLock<Option<flume::Sender<Message>>>,
-    #[cfg(feature = "priority")]
-    pub(super) shared_send_rx: Option<flume::Receiver<Message>>,
     /// Round-robin counter for `Socket::send` peer selection on
     /// round-robin socket types. Modulo against the live peer
     /// snapshot at send time. Inproc peers receive direct sends
@@ -284,17 +273,9 @@ pub(super) struct SocketInner {
     /// shared queue (where drivers work-steal).
     pub(super) rr_index: AtomicUsize,
     /// Dense list of live `out_peers` slab keys. Rebuilt on peer
-    /// add/remove. With the `priority` feature, sorted ascending by
-    /// `PeerSlot.priority`; without, insertion order. The non-priority
-    /// round-robin and the priority picker both index into this.
+    /// add/remove. Insertion order. The round-robin picker indexes
+    /// into this.
     pub(super) peer_keys: RwLock<Vec<usize>>,
-    /// Pre-connect message buffer for priority mode. Round-robin sends
-    /// that arrive before any peer is connected push here; the first
-    /// send that finds a live peer drains the buffer first. Only used
-    /// when the `priority` feature is enabled (which disables the
-    /// shared send queue).
-    #[cfg(feature = "priority")]
-    pub(super) pre_connect_buf: Mutex<VecDeque<Message>>,
 }
 
 /// Returns `true` for socket types that round-robin their outbound
@@ -354,17 +335,6 @@ impl SocketInner {
         } else {
             options.send_hwm.map(|h| (h as usize).max(16))
         };
-        // With the `priority` feature, round-robin types use per-peer
-        // outbound queues instead of one shared queue (so try_send
-        // sees Disconnected for dead peers and the picker can advance
-        // to the next priority). Skip shared-queue allocation in that
-        // mode - the driver's `shared_msg_rx` arm becomes a no-op.
-        #[cfg(feature = "priority")]
-        let (shared_send_tx, shared_send_rx): (
-            Option<flume::Sender<Message>>,
-            Option<flume::Receiver<Message>>,
-        ) = (None, None);
-        #[cfg(not(feature = "priority"))]
         let (shared_send_tx, shared_send_rx) = if is_round_robin_send(socket_type) {
             let (tx, rx) = match send_cap {
                 Some(cap) => super::shared_queue::bounded(cap),
@@ -393,9 +363,7 @@ impl SocketInner {
             options,
             out_peers: RwLock::new(Slab::new()),
             peers_gen: AtomicU64::new(0),
-            #[cfg(not(feature = "priority"))]
             out_peer_count: AtomicUsize::new(0),
-            #[cfg(not(feature = "priority"))]
             inproc_out_count: AtomicUsize::new(0),
             cached_route: Mutex::new(None),
             in_tx,
@@ -409,7 +377,6 @@ impl SocketInner {
             inproc_parked: Arc::new(AtomicBool::new(false)),
             recv_cache: RecvCache::new(),
             direct_recv_io: UnsafeCell::new(None),
-            #[cfg(not(feature = "priority"))]
             direct_send_io: UnsafeCell::new(None),
             on_peer_ready: Event::new(),
             subscriptions: RwLock::new(SubscriptionSet::new()),
@@ -427,8 +394,6 @@ impl SocketInner {
             shared_send_rx,
             rr_index: AtomicUsize::new(0),
             peer_keys: RwLock::new(Vec::new()),
-            #[cfg(feature = "priority")]
-            pre_connect_buf: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -443,7 +408,6 @@ impl SocketInner {
     /// register identity (with handover), rebuild peer keys, and
     /// notify waiters. Returns the slab index.
     pub(super) fn insert_peer_slot(&self, slot: PeerSlot, identity: Option<&Bytes>) -> usize {
-        #[cfg(not(feature = "priority"))]
         let is_inproc = matches!(&slot.out, PeerOut::Inproc { .. });
         let idx = {
             let mut peers = self.out_peers.write().expect("peers lock");
@@ -451,12 +415,9 @@ impl SocketInner {
             self.peers_gen.fetch_add(1, Ordering::Release);
             idx
         };
-        #[cfg(not(feature = "priority"))]
-        {
-            self.out_peer_count.fetch_add(1, Ordering::Release);
-            if is_inproc {
-                self.inproc_out_count.fetch_add(1, Ordering::Release);
-            }
+        self.out_peer_count.fetch_add(1, Ordering::Release);
+        if is_inproc {
+            self.inproc_out_count.fetch_add(1, Ordering::Release);
         }
         {
             let pipes = unsafe { &mut *self.inproc_send_pipes.get() };
@@ -482,14 +443,10 @@ impl SocketInner {
 
     /// Rebuild `peer_keys` from the current `out_peers` (caller
     /// must hold no lock on either; this acquires both reads/writes
-    /// internally). Stable sort by priority preserves install order
-    /// within a level - that's the round-robin tie-breaker.
+    /// internally).
     pub(super) fn rebuild_peer_keys(&self) {
         let peers = self.out_peers.read().expect("peers lock");
-        #[allow(unused_mut)]
-        let mut keys: Vec<usize> = peers.iter().map(|(key, _)| key).collect();
-        #[cfg(feature = "priority")]
-        keys.sort_by_key(|&i| peers[i].priority);
+        let keys: Vec<usize> = peers.iter().map(|(key, _)| key).collect();
         drop(peers);
         *self.peer_keys.write().expect("peer_keys lock") = keys;
     }
@@ -528,12 +485,9 @@ impl SocketInner {
             if !peers.contains(slot_idx) {
                 return;
             }
-            #[cfg(not(feature = "priority"))]
-            {
-                self.out_peer_count.fetch_sub(1, Ordering::Release);
-                if matches!(&peers[slot_idx].out, PeerOut::Inproc { .. }) {
-                    self.inproc_out_count.fetch_sub(1, Ordering::Release);
-                }
+            self.out_peer_count.fetch_sub(1, Ordering::Release);
+            if matches!(&peers[slot_idx].out, PeerOut::Inproc { .. }) {
+                self.inproc_out_count.fetch_sub(1, Ordering::Release);
             }
             peers.remove(slot_idx);
         }

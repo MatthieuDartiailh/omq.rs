@@ -2,8 +2,6 @@
 //! Bounded by a 512 KiB byte cap (`DIRECT_CAP`); the cmd channel (bounded
 //! at `send_hwm`) provides the per-message backpressure layer.
 
-#![cfg(not(feature = "priority"))]
-
 use std::net::Ipv4Addr;
 use std::time::Duration;
 

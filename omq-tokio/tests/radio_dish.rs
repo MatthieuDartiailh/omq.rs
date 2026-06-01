@@ -12,10 +12,6 @@ fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
-async fn wait() {
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
 #[tokio::test]
 async fn radio_to_dish_with_matching_group() {
     let ep = inproc_ep("rd-match");
@@ -25,7 +21,6 @@ async fn radio_to_dish_with_matching_group() {
     let dish = Socket::new(SocketType::Dish, Options::default());
     dish.connect(ep).await.unwrap();
     dish.join("weather").await.unwrap();
-    wait().await;
 
     radio
         .send(Message::multipart(["weather", "sunny"]))
@@ -77,7 +72,6 @@ async fn dish_join_replays_to_new_radios() {
     let radio = Socket::new(SocketType::Radio, Options::default());
     radio.bind(ep.clone()).await.unwrap();
     dish.connect(ep).await.unwrap();
-    wait().await;
 
     radio
         .send(Message::multipart(["late", "joined"]))
@@ -99,7 +93,6 @@ async fn dish_leave_stops_delivery() {
     let dish = Socket::new(SocketType::Dish, Options::default());
     dish.connect(ep).await.unwrap();
     dish.join("g").await.unwrap();
-    wait().await;
 
     radio
         .send(Message::multipart(["g", "first"]))
@@ -112,7 +105,7 @@ async fn dish_leave_stops_delivery() {
     assert_eq!(m.part_bytes(1).unwrap(), &b"first"[..]);
 
     dish.leave("g").await.unwrap();
-    wait().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     radio
         .send(Message::multipart(["g", "second"]))

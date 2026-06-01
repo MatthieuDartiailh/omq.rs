@@ -36,7 +36,6 @@ pub(super) fn install_inproc_peer(
     conn: InprocConn,
     endpoint: Endpoint,
     connection_id: u64,
-    #[cfg(feature = "priority")] priority: u8,
 ) {
     let our_identity = inner.inproc_identity.clone();
     let peer_identity = conn.peer.identity.clone();
@@ -78,8 +77,6 @@ pub(super) fn install_inproc_peer(
             info: info_holder,
             peer_sub,
             peer_groups: None,
-            #[cfg(feature = "priority")]
-            priority,
         },
         Some(&peer_identity),
     );
@@ -105,25 +102,12 @@ pub(super) fn install_inproc_peer(
     // before this inproc peer connected. Wire peers get this via
     // their driver's select loop; inproc has no driver, so we drain
     // inline.
-    #[cfg(not(feature = "priority"))]
     if is_round_robin_send(inner.socket_type)
         && let Some(rx) = &inner.shared_send_rx
     {
         let peers = inner.out_peers.read().expect("peers lock");
         if let Some(slot) = peers.get(idx) {
             while let Some(msg) = rx.try_recv() {
-                if slot.out.try_send_immediate(msg).is_err() {
-                    break;
-                }
-            }
-        }
-    }
-    #[cfg(feature = "priority")]
-    if is_round_robin_send(inner.socket_type) {
-        let peers = inner.out_peers.read().expect("peers lock");
-        if let Some(slot) = peers.get(idx) {
-            let mut buf = inner.pre_connect_buf.lock().expect("pre_connect_buf");
-            while let Some(msg) = buf.pop_front() {
                 if slot.out.try_send_immediate(msg).is_err() {
                     break;
                 }
@@ -393,15 +377,6 @@ fn install_accepted_wire_peer_with_leftover(
 ) {
     let cap = cmd_channel_capacity(&inner.options);
     let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
-    #[cfg(feature = "priority")]
-    if is_round_robin_send(inner.socket_type) {
-        let mut buf = inner.pre_connect_buf.lock().expect("pre_connect_buf");
-        while let Some(msg) = buf.pop_front() {
-            if cmd_tx.try_send(DriverCommand::SendMessage(msg)).is_err() {
-                break;
-            }
-        }
-    }
     let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
@@ -461,8 +436,6 @@ fn install_accepted_wire_peer_with_leftover(
             info: info_holder.clone(),
             peer_sub: peer_sub.clone(),
             peer_groups: peer_groups.clone(),
-            #[cfg(feature = "priority")]
-            priority: omq_proto::DEFAULT_PRIORITY,
         },
         None,
     );

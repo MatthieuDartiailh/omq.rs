@@ -1,11 +1,5 @@
 //! Conflate option: when enabled, the shared send queue holds only the
 //! latest message (cap-1, drain-before-send semantics).
-//!
-//! Skipped under the `priority` feature: priority mode replaces the
-//! shared queue with per-peer driver inboxes, so the cap-1 `DropOldest`
-//! path this test depends on isn't on the send path.
-
-#![cfg(not(feature = "priority"))]
 
 use std::net::Ipv4Addr;
 use std::time::Duration;

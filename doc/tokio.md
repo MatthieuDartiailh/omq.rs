@@ -78,8 +78,7 @@ This is the same pattern `tokio-tungstenite`, `redis-rs`, and `quinn`
 use: a single task serializes mutation of state that has many
 concurrent sources of input. It's the right pattern for **rare,
 stateful, multi-source events** -- bind, connect, subscribe,
-identity-route lookups, monitor fan-out, HWM accounting, conflate,
-priority tiers.
+identity-route lookups, monitor fan-out, HWM accounting, conflate.
 
 It is **not** the right pattern for the per-message hot path when no
 actor state actually mutates per-message.
@@ -194,12 +193,6 @@ the actor:
 | `fair_queue` | PULL / SUB / XSUB / GATHER / DISH | Recv-only; round-robin across peer drivers |
 | `drop_queue` | (HWM behaviour) | Bounded queue with drop-on-full when `send_hwm` reached |
 | `pump` | inproc peers | Per-peer pump task between shared queue and inbox |
-
-The `priority` Cargo feature swaps `round_robin` for strict per-pipe
-priority tiers (nanomsg-style 1..=255). Round-robin send always
-prefers the highest-priority alive peer; lower tiers run only when
-higher tiers are blocked or disconnected. This trades work-stealing
-for per-peer queues -- relevant for ordering, not for raw throughput.
 
 ## Direct I/O: single-peer send bypass
 

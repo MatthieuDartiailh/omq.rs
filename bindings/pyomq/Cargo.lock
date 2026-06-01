@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "blume"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "event-listener",
 ]
@@ -171,8 +171,7 @@ dependencies = [
 [[package]]
 name = "compio"
 version = "0.19.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e2dc4aaf309e18c4a375ad7af8b8c2c11ff39e2598f0e83dd8700118c7e5973"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "compio-buf",
  "compio-driver",
@@ -187,8 +186,7 @@ dependencies = [
 [[package]]
 name = "compio-buf"
 version = "0.8.2-rc.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea3e403b0731a21d1087b5f7247f19afffc9fa3eb7c6296de6603c5d50cdf6c2"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -198,8 +196,7 @@ dependencies = [
 [[package]]
 name = "compio-driver"
 version = "0.12.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be16d4436494c0e3f4d732a08fd4ecc22a30594db854b076e9cd927b3de86140"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -228,8 +225,7 @@ dependencies = [
 [[package]]
 name = "compio-executor"
 version = "0.1.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "864d72c185d06cb30a08cb372c21f08bbba13fdaf1cefbc1e1fb488fe87ef02c"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "cfg-if",
  "compio-log",
@@ -242,8 +238,7 @@ dependencies = [
 [[package]]
 name = "compio-io"
 version = "0.10.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a03ad0bb4fe619922d95fa2f8635c426f0434d3a6305da41ebebe85782daace"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -258,8 +253,7 @@ dependencies = [
 [[package]]
 name = "compio-log"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc4e560213c1996b618da369b7c9109564b41af9033802ae534465c4ee4e132f"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "tracing",
 ]
@@ -267,8 +261,7 @@ dependencies = [
 [[package]]
 name = "compio-macros"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f05ed201484967dc70de77a8f7a02b29aaa8e6c81cbea2e75492ee0c8d97766b"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -279,8 +272,7 @@ dependencies = [
 [[package]]
 name = "compio-net"
 version = "0.12.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11e4817866aaeb33b316669747f1f7ff301ee78e6f5ce940db0f00230b9f0c81"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "cfg-if",
  "compio-buf",
@@ -301,8 +293,7 @@ dependencies = [
 [[package]]
 name = "compio-quic"
 version = "0.8.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a544e3eb2796be816230da1d1582ff4f5056e04f73d915c422bba8f4b89691e7"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "cfg_aliases",
  "compio-buf",
@@ -324,8 +315,7 @@ dependencies = [
 [[package]]
 name = "compio-runtime"
 version = "0.12.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e85c39d4994e573abf3e13761dbe6377cd444f010fc18cbd0ac5ca7a1492f4d"
+source = "git+https://github.com/compio-rs/compio.git?tag=v0.19.0-rc.2#2e1a8f69f1b372a14e830dcd1b9ebb8f8b78da89"
 dependencies = [
  "cfg-if",
  "compio-buf",
@@ -929,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "omq-compio"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "async-lock",
  "blume",
@@ -950,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -1150,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "pyomq"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "compio",

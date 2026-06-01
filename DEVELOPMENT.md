@@ -20,7 +20,7 @@ cargo test  -p blume
 cargo test  -p omq-tokio --test req_rep -- some_test_name
 ```
 
-Feature-gated tests (mechanisms, compression, priority):
+Feature-gated tests (mechanisms, compression):
 
 ```sh
 cargo test  -p omq-tokio  --features plain     --test plain
@@ -28,7 +28,6 @@ cargo test  -p omq-tokio  --features curve     --test curve
 cargo test  -p omq-compio --features blake3zmq --test blake3zmq
 cargo test  -p omq-tokio  --features lz4       --test lz4_tcp
 cargo test  -p omq-tokio  --features zstd      --test zstd_tcp
-cargo test  -p omq-tokio  --features priority  --test priority
 ```
 
 Full sweep (all features, both backends):
@@ -62,7 +61,7 @@ Long-running leak and stability scenarios. Both backends have
 identical suites (12 scenarios each): peer churn, reconnect storm,
 PUB/SUB churn, large-message throughput, compression (zstd),
 compression (lz4), PLAIN auth, CURVE encryption, BLAKE3ZMQ
-encryption, priority tiers, multi-socket, inproc cross-thread.
+encryption, multi-socket, inproc cross-thread.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s).
 Enable all feature-gated scenarios with the full feature set.
@@ -72,7 +71,7 @@ sequentially. Launch scenarios in batches of 4 (8 processes) to
 keep peak RSS bounded while still running in parallel:
 
 ```sh
-FEATURES="soak lz4 zstd plain curve blake3zmq priority"
+FEATURES="soak lz4 zstd plain curve blake3zmq"
 
 # build first (avoid parallel compilation conflicts)
 cargo test -p omq-compio --features "$FEATURES" --release --no-run
@@ -81,7 +80,7 @@ cargo test -p omq-tokio  --features "$FEATURES" --release --no-run
 # run in batches of 4 scenarios (8 processes), 10 min each
 TESTS=(blake3zmq compression compression_lz4 curve
        inproc_cross_thread large_throughput multi_socket peer_churn
-       plain priority pub_sub_churn reconnect_storm)
+       plain pub_sub_churn reconnect_storm)
 
 batch=()
 for test in "${TESTS[@]}"; do

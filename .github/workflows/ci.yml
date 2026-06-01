@@ -75,18 +75,6 @@ jobs:
       - run: cargo test -p omq-tokio  --features zstd
       - run: cargo test -p omq-compio --features zstd
 
-  priority:
-    name: priority
-    needs: [changes]
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p omq-tokio  --features priority
-      - run: cargo test -p omq-compio --features priority
-
   facade:
     name: omq facade
     needs: [changes]
@@ -144,7 +132,7 @@ jobs:
 
   ci-success:
     name: CI success
-    needs: [changes, test, encryption, compression, priority, facade, lint, interop]
+    needs: [changes, test, encryption, compression, facade, lint, interop]
     runs-on: ubuntu-latest
     if: always()
     steps:

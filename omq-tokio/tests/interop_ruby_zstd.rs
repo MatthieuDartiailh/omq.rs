@@ -124,6 +124,7 @@ async fn bind_zstd_pull() -> (Socket, String) {
 async fn ruby_push_zstd_tcp_sustained() {
     const PAYLOAD_UNIT: &str = "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
          The quick brown fox jumps over the lazy dog.";
+    const WARMUP: Duration = Duration::from_secs(10);
     const RUN_FOR: Duration = Duration::from_secs(8);
     const MIN_RECVD: usize = 600;
 
@@ -155,13 +156,26 @@ async fn ruby_push_zstd_tcp_sustained() {
             .expect("spawn ruby omq push"),
     );
 
+    // Wait for the Ruby CLI to connect and complete the ZMTP handshake
+    // before starting the throughput timer.
+    let handshake = async {
+        loop {
+            match mon.recv().await {
+                Ok(MonitorEvent::HandshakeSucceeded { .. }) => return,
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before handshake: {e:?}"),
+            }
+        }
+    };
+    tokio::time::timeout(WARMUP, handshake)
+        .await
+        .expect("Ruby CLI did not complete handshake within warmup window");
+
     // Drain monitor in the background; record any Disconnected. We collect
     // the first one (with reason) so the assertion message is informative.
     let monitor_task = tokio::spawn(async move {
         let mut first_drop: Option<String> = None;
         let mut dropped = 0u32;
-        // Bounded by the test timeout below; we exit when the harness
-        // drops the monitor.
         loop {
             match mon.recv().await {
                 Ok(MonitorEvent::Disconnected { reason, .. }) => {
@@ -183,7 +197,7 @@ async fn ruby_push_zstd_tcp_sustained() {
     let deadline = tokio::time::Instant::now() + RUN_FOR;
     let mut got = 0usize;
     while tokio::time::Instant::now() < deadline {
-        let recv = tokio::time::timeout(Duration::from_secs(1), pull.recv()).await;
+        let recv = tokio::time::timeout(Duration::from_secs(2), pull.recv()).await;
         match recv {
             Ok(Ok(msg)) => {
                 let body = msg.part_bytes(0).unwrap();
@@ -198,12 +212,12 @@ async fn ruby_push_zstd_tcp_sustained() {
                 }
             }
             Ok(Err(e)) => panic!("pull.recv error after {got} msgs: {e:?}"),
-            Err(_) => {} // no message in this 1s window; keep waiting until deadline
+            Err(_) => break,
         }
     }
 
     // Stop Ruby, then drain the monitor task to inspect any drops.
-    let () = guard.kill();
+    guard.kill();
     let _ = tokio::task::spawn_blocking(move || guard.take().wait()).await;
     drop(pull); // closes monitor stream, lets the monitor task exit
     let (dropped, first_drop) = monitor_task.await.unwrap();

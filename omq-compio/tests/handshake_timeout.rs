@@ -4,13 +4,6 @@
 //! observable signal is back-pressure: once the (single, dead)
 //! peer's pump exits, sends queue up in the shared queue until it
 //! fills, then block.
-//!
-//! With the `priority` feature on, this test's assumption no longer
-//! holds: round-robin types use per-peer outbound queues, so a dead
-//! driver makes `try_send` return `Disconnected` immediately and the
-//! picker never buffers. Different test surface; gate this one off.
-
-#![cfg(not(feature = "priority"))]
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::time::Duration;
