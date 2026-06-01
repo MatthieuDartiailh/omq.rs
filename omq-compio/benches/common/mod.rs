@@ -322,11 +322,11 @@ where
 
     let mut rounds_data = Vec::with_capacity(n_rounds);
     for _ in 0..n_rounds {
-        let cpu0 = thread_cpu_time();
+        let cpu0 = process_cpu_time();
         let t = Instant::now();
         burst(final_n).await;
         let wall = t.elapsed();
-        let cpu = thread_cpu_time().saturating_sub(cpu0);
+        let cpu = process_cpu_time().saturating_sub(cpu0);
         rounds_data.push((wall, cpu));
     }
     let &(elapsed, cpu_time) = rounds_data
@@ -353,12 +353,12 @@ pub(crate) struct Cell {
     pub cpu_time: Duration,
 }
 
-pub(crate) fn thread_cpu_time() -> Duration {
+pub(crate) fn process_cpu_time() -> Duration {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, std::ptr::from_mut(&mut ts)) };
+    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, std::ptr::from_mut(&mut ts)) };
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
