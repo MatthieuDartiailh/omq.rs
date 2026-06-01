@@ -66,11 +66,13 @@ impl SpscAwareRecv {
         let mut cache = self.inproc_cache.lock().unwrap();
         for p in &consumers {
             if let Ok(mut consumer) = p.consumer.try_lock() {
-                consumer.prefetch();
-                while let Some(msg) = consumer.pop() {
-                    cache.push_back(msg);
+                let got = consumer.prefetch();
+                if got > 0 {
+                    while let Some(msg) = consumer.pop() {
+                        cache.push_back(msg);
+                    }
+                    consumer.release();
                 }
-                consumer.release();
             }
         }
         cache.pop_front()
@@ -92,9 +94,15 @@ impl SpscAwareRecv {
                     () = self.activated.notified() => continue,
                 }
             } else {
+                let notified = self.recv_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if let Some(msg) = self.try_drain_consumers() {
+                    return Ok(msg);
+                }
                 tokio::select! {
                     biased;
-                    () = self.recv_notify.notified() => continue,
+                    () = notified => continue,
                     res = self.rx.recv() => {
                         return res.map_err(|_| Error::Closed);
                     }

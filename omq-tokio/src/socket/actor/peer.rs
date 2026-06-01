@@ -917,6 +917,9 @@ async fn inproc_peer_driver(
     }
     .await;
     let () = result;
+    if let Some(ref ring) = spsc {
+        ring.recv_notify.notify_one();
+    }
     let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
 }
 
