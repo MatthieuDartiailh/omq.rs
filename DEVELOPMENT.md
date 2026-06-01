@@ -187,71 +187,40 @@ yring ──────────────┤                      │
                                    └─ omq-zeromq
 ```
 
+### Automation (release-plz)
+
+`release-plz` runs on every push to `main`
+(`.github/workflows/release-plz.yml`). It:
+
+- Opens/updates a release PR with version bumps for changed crates,
+  including cascading dep updates across the workspace.
+- After the PR merges: creates annotated tags, publishes to crates.io
+  in dependency order, creates GitHub releases.
+
+Configuration: `release-plz.toml`. Changelogs are hand-curated, not
+generated.
+
+Uses trusted publishing (OIDC) for crates.io authentication. Each
+crate must be configured as a trusted publisher on crates.io.
+
 ### Steps
 
-1. **Identify changed crates.** For each crate, compare against its
-   last release tag:
+1. **Review the release-plz PR.** Verify the semver bumps are correct
+   (patch for bug fixes, minor for features/perf/refactors).
 
-   ```sh
-   git log <crate>-v<last>..HEAD --no-merges -- <crate>/src/ <crate>/Cargo.toml
-   ```
+2. **Curate changelogs.** For each bumped crate, insert a new
+   `## [x.y.z]` section below `## [Unreleased]` in `CHANGELOG.md`.
+   Never modify existing versioned sections.
 
-2. **Determine semver bump.** Bug fixes only: patch. Anything else
-   (features, perf, refactors): minor. Apply the cascade rule: if
-   any dependency is bumped, bump every dependent too (even if only
-   the dep version changed).
+3. **Update zguide examples.** Bump `omq` version in
+   `examples/zguide-*/*/Cargo.toml`.
 
-3. **Update each crate:**
-   - Bump `version` in `Cargo.toml`.
-   - Update dep versions in all dependents' `Cargo.toml` files.
-   - Insert a new `## [x.y.z]` section below `## [Unreleased]` in
-     `CHANGELOG.md`. Never modify existing versioned sections.
-   - Update `omq` version in `examples/zguide-*/*/Cargo.toml`.
-   - For pyomq: bump version in both `Cargo.toml` and
-     `pyproject.toml`.
+4. **Merge the release PR.** release-plz tags and publishes to
+   crates.io automatically.
 
-4. **Verify.** `cargo check --workspace` and
-   `cargo clippy --workspace --all-targets`.
-
-5. **Commit and PR.** One commit for the entire release wave. Push
-   to a branch, create a PR, wait for CI, merge.
-
-6. **Tag.** After merge, create annotated tags on the merge commit:
-
-   ```sh
-   for t in omq-proto-v0.X.0 blume-v0.X.0 ...; do
-     git tag -a "$t" -m "$t"
-   done
-   ```
-
-7. **Push tags.** Push workspace tags (everything except pyomq):
-
-   ```sh
-   git push origin omq-proto-v0.X.0 blume-v0.X.0 ...
-   ```
-
-   Push the pyomq tag **separately** so its release workflow
-   triggers independently:
-
-   ```sh
-   git push origin pyomq-v0.X.0
-   ```
-
-8. **Publish to crates.io** in dependency order:
-
-   ```sh
-   cargo publish -p omq-proto
-   cargo publish -p blume
-   cargo publish -p omq-compio
-   cargo publish -p omq-tokio
-   cargo publish -p omq
-   cargo publish -p omq-libzmq
-   cargo publish -p omq-zeromq
-   ```
-
-   Each `cargo publish` waits for the previous crate to propagate
-   before proceeding. pyomq is published by the `release-pyomq.yml`
-   GitHub Actions workflow triggered by the `pyomq-v*` tag.
+5. **pyomq** (if changed): bump version in
+   `bindings/pyomq/Cargo.toml` and `bindings/pyomq/pyproject.toml`,
+   push a `pyomq-v*` tag to trigger the wheel build/publish workflow.
 
 ### Crates to check
 

@@ -12,7 +12,7 @@ Compared against libzmq v4.3.5 and zmq.rs (zeromq crate v0.6.0).
   <img src="doc/charts/comparison_inproc.svg" alt="PUSH/PULL throughput and REQ/REP latency: inproc" width="850">
 </p>
 
-## libzmq vs omq — inproc
+## libzmq vs omq: inproc
 
 Same process, no kernel socket overhead. libzmq v4.3.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
 
@@ -42,7 +42,7 @@ Refresh: `python3 scripts/run_comparisons.py --transport inproc --latency --upda
 
 <!-- END libzmq_comparison_inproc_tokio -->
 
-## libzmq vs omq — IPC
+## libzmq vs omq: IPC
 
 Abstract-namespace Unix socket. Push binds, pull connects. libzmq v4.3.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
 
@@ -70,7 +70,7 @@ Refresh: `python3 scripts/run_comparisons.py --transport ipc --update-markdown`
 
 <!-- END libzmq_comparison_ipc_tokio -->
 
-## libzmq vs omq — TCP
+## libzmq vs omq: TCP
 
 TCP loopback, each process pinned to one core. Push binds, pull connects. libzmq v4.3.5 (C binary) vs omq-compio (io_uring, single thread) and omq-tokio (multi-thread).
 
@@ -98,7 +98,7 @@ Refresh: `python3 scripts/run_comparisons.py --transport tcp --update-markdown`
 
 <!-- END libzmq_comparison_tcp_tokio -->
 
-## libzmq vs omq — WebSocket
+## libzmq vs omq: WebSocket
 
 ZWS/2.0 (RFC 45) over TCP loopback. Push binds, pull connects. Requires libzmq built with WebSocket support (4.3.5+) and omq built with the `ws` feature.
 
@@ -126,9 +126,9 @@ Refresh: `python3 scripts/run_comparisons.py --transport ws --update-markdown`
 
 <!-- END libzmq_comparison_ws_tokio -->
 
-> **zmq.rs inproc:** zeromq 0.6 does not implement the inproc transport, so no zmq.rs vs omq inproc comparison is available. See the libzmq vs omq — inproc table above for omq's inproc numbers against a reference implementation.
+> **zmq.rs inproc:** zeromq 0.6 does not implement the inproc transport, so no zmq.rs vs omq inproc comparison is available. See the libzmq vs omq: inproc table above for omq's inproc numbers against a reference implementation.
 
-## zmq.rs vs omq — IPC
+## zmq.rs vs omq: IPC
 
 Push binds, pull connects. zmq.rs uses a socket file; omq uses abstract-namespace sockets. zmq.rs peer: `scripts/zmqrs_bench_peer/` (zeromq crate, tokio multi-thread). omq-compio: single io_uring thread. omq-tokio: multi-thread.
 
@@ -156,7 +156,7 @@ Refresh: `python3 scripts/run_comparisons.py --transport ipc --update-markdown`
 
 <!-- END zmqrs_comparison_ipc_tokio -->
 
-## zmq.rs vs omq — TCP
+## zmq.rs vs omq: TCP
 
 TCP loopback, push binds, pull connects. zmq.rs <-> omq-tokio is apples-to-apples (both tokio multi-thread). omq-compio is intentionally CPU-constrained (single io_uring thread).
 
@@ -184,7 +184,7 @@ Refresh: `python3 scripts/run_comparisons.py --transport tcp --update-markdown`
 
 <!-- END zmqrs_comparison_tcp_tokio -->
 
-## REQ/REP latency — libzmq vs omq
+## REQ/REP latency: libzmq vs omq
 
 Serial ping-pong: one REQ/REP round-trip at a time, p50 and p99 in microseconds.
 Lower is better; speedup = libzmq / omq.
@@ -236,7 +236,7 @@ Refresh: `python3 scripts/run_comparisons.py --transport ws --update-markdown`
 (run `python3 scripts/run_comparisons.py --transport ws --update-markdown` to populate)
 <!-- END libzmq_latency_ws -->
 
-## REQ/REP latency — zmq.rs vs omq
+## REQ/REP latency: zmq.rs vs omq
 
 ### IPC
 
