@@ -66,11 +66,13 @@ impl SpscAwareRecv {
         let mut cache = self.inproc_cache.lock().unwrap();
         for p in &consumers {
             if let Ok(mut consumer) = p.consumer.try_lock() {
-                consumer.prefetch();
-                while let Some(msg) = consumer.pop() {
-                    cache.push_back(msg);
+                let got = consumer.prefetch();
+                if got > 0 {
+                    while let Some(msg) = consumer.pop() {
+                        cache.push_back(msg);
+                    }
+                    consumer.release();
                 }
-                consumer.release();
             }
         }
         cache.pop_front()
