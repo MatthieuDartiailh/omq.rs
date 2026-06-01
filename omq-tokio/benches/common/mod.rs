@@ -93,15 +93,24 @@ pub(crate) fn run_timeout() -> Duration {
     per.saturating_mul(r * 2) + Duration::from_secs(30)
 }
 
-/// `omq/benches/results.jsonl`. One row per cell.
+fn cache_dir() -> PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME").map_or_else(
+        |_| {
+            let home = std::env::var("HOME").expect("HOME not set");
+            PathBuf::from(home).join(".cache")
+        },
+        PathBuf::from,
+    );
+    base.join("omq")
+}
+
 pub(crate) fn results_path() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("benches");
+    let mut p = cache_dir();
     let suffix = std::env::var("OMQ_BENCH_RESULTS_SUFFIX").unwrap_or_default();
     if suffix.is_empty() {
-        p.push("results.jsonl");
+        p.push("results_tokio.jsonl");
     } else {
-        p.push(format!("results_{suffix}.jsonl"));
+        p.push(format!("results_tokio_{suffix}.jsonl"));
     }
     p
 }
@@ -122,9 +131,8 @@ pub(crate) fn run_id() -> String {
 }
 
 pub(crate) fn compression_results_path() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("benches");
-    p.push("results_compression.jsonl");
+    let mut p = cache_dir();
+    p.push("results_compression_tokio.jsonl");
     p
 }
 

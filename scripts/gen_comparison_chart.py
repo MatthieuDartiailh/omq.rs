@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-JSONL_PATH = REPO / "benchmarks" / "comparisons.jsonl"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
+JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
 
 COLORS = {
     "libzmq": "#eab308",

@@ -24,7 +24,8 @@ LATENCY_WARMUP = 1000
 LATENCY_ITERS = 10000
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
-JSONL_FILE = os.path.join(os.path.dirname(__file__), "..", "doc", "charts", "bindings.jsonl")
+_CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")), "omq")
+JSONL_FILE = os.path.join(_CACHE_DIR, "bindings.jsonl")
 
 
 def load_jsonl():

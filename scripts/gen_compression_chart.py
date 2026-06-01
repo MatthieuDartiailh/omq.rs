@@ -479,7 +479,8 @@ def main():
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parent.parent
-    jsonl = repo / f"omq-{args.backend}" / "benches" / "results_compression.jsonl"
+    cache_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
+    jsonl = cache_dir / f"results_compression_{args.backend}.jsonl"
 
     if not jsonl.exists():
         print(f"ERROR: {jsonl} not found. Run the compression bench first.",

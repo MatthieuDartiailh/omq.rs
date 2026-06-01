@@ -125,8 +125,8 @@ cargo bench -p omq-compio --bench push_pull
 Env knobs: `OMQ_BENCH_TRANSPORTS`, `OMQ_BENCH_SIZES`,
 `OMQ_BENCH_PEERS`, `OMQ_BENCH_ROUND_MS`, `OMQ_BENCH_ROUNDS`.
 Full size sweep: `-- --all-sizes`.
-Results append to `<crate>/benches/results.jsonl` unless
-`OMQ_BENCH_NO_WRITE=1`.
+Results append to `$XDG_CACHE_HOME/omq/` (default `~/.cache/omq/`)
+unless `OMQ_BENCH_NO_WRITE=1`.
 
 Compression benchmarks run separately with bandwidth limiting.
 See [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md) for commands and results.
@@ -153,8 +153,8 @@ libzmq or zmq.rs baselines are stale.
 Produces `doc/charts/compression/compio_2048.svg` and `doc/charts/compression/tokio_2048.svg`:
 
 ```sh
-cargo bench -p omq-compio --bench compression --features lz4,zstd  # → omq-compio/benches/results_compression.jsonl
-cargo bench -p omq-tokio  --bench compression --features lz4,zstd  # → omq-tokio/benches/results_compression.jsonl
+cargo bench -p omq-compio --bench compression --features lz4,zstd  # → ~/.cache/omq/results_compression_compio.jsonl
+cargo bench -p omq-tokio  --bench compression --features lz4,zstd  # → ~/.cache/omq/results_compression_tokio.jsonl
 python3 scripts/gen_compression_chart.py --backend compio           # JSONL → doc/charts/compression/compio_*.svg
 python3 scripts/gen_compression_chart.py --backend tokio            # JSONL → doc/charts/compression/tokio_*.svg
 ```

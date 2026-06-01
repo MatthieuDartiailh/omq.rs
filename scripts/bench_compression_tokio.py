@@ -22,7 +22,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PEER = REPO / "target" / "release" / "bench_peer_tokio"
-JSONL = REPO / "omq-tokio" / "benches" / "results_compression.jsonl"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
+JSONL = CACHE_DIR / "results_compression_tokio.jsonl"
 CHART_SCRIPT = REPO / "scripts" / "gen_compression_chart.py"
 
 CHART_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096,

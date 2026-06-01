@@ -27,7 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-JSONL_PATH = ROOT / "benchmarks" / "comparisons.jsonl"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
+JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
 COMPARISONS_MD = ROOT / "COMPARISONS.md"
 
 FULL_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
