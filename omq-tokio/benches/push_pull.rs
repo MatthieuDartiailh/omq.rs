@@ -68,8 +68,9 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
                 let p = pushes.clone();
                 let payload = payload.clone();
                 handles.push(tokio::spawn(async move {
+                    let msg = Message::from_slice(&payload);
                     for _ in 0..per {
-                        p[i].send(Message::single(payload.clone())).await.unwrap();
+                        p[i].send(msg.clone()).await.unwrap();
                     }
                 }));
             }

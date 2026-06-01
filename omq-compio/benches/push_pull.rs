@@ -114,8 +114,9 @@ fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> co
                     let p = pushes.clone();
                     let payload = payload.clone();
                     handles.push(compio::runtime::spawn(async move {
+                        let msg = Message::from_slice(&payload);
                         for _ in 0..per {
-                            p[i].send(Message::single(payload.clone())).await.unwrap();
+                            p[i].send(msg.clone()).await.unwrap();
                         }
                     }));
                 }
@@ -226,8 +227,9 @@ fn run_cell_threaded(
                             let p = pushes.clone();
                             let payload = payload.clone();
                             handles.push(compio::runtime::spawn(async move {
+                                let msg = Message::from_slice(&payload);
                                 for _ in 0..per {
-                                    p[i].send(Message::single(payload.clone())).await.unwrap();
+                                    p[i].send(msg.clone()).await.unwrap();
                                 }
                             }));
                         }
