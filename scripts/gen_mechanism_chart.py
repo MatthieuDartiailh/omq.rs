@@ -3,6 +3,7 @@
 
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -237,8 +238,8 @@ def generate_svg(data: dict) -> str:
 
 
 def main():
-    repo = Path(__file__).resolve().parent.parent
-    jsonl = repo / "omq-compio" / "benches" / "results.jsonl"
+    cache_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
+    jsonl = cache_dir / "results_compio.jsonl"
 
     if not jsonl.exists():
         print(f"ERROR: {jsonl} not found", file=sys.stderr)

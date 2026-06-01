@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/compression.svg -- three-panel combined chart.
+"""Generate doc/charts/compression.svg -- four-panel combined chart.
 
-Panels (top to bottom): 1 Gbps, 100 Mbps, 10 Mbps.
-Each panel: dashed = msg/s log scale (left axis), solid = virtual throughput (right axis).
+Panels (top to bottom): 10 Gbps, 1 Gbps, 100 Mbps, 10 Mbps.
+Each panel: dashed = CPU % (left axis), solid = virtual throughput (right axis).
 
 The bench runs at full loopback speed.  Each panel projects what throughput
 would be at its link speed: effective_msgs_s = min(cpu_msgs_s, link_bytes_s / wire_bytes).
+CPU % is projected proportionally when wire-limited.
 """
 
 import json
@@ -46,12 +47,8 @@ def fmt_size(b: int) -> str:
     return f"{b} B"
 
 
-def _fmt_y_rate(val):
-    if val >= 1_000_000:
-        return f"{val / 1_000_000:g}M"
-    if val >= 1_000:
-        return f"{val / 1_000:g}k"
-    return f"{val:g}"
+def _fmt_cpu(val):
+    return f"{val:g}%"
 
 
 def _fmt_tput(mb):
@@ -118,6 +115,23 @@ def _log_ticks(data_min, data_max):
     return axis_min, axis_max, ticks
 
 
+def _cpu_ticks(data_max):
+    """Return (axis_max, tick_values) for a linear 0-based CPU% axis."""
+    if data_max <= 0:
+        data_max = 100
+    candidates = [50, 100, 200, 400, 500, 800, 1000]
+    ceil = data_max
+    for c in candidates:
+        if c >= data_max:
+            ceil = c
+            break
+    else:
+        ceil = math.ceil(data_max / 100) * 100
+    step = 50 if ceil <= 400 else 100
+    ticks = list(range(step, int(ceil) + 1, step))
+    return ceil, ticks
+
+
 def load_raw_data(jsonl_path: Path, dict_size: int | None = None) -> dict:
     """Load the latest run and return per-series raw data (cpu_msgs_s, wire_bytes, msg_size).
 
@@ -162,8 +176,12 @@ def load_raw_data(jsonl_path: Path, dict_size: int | None = None) -> dict:
         else:
             key = transport
         sizes_set.add(r["msg_size"])
+        elapsed = r.get("elapsed", 0)
+        cpu_time = r.get("cpu_time", 0)
+        cpu_pct = (cpu_time / elapsed * 100.0) if elapsed > 0 else 0.0
         series.setdefault(key, {})[r["msg_size"]] = {
             "cpu_msgs_s": r["msgs_s"],
+            "cpu_pct": cpu_pct,
             "msg_size": r["msg_size"],
             "wire_bytes": r.get("wire_bytes", r["msg_size"]),
         }
@@ -172,7 +190,7 @@ def load_raw_data(jsonl_path: Path, dict_size: int | None = None) -> dict:
 
 
 def project(raw: dict, link_bytes_s: float) -> dict:
-    """Project throughput at a given link speed."""
+    """Project throughput and CPU% at a given link speed."""
     series = {}
     for key, size_data in raw["series"].items():
         series[key] = {}
@@ -182,9 +200,11 @@ def project(raw: dict, link_bytes_s: float) -> dict:
             wire_limited = link_bytes_s / max(wire, 1)
             eff_msgs_s = min(cpu, wire_limited)
             virt_mbps = eff_msgs_s * d["msg_size"] / 1_000_000
+            ratio = eff_msgs_s / cpu if cpu > 0 else 0
             series[key][sz] = {
                 "msgs_s": eff_msgs_s,
                 "virt_mbps": virt_mbps,
+                "cpu_pct": d["cpu_pct"] * ratio,
             }
     return {"sizes": raw["sizes"], "series": series}
 
@@ -192,7 +212,6 @@ def project(raw: dict, link_bytes_s: float) -> dict:
 def generate_svg(
     panels: dict[str, dict],
     tput_ranges: dict[str, tuple[float, float]] | None = None,
-    msgs_ranges: dict[str, tuple[float, float]] | None = None,
     dict_size_label: str | None = None,
     backend: str = "compio",
     hw_label: str | None = None,
@@ -252,15 +271,8 @@ def generate_svg(
         y_bot = y_top + panel_h
         plot_h = y_bot - y_top
 
-        if msgs_ranges and link in msgs_ranges:
-            axis_min, axis_max, msg_ticks = _log_ticks(
-                msgs_ranges[link][0], msgs_ranges[link][1])
-        else:
-            all_msgs = [d["msgs_s"] for s in series.values()
-                        for d in s.values() if d["msgs_s"] > 0]
-            msg_min = min(all_msgs) if all_msgs else 1
-            msg_max = max(all_msgs) if all_msgs else 1e6
-            axis_min, axis_max, msg_ticks = _log_ticks(msg_min, msg_max)
+        cpu_ceil = 400
+        cpu_ticks = [100, 200, 300, 400]
 
         if tput_ranges and link in tput_ranges:
             virt_min, virt_max = tput_ranges[link]
@@ -274,11 +286,8 @@ def generate_svg(
             tp_max = math.log10(tput_ranges[link][1])
             tp_ticks = [t for t in tp_ticks if t <= tput_ranges[link][1]]
 
-        def y_msg(v, _bot=y_bot, _h=plot_h, _lmin=axis_min, _lmax=axis_max):
-            if v <= 0:
-                return _bot
-            lv = math.log10(v)
-            frac = max(0, min(1, (lv - _lmin) / (_lmax - _lmin)))
+        def y_cpu(v, _bot=y_bot, _h=plot_h, _ceil=cpu_ceil):
+            frac = max(0, min(1, v / _ceil))
             return _bot - frac * _h
 
         def y_tput(v, _bot=y_bot, _h=plot_h, _lmin=tp_min, _lmax=tp_max):
@@ -295,9 +304,9 @@ def generate_svg(
             f'{link_label}</text>'
         )
 
-        # Left-axis gridlines (msg/s, log scale)
-        for val in msg_ticks:
-            yy = y_msg(val)
+        # Left-axis gridlines (CPU %, linear)
+        for val in cpu_ticks:
+            yy = y_cpu(val)
             L.append(
                 f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
                 f' stroke="#e5e7eb" stroke-width="1"/>'
@@ -305,7 +314,7 @@ def generate_svg(
             L.append(
                 f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
                 f' dominant-baseline="middle" fill="#374151" font-size="9">'
-                f'{_fmt_y_rate(val)}</text>'
+                f'{_fmt_cpu(val)}</text>'
             )
 
         # Right-axis gridlines (virtual throughput, log scale)
@@ -351,20 +360,20 @@ def generate_svg(
         L.append(
             f'  <text x="40" y="{mid_y:.1f}" text-anchor="middle"'
             f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
-            f' transform="rotate(-90,40,{mid_y:.1f})">msg/s (log)</text>'
+            f' transform="rotate(-90,40,{mid_y:.1f})">CPU %</text>'
         )
 
         # Plot lines
         present = [k for k in SERIES_ORDER if k in series]
 
-        # Dashed: msg/s (log)
+        # Dashed: CPU %
         for name in present:
             d = series[name]
             active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
             if not active:
                 continue
             pts = " ".join(
-                f"{xs[i]:.1f},{y_msg(d[s]['msgs_s']):.1f}" for i, s in active
+                f"{xs[i]:.1f},{y_cpu(d[s]['cpu_pct']):.1f}" for i, s in active
             )
             L.append(
                 f'  <polyline points="{pts}" fill="none" stroke="{COLORS[name]}"'
@@ -422,7 +431,7 @@ def generate_svg(
     L.append(
         f'  <text x="{mid_x:.1f}" y="{footer_y}" text-anchor="middle"'
         f' fill="#9ca3af" font-size="9">'
-        f'dashed = msg/s log (left) · solid = virtual throughput log (right)</text>'
+        f'dashed = CPU % (left) · solid = virtual throughput log (right)</text>'
     )
     L.append("</svg>")
 
@@ -467,18 +476,11 @@ def main():
                         help="throughput range for 100 Mbps panel (min,max MB/s)")
     parser.add_argument("--tput-10m", type=str, default=None,
                         help="throughput range for 10 Mbps panel (min,max MB/s)")
-    parser.add_argument("--msgs-10g", type=str, default=None,
-                        help="msg/s range for 10 Gbps panel (min,max)")
-    parser.add_argument("--msgs-1g", type=str, default=None,
-                        help="msg/s range for 1 Gbps panel (min,max)")
-    parser.add_argument("--msgs-100m", type=str, default=None,
-                        help="msg/s range for 100 Mbps panel (min,max)")
-    parser.add_argument("--msgs-10m", type=str, default=None,
-                        help="msg/s range for 10 Mbps panel (min,max)")
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parent.parent
-    jsonl = repo / f"omq-{args.backend}" / "benches" / "results_compression.jsonl"
+    cache_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
+    jsonl = cache_dir / f"results_compression_{args.backend}.jsonl"
 
     if not jsonl.exists():
         print(f"ERROR: {jsonl} not found. Run the compression bench first.",
@@ -498,20 +500,12 @@ def main():
         return default
 
     default_tput = {"10g": (10, 4000), "1g": (5, 2000), "100m": (1, 400), "10m": (1, 40)}
-    default_msgs = {"10g": (1000, 20_000_000), "1g": (100, 20_000_000),
-                    "100m": (10, 2_000_000), "10m": (1, 200_000)}
 
     tput_ranges = {
         "10g": parse_range(args.tput_10g, default_tput["10g"]),
         "1g": parse_range(args.tput_1g, default_tput["1g"]),
         "100m": parse_range(args.tput_100m, default_tput["100m"]),
         "10m": parse_range(args.tput_10m, default_tput["10m"]),
-    }
-    msgs_ranges = {
-        "10g": parse_range(args.msgs_10g, default_msgs["10g"]),
-        "1g": parse_range(args.msgs_1g, default_msgs["1g"]),
-        "100m": parse_range(args.msgs_100m, default_msgs["100m"]),
-        "10m": parse_range(args.msgs_10m, default_msgs["10m"]),
     }
 
     ds = args.dict_size or 2048
@@ -520,7 +514,7 @@ def main():
     else:
         dict_size_label = f"{ds} B"
 
-    svg = generate_svg(panels, tput_ranges, msgs_ranges, dict_size_label,
+    svg = generate_svg(panels, tput_ranges, dict_size_label,
                        backend=args.backend, hw_label=detect_hardware())
     output = repo / "doc" / "charts" / "compression" / f"{args.backend}_{ds}.svg"
     output.parent.mkdir(parents=True, exist_ok=True)

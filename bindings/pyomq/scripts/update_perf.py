@@ -24,7 +24,8 @@ LATENCY_WARMUP = 1000
 LATENCY_ITERS = 10000
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
-JSONL_FILE = os.path.join(os.path.dirname(__file__), "..", "doc", "charts", "bindings.jsonl")
+_CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")), "omq")
+JSONL_FILE = os.path.join(_CACHE_DIR, "bindings.jsonl")
 
 
 def load_jsonl():
@@ -749,15 +750,36 @@ def _fmt_mbps(val):
     return f"{val:.1f} MB/s"
 
 
+def _detect_hardware():
+    try:
+        cpu = None
+        for line in open("/proc/cpuinfo"):
+            if line.startswith("model name"):
+                cpu = line.split(":", 1)[1].strip()
+                cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
+                break
+        cores = os.cpu_count()
+        if cpu and cores:
+            return f"{cpu}, {cores} cores"
+    except OSError:
+        pass
+    return None
+
+
 def gen_combined_chart(data, path):
     n = len(SIZES)
-    svg_w, svg_h = 850, 600
+    hw_label = _detect_hardware()
+    hw_offset = 14 if hw_label else 0
+    svg_w = 850
+    svg_h = 670 + hw_offset
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
 
-    t1_top, t1_bot = 35, 280
+    t1_top = 35 + hw_offset
+    t1_bot = 370 + hw_offset
     t1_h = t1_bot - t1_top
-    t2_top, t2_bot = 340, 520
+    t2_top = t1_bot + 80
+    t2_bot = t2_top + 120
     t2_h = t2_bot - t2_top
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
@@ -795,10 +817,15 @@ def gen_combined_chart(data, path):
     # ── TOP PANEL: THROUGHPUT ──────────────────────────────────────
 
     L.append(
-        f'  <text x="{mid_x}" y="18" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
         f'PUSH/PULL throughput — 2-process, TCP loopback (higher is better)</text>'
     )
+    if hw_label:
+        L.append(
+            f'  <text x="{mid_x}" y="{t1_top - 3}" text-anchor="middle"'
+            f' fill="#9ca3af" font-size="10">{hw_label}</text>'
+        )
 
     n_l_ticks = 4
     for i in range(n_l_ticks + 1):
@@ -891,7 +918,7 @@ def gen_combined_chart(data, path):
     # ── BOTTOM PANEL: LATENCY ─────────────────────────────────────
 
     L.append(
-        f'  <text x="{mid_x}" y="{t2_top - 20}" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
         f'REQ/REP latency — 2-process, TCP loopback, p50 µs (lower is better)</text>'
     )

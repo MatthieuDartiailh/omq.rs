@@ -93,15 +93,24 @@ pub(crate) fn run_timeout() -> Duration {
     per.saturating_mul(r * 2) + Duration::from_secs(30)
 }
 
-/// `omq/benches/results.jsonl`. One row per cell.
+fn cache_dir() -> PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME").map_or_else(
+        |_| {
+            let home = std::env::var("HOME").expect("HOME not set");
+            PathBuf::from(home).join(".cache")
+        },
+        PathBuf::from,
+    );
+    base.join("omq")
+}
+
 pub(crate) fn results_path() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("benches");
+    let mut p = cache_dir();
     let suffix = std::env::var("OMQ_BENCH_RESULTS_SUFFIX").unwrap_or_default();
     if suffix.is_empty() {
-        p.push("results.jsonl");
+        p.push("results_tokio.jsonl");
     } else {
-        p.push(format!("results_{suffix}.jsonl"));
+        p.push(format!("results_tokio_{suffix}.jsonl"));
     }
     p
 }
@@ -122,9 +131,8 @@ pub(crate) fn run_id() -> String {
 }
 
 pub(crate) fn compression_results_path() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("benches");
-    p.push("results_compression.jsonl");
+    let mut p = cache_dir();
+    p.push("results_compression_tokio.jsonl");
     p
 }
 
@@ -301,11 +309,11 @@ where
 
     let mut rounds_data = Vec::with_capacity(n_rounds);
     for _ in 0..n_rounds {
-        let cpu0 = thread_cpu_time();
+        let cpu0 = process_cpu_time();
         let t = Instant::now();
         burst(final_n).await;
         let wall = t.elapsed();
-        let cpu = thread_cpu_time().saturating_sub(cpu0);
+        let cpu = process_cpu_time().saturating_sub(cpu0);
         rounds_data.push((wall, cpu));
     }
     let &(elapsed, cpu_time) = rounds_data
@@ -332,12 +340,12 @@ pub(crate) struct Cell {
     pub cpu_time: Duration,
 }
 
-pub(crate) fn thread_cpu_time() -> Duration {
+pub(crate) fn process_cpu_time() -> Duration {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, std::ptr::from_mut(&mut ts)) };
+    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, std::ptr::from_mut(&mut ts)) };
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
