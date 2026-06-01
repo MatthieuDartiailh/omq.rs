@@ -183,6 +183,7 @@ impl MessageEncoder {
 
     /// Update dict from the primary encoder if it changed.
     pub fn sync_dict(&mut self, primary: &Self) {
+        #[allow(unreachable_patterns)]
         match (self, primary) {
             #[cfg(feature = "lz4")]
             (Self::Lz4(me), Self::Lz4(p)) => me.sync_dict(p),
