@@ -371,13 +371,13 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
     hw_offset = 14 if hw_label else 0
     svg_w = 850
-    svg_h = (665 if has_latency else 400) + hw_offset
+    svg_h = (670 if has_latency else 400) + hw_offset
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
 
     t1_y_top = 35 + hw_offset
-    t1_y_bot = (330 if has_latency else 305) + hw_offset
+    t1_y_bot = (370 if has_latency else 305) + hw_offset
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
 
@@ -403,7 +403,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
     if has_latency:
         t2_y_top = t1_y_bot + 80
-        t2_y_bot = t2_y_top + 160
+        t2_y_bot = t2_y_top + 120
         draw_latency_panel(
             L, sizes, xs, lat, impls, x_left, x_right, t2_y_top, t2_y_bot,
             f"REQ/REP latency — {transport_label} (p50 µs, lower is better)",
