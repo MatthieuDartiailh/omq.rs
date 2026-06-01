@@ -21,7 +21,8 @@ use super::blake3zmq_aad;
 use super::{Connection, State};
 
 impl Connection {
-    pub(super) fn write_outbound_commands(&mut self, cmds: &[Command]) {
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn write_outbound_commands(&mut self, cmds: &[Command]) -> Result<()> {
         for c in cmds {
             let mut body = BytesMut::new();
             command::encode(c, &mut body);
@@ -38,9 +39,9 @@ impl Connection {
                     crate::message::FrameFlags::COMMAND,
                     plaintext.len() + TAG_LEN,
                 );
-                let Ok(ciphertext) = tx.encrypt(&aad[..aad_len], &plaintext) else {
-                    continue;
-                };
+                let ciphertext = tx
+                    .encrypt(&aad[..aad_len], &plaintext)
+                    .map_err(|_| Error::Protocol("command encryption failed".into()))?;
                 self.emit_command_frame(Bytes::from(ciphertext));
                 continue;
             }
@@ -52,9 +53,9 @@ impl Connection {
                 && let Some(FrameTransform::Curve(tx)) = self.transform.as_mut()
             {
                 let plaintext = body.freeze();
-                let Ok(enc) = tx.encrypt_message(false, true, &plaintext) else {
-                    continue;
-                };
+                let enc = tx
+                    .encrypt_message(false, true, &plaintext)
+                    .map_err(|_| Error::Protocol("command encryption failed".into()))?;
                 let mut wire = BytesMut::with_capacity(8 + enc.len());
                 wire.put_u8(b"MESSAGE".len() as u8);
                 wire.put_slice(b"MESSAGE");
@@ -65,6 +66,7 @@ impl Connection {
 
             self.emit_command_frame(body.freeze());
         }
+        Ok(())
     }
 
     fn emit_command_frame(&mut self, payload: Bytes) {
@@ -190,8 +192,7 @@ impl Connection {
                 "send_command before handshake complete".into(),
             ));
         }
-        self.write_outbound_commands(std::slice::from_ref(cmd));
-        Ok(())
+        self.write_outbound_commands(std::slice::from_ref(cmd))
     }
 
     /// Queue a WebSocket close frame.

@@ -53,7 +53,7 @@ impl std::fmt::Debug for OmqMsgRepr {
 const _SIZE_ASSERT: () = assert!(std::mem::size_of::<OmqMsgRepr>() == 64);
 
 #[inline]
-unsafe fn repr(msg: *mut OmqMsgRepr) -> &'static mut OmqMsgRepr {
+unsafe fn repr<'a>(msg: *mut OmqMsgRepr) -> &'a mut OmqMsgRepr {
     unsafe { &mut *msg }
 }
 

@@ -153,6 +153,9 @@ pub extern "C" fn zmq_poll(
     nitems: c_int,
     timeout_ms: libc::c_long,
 ) -> c_int {
+    if nitems < 0 {
+        return crate::error::fail(libc::EINVAL);
+    }
     if items.is_null() && nitems > 0 {
         return crate::error::fail(libc::EFAULT);
     }

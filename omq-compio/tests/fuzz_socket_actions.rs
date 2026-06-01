@@ -54,13 +54,10 @@ fn random_inproc(rng: &mut StdRng) -> Endpoint {
 
 fn random_ipc(rng: &mut StdRng) -> Endpoint {
     let id: u64 = rng.random();
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "omq-compio-fuzz-{}-{id:x}.sock",
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-compio-fuzz-{}-{id:x}",
         std::process::id()
-    ));
-    let _ = std::fs::remove_file(&p);
-    Endpoint::Ipc(IpcPath::Filesystem(p))
+    )))
 }
 
 #[compio::test]

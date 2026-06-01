@@ -15,7 +15,7 @@ use crate::transport::peer_io::{CancellableRecvStream, PeerIo, SharedPeerIo, Wir
 use super::inner::{LocalStream, RecvStreamState};
 use omq_proto::encoded_queue::EncodedQueue;
 
-#[expect(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct DirectIoState {
     pub(crate) peer_io: SharedPeerIo,
     pub(crate) writer: async_lock::Mutex<WireWriter>,
@@ -241,7 +241,7 @@ impl DirectIoState {
     }
 
     #[expect(clippy::too_many_arguments)]
-    #[expect(clippy::fn_params_excessive_bools)]
+    #[allow(clippy::fn_params_excessive_bools)]
     pub(crate) fn new(
         peer_io: SharedPeerIo,
         writer: WireWriter,
@@ -310,7 +310,6 @@ impl EncodedQueueCell {
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub(crate) fn try_borrow_mut(&self) -> Option<EncodedQueueGuard<'_>> {
         if self.borrowed.get() {
             return None;

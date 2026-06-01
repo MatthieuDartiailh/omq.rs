@@ -322,8 +322,11 @@ impl Socket {
                     }
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
-                self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
-                return self.send_with_direct_io(msg).await;
+                let result = self.send_with_direct_io(msg).await;
+                if result.is_ok() {
+                    self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
+                }
+                result
             }
             SocketType::Rep => {
                 let msg = self
@@ -409,15 +412,17 @@ impl Socket {
     /// delivered by the background driver are visible.
     pub fn try_recv(&self) -> Result<Message> {
         if self.inner.socket_type == SocketType::Req {
-            let mut msg = self.inner.recv_rx.try_recv()?;
-            match msg.pop_front() {
-                Some(delim) if delim.is_empty() => {}
-                _ => return Err(Error::WouldBlock),
+            loop {
+                let mut msg = self.inner.recv_rx.try_recv()?;
+                if let Some(delim) = msg.pop_front()
+                    && delim.is_empty()
+                {
+                    self.inner
+                        .req_awaiting_reply
+                        .store(false, Ordering::Relaxed);
+                    return Ok(msg);
+                }
             }
-            self.inner
-                .req_awaiting_reply
-                .store(false, Ordering::Relaxed);
-            return Ok(msg);
         }
         self.inner.recv_rx.try_recv()
     }

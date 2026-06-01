@@ -35,7 +35,7 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
     );
 }
 
-// --- IPC (filesystem path) ---
+// --- IPC (abstract namespace) ---
 
 #[test]
 fn ipc_push_pull() {
@@ -43,8 +43,7 @@ fn ipc_push_pull() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    let path = format!("/tmp/omq-libzmq-test-{}", std::process::id());
-    let addr = CString::new(format!("ipc://{path}")).unwrap();
+    let addr = CString::new(format!("ipc://@omq-libzmq-test-{}", std::process::id())).unwrap();
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
@@ -62,7 +61,6 @@ fn ipc_push_pull() {
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);
-    let _ = std::fs::remove_file(&path);
 }
 
 // --- IPC (abstract namespace, Linux) ---

@@ -779,6 +779,29 @@ impl Socket {
             ));
         }
         let group = msg.part_bytes(0).unwrap();
+        let body = msg.part_bytes(1).unwrap();
+        let udp_socks: Vec<Arc<compio::net::UdpSocket>> = self
+            .inner()
+            .udp_dialers
+            .read()
+            .expect("udp_dialers lock")
+            .iter()
+            .map(|d| d.sock.clone())
+            .collect();
+        if !udp_socks.is_empty() {
+            let dgram = crate::transport::udp::encode_datagram(&group, &body)?;
+            for sock in &udp_socks {
+                use std::os::fd::AsRawFd;
+                unsafe {
+                    libc::send(
+                        sock.as_raw_fd(),
+                        dgram.as_ptr().cast::<libc::c_void>(),
+                        dgram.len(),
+                        libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                    );
+                }
+            }
+        }
         let stream_targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
             peers

@@ -65,7 +65,17 @@ impl NotifyFd {
         // Non-semaphore: a single read returns the accumulated count
         // and resets to 0. This allows O(1) drain instead of O(N).
         let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
+        assert!(
+            recv_fd >= 0,
+            "eventfd() failed: {}",
+            std::io::Error::last_os_error()
+        );
         let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
+        assert!(
+            send_fd >= 0,
+            "eventfd() failed: {}",
+            std::io::Error::last_os_error()
+        );
         Self { recv_fd, send_fd }
     }
 
@@ -88,14 +98,24 @@ impl NotifyFd {
 impl NotifyFd {
     fn new() -> Self {
         let mut fds = [-1i32; 2];
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert!(
+            rc == 0,
+            "pipe() failed: {}",
+            std::io::Error::last_os_error()
+        );
         unsafe {
-            libc::pipe(fds.as_mut_ptr());
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
         let (recv_read, recv_write) = (fds[0], fds[1]);
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert!(
+            rc == 0,
+            "pipe() failed: {}",
+            std::io::Error::last_os_error()
+        );
         unsafe {
-            libc::pipe(fds.as_mut_ptr());
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
@@ -398,10 +418,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
         let _ = run_on(ctx, thread_idx, move || {
             // Once this job runs, the materializing thread's run_on
             // has already completed (jobs are FIFO on the io thread).
-            assert!(
-                REG.with(|r| r.borrow().contains_key(&id)),
-                "socket not in REG after materialization"
-            );
+            debug_assert!(REG.with(|r| r.borrow().contains_key(&id)));
         });
         return;
     }

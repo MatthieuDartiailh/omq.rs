@@ -49,10 +49,10 @@ fn random_inproc(rng: &mut StdRng) -> Endpoint {
 
 fn random_ipc(rng: &mut StdRng) -> Endpoint {
     let id: u64 = rng.random();
-    let mut p = std::env::temp_dir();
-    p.push(format!("omq-fuzz-{}-{id:x}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&p);
-    Endpoint::Ipc(IpcPath::Filesystem(p))
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-fuzz-{}-{id:x}",
+        std::process::id()
+    )))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

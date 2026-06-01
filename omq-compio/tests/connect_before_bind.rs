@@ -52,16 +52,11 @@ fn inproc_ep(name: &str) -> Endpoint {
 }
 
 fn ipc_ep(name: &str) -> Endpoint {
-    let path = std::env::temp_dir().join(format!(
-        "omq-cbb-comp-{name}-{}-{}.sock",
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-cbb-comp-{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
-    Endpoint::Ipc(IpcPath::Filesystem(path))
+        rand::random::<u32>()
+    )))
 }
 
 const TIMEOUT: Duration = Duration::from_secs(5);

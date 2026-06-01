@@ -91,8 +91,10 @@ async fn reconnect_after_ipc_peer_restarts() {
     use omq_tokio::IpcPath;
     use std::time::Instant;
 
-    let path = format!("/tmp/omq-test-ipc-{}", std::process::id());
-    let ep = Endpoint::Ipc(IpcPath::Filesystem(path.clone().into()));
+    let ep = Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-test-ipc-{}",
+        std::process::id()
+    )));
 
     let pull1 = Socket::new(SocketType::Pull, Options::default());
     pull1.bind(ep.clone()).await.unwrap();

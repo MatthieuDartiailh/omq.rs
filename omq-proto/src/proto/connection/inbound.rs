@@ -123,7 +123,7 @@ impl Connection {
             &self.our_greeting,
             &self.peer_greeting,
         )?;
-        self.write_outbound_commands(&cmds);
+        self.write_outbound_commands(&cmds)?;
         Ok(true)
     }
 
@@ -144,7 +144,7 @@ impl Connection {
         let cmd = decode_command_raw(payload_bytes)?;
         let mut cmds = Vec::new();
         let step = self.mechanism.on_command(cmd, &mut cmds)?;
-        self.write_outbound_commands(&cmds);
+        self.write_outbound_commands(&cmds)?;
         if let MechanismStep::Complete { peer_properties } = step {
             let peer_type = peer_properties
                 .socket_type
@@ -320,7 +320,7 @@ impl Connection {
                 // Auto-answer with PONG. PING TTL is advisory; we ignore it here
                 // (engine layer enforces heartbeat_timeout).
                 let pong = Command::Pong { context };
-                self.write_outbound_commands(&[pong]);
+                self.write_outbound_commands(&[pong])?;
             }
             Command::Pong { .. } => {
                 // Engine tracks last-received timestamp on every byte; PONG

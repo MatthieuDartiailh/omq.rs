@@ -31,12 +31,12 @@ const MSG_SIZE: usize = 131_072;
 fn soak_ipc_fanout_no_message_loss() {
     let duration = soak_common::soak_duration();
 
-    let ep: omq_compio::Endpoint = {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("omq-soak-fanout-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&dir);
-        omq_compio::Endpoint::Ipc(omq_compio::endpoint::IpcPath::Filesystem(dir))
-    };
+    let ep: omq_compio::Endpoint =
+        omq_compio::Endpoint::Ipc(omq_compio::endpoint::IpcPath::Abstract(format!(
+            "omq-soak-fanout-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        )));
 
     let recv_count = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));

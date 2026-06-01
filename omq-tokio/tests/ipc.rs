@@ -8,9 +8,10 @@ use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("omq-ipc-test-{name}-{}.sock", std::process::id()));
-    Endpoint::Ipc(IpcPath::Filesystem(dir))
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-ipc-test-{name}-{}",
+        std::process::id()
+    )))
 }
 
 #[tokio::test]
@@ -106,11 +107,11 @@ async fn ipc_connect_before_bind() {
 
 #[tokio::test]
 async fn ipc_socket_file_cleaned_on_close() {
-    let ep = temp_ipc("cleanup");
-    let path = match &ep {
-        Endpoint::Ipc(IpcPath::Filesystem(p)) => p.clone(),
-        _ => unreachable!(),
-    };
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("omq-ipc-cleanup-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&dir);
+    let ep = Endpoint::Ipc(IpcPath::Filesystem(dir.clone()));
+    let path = dir;
     let s = Socket::new(SocketType::Pull, Options::default());
     s.bind(ep).await.unwrap();
     assert!(path.exists(), "bind must create the socket file");

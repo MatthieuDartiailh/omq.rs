@@ -15,10 +15,10 @@ use omq_tokio::{Blake3ZmqKeypair, Endpoint, IpcPath, Message, Options, Socket, S
 // - same in-process testing convenience, real byte-stream
 // transport, codec runs.
 fn inproc_ep(name: &str) -> Endpoint {
-    let mut p = std::env::temp_dir();
-    p.push(format!("omq-blake3-{name}-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&p);
-    Endpoint::Ipc(IpcPath::Filesystem(p))
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-blake3-{name}-{}",
+        std::process::id()
+    )))
 }
 
 #[tokio::test]

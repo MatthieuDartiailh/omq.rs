@@ -531,7 +531,11 @@ impl Socket {
         if !recv_state.consumers.is_empty() {
             let cache = inner.recv_cache.get();
             let max = inner.options.max_message_size;
-            for c in &mut recv_state.consumers {
+            let n = recv_state.consumers.len();
+            let start = recv_state.fq_index;
+            for i in 0..n {
+                let idx = (start + i) % n;
+                let c = &mut recv_state.consumers[idx];
                 let got = c.prefetch();
                 if got > 0 {
                     while let Some(msg) = c.pop() {
@@ -541,6 +545,9 @@ impl Socket {
                         cache.push_back(msg);
                     }
                     c.release();
+                }
+                if !cache.is_empty() {
+                    recv_state.fq_index = idx + 1;
                 }
             }
             if let Some(msg) = cache.pop_front() {

@@ -11,13 +11,11 @@ use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "omq-compio-plain-{name}-{}.sock",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&dir);
-    Endpoint::Ipc(IpcPath::Filesystem(dir))
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-compio-plain-{name}-{}-{}",
+        std::process::id(),
+        rand::random::<u32>()
+    )))
 }
 
 fn tcp_loopback(port: u16) -> Endpoint {

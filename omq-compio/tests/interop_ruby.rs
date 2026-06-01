@@ -98,22 +98,22 @@ fn tcp_endpoint_port_zero() -> Endpoint {
 fn cli_addr(sock: &Socket) -> String {
     match sock.last_bound_endpoint().expect("no bound endpoint") {
         Endpoint::Tcp { host, port } => format!("tcp://{host}:{port}"),
+        Endpoint::Ipc(IpcPath::Abstract(name)) => format!("ipc://@{name}"),
         Endpoint::Ipc(IpcPath::Filesystem(p)) => format!("ipc://{}", p.display()),
         other => panic!("unexpected endpoint: {other:?}"),
     }
 }
 
 fn ipc_endpoint(name: &str) -> Endpoint {
-    let path = std::env::temp_dir().join(format!(
-        "omq-compio-interop-{name}-{}-{}.sock",
+    let abstract_name = format!(
+        "omq-compio-interop-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
-    Endpoint::Ipc(IpcPath::Filesystem(path))
+    );
+    Endpoint::Ipc(IpcPath::Abstract(abstract_name))
 }
 
 async fn wait_for_handshake(sock: &Socket) {

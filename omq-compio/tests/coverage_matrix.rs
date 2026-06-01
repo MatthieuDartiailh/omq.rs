@@ -16,16 +16,11 @@ use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 use omq_proto::endpoint::IpcPath;
 
 fn ipc_ep(name: &str) -> Endpoint {
-    let path = std::env::temp_dir().join(format!(
-        "omq-compio-cov-{name}-{}-{}.sock",
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-compio-cov-{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
-    Endpoint::Ipc(IpcPath::Filesystem(path))
+        rand::random::<u32>()
+    )))
 }
 
 fn inproc_ep(name: &str) -> Endpoint {
