@@ -94,9 +94,15 @@ impl SpscAwareRecv {
                     () = self.activated.notified() => continue,
                 }
             } else {
+                let notified = self.recv_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if let Some(msg) = self.try_drain_consumers() {
+                    return Ok(msg);
+                }
                 tokio::select! {
                     biased;
-                    () = self.recv_notify.notified() => continue,
+                    () = notified => continue,
                     res = self.rx.recv() => {
                         return res.map_err(|_| Error::Closed);
                     }
