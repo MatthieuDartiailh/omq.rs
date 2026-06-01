@@ -131,21 +131,17 @@ async fn bind_tcp_or_ipc(sock: &Socket, t: &Transport) -> String {
 }
 
 fn ipc_transport(name: &str) -> Transport {
-    // Filesystem path under the test target dir keeps the socket inside
-    // the cargo workspace and avoids /tmp permission quirks.
-    let path = std::env::temp_dir().join(format!(
-        "omq-interop-{name}-{}-{}.sock",
+    let abstract_name = format!(
+        "omq-interop-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
-    // Stale leftover from a previous run would prevent bind.
-    let _ = std::fs::remove_file(&path);
-    let cli = format!("ipc://{}", path.display());
+    );
+    let cli = format!("ipc://@{abstract_name}");
     Transport {
-        rust: Endpoint::Ipc(IpcPath::Filesystem(path)),
+        rust: Endpoint::Ipc(IpcPath::Abstract(abstract_name)),
         cli,
     }
 }

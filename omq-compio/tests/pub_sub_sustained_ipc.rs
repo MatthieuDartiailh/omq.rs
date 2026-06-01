@@ -33,12 +33,12 @@ fn sustained_ipc_fanout_no_message_loss() {
     const MSG_SIZE: usize = 131_072;
     const TOTAL_MESSAGES: usize = 50;
 
-    let ep: omq_compio::Endpoint = {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("omq-test-sustained-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&dir);
-        omq_compio::Endpoint::Ipc(omq_compio::endpoint::IpcPath::Filesystem(dir))
-    };
+    let ep: omq_compio::Endpoint =
+        omq_compio::Endpoint::Ipc(omq_compio::endpoint::IpcPath::Abstract(format!(
+            "omq-test-sustained-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        )));
 
     let recv_count = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));

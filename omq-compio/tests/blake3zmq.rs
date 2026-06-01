@@ -9,13 +9,11 @@ use std::time::Duration;
 use omq_compio::{Blake3ZmqKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "omq-compio-blake3-{name}-{}.sock",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&p);
-    Endpoint::Ipc(IpcPath::Filesystem(p))
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-compio-blake3-{name}-{}-{}",
+        std::process::id(),
+        rand::random::<u32>()
+    )))
 }
 
 #[compio::test]

@@ -12,9 +12,10 @@ use omq_tokio::endpoint::Host;
 use omq_tokio::{CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("omq-curve-{name}-{}.sock", std::process::id()));
-    Endpoint::Ipc(IpcPath::Filesystem(dir))
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-curve-{name}-{}",
+        std::process::id()
+    )))
 }
 
 fn tcp_ep(port: u16) -> Endpoint {

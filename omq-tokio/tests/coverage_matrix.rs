@@ -11,16 +11,14 @@ use omq_proto::endpoint::IpcPath;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn ipc_ep(name: &str) -> Endpoint {
-    let path = std::env::temp_dir().join(format!(
-        "omq-tokio-cov-{name}-{}-{}.sock",
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-tokio-cov-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
-    Endpoint::Ipc(IpcPath::Filesystem(path))
+    )))
 }
 
 fn inproc_ep(name: &str) -> Endpoint {

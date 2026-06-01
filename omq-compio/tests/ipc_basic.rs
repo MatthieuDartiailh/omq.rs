@@ -7,13 +7,11 @@ use omq_compio::options::ReconnectPolicy;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "omq-compio-ipc-{name}-{}-{}.sock",
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-compio-ipc-{name}-{}-{}",
         std::process::id(),
         rand::random::<u32>()
-    ));
-    Endpoint::Ipc(IpcPath::Filesystem(dir))
+    )))
 }
 
 #[compio::test]

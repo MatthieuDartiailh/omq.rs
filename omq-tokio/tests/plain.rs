@@ -10,9 +10,10 @@ use std::time::Duration;
 use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("omq-plain-{name}-{}.sock", std::process::id()));
-    Endpoint::Ipc(IpcPath::Filesystem(dir))
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-plain-{name}-{}",
+        std::process::id()
+    )))
 }
 
 fn accept_alice(peer: &omq_tokio::MechanismPeerInfo) -> bool {

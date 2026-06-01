@@ -22,10 +22,11 @@ fn inproc(name: &str) -> Endpoint {
 }
 
 fn ipc_ep(name: &str) -> Endpoint {
-    let mut p = std::env::temp_dir();
-    p.push(format!("omq-subside-{name}-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&p);
-    Endpoint::Ipc(IpcPath::Filesystem(p))
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-subside-{name}-{}-{}",
+        std::process::id(),
+        rand::random::<u32>()
+    )))
 }
 
 fn tcp_ep() -> Endpoint {

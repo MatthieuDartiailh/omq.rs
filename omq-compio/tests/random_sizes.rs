@@ -11,16 +11,11 @@ use omq_compio::endpoint::IpcPath;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType, build_default_runtime};
 
 fn ipc_ep(tag: &str) -> Endpoint {
-    let path = std::env::temp_dir().join(format!(
-        "omq-rng-{tag}-{}-{}.sock",
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-rng-{tag}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
-    Endpoint::Ipc(IpcPath::Filesystem(path))
+        rand::random::<u32>()
+    )))
 }
 
 #[test]

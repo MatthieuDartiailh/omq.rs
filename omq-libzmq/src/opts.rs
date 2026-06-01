@@ -634,7 +634,7 @@ pub extern "C" fn zmq_getsockopt(
                 SocketType::Peer => 19,
                 SocketType::Channel => 20,
                 SocketType::Stream => 11,
-                _ => unreachable!(),
+                _ => return crate::error::fail(libc::EINVAL),
             };
             write_i32(optval, optvallen, v)
         }
@@ -903,14 +903,14 @@ fn read_i32(optval: *const libc::c_void, optvallen: usize) -> i32 {
     if optval.is_null() || optvallen < 4 {
         return 0;
     }
-    unsafe { *(optval.cast::<i32>()) }
+    unsafe { std::ptr::read_unaligned(optval.cast::<i32>()) }
 }
 
 fn read_i64(optval: *const libc::c_void, optvallen: usize) -> i64 {
     if optval.is_null() || optvallen < 8 {
         return 0;
     }
-    unsafe { *(optval.cast::<i64>()) }
+    unsafe { std::ptr::read_unaligned(optval.cast::<i64>()) }
 }
 
 fn read_string(optval: *const libc::c_void, optvallen: usize) -> String {
@@ -952,7 +952,7 @@ fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_in
         return crate::error::fail(libc::EINVAL);
     }
     unsafe {
-        *(optval.cast::<i32>()) = val;
+        std::ptr::write_unaligned(optval.cast::<i32>(), val);
         *optvallen = 4;
     }
     0
@@ -967,7 +967,7 @@ fn write_i64(optval: *mut libc::c_void, optvallen: *mut usize, val: i64) -> c_in
         return crate::error::fail(libc::EINVAL);
     }
     unsafe {
-        *(optval.cast::<i64>()) = val;
+        std::ptr::write_unaligned(optval.cast::<i64>(), val);
         *optvallen = 8;
     }
     0

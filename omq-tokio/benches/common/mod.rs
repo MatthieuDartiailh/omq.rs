@@ -183,15 +183,10 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
         "inproc" => Endpoint::Inproc {
             name: format!("bench-{seq}"),
         },
-        "ipc" => {
-            let mut dir = std::env::temp_dir();
-            dir.push(format!("omq-bench-{}-{seq}.sock", std::process::id()));
-            // Ensure a stale file from a previous failed run doesn't
-            // fail bind() (transport::ipc::bind handles stale files,
-            // but be explicit).
-            let _ = std::fs::remove_file(&dir);
-            Endpoint::Ipc(IpcPath::Filesystem(dir))
-        }
+        "ipc" => Endpoint::Ipc(IpcPath::Abstract(format!(
+            "omq-bench-{}-{seq}",
+            std::process::id()
+        ))),
         "tcp" | "lz4+tcp" | "zstd+tcp" | "ws" => {
             let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
                 .expect("bench: failed to allocate a tcp port");

@@ -304,7 +304,9 @@ impl Connection {
             self.state = State::Closed;
             return;
         }
-        self.write_outbound_commands(&cmds);
+        if self.write_outbound_commands(&cmds).is_err() {
+            self.state = State::Closed;
+        }
     }
 
     fn queue_greeting(&mut self) {

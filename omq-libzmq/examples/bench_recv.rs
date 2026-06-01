@@ -206,7 +206,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10_000);
 
-    let ipc_addr = format!("ipc:///tmp/omq-bench-{}.sock", std::process::id());
+    let ipc_addr = format!("ipc://@omq-bench-{}", std::process::id());
     let sizes = [8, 64, 256, 1024, 16384];
 
     println!("=== omq-libzmq push/pull throughput ({batch} msgs/round) ===");

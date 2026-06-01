@@ -184,6 +184,12 @@ impl<T> Producer<T> {
     }
 }
 
+impl<T> Drop for Producer<T> {
+    fn drop(&mut self) {
+        self.ring.flush.0.store(self.tail, Ordering::Release);
+    }
+}
+
 // SAFETY: Producer<T> is Send because it is single-owner (not Sync) and the
 // underlying Ring is Send+Sync. Moving the producer to another thread is safe.
 unsafe impl<T: Send> Send for Producer<T> {}

@@ -10,16 +10,14 @@ use omq_tokio::endpoint::IpcPath;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn ipc_ep(tag: &str) -> Endpoint {
-    let path = std::env::temp_dir().join(format!(
-        "omq-rng-{tag}-{}-{}.sock",
+    Endpoint::Ipc(IpcPath::Abstract(format!(
+        "omq-rng-{tag}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&path);
-    Endpoint::Ipc(IpcPath::Filesystem(path))
+    )))
 }
 
 #[tokio::test]
