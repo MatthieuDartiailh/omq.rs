@@ -48,7 +48,7 @@ macro_rules! batch_encode_flush {
                 $pipeline,
             );
         } else {
-            encode_msg(&$first, $encoder, $codec, $eq, $passthrough);
+            encode_msg(&$first, $encoder, $codec, $eq, $passthrough)?;
         }
         let mut count = 1usize;
         let mut bytes = $first.byte_len();
@@ -65,7 +65,7 @@ macro_rules! batch_encode_flush {
                             $pipeline,
                         );
                     } else {
-                        encode_msg(&next, $encoder, $codec, $eq, $passthrough);
+                        encode_msg(&next, $encoder, $codec, $eq, $passthrough)?;
                     }
                     count += 1;
                 }
@@ -439,7 +439,7 @@ where
                             &mut codec,
                             &mut eq,
                             passthrough.as_ref(),
-                        );
+                        )?;
                         n += 1;
                     }
                     if n > 0 {
@@ -690,7 +690,7 @@ async fn drain_on_cancel<W: AsyncWrite + Unpin>(
     while let Ok(cmd) = inbox.try_recv() {
         match cmd {
             DriverCommand::SendMessage(msg) => {
-                encode_msg(&msg, encoder, codec, eq, passthrough);
+                encode_msg(&msg, encoder, codec, eq, passthrough).ok();
             }
             DriverCommand::SendCommand(c) => {
                 let _ = codec.send_command(&c);
@@ -701,7 +701,7 @@ async fn drain_on_cancel<W: AsyncWrite + Unpin>(
     if let Some(rx) = shared_msg_rx {
         let mut drained = 0usize;
         while let Some(msg) = rx.try_pop() {
-            encode_msg(&msg, encoder, codec, eq, passthrough);
+            encode_msg(&msg, encoder, codec, eq, passthrough).ok();
             drained += 1;
         }
         rx.release_permits(drained);
@@ -832,7 +832,7 @@ fn encode_msg(
     codec: &mut Connection,
     eq: &mut EncodedQueue,
     passthrough: Option<&(Bytes, usize)>,
-) {
+) -> Result<()> {
     #[cfg(feature = "ws")]
     if codec.is_ws() && !codec.has_frame_transform() {
         let masked = matches!(
@@ -840,29 +840,30 @@ fn encode_msg(
             Some(omq_proto::proto::connection::WsRole::Client)
         );
         eq.encode_ws(msg, masked);
-        return;
+        return Ok(());
     }
     if codec.has_frame_transform() {
         if let Some(enc) = encoder.as_mut() {
-            for wire in enc.encode(msg).unwrap_or_default() {
-                let _ = codec.send_message(&wire);
+            for wire in enc.encode(msg)? {
+                codec.send_message(&wire)?;
             }
         } else {
-            let _ = codec.send_message(msg);
+            codec.send_message(msg)?;
         }
-        return;
+        return Ok(());
     }
     if let Some((sentinel, threshold)) = passthrough
         && msg.iter().all(|b| b.len() < *threshold)
     {
         eq.encode_prefixed_auto(sentinel, msg);
     } else if let Some(enc) = encoder.as_mut() {
-        for wire in enc.encode(msg).unwrap_or_default() {
+        for wire in enc.encode(msg)? {
             eq.encode_auto(&wire);
         }
     } else {
         eq.encode_auto(msg);
     }
+    Ok(())
 }
 
 /// Flush the `EncodedQueue` to the writer. Drains chunks into a
@@ -1058,14 +1059,14 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
                         return Ok(());
                     }
                     Some(first) => {
-                        encode_msg(&first, encoder, codec, eq, passthrough);
+                        encode_msg(&first, encoder, codec, eq, passthrough)?;
                         let mut count = 1usize;
                         let mut bytes = first.byte_len();
                         while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
                             match shared_msg_rx.and_then(QueueReceiver::try_pop) {
                                 Some(next) => {
                                     bytes += next.byte_len();
-                                    encode_msg(&next, encoder, codec, eq, passthrough);
+                                    encode_msg(&next, encoder, codec, eq, passthrough)?;
                                     count += 1;
                                 }
                                 None => break,
@@ -1104,14 +1105,14 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
 
             cmd = inbox.recv() => match cmd {
                 Some(DriverCommand::SendMessage(first)) => {
-                    encode_msg(&first, encoder, codec, eq, passthrough);
+                    encode_msg(&first, encoder, codec, eq, passthrough)?;
                     let mut count = 1usize;
                     let mut bytes = first.byte_len();
                     while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
                         match inbox.try_recv() {
                             Ok(DriverCommand::SendMessage(m)) => {
                                 bytes += m.byte_len();
-                                encode_msg(&m, encoder, codec, eq, passthrough);
+                                encode_msg(&m, encoder, codec, eq, passthrough)?;
                                 count += 1;
                             }
                             Ok(DriverCommand::SendCommand(c)) => {

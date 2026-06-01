@@ -301,7 +301,9 @@ pub(crate) fn peek_frame_header(buf: &ChunkedInputBuf) -> Result<Option<PeekedFr
             return Ok(None);
         };
         let size = u64::from_be_bytes(hdr[1..].try_into().expect("8 bytes"));
-        (MAX_FRAME_HEADER_LEN, size as usize)
+        let payload_len = usize::try_from(size)
+            .map_err(|_| Error::Protocol(format!("frame size {size} exceeds platform usize")))?;
+        (MAX_FRAME_HEADER_LEN, payload_len)
     } else {
         let Some(hdr) = buf.peek_array::<2>() else {
             return Ok(None);

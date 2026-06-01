@@ -36,7 +36,7 @@ impl CompressionPool {
     /// Borrow a pool encoder matching the primary's variant, syncing
     /// its dict state. Returns `None` when all `cap` encoders are
     /// in flight. New encoders are created on demand up to `cap`.
-    #[allow(dead_code)]
+    #[allow(dead_code, unreachable_code, unused_mut, unused_variables)]
     pub(crate) fn try_take(&self, primary: &MessageEncoder) -> Option<MessageEncoder> {
         {
             let mut pool = self.encoders.lock().unwrap();
@@ -56,6 +56,7 @@ impl CompressionPool {
         Some(MessageEncoder::new_offload(primary))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn put(&self, enc: MessageEncoder) {
         self.encoders.lock().unwrap().push(enc);
         self.in_flight.fetch_sub(1, Ordering::Relaxed);
