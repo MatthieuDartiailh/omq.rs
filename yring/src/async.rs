@@ -88,7 +88,7 @@ impl<T> AsyncProducer<T> {
 
     /// Make all pushed items visible and wake the consumer if the ring was empty.
     #[inline]
-    pub fn flush(&mut self) -> FlushResult {
+    pub fn flush(&mut self) {
         let r = self.ring.ring.flush_to(self.tail, &mut self.cached_head);
         if matches!(
             r,
@@ -99,14 +99,14 @@ impl<T> AsyncProducer<T> {
         ) {
             self.ring.waker.0.wake();
         }
-        r
     }
 
     /// Push + flush in one call.
     #[inline]
-    pub fn push_and_flush(&mut self, val: T) -> Result<FlushResult, T> {
+    pub fn push_and_flush(&mut self, val: T) -> Result<(), T> {
         self.push(val)?;
-        Ok(self.flush())
+        self.flush();
+        Ok(())
     }
 
     #[inline]

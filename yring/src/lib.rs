@@ -234,16 +234,27 @@ impl<T> Producer<T> {
     }
 
     /// Make all pushed items visible to the consumer. One Release store.
+    /// Does NOT load `head`; `push()` refreshes `cached_head` on demand
+    /// when the ring appears full.
     #[inline]
-    pub fn flush(&mut self) -> FlushResult {
+    pub fn flush(&mut self) {
+        self.ring.flush.0.store(self.tail, Ordering::Release);
+    }
+
+    /// Flush and report whether the ring was empty (consumer fully caught
+    /// up). Loads `head` (one Acquire) in addition to the Release store.
+    /// Only needed when the caller uses `was_empty` for wakeup decisions.
+    #[inline]
+    pub fn flush_and_check(&mut self) -> FlushResult {
         self.ring.flush_to(self.tail, &mut self.cached_head)
     }
 
     /// Push + flush in one call (convenience for single-item sends).
     #[inline]
-    pub fn push_and_flush(&mut self, val: T) -> Result<FlushResult, T> {
+    pub fn push_and_flush(&mut self, val: T) -> Result<(), T> {
         self.push(val)?;
-        Ok(self.flush())
+        self.flush();
+        Ok(())
     }
 
     #[inline]
@@ -385,10 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_reports_was_empty() {
+    fn flush_and_check_reports_was_empty() {
         let (mut p, mut c) = spsc::<u32>(4);
         p.push(1).unwrap();
-        let r = p.flush();
+        let r = p.flush_and_check();
         assert_eq!(
             r,
             FlushResult::Flushed {
@@ -398,7 +409,7 @@ mod tests {
         );
 
         p.push(2).unwrap();
-        let r = p.flush();
+        let r = p.flush_and_check();
         // Consumer hasn't read yet, so was_empty depends on cached_head
         assert!(matches!(r, FlushResult::Flushed { count: 1, .. }));
 
@@ -410,7 +421,7 @@ mod tests {
         let _ = p.push(5);
         let _ = p.push(6);
         // After consumer consumed, the producer might see stale cached_head
-        let r = p.flush();
+        let r = p.flush_and_check();
         assert!(matches!(r, FlushResult::Flushed { .. }));
     }
 
@@ -504,17 +515,15 @@ mod tests {
     }
 
     #[test]
-    fn flush_was_empty_after_consumer_drains() {
+    fn flush_and_check_was_empty_after_consumer_drains() {
         let (mut p, mut c) = spsc::<u32>(4);
         for i in 0..5 {
             p.push_and_flush(i).unwrap();
             let val = c.prefetch_and_pop().unwrap();
             assert_eq!(val, i);
-            // Next flush must see was_empty == true because the
-            // consumer drained the ring.
         }
         p.push(99).unwrap();
-        let r = p.flush();
+        let r = p.flush_and_check();
         assert_eq!(
             r,
             FlushResult::Flushed {

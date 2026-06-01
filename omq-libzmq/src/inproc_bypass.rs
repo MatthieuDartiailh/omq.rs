@@ -69,7 +69,7 @@ impl BypassSend {
         self.producer.push(msg)?;
         if let yring::FlushResult::Flushed {
             was_empty: true, ..
-        } = self.producer.flush()
+        } = self.producer.flush_and_check()
         {
             NotifyFd::signal_recv(self.pipe.recv_signal_fd);
         }

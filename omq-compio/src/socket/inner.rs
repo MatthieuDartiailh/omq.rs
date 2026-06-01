@@ -165,7 +165,7 @@ pub(super) struct InprocSendPipe {
 
 impl Drop for InprocSendPipe {
     fn drop(&mut self) {
-        let _ = self.producer.flush();
+        self.producer.flush();
         self.notify.notify(usize::MAX);
     }
 }
