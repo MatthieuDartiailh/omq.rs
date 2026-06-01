@@ -48,14 +48,27 @@ pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
 /// across rounds (= peak throughput, closest to the hardware ceiling).
 /// Override via env for longer overnight runs (`OMQ_BENCH_ROUND_MS`,
 /// `OMQ_BENCH_ROUNDS`).
-pub(crate) const DEFAULT_ROUND_DURATION: Duration = Duration::from_millis(500);
+pub(crate) const DEFAULT_ROUND_DURATION: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_ROUNDS: usize = 3;
+pub(crate) const QUICK_ROUND_DURATION: Duration = Duration::from_millis(1500);
+pub(crate) const QUICK_ROUNDS: usize = 1;
+
+fn is_quick() -> bool {
+    std::env::var("OMQ_BENCH_QUICK").is_ok_and(|v| v == "1")
+}
 
 pub(crate) fn round_duration() -> Duration {
     std::env::var("OMQ_BENCH_ROUND_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .map_or(DEFAULT_ROUND_DURATION, Duration::from_millis)
+        .map_or(
+            if is_quick() {
+                QUICK_ROUND_DURATION
+            } else {
+                DEFAULT_ROUND_DURATION
+            },
+            Duration::from_millis,
+        )
 }
 
 pub(crate) fn rounds() -> usize {
@@ -63,7 +76,11 @@ pub(crate) fn rounds() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&n: &usize| n > 0)
-        .unwrap_or(DEFAULT_ROUNDS)
+        .unwrap_or(if is_quick() {
+            QUICK_ROUNDS
+        } else {
+            DEFAULT_ROUNDS
+        })
 }
 
 /// Hard ceiling per cell — a hang guard, not a tight bound. The 30s

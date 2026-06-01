@@ -18,7 +18,7 @@ use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut};
 use omq_proto::proto::{Command, Connection, Event};
 
-use super::compression_pool::{CompressionPool, RawCtx};
+use super::compression_pool::CompressionPool;
 use super::direct_io::{DirectIo, SharedWriter};
 use crate::routing::drop_queue::QueueReceiver;
 use omq_proto::encoded_queue::EncodedQueue;
@@ -48,7 +48,7 @@ macro_rules! batch_encode_flush {
                 $pipeline,
             );
         } else {
-            encode_msg(&$first, $encoder, $codec, $eq, $passthrough);
+            encode_msg(&$first, $encoder, $codec, $eq, $passthrough)?;
         }
         let mut count = 1usize;
         let mut bytes = $first.byte_len();
@@ -65,7 +65,7 @@ macro_rules! batch_encode_flush {
                             $pipeline,
                         );
                     } else {
-                        encode_msg(&next, $encoder, $codec, $eq, $passthrough);
+                        encode_msg(&next, $encoder, $codec, $eq, $passthrough)?;
                     }
                     count += 1;
                 }
@@ -439,7 +439,7 @@ where
                             &mut codec,
                             &mut eq,
                             passthrough.as_ref(),
-                        );
+                        )?;
                         n += 1;
                     }
                     if n > 0 {
@@ -554,11 +554,11 @@ where
                 }
 
                 // Drain completed offloaded compressions and flush.
-                Some((raw, frames)) = async {
+                Some((pool_enc, frames)) = async {
                     use futures::StreamExt;
                     offload_pipeline.next().await
                 }, if !offload_pipeline.is_empty() => {
-                    drain_offload_result(raw, frames, compression_pool.as_ref(), &mut eq)?;
+                    drain_offload_result(pool_enc, frames, compression_pool.as_ref(), &mut eq)?;
                     flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
                     while codec.has_pending_transmit() {
                         flush_once(&mut writer, &mut codec).await?;
@@ -690,7 +690,7 @@ async fn drain_on_cancel<W: AsyncWrite + Unpin>(
     while let Ok(cmd) = inbox.try_recv() {
         match cmd {
             DriverCommand::SendMessage(msg) => {
-                encode_msg(&msg, encoder, codec, eq, passthrough);
+                encode_msg(&msg, encoder, codec, eq, passthrough).ok();
             }
             DriverCommand::SendCommand(c) => {
                 let _ = codec.send_command(&c);
@@ -701,7 +701,7 @@ async fn drain_on_cancel<W: AsyncWrite + Unpin>(
     if let Some(rx) = shared_msg_rx {
         let mut drained = 0usize;
         while let Some(msg) = rx.try_pop() {
-            encode_msg(&msg, encoder, codec, eq, passthrough);
+            encode_msg(&msg, encoder, codec, eq, passthrough).ok();
             drained += 1;
         }
         rx.release_permits(drained);
@@ -745,12 +745,17 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
 }
 
 type OffloadPipeline = FuturesOrdered<
-    std::pin::Pin<Box<dyn std::future::Future<Output = (RawCtx, Result<TransformedOut>)> + Send>>,
+    std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = (Option<MessageEncoder>, Result<TransformedOut>)>
+                + Send,
+        >,
+    >,
 >;
 
 /// Submit one message to the offload pipeline. Large messages (above
-/// `threshold`) get `spawn_blocking`; small messages are encoded inline
-/// on the driver thread and wrapped in `ready()`.
+/// `threshold`) get `spawn_blocking` via a pool encoder; small messages
+/// and pool-exhausted fallbacks are encoded inline on the driver thread.
 #[allow(unused_variables)]
 fn submit_to_pipeline(
     msg: &Message,
@@ -761,25 +766,26 @@ fn submit_to_pipeline(
 ) {
     #[cfg(any(feature = "lz4", feature = "zstd"))]
     if msg.byte_len() >= threshold
-        && let Some(raw) = pool.try_take(encoder)
+        && let Some(mut pool_enc) = pool.try_take(encoder)
     {
         let msg = msg.clone();
-        let mut offload_enc = build_offload_encoder(encoder, raw);
         let handle = tokio::task::spawn_blocking(move || {
-            let result = offload_enc.encode(&msg);
-            let raw = reclaim_raw_ctx(offload_enc);
-            (raw, result)
+            let result = pool_enc.encode(&msg);
+            (Some(pool_enc), result)
         });
         pipeline.push_back(Box::pin(async move {
-            handle.await.expect("offload task panicked")
+            match handle.await {
+                Ok(pair) => pair,
+                Err(_) => (
+                    None,
+                    Err(Error::Protocol("compression offload task panicked".into())),
+                ),
+            }
         }));
         return;
     }
-    let frames = encoder.encode(msg).unwrap_or_default();
-    pipeline.push_back(Box::pin(futures::future::ready((
-        RawCtx::Inline,
-        Ok(frames),
-    ))));
+    let result = encoder.encode(msg);
+    pipeline.push_back(Box::pin(futures::future::ready((None, result))));
 }
 
 /// Drain all completed futures from the pipeline into `EncodedQueue`.
@@ -789,46 +795,20 @@ async fn drain_pipeline(
     eq: &mut EncodedQueue,
 ) -> Result<()> {
     use futures::StreamExt;
-    while let Some((raw, frames)) = pipeline.next().await {
-        drain_offload_result(raw, frames, pool, eq)?;
+    while let Some((pool_enc, frames)) = pipeline.next().await {
+        drain_offload_result(pool_enc, frames, pool, eq)?;
     }
     Ok(())
 }
 
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-fn build_offload_encoder(primary: &MessageEncoder, raw: RawCtx) -> MessageEncoder {
-    match (primary, raw) {
-        #[cfg(feature = "lz4")]
-        (MessageEncoder::Lz4(enc), RawCtx::Lz4(stream)) => {
-            MessageEncoder::Lz4(enc.with_borrowed_stream(stream))
-        }
-        #[cfg(feature = "zstd")]
-        (MessageEncoder::Zstd(enc), RawCtx::Zstd(cctx)) => {
-            MessageEncoder::Zstd(enc.with_borrowed_cctx(cctx))
-        }
-        _ => unreachable!("encoder/ctx variant mismatch"),
-    }
-}
-
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-fn reclaim_raw_ctx(enc: MessageEncoder) -> RawCtx {
-    match enc {
-        #[cfg(feature = "lz4")]
-        MessageEncoder::Lz4(e) => RawCtx::Lz4(e.take_stream()),
-        #[cfg(feature = "zstd")]
-        MessageEncoder::Zstd(e) => RawCtx::Zstd(e.take_cctx()),
-    }
-}
-
-/// Write completed offloaded frames into the `EncodedQueue`.
 fn drain_offload_result(
-    raw: RawCtx,
+    pool_enc: Option<MessageEncoder>,
     frames: Result<TransformedOut>,
     pool: Option<&Arc<CompressionPool>>,
     eq: &mut EncodedQueue,
 ) -> Result<()> {
-    if let Some(pool) = pool {
-        pool.put(raw);
+    if let (Some(enc), Some(pool)) = (pool_enc, pool) {
+        pool.put(enc);
     }
     for wire in frames? {
         eq.encode_auto(&wire);
@@ -852,7 +832,7 @@ fn encode_msg(
     codec: &mut Connection,
     eq: &mut EncodedQueue,
     passthrough: Option<&(Bytes, usize)>,
-) {
+) -> Result<()> {
     #[cfg(feature = "ws")]
     if codec.is_ws() && !codec.has_frame_transform() {
         let masked = matches!(
@@ -860,29 +840,30 @@ fn encode_msg(
             Some(omq_proto::proto::connection::WsRole::Client)
         );
         eq.encode_ws(msg, masked);
-        return;
+        return Ok(());
     }
     if codec.has_frame_transform() {
         if let Some(enc) = encoder.as_mut() {
-            for wire in enc.encode(msg).unwrap_or_default() {
-                let _ = codec.send_message(&wire);
+            for wire in enc.encode(msg)? {
+                codec.send_message(&wire)?;
             }
         } else {
-            let _ = codec.send_message(msg);
+            codec.send_message(msg)?;
         }
-        return;
+        return Ok(());
     }
     if let Some((sentinel, threshold)) = passthrough
         && msg.iter().all(|b| b.len() < *threshold)
     {
         eq.encode_prefixed_auto(sentinel, msg);
     } else if let Some(enc) = encoder.as_mut() {
-        for wire in enc.encode(msg).unwrap_or_default() {
+        for wire in enc.encode(msg)? {
             eq.encode_auto(&wire);
         }
     } else {
         eq.encode_auto(msg);
     }
+    Ok(())
 }
 
 /// Flush the `EncodedQueue` to the writer. Drains chunks into a
@@ -1078,14 +1059,14 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
                         return Ok(());
                     }
                     Some(first) => {
-                        encode_msg(&first, encoder, codec, eq, passthrough);
+                        encode_msg(&first, encoder, codec, eq, passthrough)?;
                         let mut count = 1usize;
                         let mut bytes = first.byte_len();
                         while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
                             match shared_msg_rx.and_then(QueueReceiver::try_pop) {
                                 Some(next) => {
                                     bytes += next.byte_len();
-                                    encode_msg(&next, encoder, codec, eq, passthrough);
+                                    encode_msg(&next, encoder, codec, eq, passthrough)?;
                                     count += 1;
                                 }
                                 None => break,
@@ -1124,14 +1105,14 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
 
             cmd = inbox.recv() => match cmd {
                 Some(DriverCommand::SendMessage(first)) => {
-                    encode_msg(&first, encoder, codec, eq, passthrough);
+                    encode_msg(&first, encoder, codec, eq, passthrough)?;
                     let mut count = 1usize;
                     let mut bytes = first.byte_len();
                     while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
                         match inbox.try_recv() {
                             Ok(DriverCommand::SendMessage(m)) => {
                                 bytes += m.byte_len();
-                                encode_msg(&m, encoder, codec, eq, passthrough);
+                                encode_msg(&m, encoder, codec, eq, passthrough)?;
                                 count += 1;
                             }
                             Ok(DriverCommand::SendCommand(c)) => {

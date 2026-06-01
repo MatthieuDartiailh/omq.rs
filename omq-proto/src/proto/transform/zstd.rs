@@ -243,26 +243,23 @@ impl ZstdEncoder {
         self
     }
 
-    /// True when this encoder has completed any one-time setup (dict
-    /// shipping, auto-train) and offloading encode work is safe.
+    /// True when no dict shipment is pending and offloading is safe.
     pub fn can_offload(&self) -> bool {
-        let dict_ready = self.send_dict.is_none() || self.send_dict_shipped;
-        let train_done = self.train.is_none();
-        dict_ready && train_done
+        self.send_dict.is_none() || self.send_dict_shipped
     }
 
-    /// Build an offload encoder from a borrowed [`CCtx`]. The returned
-    /// encoder shares this encoder's config (dict, level, thresholds)
-    /// but has `send_dict_shipped = true` and no auto-train state.
-    /// Call [`take_cctx`] on the result to reclaim the `CCtx` for the pool.
+    /// Create a pool encoder with the same config but its own `CCtx`.
+    /// The returned encoder has `send_dict_shipped = true` (never
+    /// re-ships the dict), no auto-train state, and a fresh `CCtx`
+    /// that will be configured lazily on first `encode_part`.
     #[must_use]
-    pub fn with_borrowed_cctx(&self, cctx: CCtx<'static>) -> Self {
+    pub fn new_offload(&self) -> Self {
         Self {
             send_dict: self.send_dict.clone(),
             send_dict_shipped: true,
             max_message_size: self.max_message_size,
             level: self.level,
-            cctx,
+            cctx: CCtx::create(),
             cctx_configured: false,
             train: None,
             out_buf: Vec::new(),
@@ -271,10 +268,19 @@ impl ZstdEncoder {
         }
     }
 
-    /// Consume this encoder and return the raw `CCtx` for pool return.
-    #[must_use]
-    pub fn take_cctx(self) -> CCtx<'static> {
-        self.cctx
+    /// Update dict from the primary encoder. If the primary's dict
+    /// changed (e.g. after auto-train), update ours and force
+    /// `CCtx` reconfiguration on the next encode.
+    pub fn sync_dict(&mut self, primary: &Self) {
+        let same = match (&self.send_dict, &primary.send_dict) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.as_ptr() == b.as_ptr(),
+            _ => false,
+        };
+        if !same {
+            self.send_dict.clone_from(&primary.send_dict);
+            self.cctx_configured = false;
+        }
     }
 
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
@@ -755,5 +761,54 @@ mod tests {
         let dict = trained_dict();
         let enc = ZstdEncoder::with_send_dict(dict).unwrap().with_auto_train();
         assert!(enc.train.is_none(), "static dict should disable auto-train");
+    }
+
+    #[test]
+    fn can_offload_true_during_auto_train() {
+        let enc = ZstdEncoder::new().with_auto_train();
+        assert!(enc.train.is_some());
+        assert!(enc.can_offload(), "send_dict is None so offloading is safe");
+    }
+
+    #[test]
+    fn new_offload_copies_config() {
+        let enc = ZstdEncoder::new().with_auto_train().with_level(-1);
+        let offload = enc.new_offload();
+        assert!(offload.send_dict_shipped);
+        assert!(offload.train.is_none());
+        assert!(!offload.cctx_configured);
+        assert_eq!(offload.level, -1);
+    }
+
+    #[test]
+    fn sync_dict_detects_change() {
+        let mut primary = ZstdEncoder::new().with_auto_train();
+        let sample = br#"{"event":"login","user":"alice","ip":"10.0.0.1","ok":true}"#;
+        for _ in 0..2000 {
+            let _ = primary.encode(&Message::single(sample.as_slice())).unwrap();
+            if primary.send_dict.is_some() {
+                break;
+            }
+        }
+        assert!(
+            primary.send_dict.is_some(),
+            "auto-train must produce a dict"
+        );
+
+        let mut offload = ZstdEncoder::new().new_offload();
+        assert!(offload.send_dict.is_none());
+        offload.sync_dict(&primary);
+        assert!(offload.send_dict.is_some());
+        assert!(!offload.cctx_configured);
+    }
+
+    #[test]
+    fn sync_dict_noop_when_same() {
+        let dict = trained_dict();
+        let primary = ZstdEncoder::with_send_dict(dict).unwrap();
+        let mut offload = primary.new_offload();
+        offload.cctx_configured = true;
+        offload.sync_dict(&primary);
+        assert!(offload.cctx_configured, "same dict must not reset cctx");
     }
 }

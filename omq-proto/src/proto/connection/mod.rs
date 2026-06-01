@@ -291,14 +291,19 @@ impl Connection {
             our_props = our_props.with_identity(self.config.identity.clone());
         }
         let mut cmds = Vec::new();
-        self.mechanism
+        if self
+            .mechanism
             .start(
                 &mut cmds,
                 our_props,
                 &self.our_greeting,
                 &self.peer_greeting,
             )
-            .expect("mechanism start failed");
+            .is_err()
+        {
+            self.state = State::Closed;
+            return;
+        }
         self.write_outbound_commands(&cmds);
     }
 

@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import signal
 import subprocess
@@ -33,7 +34,10 @@ FULL_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768
 QUICK_SIZES = [32, 1024, 4096]
 TABLE_SIZES = [32, 1024, 4096]
 
-DURATION = 2
+DEFAULT_DURATION = float(os.environ.get("OMQ_BENCH_DURATION", "2.0"))
+QUICK_DURATION = 1.5
+DEFAULT_ROUNDS = int(os.environ.get("OMQ_BENCH_ROUNDS", "3"))
+QUICK_ROUNDS = 1
 LATENCY_ITERATIONS = 5_000
 LATENCY_WARMUP = 500
 LATENCY_TIMEOUT = 15
@@ -218,9 +222,25 @@ def parse_latency(output: str) -> dict | None:
 def run_throughput_cell(
     binary: str, transport: str, addr: str, size: int,
     inproc_subcmd: str = "inproc",
+    duration: float = DEFAULT_DURATION,
+    rounds: int = DEFAULT_ROUNDS,
 ) -> dict | None:
+    best = None
+    for _ in range(rounds):
+        result = _run_throughput_once(binary, transport, addr, size,
+                                      inproc_subcmd, duration)
+        if result and (best is None or result["msgs_s"] > best["msgs_s"]):
+            best = result
+    return best
+
+
+def _run_throughput_once(
+    binary: str, transport: str, addr: str, size: int,
+    inproc_subcmd: str, duration: float,
+) -> dict | None:
+    dur = str(duration)
     if transport == "inproc":
-        output = capture_process(binary, inproc_subcmd, addr, str(size), str(DURATION))
+        output = capture_process(binary, inproc_subcmd, addr, str(size), dur)
         return parse_throughput(output, size)
 
     push = spawn_process(binary, "push", addr, str(size))
@@ -229,7 +249,7 @@ def run_throughput_cell(
         print(f"WARNING: push died (rc={push.returncode}) for {binary} {addr}", file=sys.stderr)
         return None
     try:
-        output = capture_process(binary, "pull", addr, str(size), str(DURATION))
+        output = capture_process(binary, "pull", addr, str(size), dur)
     finally:
         kill_process(push)
     return parse_throughput(output, size)
@@ -571,6 +591,8 @@ def run_benchmarks(
     run_latency: bool,
     base_port: int,
     run_id: str,
+    duration: float = DEFAULT_DURATION,
+    rounds: int = DEFAULT_ROUNDS,
     latency_iterations: int = LATENCY_ITERATIONS,
     latency_warmup: int = LATENCY_WARMUP,
     latency_timeout: int = LATENCY_TIMEOUT,
@@ -596,7 +618,8 @@ def run_benchmarks(
                 addr = addr_for(transport, prefix, idx, base_port)
                 subcmd = impl_def.get("inproc_tput_subcmd", "inproc")
                 result = run_throughput_cell(binary, transport, addr, size,
-                                            inproc_subcmd=subcmd)
+                                            inproc_subcmd=subcmd,
+                                            duration=duration, rounds=rounds)
                 cells[name] = result
                 if result:
                     append_jsonl({
@@ -677,7 +700,15 @@ def main():
     )
     parser.add_argument(
         "--quick-run", action="store_true",
-        help="3 sizes (32B, 1KiB, 4KiB) instead of full 13-size sweep",
+        help=f"3 sizes, {QUICK_ROUNDS} round of {QUICK_DURATION}s (unless overridden)",
+    )
+    parser.add_argument(
+        "--duration", type=float, default=None,
+        help=f"seconds per throughput round (default: {DEFAULT_DURATION}, quick: {QUICK_DURATION})",
+    )
+    parser.add_argument(
+        "--rounds", type=int, default=None,
+        help=f"throughput rounds per cell, best-of-N (default: {DEFAULT_ROUNDS}, quick: {QUICK_ROUNDS})",
     )
     parser.add_argument(
         "--no-latency", action="store_true",
@@ -711,6 +742,12 @@ def main():
 
     transports = args.transport or ["tcp", "inproc", "ipc"]
     sizes = QUICK_SIZES if args.quick_run else FULL_SIZES
+    if args.quick_run:
+        duration = args.duration if args.duration is not None else QUICK_DURATION
+        rounds = args.rounds if args.rounds is not None else QUICK_ROUNDS
+    else:
+        duration = args.duration if args.duration is not None else DEFAULT_DURATION
+        rounds = args.rounds if args.rounds is not None else DEFAULT_ROUNDS
     run_id = args.id or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     run_latency = not args.no_latency
     ws_needed = "ws" in transports
@@ -731,6 +768,7 @@ def main():
     print(" vs ".join(versions), file=sys.stderr)
 
     run_benchmarks(binaries, transports, sizes, run_latency, args.base_port, run_id,
+                   duration=duration, rounds=rounds,
                    latency_iterations=args.latency_iterations,
                    latency_warmup=args.latency_warmup,
                    latency_timeout=args.latency_timeout)
