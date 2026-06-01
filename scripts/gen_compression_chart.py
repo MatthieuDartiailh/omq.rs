@@ -254,7 +254,7 @@ def generate_svg(
         f'  <text x="{mid_x}" y="16" text-anchor="middle" fill="#111827"'
         f' font-size="12" font-weight="700">'
         f'Compression transports: structured JSON, PUSH/PULL, {THREAD_MODELS[backend]} (omq-{backend})'
-        f'{f" — dict {dict_size_label}" if dict_size_label else ""}</text>'
+        f'{f", dict {dict_size_label}" if dict_size_label else ""}</text>'
     )
     if hw_label:
         L.append(

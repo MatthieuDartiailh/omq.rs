@@ -391,7 +391,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
     draw_throughput_panel(
         L, sizes, xs, tput, impls, x_left, x_right, t1_y_top, t1_y_bot,
-        f"PUSH/PULL throughput — {transport_label} (higher is better)",
+        f"PUSH/PULL throughput: {transport_label} (higher is better)",
         log_gbs=log_gbs,
         fixed_msg_max=fixed_msg_max,
         fixed_gbs_max=fixed_gbs_max,
@@ -407,7 +407,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
         t2_y_bot = t2_y_top + 120
         draw_latency_panel(
             L, sizes, xs, lat, impls, x_left, x_right, t2_y_top, t2_y_bot,
-            f"REQ/REP latency — {transport_label} (p50 µs, lower is better)",
+            f"REQ/REP latency: {transport_label} (p50 µs, lower is better)",
             fixed_lat_max=fixed_lat_max,
         )
         leg_y = t2_y_bot + 60

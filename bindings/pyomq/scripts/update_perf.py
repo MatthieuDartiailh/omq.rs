@@ -819,7 +819,7 @@ def gen_combined_chart(data, path):
     L.append(
         f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f'PUSH/PULL throughput — 2-process, TCP loopback (higher is better)</text>'
+        f'PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>'
     )
     if hw_label:
         L.append(
@@ -920,7 +920,7 @@ def gen_combined_chart(data, path):
     L.append(
         f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f'REQ/REP latency — 2-process, TCP loopback, p50 µs (lower is better)</text>'
+        f'REQ/REP latency: 2-process, TCP loopback, p50 µs (lower is better)</text>'
     )
 
     sync_omq_lat = data["sync_omq_lat"]
