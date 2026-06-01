@@ -18,7 +18,7 @@ use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut};
 use omq_proto::proto::{Command, Connection, Event};
 
-use super::compression_pool::{CompressionPool, RawCtx};
+use super::compression_pool::CompressionPool;
 use super::direct_io::{DirectIo, SharedWriter};
 use crate::routing::drop_queue::QueueReceiver;
 use omq_proto::encoded_queue::EncodedQueue;
@@ -554,11 +554,11 @@ where
                 }
 
                 // Drain completed offloaded compressions and flush.
-                Some((raw, frames)) = async {
+                Some((pool_enc, frames)) = async {
                     use futures::StreamExt;
                     offload_pipeline.next().await
                 }, if !offload_pipeline.is_empty() => {
-                    drain_offload_result(raw, frames, compression_pool.as_ref(), &mut eq)?;
+                    drain_offload_result(pool_enc, frames, compression_pool.as_ref(), &mut eq)?;
                     flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
                     while codec.has_pending_transmit() {
                         flush_once(&mut writer, &mut codec).await?;
@@ -745,12 +745,17 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
 }
 
 type OffloadPipeline = FuturesOrdered<
-    std::pin::Pin<Box<dyn std::future::Future<Output = (RawCtx, Result<TransformedOut>)> + Send>>,
+    std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = (Option<MessageEncoder>, Result<TransformedOut>)>
+                + Send,
+        >,
+    >,
 >;
 
 /// Submit one message to the offload pipeline. Large messages (above
-/// `threshold`) get `spawn_blocking`; small messages are encoded inline
-/// on the driver thread and wrapped in `ready()`.
+/// `threshold`) get `spawn_blocking` via a pool encoder; small messages
+/// and pool-exhausted fallbacks are encoded inline on the driver thread.
 #[allow(unused_variables)]
 fn submit_to_pipeline(
     msg: &Message,
@@ -761,25 +766,26 @@ fn submit_to_pipeline(
 ) {
     #[cfg(any(feature = "lz4", feature = "zstd"))]
     if msg.byte_len() >= threshold
-        && let Some(raw) = pool.try_take(encoder)
+        && let Some(mut pool_enc) = pool.try_take(encoder)
     {
         let msg = msg.clone();
-        let mut offload_enc = build_offload_encoder(encoder, raw);
         let handle = tokio::task::spawn_blocking(move || {
-            let result = offload_enc.encode(&msg);
-            let raw = reclaim_raw_ctx(offload_enc);
-            (raw, result)
+            let result = pool_enc.encode(&msg);
+            (Some(pool_enc), result)
         });
         pipeline.push_back(Box::pin(async move {
-            handle.await.expect("offload task panicked")
+            match handle.await {
+                Ok(pair) => pair,
+                Err(_) => (
+                    None,
+                    Err(Error::Protocol("compression offload task panicked".into())),
+                ),
+            }
         }));
         return;
     }
-    let frames = encoder.encode(msg).unwrap_or_default();
-    pipeline.push_back(Box::pin(futures::future::ready((
-        RawCtx::Inline,
-        Ok(frames),
-    ))));
+    let result = encoder.encode(msg);
+    pipeline.push_back(Box::pin(futures::future::ready((None, result))));
 }
 
 /// Drain all completed futures from the pipeline into `EncodedQueue`.
@@ -789,46 +795,20 @@ async fn drain_pipeline(
     eq: &mut EncodedQueue,
 ) -> Result<()> {
     use futures::StreamExt;
-    while let Some((raw, frames)) = pipeline.next().await {
-        drain_offload_result(raw, frames, pool, eq)?;
+    while let Some((pool_enc, frames)) = pipeline.next().await {
+        drain_offload_result(pool_enc, frames, pool, eq)?;
     }
     Ok(())
 }
 
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-fn build_offload_encoder(primary: &MessageEncoder, raw: RawCtx) -> MessageEncoder {
-    match (primary, raw) {
-        #[cfg(feature = "lz4")]
-        (MessageEncoder::Lz4(enc), RawCtx::Lz4(stream)) => {
-            MessageEncoder::Lz4(enc.with_borrowed_stream(stream))
-        }
-        #[cfg(feature = "zstd")]
-        (MessageEncoder::Zstd(enc), RawCtx::Zstd(cctx)) => {
-            MessageEncoder::Zstd(enc.with_borrowed_cctx(cctx))
-        }
-        _ => unreachable!("encoder/ctx variant mismatch"),
-    }
-}
-
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-fn reclaim_raw_ctx(enc: MessageEncoder) -> RawCtx {
-    match enc {
-        #[cfg(feature = "lz4")]
-        MessageEncoder::Lz4(e) => RawCtx::Lz4(e.take_stream()),
-        #[cfg(feature = "zstd")]
-        MessageEncoder::Zstd(e) => RawCtx::Zstd(e.take_cctx()),
-    }
-}
-
-/// Write completed offloaded frames into the `EncodedQueue`.
 fn drain_offload_result(
-    raw: RawCtx,
+    pool_enc: Option<MessageEncoder>,
     frames: Result<TransformedOut>,
     pool: Option<&Arc<CompressionPool>>,
     eq: &mut EncodedQueue,
 ) -> Result<()> {
-    if let Some(pool) = pool {
-        pool.put(raw);
+    if let (Some(enc), Some(pool)) = (pool_enc, pool) {
+        pool.put(enc);
     }
     for wire in frames? {
         eq.encode_auto(&wire);

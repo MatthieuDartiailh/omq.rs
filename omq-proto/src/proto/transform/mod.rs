@@ -26,11 +26,9 @@ pub mod lz4;
 pub mod zstd;
 
 #[cfg(feature = "lz4")]
-pub use lz4::{Lz4Decoder, Lz4Encoder, Lz4Stream};
+pub use lz4::{Lz4Decoder, Lz4Encoder};
 #[cfg(feature = "zstd")]
 pub use zstd::{ZstdDecoder, ZstdEncoder, train_zdict};
-#[cfg(feature = "zstd")]
-pub use zstd_safe::CCtx as ZstdCCtx;
 
 use smallvec::SmallVec;
 
@@ -158,8 +156,7 @@ impl MessageEncoder {
         }
     }
 
-    /// True when dict shipping and auto-train are complete and
-    /// compression can be offloaded to a background thread.
+    /// True when no dict shipment is pending and offloading is safe.
     pub fn can_offload(&self) -> bool {
         match self {
             #[cfg(feature = "lz4")]
@@ -168,6 +165,42 @@ impl MessageEncoder {
             Self::Zstd(t) => t.can_offload(),
             #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => unreachable!(),
+        }
+    }
+
+    /// Create a pool encoder with the same config but its own context.
+    #[must_use]
+    pub fn new_offload(&self) -> Self {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(t) => Self::Lz4(t.new_offload()),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => Self::Zstd(t.new_offload()),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!(),
+        }
+    }
+
+    /// Update dict from the primary encoder if it changed.
+    pub fn sync_dict(&mut self, primary: &Self) {
+        match (self, primary) {
+            #[cfg(feature = "lz4")]
+            (Self::Lz4(me), Self::Lz4(p)) => me.sync_dict(p),
+            #[cfg(feature = "zstd")]
+            (Self::Zstd(me), Self::Zstd(p)) => me.sync_dict(p),
+            _ => {}
+        }
+    }
+
+    /// True if both encoders are the same compression variant.
+    pub fn variant_matches(&self, other: &Self) -> bool {
+        #[allow(unreachable_patterns)]
+        match (self, other) {
+            #[cfg(feature = "lz4")]
+            (Self::Lz4(_), Self::Lz4(_)) => true,
+            #[cfg(feature = "zstd")]
+            (Self::Zstd(_), Self::Zstd(_)) => true,
+            _ => false,
         }
     }
 }

@@ -80,46 +80,6 @@ unsafe extern "C" {
     fn LZ4_resetStream(stream: *mut lz4_sys::LZ4StreamEncode);
 }
 
-/// Owning wrapper around an LZ4 compression stream. The raw stream is
-/// mutable working state (hash tables, history); the dict and level
-/// are applied per-encode, so a bare stream is codec-agnostic and
-/// reusable across connections.
-pub struct Lz4Stream(*mut lz4_sys::LZ4StreamEncode);
-
-impl std::fmt::Debug for Lz4Stream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Lz4Stream").finish_non_exhaustive()
-    }
-}
-
-unsafe impl Send for Lz4Stream {}
-
-impl Default for Lz4Stream {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Lz4Stream {
-    pub fn new() -> Self {
-        Self(unsafe { lz4_sys::LZ4_createStream() })
-    }
-
-    fn into_raw(self) -> *mut lz4_sys::LZ4StreamEncode {
-        let ptr = self.0;
-        std::mem::forget(self);
-        ptr
-    }
-}
-
-impl Drop for Lz4Stream {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { lz4_sys::LZ4_freeStream(self.0) };
-        }
-    }
-}
-
 /// Send-side per-connection LZ4 state.
 pub struct Lz4Encoder {
     /// Outbound dict, validated at construction. Shipped on the first
@@ -248,37 +208,30 @@ impl Lz4Encoder {
         }
     }
 
-    /// True when this encoder has completed any one-time setup (dict
-    /// shipping) and offloading encode work to a background thread is safe.
+    /// True when no dict shipment is pending and offloading is safe.
     pub fn can_offload(&self) -> bool {
         self.send_dict.is_none() || self.send_dict_shipped
     }
 
-    /// Build an offload encoder from a borrowed [`Lz4Stream`]. The
-    /// returned encoder shares this encoder's config (dict, thresholds)
-    /// but has `send_dict_shipped = true` so it never re-ships the dict.
-    /// Call [`take_stream`] on the result to reclaim the stream for the
-    /// pool after encoding.
+    /// Create a pool encoder with the same config but its own stream.
+    /// The returned encoder has `send_dict_shipped = true` (never
+    /// re-ships the dict) and a lazy-initialized stream.
     #[must_use]
-    pub fn with_borrowed_stream(&self, stream: Lz4Stream) -> Self {
+    pub fn new_offload(&self) -> Self {
         Self {
             send_dict: self.send_dict.clone(),
             send_dict_shipped: true,
             max_message_size: self.max_message_size,
             block_size: self.block_size,
             out_buf: Vec::new(),
-            stream: stream.into_raw(),
+            stream: std::ptr::null_mut(),
             threshold_override: self.threshold_override,
         }
     }
 
-    /// Consume this encoder and return the raw stream for pool return.
-    #[must_use]
-    pub fn take_stream(mut self) -> Lz4Stream {
-        let ptr = self.stream;
-        self.stream = std::ptr::null_mut();
-        Lz4Stream(ptr)
-    }
+    /// Update dict from the primary encoder. No-op for LZ4 (dict is
+    /// static, configured at construction).
+    pub fn sync_dict(&mut self, _primary: &Self) {}
 
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
         let mut out: TransformedOut = SmallVec::new();
@@ -1001,5 +954,55 @@ mod tests {
         let mut dec = test_dec().with_max_message_size(Some(TEST_BLOCK));
         let err = dec.decode(wire.into_iter().next().unwrap()).unwrap_err();
         assert!(matches!(err, Error::MessageTooLarge { .. }));
+    }
+
+    #[test]
+    fn new_offload_copies_config() {
+        let dict = Bytes::from_static(b"some-dict-bytes-here");
+        let primary = Lz4Encoder::with_send_dict(dict.clone())
+            .unwrap()
+            .with_block_size(TEST_BLOCK)
+            .with_threshold(256);
+        let offload = primary.new_offload();
+        assert_eq!(offload.send_dict.as_ref().unwrap(), &dict);
+        assert!(offload.send_dict_shipped);
+        assert_eq!(offload.block_size, TEST_BLOCK);
+        assert_eq!(offload.threshold_override, Some(256));
+        assert!(offload.stream.is_null());
+    }
+
+    #[test]
+    fn new_offload_roundtrip_with_dict() {
+        let dict = Bytes::from(vec![b'q'; 256]);
+        let plain = vec![b'q'; 4096];
+        let msg = Message::single(plain.clone());
+
+        let mut primary = Lz4Encoder::with_send_dict(dict).unwrap();
+        let first_wire = primary.encode(&Message::single("warmup")).unwrap();
+        assert_eq!(first_wire.len(), 2, "first send ships dict + payload");
+
+        let mut dec = Lz4Decoder::new();
+        let consumed = dec.decode(first_wire[0].clone()).unwrap();
+        assert!(consumed.is_none(), "dict shipment consumed silently");
+
+        let mut offload = primary.new_offload();
+        let wire = offload.encode(&msg).unwrap();
+        assert_eq!(wire.len(), 1, "offload encoder must not re-ship dict");
+
+        let out = dec
+            .decode(wire.into_iter().next().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.part_bytes(0).unwrap().to_vec(), plain);
+    }
+
+    #[test]
+    fn sync_dict_is_noop() {
+        let dict = Bytes::from_static(b"some-dict-bytes-here");
+        let primary = Lz4Encoder::with_send_dict(dict.clone()).unwrap();
+        let mut offload = primary.new_offload();
+        let ptr_before = offload.send_dict.as_ref().unwrap().as_ptr();
+        offload.sync_dict(&primary);
+        assert_eq!(offload.send_dict.as_ref().unwrap().as_ptr(), ptr_before);
     }
 }
