@@ -19,7 +19,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
 
-### vs. libzmq
+### vs libzmq and other implementations
 
 [How to beat libzmq](doc/performance.md) | [Comparison tables](COMPARISONS.md)
 
@@ -133,7 +133,7 @@ independent, versioned, and published separately.
 Every socket type, transport, mechanism, and feature combination is
 covered by integration tests on both backends. The full suite:
 
-- **600+ integration tests** across omq-compio and omq-tokio (every
+- **750+ integration tests** across omq-compio and omq-tokio (every
   socket-type x transport x mechanism cell).
 - **Protocol fuzzing** (~10M iterations per suite): hand-rolled fuzz of
   the wire parser and the socket-action state machine.
