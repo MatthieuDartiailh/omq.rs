@@ -90,7 +90,6 @@ impl SendStrategy {
         }
     }
 
-    #[cfg(not(feature = "priority"))]
     pub(crate) fn connection_added(
         &mut self,
         peer_id: u64,
@@ -101,28 +100,6 @@ impl SendStrategy {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.connection_added(peer_id, handle, is_inproc),
-            Self::FanOut(s) => s.connection_added(peer_id, handle),
-            Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity),
-        }
-    }
-
-    /// Like `connection_added` but threads the per-pipe priority
-    /// from `connect_with`. Only the round-robin strategy honors it
-    /// today; other strategies fan-out / route by identity and
-    /// ignore the value (the priority field doesn't apply to them).
-    #[cfg(feature = "priority")]
-    pub(crate) fn connection_added_with_priority(
-        &mut self,
-        peer_id: u64,
-        handle: DriverHandle,
-        peer_identity: Bytes,
-        priority: u8,
-    ) {
-        match self {
-            Self::None => {}
-            Self::RoundRobin(s) => {
-                s.connection_added_with_priority(peer_id, handle, priority);
-            }
             Self::FanOut(s) => s.connection_added(peer_id, handle),
             Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity),
         }
@@ -185,7 +162,6 @@ impl SendStrategy {
     /// socket type uses round-robin send. `None` for fan-out, identity,
     /// and no-send strategies. The connection driver polls this directly
     /// after handshake instead of going through a pump task.
-    #[cfg(not(feature = "priority"))]
     pub(crate) fn shared_rx(&self) -> Option<drop_queue::QueueReceiver> {
         match self {
             Self::RoundRobin(s) => Some(s.shared_rx()),

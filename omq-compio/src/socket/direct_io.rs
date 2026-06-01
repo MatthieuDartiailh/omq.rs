@@ -15,7 +15,7 @@ use crate::transport::peer_io::{CancellableRecvStream, PeerIo, SharedPeerIo, Wir
 use super::inner::{LocalStream, RecvStreamState};
 use omq_proto::encoded_queue::EncodedQueue;
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 pub(crate) struct DirectIoState {
     pub(crate) peer_io: SharedPeerIo,
     pub(crate) writer: async_lock::Mutex<WireWriter>,
@@ -28,11 +28,8 @@ pub(crate) struct DirectIoState {
     pub(crate) last_input_nanos: AtomicU64,
     pub(crate) hb_epoch: Instant,
     pub(crate) handshake_done: Cell<bool>,
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) has_transform: bool,
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) uses_crypto: bool,
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
     pub(crate) encoder: async_lock::Mutex<Option<MessageEncoder>>,
     pub(crate) encoded_queue: EncodedQueueCell,
@@ -226,7 +223,6 @@ impl DirectIoState {
     /// is parked in `select_biased!`. Called after every successful
     /// direct-encode (flat, gather, prefixed, transform, or WebSocket).
     #[inline]
-    #[cfg_attr(feature = "priority", allow(dead_code))]
     pub(crate) fn signal_encoded(&self) {
         self.direct_msg_count.set(self.direct_msg_count.get() + 1);
         if self.driver_in_select.get() {
@@ -244,7 +240,8 @@ impl DirectIoState {
         self.peer_io.lock().expect("peer_io")
     }
 
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::fn_params_excessive_bools)]
     pub(crate) fn new(
         peer_io: SharedPeerIo,
         writer: WireWriter,

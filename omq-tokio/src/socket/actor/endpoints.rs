@@ -331,11 +331,7 @@ impl SocketDriver {
         Ok(ret)
     }
 
-    pub(super) fn start_dial(
-        &mut self,
-        endpoint: Endpoint,
-        #[cfg(feature = "priority")] priority: u8,
-    ) {
+    pub(super) fn start_dial(&mut self, endpoint: Endpoint) {
         let cancel = self.cancel.child_token();
         let tx = self.internal_tx.clone();
         let child_cancel = cancel.clone();
@@ -386,8 +382,6 @@ impl SocketDriver {
                         .send(InternalEvent::Connected {
                             conn,
                             endpoint: dialer_ep,
-                            #[cfg(feature = "priority")]
-                            priority,
                         })
                         .await;
                 }

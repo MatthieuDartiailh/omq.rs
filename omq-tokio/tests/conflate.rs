@@ -2,14 +2,6 @@
 //! the latest message. Verifies the silent-bug fix - the option was
 //! settable but had no effect prior to this change.
 //!
-//! Skipped under the `priority` feature: priority mode replaces the
-//! conflate-aware shared queue with per-peer driver inboxes, so the
-//! cap-1-DropOldest queue this test depends on isn't on the path.
-//! Conflate + priority is a follow-up; document and revisit when
-//! someone needs both at once.
-
-#![cfg(not(feature = "priority"))]
-
 use std::time::Duration;
 
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
@@ -148,7 +140,6 @@ async fn radio_conflate_keeps_only_latest_per_group() {
     let dish = Socket::new(SocketType::Dish, Options::default());
     dish.connect(ep).await.unwrap();
     dish.join("weather").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..N {
         radio

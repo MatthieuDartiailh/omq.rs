@@ -33,8 +33,6 @@ async fn router_dealer_rep_single_cycle() {
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(backend).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     // Broker: transparently forward one request and one reply.
     let router_c = router.clone();
     let dealer_c = dealer.clone();
@@ -88,8 +86,6 @@ async fn router_dealer_rep_multiple_rounds() {
 
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(backend).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Each round is fully sequential: REQ→ROUTER→DEALER→REP→DEALER→ROUTER→REQ.
     for i in 0..ROUNDS {
@@ -148,8 +144,6 @@ async fn router_dealer_rep_two_concurrent_clients() {
 
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(backend).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Both clients send simultaneously.
     req1.send(Message::single("alpha")).await.unwrap();

@@ -434,7 +434,7 @@ Two race-recheck signals harden the boundary:
 
 | Socket types | Strategy | Key mechanism |
 |---|---|---|
-| PUSH / DEALER / REQ / PAIR / REP | Round-robin (or priority) | Single peer -> `try_direct_encode`; multi-peer -> shared queue |
+| PUSH / DEALER / REQ / PAIR / REP | Round-robin | Single peer -> `try_direct_encode`; multi-peer -> shared queue |
 | PUB / XPUB | Fan-out, subscription-filtered | Per-peer `SubscriptionSet` checked at send time |
 | ROUTER / SERVER / PEER | Identity-routed | First frame = destination; lookup in `identity_to_slot` |
 | RADIO | Fan-out to UDP dialers + ZMTP peers, group-filtered | `[group, body]` shape validated |

@@ -285,35 +285,7 @@ impl Socket {
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
-            .send(SocketCommand::Connect {
-                endpoint,
-                ack,
-                #[cfg(feature = "priority")]
-                priority: omq_proto::DEFAULT_PRIORITY,
-            })
-            .await
-            .map_err(|_| Error::Closed)?;
-        rx.await.map_err(|_| Error::Closed)?
-    }
-
-    /// Like [`connect`], but applies the per-pipe options in `opts` to
-    /// the new endpoint. Currently the only knob is `priority`
-    /// (1..=255, lower number = higher priority; default 128).
-    /// Strict semantics - see `omq_proto::ConnectOpts`.
-    #[cfg(feature = "priority")]
-    pub async fn connect_with(
-        &self,
-        endpoint: Endpoint,
-        opts: omq_proto::ConnectOpts,
-    ) -> Result<()> {
-        let (ack, rx) = oneshot::channel();
-        self.inner
-            .cmd_tx
-            .send(SocketCommand::Connect {
-                endpoint,
-                ack,
-                priority: opts.priority.get(),
-            })
+            .send(SocketCommand::Connect { endpoint, ack })
             .await
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?

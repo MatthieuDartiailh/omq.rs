@@ -137,6 +137,7 @@ async fn ruby_push_lz4_tcp_sustained() {
     // body with `Frame_Content_Size` declared up-front).
     const PAYLOAD_UNIT: &str = "omq: foobar, lorem ipsum dolor sit amet, consectetur adipiscing elit. \
          The quick brown fox jumps over the lazy dog.";
+    const WARMUP: Duration = Duration::from_secs(10);
     const RUN_FOR: Duration = Duration::from_secs(8);
     const MIN_RECVD: usize = 600;
 
@@ -162,6 +163,21 @@ async fn ruby_push_lz4_tcp_sustained() {
             .expect("spawn ruby omq push"),
     );
 
+    // Wait for the Ruby CLI to connect and complete the ZMTP handshake
+    // before starting the throughput timer.
+    let handshake = async {
+        loop {
+            match mon.recv().await {
+                Ok(MonitorEvent::HandshakeSucceeded { .. }) => return,
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before handshake: {e:?}"),
+            }
+        }
+    };
+    tokio::time::timeout(WARMUP, handshake)
+        .await
+        .expect("Ruby CLI did not complete handshake within warmup window");
+
     let monitor_task = tokio::spawn(async move {
         let mut first_drop: Option<String> = None;
         let mut dropped = 0u32;
@@ -182,7 +198,7 @@ async fn ruby_push_lz4_tcp_sustained() {
     let deadline = tokio::time::Instant::now() + RUN_FOR;
     let mut got = 0usize;
     while tokio::time::Instant::now() < deadline {
-        let recv = tokio::time::timeout(Duration::from_secs(1), pull.recv()).await;
+        let recv = tokio::time::timeout(Duration::from_secs(2), pull.recv()).await;
         match recv {
             Ok(Ok(msg)) => {
                 let body = msg.part_bytes(0).unwrap();

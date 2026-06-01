@@ -82,8 +82,6 @@ async fn router_dealer_rep_multiple_rounds() {
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(backend).await.unwrap();
 
-    compio::time::sleep(Duration::from_millis(50)).await;
-
     let rep_task = compio::runtime::spawn(async move {
         for _ in 0..ROUNDS {
             let m = compio::time::timeout(Duration::from_secs(2), rep.recv())
@@ -147,8 +145,6 @@ async fn router_dealer_rep_two_concurrent_clients() {
 
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(backend).await.unwrap();
-
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     // Both clients send simultaneously.
     req1.send(Message::single("alpha")).await.unwrap();

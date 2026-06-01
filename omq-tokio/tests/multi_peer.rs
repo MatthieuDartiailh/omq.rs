@@ -27,7 +27,6 @@ async fn push_distributes_across_three_pulls() {
     for i in 0..3 {
         push.connect(ep(&format!("rr-{i}"))).await.unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..N {
         push.send(Message::single(format!("m{i}"))).await.unwrap();

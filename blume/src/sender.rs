@@ -53,7 +53,12 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            drop(self.shared.inner.lock().expect("blume: poisoned"));
+            drop(
+                self.shared
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
             self.shared.recv_event.notify(usize::MAX);
         }
     }

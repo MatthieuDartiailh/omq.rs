@@ -1,8 +1,7 @@
 //! Send-side dispatch for [`Socket`]. Each socket-type's send
 //! strategy lives here:
 //!
-//! - PUSH / DEALER / REQ / PAIR / REP - round-robin (with optional
-//!   strict per-pipe priority gated on the `priority` feature)
+//! - PUSH / DEALER / REQ / PAIR / REP - round-robin
 //! - PUB / XPUB - fan-out filtered by per-peer subscription set
 //! - ROUTER - identity-routed (peer lookup by first frame)
 //! - RADIO - fan-out to UDP dialers + ZMTP peers, validates
@@ -20,13 +19,18 @@ use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 use omq_proto::routing::{SendCategory, send_category};
 
-#[cfg(not(feature = "priority"))]
 use crate::socket::inner::{CachedPeerRoute, DirectIoState};
-#[cfg(not(feature = "priority"))]
 use crate::transport::driver::DriverCommand;
 
 use super::handle::Socket;
 use super::inner::PeerOut;
+
+struct PeerSelection {
+    out: PeerOut,
+    peer_count: usize,
+    direct_io: Option<Arc<DirectIoState>>,
+    slot_idx: usize,
+}
 
 /// Encode `msg` for this peer without going through the driver's cmd channel.
 /// Returns `true` if encoded and the driver was (conditionally) notified,
@@ -47,7 +51,6 @@ use super::inner::PeerOut;
 /// parked in `select_biased!` (`driver_in_select == true`). When the driver is
 /// actively looping (steps 1-3), it will drain the queue naturally on its next
 /// step-3 pass — no spurious wakeup needed.
-#[cfg(not(feature = "priority"))]
 fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
     const DIRECT_CAP: usize = 512 * 1024;
     const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
@@ -141,20 +144,6 @@ pub(super) fn pre_send_needs_type_state(t: SocketType) -> bool {
     )
 }
 
-/// Outcome of one pass of the strict-priority send picker.
-#[cfg(feature = "priority")]
-enum PriorityOutcome {
-    /// `try_send` on some peer succeeded; we're done.
-    Sent,
-    /// Every peer at every priority returned `Full` or `Disconnected`,
-    /// but at least one was alive (Full). Await on its `send` to back-
-    /// pressure the caller until that queue drains.
-    AwaitOn(PeerOut),
-    /// No peers connected, or every peer was `Disconnected`. Caller
-    /// should wait on `on_peer_ready` and retry.
-    NoLivePeers,
-}
-
 impl Socket {
     /// Send a message. Routing depends on socket type:
     /// PUSH / DEALER / REQ: round-robin across peers.
@@ -192,7 +181,6 @@ impl Socket {
         }
         // Wire direct-encode fast path: single wire peer with cached
         // DirectIoState. Skips Mutex, Arc clone, PeerOut dispatch.
-        #[cfg(not(feature = "priority"))]
         if matches!(
             st,
             SocketType::Push | SocketType::Pair | SocketType::Dealer | SocketType::Channel
@@ -247,8 +235,7 @@ impl Socket {
     /// most the latest. Sends never block waiting for a peer: if no peer
     /// is connected yet the message is placed in the queue and returns
     /// immediately; the pump drains it once a peer connects.
-    #[cfg(not(feature = "priority"))]
-    fn select_peer(&self) -> Option<(PeerOut, usize, Option<Arc<DirectIoState>>, usize)> {
+    fn select_peer(&self) -> Option<PeerSelection> {
         let inner = self.inner();
         let peers = inner.out_peers.read().expect("peers lock");
         if peers.is_empty() {
@@ -298,10 +285,14 @@ impl Socket {
                 .as_ref()
                 .and_then(|h| h.read().expect("direct_io handle lock").clone())
         };
-        Some((p.out.clone(), n, direct, idx))
+        Some(PeerSelection {
+            out: p.out.clone(),
+            peer_count: n,
+            direct_io: direct,
+            slot_idx: idx,
+        })
     }
 
-    #[cfg(not(feature = "priority"))]
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
         let inner = self.inner();
         // Fast path: reuse cached route when the peer set hasn't changed.
@@ -341,7 +332,13 @@ impl Socket {
         }
 
         loop {
-            if let Some((chosen, peer_count, direct, slot_idx)) = self.select_peer() {
+            if let Some(PeerSelection {
+                out: chosen,
+                peer_count,
+                direct_io: direct,
+                slot_idx,
+            }) = self.select_peer()
+            {
                 if peer_count == 1 {
                     let cur_gen = inner.peers_gen.load(Ordering::Acquire);
                     *inner.cached_route.lock().expect("cached_route") = Some(CachedPeerRoute {
@@ -379,7 +376,6 @@ impl Socket {
     /// so `try_send` always has room after the drain. Safe without locks
     /// in compio's cooperative single-threaded runtime: no `.await`
     /// between the drain and the send means no other task can interpose.
-    #[cfg(not(feature = "priority"))]
     fn conflate_shared_queue_send(&self, msg: Message) -> Result<()> {
         let inner = self.inner();
         let stx = inner
@@ -404,7 +400,6 @@ impl Socket {
     /// driver. Falls back to the cmd channel when the codec is busy
     /// (driver is encoding or flushing) or the transmit buffer is at
     /// the direct-write cap.
-    #[cfg(not(feature = "priority"))]
     async fn slow_round_robin(
         &self,
         chosen: PeerOut,
@@ -493,128 +488,6 @@ impl Socket {
                     .ok_or(Error::Closed)?;
                 tx.send_async(msg).await
             }
-        }
-    }
-
-    /// Strict per-pipe priority picker. Walks `peer_keys` in
-    /// ascending-priority order; within each priority tier rotates
-    /// the start index by the global `rr_index` counter so equal-
-    /// priority peers fair-share. `try_send` on each candidate; on
-    /// `Full` for the highest-priority alive peer, remember it as
-    /// the await target. On `Disconnected`, skip immediately. If
-    /// nothing was Ok and nothing was alive, await the next peer-
-    /// ready notification (e.g. reconnect).
-    #[cfg(feature = "priority")]
-    async fn send_round_robin(&self, msg: Message) -> Result<()> {
-        loop {
-            self.drain_pre_connect_buf().await;
-
-            let outcome = self.try_send_priority_walk(&msg);
-            match outcome {
-                PriorityOutcome::Sent => return Ok(()),
-                PriorityOutcome::AwaitOn(out) => {
-                    if let Err(Error::Closed) = out.send(msg.clone()).await {
-                        continue;
-                    }
-                    return Ok(());
-                }
-                PriorityOutcome::NoLivePeers => {
-                    let inner = self.inner();
-                    let cap = inner.options.send_hwm.map_or(usize::MAX, |h| h as usize);
-                    {
-                        let mut buf = inner.pre_connect_buf.lock().expect("pre_connect_buf");
-                        if buf.len() < cap {
-                            buf.push_back(msg);
-                            return Ok(());
-                        }
-                    }
-                    let listener = inner.on_peer_ready.listen();
-                    if self.has_live_peer() {
-                        continue;
-                    }
-                    listener.await;
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "priority")]
-    async fn drain_pre_connect_buf(&self) {
-        loop {
-            let queued = self
-                .inner()
-                .pre_connect_buf
-                .lock()
-                .expect("pre_connect_buf")
-                .pop_front();
-            let Some(queued) = queued else { return };
-            match self.try_send_priority_walk(&queued) {
-                PriorityOutcome::Sent => {}
-                PriorityOutcome::AwaitOn(out) => {
-                    let _ = out.send(queued).await;
-                }
-                PriorityOutcome::NoLivePeers => {
-                    self.inner()
-                        .pre_connect_buf
-                        .lock()
-                        .expect("pre_connect_buf")
-                        .push_front(queued);
-                    return;
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "priority")]
-    fn has_live_peer(&self) -> bool {
-        let peers = self.inner().out_peers.read().expect("peers lock");
-        peers.iter().any(|(_, p)| match &p.out {
-            PeerOut::Inproc { sender, .. } => !sender.is_disconnected(),
-            PeerOut::Wire(handle) => !handle
-                .read()
-                .expect("wire peer handle lock")
-                .is_disconnected(),
-        })
-    }
-
-    /// Single pass of the priority picker. Held entirely under the
-    /// `out_peers` read lock - no awaits.
-    #[cfg(feature = "priority")]
-    fn try_send_priority_walk(&self, msg: &Message) -> PriorityOutcome {
-        let peers = self.inner().out_peers.read().expect("peers lock");
-        if peers.is_empty() {
-            return PriorityOutcome::NoLivePeers;
-        }
-        let view = self.inner().peer_keys.read().expect("peer_keys lock");
-        let rr = self.inner().rr_index.fetch_add(1, Ordering::Relaxed);
-        let mut highest_alive: Option<PeerOut> = None;
-        let mut i = 0;
-        while i < view.len() {
-            let prio = peers[view[i]].priority;
-            let mut j = i;
-            while j < view.len() && peers[view[j]].priority == prio {
-                j += 1;
-            }
-            let tier_size = j - i;
-            let offset = rr % tier_size;
-            for k in 0..tier_size {
-                let peer_idx = view[i + (offset + k) % tier_size];
-                let peer = &peers[peer_idx];
-                match peer.out.try_send(msg) {
-                    Ok(()) => return PriorityOutcome::Sent,
-                    Err(blume::TrySendError::Full(())) => {
-                        if highest_alive.is_none() {
-                            highest_alive = Some(peer.out.clone());
-                        }
-                    }
-                    Err(blume::TrySendError::Disconnected(())) => {}
-                }
-            }
-            i = j;
-        }
-        match highest_alive {
-            Some(out) => PriorityOutcome::AwaitOn(out),
-            None => PriorityOutcome::NoLivePeers,
         }
     }
 
@@ -784,7 +657,6 @@ impl Socket {
         }
     }
 
-    #[cfg(not(feature = "priority"))]
     fn try_send_round_robin(&self, msg: &Message) -> Result<()> {
         let inner = self.inner();
         if inner.out_peer_count.load(Ordering::Acquire) > 1
@@ -812,7 +684,6 @@ impl Socket {
         self.try_slow_round_robin(&chosen, msg.clone(), peer_count)
     }
 
-    #[cfg(not(feature = "priority"))]
     fn try_send_via_shared(&self, msg: Message) -> Result<()> {
         let stx = self
             .inner()
@@ -824,7 +695,6 @@ impl Socket {
         stx.try_send(msg)
     }
 
-    #[cfg(not(feature = "priority"))]
     fn try_slow_round_robin(
         &self,
         chosen: &PeerOut,
@@ -850,14 +720,6 @@ impl Socket {
                 }
             }
             PeerOut::Wire(_) => self.try_send_via_shared(msg),
-        }
-    }
-
-    #[cfg(feature = "priority")]
-    fn try_send_round_robin(&self, msg: &Message) -> Result<()> {
-        match self.try_send_priority_walk(msg) {
-            PriorityOutcome::Sent => Ok(()),
-            PriorityOutcome::AwaitOn(_) | PriorityOutcome::NoLivePeers => Err(Error::WouldBlock),
         }
     }
 

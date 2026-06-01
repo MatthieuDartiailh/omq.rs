@@ -48,15 +48,11 @@ ws = [
   "omq-compio?/ws",
   "omq-tokio?/ws",
 ]
-priority = [
-  "omq-compio?/priority",
-  "omq-tokio?/priority",
-]
 
 [dependencies]
 omq-compio = { path = "../omq-compio", version = "0.12.0", default-features = false, optional = true }
 omq-tokio  = { path = "../omq-tokio",  version = "0.13.0", default-features = false, optional = true }
 
 [package.metadata.docs.rs]
-features = ["tokio-backend", "curve", "blake3zmq", "plain", "lz4", "zstd", "ws", "priority"]
+features = ["tokio-backend", "curve", "blake3zmq", "plain", "lz4", "zstd", "ws"]
 rustdoc-args = ["--cfg", "docsrs"]

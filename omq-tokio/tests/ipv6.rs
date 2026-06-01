@@ -3,6 +3,8 @@
 //! Tests are skipped silently when IPv6 is unavailable on the host
 //! (CI containers, minimal kernel builds, macOS without IPv6 loopback).
 
+mod test_support;
+
 use std::net::{Ipv6Addr, SocketAddrV6, TcpListener as StdTcpListener};
 use std::time::Duration;
 
@@ -44,7 +46,7 @@ async fn ipv6_push_pull() {
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(tcp6(port)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&push).await;
 
     push.send(Message::single("hello v6")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
@@ -63,7 +65,7 @@ async fn ipv6_req_rep() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(tcp6(port)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&req).await;
 
     req.send(Message::single("ping")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), rep.recv())
@@ -117,7 +119,7 @@ async fn ipv6_dealer_router() {
         Options::default().identity(bytes::Bytes::from_static(b"v6-cli")),
     );
     dealer.connect(tcp6(port)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&dealer).await;
 
     dealer.send(Message::single("v6-msg")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), router.recv())

@@ -7,9 +7,8 @@
 #   OMQ_FUZZ=1          opt in to the ~1 M-iter hand-rolled fuzz suites
 #   OMQ_SKIP_PYOMQ=1    skip the pyomq build + pytest pass
 #   OMQ_TEST_RETRIES=N  retry each step up to N times (default 1) -
-#                       a few inproc priority tests are sensitive to
-#                       multi-thread scheduler timing on heavily loaded
-#                       runners; one retry is usually enough.
+#                       a few timing-sensitive tests may need one
+#                       retry on heavily loaded runners.
 #   OMQ_TEST_JOBS=N     max parallel test steps (default 4)
 set -euo pipefail
 
@@ -93,7 +92,7 @@ par_wait() {
 
 # ---------------------------------------------------------------- #
 # 1) Default workspace: NULL mechanism + tcp/ipc/inproc/udp,
-#    no compression, no priority. Smallest deploy shape.
+#    no compression. Smallest deploy shape.
 #    No --workspace: uses default-members, which excludes the example
 #    crates. zguide-compio and zguide-tokio depend on mutually
 #    exclusive omq features and cannot be built in one invocation.
@@ -104,25 +103,37 @@ run cargo test
 
 
 # ---------------------------------------------------------------- #
-# 2) Each per-backend feature, full test suite for that backend.
-#    Catches regressions in shared code that only surface under a
-#    feature combination (e.g. priority swapping the routing
-#    strategy alters the send-side data flow for every socket type,
-#    not just the priority test file).
+# 2) Feature-gated tests only. Step 1 already ran the full suite
+#    with default features; mechanisms and compression transforms
+#    only add handshake/transform code paths, so only the gated
+#    test files need re-running. Step 3 (all features) catches
+#    cross-feature interactions.
 # ---------------------------------------------------------------- #
-for feature in plain curve blake3zmq lz4 zstd priority; do
-    par run cargo test -p omq-proto  --features "$feature"
-    par run cargo test -p omq-tokio  --features "$feature"
-    par run cargo test -p omq-compio --features "$feature"
+for feature in plain curve blake3zmq; do
+    par run cargo test -p omq-tokio  --features "$feature" --test "$feature"
+    par run cargo test -p omq-compio --features "$feature" --test "$feature"
 done
+par run cargo test -p omq-tokio  --features lz4 --test lz4_tcp --test lz4_pub_sub
+par run cargo test -p omq-compio --features lz4 --test lz4_tcp
+par run cargo test -p omq-tokio  --features zstd --test zstd_tcp
+par run cargo test -p omq-compio --features zstd --test zstd_tcp
+# Interop tests (external tooling; skipped automatically when absent).
+par run cargo test -p omq-tokio  --features lz4  --test interop_ruby_lz4
+par run cargo test -p omq-tokio  --features zstd --test interop_ruby_zstd
+par run cargo test -p omq-tokio  --features blake3zmq --test interop_ruby_blake3zmq
+par run cargo test -p omq-compio --features blake3zmq --test interop_ruby_blake3zmq
+par run cargo test -p omq-tokio  --features plain --test interop_pyzmq_plain
+par run cargo test -p omq-tokio  --features curve --test interop_pyzmq_curve
+par run cargo test -p omq-compio --features curve --test interop_pyzmq_curve
 par_wait
 
 # ---------------------------------------------------------------- #
 # 3) All non-fuzz features at once, full backend test suite. Catches
-#    cross-feature interactions (e.g. CURVE + zstd + priority all
-#    layered on the same connection).
+#    cross-feature interactions (e.g. CURVE + zstd layered on the
+#    same connection) and internal #[cfg(feature)] items inside
+#    otherwise-ungated test files (connect_before_bind lz4/zstd).
 # ---------------------------------------------------------------- #
-all_features='plain curve blake3zmq lz4 zstd priority'
+all_features='plain curve blake3zmq lz4 zstd'
 par run cargo test -p omq-proto  --features "$all_features"
 par run cargo test -p omq-tokio  --features "$all_features"
 par run cargo test -p omq-compio --features "$all_features"

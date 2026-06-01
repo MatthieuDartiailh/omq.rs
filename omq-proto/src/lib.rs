@@ -8,8 +8,6 @@
 //! directly.
 
 pub mod backoff;
-#[cfg(feature = "priority")]
-pub mod connect_opts;
 pub mod encoded_queue;
 pub mod endpoint;
 pub mod error;
@@ -22,8 +20,6 @@ pub mod socket_api;
 pub mod subscription;
 pub mod type_state;
 
-#[cfg(feature = "priority")]
-pub use connect_opts::{ConnectOpts, DEFAULT_PRIORITY};
 pub use endpoint::{Endpoint, EndpointRole, EndpointSpec, IpcPath};
 pub use error::{Error, Result};
 pub use message::{Frame, FrameFlags, Message, MessageIter, generated_identity};

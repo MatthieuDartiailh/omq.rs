@@ -17,8 +17,6 @@ pub mod transport;
 // Re-export the sans-I/O surface so downstream callers don't have
 // to depend on omq-proto explicitly. Identical surface to the
 // pre-split crate.
-#[cfg(feature = "priority")]
-pub use omq_proto::ConnectOpts;
 #[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
 pub use omq_proto::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]

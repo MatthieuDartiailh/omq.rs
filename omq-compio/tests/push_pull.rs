@@ -1,5 +1,7 @@
 //! Multi-peer PUSH / PULL integration tests and work-stealing demo.
 
+mod test_support;
+
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,8 +57,6 @@ async fn push_pull_multi_peer_distributes() {
         p.connect(ep.clone()).await.unwrap();
     }
 
-    compio::time::sleep(Duration::from_millis(50)).await;
-
     for i in 0..N {
         push.send(Message::single(format!("msg-{i}")))
             .await
@@ -108,7 +108,6 @@ async fn push_pull_slow_peer_does_not_block_fast() {
     let slow = Socket::new(SocketType::Pull, Options::default());
     fast.connect(ep.clone()).await.unwrap();
     slow.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..N {
         push.send(Message::single(format!("m-{i}"))).await.unwrap();
@@ -166,7 +165,6 @@ async fn push_pull_under_backpressure_delivers_everything() {
     let slow = Socket::new(SocketType::Pull, Options::default().recv_hwm(32));
     fast.connect(ep.clone()).await.unwrap();
     slow.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     // Spawn receivers BEFORE the send loop: sends block when queues are full
     // (recv_hwm=32), and in compio's cooperative runtime nothing drains the
@@ -254,7 +252,7 @@ async fn push_delivers_to_alive_peer_after_dead_slot() {
     {
         let pull1 = Socket::new(SocketType::Pull, Options::default());
         pull1.connect(ep.clone()).await.unwrap();
-        compio::time::sleep(Duration::from_millis(50)).await;
+        test_support::wait_for_handshake(&pull1).await;
         push.send(Message::single("first")).await.unwrap();
         let _ = compio::time::timeout(Duration::from_millis(200), pull1.recv()).await;
         // pull1 drops here — slot 0 becomes dead.
@@ -264,7 +262,7 @@ async fn push_delivers_to_alive_peer_after_dead_slot() {
     // Slot 1: alive peer.
     let pull2 = Socket::new(SocketType::Pull, Options::default());
     pull2.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&pull2).await;
 
     push.send(Message::single("second")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull2.recv())

@@ -2,6 +2,8 @@
 //! client disconnects (pre-handshake and mid-session) and continue to
 //! accept and serve new connections normally.
 
+mod test_support;
+
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -43,7 +45,7 @@ async fn server_survives_pre_handshake_drop() {
     // Legitimate client: full ZMTP session must work.
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake(&push).await;
 
     push.send(Message::single("alive")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
@@ -64,7 +66,7 @@ async fn server_survives_mid_session_abrupt_drop() {
     {
         let push1 = Socket::new(SocketType::Push, Options::default());
         push1.connect(ep.clone()).await.unwrap();
-        compio::time::sleep(Duration::from_millis(50)).await;
+        test_support::wait_for_handshake(&push1).await;
         push1.send(Message::single("first")).await.unwrap();
         let _ = compio::time::timeout(Duration::from_millis(300), pull.recv()).await;
         // push1 drops here — abrupt half-close.
@@ -74,7 +76,7 @@ async fn server_survives_mid_session_abrupt_drop() {
     // Second client: server must still be healthy.
     let push2 = Socket::new(SocketType::Push, Options::default());
     push2.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&push2).await;
     push2.send(Message::single("second")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
         .await
@@ -106,7 +108,7 @@ async fn abrupt_reset_mid_greeting_does_not_wedge_server() {
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake(&push).await;
 
     push.send(Message::single("ok")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())

@@ -13,27 +13,10 @@ impl SocketDriver {
     pub(super) async fn handle_internal_event(&mut self, evt: InternalEvent) {
         match evt {
             InternalEvent::Accepted { conn, endpoint } => {
-                self.spawn_on_handshake(
-                    conn,
-                    endpoint,
-                    true,
-                    #[cfg(feature = "priority")]
-                    omq_proto::DEFAULT_PRIORITY,
-                );
+                self.spawn_on_handshake(conn, endpoint, true);
             }
-            InternalEvent::Connected {
-                conn,
-                endpoint,
-                #[cfg(feature = "priority")]
-                priority,
-            } => {
-                self.spawn_on_handshake(
-                    conn,
-                    endpoint,
-                    false,
-                    #[cfg(feature = "priority")]
-                    priority,
-                );
+            InternalEvent::Connected { conn, endpoint } => {
+                self.spawn_on_handshake(conn, endpoint, false);
             }
             InternalEvent::ConnectGaveUp => {
                 // Dial task exited. Leave the entry alone; the Socket remains
@@ -61,11 +44,7 @@ impl SocketDriver {
                 {
                     let ep = peer.endpoint.clone();
                     self.dialers.retain(|d| d.endpoint != ep);
-                    self.start_dial(
-                        ep,
-                        #[cfg(feature = "priority")]
-                        peer.priority,
-                    );
+                    self.start_dial(ep);
                 }
             }
         }
@@ -129,13 +108,7 @@ impl SocketDriver {
         }
     }
 
-    fn spawn_on_handshake(
-        &mut self,
-        conn: AnyConn,
-        endpoint: Endpoint,
-        accepted: bool,
-        #[cfg(feature = "priority")] priority: u8,
-    ) {
+    fn spawn_on_handshake(&mut self, conn: AnyConn, endpoint: Endpoint, accepted: bool) {
         // During linger, the handshake may complete after begin_close().
         // Spawn anyway so queued messages can drain; teardown cancels once
         // the queue empties or linger expires.
@@ -157,25 +130,13 @@ impl SocketDriver {
             }
         };
         self.monitor.publish(event);
-        self.spawn_any_conn(
-            conn,
-            endpoint,
-            accepted,
-            #[cfg(feature = "priority")]
-            priority,
-        );
+        self.spawn_any_conn(conn, endpoint, accepted);
     }
 
     /// Dispatch on transport type: byte-stream conns get the full
     /// `ConnectionDriver` / codec stack; inproc conns skip both and
     /// run the `InprocPeerDriver` directly.
-    fn spawn_any_conn(
-        &mut self,
-        conn: AnyConn,
-        endpoint: Endpoint,
-        is_server: bool,
-        #[cfg(feature = "priority")] priority: u8,
-    ) {
+    fn spawn_any_conn(&mut self, conn: AnyConn, endpoint: Endpoint, is_server: bool) {
         match conn {
             AnyConn::ByteStream {
                 stream,
@@ -184,35 +145,15 @@ impl SocketDriver {
             } => {
                 let _ = stream.apply_tcp_options(&self.options);
                 if self.socket_type == SocketType::Stream {
-                    self.spawn_stream_connection(
-                        stream,
-                        peer_ident,
-                        endpoint,
-                        is_server,
-                        #[cfg(feature = "priority")]
-                        priority,
-                    );
+                    self.spawn_stream_connection(stream, peer_ident, endpoint, is_server);
                 } else {
                     self.spawn_byte_stream_connection(
-                        stream,
-                        peer_ident,
-                        endpoint,
-                        is_server,
-                        leftover,
-                        #[cfg(feature = "priority")]
-                        priority,
+                        stream, peer_ident, endpoint, is_server, leftover,
                     );
                 }
             }
             AnyConn::Inproc { conn, peer_ident } => {
-                self.spawn_inproc_peer(
-                    conn,
-                    peer_ident,
-                    endpoint,
-                    is_server,
-                    #[cfg(feature = "priority")]
-                    priority,
-                );
+                self.spawn_inproc_peer(conn, peer_ident, endpoint, is_server);
             }
         }
     }
@@ -225,7 +166,6 @@ impl SocketDriver {
         endpoint: Endpoint,
         is_server: bool,
         leftover: bytes::Bytes,
-        #[cfg(feature = "priority")] priority: u8,
     ) {
         // Enforce the socket type's peer cap (PAIR / CHANNEL are 1:1).
         if let Some(max) = max_peer_count(self.socket_type)
@@ -308,7 +248,6 @@ impl SocketDriver {
             }
             None => driver,
         };
-        #[cfg(not(feature = "priority"))]
         let driver = match self.send_strategy.shared_rx() {
             Some(rx) => driver.with_shared_rx(rx),
             None => driver,
@@ -361,8 +300,6 @@ impl SocketDriver {
                 info: None,
                 endpoint,
                 is_client: !is_server,
-                #[cfg(feature = "priority")]
-                priority,
                 direct_io_rx,
             },
         );
@@ -387,7 +324,6 @@ impl SocketDriver {
         peer_ident: PeerIdent,
         endpoint: Endpoint,
         is_server: bool,
-        #[cfg(feature = "priority")] priority: u8,
     ) {
         let peer_id = self.next_peer_id;
         self.next_peer_id += 1;
@@ -409,8 +345,6 @@ impl SocketDriver {
                 info: None,
                 endpoint,
                 is_client: !is_server,
-                #[cfg(feature = "priority")]
-                priority,
                 direct_io_rx: None,
             },
         );
@@ -419,14 +353,6 @@ impl SocketDriver {
             *self.send_ring.write().unwrap() = None;
         }
 
-        #[cfg(feature = "priority")]
-        self.send_strategy.connection_added_with_priority(
-            peer_id,
-            handle,
-            identity.clone(),
-            priority,
-        );
-        #[cfg(not(feature = "priority"))]
         self.send_strategy
             .connection_added(peer_id, handle, identity.clone(), false);
         self.recv_strategy.connection_added(peer_id, identity);
@@ -444,7 +370,6 @@ impl SocketDriver {
         peer_ident: PeerIdent,
         endpoint: Endpoint,
         is_server: bool,
-        #[cfg(feature = "priority")] priority: u8,
     ) {
         // Honor peer caps just like the byte-stream path.
         if let Some(max) = max_peer_count(self.socket_type)
@@ -494,8 +419,6 @@ impl SocketDriver {
                 info: None,
                 endpoint,
                 is_client: !is_server,
-                #[cfg(feature = "priority")]
-                priority,
                 direct_io_rx: None,
             },
         );
@@ -621,21 +544,6 @@ impl SocketDriver {
                 p.ident.clone(),
             )
         };
-        #[cfg(feature = "priority")]
-        {
-            let _ = peer_ident;
-            let prio = self
-                .peers
-                .get(&peer_id)
-                .map_or(omq_proto::DEFAULT_PRIORITY, |p| p.priority);
-            self.send_strategy.connection_added_with_priority(
-                peer_id,
-                handle.clone(),
-                identity.clone(),
-                prio,
-            );
-        }
-        #[cfg(not(feature = "priority"))]
         self.send_strategy.connection_added(
             peer_id,
             handle.clone(),
@@ -657,21 +565,33 @@ impl SocketDriver {
         match cmd {
             Command::Subscribe(prefix) => {
                 self.send_strategy.peer_subscribe(peer_id, prefix.clone());
+                self.monitor.publish(MonitorEvent::SubscribeReceived {
+                    prefix: prefix.clone(),
+                });
                 if self.socket_type == SocketType::XPub {
                     let _ = self.recv_tx.send(xpub_notification(0x01, &prefix)).await;
                 }
             }
             Command::Cancel(prefix) => {
                 self.send_strategy.peer_cancel(peer_id, &prefix);
+                self.monitor.publish(MonitorEvent::UnsubscribeReceived {
+                    prefix: prefix.clone(),
+                });
                 if self.socket_type == SocketType::XPub {
                     let _ = self.recv_tx.send(xpub_notification(0x00, &prefix)).await;
                 }
             }
             Command::Join(group) => {
                 self.send_strategy.peer_join(peer_id, &group);
+                self.monitor.publish(MonitorEvent::JoinReceived {
+                    group: group.clone(),
+                });
             }
             Command::Leave(group) => {
                 self.send_strategy.peer_leave(peer_id, &group);
+                self.monitor.publish(MonitorEvent::LeaveReceived {
+                    group: group.clone(),
+                });
             }
             Command::Error { reason } => {
                 self.publish_peer_command(peer_id, PeerCommandKind::Error { reason });
@@ -795,7 +715,6 @@ struct InprocDriverCtx {
 /// exchange), then forwards Messages and Commands between the
 /// `SocketDriver`'s inbox and the partner's channels until either
 /// side drops.
-#[expect(clippy::too_many_lines)]
 async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
     mut in_rx: mpsc::Receiver<InboundFrame>,
@@ -868,38 +787,17 @@ async fn inproc_peer_driver(
                         {
                             return;
                         }
-                        // Per-peer SPSC: always try the ring first.
-                        // Falls back to recv_direct/actor on full.
-                        let m = if let Some(ref ring) = spsc {
-                            let mut producer = ring.producer.lock().unwrap();
-                            if producer.is_full() {
-                                Some(m)
-                            } else {
-                                let _ = producer.push(m);
-                                producer.flush();
-                                drop(producer);
-                                ring.recv_notify.notify_one();
-                                None
-                            }
-                        } else {
-                            Some(m)
-                        };
-                        if let Some(m) = m {
-                            match recv_direct.as_ref() {
-                                Some(tx) => {
-                                    if tx.send(m).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                None => {
-                                    if emit_event(&peer_out, peer_id, ZmtpEvent::Message(m))
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                                }
-                            }
+                        let m = try_push_spsc(spsc.as_ref(), m);
+                        if let Some(m) = m
+                            && !route_inproc_message(
+                                m,
+                                recv_direct.as_ref(),
+                                &peer_out,
+                                peer_id,
+                            )
+                            .await
+                        {
+                            return;
                         }
                     }
                     Some(InboundFrame::Command(c)) => {
@@ -921,6 +819,44 @@ async fn inproc_peer_driver(
         ring.recv_notify.notify_one();
     }
     let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
+}
+
+/// Try to push a message into the SPSC ring. Returns `None` if pushed
+/// (consumed), or `Some(m)` if the ring is full or absent.
+fn try_push_spsc(
+    spsc: Option<&Arc<crate::transport::inproc::InprocSpsc>>,
+    m: Message,
+) -> Option<Message> {
+    let Some(ring) = spsc else {
+        return Some(m);
+    };
+    let mut producer = ring.producer.lock().unwrap();
+    if producer.is_full() {
+        return Some(m);
+    }
+    let _ = producer.push(m);
+    producer.flush();
+    drop(producer);
+    ring.recv_notify.notify_one();
+    None
+}
+
+/// Route a message to `recv_direct` or through the actor via `emit_event`.
+/// Returns `true` if sent, `false` if the channel closed.
+async fn route_inproc_message(
+    m: Message,
+    recv_direct: Option<&async_channel::Sender<Message>>,
+    peer_out: &mpsc::Sender<(u64, crate::engine::PeerOut)>,
+    peer_id: u64,
+) -> bool {
+    use crate::engine::PeerOut;
+    match recv_direct {
+        Some(tx) => tx.send(m).await.is_ok(),
+        None => peer_out
+            .send((peer_id, PeerOut::Event(ZmtpEvent::Message(m))))
+            .await
+            .is_ok(),
+    }
 }
 
 fn xpub_notification(tag: u8, prefix: &bytes::Bytes) -> Message {

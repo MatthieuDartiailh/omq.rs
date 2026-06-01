@@ -7,19 +7,13 @@
 //! suite; XPUB ↔ XSUB needs the explicit drain step that lives in
 //! `xpub_xsub.rs`) are intentionally absent here.
 
-use std::net::{IpAddr, Ipv4Addr, TcpListener as StdTcpListener};
+mod test_support;
+
 use std::time::Duration;
 
 use bytes::Bytes;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
-use omq_proto::endpoint::{Host, IpcPath};
-
-fn tcp_ep(port: u16) -> Endpoint {
-    Endpoint::Tcp {
-        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        port,
-    }
-}
+use omq_proto::endpoint::IpcPath;
 
 fn ipc_ep(name: &str) -> Endpoint {
     let path = std::env::temp_dir().join(format!(
@@ -46,22 +40,15 @@ fn inproc_ep(name: &str) -> Endpoint {
     }
 }
 
-fn free_tcp_port() -> u16 {
-    let l = StdTcpListener::bind("127.0.0.1:0").unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
-}
-
 async fn wait() {
     compio::time::sleep(Duration::from_millis(60)).await;
 }
 
-async fn push_pull_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn push_pull_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(server_ep).await.unwrap();
+    pull.bind(bind_ep).await.unwrap();
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect(client_ep).await.unwrap();
+    push.connect(connect_ep).await.unwrap();
     push.send(Message::single("hi")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
         .await
@@ -70,11 +57,24 @@ async fn push_pull_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
 }
 
-async fn req_rep_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn push_pull_roundtrip_tcp() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let p = test_support::bind_loopback(&pull).await;
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(test_support::tcp_loopback(p)).await.unwrap();
+    push.send(Message::single("hi")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+}
+
+async fn req_rep_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(server_ep).await.unwrap();
+    rep.bind(bind_ep).await.unwrap();
     let req = Socket::new(SocketType::Req, Options::default());
-    req.connect(client_ep).await.unwrap();
+    req.connect(connect_ep).await.unwrap();
     req.send(Message::single("q")).await.unwrap();
     let q = compio::time::timeout(Duration::from_secs(2), rep.recv())
         .await
@@ -89,14 +89,33 @@ async fn req_rep_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
 }
 
-async fn dealer_router_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn req_rep_roundtrip_tcp() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let p = test_support::bind_loopback(&rep).await;
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(test_support::tcp_loopback(p)).await.unwrap();
+    req.send(Message::single("q")).await.unwrap();
+    let q = compio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
+    rep.send(Message::single("a")).await.unwrap();
+    let a = compio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
+}
+
+async fn dealer_router_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let router = Socket::new(SocketType::Router, Options::default());
-    router.bind(server_ep).await.unwrap();
+    router.bind(bind_ep).await.unwrap();
     let dealer = Socket::new(
         SocketType::Dealer,
         Options::default().identity(Bytes::from_static(b"d1")),
     );
-    dealer.connect(client_ep).await.unwrap();
+    dealer.connect(connect_ep).await.unwrap();
     dealer.send(Message::single("hi")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), router.recv())
         .await
@@ -106,11 +125,28 @@ async fn dealer_router_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
 }
 
-async fn pair_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn dealer_router_roundtrip_tcp() {
+    let router = Socket::new(SocketType::Router, Options::default());
+    let p = test_support::bind_loopback(&router).await;
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default().identity(Bytes::from_static(b"d1")),
+    );
+    dealer.connect(test_support::tcp_loopback(p)).await.unwrap();
+    dealer.send(Message::single("hi")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+}
+
+async fn pair_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let a = Socket::new(SocketType::Pair, Options::default());
-    a.bind(server_ep).await.unwrap();
+    a.bind(bind_ep).await.unwrap();
     let b = Socket::new(SocketType::Pair, Options::default());
-    b.connect(client_ep).await.unwrap();
+    b.connect(connect_ep).await.unwrap();
     a.send(Message::single("x")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), b.recv())
         .await
@@ -119,12 +155,25 @@ async fn pair_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     assert_eq!(m.part_bytes(0).unwrap(), &b"x"[..]);
 }
 
-async fn pub_sub_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn pair_roundtrip_tcp() {
+    let a = Socket::new(SocketType::Pair, Options::default());
+    let p = test_support::bind_loopback(&a).await;
+    let b = Socket::new(SocketType::Pair, Options::default());
+    b.connect(test_support::tcp_loopback(p)).await.unwrap();
+    a.send(Message::single("x")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), b.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"x"[..]);
+}
+
+async fn pub_sub_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let p = Socket::new(SocketType::Pub, Options::default());
-    p.bind(server_ep).await.unwrap();
+    p.bind(bind_ep).await.unwrap();
     let s = Socket::new(SocketType::Sub, Options::default());
     s.subscribe("").await.unwrap();
-    s.connect(client_ep).await.unwrap();
+    s.connect(connect_ep).await.unwrap();
     // Subscription propagation can race the first publish; loop.
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
@@ -136,14 +185,31 @@ async fn pub_sub_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     panic!("SUB never received");
 }
 
-async fn client_server_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn pub_sub_roundtrip_tcp() {
+    let p = Socket::new(SocketType::Pub, Options::default());
+    let port = test_support::bind_loopback(&p).await;
+    let s = Socket::new(SocketType::Sub, Options::default());
+    s.subscribe("").await.unwrap();
+    s.connect(test_support::tcp_loopback(port)).await.unwrap();
+    // Subscription propagation can race the first publish; loop.
+    for _ in 0..30 {
+        let _ = p.send(Message::single("hello")).await;
+        if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(50), s.recv()).await {
+            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
+            return;
+        }
+    }
+    panic!("SUB never received");
+}
+
+async fn client_server_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let server = Socket::new(SocketType::Server, Options::default());
-    server.bind(server_ep).await.unwrap();
+    server.bind(bind_ep).await.unwrap();
     let client = Socket::new(
         SocketType::Client,
         Options::default().identity(Bytes::from_static(b"c1")),
     );
-    client.connect(client_ep).await.unwrap();
+    client.connect(connect_ep).await.unwrap();
     client.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), server.recv())
         .await
@@ -153,11 +219,28 @@ async fn client_server_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     assert_eq!(m.part_bytes(1).unwrap(), &b"ping"[..]);
 }
 
-async fn scatter_gather_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn client_server_roundtrip_tcp() {
+    let server = Socket::new(SocketType::Server, Options::default());
+    let p = test_support::bind_loopback(&server).await;
+    let client = Socket::new(
+        SocketType::Client,
+        Options::default().identity(Bytes::from_static(b"c1")),
+    );
+    client.connect(test_support::tcp_loopback(p)).await.unwrap();
+    client.send(Message::single("ping")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"c1"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"ping"[..]);
+}
+
+async fn scatter_gather_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let g = Socket::new(SocketType::Gather, Options::default());
-    g.bind(server_ep).await.unwrap();
+    g.bind(bind_ep).await.unwrap();
     let s = Socket::new(SocketType::Scatter, Options::default());
-    s.connect(client_ep).await.unwrap();
+    s.connect(connect_ep).await.unwrap();
     s.send(Message::single("m")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), g.recv())
         .await
@@ -166,11 +249,24 @@ async fn scatter_gather_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     assert_eq!(m.part_bytes(0).unwrap(), &b"m"[..]);
 }
 
-async fn channel_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn scatter_gather_roundtrip_tcp() {
+    let g = Socket::new(SocketType::Gather, Options::default());
+    let p = test_support::bind_loopback(&g).await;
+    let s = Socket::new(SocketType::Scatter, Options::default());
+    s.connect(test_support::tcp_loopback(p)).await.unwrap();
+    s.send(Message::single("m")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), g.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"m"[..]);
+}
+
+async fn channel_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let a = Socket::new(SocketType::Channel, Options::default());
-    a.bind(server_ep).await.unwrap();
+    a.bind(bind_ep).await.unwrap();
     let b = Socket::new(SocketType::Channel, Options::default());
-    b.connect(client_ep).await.unwrap();
+    b.connect(connect_ep).await.unwrap();
     a.send(Message::single("hi")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), b.recv())
         .await
@@ -179,17 +275,51 @@ async fn channel_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
 }
 
-async fn peer_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
+async fn channel_roundtrip_tcp() {
+    let a = Socket::new(SocketType::Channel, Options::default());
+    let p = test_support::bind_loopback(&a).await;
+    let b = Socket::new(SocketType::Channel, Options::default());
+    b.connect(test_support::tcp_loopback(p)).await.unwrap();
+    a.send(Message::single("hi")).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), b.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+}
+
+async fn peer_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     let a = Socket::new(
         SocketType::Peer,
         Options::default().identity(Bytes::from_static(b"pa")),
     );
-    a.bind(server_ep).await.unwrap();
+    a.bind(bind_ep).await.unwrap();
     let b = Socket::new(
         SocketType::Peer,
         Options::default().identity(Bytes::from_static(b"pb")),
     );
-    b.connect(client_ep).await.unwrap();
+    b.connect(connect_ep).await.unwrap();
+    wait().await;
+    b.send(Message::multipart(["pa", "hi a"])).await.unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), a.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"pb"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"hi a"[..]);
+}
+
+async fn peer_roundtrip_tcp() {
+    let a = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"pa")),
+    );
+    let p = test_support::bind_loopback(&a).await;
+    let b = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"pb")),
+    );
+    b.connect(test_support::tcp_loopback(p)).await.unwrap();
     wait().await;
     b.send(Message::multipart(["pa", "hi a"])).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), a.recv())
@@ -306,48 +436,39 @@ async fn peer_ipc() {
 
 #[compio::test]
 async fn push_pull_tcp() {
-    let p = free_tcp_port();
-    push_pull_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    push_pull_roundtrip_tcp().await;
 }
 #[compio::test]
 async fn req_rep_tcp() {
-    let p = free_tcp_port();
-    req_rep_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    req_rep_roundtrip_tcp().await;
 }
 #[compio::test]
 async fn dealer_router_tcp() {
-    let p = free_tcp_port();
-    dealer_router_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    dealer_router_roundtrip_tcp().await;
 }
 #[compio::test]
 async fn pair_tcp() {
-    let p = free_tcp_port();
-    pair_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    pair_roundtrip_tcp().await;
 }
 #[compio::test]
 async fn pub_sub_tcp() {
-    let p = free_tcp_port();
-    pub_sub_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    pub_sub_roundtrip_tcp().await;
 }
 #[compio::test]
 async fn client_server_tcp() {
-    let p = free_tcp_port();
-    client_server_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    client_server_roundtrip_tcp().await;
 }
 #[compio::test]
 async fn scatter_gather_tcp() {
-    let p = free_tcp_port();
-    scatter_gather_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    scatter_gather_roundtrip_tcp().await;
 }
 #[compio::test]
 async fn channel_tcp() {
-    let p = free_tcp_port();
-    channel_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    channel_roundtrip_tcp().await;
 }
 #[compio::test]
 async fn peer_tcp() {
-    let p = free_tcp_port();
-    peer_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+    peer_roundtrip_tcp().await;
 }
 
 // =====================================================================
@@ -373,11 +494,11 @@ async fn send_before_connect_ipc() {
 
 #[compio::test]
 async fn send_before_connect_tcp() {
-    let p = free_tcp_port();
     let push = Socket::new(SocketType::Push, Options::default());
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(tcp_ep(p)).await.unwrap();
-    push.connect(tcp_ep(p)).await.unwrap();
+    let p = test_support::bind_loopback(&pull).await;
+    push.connect(test_support::tcp_loopback(p)).await.unwrap();
+    // Send immediately, before the handshake can complete.
     push.send(Message::single("early")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
         .await

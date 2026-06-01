@@ -1,69 +1,29 @@
 //! Round-robin send.
 //!
-//! **Default mode** (no `priority` feature): a single shared send queue
-//! feeds N per-peer pumps. Each pump is a tokio task that races its
-//! peers for the next message. Fast peers naturally pull more; slow
-//! peers pull what they can. Load-balancing semantics for PUSH /
-//! DEALER / REQ / PAIR / CLIENT / CHANNEL / SCATTER.
+//! A single shared send queue feeds N per-peer pumps. Each pump is a
+//! tokio task that races its peers for the next message. Fast peers
+//! naturally pull more; slow peers pull what they can. Load-balancing
+//! semantics for PUSH / DEALER / REQ / PAIR / CLIENT / CHANNEL / SCATTER.
 //!
 //! Per-batch fairness: each pump wakes, pulls one message, then opportun-
 //! istically drains up to 256 more or 512 KiB (whichever first), then
 //! `tokio::task::yield_now()`s so the tokio worker can schedule peers.
-//!
-//! **Priority mode** (`feature = "priority"` on): no shared queue, no
-//! pumps. Each peer's `DriverHandle.inbox` IS its outbound queue. The
-//! submitter walks peers in strict priority order, `try_send`s on each
-//! peer's inbox, falls through `Full`/`Closed` to the next priority,
-//! and back-pressures only when all peers at every priority are
-//! `Full` (await `send` on the highest-priority alive). `Disconnected`
-//! / `Closed` peers are skipped instantly - no HWM-stall on a dead
-//! high-priority pipe. Mirrors the omq-compio implementation.
-//!
-//! **In-flight loss on disconnect (priority).** Because each send is
-//! committed to a specific peer's inbox before the wire write happens,
-//! a send that races a TCP teardown can land in the dying peer's queue
-//! and be dropped when the driver exits. This is the standard ZMQ
-//! "messages queued for a vanished peer are lost" semantic — strict
-//! per-pipe priority needs per-pipe queues, and per-pipe queues can't
-//! migrate across peers without giving up the ordering. Default mode
-//! sidesteps it because its shared queue spans drivers; callers that
-//! need delivery confirmation across reconnects must layer it on top
-//! (`MonitorEvent::HandshakeSucceeded` / app-level acks). See
-//! `tests/reconnect.rs::peer_drop_mid_send_is_handled_cleanly` for
-//! how the test suite synchronises on this.
-
-#[cfg(feature = "priority")]
-use std::collections::VecDeque;
-#[cfg(feature = "priority")]
-use std::sync::{
-    Arc, Mutex, RwLock,
-    atomic::{AtomicUsize, Ordering},
-};
 
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "priority")]
-use crate::engine::DriverCommand;
 use crate::engine::DriverHandle;
-#[cfg(feature = "priority")]
-use omq_proto::error::Error;
 use omq_proto::error::Result;
 use omq_proto::message::Message;
-#[cfg(feature = "priority")]
-use omq_proto::options::OnMute;
 use omq_proto::options::Options;
 
-#[cfg(not(feature = "priority"))]
 use super::drop_queue::{DropQueue, QueueReceiver};
 
 /// Cloneable handle for submitting messages into a [`RoundRobinSend`].
-#[cfg(not(feature = "priority"))]
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
     queue: DropQueue,
 }
 
-#[cfg(not(feature = "priority"))]
 impl Submitter {
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         self.queue.send(msg).await
@@ -76,7 +36,6 @@ impl Submitter {
 /// Each driver polls `shared_rx` inside its own select! loop after the
 /// ZMTP handshake completes, eliminating the pump-task intermediary and
 /// the per-message inbox hop that it implied.
-#[cfg(not(feature = "priority"))]
 #[derive(Debug)]
 pub(crate) struct RoundRobinSend {
     queue: DropQueue,
@@ -84,7 +43,6 @@ pub(crate) struct RoundRobinSend {
     root_cancel: CancellationToken,
 }
 
-#[cfg(not(feature = "priority"))]
 impl RoundRobinSend {
     pub(crate) fn new(options: &Options) -> Self {
         let (cap, policy) = super::effective_queue_params(options);
@@ -140,267 +98,5 @@ impl RoundRobinSend {
 
     pub(crate) fn is_drained(&self) -> bool {
         self.queue.len() == 0
-    }
-}
-
-// ============================================================================
-// Priority mode - strict per-pipe priority via per-peer driver inboxes.
-// ============================================================================
-
-#[cfg(feature = "priority")]
-#[derive(Clone, Debug)]
-struct PriorityPeer {
-    peer_id: u64,
-    priority: u8,
-    handle: DriverHandle,
-}
-
-#[cfg(feature = "priority")]
-enum PriorityOutcome {
-    Sent,
-    AwaitOn(DriverHandle),
-    NoLivePeers,
-}
-
-#[cfg(feature = "priority")]
-#[derive(Clone)]
-pub(crate) struct Submitter {
-    peers: Arc<RwLock<Arc<Vec<PriorityPeer>>>>,
-    rr_index: Arc<AtomicUsize>,
-    on_change: Arc<tokio::sync::Notify>,
-    staging: Arc<Mutex<VecDeque<Message>>>,
-    hwm: usize,
-    on_mute: OnMute,
-}
-
-#[cfg(feature = "priority")]
-impl std::fmt::Debug for Submitter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Submitter").finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "priority")]
-impl Submitter {
-    pub(crate) async fn send(&self, msg: Message) -> Result<()> {
-        self.drain_staging().await;
-
-        loop {
-            match self.try_send_priority_walk(&msg) {
-                PriorityOutcome::Sent => return Ok(()),
-                PriorityOutcome::AwaitOn(h) => {
-                    return h
-                        .inbox
-                        .send(DriverCommand::SendMessage(msg))
-                        .await
-                        .map_err(|_| Error::Closed);
-                }
-                PriorityOutcome::NoLivePeers => {
-                    let staged = {
-                        let mut buf = self.staging.lock().expect("staging lock");
-                        if buf.len() < self.hwm {
-                            buf.push_back(msg);
-                            return Ok(());
-                        }
-                        match self.on_mute {
-                            OnMute::DropNewest => return Ok(()),
-                            OnMute::DropOldest => {
-                                let _ = buf.pop_front();
-                                buf.push_back(msg);
-                                return Ok(());
-                            }
-                            OnMute::Block => false,
-                            _ => unreachable!(),
-                        }
-                    };
-                    if !staged {
-                        let waiter = self.on_change.notified();
-                        if self.has_live_peer() {
-                            continue;
-                        }
-                        waiter.await;
-                        self.drain_staging().await;
-                    }
-                }
-            }
-        }
-    }
-
-    fn try_send_priority_walk(&self, msg: &Message) -> PriorityOutcome {
-        let snapshot = self.peers.read().expect("peers lock").clone();
-        if snapshot.is_empty() {
-            return PriorityOutcome::NoLivePeers;
-        }
-        let rr = self.rr_index.fetch_add(1, Ordering::Relaxed);
-        let mut tier_back_pressure: Option<DriverHandle> = None;
-        let mut i = 0;
-        while i < snapshot.len() {
-            let prio = snapshot[i].priority;
-            let mut j = i;
-            while j < snapshot.len() && snapshot[j].priority == prio {
-                j += 1;
-            }
-            let tier_size = j - i;
-            let offset = rr % tier_size;
-            let mut tier_full: Option<DriverHandle> = None;
-            let mut tier_has_alive = false;
-            for k in 0..tier_size {
-                let peer = &snapshot[i + (offset + k) % tier_size];
-                if peer.handle.cancel.is_cancelled() {
-                    continue;
-                }
-                match peer
-                    .handle
-                    .inbox
-                    .try_send(DriverCommand::SendMessage(msg.clone()))
-                {
-                    Ok(()) => return PriorityOutcome::Sent,
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        tier_has_alive = true;
-                        if tier_full.is_none() {
-                            tier_full = Some(peer.handle.clone());
-                        }
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
-                }
-            }
-            if tier_has_alive {
-                tier_back_pressure = tier_full;
-                break;
-            }
-            i = j;
-        }
-        match tier_back_pressure {
-            Some(h) => PriorityOutcome::AwaitOn(h),
-            None => PriorityOutcome::NoLivePeers,
-        }
-    }
-
-    async fn drain_staging(&self) {
-        loop {
-            let queued = self.staging.lock().expect("staging lock").pop_front();
-            let Some(msg) = queued else { return };
-            match self.try_send_priority_walk(&msg) {
-                PriorityOutcome::Sent => {}
-                PriorityOutcome::AwaitOn(h) => {
-                    let _ = h.inbox.send(DriverCommand::SendMessage(msg)).await;
-                }
-                PriorityOutcome::NoLivePeers => {
-                    self.staging.lock().expect("staging lock").push_front(msg);
-                    return;
-                }
-            }
-        }
-    }
-
-    fn has_live_peer(&self) -> bool {
-        self.peers
-            .read()
-            .expect("peers lock")
-            .iter()
-            .any(|p| !p.handle.inbox.is_closed())
-    }
-}
-
-#[cfg(feature = "priority")]
-#[derive(Debug)]
-pub(crate) struct RoundRobinSend {
-    peers: Arc<RwLock<Arc<Vec<PriorityPeer>>>>,
-    rr_index: Arc<AtomicUsize>,
-    on_change: Arc<tokio::sync::Notify>,
-    staging: Arc<Mutex<VecDeque<Message>>>,
-    hwm: usize,
-    on_mute: OnMute,
-    root_cancel: CancellationToken,
-}
-
-#[cfg(feature = "priority")]
-impl RoundRobinSend {
-    pub(crate) fn new(options: &Options) -> Self {
-        let (hwm, on_mute) = super::effective_queue_params(options);
-        Self {
-            peers: Arc::new(RwLock::new(Arc::new(Vec::new()))),
-            rr_index: Arc::new(AtomicUsize::new(0)),
-            on_change: Arc::new(tokio::sync::Notify::new()),
-            staging: Arc::new(Mutex::new(VecDeque::new())),
-            hwm,
-            on_mute,
-            root_cancel: CancellationToken::new(),
-        }
-    }
-
-    #[expect(dead_code)] // kept for parity with the non-priority impl's API
-    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle) {
-        self.connection_added_with_priority(peer_id, handle, omq_proto::DEFAULT_PRIORITY);
-    }
-
-    #[expect(clippy::needless_pass_by_value)]
-    pub(crate) fn connection_added_with_priority(
-        &mut self,
-        peer_id: u64,
-        handle: DriverHandle,
-        priority: u8,
-    ) {
-        let mut guard = self.peers.write().expect("peers lock");
-        let mut new_peers = (**guard).clone();
-        new_peers.push(PriorityPeer {
-            peer_id,
-            priority,
-            handle: handle.clone(),
-        });
-        new_peers.sort_by_key(|p| p.priority);
-        *guard = Arc::new(new_peers);
-        drop(guard);
-
-        let mut buf = self.staging.lock().expect("staging lock");
-        while let Some(msg) = buf.pop_front() {
-            match handle.inbox.try_send(DriverCommand::SendMessage(msg)) {
-                Ok(()) => {}
-                Err(
-                    tokio::sync::mpsc::error::TrySendError::Full(cmd)
-                    | tokio::sync::mpsc::error::TrySendError::Closed(cmd),
-                ) => {
-                    let DriverCommand::SendMessage(msg) = cmd else {
-                        unreachable!()
-                    };
-                    buf.push_front(msg);
-                    break;
-                }
-            }
-        }
-        drop(buf);
-
-        self.on_change.notify_waiters();
-    }
-
-    pub(crate) fn connection_removed(&mut self, peer_id: u64) {
-        let mut guard = self.peers.write().expect("peers lock");
-        let new_peers: Vec<_> = guard
-            .iter()
-            .filter(|p| p.peer_id != peer_id)
-            .cloned()
-            .collect();
-        *guard = Arc::new(new_peers);
-        drop(guard);
-        self.on_change.notify_waiters();
-    }
-
-    pub(crate) fn submitter(&self) -> Submitter {
-        Submitter {
-            peers: self.peers.clone(),
-            rr_index: self.rr_index.clone(),
-            on_change: self.on_change.clone(),
-            staging: self.staging.clone(),
-            hwm: self.hwm,
-            on_mute: self.on_mute,
-        }
-    }
-
-    pub(crate) fn shutdown(&self) {
-        self.root_cancel.cancel();
-    }
-
-    pub(crate) fn is_drained(&self) -> bool {
-        self.staging.lock().expect("staging lock").is_empty()
     }
 }

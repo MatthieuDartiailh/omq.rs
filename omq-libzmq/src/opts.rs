@@ -8,6 +8,15 @@ use bytes::Bytes;
 use omq_compio::MechanismSetup;
 use omq_compio::options::{KeepAlive, ReconnectPolicy};
 
+macro_rules! lock_overlay {
+    ($sock:expr) => {
+        match $sock.overlay.lock() {
+            Ok(g) => g,
+            Err(_) => return crate::error::fail(crate::error::ETERM),
+        }
+    };
+}
+
 #[derive(Clone, Debug, Default)]
 #[expect(clippy::struct_excessive_bools)]
 pub(crate) struct SocketOverlay {
@@ -236,15 +245,15 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_SNDHWM => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().send_hwm = if v <= 0 { None } else { Some(v as u32) };
+            lock_overlay!(sock_arc).send_hwm = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_RCVHWM => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().recv_hwm = if v <= 0 { None } else { Some(v as u32) };
+            lock_overlay!(sock_arc).recv_hwm = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_LINGER => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().linger = if v < 0 {
+            lock_overlay!(sock_arc).linger = if v < 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -255,11 +264,11 @@ pub extern "C" fn zmq_setsockopt(
                 return crate::error::fail(libc::EFAULT);
             }
             let bytes = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
-            sock_arc.overlay.lock().unwrap().identity = Bytes::copy_from_slice(bytes);
+            lock_overlay!(sock_arc).identity = Bytes::copy_from_slice(bytes);
         }
         ZMQ_RECONNECT_IVL => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().reconnect_ivl = if v <= 0 {
+            lock_overlay!(sock_arc).reconnect_ivl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -267,7 +276,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_RECONNECT_IVL_MAX => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().reconnect_ivl_max = if v <= 0 {
+            lock_overlay!(sock_arc).reconnect_ivl_max = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -275,7 +284,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_HEARTBEAT_IVL => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().heartbeat_ivl = if v <= 0 {
+            lock_overlay!(sock_arc).heartbeat_ivl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -283,7 +292,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_HEARTBEAT_TTL => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().heartbeat_ttl = if v <= 0 {
+            lock_overlay!(sock_arc).heartbeat_ttl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -291,7 +300,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_HEARTBEAT_TIMEOUT => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().heartbeat_timeout = if v <= 0 {
+            lock_overlay!(sock_arc).heartbeat_timeout = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64))
@@ -299,7 +308,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_HANDSHAKE_IVL => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().handshake_ivl = if v <= 0 {
+            lock_overlay!(sock_arc).handshake_ivl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_millis(v as u64 * 1000))
@@ -307,29 +316,27 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_MAXMSGSIZE => {
             let v = read_i64(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().max_message_size =
-                if v < 0 { None } else { Some(v as usize) };
+            lock_overlay!(sock_arc).max_message_size = if v < 0 { None } else { Some(v as usize) };
         }
         ZMQ_ROUTER_MANDATORY => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().router_mandatory = v != 0;
+            lock_overlay!(sock_arc).router_mandatory = v != 0;
         }
         ZMQ_CONFLATE => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().conflate = v != 0;
+            lock_overlay!(sock_arc).conflate = v != 0;
         }
         ZMQ_TCP_KEEPALIVE => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().tcp_keepalive = v;
+            lock_overlay!(sock_arc).tcp_keepalive = v;
         }
         ZMQ_TCP_KEEPALIVE_CNT => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().tcp_keepalive_cnt =
-                if v <= 0 { None } else { Some(v as u32) };
+            lock_overlay!(sock_arc).tcp_keepalive_cnt = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_TCP_KEEPALIVE_IDLE => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().tcp_keepalive_idle = if v <= 0 {
+            lock_overlay!(sock_arc).tcp_keepalive_idle = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_secs(v as u64))
@@ -337,7 +344,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_TCP_KEEPALIVE_INTVL => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().tcp_keepalive_intvl = if v <= 0 {
+            lock_overlay!(sock_arc).tcp_keepalive_intvl = if v <= 0 {
                 None
             } else {
                 Some(Duration::from_secs(v as u64))
@@ -345,15 +352,15 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_SNDBUF => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().sndbuf = if v <= 0 { None } else { Some(v as usize) };
+            lock_overlay!(sock_arc).sndbuf = if v <= 0 { None } else { Some(v as usize) };
         }
         ZMQ_RCVBUF => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().rcvbuf = if v <= 0 { None } else { Some(v as usize) };
+            lock_overlay!(sock_arc).rcvbuf = if v <= 0 { None } else { Some(v as usize) };
         }
         ZMQ_XPUB_VERBOSE => {
             let v = read_i32(optval, optvallen);
-            sock_arc.overlay.lock().unwrap().xpub_verbose = v != 0;
+            lock_overlay!(sock_arc).xpub_verbose = v != 0;
         }
         ZMQ_SUBSCRIBE => {
             return do_subscribe(sock_arc, optval, optvallen, true);
@@ -363,7 +370,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_PLAIN_SERVER => {
             let v = read_i32(optval, optvallen);
-            let mut ov = sock_arc.overlay.lock().unwrap();
+            let mut ov = lock_overlay!(sock_arc);
             if v != 0 {
                 ov.mechanism = MechanismOverlay::PlainServer;
             } else if matches!(ov.mechanism, MechanismOverlay::PlainServer) {
@@ -372,7 +379,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_PLAIN_USERNAME => {
             let s = read_string(optval, optvallen);
-            let mut ov = sock_arc.overlay.lock().unwrap();
+            let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { username, .. } => *username = s,
                 _ => {
@@ -385,7 +392,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_PLAIN_PASSWORD => {
             let s = read_string(optval, optvallen);
-            let mut ov = sock_arc.overlay.lock().unwrap();
+            let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { password, .. } => *password = s,
                 _ => {
@@ -398,7 +405,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_CURVE_SERVER => {
             let v = read_i32(optval, optvallen);
-            let mut ov = sock_arc.overlay.lock().unwrap();
+            let mut ov = lock_overlay!(sock_arc);
             if v != 0 {
                 if !matches!(ov.mechanism, MechanismOverlay::CurveServer { .. }) {
                     ov.mechanism = MechanismOverlay::CurveServer {
@@ -411,7 +418,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_CURVE_PUBLICKEY => {
             let key = read_key(optval, optvallen);
-            let mut ov = sock_arc.overlay.lock().unwrap();
+            let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { public_key, .. } => *public_key = key,
                 _ => {
@@ -425,7 +432,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_CURVE_SECRETKEY => {
             let key = read_key(optval, optvallen);
-            let mut ov = sock_arc.overlay.lock().unwrap();
+            let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::CurveServer { secret_key, .. }
                 | MechanismOverlay::CurveClient { secret_key, .. } => *secret_key = key,
@@ -440,7 +447,7 @@ pub extern "C" fn zmq_setsockopt(
         }
         ZMQ_CURVE_SERVERKEY => {
             let key = read_key(optval, optvallen);
-            let mut ov = sock_arc.overlay.lock().unwrap();
+            let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { server_key, .. } => *server_key = key,
                 _ => {
@@ -453,31 +460,31 @@ pub extern "C" fn zmq_setsockopt(
             }
         }
         ZMQ_IPV6 => {
-            sock_arc.overlay.lock().unwrap().ipv6 = read_i32(optval, optvallen) != 0;
+            lock_overlay!(sock_arc).ipv6 = read_i32(optval, optvallen) != 0;
         }
         // Always-on in omq; accept silently.
         #[expect(clippy::match_same_arms)]
         ZMQ_ROUTER_HANDOVER => {}
         ZMQ_BACKLOG => {
-            sock_arc.overlay.lock().unwrap().backlog = read_i32(optval, optvallen);
+            lock_overlay!(sock_arc).backlog = read_i32(optval, optvallen);
         }
         ZMQ_IMMEDIATE => {
-            sock_arc.overlay.lock().unwrap().immediate = read_i32(optval, optvallen) != 0;
+            lock_overlay!(sock_arc).immediate = read_i32(optval, optvallen) != 0;
         }
         ZMQ_CONNECT_TIMEOUT => {
-            sock_arc.overlay.lock().unwrap().connect_timeout = read_i32(optval, optvallen);
+            lock_overlay!(sock_arc).connect_timeout = read_i32(optval, optvallen);
         }
         ZMQ_PROBE_ROUTER => {
-            sock_arc.overlay.lock().unwrap().probe_router = read_i32(optval, optvallen) != 0;
+            lock_overlay!(sock_arc).probe_router = read_i32(optval, optvallen) != 0;
         }
         ZMQ_REQ_CORRELATE => {
-            sock_arc.overlay.lock().unwrap().req_correlate = read_i32(optval, optvallen) != 0;
+            lock_overlay!(sock_arc).req_correlate = read_i32(optval, optvallen) != 0;
         }
         ZMQ_REQ_RELAXED => {
-            sock_arc.overlay.lock().unwrap().req_relaxed = read_i32(optval, optvallen) != 0;
+            lock_overlay!(sock_arc).req_relaxed = read_i32(optval, optvallen) != 0;
         }
         ZMQ_XPUB_NODROP => {
-            sock_arc.overlay.lock().unwrap().xpub_nodrop = read_i32(optval, optvallen) != 0;
+            lock_overlay!(sock_arc).xpub_nodrop = read_i32(optval, optvallen) != 0;
         }
         #[expect(clippy::match_same_arms)]
         ZMQ_AFFINITY
@@ -595,7 +602,7 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, v)
         }
         ZMQ_IDENTITY => {
-            let ov = sock_arc.overlay.lock().unwrap();
+            let ov = lock_overlay!(sock_arc);
             write_bytes(optval, optvallen, &ov.identity)
         }
         ZMQ_RCVMORE => {
@@ -716,15 +723,15 @@ pub extern "C" fn zmq_getsockopt(
             write_i64(optval, optvallen, v)
         }
         ZMQ_ROUTER_MANDATORY => {
-            let v = sock_arc.overlay.lock().unwrap().router_mandatory;
+            let v = lock_overlay!(sock_arc).router_mandatory;
             write_i32(optval, optvallen, i32::from(v))
         }
         ZMQ_CONFLATE => {
-            let v = sock_arc.overlay.lock().unwrap().conflate;
+            let v = lock_overlay!(sock_arc).conflate;
             write_i32(optval, optvallen, i32::from(v))
         }
         ZMQ_TCP_KEEPALIVE => {
-            let v = sock_arc.overlay.lock().unwrap().tcp_keepalive;
+            let v = lock_overlay!(sock_arc).tcp_keepalive;
             write_i32(optval, optvallen, v)
         }
         ZMQ_TCP_KEEPALIVE_CNT => {
@@ -773,7 +780,7 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, v)
         }
         ZMQ_XPUB_VERBOSE => {
-            let v = sock_arc.overlay.lock().unwrap().xpub_verbose;
+            let v = lock_overlay!(sock_arc).xpub_verbose;
             write_i32(optval, optvallen, i32::from(v))
         }
         ZMQ_LAST_ENDPOINT => {
@@ -782,7 +789,7 @@ pub extern "C" fn zmq_getsockopt(
             write_string(optval, optvallen, s.as_bytes())
         }
         ZMQ_MECHANISM => {
-            let v = match sock_arc.overlay.lock().unwrap().mechanism {
+            let v = match lock_overlay!(sock_arc).mechanism {
                 MechanismOverlay::Null => ZMQ_NULL,
                 MechanismOverlay::PlainServer | MechanismOverlay::PlainClient { .. } => ZMQ_PLAIN,
                 MechanismOverlay::CurveServer { .. } | MechanismOverlay::CurveClient { .. } => {
@@ -793,13 +800,13 @@ pub extern "C" fn zmq_getsockopt(
         }
         ZMQ_PLAIN_SERVER => {
             let v = matches!(
-                sock_arc.overlay.lock().unwrap().mechanism,
+                lock_overlay!(sock_arc).mechanism,
                 MechanismOverlay::PlainServer
             );
             write_i32(optval, optvallen, i32::from(v))
         }
         ZMQ_PLAIN_USERNAME => {
-            let ov = sock_arc.overlay.lock().unwrap();
+            let ov = lock_overlay!(sock_arc);
             if let MechanismOverlay::PlainClient { ref username, .. } = ov.mechanism {
                 write_string(optval, optvallen, username.as_bytes())
             } else {
@@ -807,7 +814,7 @@ pub extern "C" fn zmq_getsockopt(
             }
         }
         ZMQ_PLAIN_PASSWORD => {
-            let ov = sock_arc.overlay.lock().unwrap();
+            let ov = lock_overlay!(sock_arc);
             if let MechanismOverlay::PlainClient { ref password, .. } = ov.mechanism {
                 write_string(optval, optvallen, password.as_bytes())
             } else {
@@ -816,13 +823,13 @@ pub extern "C" fn zmq_getsockopt(
         }
         ZMQ_CURVE_SERVER => {
             let v = matches!(
-                sock_arc.overlay.lock().unwrap().mechanism,
+                lock_overlay!(sock_arc).mechanism,
                 MechanismOverlay::CurveServer { .. }
             );
             write_i32(optval, optvallen, i32::from(v))
         }
         ZMQ_CURVE_PUBLICKEY => {
-            let ov = sock_arc.overlay.lock().unwrap();
+            let ov = lock_overlay!(sock_arc);
             if let MechanismOverlay::CurveClient { ref public_key, .. } = ov.mechanism {
                 write_key(optval, optvallen, public_key)
             } else {
@@ -830,7 +837,7 @@ pub extern "C" fn zmq_getsockopt(
             }
         }
         ZMQ_CURVE_SECRETKEY => {
-            let ov = sock_arc.overlay.lock().unwrap();
+            let ov = lock_overlay!(sock_arc);
             let key = match ov.mechanism {
                 MechanismOverlay::CurveServer { ref secret_key, .. }
                 | MechanismOverlay::CurveClient { ref secret_key, .. } => secret_key,
@@ -839,7 +846,7 @@ pub extern "C" fn zmq_getsockopt(
             write_key(optval, optvallen, key)
         }
         ZMQ_CURVE_SERVERKEY => {
-            let ov = sock_arc.overlay.lock().unwrap();
+            let ov = lock_overlay!(sock_arc);
             if let MechanismOverlay::CurveClient { ref server_key, .. } = ov.mechanism {
                 write_key(optval, optvallen, server_key)
             } else {
@@ -847,40 +854,38 @@ pub extern "C" fn zmq_getsockopt(
             }
         }
         ZMQ_IPV6 => {
-            let v = sock_arc.overlay.lock().unwrap().ipv6;
+            let v = lock_overlay!(sock_arc).ipv6;
             write_i32(optval, optvallen, i32::from(v))
         }
         ZMQ_ROUTER_HANDOVER => write_i32(optval, optvallen, 1),
-        ZMQ_BACKLOG => write_i32(optval, optvallen, sock_arc.overlay.lock().unwrap().backlog),
+        ZMQ_BACKLOG => write_i32(optval, optvallen, lock_overlay!(sock_arc).backlog),
         ZMQ_IMMEDIATE => write_i32(
             optval,
             optvallen,
-            i32::from(sock_arc.overlay.lock().unwrap().immediate),
+            i32::from(lock_overlay!(sock_arc).immediate),
         ),
-        ZMQ_CONNECT_TIMEOUT => write_i32(
-            optval,
-            optvallen,
-            sock_arc.overlay.lock().unwrap().connect_timeout,
-        ),
+        ZMQ_CONNECT_TIMEOUT => {
+            write_i32(optval, optvallen, lock_overlay!(sock_arc).connect_timeout)
+        }
         ZMQ_PROBE_ROUTER => write_i32(
             optval,
             optvallen,
-            i32::from(sock_arc.overlay.lock().unwrap().probe_router),
+            i32::from(lock_overlay!(sock_arc).probe_router),
         ),
         ZMQ_REQ_CORRELATE => write_i32(
             optval,
             optvallen,
-            i32::from(sock_arc.overlay.lock().unwrap().req_correlate),
+            i32::from(lock_overlay!(sock_arc).req_correlate),
         ),
         ZMQ_REQ_RELAXED => write_i32(
             optval,
             optvallen,
-            i32::from(sock_arc.overlay.lock().unwrap().req_relaxed),
+            i32::from(lock_overlay!(sock_arc).req_relaxed),
         ),
         ZMQ_XPUB_NODROP => write_i32(
             optval,
             optvallen,
-            i32::from(sock_arc.overlay.lock().unwrap().xpub_nodrop),
+            i32::from(lock_overlay!(sock_arc).xpub_nodrop),
         ),
         ZMQ_AFFINITY => write_i64(optval, optvallen, 0),
         ZMQ_RATE | ZMQ_RECOVERY_IVL | ZMQ_MULTICAST_HOPS | ZMQ_TOS | ZMQ_TCP_MAXRT

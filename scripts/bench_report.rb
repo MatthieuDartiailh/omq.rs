@@ -24,11 +24,6 @@ JSONL_PATH = {
   'tokio'  => File.join(ROOT, 'omq-tokio',  'benches', 'results.jsonl'),
 }.freeze
 
-JSONL_PRIORITY_PATH = {
-  'compio' => File.join(ROOT, 'omq-compio', 'benches', 'results_priority.jsonl'),
-  'tokio'  => File.join(ROOT, 'omq-tokio',  'benches', 'results_priority.jsonl'),
-}.freeze
-
 # ── formatting helpers (local, not shared) ────────────────────────────────────
 
 def format_mbps_report(v)
@@ -66,11 +61,6 @@ rows_by_backend = JSONL_PATH.filter_map { |b, p|
   [b, BenchHelpers.load_jsonl(p, exclude_runs: options[:exclude_runs])]
 }.to_h
 
-priority_rows_by_backend = JSONL_PRIORITY_PATH.filter_map { |b, p|
-  next unless options[:backends].include?(b)
-  [b, BenchHelpers.load_jsonl(p, exclude_runs: options[:exclude_runs])]
-}.to_h
-
 # ── --update-benchmarks ─────────────────────────────────────────────────────
 
 if options[:update_benchmarks]
@@ -78,7 +68,6 @@ if options[:update_benchmarks]
     next '—' unless row
     [BenchHelpers.format_si(row[:msgs_s]), BenchHelpers.format_mbps(row[:mbps])].compact.join(' / ')
   }
-  PRIORITY_CELL = ->(row) { BenchHelpers.format_si(row&.dig(:msgs_s)) || '—' }
   MBPS_CELL     = ->(row) { row ? (BenchHelpers.format_mbps(row[:mbps]) || '—') : '—' }
 
   CORE = %w[inproc ipc tcp ws]
@@ -92,8 +81,6 @@ if options[:update_benchmarks]
     { stem: 'pub_sub',                pattern: 'pub_sub',           peers: 3 },
     { stem: 'router_dealer',          pattern: 'router_dealer',     peers: 3 },
     { stem: 'pair',                   pattern: 'pair',              peers: 1 },
-    { stem: 'push_pull_priority',     pattern: 'push_pull',        peers: 1,
-      cell_fmt: PRIORITY_CELL, source: :priority },
   ].freeze
 
   bm = File.read(BENCHMARKS_PATH)
@@ -102,8 +89,7 @@ if options[:update_benchmarks]
     %w[compio tokio].each do |backend|
       ts = d.fetch(:transports, CORE)
       ts = ts[backend] if ts.is_a?(Hash)
-      src = d[:source] == :priority ? priority_rows_by_backend : rows_by_backend
-      rows = src[backend] || []
+      rows = rows_by_backend[backend] || []
 
       lookup = ->(transport, sz) {
         BenchHelpers.latest_row(rows, pattern: d[:pattern], transport: transport,
@@ -111,8 +97,6 @@ if options[:update_benchmarks]
       }
 
       empty = "no #{d[:pattern]} #{backend} data"
-      empty += ' — run: bench_run.rb --with-priority' if d[:source] == :priority
-
       content = BenchHelpers.build_size_table(
         columns: ts, cell_fmt: d.fetch(:cell_fmt, THROUGHPUT_CELL),
         lookup: lookup, empty_msg: empty, sizes: BenchHelpers::TABLE_SIZES,

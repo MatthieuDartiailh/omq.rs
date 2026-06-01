@@ -375,7 +375,10 @@ pub extern "C" fn zmq_msg_send(
     };
 
     if !group.is_empty() {
-        sock_arc.send_accum.lock().unwrap().push(group);
+        let Ok(mut accum) = sock_arc.send_accum.lock() else {
+            return crate::error::fail(crate::error::ETERM);
+        };
+        accum.push(group);
     }
 
     let ret = crate::send_recv::send_bytes(sock_arc, bytes, flags);

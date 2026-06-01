@@ -5,6 +5,8 @@
 use std::net::TcpListener as StdTcpListener;
 use std::time::Duration;
 
+mod test_support;
+
 use bytes::Bytes;
 use omq_proto::endpoint::IpcPath;
 use omq_tokio::endpoint::Host;
@@ -65,7 +67,6 @@ fn ipc_ep(name: &str) -> Endpoint {
     Endpoint::Ipc(IpcPath::Filesystem(path))
 }
 
-const BIND_DELAY: Duration = Duration::from_millis(100);
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 // -- PUSH/PULL ---------------------------------------------------------------
@@ -74,10 +75,9 @@ async fn push_pull_connect_before_bind(ep: Endpoint) {
     let push = Socket::new(SocketType::Push, opts());
     push.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&pull).await;
 
     push.send(Message::single("late")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, pull.recv())
@@ -108,10 +108,9 @@ async fn req_rep_connect_before_bind(ep: Endpoint) {
     let req = Socket::new(SocketType::Req, opts());
     req.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&rep).await;
 
     req.send(Message::single("q")).await.unwrap();
     let q = tokio::time::timeout(TIMEOUT, rep.recv())
@@ -149,10 +148,9 @@ async fn pair_connect_before_bind(ep: Endpoint) {
     let a = Socket::new(SocketType::Pair, opts());
     a.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let b = Socket::new(SocketType::Pair, Options::default());
     b.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&b).await;
 
     a.send(Message::single("from-a")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, b.recv())
@@ -191,10 +189,9 @@ async fn pub_sub_connect_before_bind(ep: Endpoint) {
     sub.subscribe("x.").await.unwrap();
     sub.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     pub_.bind(ep).await.unwrap();
+    test_support::wait_for_subscribe(&pub_).await;
 
     let deadline = std::time::Instant::now() + TIMEOUT;
     loop {
@@ -242,10 +239,9 @@ async fn dealer_router_connect_before_bind(ep: Endpoint) {
     );
     dealer.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let router = Socket::new(SocketType::Router, Options::default());
     router.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&router).await;
 
     dealer.send(Message::single("hello")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, router.recv())
@@ -293,10 +289,9 @@ async fn client_server_connect_before_bind(ep: Endpoint) {
     );
     client.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let server = Socket::new(SocketType::Server, Options::default());
     server.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&server).await;
 
     client.send(Message::single("ping")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, server.recv())
@@ -341,10 +336,9 @@ async fn scatter_gather_connect_before_bind(ep: Endpoint) {
     let scatter = Socket::new(SocketType::Scatter, opts());
     scatter.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let gather = Socket::new(SocketType::Gather, Options::default());
     gather.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&gather).await;
 
     scatter.send(Message::single("late")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, gather.recv())
@@ -376,10 +370,9 @@ async fn radio_dish_connect_before_bind(ep: Endpoint) {
     dish.join("w").await.unwrap();
     dish.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let radio = Socket::new(SocketType::Radio, Options::default());
     radio.bind(ep).await.unwrap();
+    test_support::wait_for_join(&radio).await;
 
     let deadline = std::time::Instant::now() + TIMEOUT;
     loop {
@@ -432,13 +425,12 @@ async fn peer_connect_before_bind(ep: Endpoint) {
     let b = Socket::new(SocketType::Peer, opts().identity(Bytes::from_static(b"pb")));
     b.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let a = Socket::new(
         SocketType::Peer,
         Options::default().identity(Bytes::from_static(b"pa")),
     );
     a.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&a).await;
 
     let deadline = std::time::Instant::now() + TIMEOUT;
     loop {
@@ -484,10 +476,9 @@ async fn channel_connect_before_bind(ep: Endpoint) {
     let a = Socket::new(SocketType::Channel, opts());
     a.connect(ep.clone()).await.unwrap();
 
-    tokio::time::sleep(BIND_DELAY).await;
-
     let b = Socket::new(SocketType::Channel, Options::default());
     b.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&b).await;
 
     a.send(Message::single("from-a")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, b.recv())

@@ -329,17 +329,16 @@ impl Socket {
             .expect("udp_dialers lock")
             .clear();
         Self::drain_shared_queue(&self.inner, deadline).await;
-        if let Some(_tx) = self
+        if self
             .inner
             .shared_send_tx
             .write()
             .expect("shared_send_tx lock")
             .take()
+            .is_some()
+            && let Some(rx) = &self.inner.shared_send_rx
         {
-            #[cfg(not(feature = "priority"))]
-            if let Some(rx) = &self.inner.shared_send_rx {
-                rx.close();
-            }
+            rx.close();
         }
         loop {
             {
@@ -386,7 +385,6 @@ impl Socket {
 
         // Drop cached DirectIoState refs so the Arc can reach zero
         // once the driver task exits and drops its own ref.
-        #[cfg(not(feature = "priority"))]
         unsafe {
             *self.inner.direct_send_io.get() = None;
         }
@@ -414,23 +412,10 @@ impl Socket {
         deadline: Option<std::time::Instant>,
     ) {
         let has_pending = || {
-            if inner
+            inner
                 .shared_send_rx
                 .as_ref()
                 .is_some_and(|rx| !rx.is_empty())
-            {
-                return true;
-            }
-            #[cfg(feature = "priority")]
-            if !inner
-                .pre_connect_buf
-                .lock()
-                .expect("pre_connect_buf")
-                .is_empty()
-            {
-                return true;
-            }
-            false
         };
         while has_pending() && !inner.dialers.read().expect("dialers lock").is_empty() {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {

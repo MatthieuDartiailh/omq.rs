@@ -21,7 +21,6 @@ workspace = true
 #   blake3zmq omq-native BLAKE3+ChaCha20 mechanism
 #   lz4       lz4+tcp:// transport (bundles liblz4; needs cc)
 #   zstd      zstd+tcp:// transport (bundles libzstd; needs cc)
-#   priority  strict per-pipe priority on connect_with
 default = []
 curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:subtle", "dep:x25519-dalek", "dep:zeroize"]
 blake3zmq = [
@@ -34,7 +33,6 @@ plain = []
 lz4 = ["dep:lz4-sys"]
 zstd = ["dep:zstd-safe"]
 ws = []
-priority = []
 
 [dependencies]
 blake3 = { version = "1", optional = true }

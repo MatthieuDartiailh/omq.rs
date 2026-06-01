@@ -75,6 +75,16 @@ pub enum MonitorEvent {
         peer: PeerInfo,
         reason: DisconnectReason,
     },
+    /// A remote peer sent a SUBSCRIBE command. Emitted on PUB/XPUB
+    /// sockets when the subscription is registered in the send-side
+    /// prefix filter.
+    SubscribeReceived { prefix: Bytes },
+    /// A remote peer sent a CANCEL command (unsubscribe).
+    UnsubscribeReceived { prefix: Bytes },
+    /// A remote peer sent a JOIN command (RADIO/DISH group membership).
+    JoinReceived { group: Bytes },
+    /// A remote peer sent a LEAVE command.
+    LeaveReceived { group: Bytes },
     /// A post-handshake ZMTP command from the peer that the routing
     /// layer doesn't consume itself: `ERROR` and any `Unknown` extension
     /// command. SUBSCRIBE / CANCEL / JOIN / LEAVE / PING / PONG are

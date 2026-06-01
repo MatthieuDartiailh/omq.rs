@@ -2,6 +2,8 @@
 
 //! Pub/sub over `lz4+tcp://` — used to verify the README example.
 
+mod test_support;
+
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
@@ -42,8 +44,8 @@ async fn pub_sub_prefix_filter() {
     subscriber.connect(ep).await.unwrap();
     subscriber.subscribe("news.").await.unwrap();
 
-    // Let the SUBSCRIBE command travel from SUB -> PUB over the wire.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for the SUBSCRIBE command to travel from SUB -> PUB over the wire.
+    test_support::wait_for_subscribe(&publisher).await;
 
     publisher
         .send(Message::multipart(["news.sports", "ball scores"]))

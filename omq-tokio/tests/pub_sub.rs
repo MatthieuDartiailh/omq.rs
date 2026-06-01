@@ -8,10 +8,6 @@ fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
-async fn wait_ready() {
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
 #[tokio::test]
 async fn pub_sub_simple_prefix_match() {
     let ep = inproc_ep("ps-simple");
@@ -21,9 +17,6 @@ async fn pub_sub_simple_prefix_match() {
     let subscriber = Socket::new(SocketType::Sub, Options::default());
     subscriber.connect(ep).await.unwrap();
     subscriber.subscribe("news.").await.unwrap();
-    // SUBSCRIBE command has to reach PUB before we publish anything that
-    // depends on it.
-    wait_ready().await;
 
     // Matches: prefix "news."
     publisher
@@ -75,7 +68,6 @@ async fn pub_sub_late_subscriber_misses_earlier() {
     let subscriber = Socket::new(SocketType::Sub, Options::default());
     subscriber.connect(ep).await.unwrap();
     subscriber.subscribe("").await.unwrap(); // match all
-    wait_ready().await;
 
     publisher
         .send(Message::single("post-subscribe"))
@@ -102,7 +94,6 @@ async fn pub_sub_subscribe_all_with_empty_prefix() {
     let subscriber = Socket::new(SocketType::Sub, Options::default());
     subscriber.connect(ep).await.unwrap();
     subscriber.subscribe(bytes::Bytes::new()).await.unwrap();
-    wait_ready().await;
 
     for t in ["a", "bb", "ccc", "quux"] {
         publisher
@@ -129,7 +120,6 @@ async fn pub_sub_unsubscribe() {
     subscriber.connect(ep).await.unwrap();
     subscriber.subscribe("a").await.unwrap();
     subscriber.subscribe("b").await.unwrap();
-    wait_ready().await;
 
     publisher.send(Message::single("apple")).await.unwrap();
     publisher.send(Message::single("banana")).await.unwrap();
@@ -147,7 +137,7 @@ async fn pub_sub_unsubscribe() {
     assert!(got.contains(&bytes::Bytes::from_static(b"banana")));
 
     subscriber.unsubscribe("b").await.unwrap();
-    wait_ready().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     publisher.send(Message::single("apricot")).await.unwrap();
     publisher.send(Message::single("blueberry")).await.unwrap();
@@ -174,7 +164,6 @@ async fn sub_replays_subscriptions_on_new_peer() {
     let publisher = Socket::new(SocketType::Pub, Options::default());
     publisher.bind(ep.clone()).await.unwrap();
     subscriber.connect(ep).await.unwrap();
-    wait_ready().await;
 
     publisher.send(Message::single("x.hello")).await.unwrap();
     publisher.send(Message::single("y.nope")).await.unwrap();

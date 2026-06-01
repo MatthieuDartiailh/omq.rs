@@ -190,7 +190,7 @@ fn map_socket_type(t: c_int) -> Option<SocketType> {
 }
 
 /// Run `f` on the io thread identified by `thread_idx` and wait for the result.
-pub(crate) fn run_on<F, T>(ctx: &Arc<OmqContext>, thread_idx: usize, f: F) -> T
+pub(crate) fn run_on<F, T>(ctx: &Arc<OmqContext>, thread_idx: usize, f: F) -> Result<T, ()>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -202,7 +202,7 @@ where
             let _ = otx.send(f());
         }),
     );
-    orx.recv().expect("omq-libzmq: io thread gone")
+    orx.recv().map_err(|_| ())
 }
 
 /// Run an async op on the socket from within the io thread.
@@ -236,7 +236,7 @@ where
             }
         }),
     );
-    orx.recv().expect("omq-libzmq: io thread gone").ok_or(())
+    orx.recv().map_err(|_| ())?.ok_or(())
 }
 
 fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {
@@ -395,7 +395,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
         let id = sock.id;
         let ctx = &sock.ctx;
         let thread_idx = sock.thread_idx;
-        run_on(ctx, thread_idx, move || {
+        let _ = run_on(ctx, thread_idx, move || {
             // Once this job runs, the materializing thread's run_on
             // has already completed (jobs are FIFO on the io thread).
             assert!(
@@ -405,7 +405,9 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
         });
         return;
     }
-    let overlay = sock.overlay.lock().unwrap();
+    let Ok(overlay) = sock.overlay.lock() else {
+        return;
+    };
     let opts = overlay.to_options();
     let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
     let send_hwm = overlay.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
@@ -418,14 +420,16 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
 
     let socket_type = sock.socket_type;
     let id = sock.id;
-    let close_rx = sock.close_rx.lock().unwrap().take().unwrap();
+    let Some(close_rx) = sock.close_rx.lock().ok().and_then(|mut g| g.take()) else {
+        return;
+    };
 
     #[cfg(target_os = "linux")]
     let recv_signal_fd = sock.notify.recv_fd;
     #[cfg(not(target_os = "linux"))]
     let recv_signal_fd = sock.notify.recv_write;
 
-    run_on(&sock.ctx, sock.thread_idx, move || {
+    let _ = run_on(&sock.ctx, sock.thread_idx, move || {
         let inner = Rc::new(omq_compio::Socket::new(socket_type, opts));
         REG.with(|r| r.borrow_mut().insert(id, inner.clone()));
 
@@ -477,7 +481,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // Remove socket from registry on its io thread.
     let id = arc.id;
     let thread_idx = arc.thread_idx;
-    run_on(&arc.ctx, thread_idx, move || {
+    let _ = run_on(&arc.ctx, thread_idx, move || {
         REG.with(|r| r.borrow_mut().remove(&id));
     });
 

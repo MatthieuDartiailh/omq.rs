@@ -4,19 +4,13 @@
 
 #![cfg(feature = "ws")]
 
-use std::net::{IpAddr, Ipv4Addr, TcpListener as StdTcpListener};
+use std::net::{IpAddr, Ipv4Addr};
 use std::thread;
 use std::time::Duration;
 
 use bytes::Bytes;
+use omq_proto::MonitorEvent;
 use omq_proto::endpoint::Host;
-
-fn free_tcp_port() -> u16 {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
 
 fn ws_tokio(port: u16) -> omq_tokio::Endpoint {
     omq_tokio::Endpoint::Ws {
@@ -36,16 +30,25 @@ fn ws_compio(port: u16) -> omq_compio::Endpoint {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tokio_push_to_compio_pull_ws() {
-    let port = free_tcp_port();
-    let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+    let (port_tx, port_rx) = std::sync::mpsc::channel();
 
     let pull_thread = thread::spawn(move || {
         let rt = compio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
             use omq_compio::{Options, Socket, SocketType};
             let pull = Socket::new(SocketType::Pull, Options::default());
-            pull.bind(ws_compio(port)).await.unwrap();
-            let _ = bound_tx.send(());
+            let mut mon = pull.monitor();
+            pull.bind(ws_compio(0)).await.unwrap();
+            let port = loop {
+                match mon.recv().await {
+                    Ok(MonitorEvent::Listening {
+                        endpoint: omq_compio::Endpoint::Ws { port, .. },
+                    }) => break port,
+                    Ok(_) => {}
+                    other => panic!("expected Listening, got {other:?}"),
+                }
+            };
+            let _ = port_tx.send(port);
             let mut got = Vec::new();
             for _ in 0..3 {
                 let msg = compio::time::timeout(Duration::from_secs(5), pull.recv())
@@ -58,7 +61,7 @@ async fn tokio_push_to_compio_pull_ws() {
         })
     });
 
-    tokio::task::spawn_blocking(move || bound_rx.recv().unwrap())
+    let port = tokio::task::spawn_blocking(move || port_rx.recv().unwrap())
         .await
         .unwrap();
 
@@ -83,10 +86,18 @@ async fn tokio_push_to_compio_pull_ws() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compio_push_to_tokio_pull_ws() {
-    let port = free_tcp_port();
-
     let pull = omq_tokio::Socket::new(omq_tokio::SocketType::Pull, omq_tokio::Options::default());
-    pull.bind(ws_tokio(port)).await.unwrap();
+    let mut mon = pull.monitor();
+    pull.bind(ws_tokio(0)).await.unwrap();
+    let port = loop {
+        match mon.recv().await {
+            Ok(omq_tokio::MonitorEvent::Listening {
+                endpoint: omq_tokio::Endpoint::Ws { port, .. },
+            }) => break port,
+            Ok(_) => {}
+            other => panic!("expected Listening, got {other:?}"),
+        }
+    };
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let push_thread = thread::spawn(move || {

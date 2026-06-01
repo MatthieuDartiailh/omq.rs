@@ -14,7 +14,6 @@
 #![allow(clippy::match_wild_err_arm)]
 
 use std::io::{BufRead, BufReader, Read};
-use std::net::TcpListener as StdTcpListener;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -43,17 +42,26 @@ fn skip_if_no_pyzmq_curve() -> bool {
     false
 }
 
-fn free_tcp_port() -> u16 {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 fn loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
         host: Host::Ip("127.0.0.1".parse().unwrap()),
         port,
+    }
+}
+
+/// Bind a socket to an ephemeral loopback port and return the
+/// kernel-assigned port number, read from the monitor stream.
+async fn bind_loopback(sock: &Socket) -> u16 {
+    let mut mon = sock.monitor();
+    sock.bind(loopback(0)).await.unwrap();
+    loop {
+        match mon.recv().await {
+            Ok(MonitorEvent::Listening {
+                endpoint: Endpoint::Tcp { port, .. },
+            }) => return port,
+            Ok(_) => {}
+            other => panic!("expected Listening, got {other:?}"),
+        }
     }
 }
 
@@ -99,9 +107,8 @@ async fn rust_curve_pull_from_pyzmq_push() {
     let client_pub_z85 = client_kp.public.to_z85();
     let client_sec_z85 = client_kp.secret.to_z85();
 
-    let port = free_tcp_port();
     let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
-    pull.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pull).await;
 
     let script = r#"
 import os, sys, zmq
@@ -177,8 +184,8 @@ async fn rust_curve_push_to_pyzmq_pull() {
     let server_sec_z85 = server_kp.secret.to_z85();
     let server_pub_for_client = server_kp.public;
 
-    let port = free_tcp_port();
-
+    // pyzmq PULL server: bind to an ephemeral port, print the port as
+    // the first stdout line, recv 5 msgs, print each, then close.
     let script = r#"
 import os, sys, zmq
 ctx = zmq.Context.instance()
@@ -186,8 +193,8 @@ s = ctx.socket(zmq.PULL)
 s.curve_server = True
 s.curve_secretkey = os.environ['SRV_SEC'].encode()
 s.curve_publickey = os.environ['SRV_PUB'].encode()
-s.bind(f"tcp://127.0.0.1:{os.environ['PORT']}")
-sys.stdout.write("READY\n"); sys.stdout.flush()
+port = s.bind_to_random_port("tcp://127.0.0.1")
+sys.stdout.write(f"{port}\n"); sys.stdout.flush()
 for _ in range(5):
     sys.stdout.write(s.recv().decode() + "\n"); sys.stdout.flush()
 s.close(linger=0)
@@ -196,7 +203,6 @@ ctx.term()
 
     let mut child = Command::new("python3")
         .args(["-c", script])
-        .env("PORT", port.to_string())
         .env("SRV_PUB", &server_pub_z85)
         .env("SRV_SEC", &server_sec_z85)
         .stdout(Stdio::piped())
@@ -208,13 +214,13 @@ ctx.term()
     let mut stderr = child.stderr.take().unwrap();
     // compio is single-threaded; drive the blocking child stdout from a
     // worker thread and signal back over channels.
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (port_tx, port_rx) = mpsc::channel();
     let (lines_tx, lines_rx) = mpsc::channel();
     thread::spawn(move || {
         let mut r = BufReader::new(stdout);
         let mut first = String::new();
         let _ = r.read_line(&mut first);
-        let _ = ready_tx.send(first.trim() == "READY");
+        let _ = port_tx.send(first.trim().to_string());
         let mut lines = Vec::new();
         for _ in 0..5 {
             let mut buf = String::new();
@@ -226,23 +232,21 @@ ctx.term()
         let _ = lines_tx.send(lines);
     });
 
-    let ready = compio::time::timeout(Duration::from_secs(5), async move {
-        // Block-on-channel without parking the runtime: poll with try_recv +
-        // a yielded delay. The bind happens synchronously in pyzmq so this
-        // resolves within milliseconds in practice.
+    let port: u16 = compio::time::timeout(Duration::from_secs(5), async move {
         loop {
-            match ready_rx.try_recv() {
+            match port_rx.try_recv() {
                 Ok(v) => return v,
                 Err(mpsc::TryRecvError::Empty) => {
                     compio::time::sleep(Duration::from_millis(10)).await;
                 }
-                Err(_) => return false,
+                Err(_) => return String::new(),
             }
         }
     })
     .await
-    .expect("python bind timed out");
-    assert!(ready, "python pull did not signal READY");
+    .expect("python bind timed out")
+    .parse()
+    .expect("python did not print a valid port");
 
     let push = Socket::new(
         SocketType::Push,
@@ -299,9 +303,8 @@ async fn rust_curve_pull_rejects_null_pyzmq_push() {
     }
 
     let server_kp = CurveKeypair::generate();
-    let port = free_tcp_port();
     let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
-    pull.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pull).await;
 
     let script = r#"
 import os, zmq
@@ -356,9 +359,8 @@ async fn rust_curve_pub_to_pyzmq_sub() {
     let client_pub_z85 = client_kp.public.to_z85();
     let client_sec_z85 = client_kp.secret.to_z85();
 
-    let port = free_tcp_port();
     let pub_sock = Socket::new(SocketType::Pub, Options::default().curve_server(server_kp));
-    pub_sock.bind(loopback(port)).await.unwrap();
+    let port = bind_loopback(&pub_sock).await;
 
     let script = r#"
 import os, sys, zmq
@@ -431,8 +433,9 @@ async fn pyzmq_curve_pub_to_rust_sub() {
     let server_sec_z85 = server_kp.secret.to_z85();
     let server_pub_for_client = server_kp.public;
 
-    let port = free_tcp_port();
-
+    // pyzmq PUB server: bind to an ephemeral port, print the port as
+    // the first stdout line, then publish 60 messages with 50ms spacing
+    // (enough for the SUB's subscription to propagate).
     let script = r#"
 import os, sys, zmq, time
 ctx = zmq.Context.instance()
@@ -440,8 +443,8 @@ s = ctx.socket(zmq.PUB)
 s.curve_server = True
 s.curve_secretkey = os.environ['SRV_SEC'].encode()
 s.curve_publickey = os.environ['SRV_PUB'].encode()
-s.bind(f"tcp://127.0.0.1:{os.environ['PORT']}")
-sys.stdout.write("READY\n"); sys.stdout.flush()
+port = s.bind_to_random_port("tcp://127.0.0.1")
+sys.stdout.write(f"{port}\n"); sys.stdout.flush()
 for i in range(60):
     s.send(f"msg-{i}".encode())
     time.sleep(0.05)
@@ -451,7 +454,6 @@ ctx.term()
 
     let mut child = Command::new("python3")
         .args(["-c", script])
-        .env("PORT", port.to_string())
         .env("SRV_PUB", &server_pub_z85)
         .env("SRV_SEC", &server_sec_z85)
         .stdout(Stdio::piped())
@@ -461,27 +463,28 @@ ctx.term()
 
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (port_tx, port_rx) = mpsc::channel();
     thread::spawn(move || {
         let mut r = BufReader::new(stdout);
         let mut first = String::new();
         let _ = r.read_line(&mut first);
-        let _ = ready_tx.send(first.trim() == "READY");
+        let _ = port_tx.send(first.trim().to_string());
     });
-    let ready = compio::time::timeout(Duration::from_secs(5), async move {
+    let port: u16 = compio::time::timeout(Duration::from_secs(5), async move {
         loop {
-            match ready_rx.try_recv() {
+            match port_rx.try_recv() {
                 Ok(v) => return v,
                 Err(mpsc::TryRecvError::Empty) => {
                     compio::time::sleep(Duration::from_millis(10)).await;
                 }
-                Err(_) => return false,
+                Err(_) => return String::new(),
             }
         }
     })
     .await
-    .expect("python bind timed out");
-    assert!(ready, "python pub did not signal READY");
+    .expect("python bind timed out")
+    .parse()
+    .expect("python did not print a valid port");
 
     let sub = Socket::new(
         SocketType::Sub,

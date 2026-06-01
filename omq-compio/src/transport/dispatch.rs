@@ -43,13 +43,26 @@ async fn handle_sub_cmd(
         Command::Subscribe(p) | Command::Cancel(p) => p.clone(),
         _ => return Ok(()),
     };
-    if let Some(ctx) = monitor_ctx
-        && let Some(set) = &ctx.peer_sub
-    {
-        let mut s = set.write().expect("peer_sub lock");
-        match cmd {
-            Command::Subscribe(_) => s.add(&prefix),
-            Command::Cancel(_) => s.remove(&prefix),
+    if let Some(ctx) = monitor_ctx {
+        if let Some(set) = &ctx.peer_sub {
+            let mut s = set.write().expect("peer_sub lock");
+            match &cmd {
+                Command::Subscribe(_) => s.add(&prefix),
+                Command::Cancel(_) => s.remove(&prefix),
+                _ => {}
+            }
+        }
+        match &cmd {
+            Command::Subscribe(_) => {
+                ctx.monitor.publish(MonitorEvent::SubscribeReceived {
+                    prefix: prefix.clone(),
+                });
+            }
+            Command::Cancel(_) => {
+                ctx.monitor.publish(MonitorEvent::UnsubscribeReceived {
+                    prefix: prefix.clone(),
+                });
+            }
             _ => {}
         }
     }
@@ -72,17 +85,19 @@ pub(super) async fn dispatch_command(
             handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, cmd).await?;
         }
         Command::Join(group) => {
-            if let Some(ctx) = monitor_ctx
-                && let Some(set) = &ctx.peer_groups
-            {
-                set.write().expect("peer_groups lock").insert(group);
+            if let Some(ctx) = monitor_ctx {
+                if let Some(set) = &ctx.peer_groups {
+                    set.write().expect("peer_groups lock").insert(group.clone());
+                }
+                ctx.monitor.publish(MonitorEvent::JoinReceived { group });
             }
         }
         Command::Leave(group) => {
-            if let Some(ctx) = monitor_ctx
-                && let Some(set) = &ctx.peer_groups
-            {
-                set.write().expect("peer_groups lock").remove(&group);
+            if let Some(ctx) = monitor_ctx {
+                if let Some(set) = &ctx.peer_groups {
+                    set.write().expect("peer_groups lock").remove(&group);
+                }
+                ctx.monitor.publish(MonitorEvent::LeaveReceived { group });
             }
         }
         Command::Error { reason } => {

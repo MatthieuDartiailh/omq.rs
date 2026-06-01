@@ -1,5 +1,7 @@
 //! REQ/REP envelope handling.
 
+mod test_support;
+
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -125,7 +127,7 @@ async fn req_rep_1000_cycles_tcp() {
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&req).await;
 
     let rep_task = compio::runtime::spawn(async move {
         for _ in 0..CYCLES {

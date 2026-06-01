@@ -3,6 +3,8 @@
 //! channel full). Previously `close()` could hang indefinitely because
 //! `send_async(Close)` blocked on a full command channel.
 
+mod test_support;
+
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -23,7 +25,7 @@ async fn close_push_pull_under_backpressure() {
 
     let push = Socket::new(SocketType::Push, Options::default().send_hwm(4));
     push.connect(ep).await.unwrap();
-    compio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&push).await;
 
     // Saturate the pipeline: send until both hwm and TCP buffer fill.
     for _ in 0..100 {
@@ -51,9 +53,9 @@ async fn close_many_pairs_no_hang() {
         let ep = pull.bind(tcp_ep(0)).await.unwrap();
         let push = Socket::new(SocketType::Push, Options::default().send_hwm(4));
         push.connect(ep).await.unwrap();
+        test_support::wait_for_handshake(&push).await;
         pairs.push((push, pull));
     }
-    compio::time::sleep(Duration::from_millis(50)).await;
 
     for (push, _pull) in &pairs {
         for _ in 0..50 {

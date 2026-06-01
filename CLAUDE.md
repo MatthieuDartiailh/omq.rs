@@ -77,7 +77,6 @@ revs link two `compio-runtime` instances -> TLS mismatch panic.
 | `blake3zmq` | BLAKE3 + ChaCha20 mechanism | `blake3`, `chacha20-blake3` (git, AVX2), `x25519-dalek` |
 | `lz4` | `lz4+tcp://` transform | `lz4-sys` (needs `cc`) |
 | `zstd` | `zstd+tcp://` transform | `zstd-safe` (needs `cc`) |
-| `priority` | per-pipe priority tiers | - |
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |
 

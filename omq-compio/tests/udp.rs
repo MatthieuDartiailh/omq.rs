@@ -45,9 +45,6 @@ async fn radio_to_dish_matching_group_delivers() {
 
     let radio = Socket::new(SocketType::Radio, Options::default());
     radio.connect(ep).await.unwrap();
-
-    // Tiny pause so the RADIO sender is wired before the first
-    // datagram fires.
     compio::time::sleep(Duration::from_millis(20)).await;
 
     radio
