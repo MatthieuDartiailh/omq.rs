@@ -1,10 +1,10 @@
 //! Connect-before-bind: the dialer connects before the listener binds.
 //! The dialer must retry until the listener appears, then deliver messages.
-//! Tested across inproc, IPC, TCP, lz4+tcp, and zstd+tcp for PUSH/PULL,
-//! REQ/REP, and PAIR.
+//! Tested across inproc, IPC, and TCP for every socket-type pair.
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use omq_compio::endpoint::IpcPath;
 use omq_compio::{Endpoint, Message, Options, ReconnectPolicy, Socket, SocketType};
 
@@ -181,6 +181,343 @@ async fn pair_connect_before_bind_tcp() {
     pair_connect_before_bind(tcp_ep(free_tcp_port())).await;
 }
 
+// -- PUB/SUB -----------------------------------------------------------------
+
+async fn pub_sub_connect_before_bind(ep: Endpoint) {
+    let sub = Socket::new(SocketType::Sub, opts());
+    sub.subscribe("x.").await.unwrap();
+    sub.connect(ep.clone()).await.unwrap();
+
+    compio::time::sleep(BIND_DELAY).await;
+
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    pub_.bind(ep).await.unwrap();
+
+    // Probe until the subscription propagates.
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        pub_.send(Message::single("x.hit")).await.unwrap();
+        if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), sub.recv()).await {
+            assert_eq!(m.part_bytes(0).unwrap(), &b"x.hit"[..]);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "subscription never propagated"
+        );
+    }
+
+    pub_.send(Message::single("y.miss")).await.unwrap();
+    pub_.send(Message::single("x.second")).await.unwrap();
+    let m = compio::time::timeout(TIMEOUT, sub.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"x.second"[..]);
+}
+
+#[compio::test]
+async fn pub_sub_connect_before_bind_inproc() {
+    pub_sub_connect_before_bind(inproc_ep("cbb-ps-comp-inproc")).await;
+}
+
+#[compio::test]
+async fn pub_sub_connect_before_bind_ipc() {
+    pub_sub_connect_before_bind(ipc_ep("cbb-ps-comp")).await;
+}
+
+#[compio::test]
+async fn pub_sub_connect_before_bind_tcp() {
+    pub_sub_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+// -- DEALER/ROUTER -----------------------------------------------------------
+
+async fn dealer_router_connect_before_bind(ep: Endpoint) {
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        opts().identity(Bytes::from_static(b"d1")),
+    );
+    dealer.connect(ep.clone()).await.unwrap();
+
+    compio::time::sleep(BIND_DELAY).await;
+
+    let router = Socket::new(SocketType::Router, Options::default());
+    router.bind(ep).await.unwrap();
+
+    dealer.send(Message::single("hello")).await.unwrap();
+    let m = compio::time::timeout(TIMEOUT, router.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"hello"[..]);
+
+    router
+        .send(Message::multipart([
+            Bytes::from_static(b"d1"),
+            Bytes::from_static(b"world"),
+        ]))
+        .await
+        .unwrap();
+    let m = compio::time::timeout(TIMEOUT, dealer.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"world"[..]);
+}
+
+#[compio::test]
+async fn dealer_router_connect_before_bind_inproc() {
+    dealer_router_connect_before_bind(inproc_ep("cbb-dr-comp-inproc")).await;
+}
+
+#[compio::test]
+async fn dealer_router_connect_before_bind_ipc() {
+    dealer_router_connect_before_bind(ipc_ep("cbb-dr-comp")).await;
+}
+
+#[compio::test]
+async fn dealer_router_connect_before_bind_tcp() {
+    dealer_router_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+// -- CLIENT/SERVER -----------------------------------------------------------
+
+async fn client_server_connect_before_bind(ep: Endpoint) {
+    let client = Socket::new(
+        SocketType::Client,
+        opts().identity(Bytes::from_static(b"c1")),
+    );
+    client.connect(ep.clone()).await.unwrap();
+
+    compio::time::sleep(BIND_DELAY).await;
+
+    let server = Socket::new(SocketType::Server, Options::default());
+    server.bind(ep).await.unwrap();
+
+    client.send(Message::single("ping")).await.unwrap();
+    let m = compio::time::timeout(TIMEOUT, server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"c1"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"ping"[..]);
+
+    server
+        .send(Message::multipart([
+            Bytes::from_static(b"c1"),
+            Bytes::from_static(b"pong"),
+        ]))
+        .await
+        .unwrap();
+    let m = compio::time::timeout(TIMEOUT, client.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"pong"[..]);
+}
+
+#[compio::test]
+async fn client_server_connect_before_bind_inproc() {
+    client_server_connect_before_bind(inproc_ep("cbb-cs-comp-inproc")).await;
+}
+
+#[compio::test]
+async fn client_server_connect_before_bind_ipc() {
+    client_server_connect_before_bind(ipc_ep("cbb-cs-comp")).await;
+}
+
+#[compio::test]
+async fn client_server_connect_before_bind_tcp() {
+    client_server_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+// -- SCATTER/GATHER ----------------------------------------------------------
+
+async fn scatter_gather_connect_before_bind(ep: Endpoint) {
+    let scatter = Socket::new(SocketType::Scatter, opts());
+    scatter.connect(ep.clone()).await.unwrap();
+
+    compio::time::sleep(BIND_DELAY).await;
+
+    let gather = Socket::new(SocketType::Gather, Options::default());
+    gather.bind(ep).await.unwrap();
+
+    scatter.send(Message::single("late")).await.unwrap();
+    let m = compio::time::timeout(TIMEOUT, gather.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"late"[..]);
+}
+
+#[compio::test]
+async fn scatter_gather_connect_before_bind_inproc() {
+    scatter_gather_connect_before_bind(inproc_ep("cbb-sg-comp-inproc")).await;
+}
+
+#[compio::test]
+async fn scatter_gather_connect_before_bind_ipc() {
+    scatter_gather_connect_before_bind(ipc_ep("cbb-sg-comp")).await;
+}
+
+#[compio::test]
+async fn scatter_gather_connect_before_bind_tcp() {
+    scatter_gather_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+// -- RADIO/DISH --------------------------------------------------------------
+
+async fn radio_dish_connect_before_bind(ep: Endpoint) {
+    let dish = Socket::new(SocketType::Dish, opts());
+    dish.join("w").await.unwrap();
+    dish.connect(ep.clone()).await.unwrap();
+
+    compio::time::sleep(BIND_DELAY).await;
+
+    let radio = Socket::new(SocketType::Radio, Options::default());
+    radio.bind(ep).await.unwrap();
+
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        radio.send(Message::multipart(["w", "hit"])).await.unwrap();
+        if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), dish.recv()).await {
+            assert_eq!(m.part_bytes(0).unwrap(), &b"w"[..]);
+            assert_eq!(m.part_bytes(1).unwrap(), &b"hit"[..]);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "join never propagated"
+        );
+    }
+
+    radio
+        .send(Message::multipart(["other", "miss"]))
+        .await
+        .unwrap();
+    radio
+        .send(Message::multipart(["w", "second"]))
+        .await
+        .unwrap();
+    let m = compio::time::timeout(TIMEOUT, dish.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"w"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"second"[..]);
+}
+
+#[compio::test]
+async fn radio_dish_connect_before_bind_inproc() {
+    radio_dish_connect_before_bind(inproc_ep("cbb-rd-comp-inproc")).await;
+}
+
+#[compio::test]
+async fn radio_dish_connect_before_bind_ipc() {
+    radio_dish_connect_before_bind(ipc_ep("cbb-rd-comp")).await;
+}
+
+#[compio::test]
+async fn radio_dish_connect_before_bind_tcp() {
+    radio_dish_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+// -- PEER --------------------------------------------------------------------
+
+async fn peer_connect_before_bind(ep: Endpoint) {
+    let b = Socket::new(SocketType::Peer, opts().identity(Bytes::from_static(b"pb")));
+    b.connect(ep.clone()).await.unwrap();
+
+    compio::time::sleep(BIND_DELAY).await;
+
+    let a = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"pa")),
+    );
+    a.bind(ep).await.unwrap();
+
+    // PEER routes by identity. Probe until B discovers A's identity.
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        b.send(Message::multipart(["pa", "from-b"])).await.unwrap();
+        if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), a.recv()).await {
+            assert_eq!(m.part_bytes(0).unwrap(), &b"pb"[..]);
+            assert_eq!(m.part_bytes(1).unwrap(), &b"from-b"[..]);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "peer identity never discovered"
+        );
+    }
+
+    a.send(Message::multipart(["pb", "from-a"])).await.unwrap();
+    let m = compio::time::timeout(TIMEOUT, b.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"pa"[..]);
+    assert_eq!(m.part_bytes(1).unwrap(), &b"from-a"[..]);
+}
+
+#[compio::test]
+async fn peer_connect_before_bind_inproc() {
+    peer_connect_before_bind(inproc_ep("cbb-peer-comp-inproc")).await;
+}
+
+#[compio::test]
+async fn peer_connect_before_bind_ipc() {
+    peer_connect_before_bind(ipc_ep("cbb-peer-comp")).await;
+}
+
+#[compio::test]
+async fn peer_connect_before_bind_tcp() {
+    peer_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+// -- CHANNEL -----------------------------------------------------------------
+
+async fn channel_connect_before_bind(ep: Endpoint) {
+    let a = Socket::new(SocketType::Channel, opts());
+    a.connect(ep.clone()).await.unwrap();
+
+    compio::time::sleep(BIND_DELAY).await;
+
+    let b = Socket::new(SocketType::Channel, Options::default());
+    b.bind(ep).await.unwrap();
+
+    a.send(Message::single("from-a")).await.unwrap();
+    let m = compio::time::timeout(TIMEOUT, b.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"from-a"[..]);
+
+    b.send(Message::single("from-b")).await.unwrap();
+    let m = compio::time::timeout(TIMEOUT, a.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"from-b"[..]);
+}
+
+#[compio::test]
+async fn channel_connect_before_bind_inproc() {
+    channel_connect_before_bind(inproc_ep("cbb-ch-comp-inproc")).await;
+}
+
+#[compio::test]
+async fn channel_connect_before_bind_ipc() {
+    channel_connect_before_bind(ipc_ep("cbb-ch-comp")).await;
+}
+
+#[compio::test]
+async fn channel_connect_before_bind_tcp() {
+    channel_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
 // -- lz4+tcp -----------------------------------------------------------------
 
 #[cfg(feature = "lz4")]
@@ -207,4 +544,34 @@ async fn push_pull_connect_before_bind_zstd() {
 #[compio::test]
 async fn req_rep_connect_before_bind_zstd() {
     req_rep_connect_before_bind(zstd_ep(free_tcp_port())).await;
+}
+
+// -- ws ----------------------------------------------------------------------
+// TODO: WS connect is fire-and-forget (no dial_supervisor retry loop), so
+// these fail until WS gets a reconnect supervisor like TCP/IPC have.
+
+#[cfg(feature = "ws")]
+fn ws_ep(port: u16) -> Endpoint {
+    format!("ws://127.0.0.1:{port}/").parse().unwrap()
+}
+
+#[cfg(feature = "ws")]
+#[compio::test]
+#[ignore = "WS lacks reconnect supervisor"]
+async fn push_pull_connect_before_bind_ws() {
+    push_pull_connect_before_bind(ws_ep(free_tcp_port())).await;
+}
+
+#[cfg(feature = "ws")]
+#[compio::test]
+#[ignore = "WS lacks reconnect supervisor"]
+async fn req_rep_connect_before_bind_ws() {
+    req_rep_connect_before_bind(ws_ep(free_tcp_port())).await;
+}
+
+#[cfg(feature = "ws")]
+#[compio::test]
+#[ignore = "WS lacks reconnect supervisor"]
+async fn pub_sub_connect_before_bind_ws() {
+    pub_sub_connect_before_bind(ws_ep(free_tcp_port())).await;
 }
