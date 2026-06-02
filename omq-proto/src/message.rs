@@ -3,7 +3,7 @@
 //! `Payload` represents a frame's byte content in one of four forms:
 //!
 //! - **Empty**: zero bytes, no backing storage.
-//! - **Inline**: ≤ 31 bytes stored directly in the struct, no heap
+//! - **Inline**: ≤ 62 bytes stored directly in the struct, no heap
 //!   allocation and no refcounting. Produced by the codec for small
 //!   frames on the recv hot path.
 //! - **Single**: one `Bytes` chunk (overwhelmingly common on the send
@@ -18,10 +18,10 @@ use bytes::Bytes;
 use smallvec::SmallVec;
 
 /// Maximum payload bytes stored inline (no `Bytes` / Arc).
-/// 38 is the largest value that keeps `Payload` at 40 bytes.
-pub const MAX_INLINE_PAYLOAD: usize = 38;
+/// 62 is the largest value that keeps `Payload` at 64 bytes (one cache line).
+pub const MAX_INLINE_PAYLOAD: usize = 62;
 
-const _: () = assert!(std::mem::size_of::<Payload>() == 40);
+const _: () = assert!(std::mem::size_of::<Payload>() == 64);
 
 /// A frame payload, possibly composed of multiple `Bytes` chunks that are
 /// concatenated on the wire.
@@ -123,7 +123,7 @@ impl Payload {
     /// Returns the payload as a single contiguous `Bytes`.
     ///
     /// - Empty → `Bytes::new()`.
-    /// - Inline → `Bytes::copy_from_slice` (≤ 38 B copy).
+    /// - Inline → `Bytes::copy_from_slice` (≤ 62 B copy).
     /// - Single → `Bytes::clone` (Arc bump only).
     pub fn as_bytes(&self) -> Bytes {
         match &self.inner {
@@ -264,9 +264,10 @@ impl Frame {
 }
 
 /// Maximum bytes stored inline in a `Message` (no heap, no refcount).
-pub const MAX_INLINE_MESSAGE: usize = 39;
+/// 55 is the largest value that keeps `Message` at 64 bytes (one cache line).
+pub const MAX_INLINE_MESSAGE: usize = 55;
 
-const _: () = assert!(std::mem::size_of::<Message>() == 48);
+const _: () = assert!(std::mem::size_of::<Message>() == 64);
 
 pub(crate) enum MessageInner {
     Empty,
@@ -303,7 +304,7 @@ impl Message {
     }
 
     /// Create a single-part message from a byte slice. Avoids heap
-    /// allocation for payloads up to 39 bytes.
+    /// allocation for payloads up to 55 bytes.
     #[inline]
     pub fn from_slice(data: &[u8]) -> Self {
         if data.len() <= MAX_INLINE_MESSAGE {
@@ -778,7 +779,7 @@ mod tests {
 
     #[test]
     fn payload_size_of() {
-        assert_eq!(std::mem::size_of::<Payload>(), 40);
+        assert_eq!(std::mem::size_of::<Payload>(), 64);
     }
 
     #[test]

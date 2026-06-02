@@ -48,7 +48,7 @@ errors. Run all three before every `git push`:
 
 ```sh
 cargo clippy --workspace --all-targets                # default features
-cargo clippy --workspace --all-targets --all-features # feature-gated paths
+cargo clippy --workspace --all-targets --all-features # feature-gated paths (omq facade compile_error! is expected here: both backends are mutually exclusive)
 (cd bindings/pyomq && cargo clippy --all-targets)     # separate workspace
 ```
 

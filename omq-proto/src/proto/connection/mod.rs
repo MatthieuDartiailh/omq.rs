@@ -468,14 +468,15 @@ mod tests {
 
     #[test]
     fn max_message_size_accounts_for_overhead_plus_content() {
-        let max = 300;
-        let mut c = ready_connection(Some(max));
         let overhead = size_of::<Payload>();
-        // 2 frames: each costs overhead + 100 = 140 bytes, total 280 <= 300
+        let per = overhead + 100;
+        let max = 2 * per + 1;
+        let mut c = ready_connection(Some(max));
+        // 2 frames fit
         let r = feed_data_frames(&mut c, &[(true, &[0xAB; 100]), (false, &[0xCD; 100])]);
-        assert!(r.is_ok(), "2 × 140 = 280 <= 300, got: {r:?}");
+        assert!(r.is_ok(), "2 × {per} = {} <= {max}, got: {r:?}", 2 * per);
 
-        // 3 frames: each costs 140, total 420 > 300
+        // 3 frames exceed
         let mut c = ready_connection(Some(max));
         let err = feed_data_frames(
             &mut c,
@@ -483,8 +484,8 @@ mod tests {
         );
         assert!(
             matches!(err, Err(Error::MessageTooLarge { .. })),
-            "3 × (40 + 100) = {}, should exceed max={max}",
-            3 * (overhead + 100),
+            "3 × {per} = {} > {max}",
+            3 * per,
         );
     }
 
