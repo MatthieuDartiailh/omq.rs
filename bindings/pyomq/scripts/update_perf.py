@@ -160,26 +160,22 @@ def _run_subprocess(code, label, timeout=30, retries=2):
 
 
 def _measure_throughput_subprocess(lib_name, transport, size, n_target_per_s=200_000):
-    """Run a throughput measurement in a subprocess to isolate libzmq state."""
-    code = f"""
-import threading, time, json, socket as sock
-def free_tcp():
-    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return f'tcp://127.0.0.1:{{port}}'
-if '{lib_name}' == 'pyzmq':
-    import zmq as lib
-else:
-    import pyomq as lib
-size = {size}
-n = max(int({n_target_per_s} * {TARGET_RUNTIME_S}), 100)
-payload = b'x' * size
-if '{transport}' == 'inproc':
-    ep = f'inproc://bench-{{time.monotonic_ns()}}'
-else:
-    ep = free_tcp()
+    """Run a throughput measurement. TCP uses 2 separate processes (push +
+    pull) so each gets its own runtime. Inproc must stay single-process."""
+    if lib_name == "pyzmq":
+        lib_import = "import zmq as lib"
+    else:
+        lib_import = "import pyomq as lib"
+
+    n = max(int(n_target_per_s * TARGET_RUNTIME_S), 100)
+
+    if transport == "inproc":
+        code = f"""
+import threading, time, json
+{lib_import}
+n = {n}
+payload = b'x' * {size}
+ep = f'inproc://bench-{{time.monotonic_ns()}}'
 ctx = lib.Context()
 pull = ctx.socket(lib.PULL)
 push = ctx.socket(lib.PUSH)
@@ -197,13 +193,84 @@ for _ in range(n):
     pull.recv()
 elapsed = time.monotonic() - start
 t.join()
-push.close()
-pull.close()
+push.close(); pull.close()
 print(json.dumps(n / elapsed))
 import sys; sys.stdout.flush(); import os; os._exit(0)
 """
-    result = _run_subprocess(code, f"{lib_name} {transport} {size}B")
-    return result if result is not None else 0.0
+        result = _run_subprocess(code, f"{lib_name} inproc {size}B")
+        return result if result is not None else 0.0
+
+    push_code = f"""
+import time, sys
+{lib_import}
+n = {n}
+payload = b'x' * {size}
+ctx = lib.Context()
+push = ctx.socket(lib.PUSH)
+push.linger = 0
+ep = push.bind('tcp://127.0.0.1:0')
+if isinstance(ep, bytes): ep = ep.decode()
+port = ep.rsplit(':', 1)[1]
+print(port, flush=True)
+for _ in range(n):
+    push.send(payload)
+sys.stdin.readline()
+push.close()
+import os; os._exit(0)
+"""
+    pull_code = f"""
+import time, json, sys
+{lib_import}
+n = {n}
+port = sys.argv[1]
+ctx = lib.Context()
+pull = ctx.socket(lib.PULL)
+pull.linger = 0
+pull.connect(f'tcp://127.0.0.1:{{port}}')
+start = time.monotonic()
+for _ in range(n):
+    pull.recv()
+elapsed = time.monotonic() - start
+pull.close()
+print(json.dumps(n / elapsed))
+sys.stdout.flush()
+import os; os._exit(0)
+"""
+    push_proc = subprocess.Popen(
+        [sys.executable, "-c", push_code],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        stdin=subprocess.PIPE, text=True,
+    )
+    try:
+        port_line = push_proc.stdout.readline().strip()
+        if not port_line:
+            push_proc.terminate()
+            push_proc.wait(timeout=5)
+            return 0.0
+        pull_proc = subprocess.Popen(
+            [sys.executable, "-c", pull_code, port_line],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        try:
+            stdout, _ = pull_proc.communicate(timeout=30)
+            result = json.loads(stdout.strip())
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+            pull_proc.kill()
+            pull_proc.wait()
+            result = 0.0
+    finally:
+        try:
+            push_proc.stdin.write("\n")
+            push_proc.stdin.flush()
+        except OSError:
+            pass
+        push_proc.terminate()
+        try:
+            push_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            push_proc.kill()
+            push_proc.wait()
+    return result
 
 
 def run_throughput(lib_name):
@@ -235,70 +302,44 @@ def run_throughput(lib_name):
 # ── async PUSH/PULL throughput ───────────────────────────────────────
 
 def _measure_async_subprocess(lib_name, size, n_target_per_s=200_000):
-    """Async throughput: sync sender thread + async recv, single subprocess."""
-    n = min(max(int(n_target_per_s * TARGET_RUNTIME_S), 100), 20_000)
+    """Async throughput: push in one process, async pull in another."""
     if lib_name == "pyzmq":
-        code = f"""
-import asyncio, threading, time, json, sys, socket as sock
-import zmq, zmq.asyncio
-def free_tcp():
-    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return f'tcp://127.0.0.1:{{port}}'
-async def run():
-    ep = free_tcp()
-    ctx = zmq.asyncio.Context()
-    pull = ctx.socket(zmq.PULL); pull.linger = 0
-    pull.bind(ep)
-    sctx = zmq.Context()
-    push = sctx.socket(zmq.PUSH); push.linger = 0
-    push.connect(ep)
-    payload = b'x' * {size}
-    n = {n}
-    def sender():
-        for _ in range(n):
-            push.send(payload)
-    t = threading.Thread(target=sender)
-    t.start()
-    count = 0; start = None
-    for _ in range(n):
-        await pull.recv()
-        if start is None:
-            start = time.monotonic()
-        count += 1
-    elapsed = time.monotonic() - start
-    t.join()
-    push.close(); pull.close()
-    print(json.dumps(count / elapsed))
-    sys.stdout.flush(); import os; os._exit(0)
-asyncio.run(run())
-"""
+        lib_import = "import zmq as lib; import zmq.asyncio as alib"
+        push_import = "import zmq as lib"
     else:
-        code = f"""
-import asyncio, threading, time, json, sys, socket as sock
-import pyomq, pyomq.asyncio as zmq_async
-def free_tcp():
-    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return f'tcp://127.0.0.1:{{port}}'
+        lib_import = "import pyomq as lib; import pyomq.asyncio as alib"
+        push_import = "import pyomq as lib"
+
+    n = min(max(int(n_target_per_s * TARGET_RUNTIME_S), 100), 20_000)
+
+    push_code = f"""
+import sys
+{push_import}
+n = {n}
+payload = b'x' * {size}
+ctx = lib.Context()
+push = ctx.socket(lib.PUSH)
+push.linger = 0
+ep = push.bind('tcp://127.0.0.1:0')
+if isinstance(ep, bytes): ep = ep.decode()
+port = ep.rsplit(':', 1)[1]
+print(port, flush=True)
+for _ in range(n):
+    push.send(payload)
+sys.stdin.readline()
+push.close()
+import os; os._exit(0)
+"""
+    pull_code = f"""
+import asyncio, time, json, sys
+{lib_import}
 async def run():
-    ep = free_tcp()
-    ctx = zmq_async.Context()
-    pull = ctx.socket(pyomq.PULL)
-    pull.bind(ep)
-    push = pyomq.Context().socket(pyomq.PUSH)
-    push.connect(ep)
-    payload = b'x' * {size}
+    port = sys.argv[1]
     n = {n}
-    def sender():
-        for _ in range(n):
-            push.send(payload)
-    t = threading.Thread(target=sender)
-    t.start()
+    ctx = alib.Context()
+    pull = ctx.socket(lib.PULL)
+    pull.linger = 0
+    pull.connect(f'tcp://127.0.0.1:{{port}}')
     count = 0; start = None
     for _ in range(n):
         await pull.recv()
@@ -306,15 +347,46 @@ async def run():
             start = time.monotonic()
         count += 1
     elapsed = time.monotonic() - start
-    t.join()
-    push.close()
     pull.close()
     print(json.dumps(count / elapsed))
     sys.stdout.flush(); import os; os._exit(0)
 asyncio.run(run())
 """
-    result = _run_subprocess(code, f"{lib_name} async tcp {size}B")
-    return result if result is not None else 0.0
+    push_proc = subprocess.Popen(
+        [sys.executable, "-c", push_code],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        stdin=subprocess.PIPE, text=True,
+    )
+    try:
+        port_line = push_proc.stdout.readline().strip()
+        if not port_line:
+            push_proc.terminate()
+            push_proc.wait(timeout=5)
+            return 0.0
+        pull_proc = subprocess.Popen(
+            [sys.executable, "-c", pull_code, port_line],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        try:
+            stdout, _ = pull_proc.communicate(timeout=30)
+            result = json.loads(stdout.strip())
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+            pull_proc.kill()
+            pull_proc.wait()
+            result = 0.0
+    finally:
+        try:
+            push_proc.stdin.write("\n")
+            push_proc.stdin.flush()
+        except OSError:
+            pass
+        push_proc.terminate()
+        try:
+            push_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            push_proc.kill()
+            push_proc.wait()
+    return result
 
 
 def run_async_throughput(lib_name):
@@ -787,8 +859,8 @@ def gen_combined_chart(data, path):
     async_omq_tp = data["async_omq_tp"]
     async_pz_tp = data["async_pz_tp"]
 
-    msg_max = 2_000_000
-    mbps_max = 5_000
+    msg_max = 2_500_000
+    mbps_max = 6_000
 
     def y_msg(v):
         frac = v / msg_max if msg_max > 0 else 0
@@ -824,7 +896,7 @@ def gen_combined_chart(data, path):
             f' fill="#9ca3af" font-size="10">{hw_label}</text>'
         )
 
-    n_l_ticks = 4
+    n_l_ticks = 5
     for i in range(n_l_ticks + 1):
         val = i * msg_max / n_l_ticks
         yy = y_msg(val)
@@ -1071,10 +1143,9 @@ def update_marker(content, marker, table):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scope", choices=["all", "pyomq"],
-                        default="all",
-                        help="all: bench both impls. pyomq: bench pyomq only, "
-                             "chart uses latest pyzmq from JSONL")
+    parser.add_argument("--impl", action="append", dest="impls",
+                        choices=["pyomq", "pyzmq"],
+                        help="implementation(s) to benchmark (default: both)")
     parser.add_argument("--chart-only", action="store_true",
                         help="regenerate SVG from existing JSONL, no benchmarking")
     args = parser.parse_args()
@@ -1086,7 +1157,7 @@ def main():
         return
 
     run_id = time.strftime("%Y-%m-%dT%H:%M:%S")
-    impls = ["pyomq", "pyzmq"] if args.scope == "all" else ["pyomq"]
+    impls = args.impls or ["pyomq", "pyzmq"]
 
     for impl in impls:
         print(f"\n{'=' * 40}")

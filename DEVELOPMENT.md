@@ -141,12 +141,12 @@ Produces `doc/charts/pushpull/comparison_*.svg` and
 `doc/charts/pubsub/comparison_*.svg`:
 
 ```sh
-python3 scripts/run_comparisons.py --scope omq   # bench omq-compio + omq-tokio only, reuse existing libzmq/zmq.rs baselines
-python3 scripts/gen_comparison_chart.py           # JSONL → doc/charts/{pushpull,pubsub}/comparison_*.svg
+python3 scripts/run_comparisons.py --impl omq-compio --impl omq-tokio   # omq only, reuse existing libzmq/zmq.rs baselines
+python3 scripts/gen_comparison_chart.py                                  # JSONL → doc/charts/{pushpull,pubsub}/comparison_*.svg
 ```
 
-Use `--scope all` (default) to rebench all implementations when
-libzmq or zmq.rs baselines are stale.
+Omit `--impl` to rebench all implementations when libzmq or zmq.rs
+baselines are stale.
 
 ### Compression charts
 
@@ -166,11 +166,11 @@ Produces `bindings/pyomq/doc/charts/bindings.svg`:
 ```sh
 cd bindings/pyomq
 maturin develop --release
-python scripts/update_perf.py --scope pyomq  # bench pyomq only, reuse existing pyzmq baseline
+python scripts/update_perf.py --impl pyomq   # bench pyomq only, reuse existing pyzmq baseline
 python scripts/update_perf.py --chart-only   # regenerate SVG from existing JSONL
 ```
 
-Use `--scope all` (default) to rebench both pyomq and pyzmq.
+Omit `--impl` to rebench both pyomq and pyzmq.
 
 ## Releasing
 

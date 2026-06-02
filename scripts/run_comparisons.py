@@ -168,9 +168,25 @@ def libzmq_version() -> str:
 def spawn_process(binary: str, *args: str) -> subprocess.Popen:
     return subprocess.Popen(
         [binary, *args],
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        text=True,
     )
+
+
+def read_bound_port(proc: subprocess.Popen, timeout: float = 5.0) -> int | None:
+    """Read 'PORT <n>' from the process's first stdout line."""
+    import selectors
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    ready = sel.select(timeout=timeout)
+    sel.close()
+    if not ready:
+        return None
+    line = proc.stdout.readline().strip()
+    if line.startswith("PORT "):
+        return int(line.split()[1])
+    return None
 
 
 def capture_process(binary: str, *args: str, timeout: int = 15) -> str:
@@ -263,12 +279,13 @@ def _run_throughput_once(
         return parse_throughput(output, size)
 
     push = spawn_process(binary, "push", addr, str(size))
-    time.sleep(0.15)
-    if push.poll() is not None:
-        print(f"WARNING: push died (rc={push.returncode}) for {binary} {addr}", file=sys.stderr)
+    port = read_bound_port(push)
+    if port is None:
+        kill_process(push)
         return None
+    connect_addr = str(port)
     try:
-        output = capture_process(binary, "pull", addr, str(size), dur)
+        output = capture_process(binary, "pull", connect_addr, str(size), dur)
     finally:
         kill_process(push)
     return parse_throughput(output, size)
@@ -337,13 +354,14 @@ def run_latency_cell(
         return parse_latency(output)
 
     rep = spawn_process(binary, "rep", addr, str(size))
-    time.sleep(0.2)
-    if rep.poll() is not None:
-        print(f"WARNING: rep died (rc={rep.returncode}) for {binary} {addr}", file=sys.stderr)
+    port = read_bound_port(rep)
+    if port is None:
+        kill_process(rep)
         return None
+    connect_addr = str(port)
     try:
         output = capture_process(
-            binary, "req", addr, str(size),
+            binary, "req", connect_addr, str(size),
             str(iterations), str(warmup),
             timeout=timeout,
         )
