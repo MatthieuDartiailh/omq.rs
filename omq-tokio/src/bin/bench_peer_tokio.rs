@@ -48,23 +48,14 @@ fn parse_ep(s: &str) -> Endpoint {
         .expect("valid endpoint (port, ip:port, or full URI)")
 }
 
-fn bind_ep() -> Endpoint {
-    Endpoint::Tcp {
-        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
-        port: 0,
-    }
-}
-
 fn print_bound_port(ep: &Endpoint) {
     if let Endpoint::Tcp { port, .. } = ep {
         println!("PORT {port}");
     }
 }
 
-static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 extern "C" fn exit_on_signal(_sig: libc::c_int) {
-    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    unsafe { libc::_exit(0) };
 }
 
 #[tokio::main]
@@ -282,16 +273,13 @@ fn bench_options(msg_size: usize) -> Options {
     o
 }
 
-async fn run_push(_ep: Endpoint, size: usize) {
-    use std::sync::atomic::Ordering;
+async fn run_push(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options(size));
-    let bound = push.bind(bind_ep()).await.expect("push bind");
+    let bound = push.bind(ep).await.expect("push bind");
     print_bound_port(&bound);
     let payload = bench_payload(size);
-    while !STOP.load(Ordering::Relaxed) {
-        if push.send(Message::single(payload.clone())).await.is_err() {
-            break;
-        }
+    loop {
+        push.send(Message::single(payload.clone())).await.unwrap();
     }
 }
 
@@ -443,16 +431,13 @@ async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup
     println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
 }
 
-async fn run_rep(_ep: Endpoint, size: usize) {
-    use std::sync::atomic::Ordering;
+async fn run_rep(ep: Endpoint, size: usize) {
     let rep = Socket::new(SocketType::Rep, bench_options(size));
-    let bound = rep.bind(bind_ep()).await.expect("rep bind");
+    let bound = rep.bind(ep).await.expect("rep bind");
     print_bound_port(&bound);
-    while !STOP.load(Ordering::Relaxed) {
-        let Ok(msg) = rep.recv().await else { break };
-        if rep.send(msg).await.is_err() {
-            break;
-        }
+    loop {
+        let msg = rep.recv().await.unwrap();
+        rep.send(msg).await.unwrap();
     }
 }
 
