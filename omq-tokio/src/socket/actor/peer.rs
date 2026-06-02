@@ -769,7 +769,7 @@ async fn inproc_peer_driver(
                 () = cancel.cancelled() => return,
                 cmd = inbox.recv() => match cmd {
                     Some(DriverCommand::SendMessage(m)) => {
-                        if out.send(InboundFrame::message(m)).await.is_err() {
+                        if out.send(InboundFrame::Message(m)).await.is_err() {
                             return;
                         }
                     }
@@ -781,8 +781,7 @@ async fn inproc_peer_driver(
                     Some(DriverCommand::Close) | None => return,
                 },
                 frame = in_rx.recv() => match frame {
-                    Some(InboundFrame::Message(im)) => {
-                        let m = im.msg;
+                    Some(InboundFrame::Message(m)) => {
                         if let Some(max) = max_message_size
                             && m.byte_len() > max
                         {

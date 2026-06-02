@@ -12,37 +12,14 @@ use crate::proto::command::Command;
 /// are in the same process.
 #[derive(Debug)]
 pub enum InboundFrame {
-    Message(InboundMessage),
+    Message(Message),
     Command(Box<Command>),
 }
 
-/// Application message with optional sender identity. The identity is
-/// used by identity-aware socket types (ROUTER, SERVER, REP, STREAM,
-/// PEER) to identify which peer sent the message.
-#[derive(Debug)]
-pub struct InboundMessage {
-    pub peer_identity: Option<Bytes>,
-    pub msg: Message,
-}
-
 impl InboundFrame {
-    /// Construct a `Message` frame with no sender identity.
+    /// Construct a `Message` frame.
     pub fn message(msg: Message) -> Self {
-        Self::Message(InboundMessage {
-            peer_identity: None,
-            msg,
-        })
-    }
-
-    /// Construct a `Message` frame tagged with the sender's identity.
-    /// Empty identity collapses to `None`.
-    pub fn message_from(identity: Bytes, msg: Message) -> Self {
-        let peer_identity = if identity.is_empty() {
-            None
-        } else {
-            Some(identity)
-        };
-        Self::Message(InboundMessage { peer_identity, msg })
+        Self::Message(msg)
     }
 }
 

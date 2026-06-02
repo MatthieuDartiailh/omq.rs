@@ -282,7 +282,7 @@ mod tests {
 
         client_side
             .out
-            .send(InboundFrame::message(Message::single("hi")))
+            .send(InboundFrame::Message(Message::single("hi")))
             .await
             .unwrap();
         let f = tokio::time::timeout(std::time::Duration::from_millis(100), {
@@ -294,7 +294,7 @@ mod tests {
         .unwrap();
         match f {
             InboundFrame::Message(m) => {
-                assert_eq!(m.msg.part_bytes(0).unwrap(), &b"hi"[..]);
+                assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
             }
             InboundFrame::Command(_) => panic!("expected Message"),
         }

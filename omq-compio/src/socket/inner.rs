@@ -55,7 +55,19 @@ use omq_proto::type_state::TypeState;
 
 use crate::monitor::{DisconnectReason, MonitorEvent, MonitorPublisher};
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::{InboundFrame, InprocPeerSnapshot};
+use crate::transport::inproc::InprocPeerSnapshot;
+
+use omq_proto::inproc::InboundFrame;
+
+/// Compio-specific wrapper: pairs an `InboundFrame` with a
+/// `connection_id` so identity-aware socket types (ROUTER, SERVER,
+/// REP, STREAM, PEER) can look up the sender without cloning
+/// identity bytes into every frame.
+#[derive(Debug)]
+pub(crate) struct TaggedFrame {
+    pub(crate) connection_id: u64,
+    pub(crate) frame: InboundFrame,
+}
 use crate::transport::peer_io::{CancellableRecvStream, SharedPeerIo};
 
 pub(super) use super::direct_io::DirectIoState;
@@ -198,8 +210,8 @@ pub(super) struct SocketInner {
     /// Cached route for the common single-peer case. Invalidated
     /// when `peers_gen` advances past the stored generation.
     pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
-    pub(super) in_tx: blume::Sender<InboundFrame>,
-    pub(super) in_rx: blume::Receiver<InboundFrame>,
+    pub(super) in_tx: blume::Sender<TaggedFrame>,
+    pub(super) in_rx: blume::Receiver<TaggedFrame>,
     /// Per-peer SPSC send pipes, indexed parallel to `out_peers`.
     /// None for wire / same-thread / non-eligible slots.
     pub(super) inproc_send_pipes: UnsafeCell<Vec<Option<InprocSendPipe>>>,
@@ -237,6 +249,9 @@ pub(super) struct SocketInner {
     /// LATEST peer for an identity, so reconnect replaces the stale
     /// slot without leaking state. Empty for non-router socket types.
     pub(super) identity_to_slot: RwLock<FxHashMap<Bytes, usize>>,
+    /// `connection_id` → peer identity lookup for the recv path.
+    /// Populated in `insert_peer_slot`, removed in `release_slot`.
+    pub(super) conn_id_to_identity: RwLock<FxHashMap<u64, Bytes>>,
     pub(super) monitor: MonitorPublisher,
     pub(super) next_connection_id: AtomicU64,
     /// Set by `close()` / `Drop` so install paths bail.
@@ -324,8 +339,8 @@ pub(super) struct UdpDialerEntry {
 impl SocketInner {
     pub(super) fn new(socket_type: SocketType, options: Options) -> Arc<Self> {
         let (in_tx, in_rx) = match options.recv_hwm {
-            None => blume::unbounded::<InboundFrame>(),
-            Some(hwm) => blume::bounded::<InboundFrame>((hwm as usize).max(16)),
+            None => blume::unbounded::<TaggedFrame>(),
+            Some(hwm) => blume::bounded::<TaggedFrame>((hwm as usize).max(16)),
         };
         // Conflate forces cap-1 with drain-before-send semantics so that only
         // the latest message survives in the queue at any point in time.
@@ -383,6 +398,7 @@ impl SocketInner {
             our_subs: RwLock::new(Vec::new()),
             type_state: Mutex::new(TypeState::new()),
             identity_to_slot: RwLock::new(FxHashMap::default()),
+            conn_id_to_identity: RwLock::new(FxHashMap::default()),
             monitor: MonitorPublisher::new(),
             next_connection_id: AtomicU64::new(0),
             closed: AtomicBool::new(false),
@@ -409,6 +425,7 @@ impl SocketInner {
     /// notify waiters. Returns the slab index.
     pub(super) fn insert_peer_slot(&self, slot: PeerSlot, identity: Option<&Bytes>) -> usize {
         let is_inproc = matches!(&slot.out, PeerOut::Inproc { .. });
+        let conn_id = slot.connection_id;
         let idx = {
             let mut peers = self.out_peers.write().expect("peers lock");
             let idx = peers.insert(slot);
@@ -425,16 +442,21 @@ impl SocketInner {
                 pipes.push(None);
             }
         }
-        if let Some(id) = identity
-            && !id.is_empty()
-            && let Some(old_idx) = self
-                .identity_to_slot
+        if let Some(id) = identity {
+            if !id.is_empty()
+                && let Some(old_idx) = self
+                    .identity_to_slot
+                    .write()
+                    .expect("identity table")
+                    .insert(id.clone(), idx)
+                && old_idx != idx
+            {
+                self.evict_peer_for_handover(old_idx);
+            }
+            self.conn_id_to_identity
                 .write()
-                .expect("identity table")
-                .insert(id.clone(), idx)
-            && old_idx != idx
-        {
-            self.evict_peer_for_handover(old_idx);
+                .expect("conn_id_to_identity lock")
+                .insert(conn_id, id.clone());
         }
         self.rebuild_peer_keys();
         self.on_peer_ready.notify(usize::MAX);
@@ -501,6 +523,11 @@ impl SocketInner {
             let mut table = self.identity_to_slot.write().expect("identity table");
             table.retain(|_, &mut v| v != slot_idx);
         }
+        // conn_id_to_identity is NOT cleaned up here: frames
+        // referencing this connection_id may still be queued in
+        // the blume channel (e.g. STREAM disconnect notifications).
+        // Stale entries are harmless since connection_ids are
+        // monotonic and never reused.
         self.rebuild_peer_keys();
         self.peers_gen.fetch_add(1, Ordering::Release);
     }

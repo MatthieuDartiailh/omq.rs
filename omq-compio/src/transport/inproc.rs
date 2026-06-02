@@ -18,17 +18,23 @@ use rustc_hash::FxHashMap;
 use event_listener::Event;
 
 use omq_proto::error::{Error, Result};
-pub use omq_proto::inproc::{InboundFrame, InboundMessage, InprocPeerSnapshot};
+pub use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
+
+use crate::socket::TaggedFrame;
 
 /// What `connect` / `accept` hand back. `out` is where WE send
 /// frames (= the peer's shared `in_tx`). `peer` is the peer's
 /// snapshot.
 #[derive(Debug)]
-pub struct InprocConn {
-    pub out: blume::Sender<InboundFrame>,
+pub(crate) struct InprocConn {
+    pub out: blume::Sender<TaggedFrame>,
     pub peer: InprocPeerSnapshot,
+    /// The `connection_id` that the remote socket assigned to this
+    /// connection. Used as the tag in `PeerOut::Inproc` so the
+    /// remote recv side can look up our identity.
+    pub remote_connection_id: u64,
     /// SPSC fast-path producer (we push Messages here instead of
     /// through `out`). Present only for eligible cross-thread pairs.
     pub spsc_send: Option<yring::Producer<Message>>,
@@ -48,6 +54,16 @@ pub struct InprocConn {
 /// snapshot, connector's `in_tx` (so the listener knows where to
 /// reply), and an ack channel through which the listener returns
 /// its own snapshot + `in_tx`.
+struct InprocConnectRequest {
+    connector: InprocPeerSnapshot,
+    connector_in_tx: blume::Sender<TaggedFrame>,
+    connector_connection_id: u64,
+    connector_thread: std::thread::ThreadId,
+    connector_recv_event: Arc<Event>,
+    connector_parked: Arc<std::sync::atomic::AtomicBool>,
+    accept_ack: flume::Sender<AckPayload>,
+}
+
 /// SPSC halves sent back to the connector via the ack channel.
 struct SpscPair {
     for_connector_send: Option<yring::Producer<Message>>,
@@ -56,16 +72,12 @@ struct SpscPair {
     listener_parked: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
-type AckPayload = (InprocPeerSnapshot, blume::Sender<InboundFrame>, SpscPair);
-
-struct InprocConnectRequest {
-    connector: InprocPeerSnapshot,
-    connector_in_tx: blume::Sender<InboundFrame>,
-    connector_thread: std::thread::ThreadId,
-    connector_recv_event: Arc<Event>,
-    connector_parked: Arc<std::sync::atomic::AtomicBool>,
-    accept_ack: flume::Sender<AckPayload>,
-}
+type AckPayload = (
+    InprocPeerSnapshot,
+    blume::Sender<TaggedFrame>,
+    u64,
+    SpscPair,
+);
 
 type ReqSender = flume::Sender<InprocConnectRequest>;
 
@@ -116,10 +128,10 @@ fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
 /// `InprocConn` per accepted connector. `in_tx` is the socket's
 /// shared inbound sender - handed to each connector at accept
 /// time so they can deliver frames straight into our queue.
-pub fn bind(
+pub(crate) fn bind(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    in_tx: blume::Sender<InboundFrame>,
+    in_tx: blume::Sender<TaggedFrame>,
     recv_event: Arc<Event>,
     parked: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InprocListener> {
@@ -152,10 +164,12 @@ pub fn bind(
 
 /// Connect to a bound (or not-yet-bound) `name`. If the name is
 /// not in the registry yet, parks until `bind()` wakes us.
-pub async fn connect(
+/// `connection_id` is this socket's `connection_id` for the new peer.
+pub(crate) async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    in_tx: blume::Sender<InboundFrame>,
+    in_tx: blume::Sender<TaggedFrame>,
+    connection_id: u64,
     recv_event: Arc<Event>,
     parked: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InprocConn> {
@@ -192,6 +206,7 @@ pub async fn connect(
     let request = InprocConnectRequest {
         connector: snapshot,
         connector_in_tx: in_tx,
+        connector_connection_id: connection_id,
         connector_thread: std::thread::current().id(),
         connector_recv_event: recv_event,
         connector_parked: parked,
@@ -202,20 +217,16 @@ pub async fn connect(
         .send_async(request)
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc binding closed: {name}")))?;
-    let (listener_snapshot, listener_in_tx, spsc_pair) = ack_rx
+    let (listener_snapshot, listener_in_tx, listener_conn_id, spsc_pair) = ack_rx
         .recv_async()
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc accept dropped: {name}")))?;
 
-    // The accept ran on the binder's thread. If we're on a different
-    // thread, the SPSC ring can be used without cooperative yield issues.
-    // The accept side already computed cross_thread from our connector_thread.
-    // We just recompute the same thing here (our thread vs accept's thread
-    // doesn't matter since both sides agreed in the handshake).
     let cross_thread = spsc_pair.for_connector_send.is_some();
     Ok(InprocConn {
         out: listener_in_tx,
         peer: listener_snapshot,
+        remote_connection_id: listener_conn_id,
         spsc_send: spsc_pair.for_connector_send,
         spsc_recv: spsc_pair.for_connector_recv,
         cross_thread,
@@ -226,21 +237,19 @@ pub async fn connect(
 
 /// Bound inproc listener. Releases its registry slot on drop.
 #[derive(Debug)]
-pub struct InprocListener {
+pub(crate) struct InprocListener {
     name: String,
     snapshot: InprocPeerSnapshot,
-    in_tx: blume::Sender<InboundFrame>,
+    in_tx: blume::Sender<TaggedFrame>,
     recv_event: Arc<Event>,
     parked: Arc<std::sync::atomic::AtomicBool>,
     incoming: flume::Receiver<InprocConnectRequest>,
 }
 
 impl InprocListener {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub async fn accept(&self) -> Result<InprocConn> {
+    /// Accept the next incoming connector.
+    /// `connection_id` is this socket's `connection_id` for the new peer.
+    pub(crate) async fn accept(&self, connection_id: u64) -> Result<InprocConn> {
         let req = self
             .incoming
             .recv_async()
@@ -249,6 +258,7 @@ impl InprocListener {
         let InprocConnectRequest {
             connector,
             connector_in_tx,
+            connector_connection_id,
             connector_thread,
             connector_recv_event,
             connector_parked,
@@ -284,10 +294,16 @@ impl InprocListener {
             )
         };
 
-        let _ = accept_ack.send((self.snapshot.clone(), self.in_tx.clone(), connector_pair));
+        let _ = accept_ack.send((
+            self.snapshot.clone(),
+            self.in_tx.clone(),
+            connection_id,
+            connector_pair,
+        ));
         Ok(InprocConn {
             out: connector_in_tx,
             peer: connector,
+            remote_connection_id: connector_connection_id,
             spsc_send: my_spsc_send,
             spsc_recv: my_spsc_recv,
             cross_thread,

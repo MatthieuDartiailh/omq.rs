@@ -15,25 +15,29 @@ use bytes::Bytes;
 use compio::net::TcpStream;
 use event_listener::Event;
 
+use omq_proto::inproc::InboundFrame;
 use omq_proto::message::Message;
 
+use crate::socket::TaggedFrame;
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::InboundFrame;
 use crate::transport::peer_io::WireWriter;
 
-fn notification(identity: &Bytes) -> InboundFrame {
-    InboundFrame::message_from(identity.clone(), Message::single(Bytes::new()))
+fn notification(connection_id: u64) -> TaggedFrame {
+    TaggedFrame {
+        connection_id,
+        frame: InboundFrame::Message(Message::single(Bytes::new())),
+    }
 }
 
 pub(crate) async fn run(
     stream: TcpStream,
     mut writer: WireWriter,
-    identity: Bytes,
-    in_tx: blume::Sender<InboundFrame>,
+    connection_id: u64,
+    in_tx: blume::Sender<TaggedFrame>,
     cmd_rx: flume::Receiver<DriverCommand>,
 ) {
     // Connect notification.
-    if in_tx.send_async(notification(&identity)).await.is_err() {
+    if in_tx.send_async(notification(connection_id)).await.is_err() {
         return;
     }
 
@@ -42,7 +46,6 @@ pub(crate) async fn run(
     let shutdown_handle = stream.clone();
 
     // Read task: TCP -> inbound queue.
-    let read_identity = identity.clone();
     let read_in_tx = in_tx.clone();
     let read_stop = stop.clone();
     compio::runtime::spawn(async move {
@@ -56,7 +59,10 @@ pub(crate) async fn run(
                 Ok(n) => {
                     let data = Bytes::copy_from_slice(&buf[..n]);
                     let msg = Message::single(data);
-                    let frame = InboundFrame::message_from(read_identity.clone(), msg);
+                    let frame = TaggedFrame {
+                        connection_id,
+                        frame: InboundFrame::Message(msg),
+                    };
                     if read_in_tx.send_async(frame).await.is_err() {
                         break;
                     }
@@ -98,7 +104,7 @@ pub(crate) async fn run(
     unsafe { libc::shutdown(shutdown_handle.as_raw_fd(), libc::SHUT_RDWR) };
 
     // Disconnect notification.
-    let _ = in_tx.send_async(notification(&identity)).await;
+    let _ = in_tx.send_async(notification(connection_id)).await;
 }
 
 pub(crate) use omq_proto::message::generated_identity;

@@ -35,7 +35,7 @@ pub use handle::Socket;
 pub(crate) use direct_io::{
     DirectIoState, OneShotLargeRecvOutcome, one_shot_recv_and_feed, try_one_shot_large_recv,
 };
-pub(crate) use inner::{AccRestore, RecvStreamState};
+pub(crate) use inner::{AccRestore, RecvStreamState, TaggedFrame};
 
 /// Per-peer cmd channel capacity, sized off `Options::send_hwm`.
 /// When conflate is enabled the shared send queue is cap-1 (drain-before-send),

@@ -8,7 +8,7 @@ use omq_proto::proto::SocketType;
 
 use crate::monitor::PeerIdent;
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::{self, InboundFrame};
+use crate::transport::inproc;
 use crate::transport::ipc as ipc_transport;
 use crate::transport::stream_raw;
 use crate::transport::tcp as tcp_transport;
@@ -65,8 +65,11 @@ impl Socket {
         let ep_for_task = resolved.clone();
         let name_for_ident = name;
         let task = compio::runtime::spawn(async move {
-            while let Ok(conn) = listener.accept().await {
+            loop {
                 let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+                let Ok(conn) = listener.accept(conn_id).await else {
+                    break;
+                };
                 inner.monitor.accepted(
                     ep_for_task.clone(),
                     PeerIdent::Inproc(name_for_ident.clone()),
@@ -230,7 +233,7 @@ impl Socket {
                 let inner2 = inner.clone();
                 let in_tx = inner.in_tx.clone();
                 compio::runtime::spawn(async move {
-                    stream_raw::run(stream, writer.into(), identity, in_tx, cmd_rx).await;
+                    stream_raw::run(stream, writer.into(), conn_id, in_tx, cmd_rx).await;
                     inner2.release_slot(slot_idx);
                 })
                 .detach();
@@ -283,10 +286,10 @@ impl Socket {
                     continue;
                 }
                 let msg = Message::multipart([group, body]);
-                let frame = InboundFrame::Message(crate::transport::inproc::InboundMessage {
-                    peer_identity: None,
-                    msg,
-                });
+                let frame = super::inner::TaggedFrame {
+                    connection_id: 0,
+                    frame: omq_proto::inproc::InboundFrame::Message(msg),
+                };
                 if inner.in_tx.send_async(frame).await.is_err() {
                     break;
                 }
