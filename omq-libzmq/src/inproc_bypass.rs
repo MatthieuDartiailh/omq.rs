@@ -18,6 +18,11 @@ pub(crate) struct InprocPipe {
     /// Receiver's recv eventfd. Signaled by the sender when the pipe
     /// transitions from empty to non-empty.
     pub(crate) recv_signal_fd: std::os::unix::io::RawFd,
+    /// True when the sender is parked waiting for ring space.
+    sender_waiting: AtomicBool,
+    /// Handle for unparking the sender thread. Written by sender under
+    /// the `sender_waiting` flag; read by consumer only when the flag is set.
+    sender_thread: std::sync::Mutex<Option<std::thread::Thread>>,
 }
 
 impl std::fmt::Debug for InprocPipe {
@@ -51,6 +56,8 @@ pub(crate) fn create_bypass(
     let pipe = Arc::new(InprocPipe {
         closed: AtomicBool::new(false),
         recv_signal_fd,
+        sender_waiting: AtomicBool::new(false),
+        sender_thread: std::sync::Mutex::new(None),
     });
     (
         BypassSend {
@@ -75,17 +82,48 @@ impl BypassSend {
         }
         Ok(())
     }
+
+    /// Blocking push: parks the sender thread until ring space is available.
+    pub(crate) fn push_blocking(&mut self, mut msg: omq_compio::Message) {
+        loop {
+            match self.push(msg) {
+                Ok(()) => return,
+                Err(returned) => {
+                    msg = returned;
+                    {
+                        let mut guard = self.pipe.sender_thread.lock().unwrap();
+                        *guard = Some(std::thread::current());
+                    }
+                    self.pipe.sender_waiting.store(true, Ordering::Release);
+                    // Re-check after publishing to avoid missed wakeup.
+                    if self.producer.is_full() {
+                        std::thread::park();
+                    }
+                    self.pipe.sender_waiting.store(false, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 impl BypassRecv {
     /// Prefetch + pop a message. Returns None if empty.
     /// Drains the recv eventfd when the ring becomes empty so poll
     /// sees the fd as not-readable after all messages are consumed.
+    /// Unparks a blocked sender when space becomes available.
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<omq_compio::Message> {
         let msg = self.consumer.prefetch_and_pop();
-        if msg.is_some() && self.consumer.is_empty() {
-            drain_recv_fd(self.pipe.recv_signal_fd);
+        if msg.is_some() {
+            if self.consumer.is_empty() {
+                drain_recv_fd(self.pipe.recv_signal_fd);
+            }
+            if self.pipe.sender_waiting.load(Ordering::Acquire)
+                && let Ok(guard) = self.pipe.sender_thread.lock()
+                && let Some(t) = guard.as_ref()
+            {
+                t.unpark();
+            }
         }
         msg
     }

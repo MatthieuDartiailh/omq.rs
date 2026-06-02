@@ -79,10 +79,16 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
     // Inproc bypass: push directly to lock-free SPSC ring.
     // SAFETY: zmq contract guarantees single-threaded access per socket.
     if let Some(bypass) = unsafe { &mut *sock.bypass_send.get() } {
-        return match bypass.push(msg) {
-            Ok(()) => len as c_int,
-            Err(_msg) => fail(libc::EAGAIN),
-        };
+        let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
+        let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
+        if dontwait {
+            return match bypass.push(msg) {
+                Ok(()) => len as c_int,
+                Err(_msg) => fail(libc::EAGAIN),
+            };
+        }
+        bypass.push_blocking(msg);
+        return len as c_int;
     }
 
     let Some(send_tx) = sock.send_tx.get() else {
@@ -212,8 +218,16 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
 
     // Inproc bypass: pop directly from lock-free SPSC ring.
+    // Drain recv_rx first: messages delivered via the normal omq-compio
+    // inproc path before bypass was installed land there and must be
+    // consumed in order before switching to the bypass ring.
     // SAFETY: zmq contract guarantees single-threaded access per socket.
     if let Some(bypass) = unsafe { &mut *sock.bypass_recv.get() } {
+        if let Some(rx) = sock.recv_rx.get()
+            && let Ok(m) = rx.try_recv()
+        {
+            return decompose_message(sock, &m);
+        }
         let msg = if dontwait {
             match bypass.pop() {
                 Some(m) => m,

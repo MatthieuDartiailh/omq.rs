@@ -184,11 +184,14 @@ pub extern "C" fn zmq_poll(
         return 0;
     }
 
-    // Drain stale eventfd counters before blocking. zmq_send/zmq_recv
-    // skip the eventfd for performance; stale signals accumulate. A
-    // single 8-byte read on an EFD_SEMAPHORE fd drains one count; we
-    // drain all counts so libc::poll only wakes on genuinely new data.
+    // Drain stale eventfd counters before blocking so libc::poll only
+    // wakes on genuinely new data. Then re-check: messages may have
+    // arrived between check_immediate and drain_eventfds.
     drain_eventfds(items_slice);
+    let ready = check_immediate(items_slice);
+    if ready > 0 {
+        return ready;
+    }
 
     let poll_timeout = if timeout_ms < 0 {
         -1
