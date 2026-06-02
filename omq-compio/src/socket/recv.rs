@@ -374,6 +374,7 @@ impl Socket {
                             cache.push_back(msg);
                         }
                         c.release();
+                        recv_state.space_events[idx].notify(usize::MAX);
                     }
                     if !cache.is_empty() {
                         recv_state.fq_index = idx + 1;

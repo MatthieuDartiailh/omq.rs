@@ -167,9 +167,11 @@ pub(super) struct InprocSendPipe {
     /// Set by the remote recv loop when it parks in select.
     /// Cleared when it wakes. Producers skip notify when false.
     pub(super) parked: Arc<AtomicBool>,
-    /// True when the peer is on a different thread. Cross-thread:
-    /// spin-wait on full (receiver drains independently). Same-thread:
-    /// fall back to blume (spin would deadlock).
+    /// Notified by the consumer after `release()` frees ring slots.
+    /// The producer listens on this when the ring is full instead of
+    /// spinning.
+    pub(super) space_event: Arc<Event>,
+    /// True when the peer is on a different thread.
     pub(super) cross_thread: bool,
 }
 
@@ -183,6 +185,9 @@ impl Drop for InprocSendPipe {
 /// Per-socket inproc recv state: per-peer consumers + fair-queue index.
 pub(super) struct InprocRecvState {
     pub(super) consumers: Vec<yring::Consumer<Message>>,
+    /// Notified after `release()` so the remote producer can wake up
+    /// when the ring was full.
+    pub(super) space_events: Vec<Arc<Event>>,
     pub(super) fq_index: usize,
 }
 
@@ -386,6 +391,7 @@ impl SocketInner {
             inproc_send_pipes: UnsafeCell::new(Vec::new()),
             inproc_recv: UnsafeCell::new(InprocRecvState {
                 consumers: Vec::new(),
+                space_events: Vec::new(),
                 fq_index: 0,
             }),
             inproc_recv_event: Arc::new(Event::new()),

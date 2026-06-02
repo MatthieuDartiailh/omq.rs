@@ -88,12 +88,19 @@ pub(super) fn install_inproc_peer(
                     .peer_recv_event
                     .expect("eligible must have peer_recv_event"),
                 parked: conn.peer_parked.expect("eligible must have peer_parked"),
+                space_event: conn
+                    .send_space_event
+                    .expect("eligible must have send_space_event"),
                 cross_thread: conn.cross_thread,
             });
         }
         if let Some(consumer) = conn.spsc_recv {
             let recv = unsafe { &mut *inner.inproc_recv.get() };
             recv.consumers.push(consumer);
+            recv.space_events.push(
+                conn.recv_space_event
+                    .expect("eligible must have recv_space_event"),
+            );
         }
     }
     inner.inproc_recv_event.notify(usize::MAX);

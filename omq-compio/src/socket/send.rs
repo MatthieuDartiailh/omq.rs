@@ -159,24 +159,23 @@ impl Socket {
             if let [Some(pipe)] = pipes.as_mut_slice() {
                 let mut msg = msg;
                 loop {
+                    let listener = pipe.space_event.listen();
                     match pipe.producer.push(msg) {
-                        Ok(()) => {
-                            pipe.producer.flush();
-                            if pipe.parked.load(Ordering::Acquire) {
-                                pipe.notify.notify(usize::MAX);
-                            }
-                            return Ok(());
-                        }
+                        Ok(()) => break,
                         Err(returned) => {
-                            if pipe.cross_thread {
-                                msg = returned;
-                                std::hint::spin_loop();
-                            } else {
+                            if !pipe.cross_thread {
                                 return self.send_round_robin(returned).await;
                             }
+                            msg = returned;
+                            listener.await;
                         }
                     }
                 }
+                pipe.producer.flush();
+                if pipe.parked.load(Ordering::Acquire) {
+                    pipe.notify.notify(usize::MAX);
+                }
+                return Ok(());
             }
         }
         // Wire direct-encode fast path: single wire peer with cached
@@ -414,6 +413,7 @@ impl Socket {
                 let msg = if let Some(Some(pipe)) = pipes.get_mut(slot_idx) {
                     let mut msg = msg;
                     loop {
+                        let listener = pipe.space_event.listen();
                         match pipe.producer.push(msg) {
                             Ok(()) => {
                                 pipe.producer.flush();
@@ -424,7 +424,7 @@ impl Socket {
                             }
                             Err(returned) if pipe.cross_thread => {
                                 msg = returned;
-                                std::hint::spin_loop();
+                                listener.await;
                             }
                             Err(returned) => break returned,
                         }

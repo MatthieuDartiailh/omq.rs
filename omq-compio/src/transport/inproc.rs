@@ -48,6 +48,12 @@ pub(crate) struct InprocConn {
     pub peer_recv_event: Option<Arc<Event>>,
     /// Remote socket's parked flag. We check before notify.
     pub peer_parked: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Notified by the consumer after `release()` frees ring slots.
+    /// The send side listens on this when the ring is full.
+    pub send_space_event: Option<Arc<Event>>,
+    /// Notified by us after draining the recv-side ring so the remote
+    /// producer can wake up.
+    pub recv_space_event: Option<Arc<Event>>,
 }
 
 /// Sent from connect to accept through the registry: connector's
@@ -70,6 +76,8 @@ struct SpscPair {
     for_connector_recv: Option<yring::Consumer<Message>>,
     listener_recv_event: Option<Arc<Event>>,
     listener_parked: Option<Arc<std::sync::atomic::AtomicBool>>,
+    connector_send_space: Option<Arc<Event>>,
+    connector_recv_space: Option<Arc<Event>>,
 }
 
 type AckPayload = (
@@ -232,6 +240,8 @@ pub(crate) async fn connect(
         cross_thread,
         peer_recv_event: spsc_pair.listener_recv_event,
         peer_parked: spsc_pair.listener_parked,
+        send_space_event: spsc_pair.connector_send_space,
+        recv_space_event: spsc_pair.connector_recv_space,
     })
 }
 
@@ -268,21 +278,32 @@ impl InprocListener {
         let cross_thread = connector_thread != std::thread::current().id();
         let eligible =
             cross_thread && is_spsc_eligible(self.snapshot.socket_type, connector.socket_type);
-        let (my_spsc_send, my_spsc_recv, connector_pair) = if eligible {
+        let (my_spsc_send, my_spsc_recv, my_send_space, my_recv_space, connector_pair) = if eligible
+        {
+            // ring1: listener sends, connector receives (p1→c1)
+            // ring2: connector sends, listener receives (p2→c2)
             let (p1, c1) = yring::spsc(DEFAULT_INPROC_HWM);
             let (p2, c2) = yring::spsc(DEFAULT_INPROC_HWM);
+            let space1 = Arc::new(Event::new());
+            let space2 = Arc::new(Event::new());
             (
                 Some(p1),
                 Some(c2),
+                Some(space1.clone()),
+                Some(space2.clone()),
                 SpscPair {
                     for_connector_send: Some(p2),
                     for_connector_recv: Some(c1),
                     listener_recv_event: Some(self.recv_event.clone()),
                     listener_parked: Some(self.parked.clone()),
+                    connector_send_space: Some(space2),
+                    connector_recv_space: Some(space1),
                 },
             )
         } else {
             (
+                None,
+                None,
                 None,
                 None,
                 SpscPair {
@@ -290,6 +311,8 @@ impl InprocListener {
                     for_connector_recv: None,
                     listener_recv_event: None,
                     listener_parked: None,
+                    connector_send_space: None,
+                    connector_recv_space: None,
                 },
             )
         };
@@ -317,6 +340,8 @@ impl InprocListener {
             } else {
                 None
             },
+            send_space_event: my_send_space,
+            recv_space_event: my_recv_space,
         })
     }
 }
