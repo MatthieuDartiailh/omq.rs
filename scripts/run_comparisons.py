@@ -206,6 +206,15 @@ def capture_process(binary: str, *args: str, timeout: int = 15) -> str:
         return ""
 
 
+def cleanup_ipc_socket(addr: str):
+    if addr.startswith("ipc://") and not addr.startswith("ipc://@"):
+        path = addr[len("ipc://"):]
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 def kill_process(proc: subprocess.Popen):
     try:
         proc.send_signal(signal.SIGTERM)
@@ -266,6 +275,13 @@ def run_throughput_cell(
     return best
 
 
+def _fresh_addr(addr: str) -> str:
+    """Return a unique variant of an IPC address to avoid kernel cleanup races."""
+    if addr.startswith("ipc://"):
+        return f"{addr}-{next_addr_id()}"
+    return addr
+
+
 def _run_throughput_once(
     binary: str, transport: str, addr: str, size: int,
     inproc_subcmd: str, duration: float,
@@ -278,16 +294,23 @@ def _run_throughput_once(
                                  timeout=5)
         return parse_throughput(output, size)
 
+    addr = _fresh_addr(addr)
+    cleanup_ipc_socket(addr)
     push = spawn_process(binary, "push", addr, str(size))
-    port = read_bound_port(push)
-    if port is None:
-        kill_process(push)
-        return None
-    connect_addr = str(port)
+    if transport in ("ipc", "ws"):
+        time.sleep(0.2)
+        connect_addr = addr
+    else:
+        port = read_bound_port(push)
+        if port is None:
+            kill_process(push)
+            return None
+        connect_addr = str(port)
     try:
         output = capture_process(binary, "pull", connect_addr, str(size), dur)
     finally:
         kill_process(push)
+        cleanup_ipc_socket(addr)
     return parse_throughput(output, size)
 
 
@@ -353,12 +376,18 @@ def run_latency_cell(
         )
         return parse_latency(output)
 
+    addr = _fresh_addr(addr)
+    cleanup_ipc_socket(addr)
     rep = spawn_process(binary, "rep", addr, str(size))
-    port = read_bound_port(rep)
-    if port is None:
-        kill_process(rep)
-        return None
-    connect_addr = str(port)
+    if transport in ("ipc", "ws"):
+        time.sleep(0.2)
+        connect_addr = addr
+    else:
+        port = read_bound_port(rep)
+        if port is None:
+            kill_process(rep)
+            return None
+        connect_addr = str(port)
     try:
         output = capture_process(
             binary, "req", connect_addr, str(size),
@@ -367,23 +396,34 @@ def run_latency_cell(
         )
     finally:
         kill_process(rep)
+        cleanup_ipc_socket(addr)
     return parse_latency(output)
 
 
 # ── address generation ────────────────────────────────────────────
 
-def addr_for(transport: str, prefix: str, idx: int, base_port: int) -> str:
+_addr_counter = 0
+
+def next_addr_id() -> int:
+    global _addr_counter
+    _addr_counter += 1
+    return _addr_counter
+
+def addr_for(transport: str, prefix: str, idx: int, base_port: int,
+             *, impl_name: str = "") -> str:
+    uid = next_addr_id()
     if transport == "tcp":
-        offsets = {"c": 0, "t": 100, "z": 200, "q": 300, "s": 400, "r": 1000, "m": 1200}
-        return str(base_port + offsets.get(prefix, 0) + idx)
+        return "0"
     if transport == "ws":
         offsets = {"c": 500, "t": 600, "z": 700, "q": 800, "s": 900, "r": 1100, "m": 1300}
         return f"ws://127.0.0.1:{base_port + offsets.get(prefix, 500) + idx}/"
     if transport == "ipc":
-        return f"ipc://@omq-bench-cmp-{prefix}-{idx}"
+        if impl_name in ("zmq.rs", "rzmq", "rust-zmq"):
+            return f"ipc:///tmp/omq-bench-cmp-{prefix}-{uid}"
+        return f"ipc://@omq-bench-cmp-{prefix}-{uid}"
     if transport == "inproc":
-        return f"bench-cmp-{prefix}-{idx}"
-    return str(base_port + idx)
+        return f"bench-cmp-{prefix}-{uid}"
+    return "0"
 
 
 # ── JSONL I/O ─────────────────────────────────────────────────────
@@ -739,7 +779,8 @@ def run_benchmarks(
             for name, binary in active.items():
                 impl_def = IMPLS[name]
                 prefix = impl_def["prefix"]
-                addr = addr_for(transport, prefix, idx, base_port)
+                addr = addr_for(transport, prefix, idx, base_port,
+                               impl_name=name)
                 subcmd = impl_def.get("inproc_tput_subcmd", "inproc")
                 result = run_throughput_cell(binary, transport, addr, size,
                                             inproc_subcmd=subcmd,
@@ -776,7 +817,8 @@ def run_benchmarks(
                 for name, binary in active.items():
                     impl_def = IMPLS[name]
                     prefix = impl_def["prefix"]
-                    addr = addr_for(transport, prefix, idx + len(sizes), base_port)
+                    addr = addr_for(transport, prefix, idx + len(sizes), base_port,
+                                   impl_name=name)
                     subcmd = impl_def.get("inproc_lat_subcmd", "inproc-latency")
                     result = run_latency_cell(binary, transport, addr, size,
                                              inproc_subcmd=subcmd,
