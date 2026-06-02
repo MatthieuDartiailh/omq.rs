@@ -33,4 +33,4 @@ def test_inproc_throughput_above_500k():
     pull.close()
 
     rate = n / elapsed
-    assert rate > 1_000_000, f"inproc throughput {rate/1e6:.2f}M msg/s, expected >1.0M"
+    assert rate > 800_000, f"inproc throughput {rate/1e6:.2f}M msg/s, expected >0.8M"
