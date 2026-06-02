@@ -163,9 +163,6 @@ class Socket:
         self._context = _context
         self._closed = False
         self._last_endpoint = None
-        self._recv_fd_cached = -1
-        self._recv_waiters = None
-        self._recv_reader_active = False
 
     def __getattr__(self, name):
         opt = _SOCKOPT_NAMES.get(name)
@@ -282,6 +279,7 @@ class Socket:
         return self._add_recv_event(self._sock._try_recv_multipart)
 
     def _add_recv_event(self, try_fn):
+        # Fast path: message already available, no event loop needed.
         try:
             result = try_fn()
         except _native.ZMQError as e:
@@ -289,58 +287,18 @@ class Socket:
         if result is not None:
             return _resolved_future(result)
 
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
+        fd = self._sock._recv_fd()
 
-        if self._recv_waiters is None:
-            self._recv_waiters = []
+        try:
+            result = try_fn()
+        except _native.ZMQError as e:
+            os.close(fd)
+            raise error.from_native(e) from None
+        if result is not None:
+            os.close(fd)
+            return _resolved_future(result)
 
-        self._recv_waiters.append((try_fn, fut))
-        self._ensure_recv_reader(loop)
-        self._dispatch_recv_waiters(loop)
-        return fut
-
-    def _ensure_recv_reader(self, loop):
-        if self._recv_reader_active:
-            return
-        if self._recv_fd_cached < 0:
-            self._recv_fd_cached = self._sock._recv_fd()
-        fd = self._recv_fd_cached
-
-        def _on_readable():
-            try:
-                os.read(fd, 8)
-            except OSError:
-                pass
-            self._dispatch_recv_waiters(loop)
-
-        loop.add_reader(fd, _on_readable)
-        self._recv_reader_active = True
-
-    def _dispatch_recv_waiters(self, loop):
-        while self._recv_waiters:
-            try_fn, fut = self._recv_waiters[0]
-            if fut.done():
-                self._recv_waiters.pop(0)
-                continue
-            try:
-                r = try_fn()
-            except Exception as e:
-                self._recv_waiters.pop(0)
-                fut.set_exception(e)
-                continue
-            if r is not None:
-                self._recv_waiters.pop(0)
-                fut.set_result(r)
-            else:
-                break
-        if not self._recv_waiters:
-            self._remove_recv_reader(loop)
-
-    def _remove_recv_reader(self, loop):
-        if self._recv_reader_active:
-            loop.remove_reader(self._recv_fd_cached)
-            self._recv_reader_active = False
+        return _RecvFuture(try_fn, fd)
 
     def _send_with_backpressure(self, data, flags):
         fd = self._sock._send_fd()
@@ -491,16 +449,6 @@ class Socket:
     def close(self, linger=None):
         if not self._closed:
             self._closed = True
-            if self._recv_reader_active:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.remove_reader(self._recv_fd_cached)
-                except RuntimeError:
-                    pass
-                self._recv_reader_active = False
-            if self._recv_fd_cached >= 0:
-                os.close(self._recv_fd_cached)
-                self._recv_fd_cached = -1
             self._sock.close(linger)
 
     def __del__(self):
@@ -595,9 +543,6 @@ class Context(_SyncContext):
         s._pid = os.getpid()
         s._binds = []
         s._connects = []
-        s._recv_fd_cached = -1
-        s._recv_waiters = None
-        s._recv_reader_active = False
         self._sockets.add(s)
         return s
 
