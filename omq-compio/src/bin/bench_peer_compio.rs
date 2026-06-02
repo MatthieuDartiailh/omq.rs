@@ -28,27 +28,41 @@ use std::net::Ipv4Addr;
 
 fn parse_ep(s: &str) -> Endpoint {
     if let Ok(port) = s.parse::<u16>() {
-        Endpoint::Tcp {
+        return Endpoint::Tcp {
             host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
             port,
-        }
-    } else if let Some((ip, port)) = s.split_once(':') {
-        if let (Ok(addr), Ok(port)) = (ip.parse::<Ipv4Addr>(), port.parse::<u16>()) {
-            return Endpoint::Tcp {
-                host: Host::Ip(addr.into()),
-                port,
-            };
-        }
-        s.parse()
-            .expect("valid endpoint (port, ip:port, or full URI)")
-    } else {
-        s.parse()
-            .expect("valid endpoint (port, ip:port, or full URI)")
+        };
+    }
+    if let Some((ip, port_str)) = s.split_once(':')
+        && let Ok(addr) = ip.parse::<Ipv4Addr>()
+        && let Ok(port) = port_str.parse::<u16>()
+    {
+        return Endpoint::Tcp {
+            host: Host::Ip(addr.into()),
+            port,
+        };
+    }
+    s.parse()
+        .expect("valid endpoint (port, ip:port, or full URI)")
+}
+
+fn bind_ep() -> Endpoint {
+    Endpoint::Tcp {
+        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
+        port: 0,
     }
 }
 
+fn print_bound_port(ep: &Endpoint) {
+    if let Endpoint::Tcp { port, .. } = ep {
+        println!("PORT {port}");
+    }
+}
+
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 extern "C" fn exit_on_signal(_sig: libc::c_int) {
-    unsafe { libc::_exit(0) };
+    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[expect(clippy::too_many_lines)]
@@ -170,32 +184,21 @@ fn main() {
     });
 }
 
-async fn retry_bind(sock: &Socket, ep: &Endpoint) {
-    for attempt in 0..20 {
-        match sock.bind(ep.clone()).await {
-            Ok(_) => return,
-            Err(e) if attempt < 19 => {
-                eprintln!("bind retry {attempt}: {e}");
-                compio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(e) => panic!("bind failed after retries: {e}"),
-        }
-    }
-}
-
-async fn run_push(ep: Endpoint, size: usize) {
+async fn run_push(_ep: Endpoint, size: usize) {
+    use std::sync::atomic::Ordering;
     let push = Socket::new(SocketType::Push, bench_options(size));
-    retry_bind(&push, &ep).await;
+    let bound = push.bind(bind_ep()).await.expect("push bind");
+    print_bound_port(&bound);
     let payload = vec![b'x'; size];
     if size <= omq_proto::message::MAX_INLINE_MESSAGE {
-        loop {
+        while !STOP.load(Ordering::Relaxed) {
             if push.send(Message::from_slice(&payload)).await.is_err() {
                 break;
             }
         }
     } else {
         let msg = Message::single(payload);
-        loop {
+        while !STOP.load(Ordering::Relaxed) {
             if push.send(msg.clone()).await.is_err() {
                 break;
             }
@@ -345,12 +348,16 @@ fn with_commas(s: &str) -> String {
     out
 }
 
-async fn run_rep(ep: Endpoint, size: usize) {
+async fn run_rep(_ep: Endpoint, size: usize) {
+    use std::sync::atomic::Ordering;
     let rep = Socket::new(SocketType::Rep, bench_options(size));
-    retry_bind(&rep, &ep).await;
-    loop {
-        let msg = rep.recv().await.unwrap();
-        rep.send(msg).await.unwrap();
+    let bound = rep.bind(bind_ep()).await.expect("rep bind");
+    print_bound_port(&bound);
+    while !STOP.load(Ordering::Relaxed) {
+        let Ok(msg) = rep.recv().await else { break };
+        if rep.send(msg).await.is_err() {
+            break;
+        }
     }
 }
 
@@ -538,14 +545,16 @@ async fn run_latency_mt(ep: Endpoint, size: usize, iterations: usize, warmup: us
     std::process::exit(0);
 }
 
-async fn run_pub(ep: Endpoint, size: usize) {
+async fn run_pub(_ep: Endpoint, size: usize) {
+    use std::sync::atomic::Ordering;
     let pub_ = Socket::new(
         SocketType::Pub,
         bench_options(size).on_mute(omq_compio::OnMute::Block),
     );
-    retry_bind(&pub_, &ep).await;
+    let bound = pub_.bind(bind_ep()).await.expect("pub bind");
+    print_bound_port(&bound);
     let payload = vec![b'x'; size];
-    loop {
+    while !STOP.load(Ordering::Relaxed) {
         if pub_.send(Message::from_slice(&payload)).await.is_err() {
             break;
         }
