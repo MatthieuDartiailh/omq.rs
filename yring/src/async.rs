@@ -1,9 +1,11 @@
 //! Async wrapper over the core SPSC ring.
 //!
-//! `AsyncProducer::flush()` wakes the consumer when the ring transitions
-//! from empty to non-empty. `AsyncConsumer` implements `futures_core::Stream`.
+//! `AsyncProducer::flush()` wakes the consumer when items become visible.
+//! `AsyncConsumer::release()` wakes the producer when slots become available.
+//! `AsyncConsumer` implements `futures_core::Stream`.
 //! No runtime dependency; works with any executor.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -15,7 +17,8 @@ use crate::{Padded, Ring};
 
 struct AsyncRing<T> {
     ring: Ring<T>,
-    waker: Padded<AtomicWaker>,
+    consumer_waker: Padded<AtomicWaker>,
+    producer_waker: Padded<AtomicWaker>,
 }
 
 // SAFETY: AsyncRing<T> is Send because the inner Ring<T> is Send and
@@ -61,7 +64,8 @@ unsafe impl<T: Send> Send for AsyncConsumer<T> {}
 pub fn async_spsc<T>(capacity: usize) -> (AsyncProducer<T>, AsyncConsumer<T>) {
     let ring = Arc::new(AsyncRing {
         ring: Ring::new(capacity),
-        waker: Padded(AtomicWaker::new()),
+        consumer_waker: Padded(AtomicWaker::new()),
+        producer_waker: Padded(AtomicWaker::new()),
     });
     (
         AsyncProducer {
@@ -101,7 +105,7 @@ impl<T> AsyncProducer<T> {
             .flush
             .0
             .store(self.tail, std::sync::atomic::Ordering::Release);
-        self.ring.waker.0.wake();
+        self.ring.consumer_waker.0.wake();
     }
 
     /// Push + flush in one call.
@@ -110,6 +114,19 @@ impl<T> AsyncProducer<T> {
         self.push(val)?;
         self.flush();
         Ok(())
+    }
+
+    /// Push a value, waiting asynchronously if the ring is full.
+    ///
+    /// Returns `Err(val)` only if the consumer has been dropped (the ring
+    /// will never drain). On success the value is buffered but not yet
+    /// visible to the consumer; call [`flush`](Self::flush) to publish.
+    #[inline]
+    pub fn push_async(&mut self, val: T) -> PushFuture<'_, T> {
+        PushFuture {
+            producer: self,
+            val: Some(val),
+        }
     }
 
     #[inline]
@@ -133,6 +150,51 @@ impl<T> AsyncProducer<T> {
     }
 }
 
+/// Future returned by [`AsyncProducer::push_async`].
+pub struct PushFuture<'a, T> {
+    producer: &'a mut AsyncProducer<T>,
+    val: Option<T>,
+}
+
+impl<T> std::fmt::Debug for PushFuture<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushFuture")
+            .field("has_value", &self.val.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+// SAFETY: PushFuture has no self-referential structure. The mutable
+// reference and the Option<T> are independent fields.
+impl<T> Unpin for PushFuture<'_, T> {}
+
+impl<T> Future for PushFuture<'_, T> {
+    type Output = Result<(), T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let val = this.val.take().expect("PushFuture polled after completion");
+
+        match this.producer.push(val) {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(returned) => {
+                if Arc::strong_count(&this.producer.ring) == 1 {
+                    return Poll::Ready(Err(returned));
+                }
+                this.producer.ring.producer_waker.0.register(cx.waker());
+                // Retry after registration to close the race window.
+                match this.producer.push(returned) {
+                    Ok(()) => Poll::Ready(Ok(())),
+                    Err(returned) => {
+                        this.val = Some(returned);
+                        Poll::Pending
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl<T> AsyncConsumer<T> {
     /// Pop one item from the prefetched window. Zero atomics.
     /// Call [`release`](Self::release) after draining a batch.
@@ -141,10 +203,12 @@ impl<T> AsyncConsumer<T> {
         self.ring.ring.pop(&mut self.head, self.cached_flush)
     }
 
-    /// Publish consumed position so the producer can reuse slots.
+    /// Publish consumed position so the producer can reuse slots,
+    /// and wake the producer if it is waiting for space.
     #[inline]
     pub fn release(&mut self) {
         self.ring.ring.release(self.head);
+        self.ring.producer_waker.0.wake();
     }
 
     /// Load all items flushed since the last prefetch. One Acquire load.
@@ -194,7 +258,7 @@ impl<T> Stream for AsyncConsumer<T> {
             return Poll::Ready(Some(val));
         }
 
-        this.ring.waker.0.register(cx.waker());
+        this.ring.consumer_waker.0.register(cx.waker());
 
         // Re-check after registering to avoid lost wakes.
         if let Some(val) = this.prefetch_and_pop() {
@@ -216,7 +280,7 @@ impl<T> Drop for AsyncConsumer<T> {
 impl<T> Drop for AsyncProducer<T> {
     fn drop(&mut self) {
         self.flush();
-        self.ring.waker.0.wake();
+        self.ring.consumer_waker.0.wake();
     }
 }
 
@@ -353,5 +417,97 @@ mod tests {
         }
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn push_async_blocks_when_full() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (mut p, mut c) = async_spsc::<u32>(4);
+        // Fill the ring (capacity rounds to 4).
+        for i in 0..4 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        assert!(p.push(99).is_err());
+
+        let pushed = Arc::new(AtomicBool::new(false));
+        let pushed2 = pushed.clone();
+
+        let handle = std::thread::spawn(move || {
+            futures_lite::future::block_on(async {
+                p.push_async(99).await.unwrap();
+                p.flush();
+                pushed2.store(true, Ordering::Release);
+            });
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!pushed.load(Ordering::Acquire), "should be blocked");
+
+        // Drain one slot.
+        c.prefetch();
+        c.pop();
+        c.release();
+
+        handle.join().unwrap();
+        assert!(pushed.load(Ordering::Acquire));
+
+        // Verify the value arrived.
+        c.prefetch();
+        // Skip remaining 1,2,3 that were in the ring.
+        c.pop(); // 1
+        c.pop(); // 2
+        c.pop(); // 3
+        let val = c.pop(); // 99
+        assert_eq!(val, Some(99));
+    }
+
+    #[test]
+    fn push_async_cross_thread() {
+        let (mut p, c) = async_spsc::<u64>(64);
+        let n = 100_000u64;
+
+        let receiver = std::thread::spawn(move || {
+            futures_lite::future::block_on(async {
+                futures_lite::pin!(c);
+                let mut received = 0u64;
+                while let Some(v) = c.next().await {
+                    assert_eq!(v, received);
+                    received += 1;
+                    if received == n {
+                        break;
+                    }
+                }
+                received
+            })
+        });
+
+        futures_lite::future::block_on(async {
+            for i in 0..n {
+                p.push_async(i).await.unwrap();
+                if i % 64 == 63 {
+                    p.flush();
+                }
+            }
+            p.flush();
+        });
+
+        let count = receiver.join().unwrap();
+        assert_eq!(count, n);
+    }
+
+    #[test]
+    fn push_async_returns_err_on_consumer_drop() {
+        let (mut p, c) = async_spsc::<u32>(4);
+        for i in 0..4 {
+            p.push(i).unwrap();
+        }
+        p.flush();
+        drop(c);
+
+        let result = futures_lite::future::block_on(async { p.push_async(99).await });
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), 99);
     }
 }
