@@ -291,10 +291,10 @@ def run_latency_cell(
 
 def addr_for(transport: str, prefix: str, idx: int, base_port: int) -> str:
     if transport == "tcp":
-        offsets = {"c": 0, "t": 100, "z": 200, "q": 300, "s": 400, "r": 1000}
+        offsets = {"c": 0, "t": 100, "z": 200, "q": 300, "s": 400, "r": 1000, "m": 1200}
         return str(base_port + offsets.get(prefix, 0) + idx)
     if transport == "ws":
-        offsets = {"c": 500, "t": 600, "z": 700, "q": 800, "s": 900, "r": 1100}
+        offsets = {"c": 500, "t": 600, "z": 700, "q": 800, "s": 900, "r": 1100, "m": 1300}
         return f"ws://127.0.0.1:{base_port + offsets.get(prefix, 500) + idx}/"
     if transport == "ipc":
         return f"ipc://@omq-bench-cmp-{prefix}-{idx}"
@@ -536,6 +536,12 @@ IMPLS = {
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
     },
+    "omq-libzmq": {
+        "prefix": "m",
+        "transports": ["tcp", "inproc", "ipc"],
+        "inproc_tput_subcmd": "inproc",
+        "inproc_lat_subcmd": "inproc-latency",
+    },
 }
 
 
@@ -581,6 +587,24 @@ def build_peers(impl_names: set[str], ws_needed: bool):
             cwd=rzmq_dir, check=True,
         )
         binaries["rzmq"] = str(rzmq_dir / "target" / "release" / "rzmq_bench_peer")
+
+    if "omq-libzmq" in impl_names:
+        print("==> building omq-libzmq bench_peer...", file=sys.stderr)
+        subprocess.run(
+            ["cargo", "build", "--release", "-p", "omq-libzmq", "-q"],
+            cwd=ROOT, check=True,
+        )
+        src = ROOT / "scripts" / "libzmq_bench_peer.c"
+        out = ROOT / "scripts" / "omq_zmq_bench_peer"
+        inc = ROOT / "omq-libzmq" / "include"
+        lib_dir = ROOT / "target" / "release"
+        subprocess.run(
+            ["gcc", "-O2", "-o", str(out), str(src),
+             f"-I{inc}", f"-L{lib_dir}", "-lomq_zmq", "-lpthread",
+             f"-Wl,-rpath,{lib_dir}"],
+            check=True,
+        )
+        binaries["omq-libzmq"] = str(out)
 
     return binaries
 
@@ -766,6 +790,8 @@ def main():
         versions.append(f"zmq.rs {cargo_version('zeromq', manifest=ROOT / 'scripts' / 'zmqrs_bench_peer' / 'Cargo.toml')}")
     if "rzmq" in impl_names:
         versions.append(f"rzmq {cargo_version('rzmq', manifest=ROOT / 'scripts' / 'rzmq_bench_peer' / 'Cargo.toml')}")
+    if "omq-libzmq" in impl_names:
+        versions.append(f"omq-libzmq {cargo_version('omq-libzmq')}")
     print(" vs ".join(versions), file=sys.stderr)
 
     run_benchmarks(binaries, transports, sizes, run_latency, args.base_port, run_id,
