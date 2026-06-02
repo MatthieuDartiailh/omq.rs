@@ -31,7 +31,7 @@ public `Socket` API. Verified by `tests/coverage_matrix.rs` (both) and
 ## Build / test / bench
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the full command reference
-(unit tests, feature-gated tests, fuzz, soak, benchmarks).
+(unit tests, feature-gated tests, fuzz, soak, stress tests, benchmarks).
 
 Quick reference:
 

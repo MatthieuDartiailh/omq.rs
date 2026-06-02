@@ -115,6 +115,18 @@ maturin develop --release
 OMQ_SOAK_DURATION_SECS=120 python3 -m pytest tests/soak/ -v --tb=short
 ```
 
+## Stress tests
+
+Connect-before-bind and reconnection stress: 200 rounds per
+socket-type/transport/bind-role combo. Covers PUSH/PULL, REQ/REP,
+PUB/SUB, PAIR, DEALER/ROUTER across TCP, IPC, and inproc with both
+sides taking the bind role. Single-threaded to catch hangs.
+
+```sh
+cargo test -p omq-compio --test stress_connect_before_bind -- --test-threads=1
+cargo test -p omq-tokio  --test stress_connect_before_bind -- --test-threads=1
+```
+
 ## Benchmarks
 
 ```sh
