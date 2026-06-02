@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use atomic_waker::AtomicWaker;
 use futures_core::Stream;
 
-use crate::{FlushResult, Padded, Ring};
+use crate::{Padded, Ring};
 
 struct AsyncRing<T> {
     ring: Ring<T>,
@@ -86,19 +86,22 @@ impl<T> AsyncProducer<T> {
             .push(&mut self.tail, &mut self.cached_head, val)
     }
 
-    /// Make all pushed items visible and wake the consumer if the ring was empty.
+    /// Make all pushed items visible and wake the consumer unconditionally.
+    ///
+    /// The `was_empty` optimization (only wake when the ring transitions
+    /// from empty to non-empty) has a race: the consumer can drain and
+    /// re-register its waker between two producer flushes, making
+    /// `was_empty` false even though the consumer is parked. Waking
+    /// unconditionally is one extra `AtomicWaker::wake()` per flush
+    /// (a no-op when no waker is registered) but is race-free.
     #[inline]
     pub fn flush(&mut self) {
-        let r = self.ring.ring.flush_to(self.tail, &mut self.cached_head);
-        if matches!(
-            r,
-            FlushResult::Flushed {
-                was_empty: true,
-                ..
-            }
-        ) {
-            self.ring.waker.0.wake();
-        }
+        self.ring
+            .ring
+            .flush
+            .0
+            .store(self.tail, std::sync::atomic::Ordering::Release);
+        self.ring.waker.0.wake();
     }
 
     /// Push + flush in one call.

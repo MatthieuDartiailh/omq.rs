@@ -14,18 +14,143 @@ Use::
 """
 
 import asyncio
-import errno as _errno
 import json
 import os
 import pickle
-import time
+import weakref
 
 from . import _native  # type: ignore[attr-defined]
 from . import error
+from . import Context as _SyncContext
+from . import _next_ctx_id
 from . import (
-    POLLIN, POLLOUT, SNDHWM, RCVHWM, LINGER, TYPE, LAST_ENDPOINT,
+    FD, POLLIN, POLLOUT, SNDHWM, RCVHWM, LINGER, TYPE, LAST_ENDPOINT,
     _TYPE_NAMES, _SOCKOPT_NAMES,
 )
+
+
+def _resolved_future(result):
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    fut.set_result(result)
+    return fut
+
+
+import errno as _errno
+import select as _select
+
+_EAGAIN = _errno.EAGAIN
+_MISSING = object()
+
+
+class _DoneFuture:
+    """Lightweight awaitable that resolves immediately to None."""
+
+    def __await__(self):
+        return
+        yield  # noqa: unreachable -- makes this a generator
+
+    def result(self):
+        return None
+
+    def done(self):
+        return True
+
+
+_SEND_DONE = _DoneFuture()
+
+
+class _RecvFuture:
+    """Supports both ``await fut`` (event-loop) and ``fut.result()`` (blocking)."""
+
+    __slots__ = ("_try_fn", "_fd", "_result", "_exception")
+
+    def __init__(self, try_fn, fd):
+        self._try_fn = try_fn
+        self._fd = fd
+        self._result = _MISSING
+        self._exception = None
+
+    def done(self):
+        if self._result is not _MISSING or self._exception is not None:
+            return True
+        try:
+            r = self._try_fn()
+        except Exception as e:
+            self._exception = e
+            return True
+        if r is not None:
+            self._result = r
+            return True
+        return False
+
+    def result(self):
+        if self._exception is not None:
+            raise self._exception
+        if self._result is not _MISSING:
+            return self._result
+        try:
+            while True:
+                _select.select([self._fd], [], [])
+                try:
+                    os.read(self._fd, 8)
+                except OSError:
+                    pass
+                try:
+                    r = self._try_fn()
+                except Exception as e:
+                    self._exception = e
+                    raise
+                if r is not None:
+                    self._result = r
+                    return r
+        finally:
+            if self._fd >= 0:
+                os.close(self._fd)
+                self._fd = -1
+
+    def __await__(self):
+        if self.done():
+            if self._fd >= 0:
+                os.close(self._fd)
+                self._fd = -1
+            if self._exception is not None:
+                raise self._exception
+            return self._result
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        fd = self._fd
+        self._fd = -1
+        try_fn = self._try_fn
+
+        def _on_readable():
+            try:
+                os.read(fd, 8)
+            except OSError:
+                pass
+            try:
+                r = try_fn()
+            except Exception as e:
+                loop.remove_reader(fd)
+                os.close(fd)
+                if not fut.done():
+                    fut.set_exception(e)
+                return
+            if r is not None:
+                loop.remove_reader(fd)
+                os.close(fd)
+                if not fut.done():
+                    fut.set_result(r)
+
+        def _on_cancel(f):
+            if f.cancelled():
+                loop.remove_reader(fd)
+                os.close(fd)
+
+        fut.add_done_callback(_on_cancel)
+        loop.add_reader(fd, _on_readable)
+        return (yield from fut.__await__())
 
 
 class Socket:
@@ -38,6 +163,9 @@ class Socket:
         self._context = _context
         self._closed = False
         self._last_endpoint = None
+        self._recv_fd_cached = -1
+        self._recv_waiters = None
+        self._recv_reader_active = False
 
     def __getattr__(self, name):
         opt = _SOCKOPT_NAMES.get(name)
@@ -85,9 +213,12 @@ class Socket:
 
     # ── I/O ──────────────────────────────────────────────────────────
 
+    def fileno(self):
+        return self.getsockopt(FD)
+
     def bind(self, endpoint):
         try:
-            ep = self._sock.bind(endpoint)
+            ep = self._sock.bind(self._context._namespace_inproc(endpoint))
             self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
             return ep
         except _native.ZMQError as e:
@@ -95,7 +226,7 @@ class Socket:
 
     def connect(self, endpoint):
         try:
-            self._sock.connect(endpoint)
+            self._sock.connect(self._context._namespace_inproc(endpoint))
             self._last_endpoint = (
                 endpoint.encode() if isinstance(endpoint, str) else endpoint
             )
@@ -104,91 +235,136 @@ class Socket:
 
     def unbind(self, endpoint):
         try:
-            return self._sock.unbind(endpoint)
+            return self._sock.unbind(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def disconnect(self, endpoint):
         try:
-            return self._sock.disconnect(endpoint)
+            return self._sock.disconnect(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def send(self, data, flags=0, copy=True, track=False):
-        while True:
-            try:
-                self._sock._send_direct(data, flags)
-                return
-            except _native.ZMQError as e:
-                if getattr(e, "errno", None) == _errno.EAGAIN:
-                    time.sleep(0.0001)
-                    continue
-                raise error.from_native(e) from None
-
-    async def recv(self, flags=0, copy=True, track=False):
         try:
-            return await self._wait_and_recv(self._sock._try_recv)
+            self._sock.send(data, flags)
         except _native.ZMQError as e:
+            if e.errno == _EAGAIN:
+                return self._send_with_backpressure(data, flags)
             raise error.from_native(e) from None
+        return _SEND_DONE
+
+    def recv(self, flags=0, copy=True, track=False):
+        if not copy:
+            from pyomq import Frame
+            async def _wrap():
+                data = await self._add_recv_event(self._sock._try_recv)
+                return Frame(data)
+            return asyncio.ensure_future(_wrap())
+        return self._add_recv_event(self._sock._try_recv)
 
     def send_multipart(self, parts, flags=0, copy=True, track=False):
-        while True:
-            try:
-                self._sock._send_multipart_direct(parts, flags)
-                return
-            except _native.ZMQError as e:
-                if getattr(e, "errno", None) == _errno.EAGAIN:
-                    time.sleep(0.0001)
-                    continue
-                raise error.from_native(e) from None
-
-    async def recv_multipart(self, flags=0, copy=True, track=False):
         try:
-            return await self._wait_and_recv(self._sock._try_recv_multipart)
+            self._sock.send_multipart(parts, flags)
+        except _native.ZMQError as e:
+            if e.errno == _EAGAIN:
+                return self._send_multipart_with_backpressure(parts, flags)
+            raise error.from_native(e) from None
+        return _SEND_DONE
+
+    def recv_multipart(self, flags=0, copy=True, track=False):
+        if not copy:
+            from pyomq import Frame
+            async def _wrap():
+                parts = await self._add_recv_event(self._sock._try_recv_multipart)
+                return [Frame(p) for p in parts]
+            return asyncio.ensure_future(_wrap())
+        return self._add_recv_event(self._sock._try_recv_multipart)
+
+    def _add_recv_event(self, try_fn):
+        try:
+            result = try_fn()
         except _native.ZMQError as e:
             raise error.from_native(e) from None
-
-    async def _wait_and_recv(self, try_fn):
-        result = try_fn()
         if result is not None:
-            return result
-
-        fd = self._sock._recv_fd()
-
-        result = try_fn()
-        if result is not None:
-            os.close(fd)
-            return result
+            return _resolved_future(result)
 
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
+
+        if self._recv_waiters is None:
+            self._recv_waiters = []
+
+        self._recv_waiters.append((try_fn, fut))
+        self._ensure_recv_reader(loop)
+        self._dispatch_recv_waiters(loop)
+        return fut
+
+    def _ensure_recv_reader(self, loop):
+        if self._recv_reader_active:
+            return
+        if self._recv_fd_cached < 0:
+            self._recv_fd_cached = self._sock._recv_fd()
+        fd = self._recv_fd_cached
 
         def _on_readable():
             try:
                 os.read(fd, 8)
             except OSError:
                 pass
-            try:
-                msg = try_fn()
-            except Exception as e:
-                loop.remove_reader(fd)
-                os.close(fd)
-                if not fut.done():
-                    fut.set_exception(e)
-                return
-            if msg is not None:
-                loop.remove_reader(fd)
-                os.close(fd)
-                if not fut.done():
-                    fut.set_result(msg)
+            self._dispatch_recv_waiters(loop)
 
         loop.add_reader(fd, _on_readable)
-        try:
-            return await fut
-        except asyncio.CancelledError:
-            loop.remove_reader(fd)
-            os.close(fd)
-            raise
+        self._recv_reader_active = True
+
+    def _dispatch_recv_waiters(self, loop):
+        while self._recv_waiters:
+            try_fn, fut = self._recv_waiters[0]
+            if fut.done():
+                self._recv_waiters.pop(0)
+                continue
+            try:
+                r = try_fn()
+            except Exception as e:
+                self._recv_waiters.pop(0)
+                fut.set_exception(e)
+                continue
+            if r is not None:
+                self._recv_waiters.pop(0)
+                fut.set_result(r)
+            else:
+                break
+        if not self._recv_waiters:
+            self._remove_recv_reader(loop)
+
+    def _remove_recv_reader(self, loop):
+        if self._recv_reader_active:
+            loop.remove_reader(self._recv_fd_cached)
+            self._recv_reader_active = False
+
+    def _send_with_backpressure(self, data, flags):
+        fd = self._sock._send_fd()
+        def try_send():
+            try:
+                self._sock.send(data, flags)
+                return True
+            except _native.ZMQError as e:
+                if e.errno == _EAGAIN:
+                    return None
+                raise
+        return _RecvFuture(try_send, fd)
+
+    def _send_multipart_with_backpressure(self, parts, flags):
+        fd = self._sock._send_fd()
+        def try_send():
+            try:
+                self._sock.send_multipart(parts, flags)
+                return True
+            except _native.ZMQError as e:
+                if e.errno == _EAGAIN:
+                    return None
+                raise
+        return _RecvFuture(try_send, fd)
 
     # ── Serialization helpers ────────────────────────────────────────
 
@@ -231,6 +407,9 @@ class Socket:
             raise error.from_native(e) from None
 
     def getsockopt(self, option):
+        from pyomq import LAST_ENDPOINT
+        if option == LAST_ENDPOINT:
+            return self._last_endpoint
         try:
             return self._sock.getsockopt(option)
         except _native.ZMQError as e:
@@ -312,7 +491,20 @@ class Socket:
     def close(self, linger=None):
         if not self._closed:
             self._closed = True
+            if self._recv_reader_active:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.remove_reader(self._recv_fd_cached)
+                except RuntimeError:
+                    pass
+                self._recv_reader_active = False
+            if self._recv_fd_cached >= 0:
+                os.close(self._recv_fd_cached)
+                self._recv_fd_cached = -1
             self._sock.close(linger)
+
+    def __del__(self):
+        self.close()
 
     async def poll(self, timeout=None, flags=POLLIN):
         p = Poller()
@@ -379,11 +571,14 @@ class Poller:
         ]
 
 
-class Context:
+class Context(_SyncContext):
+    _socket_class = None
+
     def __init__(self, io_threads=1):
         self._ctx = _native.AsyncContext(io_threads)
         self._closed = False
-        self._sockets = set()
+        self._sockets = weakref.WeakSet()
+        self._ctx_id = next(_next_ctx_id)
 
     @property
     def closed(self):
@@ -397,19 +592,34 @@ class Context:
         s._context = self
         s._closed = False
         s._last_endpoint = None
+        s._pid = os.getpid()
+        s._binds = []
+        s._connects = []
+        s._recv_fd_cached = -1
+        s._recv_waiters = None
+        s._recv_reader_active = False
         self._sockets.add(s)
         return s
 
     def term(self):
         self._closed = True
+        for s in list(self._sockets):
+            if not s.closed:
+                s.close()
+        self._sockets.clear()
 
     def destroy(self, linger=None):
         for s in list(self._sockets):
             if not s.closed:
                 if linger is not None:
                     s.setsockopt(LINGER, linger)
+                s.close()
         self._sockets.clear()
         self.term()
+
+    def __del__(self):
+        if not self._closed:
+            self.term()
 
     def __enter__(self):
         return self
@@ -418,5 +628,7 @@ class Context:
         self.term()
         return False
 
+
+Context._socket_class = Socket
 
 __all__ = ["Context", "Socket", "Poller"]

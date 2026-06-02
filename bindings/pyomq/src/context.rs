@@ -10,27 +10,28 @@ use crate::error::map_err;
 use crate::socket::Socket;
 use crate::socket_async::AsyncSocket;
 
-fn map_socket_type(st: i32) -> PyResult<omq_compio::SocketType> {
+fn map_socket_type(st: i32) -> PyResult<omq_tokio::SocketType> {
     Ok(match st {
-        constants::PAIR => omq_compio::SocketType::Pair,
-        constants::PUB => omq_compio::SocketType::Pub,
-        constants::SUB => omq_compio::SocketType::Sub,
-        constants::REQ => omq_compio::SocketType::Req,
-        constants::REP => omq_compio::SocketType::Rep,
-        constants::DEALER => omq_compio::SocketType::Dealer,
-        constants::ROUTER => omq_compio::SocketType::Router,
-        constants::PULL => omq_compio::SocketType::Pull,
-        constants::PUSH => omq_compio::SocketType::Push,
-        constants::XPUB => omq_compio::SocketType::XPub,
-        constants::XSUB => omq_compio::SocketType::XSub,
-        constants::SERVER => omq_compio::SocketType::Server,
-        constants::CLIENT => omq_compio::SocketType::Client,
-        constants::RADIO => omq_compio::SocketType::Radio,
-        constants::DISH => omq_compio::SocketType::Dish,
-        constants::GATHER => omq_compio::SocketType::Gather,
-        constants::SCATTER => omq_compio::SocketType::Scatter,
-        constants::PEER => omq_compio::SocketType::Peer,
-        constants::CHANNEL => omq_compio::SocketType::Channel,
+        constants::PAIR => omq_tokio::SocketType::Pair,
+        constants::PUB => omq_tokio::SocketType::Pub,
+        constants::SUB => omq_tokio::SocketType::Sub,
+        constants::REQ => omq_tokio::SocketType::Req,
+        constants::REP => omq_tokio::SocketType::Rep,
+        constants::DEALER => omq_tokio::SocketType::Dealer,
+        constants::ROUTER => omq_tokio::SocketType::Router,
+        constants::PULL => omq_tokio::SocketType::Pull,
+        constants::PUSH => omq_tokio::SocketType::Push,
+        constants::XPUB => omq_tokio::SocketType::XPub,
+        constants::XSUB => omq_tokio::SocketType::XSub,
+        constants::STREAM => omq_tokio::SocketType::Stream,
+        constants::SERVER => omq_tokio::SocketType::Server,
+        constants::CLIENT => omq_tokio::SocketType::Client,
+        constants::RADIO => omq_tokio::SocketType::Radio,
+        constants::DISH => omq_tokio::SocketType::Dish,
+        constants::GATHER => omq_tokio::SocketType::Gather,
+        constants::SCATTER => omq_tokio::SocketType::Scatter,
+        constants::PEER => omq_tokio::SocketType::Peer,
+        constants::CHANNEL => omq_tokio::SocketType::Channel,
         other => {
             return Err(map_err(omq_proto::error::Error::InvalidEndpoint(format!(
                 "unknown socket type {other}"
@@ -47,7 +48,7 @@ impl Context {
     #[new]
     #[pyo3(signature = (io_threads = 1))]
     fn new(io_threads: i32) -> Self {
-        let _ = io_threads; // libzmq legacy; unused on our runtime model
+        crate::runtime::set_io_threads(io_threads.max(1) as u64);
         Context
     }
 
@@ -88,7 +89,7 @@ impl AsyncContext {
     #[new]
     #[pyo3(signature = (io_threads = 1))]
     fn new(io_threads: i32) -> Self {
-        let _ = io_threads;
+        crate::runtime::set_io_threads(io_threads.max(1) as u64);
         AsyncContext
     }
 

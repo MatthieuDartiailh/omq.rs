@@ -132,7 +132,9 @@ pub fn bind(
     let (tx, rx) = mpsc::channel(32);
     {
         let mut reg = REGISTRY.lock().expect("inproc registry poisoned");
-        if reg.contains_key(name) {
+        if let Some(existing) = reg.get(name)
+            && !existing.is_closed()
+        {
             return Err(Error::InvalidEndpoint(format!(
                 "inproc name already bound: {name}"
             )));

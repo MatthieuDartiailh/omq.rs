@@ -16,6 +16,7 @@ pub const PULL: i32 = 7;
 pub const PUSH: i32 = 8;
 pub const XPUB: i32 = 9;
 pub const XSUB: i32 = 10;
+pub const STREAM: i32 = 11;
 // Draft socket types (libzmq `zmq_draft.h`):
 pub const SERVER: i32 = 12;
 pub const CLIENT: i32 = 13;
@@ -126,6 +127,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         PUSH,
         XPUB,
         XSUB,
+        STREAM,
         SERVER,
         CLIENT,
         RADIO,

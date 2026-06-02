@@ -1,97 +1,108 @@
-//! Runtime: a single compio runtime on a dedicated background thread,
-//! with a Socket registry keyed by id.
+//! Runtime: a single-threaded tokio runtime on a dedicated background thread.
 //!
-//! `omq_compio::Socket` is not `Send` (it transitively holds `Rc`s for
-//! UDP state), so the Socket itself has to live on the runtime thread.
-//! Python-side `Socket` wrappers hold an `id: u64`; each I/O method
-//! posts a job to the runtime thread, which pulls the matching socket
-//! out of a `thread_local` registry, runs the op there, and ships the
-//! result back via a oneshot.
+//! omq-tokio::Socket is Send + Sync, so Python-side wrappers hold an
+//! Arc<Socket> directly in SocketInner. However, the socket's internal
+//! driver tasks (ConnectionDriver, actor loop) are spawned via
+//! tokio::spawn and need the tokio scheduler actively polling to make
+//! progress. Python threads have no tokio runtime context, so they
+//! cannot call socket.send()/recv() directly.
 //!
-//! All public functions block the calling Python thread for the
-//! duration; the caller is expected to `Python::allow_threads(...)`
-//! around the call so the GIL is released.
+//! The yring SPSC relay bridges the two worlds: Python does a fast
+//! lock-free ring push/pop (no syscall, no async context needed), and
+//! pump tasks on the tokio thread relay between the rings and the
+//! actual socket.send()/recv().await calls.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::future::Future;
-use std::rc::Rc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use futures::FutureExt;
-use omq_compio::Socket as InnerSocket;
+use omq_tokio::Socket as InnerSocket;
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 
-/// Job: a closure that runs on the compio thread. We can't carry the
-/// future itself because `omq_compio::Socket` is `!Send`; instead the
-/// closure builds and spawns the future on the compio thread.
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
-static SUBMIT: OnceLock<flume::Sender<Job>> = OnceLock::new();
-
-/// Global recv notification: all recv pumps signal this after pushing
-/// a message to an empty ring. `wait_any` parks on it.
-pub(crate) static RECV_READY: std::sync::LazyLock<crate::socket::RecvNotify> =
-    std::sync::LazyLock::new(crate::socket::RecvNotify::new);
-
-thread_local! {
-    /// Compio-thread-local: id -> Socket. `Rc` is fine because
-    /// everything that touches this map runs on the compio thread.
-    static REG: RefCell<HashMap<u64, Rc<InnerSocket>>> = RefCell::new(HashMap::new());
-
-    /// Pump task handles. Stored so the proxy can cancel them to get
-    /// exclusive send/recv access on the underlying socket.
-    #[allow(clippy::type_complexity)]
-    static PUMPS: RefCell<HashMap<u64, (
-        compio::runtime::JoinHandle<()>,
-        compio::runtime::JoinHandle<()>,
-    )>> = RefCell::new(HashMap::new());
+struct RuntimeState {
+    pid: u32,
+    handle: Handle,
+    submit: flume::Sender<Job>,
+    recv_ready: Arc<crate::socket::RecvNotify>,
 }
 
+static RUNTIME: Mutex<Option<RuntimeState>> = Mutex::new(None);
+static IO_THREADS: AtomicU64 = AtomicU64::new(1);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-fn submit_chan() -> &'static flume::Sender<Job> {
-    SUBMIT.get_or_init(|| {
-        let (tx, rx) = flume::unbounded::<Job>();
-        thread::Builder::new()
-            .name("pyomq-compio".into())
-            .spawn(move || {
-                let rt = build_compio_runtime().expect("pyomq: compio runtime build");
-                rt.block_on(async move {
-                    while let Ok(job) = rx.recv_async().await {
-                        // Job runs synchronously here. Each job either
-                        // mutates the registry (e.g. socket creation) or
-                        // spawns a detached task that uses an entry.
-                        job();
-                    }
-                });
-            })
-            .expect("pyomq: spawn compio thread");
-        tx
-    })
+fn ensure_runtime() -> (Handle, flume::Sender<Job>, Arc<crate::socket::RecvNotify>) {
+    let mut guard = RUNTIME.lock().unwrap();
+    let pid = std::process::id();
+    if let Some(rt) = guard.as_ref()
+        && rt.pid == pid
+    {
+        return (rt.handle.clone(), rt.submit.clone(), rt.recv_ready.clone());
+    }
+    // First call, or child process after fork: (re)initialize.
+    let (tx, rx) = flume::unbounded::<Job>();
+    let recv_ready = Arc::new(crate::socket::RecvNotify::new());
+    let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
+    let n = IO_THREADS.load(Ordering::Relaxed) as usize;
+    thread::Builder::new()
+        .name("pyomq-tokio".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(n.max(1))
+                .enable_all()
+                .build()
+                .expect("pyomq: tokio runtime build");
+            let _ = handle_tx.send(rt.handle().clone());
+            rt.block_on(async move {
+                while let Ok(job) = rx.recv_async().await {
+                    job();
+                }
+            });
+        })
+        .expect("pyomq: spawn tokio thread");
+    let handle = handle_rx.recv().expect("pyomq: runtime handle");
+    let state = RuntimeState {
+        pid,
+        handle: handle.clone(),
+        submit: tx.clone(),
+        recv_ready: recv_ready.clone(),
+    };
+    *guard = Some(state);
+    (handle, tx, recv_ready)
 }
 
-/// Build the compio runtime, honoring `OMQ_SQPOLL_IDLE_MS` if set.
-///
-/// SQPOLL trades a constantly-spinning kernel thread for zero
-/// `io_uring_enter` syscalls in steady state. Only worth it for
-/// throughput-bound workloads on a dedicated machine; off by default
-/// because the kernel poll thread eats a CPU core even when idle.
-fn build_compio_runtime() -> std::io::Result<compio::runtime::Runtime> {
-    use omq_compio::ProactorBuilderExt;
-
-    let mut runtime_builder = compio::runtime::RuntimeBuilder::new();
-    let mut proactor = compio::driver::ProactorBuilder::new();
-    proactor.with_omq_buffer_pool();
-    if let Ok(raw) = std::env::var("OMQ_SQPOLL_IDLE_MS")
-        && let Ok(ms) = raw.parse::<u64>()
+/// Set the number of tokio worker threads. Only takes effect before the
+/// runtime starts (i.e. before the first socket is materialized). Later
+/// calls are silently ignored.
+pub(crate) fn set_io_threads(n: u64) {
+    let guard = RUNTIME.lock().unwrap();
+    if guard
+        .as_ref()
+        .is_some_and(|rt| rt.pid == std::process::id())
     {
-        proactor.sqpoll_idle(std::time::Duration::from_millis(ms));
+        return;
     }
-    runtime_builder.with_proactor(proactor);
-    runtime_builder.build()
+    drop(guard);
+    IO_THREADS.store(n.max(1), Ordering::Relaxed);
+}
+
+pub(crate) fn runtime_handle() -> Handle {
+    ensure_runtime().0
+}
+
+fn submit_tx() -> flume::Sender<Job> {
+    ensure_runtime().1
+}
+
+/// Global recv notification for the current process. Recv pumps signal
+/// this after pushing a message; `wait_any` parks on it.
+pub(crate) fn recv_ready() -> Arc<crate::socket::RecvNotify> {
+    ensure_runtime().2
 }
 
 /// Allocate the next socket id. Strictly monotonic; never recycled.
@@ -99,52 +110,51 @@ fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Run `f` on the compio thread, capturing its output. Blocks the
-/// calling thread until the runtime thread answers.
-pub fn run<F, T>(f: F) -> T
+/// Spawn a Send future on the tokio runtime and block until it completes.
+pub fn spawn_blocking<F, T>(fut: F) -> T
 where
-    F: FnOnce() -> T + Send + 'static,
+    F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
+    let handle = runtime_handle();
     let (otx, orx) = flume::bounded::<T>(1);
-    let job: Job = Box::new(move || {
-        let _ = otx.send(f());
+    handle.spawn(async move {
+        let out = fut.await;
+        let _ = otx.send(out);
     });
-    submit_chan().send(job).expect("pyomq: compio runtime gone");
-    // Release the GIL (if held) while blocking so detached compio
-    // tasks that need Python::with_gil() can make progress.
     pyo3::Python::with_gil(|py| {
         py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result"))
     })
 }
 
-/// Build a socket on the compio thread, store it in the registry, spawn
-/// per-socket send / recv pumps, and return its id.
+/// Build a socket on the tokio thread, spawn per-socket send/recv pumps,
+/// and return the socket Arc and its id.
 ///
-/// The pumps are the perf-critical piece: Python pushes outbound
-/// messages into a yring `AsyncProducer`, and pulls inbound messages
-/// from a yring `Consumer`. The pumps relay between these rings and the
-/// actual omq Socket, running entirely on the compio thread.
+/// The pumps relay between the yring rings and the socket's async
+/// send/recv. They must run on the tokio thread because socket
+/// operations need the runtime's scheduler and I/O driver.
 pub fn materialize(
-    socket_type: omq_compio::SocketType,
-    options: omq_compio::Options,
-    send_cons: yring::AsyncConsumer<omq_compio::Message>,
-    mut recv_prod: yring::Producer<omq_compio::Message>,
-    recv_notify: std::sync::Arc<crate::socket::RecvNotify>,
-) -> u64 {
-    run(move || {
+    socket_type: omq_tokio::SocketType,
+    options: omq_tokio::Options,
+    send_cons: yring::AsyncConsumer<omq_tokio::Message>,
+    mut recv_prod: yring::Producer<omq_tokio::Message>,
+    recv_notify: Arc<crate::socket::RecvNotify>,
+    send_notify: Arc<crate::socket::RecvNotify>,
+    recv_space: Arc<tokio::sync::Notify>,
+) -> (u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>) {
+    let (otx, orx) = flume::bounded(1);
+    let job: Job = Box::new(move || {
         let id = next_id();
-        let sock = Rc::new(InnerSocket::new(socket_type, options));
-        REG.with(|r| r.borrow_mut().insert(id, sock.clone()));
+        let sock = Arc::new(InnerSocket::new(socket_type, options));
 
         // Send pump: drain Python-side yring into the omq Socket.
         // Yield every N messages so the connection drivers get
-        // scheduled on this single-threaded compio runtime. Without
-        // this, try_direct_encode's synchronous fast path turns the
-        // loop into a tight spin that starves other tasks.
-        const SEND_YIELD_INTERVAL: u32 = 64;
+        // scheduled on this single-threaded tokio runtime.
+        // Signal send_notify after each drain so the Python thread
+        // can wake up from backpressure parking.
+        const SEND_YIELD_INTERVAL: u32 = 256;
         let s = sock.clone();
-        let send_pump = compio::runtime::spawn(async move {
+        let send_pump = tokio::spawn(async move {
             futures::pin_mut!(send_cons);
             let mut batch = 0u32;
             while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
@@ -152,14 +162,19 @@ pub fn materialize(
                 batch += 1;
                 if batch >= SEND_YIELD_INTERVAL {
                     batch = 0;
-                    compio::time::sleep(std::time::Duration::from_micros(10)).await;
+                    send_notify.notify();
+                    tokio::task::yield_now().await;
                 }
             }
+            send_notify.notify();
         });
 
         // Recv pump: drain the omq Socket into Python-side yring.
-        let s = sock;
-        let recv_pump = compio::runtime::spawn(async move {
+        // When the ring is full, wait on recv_space (signaled by the
+        // Python consumer after draining) instead of spin-looping.
+        let s = sock.clone();
+        let global_recv_ready = recv_ready();
+        let recv_pump = tokio::spawn(async move {
             while let Ok(msg) = s.recv().await {
                 let mut m = msg;
                 loop {
@@ -167,256 +182,194 @@ pub fn materialize(
                         Ok(()) => {
                             recv_prod.flush();
                             recv_notify.notify();
-                            RECV_READY.notify();
+
+                            global_recv_ready.notify();
                             break;
                         }
                         Err(returned) => {
                             m = returned;
-                            compio::time::sleep(std::time::Duration::from_micros(10)).await;
+                            let notified = recv_space.notified();
+                            tokio::pin!(notified);
+                            notified.as_mut().enable();
+                            match recv_prod.push(m) {
+                                Ok(()) => {
+                                    recv_prod.flush();
+                                    recv_notify.notify();
+        
+                                    global_recv_ready.notify();
+                                    break;
+                                }
+                                Err(returned2) => {
+                                    m = returned2;
+                                    notified.await;
+                                }
+                            }
                         }
                     }
                 }
             }
         });
 
-        PUMPS.with(|p| p.borrow_mut().insert(id, (send_pump, recv_pump)));
-
-        id
+        let _ = otx.send((id, sock, send_pump, recv_pump));
+    });
+    submit_tx().send(job).expect("pyomq: tokio runtime gone");
+    pyo3::Python::with_gil(|py| {
+        py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result"))
     })
 }
 
-/// Remove a socket from the registry and close it on the compio
-/// thread. Waits for the close to complete so pump tasks and driver
-/// tasks are fully drained before returning.
-pub fn destroy_socket(id: u64) {
-    let (tx, rx) = flume::bounded::<()>(1);
-    let job: Job = Box::new(move || {
-        let sock = REG.with(|r| r.borrow_mut().remove(&id));
-        let handles = PUMPS.with(|p| p.borrow_mut().remove(&id));
-        let Some(rc) = sock else {
-            // No socket; still cancel any orphaned pumps before signalling done.
-            compio::runtime::spawn(async move {
-                if let Some((send_h, recv_h)) = handles {
-                    let _ = send_h.cancel().await;
-                    let _ = recv_h.cancel().await;
-                }
-                let _ = tx.send(());
-            })
-            .detach();
-            return;
-        };
-        compio::runtime::spawn(async move {
-            // Cancel pumps and await completion so their Rc<InnerSocket>
-            // clones are released before we attempt close. Dropping a compio
-            // JoinHandle detaches the task; only cancel().await truly cancels.
-            if let Some((send_h, recv_h)) = handles {
-                let _ = send_h.cancel().await;
-                let _ = recv_h.cancel().await;
-            }
-            match Rc::try_unwrap(rc) {
-                Ok(sock) => {
-                    let _ = sock.close().await;
-                }
-                Err(still_shared) => {
-                    still_shared.signal_close();
-                }
-            }
-            let _ = tx.send(());
-        })
-        .detach();
+/// Close a socket: drain the send yring, then close with linger.
+///
+/// Drops `send_prod` so the send pump's consumer stream ends after
+/// draining remaining messages. Awaits the pump (up to 1s) before
+/// closing the socket. The recv pump is aborted immediately.
+pub fn destroy_socket(
+    sock: Arc<InnerSocket>,
+    send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
+    send_pump: JoinHandle<()>,
+    recv_pump: JoinHandle<()>,
+) {
+    recv_pump.abort();
+    // Drop the producer so the pump's consumer stream ends once drained.
+    drop(send_prod);
+    spawn_blocking(async move {
+        // Give the send pump time to drain remaining messages.
+        let _ = tokio::time::timeout(Duration::from_secs(1), send_pump).await;
+        let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone());
+        let _ = s.close().await;
     });
-    submit_chan().send(job).expect("pyomq: compio runtime gone");
-    let _ = rx.recv();
 }
 
-/// Like `destroy_socket`, but for use *from inside a future already
-/// running on the compio thread*. Properly closes the socket with
-/// linger so pending messages are flushed before returning.
-#[allow(dead_code)]
-pub async fn destroy_socket_local(id: u64) {
-    stop_pumps_async(id).await;
-
-    let sock = REG.with(|r| r.borrow_mut().remove(&id));
-    let Some(mut rc) = sock else { return };
-    for _ in 0..5 {
-        match Rc::try_unwrap(rc) {
-            Ok(sock) => {
-                let _ = sock.close().await;
-                return;
-            }
-            Err(still_shared) => {
-                rc = still_shared;
-                compio::time::sleep(Duration::from_millis(1)).await;
-            }
-        }
-    }
-    rc.signal_close();
-    drop(rc);
-}
-
-/// Run an async op on the socket identified by `id` and return the
-/// output. The op closure produces a future from a `Rc<Socket>`; the
-/// future runs on the compio runtime, never crosses threads, and only
-/// the (Send) output is shipped back.
-pub fn with_socket<F, Fut, T>(id: u64, op: F) -> Result<T, MissingSocket>
+/// Run an async op against a socket and return the result. The future
+/// is spawned on the tokio runtime. Blocks the calling thread.
+pub fn with_socket<F, Fut, T>(sock: &Arc<InnerSocket>, op: F) -> T
 where
-    F: FnOnce(Rc<InnerSocket>) -> Fut + Send + 'static,
-    Fut: Future<Output = T> + 'static,
+    F: FnOnce(Arc<InnerSocket>) -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let (otx, orx) = flume::bounded::<Result<T, MissingSocket>>(1);
-    let job: Job = Box::new(move || {
-        let sock = REG.with(|r| r.borrow().get(&id).cloned());
-        match sock {
-            Some(sock) => {
-                compio::runtime::spawn(async move {
-                    let out = op(sock).await;
-                    let _ = otx.send(Ok(out));
-                })
-                .detach();
-            }
-            None => {
-                let _ = otx.send(Err(MissingSocket));
-            }
-        }
-    });
-    submit_chan().send(job).expect("pyomq: compio runtime gone");
-    orx.recv().expect("pyomq: runtime dropped result")
+    let s = sock.clone();
+    spawn_blocking(op(s))
 }
 
-/// Async helper: like `with_socket`, but for use *from inside a future
-/// that's already running on the compio thread*. Looks up the socket
-/// in the local registry and runs `op` against it inline. Calling the
-/// sync `with_socket` from a compio task deadlocks (it submits a job
-/// to the same thread and blocks waiting for the response).
-pub async fn with_socket_async<F, Fut, T>(id: u64, op: F) -> Result<T, MissingSocket>
-where
-    F: FnOnce(Rc<InnerSocket>) -> Fut,
-    Fut: Future<Output = T>,
-{
-    let sock = REG.with(|r| r.borrow().get(&id).cloned());
-    match sock {
-        Some(sock) => Ok(op(sock).await),
-        None => Err(MissingSocket),
-    }
-}
-
-async fn stop_pumps_async(id: u64) {
-    let handles = PUMPS.with(|p| p.borrow_mut().remove(&id));
-    if let Some((send_h, recv_h)) = handles {
-        let _ = send_h.cancel().await;
-        let _ = recv_h.cancel().await;
-    }
-}
-
-fn drain_recv_ring(
-    inner: &std::sync::Arc<crate::socket::SocketInner>,
-) -> Vec<omq_compio::Message> {
-    let mat = inner.materialized.lock().unwrap();
+fn drain_recv_ring(inner: &Arc<crate::socket::SocketInner>) -> Vec<omq_tokio::Message> {
+    let mat = inner.materialized.read().unwrap();
     let Some(m) = mat.as_ref() else { return vec![] };
     let mut cons = m.recv_cons.lock().unwrap();
     let mut msgs = Vec::new();
     while let Some(msg) = cons.prefetch_and_pop() {
         msgs.push(msg);
     }
+    if !msgs.is_empty() {
+        m.recv_space.notify_one();
+    }
     msgs
 }
 
-fn push_to_capture(
-    cap: &std::sync::Arc<crate::socket::SocketInner>,
-    msg: &omq_compio::Message,
-) {
-    let copy = omq_compio::Message::multipart(msg.iter());
-    let mat = cap.materialized.lock().unwrap();
+fn push_to_capture(cap: &Arc<crate::socket::SocketInner>, msg: &omq_tokio::Message) {
+    let copy = omq_tokio::Message::multipart(msg.iter());
+    let mat = cap.materialized.read().unwrap();
     if let Some(m) = mat.as_ref() {
         let mut prod = m.send_prod.lock().unwrap();
         let _ = prod.push_and_flush(copy);
     }
 }
 
-/// Run a forwarding proxy between two sockets on the compio thread.
+/// Run a forwarding proxy between two sockets on the tokio thread.
 ///
 /// Stops the send/recv pumps on fe/be (and control, if any), then
 /// runs direct async forwarding loops. Capture stays ring-based.
-///
-/// Control socket commands (PAUSE, RESUME, TERMINATE) are handled
-/// inline between forwarded messages via `select!`.
 pub fn proxy(
-    fe_inner: std::sync::Arc<crate::socket::SocketInner>,
-    be_inner: std::sync::Arc<crate::socket::SocketInner>,
-    cap_inner: Option<std::sync::Arc<crate::socket::SocketInner>>,
-    ctrl_inner: Option<std::sync::Arc<crate::socket::SocketInner>>,
+    fe_inner: Arc<crate::socket::SocketInner>,
+    be_inner: Arc<crate::socket::SocketInner>,
+    cap_inner: Option<Arc<crate::socket::SocketInner>>,
+    ctrl_inner: Option<Arc<crate::socket::SocketInner>>,
 ) {
-    let fe_id = fe_inner.materialized.lock().unwrap().as_ref().unwrap().id;
-    let be_id = be_inner.materialized.lock().unwrap().as_ref().unwrap().id;
-    let ctrl_id = ctrl_inner.as_ref().map(|c| {
-        c.materialized.lock().unwrap().as_ref().unwrap().id
+    // Abort pumps so proxy gets exclusive socket access.
+    let fe_mat = fe_inner.materialized.read().unwrap();
+    let fe_m = fe_mat.as_ref().unwrap();
+    fe_m.send_pump.abort();
+    fe_m.recv_pump.abort();
+    let fe_sock = fe_m.socket.clone();
+    drop(fe_mat);
+
+    let be_mat = be_inner.materialized.read().unwrap();
+    let be_m = be_mat.as_ref().unwrap();
+    be_m.send_pump.abort();
+    be_m.recv_pump.abort();
+    let be_sock = be_m.socket.clone();
+    drop(be_mat);
+
+    let ctrl_sock = ctrl_inner.as_ref().map(|c| {
+        let mat = c.materialized.read().unwrap();
+        let m = mat.as_ref().unwrap();
+        m.send_pump.abort();
+        m.recv_pump.abort();
+        m.socket.clone()
     });
 
-    let (done_tx, done_rx) = flume::bounded::<()>(1);
+    let fe_drained = drain_recv_ring(&fe_inner);
+    let be_drained = drain_recv_ring(&be_inner);
 
-    let job: Job = Box::new(move || {
-        compio::runtime::spawn(async move {
-            stop_pumps_async(fe_id).await;
-            stop_pumps_async(be_id).await;
-            if let Some(id) = ctrl_id {
-                stop_pumps_async(id).await;
+    spawn_blocking(async move {
+        for msg in fe_drained {
+            if let Some(ref cap) = cap_inner {
+                push_to_capture(cap, &msg);
             }
-
-            let fe_drained = drain_recv_ring(&fe_inner);
-            let be_drained = drain_recv_ring(&be_inner);
-
-            let fe_sock = REG.with(|r| r.borrow().get(&fe_id).cloned());
-            let be_sock = REG.with(|r| r.borrow().get(&be_id).cloned());
-            let ctrl_sock = ctrl_id.and_then(|id| {
-                REG.with(|r| r.borrow().get(&id).cloned())
-            });
-            let (Some(fe_sock), Some(be_sock)) = (fe_sock, be_sock) else {
-                let _ = done_tx.send(());
+            if be_sock.send(msg).await.is_err() {
                 return;
-            };
-
-            for msg in fe_drained {
-                if let Some(ref cap) = cap_inner {
-                    push_to_capture(cap, &msg);
-                }
-                if be_sock.send(msg).await.is_err() {
-                    let _ = done_tx.send(());
-                    return;
-                }
             }
-            for msg in be_drained {
-                if let Some(ref cap) = cap_inner {
-                    push_to_capture(cap, &msg);
-                }
-                if fe_sock.send(msg).await.is_err() {
-                    let _ = done_tx.send(());
-                    return;
-                }
+        }
+        for msg in be_drained {
+            if let Some(ref cap) = cap_inner {
+                push_to_capture(cap, &msg);
             }
+            if fe_sock.send(msg).await.is_err() {
+                return;
+            }
+        }
 
-            proxy_loop(&fe_sock, &be_sock, &cap_inner, &ctrl_sock).await;
-
-            let _ = done_tx.send(());
-        })
-        .detach();
+        proxy_loop(&fe_sock, &be_sock, &cap_inner, &ctrl_sock).await;
     });
+}
 
-    submit_chan().send(job).expect("pyomq: compio runtime gone");
-    let _ = done_rx.recv();
+const PROXY_BATCH: usize = 64;
+
+async fn proxy_drain_and_forward(
+    from: &Arc<InnerSocket>,
+    to: &Arc<InnerSocket>,
+    first: omq_tokio::Message,
+    cap: &Option<Arc<crate::socket::SocketInner>>,
+) -> bool {
+    if let Some(c) = cap {
+        push_to_capture(c, &first);
+    }
+    if to.send(first).await.is_err() {
+        return false;
+    }
+    for _ in 1..PROXY_BATCH {
+        let Ok(msg) = from.try_recv() else { break };
+        if let Some(c) = cap {
+            push_to_capture(c, &msg);
+        }
+        if to.send(msg).await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 async fn proxy_loop(
-    fe: &Rc<InnerSocket>,
-    be: &Rc<InnerSocket>,
-    cap: &Option<std::sync::Arc<crate::socket::SocketInner>>,
-    ctrl: &Option<Rc<InnerSocket>>,
+    fe: &Arc<InnerSocket>,
+    be: &Arc<InnerSocket>,
+    cap: &Option<Arc<crate::socket::SocketInner>>,
+    ctrl: &Option<Arc<InnerSocket>>,
 ) {
     loop {
         enum Action {
-            FeToBe(omq_compio::Message),
-            BeToFe(omq_compio::Message),
-            Control(omq_compio::Message),
+            FeToBe(omq_tokio::Message),
+            BeToFe(omq_tokio::Message),
+            Control(omq_tokio::Message),
             Done,
         }
 
@@ -450,12 +403,14 @@ async fn proxy_loop(
 
         match action {
             Action::FeToBe(msg) => {
-                if let Some(c) = cap { push_to_capture(c, &msg); }
-                if be.send(msg).await.is_err() { return; }
+                if !proxy_drain_and_forward(fe, be, msg, cap).await {
+                    return;
+                }
             }
             Action::BeToFe(msg) => {
-                if let Some(c) = cap { push_to_capture(c, &msg); }
-                if fe.send(msg).await.is_err() { return; }
+                if !proxy_drain_and_forward(be, fe, msg, cap).await {
+                    return;
+                }
             }
             Action::Control(msg) => {
                 let cmd: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
@@ -464,9 +419,10 @@ async fn proxy_loop(
                     b"PAUSE" => {
                         if let Some(ctrl_sock) = ctrl {
                             loop {
-                                let Ok(m) = ctrl_sock.recv().await else { return };
-                                let c: Vec<u8> = m.iter().next()
-                                    .unwrap_or_default().to_vec();
+                                let Ok(m) = ctrl_sock.recv().await else {
+                                    return;
+                                };
+                                let c: Vec<u8> = m.iter().next().unwrap_or_default().to_vec();
                                 match c.as_slice() {
                                     b"RESUME" => break,
                                     b"TERMINATE" | b"KILL" => return,
@@ -487,21 +443,21 @@ async fn proxy_loop(
 /// an inbound message ready (or until `timeout_ms` elapses). Returns
 /// the list of socket IDs that are ready.
 pub fn wait_any(
-    sockets: Vec<(u64, std::sync::Arc<crate::socket::SocketInner>)>,
+    sockets: Vec<(u64, Arc<crate::socket::SocketInner>)>,
     timeout_ms: Option<u64>,
 ) -> Vec<u64> {
     if sockets.is_empty() {
         return vec![];
     }
 
-    let poll_ready = |sockets: &[(u64, std::sync::Arc<crate::socket::SocketInner>)]| -> Vec<u64> {
+    let poll_ready = |sockets: &[(u64, Arc<crate::socket::SocketInner>)]| -> Vec<u64> {
         sockets
             .iter()
             .filter(|(_, inner)| {
                 if !inner.rxbuf.lock().unwrap().is_empty() {
                     return true;
                 }
-                let mat = inner.materialized.lock().unwrap();
+                let mat = inner.materialized.read().unwrap();
                 if let Some(m) = mat.as_ref() {
                     let cons = m.recv_cons.lock().unwrap();
                     !cons.is_empty()
@@ -518,12 +474,13 @@ pub fn wait_any(
         return ready;
     }
 
+    let rr = recv_ready();
     let deadline = timeout_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
 
-    RECV_READY.park_begin();
+    rr.park_begin();
     let ready = poll_ready(&sockets);
     if !ready.is_empty() {
-        RECV_READY.park_end();
+        rr.park_end();
         return ready;
     }
 
@@ -532,7 +489,7 @@ pub fn wait_any(
             Some(d) => {
                 let now = std::time::Instant::now();
                 if now >= d {
-                    RECV_READY.park_end();
+                    rr.park_end();
                     return vec![];
                 }
                 d - now
@@ -540,39 +497,36 @@ pub fn wait_any(
             None => Duration::from_millis(100),
         };
 
-        RECV_READY.wait_timeout(wait_dur);
+        rr.wait_timeout(wait_dur);
 
         let ready = poll_ready(&sockets);
         if !ready.is_empty() {
-            RECV_READY.park_end();
+            rr.park_end();
             return ready;
         }
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            RECV_READY.park_end();
+            rr.park_end();
             return vec![];
         }
     }
 }
 
-#[derive(Debug)]
-pub struct MissingSocket;
-
+/// Return an already-resolved `asyncio.Future`. Avoids the tokio
+/// spawn + `call_soon_threadsafe` round trip for fast-path results.
 /// Bridge a Rust future to a Python `asyncio.Future`.
 ///
 /// 1. Acquires the running asyncio loop on the calling Python thread.
 /// 2. Creates a fresh `asyncio.Future` via `loop.create_future()`.
-/// 3. Spawns `fut` on the compio runtime.
-/// 4. When `fut` resolves, the compio thread acquires the GIL and calls
+/// 3. Spawns the future on the tokio runtime.
+/// 4. When it resolves, the tokio thread acquires the GIL and calls
 ///    `loop.call_soon_threadsafe(future.set_result | set_exception, ...)`
-///    which is the asyncio-blessed cross-thread completion path.
 /// 5. Returns the Python `asyncio.Future` to the caller.
-pub fn compio_future_into_py<C, F>(
+pub fn tokio_future_into_py<F>(
     py: pyo3::Python<'_>,
-    builder: C,
+    fut: F,
 ) -> pyo3::PyResult<pyo3::Bound<'_, pyo3::PyAny>>
 where
-    C: FnOnce() -> F + Send + 'static,
-    F: Future<Output = pyo3::PyResult<pyo3::PyObject>> + 'static,
+    F: Future<Output = pyo3::PyResult<pyo3::PyObject>> + Send + 'static,
 {
     use pyo3::prelude::*;
 
@@ -582,35 +536,25 @@ where
     let loop_handle: PyObject = event_loop.clone().unbind().into_any();
     let future_handle: PyObject = py_future.clone().unbind().into_any();
 
-    submit_chan()
-        .send(Box::new(move || {
-            // Build the future on the compio thread; it can hold !Send
-            // state (Rc<InnerSocket> etc.) because it never leaves
-            // this thread.
-            let fut = builder();
-            compio::runtime::spawn(async move {
-                let result = fut.await;
-                Python::with_gil(|gil| {
-                    let loop_obj = loop_handle.bind(gil);
-                    let fut_obj = future_handle.bind(gil);
-                    let _ = match result {
-                        Ok(value) => {
-                            let setter = fut_obj.getattr("set_result")?;
-                            loop_obj.call_method1("call_soon_threadsafe", (setter, value))
-                        }
-                        Err(e) => {
-                            let setter = fut_obj.getattr("set_exception")?;
-                            loop_obj
-                                .call_method1("call_soon_threadsafe", (setter, e.into_value(gil)))
-                        }
-                    };
-                    PyResult::<()>::Ok(())
-                })
-                .ok();
-            })
-            .detach();
-        }))
-        .expect("pyomq: compio runtime gone");
+    runtime_handle().spawn(async move {
+        let result = fut.await;
+        Python::with_gil(|gil| {
+            let loop_obj = loop_handle.bind(gil);
+            let fut_obj = future_handle.bind(gil);
+            let _ = match result {
+                Ok(value) => {
+                    let setter = fut_obj.getattr("set_result")?;
+                    loop_obj.call_method1("call_soon_threadsafe", (setter, value))
+                }
+                Err(e) => {
+                    let setter = fut_obj.getattr("set_exception")?;
+                    loop_obj.call_method1("call_soon_threadsafe", (setter, e.into_value(gil)))
+                }
+            };
+            PyResult::<()>::Ok(())
+        })
+        .ok();
+    });
 
     Ok(py_future)
 }

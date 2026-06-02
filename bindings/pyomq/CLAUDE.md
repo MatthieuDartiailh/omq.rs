@@ -2,13 +2,17 @@
 
 ## Purpose
 
-PyO3 binding for `omq-compio`. Drop-in pyzmq API for Python: sync
+PyO3 binding for `omq-tokio`. Drop-in pyzmq API for Python: sync
 (`pyomq`) and async (`pyomq.asyncio`). Single stable-ABI wheel
-(`abi3-py39`, Python 3.9+) via maturin. **Linux only** (io_uring).
+(`abi3-py39`, Python 3.9+) via maturin. Linux and macOS.
 
 See [`doc/architecture.md`](doc/architecture.md) for internals:
 threading model, queue relay, send/recv paths, zero-copy conversions,
 proxy, authentication, error mapping, and known limitations.
+
+See [`doc/performance.md`](doc/performance.md) for the performance
+journey: dead ends, profiling results, and the decisions behind the
+current design. Read it before changing hot paths.
 
 ## Build / test / lint
 
@@ -36,5 +40,17 @@ python scripts/update_perf.py --scope pyomq  # reuse latest pyzmq baseline
 python scripts/update_perf.py --chart-only   # regenerate SVG from JSONL
 ```
 
-Results in `doc/charts/bindings.jsonl` (latest `run_id` per impl wins).
+Results in `~/.cache/omq/bindings.jsonl` (latest `run_id` per impl wins).
 Regenerates `doc/charts/bindings.svg` and the proxy table in `README.md`.
+
+The proxy PUSH/PULL benchmark uses a native omq-compio client
+(`bench_proxy_client`) to saturate the proxy without Python
+sender/receiver overhead. Build it before running benchmarks:
+
+```sh
+cargo build --release -p omq-compio --bin bench_proxy_client
+```
+
+If the binary is missing, the proxy PUSH/PULL bench falls back to
+Python sender/receiver (slower, measures Python overhead not proxy
+throughput).
