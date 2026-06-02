@@ -17,13 +17,13 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use rustc_hash::FxHashMap;
 
-use bytes::Bytes;
 use futures::channel::oneshot;
 use tokio::sync::mpsc;
 
 use omq_proto::error::{Error, Result};
+use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 use omq_proto::message::Message;
-use omq_proto::proto::{Command, SocketType};
+use omq_proto::proto::SocketType;
 
 /// Per-peer SPSC state for inproc fast path.
 #[derive(Debug)]
@@ -66,25 +66,6 @@ fn is_recv_side(t: SocketType) -> bool {
             | SocketType::Channel
             | SocketType::Gather
     )
-}
-
-/// Frame exchanged between two inproc peers. Either a fully-
-/// assembled application Message or a ZMTP command (SUBSCRIBE,
-/// CANCEL, JOIN, LEAVE, ERROR). No frame headers, no greeting,
-/// no codec.
-#[derive(Debug)]
-pub enum InboundFrame {
-    Message(Message),
-    Command(Command),
-}
-
-/// Pre-computed peer info - known at connect/accept time because
-/// both sides are local. Stands in for the `READY` properties that
-/// real ZMTP would exchange over the wire.
-#[derive(Clone, Debug)]
-pub struct InprocPeerSnapshot {
-    pub socket_type: SocketType,
-    pub identity: Bytes,
 }
 
 /// What `connect` / `accept` hand back to the `SocketDriver` instead
@@ -273,6 +254,7 @@ impl Drop for InprocListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use omq_proto::proto::SocketType;
 
     fn snap(t: SocketType) -> InprocPeerSnapshot {
@@ -300,7 +282,7 @@ mod tests {
 
         client_side
             .out
-            .send(InboundFrame::Message(Message::single("hi")))
+            .send(InboundFrame::message(Message::single("hi")))
             .await
             .unwrap();
         let f = tokio::time::timeout(std::time::Duration::from_millis(100), {
@@ -312,7 +294,7 @@ mod tests {
         .unwrap();
         match f {
             InboundFrame::Message(m) => {
-                assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+                assert_eq!(m.msg.part_bytes(0).unwrap(), &b"hi"[..]);
             }
             InboundFrame::Command(_) => panic!("expected Message"),
         }

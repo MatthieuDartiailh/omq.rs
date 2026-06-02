@@ -25,8 +25,9 @@ pub mod tcp;
 pub mod udp;
 
 pub use backoff::{Canceled, dial_with_backoff};
-pub use inproc::{InboundFrame, InprocConn, InprocListener, InprocPeerSnapshot};
+pub use inproc::{InprocConn, InprocListener};
 pub use ipc::IpcTransport;
+pub use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 pub use tcp::TcpTransport;
 #[cfg(feature = "ws")]
 pub mod ws;

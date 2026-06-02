@@ -769,19 +769,20 @@ async fn inproc_peer_driver(
                 () = cancel.cancelled() => return,
                 cmd = inbox.recv() => match cmd {
                     Some(DriverCommand::SendMessage(m)) => {
-                        if out.send(InboundFrame::Message(m)).await.is_err() {
+                        if out.send(InboundFrame::message(m)).await.is_err() {
                             return;
                         }
                     }
                     Some(DriverCommand::SendCommand(c)) => {
-                        if out.send(InboundFrame::Command(c)).await.is_err() {
+                        if out.send(InboundFrame::Command(Box::new(c))).await.is_err() {
                             return;
                         }
                     }
                     Some(DriverCommand::Close) | None => return,
                 },
                 frame = in_rx.recv() => match frame {
-                    Some(InboundFrame::Message(m)) => {
+                    Some(InboundFrame::Message(im)) => {
+                        let m = im.msg;
                         if let Some(max) = max_message_size
                             && m.byte_len() > max
                         {
@@ -801,7 +802,7 @@ async fn inproc_peer_driver(
                         }
                     }
                     Some(InboundFrame::Command(c)) => {
-                        if emit_event(&peer_out, peer_id, ZmtpEvent::Command(c))
+                        if emit_event(&peer_out, peer_id, ZmtpEvent::Command(*c))
                             .await
                             .is_err()
                         {

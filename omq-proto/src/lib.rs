@@ -11,6 +11,7 @@ pub mod backoff;
 pub mod encoded_queue;
 pub mod endpoint;
 pub mod error;
+pub mod inproc;
 pub mod message;
 pub mod monitor;
 pub mod options;

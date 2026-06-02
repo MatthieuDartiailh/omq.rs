@@ -17,55 +17,10 @@ use rustc_hash::FxHashMap;
 
 use event_listener::Event;
 
-use bytes::Bytes;
-
 use omq_proto::error::{Error, Result};
+pub use omq_proto::inproc::{InboundFrame, InboundMessage, InprocPeerSnapshot};
 use omq_proto::message::Message;
-use omq_proto::proto::{Command, SocketType};
-
-/// Frame exchanged between two inproc peers. Either a fully-
-/// assembled application Message or a ZMTP command. No frame
-/// headers, no greeting, no codec - both ends are in-process.
-///
-/// In-flight slot moved through the inproc flume channel. Rust
-/// Frame exchanged over blume `in_tx`/`in_rx` for wire, same-thread,
-/// and non-SPSC-eligible inproc peers. SPSC-eligible cross-thread
-/// peers bypass this entirely (Message goes through the ypipe ring).
-#[derive(Debug)]
-pub enum InboundFrame {
-    Message(InboundMessage),
-    Command(Box<Command>),
-}
-
-#[derive(Debug)]
-pub struct InboundMessage {
-    pub peer_identity: Option<Bytes>,
-    pub msg: Message,
-}
-
-impl InboundFrame {
-    /// Construct a Message frame tagged with the sender's identity.
-    /// Empty identity collapses to `None`. Single-part messages take
-    /// the inline `SinglePart` path; everything else boxes the full
-    /// `Message`.
-    pub fn message_from(identity: Bytes, msg: Message) -> Self {
-        let peer_identity = if identity.is_empty() {
-            None
-        } else {
-            Some(identity)
-        };
-        Self::Message(InboundMessage { peer_identity, msg })
-    }
-}
-
-/// Pre-computed peer info - known at connect/accept time because
-/// both sides are local. Stands in for the `READY` properties
-/// real ZMTP exchanges over the wire.
-#[derive(Clone, Debug)]
-pub struct InprocPeerSnapshot {
-    pub socket_type: SocketType,
-    pub identity: Bytes,
-}
+use omq_proto::proto::SocketType;
 
 /// What `connect` / `accept` hand back. `out` is where WE send
 /// frames (= the peer's shared `in_tx`). `peer` is the peer's
