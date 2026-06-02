@@ -105,28 +105,27 @@ look up the peer by destination identity and bypass the shared queue.
 ## Message and Payload types
 
 Both are custom enums (not SmallVecs) tuned for the common decode
-path:
+path. Each is exactly 64 bytes (one cache line):
 
 ```rust
-// Payload: 40 bytes. One decoded ZMTP frame.
+// Payload: 64 bytes. One decoded ZMTP frame.
 enum PayloadInner {
     Empty,
-    Inline { len: u8, data: [u8; 38] },  // no heap, no Arc
+    Inline { len: u8, data: [u8; 62] },  // no heap, no Arc
     Single(Bytes),                         // one owned chunk
-    Multi(Vec<Bytes>),                     // rare: prepended headers
 }
 
-// Message: 48 bytes. One or more frames (parts).
+// Message: 64 bytes. One or more frames (parts).
 enum MessageInner {
     Empty,
-    Inline { len: u8, data: [MaybeUninit<u8>; 39] },  // single-frame <= 39 B
+    Inline { len: u8, data: [u8; 55] },  // single-frame <= 55 B
     Single(Payload),
     Multi(Vec<Payload>),
 }
 ```
 
-Inline variants cover payloads up to 38 bytes and single-frame
-messages up to 39 bytes with zero refcounting overhead. The codec's
+Inline variants cover payloads up to 62 bytes and single-frame
+messages up to 55 bytes with zero refcounting overhead. The codec's
 fast path (`try_advance_ready`) constructs `MessageInner::Inline`
 directly from the input buffer, skipping the intermediate `Payload`.
 

@@ -332,14 +332,13 @@ bumps the offset. Front `Bytes` dropped only when fully consumed.
 ```rust
 enum PayloadInner {
     Empty,
-    Inline { len: u8, data: [u8; 38] },  // no heap, no Arc
+    Inline { len: u8, data: [u8; 62] },  // no heap, no Arc
     Single(Bytes),
-    Multi(Vec<Bytes>),
 }
 ```
 
-38 B inline capacity covers every bench size up to 38 B.
-Per-frame cost: ~3 atomic ops -> ~0.
+64 bytes (one cache line). 62 B inline capacity covers most
+small-message workloads. Per-frame cost: ~3 atomic ops -> ~0.
 
 **PULL fast path in `try_recv`.** Three specialization levels:
 REQ/REP/DISH lock per pop, SUB holds lock for filtering,
@@ -362,7 +361,7 @@ not needed; `#[inline]` annotations stay.
 
 **`Message` inline parts 3 -> 1.** Was `SmallVec<[Payload; 3]>`
 = 128 B. Single-part PUSH/PULL: two dead slots copied per message.
-Now `[Payload; 1]` = 48 B. 62% less copied per push/pop.
+Now `[Payload; 1]` = 64 B.
 
 **`UnsafeCell` recv_cache.** On compio's single-threaded runtime,
 recv_cache is never contended. Replaced `Mutex<VecDeque<Message>>`
@@ -418,16 +417,15 @@ Replaced `SmallVec<[Payload; 1]>` with a custom enum:
 ```rust
 enum MessageInner {
     Empty,
-    Inline { len: u8, data: [MaybeUninit<u8>; 39] },
+    Inline { len: u8, data: [u8; 55] },
     Single(Payload),
     Multi(Vec<Payload>),
 }
 ```
 
-48 B, covers up to 39 B inline. `absorb_data_frame` constructs
-`Inline` directly. SmallVec::drop disappeared from the profile
-(was 6%). `MaybeUninit` skips zeroing the 39 B array -- worth
-~13% at 8 B.
+64 B (one cache line), covers up to 55 B inline.
+`absorb_data_frame` constructs `Inline` directly. SmallVec::drop
+disappeared from the profile (was 6%).
 
 `Payload` removed from the public API. Users see only `Message`.
 
@@ -445,10 +443,10 @@ directly into `MessageInner::Inline`. One memcpy.
 | path | copies | total bytes (32 B msg) |
 |---|---|---|
 | before: split_to -> Payload -> Message -> push_back | 3 | 112 B |
-| after: read_into -> Message -> push_back | 2 | 80 B |
+| after: read_into -> Message -> push_back | 2 | 96 B |
 | libzmq: memcpy(msg_t) | 1 | 64 B |
 
-Remaining gap: `VecDeque::push_back` copies 48 B per message.
+Remaining gap: `VecDeque::push_back` copies 64 B per message.
 libzmq's `yqueue_t` writes in-place (one pointer advance).
 
 ### Round 9: SmallVec for parts_payload()
@@ -463,7 +461,7 @@ per single-part send. Fix: `SmallVec<[Payload; 1]>`.
 Tried sharing the read buffer's Arc via `Bytes::slice` instead of
 inline copy. Arc bump + drop (~10 ns for two atomics) cost the
 same as the inline copy + zeroing. A microbenchmark confirmed:
-inline wins or ties at every size up to 39 B. For payloads that
+inline wins or ties at every size up to 55 B. For payloads that
 fit in a cache line, the atomic in an Arc bump is more expensive
 than the copy.
 
@@ -563,8 +561,8 @@ No separate I/O thread, but encode pipelines against write.
 Each SPSC-eligible inproc connection (PUSH/PULL, PAIR) gets a
 dedicated `blume::spsc` ring (1024-slot, lock-free). Per-peer
 rings replace the shared blume MPSC channel. The ring carries
-`Message` directly (48 B by value); no `InboundFrame` wrapper, no
-`Bytes` clone, no heap allocation for messages <=39 B.
+`Message` directly (64 B by value); no `InboundFrame` wrapper, no
+`Bytes` clone, no heap allocation for messages <=55 B.
 
 Send fast path (PUSH/PAIR, single peer): one `UnsafeCell` access
 to the per-peer producer, push, flush. No Mutex, no PeerOut clone,
@@ -625,7 +623,7 @@ Profile at 32 B TCP before this change:
 changes during the benchmark. Two fixes:
 
 **`iter_slices` replaces `iter_parts`.** The old path constructed a
-temporary `Payload` struct (40 B) for each part of an inline message,
+temporary `Payload` struct (64 B) for each part of an inline message,
 copying the data in and then reading it back out. `iter_slices` yields
 `&[u8]` directly from the message's inline storage. One fewer 32 B
 memcpy per message on the flat-encode path.
@@ -880,7 +878,7 @@ heap-allocates (no inline representation). Clone and drop each touch
 a refcount. This cost 12.8% of push-side CPU.
 
 Added `Message::from_slice(&[u8])` which copies directly into the
-inline `MessageInner::Inline` variant for payloads up to 39 bytes.
+inline `MessageInner::Inline` variant for payloads up to 55 bytes.
 No heap allocation, no refcounting. Falls back to
 `Bytes::copy_from_slice` for larger payloads.
 
@@ -991,4 +989,29 @@ dominates at every size.
 overhead comes from: (1) per-frame WS header + client-side XOR
 masking, (2) no gather I/O (each WS message is an independent
 tungstenite write), (3) the HTTP upgrade handshake at connect time.
+
+## Cache-line-aligned inline thresholds
+
+`Payload` was 40 bytes (inline up to 38 B). `Message` was 48 bytes
+(inline up to 39 B). Both were sized to minimize struct width, but
+neither aligned to a cache line boundary. The 39-to-40 byte cliff
+was steep: TCP throughput dropped 29% at the transition (17.8M to
+12.6M msg/s at 1 peer).
+
+Bumped both to 64 bytes (one cache line each). `Payload` now
+inlines up to 62 B, `Message` up to 55 B. The `Message` bump
+drives the improvement because the recv fast path
+(`try_advance_ready`) writes directly into `MessageInner::Inline`,
+bypassing `Payload` entirely for single-part messages. The
+`Payload` bump fills the same cache line that `Single(Bytes)`
+already occupied and helps multi-part messages where each frame
+goes through `Payload::Inline`.
+
+TCP throughput at 40 B (the old cliff): 12.6M to 17.0M msg/s
+(+35%). No regression at any other size. Latency unchanged
+(~21 µs p50 REQ/REP TCP).
+
+`Message` at 80 B was tested and rejected. Per-message throughput
+did not improve at sizes the 64 B variant already covers, and the
+struct crosses a second cache line.
 
