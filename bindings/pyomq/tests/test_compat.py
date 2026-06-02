@@ -168,42 +168,51 @@ def test_setsockopt_string():
         ctx.term()
 
 
-def test_copy_false_recv_raises():
-    import builtins
+def test_copy_false_recv_returns_frame():
     ctx = zmq.Context()
-    sock = ctx.socket(zmq.PULL)
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
     try:
-        import pytest
-        with pytest.raises(builtins.NotImplementedError):
-            sock.recv(copy=False)
+        ep = pull.bind("tcp://127.0.0.1:0")
+        push.connect(ep)
+        push.send(b"hello")
+        frame = pull.recv(copy=False)
+        assert isinstance(frame, zmq.Frame)
+        assert bytes(frame) == b"hello"
     finally:
-        sock.close()
+        push.close()
+        pull.close()
         ctx.term()
 
 
-def test_copy_false_send_raises():
-    import builtins
+def test_copy_false_send_accepted():
     ctx = zmq.Context()
-    sock = ctx.socket(zmq.PUSH)
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
     try:
-        import pytest
-        with pytest.raises(builtins.NotImplementedError):
-            sock.send(b"x", copy=False)
+        ep = pull.bind("tcp://127.0.0.1:0")
+        push.connect(ep)
+        push.send(b"hello", copy=False)
+        assert pull.recv() == b"hello"
     finally:
-        sock.close()
+        push.close()
+        pull.close()
         ctx.term()
 
 
-def test_track_true_send_raises():
-    import builtins
+def test_track_true_send_returns_tracker():
     ctx = zmq.Context()
-    sock = ctx.socket(zmq.PUSH)
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
     try:
-        import pytest
-        with pytest.raises(builtins.NotImplementedError):
-            sock.send(b"x", track=True)
+        ep = pull.bind("tcp://127.0.0.1:0")
+        push.connect(ep)
+        tracker = push.send(b"hello", track=True)
+        assert isinstance(tracker, zmq.MessageTracker)
+        assert pull.recv() == b"hello"
     finally:
-        sock.close()
+        push.close()
+        pull.close()
         ctx.term()
 
 

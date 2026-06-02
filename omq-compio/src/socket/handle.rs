@@ -52,6 +52,15 @@ impl Drop for Socket {
                 d.clear();
             }
             if let Ok(mut l) = self.inner.listeners.write() {
+                // Release inproc names before clearing. The accept
+                // task holds the InprocListener inside a detached
+                // compio task that won't be cancelled by dropping the
+                // JoinHandle, so the listener's Drop won't fire.
+                for entry in l.iter() {
+                    if let Endpoint::Inproc { name } = &entry.endpoint {
+                        crate::transport::inproc::force_unbind(name);
+                    }
+                }
                 l.clear();
             }
             if let Ok(mut u) = self.inner.udp_dialers.write() {
@@ -291,20 +300,6 @@ impl Socket {
             let _ = p.send_command(cmd.clone()).await;
         }
         Ok(())
-    }
-
-    /// Set the closed flag without draining or awaiting linger.
-    /// Also releases inproc names from the global registry so
-    /// rebinding succeeds even when the socket outlives this call.
-    pub fn signal_close(&self) {
-        self.inner.closed.store(true, Ordering::SeqCst);
-        let listeners = self.inner.listeners.write().expect("listeners lock");
-        for entry in listeners.iter() {
-            if let Endpoint::Inproc { name } = &entry.endpoint {
-                crate::transport::inproc::force_unbind(name);
-            }
-        }
-        drop(listeners);
     }
 
     /// Graceful close: stop accepting, drain pending sends up to linger, then shut down.

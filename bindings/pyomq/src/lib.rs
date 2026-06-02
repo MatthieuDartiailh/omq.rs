@@ -29,10 +29,31 @@ mod runtime;
 mod socket;
 mod socket_async;
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
+
+/// Extractor that accepts either a sync `Socket` or an `AsyncSocket`,
+/// yielding the shared `SocketInner`.
+struct AnySocket(Arc<socket::SocketInner>);
+
+impl<'py> FromPyObject<'py> for AnySocket {
+    fn extract_bound(obj: &Bound<'py, PyAny>) -> PyResult<Self> {
+        if let Ok(s) = obj.downcast::<socket::Socket>() {
+            return Ok(Self(s.borrow().inner.clone()));
+        }
+        if let Ok(s) = obj.downcast::<socket_async::AsyncSocket>() {
+            return Ok(Self(s.borrow().inner.clone()));
+        }
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "expected a Socket or AsyncSocket",
+        ))
+    }
+}
 
 #[pymodule]
 fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    socket::register_atfork();
     constants::register(m)?;
     error::register(py, m)?;
     m.add_class::<context::Context>()?;
@@ -62,14 +83,13 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pyo3(signature = (sockets, timeout_ms=None))]
 fn wait_any(
     py: Python<'_>,
-    sockets: Vec<Bound<'_, socket::Socket>>,
+    sockets: Vec<AnySocket>,
     timeout_ms: Option<u64>,
 ) -> PyResult<Vec<u64>> {
     let mut entries = Vec::with_capacity(sockets.len());
-    for sock in &sockets {
-        let inner = &sock.borrow().inner;
-        let id = inner.ensure_id()?;
-        entries.push((id, inner.clone()));
+    for s in &sockets {
+        let id = s.0.ensure_id()?;
+        entries.push((id, s.0.clone()));
     }
     Ok(py.allow_threads(|| runtime::wait_any(entries, timeout_ms)))
 }
@@ -160,7 +180,7 @@ fn has_feature(name: &str) -> bool {
 
 #[pyfunction]
 fn backend_name() -> &'static str {
-    "compio"
+    "tokio"
 }
 
 #[pyfunction]

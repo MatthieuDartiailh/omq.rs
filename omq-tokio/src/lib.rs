@@ -40,5 +40,5 @@ pub use omq_proto::proto;
 
 pub use socket::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
-    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket,
+    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket, TrySendError,
 };

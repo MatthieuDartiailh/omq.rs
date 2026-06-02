@@ -20,8 +20,17 @@ fn int_to_bound<T: pyo3::IntoPy<PyObject>>(py: Python<'_>, v: T) -> Bound<'_, Py
 
 use crate::constants;
 use crate::error::{map_err, not_implemented};
-use omq_compio as backend;
-// SocketInner accessed via fully-qualified path; no top-level import.
+use omq_tokio as backend;
+
+#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+fn bad_key(name: &str) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!("invalid {name}"))
+}
+
+#[cfg(feature = "curve")]
+fn bad_key_detail(name: &str, e: &dyn std::fmt::Display) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!("invalid {name}: {e}"))
+}
 
 /// Wrapper-only state that doesn't live on `Options`.
 #[derive(Clone, Debug)]
@@ -116,9 +125,9 @@ impl Default for Overlay {
 }
 
 impl Overlay {
-    /// Materialise an `omq_compio::Options` from the overlay. Used
+    /// Materialise an `backend::Options` from the overlay. Used
     /// when the underlying Socket is first built.
-    pub fn to_options(&self) -> backend::Options {
+    pub fn to_options(&self) -> PyResult<backend::Options> {
         #[allow(unused_mut)]
         let mut opts = backend::Options {
             send_hwm: self.send_hwm,
@@ -148,52 +157,48 @@ impl Overlay {
         };
         #[cfg(feature = "plain")]
         if self.plain_server {
-            opts.mechanism =
-                omq_proto::options::MechanismConfig::PlainServer {
-                    authenticator: omq_proto::proto::mechanism::Authenticator::new(|_| true),
-                };
-        } else if let (Some(u), Some(p)) =
-            (&self.plain_username, &self.plain_password)
-        {
-            opts.mechanism =
-                omq_proto::options::MechanismConfig::PlainClient {
-                    username: u.clone(),
-                    password: p.clone(),
-                };
+            opts.mechanism = omq_proto::options::MechanismConfig::PlainServer {
+                authenticator: omq_proto::proto::mechanism::Authenticator::new(|_| true),
+            };
+        } else if let (Some(u), Some(p)) = (&self.plain_username, &self.plain_password) {
+            opts.mechanism = omq_proto::options::MechanismConfig::PlainClient {
+                username: u.clone(),
+                password: p.clone(),
+            };
         }
         #[cfg(feature = "curve")]
         if self.curve_server {
             if let (Some(pk), Some(sk)) = (&self.curve_publickey, &self.curve_secretkey) {
-                let pk_str = std::str::from_utf8(pk).unwrap_or("");
-                let sk_str = std::str::from_utf8(sk).unwrap_or("");
+                let pk_str = std::str::from_utf8(pk).map_err(|_| bad_key("CURVE_PUBLICKEY"))?;
+                let sk_str = std::str::from_utf8(sk).map_err(|_| bad_key("CURVE_SECRETKEY"))?;
                 let public = backend::CurvePublicKey::from_z85(pk_str)
-                    .expect("bad CURVE_PUBLICKEY Z85");
+                    .map_err(|e| bad_key_detail("CURVE_PUBLICKEY", &e))?;
                 let secret = backend::CurveSecretKey::from_z85(sk_str)
-                    .expect("bad CURVE_SECRETKEY Z85");
+                    .map_err(|e| bad_key_detail("CURVE_SECRETKEY", &e))?;
                 let keypair = backend::CurveKeypair { public, secret };
                 opts.mechanism = omq_proto::options::MechanismConfig::CurveServer {
                     our_keypair: keypair,
-                    cookie_keyring: std::sync::Arc::new(
-                        backend::CurveCookieKeyring::new(),
-                    ),
+                    cookie_keyring: std::sync::Arc::new(backend::CurveCookieKeyring::new()),
                     authenticator: self
                         .curve_authenticator
                         .as_ref()
                         .map(crate::auth::build_authenticator),
                 };
             }
-        } else if let (Some(pk), Some(sk), Some(svk)) =
-            (&self.curve_publickey, &self.curve_secretkey, &self.curve_serverkey)
-        {
-            let pk_str = std::str::from_utf8(pk).unwrap_or("");
-            let sk_str = std::str::from_utf8(sk).unwrap_or("");
-            let svk_str = std::str::from_utf8(svk).unwrap_or("");
+        } else if let (Some(pk), Some(sk), Some(svk)) = (
+            &self.curve_publickey,
+            &self.curve_secretkey,
+            &self.curve_serverkey,
+        ) {
+            let pk_str = std::str::from_utf8(pk).map_err(|_| bad_key("CURVE_PUBLICKEY"))?;
+            let sk_str = std::str::from_utf8(sk).map_err(|_| bad_key("CURVE_SECRETKEY"))?;
+            let svk_str = std::str::from_utf8(svk).map_err(|_| bad_key("CURVE_SERVERKEY"))?;
             let public = backend::CurvePublicKey::from_z85(pk_str)
-                .expect("bad CURVE_PUBLICKEY Z85");
+                .map_err(|e| bad_key_detail("CURVE_PUBLICKEY", &e))?;
             let secret = backend::CurveSecretKey::from_z85(sk_str)
-                .expect("bad CURVE_SECRETKEY Z85");
+                .map_err(|e| bad_key_detail("CURVE_SECRETKEY", &e))?;
             let server_public = backend::CurvePublicKey::from_z85(svk_str)
-                .expect("bad CURVE_SERVERKEY Z85");
+                .map_err(|e| bad_key_detail("CURVE_SERVERKEY", &e))?;
             let keypair = backend::CurveKeypair { public, secret };
             opts.mechanism = omq_proto::options::MechanismConfig::CurveClient {
                 our_keypair: keypair,
@@ -202,16 +207,16 @@ impl Overlay {
         }
         #[cfg(feature = "blake3zmq")]
         if self.blake3zmq_server {
-            if let (Some(pk), Some(sk)) =
-                (&self.blake3zmq_publickey, &self.blake3zmq_secretkey)
-            {
-                let public = omq_compio::Blake3ZmqPublicKey(
-                    <[u8; 32]>::try_from(pk.as_slice()).expect("bad BLAKE3ZMQ_PUBLICKEY"),
+            if let (Some(pk), Some(sk)) = (&self.blake3zmq_publickey, &self.blake3zmq_secretkey) {
+                let public = backend::Blake3ZmqPublicKey(
+                    <[u8; 32]>::try_from(pk.as_slice())
+                        .map_err(|_| bad_key("BLAKE3ZMQ_PUBLICKEY"))?,
                 );
-                let secret = omq_compio::Blake3ZmqSecretKey(
-                    <[u8; 32]>::try_from(sk.as_slice()).expect("bad BLAKE3ZMQ_SECRETKEY"),
+                let secret = backend::Blake3ZmqSecretKey(
+                    <[u8; 32]>::try_from(sk.as_slice())
+                        .map_err(|_| bad_key("BLAKE3ZMQ_SECRETKEY"))?,
                 );
-                let keypair = omq_compio::Blake3ZmqKeypair { public, secret };
+                let keypair = backend::Blake3ZmqKeypair { public, secret };
                 opts.mechanism = omq_proto::options::MechanismConfig::Blake3ZmqServer {
                     our_keypair: keypair,
                     cookie_keyring: std::sync::Arc::new(
@@ -223,25 +228,30 @@ impl Overlay {
                         .map(crate::blake3zmq_auth::build_authenticator),
                 };
             }
-        } else if let (Some(pk), Some(sk), Some(svk)) =
-            (&self.blake3zmq_publickey, &self.blake3zmq_secretkey, &self.blake3zmq_serverkey)
-        {
-            let public = omq_compio::Blake3ZmqPublicKey(
-                <[u8; 32]>::try_from(pk.as_slice()).expect("bad BLAKE3ZMQ_PUBLICKEY"),
+        } else if let (Some(pk), Some(sk), Some(svk)) = (
+            &self.blake3zmq_publickey,
+            &self.blake3zmq_secretkey,
+            &self.blake3zmq_serverkey,
+        ) {
+            let public = backend::Blake3ZmqPublicKey(
+                <[u8; 32]>::try_from(pk.as_slice())
+                    .map_err(|_| bad_key("BLAKE3ZMQ_PUBLICKEY"))?,
             );
-            let secret = omq_compio::Blake3ZmqSecretKey(
-                <[u8; 32]>::try_from(sk.as_slice()).expect("bad BLAKE3ZMQ_SECRETKEY"),
+            let secret = backend::Blake3ZmqSecretKey(
+                <[u8; 32]>::try_from(sk.as_slice())
+                    .map_err(|_| bad_key("BLAKE3ZMQ_SECRETKEY"))?,
             );
-            let server_public = omq_compio::Blake3ZmqPublicKey(
-                <[u8; 32]>::try_from(svk.as_slice()).expect("bad BLAKE3ZMQ_SERVERKEY"),
+            let server_public = backend::Blake3ZmqPublicKey(
+                <[u8; 32]>::try_from(svk.as_slice())
+                    .map_err(|_| bad_key("BLAKE3ZMQ_SERVERKEY"))?,
             );
-            let keypair = omq_compio::Blake3ZmqKeypair { public, secret };
+            let keypair = backend::Blake3ZmqKeypair { public, secret };
             opts.mechanism = omq_proto::options::MechanismConfig::Blake3ZmqClient {
                 our_keypair: keypair,
                 server_public,
             };
         }
-        opts
+        Ok(opts)
     }
 
     pub fn from_options(o: &backend::Options) -> Self {
@@ -342,33 +352,22 @@ pub fn setsockopt(
         constants::SUBSCRIBE => {
             let v: &[u8] = value.extract()?;
             let bytes = Bytes::copy_from_slice(v);
-            // `ensure_id` re-locks `sock.overlay` to materialise on
-            // first call. Drop the overlay guard we acquired at the
-            // top of `setsockopt` before calling into it.
             drop(ov);
-            let id = sock.ensure_id()?;
+            let s = sock.ensure_socket()?;
             let r = py.allow_threads(|| {
-                crate::runtime::with_socket(id, move |s| async move { s.subscribe(bytes).await })
+                crate::runtime::with_socket(&s, move |s| async move { s.subscribe(bytes).await })
             });
-            return match r {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(omq_proto::error::Error::Closed)),
-            };
+            return r.map_err(map_err);
         }
         constants::UNSUBSCRIBE => {
             let v: &[u8] = value.extract()?;
             let bytes = Bytes::copy_from_slice(v);
             drop(ov);
-            let id = sock.ensure_id()?;
+            let s = sock.ensure_socket()?;
             let r = py.allow_threads(|| {
-                crate::runtime::with_socket(id, move |s| async move { s.unsubscribe(bytes).await })
+                crate::runtime::with_socket(&s, move |s| async move { s.unsubscribe(bytes).await })
             });
-            return match r {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(omq_proto::error::Error::Closed)),
-            };
+            return r.map_err(map_err);
         }
         constants::RCVTIMEO => {
             ov.rcvtimeo = ms(value.extract::<i64>()?);
@@ -579,6 +578,15 @@ pub fn getsockopt<'py>(
                 backend::SocketType::Push => constants::PUSH,
                 backend::SocketType::XPub => constants::XPUB,
                 backend::SocketType::XSub => constants::XSUB,
+                backend::SocketType::Stream => constants::STREAM,
+                backend::SocketType::Server => constants::SERVER,
+                backend::SocketType::Client => constants::CLIENT,
+                backend::SocketType::Radio => constants::RADIO,
+                backend::SocketType::Dish => constants::DISH,
+                backend::SocketType::Gather => constants::GATHER,
+                backend::SocketType::Scatter => constants::SCATTER,
+                backend::SocketType::Peer => constants::PEER,
+                backend::SocketType::Channel => constants::CHANNEL,
                 _ => -1,
             };
             Ok(int_to_bound(py, v))
@@ -686,21 +694,11 @@ pub fn getsockopt<'py>(
             Ok(int_to_bound(py, v))
         }
         constants::SNDBUF => {
-            let v = sock
-                .overlay
-                .lock()
-                .unwrap()
-                .send_buffer_size
-                .unwrap_or(0) as i64;
+            let v = sock.overlay.lock().unwrap().send_buffer_size.unwrap_or(0) as i64;
             Ok(int_to_bound(py, v))
         }
         constants::RCVBUF => {
-            let v = sock
-                .overlay
-                .lock()
-                .unwrap()
-                .recv_buffer_size
-                .unwrap_or(0) as i64;
+            let v = sock.overlay.lock().unwrap().recv_buffer_size.unwrap_or(0) as i64;
             Ok(int_to_bound(py, v))
         }
         constants::PLAIN_SERVER => {
@@ -834,12 +832,26 @@ pub fn getsockopt<'py>(
         | constants::TCP_MAXRT
         | constants::MULTICAST_HOPS
         | constants::RECOVERY_IVL
-        | constants::RECONNECT_STOP
-        | constants::FD
-        | constants::EVENTS => Ok(int_to_bound(py, 0_i64)),
-        constants::ZAP_DOMAIN
-        | constants::TCP_ACCEPT_FILTER
-        | constants::LAST_ENDPOINT => {
+        | constants::RECONNECT_STOP => Ok(int_to_bound(py, 0_i64)),
+        constants::FD => {
+            sock.materialize()?;
+            let mat = sock.materialized.read().unwrap();
+            let m = mat.as_ref().unwrap();
+            m.recv_notify.arm_persistent();
+            Ok(int_to_bound(py, m.recv_notify.fd() as i64))
+        }
+        constants::EVENTS => {
+            let has_data = if !sock.rxbuf.lock().unwrap().is_empty() {
+                true
+            } else {
+                let mat = sock.materialized.read().unwrap();
+                mat.as_ref()
+                    .is_some_and(|m| !m.recv_cons.lock().unwrap().is_empty())
+            };
+            let flags: i64 = if has_data { 1 } else { 0 };
+            Ok(int_to_bound(py, flags))
+        }
+        constants::ZAP_DOMAIN | constants::TCP_ACCEPT_FILTER | constants::LAST_ENDPOINT => {
             Ok(PyBytes::new_bound(py, b"").into_any())
         }
         other => Err(not_implemented(&format!(

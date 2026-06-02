@@ -1,32 +1,28 @@
-//! Sync ↔ async dispatch glue, factored out of `socket.rs` and
-//! `socket_async.rs`. Most non-I/O-shape methods (bind, connect,
+//! Sync and async dispatch glue. Most non-I/O methods (bind, connect,
 //! unbind, disconnect, subscribe, unsubscribe, join, leave) just
-//! materialise the underlying socket, hand a closure to the compio
-//! runtime, and translate the result. Without these helpers the two
-//! files repeated the same 6-line pattern eight times each.
+//! spawn the operation on the tokio runtime and translate the result.
 
 use std::future::Future;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use omq_proto::error::Error as PError;
+use omq_tokio::Socket;
 use pyo3::prelude::*;
 
 use crate::error::map_err;
-use crate::runtime::{self, MissingSocket};
+use crate::runtime;
 use crate::socket::SocketInner;
 
-/// Sync version: drive a `Result<()>`-returning op on the compio
-/// thread, blocking the caller. Releases the GIL across the trip.
+/// Sync version: spawn a `Result<()>`-returning op on the tokio
+/// runtime, blocking the caller. Releases the GIL across the trip.
 pub(crate) fn sync_unit<F, Fut>(inner: &Arc<SocketInner>, py: Python<'_>, op: F) -> PyResult<()>
 where
-    F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<(), PError>> + 'static,
+    F: FnOnce(Arc<Socket>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), PError>> + Send + 'static,
 {
-    let id = inner.ensure_id()?;
-    py.allow_threads(|| runtime::with_socket(id, op))
-        .map_err(|_: MissingSocket| map_err(PError::Closed))
-        .and_then(|r| r.map_err(map_err))
+    let sock = inner.ensure_socket()?;
+    py.allow_threads(|| runtime::with_socket(&sock, op))
+        .map_err(map_err)
 }
 
 /// Like `sync_unit` but returns a `String`.
@@ -36,16 +32,15 @@ pub(crate) fn sync_string<F, Fut>(
     op: F,
 ) -> PyResult<String>
 where
-    F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<String, PError>> + 'static,
+    F: FnOnce(Arc<Socket>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<String, PError>> + Send + 'static,
 {
-    let id = inner.ensure_id()?;
-    py.allow_threads(|| runtime::with_socket(id, op))
-        .map_err(|_: MissingSocket| map_err(PError::Closed))
-        .and_then(|r| r.map_err(map_err))
+    let sock = inner.ensure_socket()?;
+    py.allow_threads(|| runtime::with_socket(&sock, op))
+        .map_err(map_err)
 }
 
-/// Async version: drive a `Result<()>`-returning op via an asyncio.Future.
+/// Async version: spawn a `Result<()>`-returning op via an asyncio.Future.
 #[allow(dead_code)]
 pub(crate) fn async_unit<'py, F, Fut>(
     inner: &Arc<SocketInner>,
@@ -53,20 +48,17 @@ pub(crate) fn async_unit<'py, F, Fut>(
     op: F,
 ) -> PyResult<Bound<'py, PyAny>>
 where
-    F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<(), PError>> + 'static,
+    F: FnOnce(Arc<Socket>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), PError>> + Send + 'static,
 {
-    let id = inner.ensure_id()?;
-    runtime::compio_future_into_py(py, move || async move {
-        match runtime::with_socket_async(id, op).await {
-            Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-            Ok(Err(e)) => Err(map_err(e)),
-            Err(_) => Err(map_err(PError::Closed)),
-        }
+    let sock = inner.ensure_socket()?;
+    runtime::tokio_future_into_py(py, async move {
+        op(sock).await.map_err(map_err)?;
+        Python::with_gil(|py| Ok(py.None()))
     })
 }
 
-/// Async version: drive a `Result<String>`-returning op via an asyncio.Future.
+/// Async version: spawn a `Result<String>`-returning op via an asyncio.Future.
 #[allow(dead_code)]
 pub(crate) fn async_string<'py, F, Fut>(
     inner: &Arc<SocketInner>,
@@ -74,15 +66,12 @@ pub(crate) fn async_string<'py, F, Fut>(
     op: F,
 ) -> PyResult<Bound<'py, PyAny>>
 where
-    F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<String, PError>> + 'static,
+    F: FnOnce(Arc<Socket>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<String, PError>> + Send + 'static,
 {
-    let id = inner.ensure_id()?;
-    runtime::compio_future_into_py(py, move || async move {
-        match runtime::with_socket_async(id, op).await {
-            Ok(Ok(s)) => Python::with_gil(|py| Ok(s.to_object(py))),
-            Ok(Err(e)) => Err(map_err(e)),
-            Err(_) => Err(map_err(PError::Closed)),
-        }
+    let sock = inner.ensure_socket()?;
+    runtime::tokio_future_into_py(py, async move {
+        let s = op(sock).await.map_err(map_err)?;
+        Python::with_gil(|py| Ok(s.to_object(py)))
     })
 }

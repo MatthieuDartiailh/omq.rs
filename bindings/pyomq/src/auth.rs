@@ -50,9 +50,7 @@ impl Clone for CurveAuthenticator {
     fn clone(&self) -> Self {
         match self {
             Self::AllowedKeys(keys) => Self::AllowedKeys(keys.clone()),
-            Self::Callback(cb) => {
-                Python::with_gil(|py| Self::Callback(cb.clone_ref(py)))
-            }
+            Self::Callback(cb) => Python::with_gil(|py| Self::Callback(cb.clone_ref(py))),
         }
     }
 }
@@ -102,18 +100,14 @@ pub(crate) fn build_authenticator(
 
 /// Shared implementation for `Socket::set_curve_auth` and
 /// `AsyncSocket::set_curve_auth`.
-pub(crate) fn set_curve_auth_impl(
-    inner: &SocketInner,
-    auth: &Bound<'_, PyAny>,
-) -> PyResult<()> {
+pub(crate) fn set_curve_auth_impl(inner: &SocketInner, auth: &Bound<'_, PyAny>) -> PyResult<()> {
     let mut ov = inner.overlay.lock().unwrap();
     if auth.is_none() {
         ov.curve_authenticator = None;
         return Ok(());
     }
     if auth.is_callable() {
-        ov.curve_authenticator =
-            Some(CurveAuthenticator::Callback(auth.clone().unbind()));
+        ov.curve_authenticator = Some(CurveAuthenticator::Callback(auth.clone().unbind()));
         return Ok(());
     }
     let iter = auth.iter().map_err(|_| {
@@ -125,10 +119,9 @@ pub(crate) fn set_curve_auth_impl(
     for item in iter {
         let item = item?;
         let z85_bytes: &[u8] = item.extract()?;
-        let z85_str = std::str::from_utf8(z85_bytes).map_err(|_| {
-            pyo3::exceptions::PyValueError::new_err("key must be valid Z85 ASCII")
-        })?;
-        let pk = omq_compio::CurvePublicKey::from_z85(z85_str)
+        let z85_str = std::str::from_utf8(z85_bytes)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("key must be valid Z85 ASCII"))?;
+        let pk = omq_tokio::CurvePublicKey::from_z85(z85_str)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         keys.insert(*pk.as_bytes());
     }

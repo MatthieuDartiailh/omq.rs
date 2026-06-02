@@ -14,9 +14,7 @@ impl Clone for Blake3ZmqAuthenticator {
     fn clone(&self) -> Self {
         match self {
             Self::AllowedKeys(keys) => Self::AllowedKeys(keys.clone()),
-            Self::Callback(cb) => {
-                Python::with_gil(|py| Self::Callback(cb.clone_ref(py)))
-            }
+            Self::Callback(cb) => Python::with_gil(|py| Self::Callback(cb.clone_ref(py))),
         }
     }
 }
@@ -44,8 +42,10 @@ pub(crate) fn build_authenticator(
             let cb = Python::with_gil(|py| cb.clone_ref(py));
             omq_proto::proto::mechanism::Authenticator::new(move |peer| {
                 Python::with_gil(|py| {
-                    let info =
-                        Py::new(py, crate::auth::PeerInfo::from_raw_bytes(py, &peer.public_key));
+                    let info = Py::new(
+                        py,
+                        crate::auth::PeerInfo::from_raw_bytes(py, &peer.public_key),
+                    );
                     let info = match info {
                         Ok(i) => i,
                         Err(_) => return false,
@@ -73,8 +73,7 @@ pub(crate) fn set_blake3zmq_auth_impl(
         return Ok(());
     }
     if auth.is_callable() {
-        ov.blake3zmq_authenticator =
-            Some(Blake3ZmqAuthenticator::Callback(auth.clone().unbind()));
+        ov.blake3zmq_authenticator = Some(Blake3ZmqAuthenticator::Callback(auth.clone().unbind()));
         return Ok(());
     }
     let iter = auth.iter().map_err(|_| {
@@ -87,9 +86,10 @@ pub(crate) fn set_blake3zmq_auth_impl(
         let item = item?;
         let raw: &[u8] = item.extract()?;
         if raw.len() != 32 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("BLAKE3ZMQ public key must be 32 bytes, got {}", raw.len()),
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "BLAKE3ZMQ public key must be 32 bytes, got {}",
+                raw.len()
+            )));
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(raw);

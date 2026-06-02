@@ -486,224 +486,221 @@ def run_async_latency(lib_name):
     return results
 
 
-# ── proxy forwarding ─────────────────────────────────────────────────
+# ── proxy forwarding (2-process) ─────────────────────────────────────
 
-def _quiet_proxy(lib, fe, be):
-    try:
-        lib.proxy(fe, be)
-    except Exception:
-        pass
+def _measure_proxy_subprocess(lib_name, pattern, n):
+    if lib_name == "pyzmq":
+        lib_import = "import zmq as lib"
+    else:
+        lib_import = "import pyomq as lib"
 
-
-def measure_proxy_pushpull(lib, n=200_000):
-    payload = b"x" * 128
-    ctx = lib.Context()
-    frontend = ctx.socket(lib.PULL)
-    backend = ctx.socket(lib.PUSH)
-    fe_ep = free_tcp()
-    be_ep = free_tcp()
-    frontend.bind(fe_ep)
-    backend.bind(be_ep)
-
-    sender = ctx.socket(lib.PUSH)
-    sender.connect(fe_ep)
-    receiver = ctx.socket(lib.PULL)
-    receiver.connect(be_ep)
-
-    proxy_t = threading.Thread(
-        target=_quiet_proxy, args=(lib, frontend, backend), daemon=True,
-    )
-    proxy_t.start()
-    time.sleep(0.05)
-
-    for _ in range(200):
-        sender.send(b"w")
-        receiver.recv()
-
-    def send_all():
-        for _ in range(n):
-            sender.send(payload)
-
-    t = threading.Thread(target=send_all)
-    start = time.monotonic()
-    t.start()
-    for _ in range(n):
-        receiver.recv()
-    elapsed = time.monotonic() - start
-    t.join()
-
-    sender.close()
-    receiver.close()
-    frontend.close()
-    backend.close()
-    return n / elapsed
-
-
-def measure_proxy_reqrep(lib, n=10_000):
-    payload = b"x" * 128
-    ctx = lib.Context()
-    frontend = ctx.socket(lib.ROUTER)
-    backend = ctx.socket(lib.DEALER)
-    fe_ep = free_tcp()
-    be_ep = free_tcp()
-    frontend.bind(fe_ep)
-    backend.bind(be_ep)
-
-    worker = ctx.socket(lib.REP)
-    worker.connect(be_ep)
-    client = ctx.socket(lib.REQ)
-    client.connect(fe_ep)
-
-    proxy_t = threading.Thread(
-        target=_quiet_proxy, args=(lib, frontend, backend), daemon=True,
-    )
-    proxy_t.start()
-    time.sleep(0.05)
-
-    for _ in range(100):
-        client.send(b"w")
-        worker.recv()
-        worker.send(b"w")
-        client.recv()
-
-    start = time.monotonic()
-    for _ in range(n):
-        client.send(payload)
-        worker.recv()
-        worker.send(payload)
-        client.recv()
-    elapsed = time.monotonic() - start
-
-    client.close()
-    worker.close()
-    frontend.close()
-    backend.close()
-    return n / elapsed
-
-
-def _measure_proxy_pyzmq_subprocess(pattern, n):
-    code = f"""
-import threading, time, json, socket as sock
-def free_tcp():
+    proxy_code = f"""
+import json, sys, socket as sock
+{lib_import}
+def pick_port():
     s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
     s.bind(('127.0.0.1', 0))
     port = s.getsockname()[1]
     s.close()
-    return f'tcp://127.0.0.1:{{port}}'
-import zmq
-ctx = zmq.Context()
+    return port
+ctx = lib.Context()
+fe_port = pick_port()
+be_port = pick_port()
 """
     if pattern == "pushpull":
-        code += f"""
-frontend = ctx.socket(zmq.PULL)
-backend = ctx.socket(zmq.PUSH)
-fe_ep = free_tcp()
-be_ep = free_tcp()
-frontend.bind(fe_ep)
-backend.bind(be_ep)
-sender = ctx.socket(zmq.PUSH)
-sender.connect(fe_ep)
-receiver = ctx.socket(zmq.PULL)
-receiver.connect(be_ep)
-def proxy():
-    try:
-        zmq.proxy(frontend, backend)
-    except Exception:
-        pass
-t = threading.Thread(target=proxy, daemon=True)
-t.start()
-time.sleep(0.05)
-payload = b'x' * 128
-for _ in range(200):
-    sender.send(b'w')
-    receiver.recv()
-n = {n}
-def send_all():
-    for _ in range(n):
-        sender.send(payload)
-st = threading.Thread(target=send_all)
-start = time.monotonic()
-st.start()
-for _ in range(n):
-    receiver.recv()
-elapsed = time.monotonic() - start
-st.join()
-sender.close()
-receiver.close()
-frontend.close()
-backend.close()
-print(json.dumps(n / elapsed))
-import sys; sys.stdout.flush(); import os; os._exit(0)
+        proxy_code += """
+frontend = ctx.socket(lib.PULL)
+backend = ctx.socket(lib.PUSH)
 """
     else:
-        code += f"""
-frontend = ctx.socket(zmq.ROUTER)
-backend = ctx.socket(zmq.DEALER)
-fe_ep = free_tcp()
-be_ep = free_tcp()
-frontend.bind(fe_ep)
-backend.bind(be_ep)
-worker = ctx.socket(zmq.REP)
-worker.connect(be_ep)
-client = ctx.socket(zmq.REQ)
-client.connect(fe_ep)
-def proxy():
+        proxy_code += """
+frontend = ctx.socket(lib.ROUTER)
+backend = ctx.socket(lib.DEALER)
+"""
+    proxy_code += """
+frontend.bind(f'tcp://127.0.0.1:{fe_port}')
+backend.bind(f'tcp://127.0.0.1:{be_port}')
+print(json.dumps([fe_port, be_port]), flush=True)
+try:
+    lib.proxy(frontend, backend)
+except Exception:
+    pass
+"""
+
+    proxy_proc = subprocess.Popen(
+        [sys.executable, "-c", proxy_code],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
     try:
-        zmq.proxy(frontend, backend)
-    except Exception:
-        pass
-t = threading.Thread(target=proxy, daemon=True)
+        line = proxy_proc.stdout.readline()
+        fe_port, be_port = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        proxy_proc.terminate()
+        proxy_proc.wait(timeout=5)
+        return 0.0
+    fe_ep = f"tcp://127.0.0.1:{fe_port}"
+    be_ep = f"tcp://127.0.0.1:{be_port}"
+
+    if pattern == "pushpull":
+        bench_code = f"""
+import threading, time, json, sys, os
+{lib_import}
+payload = b'x' * 128
+n = {n}
+ctx = lib.Context()
+push = ctx.socket(lib.PUSH)
+pull = ctx.socket(lib.PULL)
+push.linger = 0
+push.connect('{fe_ep}')
+pull.connect('{be_ep}')
+for _ in range(200):
+    push.send(b'w')
+    pull.recv()
+def sender():
+    for _ in range(n):
+        push.send(payload)
+t = threading.Thread(target=sender)
+start = time.monotonic()
 t.start()
-time.sleep(0.05)
+for _ in range(n):
+    pull.recv()
+elapsed = time.monotonic() - start
+t.join()
+push.close()
+pull.close()
+print(json.dumps(n / elapsed))
+sys.stdout.flush(); os._exit(0)
+"""
+    else:
+        bench_code = f"""
+import threading, time, json, sys, os
+{lib_import}
+payload = b'x' * 128
+n = {n}
+ctx = lib.Context()
+client = ctx.socket(lib.REQ)
+worker = ctx.socket(lib.REP)
+client.linger = 0
+worker.linger = 0
+client.connect('{fe_ep}')
+worker.connect('{be_ep}')
 for _ in range(100):
     client.send(b'w')
-    worker.recv()
-    worker.send(b'w')
+    worker.send(worker.recv())
     client.recv()
-n = {n}
-payload = b'x' * 128
 start = time.monotonic()
 for _ in range(n):
     client.send(payload)
-    worker.recv()
-    worker.send(payload)
+    worker.send(worker.recv())
     client.recv()
 elapsed = time.monotonic() - start
 client.close()
 worker.close()
-frontend.close()
-backend.close()
 print(json.dumps(n / elapsed))
-import sys; sys.stdout.flush(); import os; os._exit(0)
+sys.stdout.flush(); os._exit(0)
 """
-    result = _run_subprocess(code, f"pyzmq proxy {pattern}", timeout=30)
-    return result if result is not None else 0.0
+
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", bench_code],
+            capture_output=True, text=True, timeout=60,
+        )
+        if r.returncode != 0:
+            return 0.0
+        return json.loads(r.stdout.strip())
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+        return 0.0
+    finally:
+        proxy_proc.terminate()
+        proxy_proc.wait(timeout=5)
+
+
+BENCH_PROXY_CLIENT = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..", "target", "release",
+    "bench_proxy_client",
+)
+
+
+def _measure_proxy_native(lib_name, duration=2.0):
+    if lib_name == "pyzmq":
+        lib_import = "import zmq as lib"
+    else:
+        lib_import = "import pyomq as lib"
+
+    proxy_code = f"""
+import json, sys, socket as sock
+{lib_import}
+def pick_port():
+    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+ctx = lib.Context()
+frontend = ctx.socket(lib.PULL)
+backend = ctx.socket(lib.PUSH)
+fe_port = pick_port()
+be_port = pick_port()
+frontend.bind(f'tcp://127.0.0.1:{{fe_port}}')
+backend.bind(f'tcp://127.0.0.1:{{be_port}}')
+print(json.dumps([fe_port, be_port]), flush=True)
+try:
+    lib.proxy(frontend, backend)
+except Exception:
+    pass
+"""
+
+    proxy_proc = subprocess.Popen(
+        [sys.executable, "-c", proxy_code],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        line = proxy_proc.stdout.readline()
+        fe_port, be_port = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        proxy_proc.terminate()
+        proxy_proc.wait(timeout=5)
+        return 0.0
+
+    try:
+        r = subprocess.run(
+            [BENCH_PROXY_CLIENT, str(fe_port), str(be_port), "128",
+             str(duration)],
+            capture_output=True, text=True,
+            timeout=duration + 10,
+        )
+        if r.returncode != 0:
+            return 0.0
+        parts = r.stdout.strip().split()
+        count, elapsed = int(parts[0]), float(parts[1])
+        return count / elapsed
+    except (subprocess.TimeoutExpired, ValueError, IndexError):
+        return 0.0
+    finally:
+        proxy_proc.terminate()
+        proxy_proc.wait(timeout=5)
 
 
 def run_proxy(lib_name):
-    if lib_name == "pyomq":
-        import pyomq as lib
-        sys.stdout.write("  PUSH/PULL ...")
-        sys.stdout.flush()
-        pp = max(measure_proxy_pushpull(lib) for _ in range(N_ROUNDS))
-        print(f" {fmt_rate(pp)}")
+    use_native = os.path.isfile(BENCH_PROXY_CLIENT)
 
-        sys.stdout.write("  REQ/REP ...")
-        sys.stdout.flush()
-        rr = max(measure_proxy_reqrep(lib) for _ in range(N_ROUNDS))
-        print(f" {fmt_rate(rr)}")
+    sys.stdout.write("  PUSH/PULL ...")
+    sys.stdout.flush()
+    if use_native:
+        _measure_proxy_native(lib_name, 1.0)
+        pp = max(_measure_proxy_native(lib_name) for _ in range(N_ROUNDS))
     else:
-        sys.stdout.write("  PUSH/PULL ...")
-        sys.stdout.flush()
-        pp = max(_measure_proxy_pyzmq_subprocess("pushpull", 200_000)
+        _measure_proxy_subprocess(lib_name, "pushpull", 200_000)
+        pp = max(_measure_proxy_subprocess(lib_name, "pushpull", 200_000)
                  for _ in range(N_ROUNDS))
-        print(f" {fmt_rate(pp)}")
+    print(f" {fmt_rate(pp)}")
 
-        sys.stdout.write("  REQ/REP ...")
-        sys.stdout.flush()
-        rr = max(_measure_proxy_pyzmq_subprocess("reqrep", 10_000)
-                 for _ in range(N_ROUNDS))
-        print(f" {fmt_rate(rr)}")
+    sys.stdout.write("  REQ/REP ...")
+    sys.stdout.flush()
+    _measure_proxy_subprocess(lib_name, "reqrep", 10_000)
+    rr = max(_measure_proxy_subprocess(lib_name, "reqrep", 10_000)
+             for _ in range(N_ROUNDS))
+    print(f" {fmt_rate(rr)}")
 
     return pp, rr
 
@@ -1096,19 +1093,19 @@ def main():
         print(f"Benchmarking {impl}")
         print(f"{'=' * 40}")
 
-        print("\nSync PUSH/PULL throughput...")
+        print(f"\n{impl} sync PUSH/PULL throughput...")
         tp_inproc, tp_tcp = run_throughput(impl)
 
-        print("\nAsync PUSH/PULL throughput...")
+        print(f"\n{impl} async PUSH/PULL throughput...")
         atp_tcp = run_async_throughput(impl)
 
-        print("\nSync REQ/REP latency (TCP)...")
+        print(f"\n{impl} sync REQ/REP latency (TCP)...")
         lat = run_latency(impl)
 
-        print("\nAsync REQ/REP latency (TCP)...")
+        print(f"\n{impl} async REQ/REP latency (TCP)...")
         alat = run_async_latency(impl)
 
-        print("\nzmq.proxy() forwarding...")
+        print(f"\n{impl} zmq.proxy() forwarding...")
         proxy_pp, proxy_rr = run_proxy(impl)
 
         print("\nSaving results...")

@@ -13,11 +13,14 @@ For asynchronous code::
     import pyomq.asyncio as zmq_async
 """
 
+import errno as _errno
+import itertools
 import json
 import os
 import pickle
-import random
+import select as _select
 import threading
+import weakref
 
 from . import _native  # type: ignore[attr-defined]
 from . import error as error  # noqa: F401
@@ -37,6 +40,7 @@ from ._native import (  # type: ignore[attr-defined]
     PUSH,
     XPUB,
     XSUB,
+    STREAM,
     # Draft socket types (RFC 41 / 48 / 49 / 51 + PEER)
     SERVER,
     CLIENT,
@@ -114,7 +118,6 @@ POLLIN = 1
 POLLOUT = 2
 POLLERR = 4
 POLLPRI = 32
-STREAM = 11
 HWM = 1
 
 ROUTING_ID = 5
@@ -150,6 +153,29 @@ NULL = 0
 PLAIN = 1
 CURVE = 2
 BLAKE3ZMQ = 3
+
+ETERM = 156384765
+ENOTSOCK = 108
+COPY_THRESHOLD = 65536
+
+# errno constants (pyzmq exposes these at top level)
+EAGAIN = _errno.EAGAIN
+ENOTSUP = _errno.ENOTSUP
+EINVAL = _errno.EINVAL
+EFAULT = _errno.EFAULT
+ENOMEM = _errno.ENOMEM
+ENODEV = _errno.ENODEV
+EMSGSIZE = _errno.EMSGSIZE
+EAFNOSUPPORT = _errno.EAFNOSUPPORT
+ENETUNREACH = _errno.ENETUNREACH
+ECONNABORTED = _errno.ECONNABORTED
+ECONNRESET = _errno.ECONNRESET
+ENOTCONN = _errno.ENOTCONN
+ETIMEDOUT = _errno.ETIMEDOUT
+EHOSTUNREACH = _errno.EHOSTUNREACH
+ENETRESET = _errno.ENETRESET
+EADDRINUSE = _errno.EADDRINUSE
+EADDRNOTAVAIL = _errno.EADDRNOTAVAIL
 
 __version__ = version()
 zmq_version_info = (4, 3, 4)
@@ -266,9 +292,56 @@ _SOCKOPT_NAMES = {
 }
 
 
+# ── MessageTracker / Message / Frame (pyzmq compat) ─────────────────
+
+class NotDone(ZMQBaseError):
+    pass
+
+
+class MessageTracker:
+    def __init__(self, *args, _pending=False, **kwargs):
+        self.done = not _pending
+
+    def wait(self, timeout=None):
+        if not self.done:
+            raise NotDone
+
+
+class Message(bytes):
+    tracker = None
+
+    def __new__(cls, data=b"", track=False):
+        return super().__new__(cls, data)
+
+    @property
+    def bytes(self):
+        return bytes(self)
+
+    @property
+    def buffer(self):
+        return memoryview(bytes(self))
+
+
+Frame = Message
+
+
 # ── Socket wrapper ───────────────────────────────────────────────────
 
-class Socket:
+import sys as _sys
+
+
+class _SocketMeta(type):
+    def __instancecheck__(cls, instance):
+        if type.__instancecheck__(cls, instance):
+            return True
+        if cls is Socket:
+            amod = _sys.modules.get("pyomq.asyncio")
+            if amod is not None and type.__instancecheck__(amod.Socket, instance):
+                return True
+        return False
+
+
+class Socket(metaclass=_SocketMeta):
     _sock: _native.Socket
     _context: "Context"
     _closed: bool
@@ -278,6 +351,19 @@ class Socket:
         self._context = _context
         self._closed = False
         self._last_endpoint = None
+        self._pid = os.getpid()
+        self._binds = []
+        self._connects = []
+
+    def __class_getitem__(cls, item):
+        return cls
+
+    @classmethod
+    def shadow(cls, socket):
+        from . import asyncio as _zmq_async
+        if isinstance(socket, _zmq_async.Socket):
+            return _ShadowSocket(socket)
+        return socket
 
     def __getattr__(self, name):
         opt = _SOCKOPT_NAMES.get(name)
@@ -321,74 +407,96 @@ class Socket:
 
     # ── I/O ──────────────────────────────────────────────────────────
 
+    def fileno(self):
+        return self.getsockopt(FD)
+
     @property
     def last_endpoint(self):
         return self._last_endpoint
 
+    def _check_fork(self):
+        pid = os.getpid()
+        if pid == self._pid:
+            return
+        self._pid = pid
+        for ep in self._binds:
+            try:
+                self._sock.bind(self._context._namespace_inproc(ep))
+            except _native.ZMQError:
+                pass
+        for ep in self._connects:
+            try:
+                self._sock.connect(self._context._namespace_inproc(ep))
+            except _native.ZMQError:
+                pass
+
     def bind(self, endpoint):
         try:
-            ep = self._sock.bind(endpoint)
+            ep = self._sock.bind(self._context._namespace_inproc(endpoint))
             self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
+            self._binds.append(endpoint)
             return ep
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def connect(self, endpoint):
+        if isinstance(endpoint, bytes):
+            endpoint = endpoint.decode("utf-8")
         try:
-            self._sock.connect(endpoint)
+            self._sock.connect(self._context._namespace_inproc(endpoint))
             self._last_endpoint = (
                 endpoint.encode() if isinstance(endpoint, str) else endpoint
             )
+            self._connects.append(endpoint)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def unbind(self, endpoint):
         try:
-            return self._sock.unbind(endpoint)
+            return self._sock.unbind(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def disconnect(self, endpoint):
         try:
-            return self._sock.disconnect(endpoint)
+            return self._sock.disconnect(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def send(self, data, flags=0, copy=True, track=False):
-        if not copy:
-            raise builtins.NotImplementedError(
-                "copy=False requires Frame, which is not implemented"
-            )
-        if track:
-            raise builtins.NotImplementedError(
-                "track=True requires MessageTracker, which is not implemented"
-            )
         try:
-            return self._sock.send(data, flags)
+            self._sock.send(data, flags)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
+        if track:
+            return MessageTracker(_pending=True)
 
     def recv(self, flags=0, copy=True, track=False):
-        if not copy:
-            raise builtins.NotImplementedError(
-                "copy=False requires Frame, which is not implemented"
-            )
         try:
-            return self._sock.recv(flags)
+            data = self._sock.recv(flags)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
+        if not copy:
+            return Frame(data)
+        return data
 
     def send_multipart(self, parts, flags=0, copy=True, track=False):
+        parts = [p.encode("utf-8") if isinstance(p, str) else p for p in parts]
         try:
-            return self._sock.send_multipart(parts, flags)
+            self._sock.send_multipart(parts, flags)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
+        if track:
+            return MessageTracker(_pending=True)
 
     def recv_multipart(self, flags=0, copy=True, track=False):
         try:
-            return self._sock.recv_multipart(flags)
+            parts = self._sock.recv_multipart(flags)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
+        if not copy:
+            return [Frame(p) for p in parts]
+        return parts
 
     # ── Serialization helpers ────────────────────────────────────────
 
@@ -427,6 +535,8 @@ class Socket:
             raise error.from_native(e) from None
 
     def getsockopt(self, option):
+        if option == LAST_ENDPOINT:
+            return self._last_endpoint
         try:
             return self._sock.getsockopt(option)
         except _native.ZMQError as e:
@@ -519,6 +629,9 @@ class Socket:
             self._closed = True
             self._sock.close(linger)
 
+    def __del__(self):
+        self.close()
+
     def bind_to_random_port(self, addr, min_port=49152, max_port=65536,
                             max_tries=100):
         ep = self.bind(f"{addr}:0")
@@ -543,16 +656,211 @@ class Socket:
         return False
 
 
+# ── Shadow socket (sync recv bridge over async handle) ──────────────
+
+class _ShadowSocket:
+    """Blocking recv bridge over an async socket's native handle.
+
+    Returned by Socket.shadow() when given a pyomq.asyncio.Socket.
+    Provides sync recv via select() + eventfd without entering the
+    asyncio event loop, matching pyzmq's shadow(underlying) behavior.
+    """
+
+    def __init__(self, async_socket):
+        self._async_socket = async_socket
+        self._native = async_socket._sock
+        self._context = async_socket._context
+        self._closed = False
+        self._last_endpoint = async_socket._last_endpoint
+
+    def __getattr__(self, name):
+        opt = _SOCKOPT_NAMES.get(name)
+        if opt is not None:
+            if opt == LAST_ENDPOINT:
+                return self._last_endpoint
+            return self.getsockopt(opt)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        opt = _SOCKOPT_NAMES.get(name)
+        if opt is not None:
+            self.setsockopt(opt, value)
+            return
+        object.__setattr__(self, name, value)
+
+    @property
+    def closed(self):
+        return self._closed or self._async_socket._closed
+
+    @property
+    def context(self):
+        return self._context
+
+    @property
+    def socket_type(self):
+        return self._native.getsockopt(TYPE)
+
+    @property
+    def underlying(self):
+        return self
+
+    def getsockopt(self, option):
+        try:
+            return self._native.getsockopt(option)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def setsockopt(self, option, value):
+        try:
+            return self._native.setsockopt(option, value)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def set(self, option, value):
+        return self.setsockopt(option, value)
+
+    def get(self, option):
+        return self.getsockopt(option)
+
+    def _blocking_recv(self, try_fn):
+        try:
+            result = try_fn()
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+        if result is not None:
+            return result
+
+        fd = self._native._recv_fd()
+        try:
+            try:
+                result = try_fn()
+            except _native.ZMQError as e:
+                raise error.from_native(e) from None
+            if result is not None:
+                return result
+
+            while True:
+                _select.select([fd], [], [])
+                try:
+                    os.read(fd, 8)
+                except OSError:
+                    pass
+                try:
+                    result = try_fn()
+                except _native.ZMQError as e:
+                    raise error.from_native(e) from None
+                if result is not None:
+                    return result
+        finally:
+            os.close(fd)
+
+    def recv(self, flags=0, copy=True, track=False):
+        data = self._blocking_recv(self._native._try_recv)
+        if not copy:
+            return Frame(data)
+        return data
+
+    def recv_multipart(self, flags=0, copy=True, track=False):
+        parts = self._blocking_recv(self._native._try_recv_multipart)
+        if not copy:
+            return [Frame(p) for p in parts]
+        return parts
+
+    def send(self, data, flags=0, copy=True, track=False):
+        self._blocking_send(
+            lambda: self._native.send(data, flags)
+        )
+        if track:
+            return MessageTracker(_pending=True)
+
+    def send_multipart(self, parts, flags=0, copy=True, track=False):
+        self._blocking_send(
+            lambda: self._native.send_multipart(parts, flags)
+        )
+        if track:
+            return MessageTracker(_pending=True)
+
+    def _blocking_send(self, send_fn):
+        try:
+            send_fn()
+            return
+        except _native.ZMQError as e:
+            if getattr(e, "errno", None) != _errno.EAGAIN:
+                raise error.from_native(e) from None
+
+        fd = self._native._send_fd()
+        try:
+            try:
+                send_fn()
+                return
+            except _native.ZMQError as e:
+                if getattr(e, "errno", None) != _errno.EAGAIN:
+                    raise error.from_native(e) from None
+
+            while True:
+                _select.select([fd], [], [])
+                try:
+                    os.read(fd, 8)
+                except OSError:
+                    pass
+                try:
+                    send_fn()
+                    return
+                except _native.ZMQError as e:
+                    if getattr(e, "errno", None) != _errno.EAGAIN:
+                        raise error.from_native(e) from None
+        finally:
+            os.close(fd)
+
+    def close(self, linger=None):
+        pass
+
+
 # ── Context wrapper ──────────────────────────────────────────────────
+
+_next_ctx_id = itertools.count(1)
+
+_INPROC_PREFIX = "inproc://"
+
 
 class Context:
     _instance = None
     _instance_lock = threading.Lock()
+    _socket_class = None  # set after Socket is defined
 
     def __init__(self, io_threads=1):
         self._ctx = _native.Context(io_threads)
         self._closed = False
-        self._sockets = set()
+        self._sockets = weakref.WeakSet()
+        self._ctx_id = next(_next_ctx_id)
+
+    def _namespace_inproc(self, endpoint):
+        # libzmq scopes inproc per-context; omq's registry is global. pytest
+        # holds frame references to locals (traceback capture), so __del__
+        # never fires and the old socket's registry entry stays alive. Next
+        # test's new Context tries bind("inproc://test") and gets "already
+        # bound". The entry is cleaned up eventually (Socket.close() ->
+        # SocketCommand::Close -> InprocListener::drop removes it), but not
+        # before the next test's bind(). Prefixing with context ID gives each
+        # Context its own namespace, matching libzmq's per-context scoping.
+        ns_str = f"pyomq-ctx-{self._ctx_id}/"
+        ns_bytes = ns_str.encode()
+        if isinstance(endpoint, bytes):
+            pfx = b"inproc://"
+            if endpoint.startswith(pfx) and not endpoint[len(pfx):].startswith(ns_bytes):
+                return pfx + ns_bytes + endpoint[len(pfx):]
+        elif isinstance(endpoint, str):
+            if endpoint.startswith(_INPROC_PREFIX) and not endpoint[len(_INPROC_PREFIX):].startswith(ns_str):
+                return f"inproc://{ns_str}{endpoint[len(_INPROC_PREFIX):]}"
+        return endpoint
+
+    def __class_getitem__(cls, item):
+        return cls
 
     @property
     def closed(self):
@@ -566,6 +874,9 @@ class Context:
         s._context = self
         s._closed = False
         s._last_endpoint = None
+        s._pid = os.getpid()
+        s._binds = []
+        s._connects = []
         self._sockets.add(s)
         return s
 
@@ -578,6 +889,10 @@ class Context:
 
     def term(self):
         self._closed = True
+        for s in list(self._sockets):
+            if not s.closed:
+                s.close()
+        self._sockets.clear()
         self._ctx.term()
 
     def destroy(self, linger=None):
@@ -589,12 +904,19 @@ class Context:
         self._sockets.clear()
         self.term()
 
+    def __del__(self):
+        if not self._closed:
+            self.term()
+
     def __enter__(self):
         return self
 
     def __exit__(self, *args):
         self.term()
         return False
+
+
+Context._socket_class = Socket
 
 
 # ── Poller ───────────────────────────────────────────────────────────
@@ -682,12 +1004,13 @@ def device(device_type, frontend, backend):
 
 # ── builtins reference (for copy/track errors) ──────────────────────
 
-import builtins  # noqa: E402
+from .zmqstream import ZMQStream  # noqa: E402
 
 __all__ = [
     "Context",
     "Socket",
     "Poller",
+    "ZMQStream",
     "ZMQBaseError",
     "ZMQError",
     "ZMQBindError",
@@ -706,7 +1029,7 @@ __all__ = [
     "error",
     # socket types
     "PAIR", "PUB", "SUB", "REQ", "REP", "DEALER", "ROUTER",
-    "PULL", "PUSH", "XPUB", "XSUB",
+    "PULL", "PUSH", "XPUB", "XSUB", "STREAM",
     # draft socket types
     "SERVER", "CLIENT", "RADIO", "DISH", "GATHER", "SCATTER",
     "PEER", "CHANNEL",
@@ -726,7 +1049,7 @@ __all__ = [
     "OMQ_COMPRESSION_AUTO_TRAIN",
     "OMQ_ON_MUTE_BLOCK", "OMQ_ON_MUTE_DROP_NEWEST", "OMQ_ON_MUTE_DROP_OLDEST",
     # poll / compat constants
-    "POLLIN", "POLLOUT", "POLLERR", "POLLPRI", "STREAM", "HWM",
+    "POLLIN", "POLLOUT", "POLLERR", "POLLPRI", "HWM",
     # additional compat constants
     "LAST_ENDPOINT", "FD", "EVENTS", "MECHANISM", "SNDBUF", "RCVBUF",
     "RATE", "CONNECT_TIMEOUT", "XPUB_VERBOSE", "PROBE_ROUTER",
@@ -741,6 +1064,32 @@ __all__ = [
     # version
     "__version__", "zmq_version_info", "zmq_version",
     "pyomq_version", "pyomq_version_info",
+    # errno constants
+    "EAGAIN", "ENOTSUP", "EINVAL", "EFAULT", "ENOMEM", "ENODEV",
+    "EMSGSIZE", "EAFNOSUPPORT", "ENETUNREACH", "ECONNABORTED",
+    "ECONNRESET", "ENOTCONN", "ETIMEDOUT", "EHOSTUNREACH", "ENETRESET",
+    "EADDRINUSE", "EADDRNOTAVAIL",
+    # pyzmq compat types
+    "NotDone", "MessageTracker", "Message", "Frame",
+    # extra constants
+    "ETERM", "ENOTSOCK", "COPY_THRESHOLD",
     # curve
     "curve_keypair", "curve_public", "blake3zmq_keypair", "PeerInfo",
 ]
+
+
+# ── ZMQError errno patch ────────────────────────────────────────────
+# pyzmq supports ZMQError(errno, msg) which sets .errno on the instance.
+# The native _native.ZMQError doesn't. Patch __init__ so ipykernel's
+# mock-based tests and heartbeat code can construct ZMQError(errno, msg).
+_orig_zmqerror_init = _native.ZMQError.__init__
+
+def _zmqerror_init(self, *args, **kwargs):
+    if args and isinstance(args[0], int):
+        _orig_zmqerror_init(self, args[1] if len(args) > 1 else "")
+        self.errno = args[0]
+        self.strerror = args[1] if len(args) > 1 else ""
+    else:
+        _orig_zmqerror_init(self, *args, **kwargs)
+
+_native.ZMQError.__init__ = _zmqerror_init

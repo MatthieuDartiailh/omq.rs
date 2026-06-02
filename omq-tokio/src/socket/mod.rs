@@ -13,7 +13,7 @@ pub mod monitor;
 pub(crate) mod type_state;
 pub(crate) mod udp;
 
-pub use handle::Socket;
+pub use handle::{Socket, TrySendError};
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo,

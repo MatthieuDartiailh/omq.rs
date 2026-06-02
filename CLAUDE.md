@@ -42,7 +42,9 @@ cargo clippy --workspace --all-targets   # pre-commit hook checks this
 ./scripts/test-all.sh                    # full sweep, both backends
 ```
 
-Clippy must pass under all three configurations before pushing:
+**HARD RULE:** Clippy must pass under all three configurations before
+pushing to GitHub. Never push code that produces clippy warnings or
+errors. Run all three before every `git push`:
 
 ```sh
 cargo clippy --workspace --all-targets                # default features

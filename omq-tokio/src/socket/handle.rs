@@ -1,5 +1,6 @@
 //! Public `Socket` handle.
 
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -23,6 +24,29 @@ use crate::transport::inproc::InprocSpsc;
 
 pub(crate) type DirectIoSlot = Arc<tokio::sync::Mutex<Option<DirectIo>>>;
 pub(crate) type DirectIoPending = Arc<AtomicBool>;
+
+/// Error returned by [`Socket::try_send`].
+#[derive(Debug)]
+pub enum TrySendError {
+    /// Channel full (HWM reached). Contains the message for retry.
+    Full(Message),
+    /// Socket closed.
+    Closed,
+    /// Protocol or framing error.
+    Error(Error),
+}
+
+impl fmt::Display for TrySendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full(_) => write!(f, "send queue full"),
+            Self::Closed => write!(f, "socket closed"),
+            Self::Error(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for TrySendError {}
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
 pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
@@ -373,18 +397,41 @@ impl Socket {
         }
     }
 
-    /// Non-blocking send. Returns `Err(Error::WouldBlock)` if the socket's
-    /// outbound queue is full (HWM reached). The message is accepted into the
-    /// queue and routed asynchronously; delivery confirmation is not awaited.
-    pub fn try_send(&self, msg: Message) -> Result<()> {
-        use tokio::sync::mpsc::error::TrySendError;
+    /// Non-blocking send. Returns `Ok(())` on success, `Err(TrySendError)`
+    /// on failure. `Full(msg)` returns the message so the caller can retry.
+    pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
+        if let Err(e) = check_pre_send_frame_count(self.inner.socket_type, &msg) {
+            return Err(TrySendError::Error(e));
+        }
+        // SPSC ring bypass for single-peer socket types (PUSH/PULL, etc.).
+        let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
+        if let Some(ref pair) = spsc
+            && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+            && pair
+                .max_message_size
+                .is_none_or(|max| msg.byte_len() <= max)
+            && let Ok(mut producer) = pair.producer.try_lock()
+            && !producer.is_full()
+        {
+            let _ = producer.push(msg);
+            producer.flush();
+            pair.recv_notify.notify_one();
+            return Ok(());
+        }
+
         let (ack, _rx) = oneshot::channel();
         self.inner
             .cmd_tx
             .try_send(SocketCommand::Send { msg, ack })
-            .map_err(|e| match e {
-                TrySendError::Full(_) => Error::WouldBlock,
-                TrySendError::Closed(_) => Error::Closed,
+            .map_err(|e| {
+                use tokio::sync::mpsc::error::TrySendError as MpscTrySendError;
+                match e {
+                    MpscTrySendError::Full(SocketCommand::Send { msg, .. }) => {
+                        TrySendError::Full(msg)
+                    }
+                    MpscTrySendError::Full(_) => unreachable!(),
+                    MpscTrySendError::Closed(_) => TrySendError::Closed,
+                }
             })
     }
 
@@ -582,7 +629,11 @@ impl omq_proto::socket_api::SocketApi for Socket {
         self.recv().await
     }
     fn try_send(&self, msg: Message) -> Result<()> {
-        self.try_send(msg)
+        self.try_send(msg).map_err(|e| match e {
+            TrySendError::Full(_) => Error::WouldBlock,
+            TrySendError::Closed => Error::Closed,
+            TrySendError::Error(e) => e,
+        })
     }
     fn try_recv(&self) -> Result<Message> {
         self.try_recv()

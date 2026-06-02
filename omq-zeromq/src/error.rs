@@ -66,6 +66,16 @@ impl std::error::Error for ZmqError {
 /// Convenience alias matching the zmq.rs API.
 pub type ZmqResult<T> = Result<T, ZmqError>;
 
+impl From<omq_tokio::TrySendError> for ZmqError {
+    fn from(e: omq_tokio::TrySendError) -> Self {
+        match e {
+            omq_tokio::TrySendError::Full(_) => Self::BufferFull("send buffer full"),
+            omq_tokio::TrySendError::Closed => Self::Socket("socket closed"),
+            omq_tokio::TrySendError::Error(e) => Self::from(e),
+        }
+    }
+}
+
 impl From<omq_proto::Error> for ZmqError {
     fn from(e: omq_proto::Error) -> Self {
         match e {
