@@ -148,6 +148,7 @@ pub extern "C" fn zmq_proxy_steerable(
             return -1;
         }
 
+        // SAFETY: frontend is non-null (checked at function entry).
         let fe_sock = unsafe { &*(frontend.cast::<Arc<OmqSocket>>()) };
         if fe_sock
             .ctx

@@ -29,6 +29,7 @@ fn build_pollfds(items: &[ZmqPollItem]) -> (Vec<libc::pollfd>, Vec<(usize, libc:
 
     for (i, item) in items.iter().enumerate() {
         if !item.socket.is_null() {
+            // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
             let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
             if (item.events & ZMQ_POLLIN) != 0 {
@@ -90,6 +91,7 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
         if item.socket.is_null() {
             continue;
         }
+        // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
@@ -97,6 +99,7 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed)
                 || sock.recv_rx.get().is_some_and(|rx| !rx.is_empty())
+                // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock.bypass_recv.get() }
                     .as_ref()
                     .is_some_and(|br| !br.consumer.is_empty());
@@ -121,6 +124,7 @@ fn drain_eventfds(items: &[ZmqPollItem]) {
         if item.socket.is_null() {
             continue;
         }
+        // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
@@ -128,6 +132,7 @@ fn drain_eventfds(items: &[ZmqPollItem]) {
             {
                 let fd = sock.notify.recv_fd;
                 let mut val = 0u64;
+                // SAFETY: fd is a valid eventfd; 8-byte read drains the counter.
                 unsafe { libc::read(fd, (&raw mut val).cast(), 8) };
             }
             #[cfg(not(target_os = "linux"))]
@@ -135,6 +140,7 @@ fn drain_eventfds(items: &[ZmqPollItem]) {
                 let fd = sock.notify.recv_read;
                 let mut buf = [0u8; 64];
                 loop {
+                    // SAFETY: fd is a valid pipe read end; draining buffered signal bytes.
                     let n = unsafe {
                         libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
                     };
@@ -160,6 +166,7 @@ pub extern "C" fn zmq_poll(
         return crate::error::fail(libc::EFAULT);
     }
     let n = nitems as usize;
+    // SAFETY: items is non-null (checked above) with nitems elements.
     let items_slice = unsafe { std::slice::from_raw_parts_mut(items, n) };
 
     // Fast path: check userspace buffers first (multipart drain, channel).
@@ -188,6 +195,7 @@ pub extern "C" fn zmq_poll(
     } else {
         timeout_ms as c_int
     };
+    // SAFETY: pfds is a valid pollfd array; poll blocks until events or timeout.
     let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, poll_timeout) };
     if rc < 0 {
         return crate::error::fail(

@@ -94,6 +94,7 @@ impl BypassRecv {
 #[cfg(target_os = "linux")]
 fn drain_recv_fd(fd: std::os::unix::io::RawFd) {
     let mut buf = 0u64;
+    // SAFETY: fd is a valid eventfd; 8-byte read drains the counter.
     unsafe {
         libc::read(fd, (&raw mut buf).cast::<libc::c_void>(), 8);
     }
@@ -103,6 +104,7 @@ fn drain_recv_fd(fd: std::os::unix::io::RawFd) {
 fn drain_recv_fd(fd: std::os::unix::io::RawFd) {
     let mut buf = [0u8; 64];
     loop {
+        // SAFETY: fd is a valid pipe read end; draining signal bytes.
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
         if n <= 0 {
             break;

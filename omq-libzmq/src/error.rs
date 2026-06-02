@@ -52,6 +52,7 @@ pub extern "C" fn zmq_strerror(errnum: c_int) -> *const libc::c_char {
         ENOBUFS => c"No buffer space available".as_ptr(),
         ENETDOWN => c"Network is down".as_ptr(),
         EPROTONOSUPPORT => c"Protocol not supported".as_ptr(),
+        // SAFETY: libc::strerror is safe for any c_int; returns a static string.
         _ => unsafe { libc::strerror(errnum) },
     }
 }

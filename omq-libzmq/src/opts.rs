@@ -228,6 +228,7 @@ pub extern "C" fn zmq_setsockopt(
     if sock.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: caller guarantees sock is a valid socket pointer from zmq_socket.
     let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
 
     match option {
@@ -263,6 +264,7 @@ pub extern "C" fn zmq_setsockopt(
             if optval.is_null() {
                 return crate::error::fail(libc::EFAULT);
             }
+            // SAFETY: optval is non-null (checked above); optvallen bytes are readable.
             let bytes = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
             lock_overlay!(sock_arc).identity = Bytes::copy_from_slice(bytes);
         }
@@ -517,6 +519,7 @@ fn do_subscribe(
     let prefix = if optval.is_null() {
         Bytes::new()
     } else {
+        // SAFETY: optval is non-null (checked above) with optvallen readable bytes.
         Bytes::copy_from_slice(unsafe {
             std::slice::from_raw_parts(optval.cast::<u8>(), optvallen)
         })
@@ -555,6 +558,7 @@ pub extern "C" fn zmq_getsockopt(
     if sock.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: caller guarantees sock is a valid socket pointer from zmq_socket.
     let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
 
     match option {
@@ -572,31 +576,16 @@ pub extern "C" fn zmq_getsockopt(
                 .rcvtimeo_ms
                 .load(std::sync::atomic::Ordering::Relaxed) as i32,
         ),
-        ZMQ_SNDHWM => write_i32(
-            optval,
-            optvallen,
-            sock_arc
-                .overlay
-                .lock()
-                .unwrap()
-                .send_hwm
-                .map_or(0, |n| n as i32),
-        ),
-        ZMQ_RCVHWM => write_i32(
-            optval,
-            optvallen,
-            sock_arc
-                .overlay
-                .lock()
-                .unwrap()
-                .recv_hwm
-                .map_or(0, |n| n as i32),
-        ),
+        ZMQ_SNDHWM => {
+            let v = lock_overlay!(sock_arc).send_hwm.map_or(0, |n| n as i32);
+            write_i32(optval, optvallen, v)
+        }
+        ZMQ_RCVHWM => {
+            let v = lock_overlay!(sock_arc).recv_hwm.map_or(0, |n| n as i32);
+            write_i32(optval, optvallen, v)
+        }
         ZMQ_LINGER => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .linger
                 .map_or(-1, |d| d.as_millis() as i32);
             write_i32(optval, optvallen, v)
@@ -651,6 +640,7 @@ pub extern "C" fn zmq_getsockopt(
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed)
                 || sock_arc.recv_rx.get().is_some_and(|rx| !rx.is_empty())
+                // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock_arc.bypass_recv.get() }
                     .as_ref()
                     .is_some_and(|br| !br.consumer.is_empty());
@@ -660,64 +650,43 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, events)
         }
         ZMQ_RECONNECT_IVL => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .reconnect_ivl
                 .map_or(-1, |d| d.as_millis() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_RECONNECT_IVL_MAX => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .reconnect_ivl_max
                 .map_or(0, |d| d.as_millis() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_HEARTBEAT_IVL => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .heartbeat_ivl
                 .map_or(0, |d| d.as_millis() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_HEARTBEAT_TTL => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .heartbeat_ttl
                 .map_or(0, |d| d.as_millis() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_HEARTBEAT_TIMEOUT => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .heartbeat_timeout
                 .map_or(0, |d| d.as_millis() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_HANDSHAKE_IVL => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .handshake_ivl
                 .map_or(30, |d| d.as_secs() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_MAXMSGSIZE => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .max_message_size
                 .map_or(-1i64, |n| n as i64);
             write_i64(optval, optvallen, v)
@@ -735,48 +704,29 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, v)
         }
         ZMQ_TCP_KEEPALIVE_CNT => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .tcp_keepalive_cnt
                 .map_or(-1, |n| n as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_TCP_KEEPALIVE_IDLE => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .tcp_keepalive_idle
                 .map_or(-1, |d| d.as_secs() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_TCP_KEEPALIVE_INTVL => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
+            let v = lock_overlay!(sock_arc)
                 .tcp_keepalive_intvl
                 .map_or(-1, |d| d.as_secs() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_SNDBUF => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
-                .sndbuf
-                .map_or(0, |n| n as i32);
+            let v = lock_overlay!(sock_arc).sndbuf.map_or(0, |n| n as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_RCVBUF => {
-            let v = sock_arc
-                .overlay
-                .lock()
-                .unwrap()
-                .rcvbuf
-                .map_or(0, |n| n as i32);
+            let v = lock_overlay!(sock_arc).rcvbuf.map_or(0, |n| n as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_XPUB_VERBOSE => {
@@ -784,7 +734,9 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, i32::from(v))
         }
         ZMQ_LAST_ENDPOINT => {
-            let ep = sock_arc.last_endpoint.lock().unwrap();
+            let Ok(ep) = sock_arc.last_endpoint.lock() else {
+                return crate::error::fail(crate::error::ETERM);
+            };
             let s = ep.as_deref().unwrap_or("");
             write_string(optval, optvallen, s.as_bytes())
         }
@@ -903,6 +855,7 @@ fn read_i32(optval: *const libc::c_void, optvallen: usize) -> i32 {
     if optval.is_null() || optvallen < 4 {
         return 0;
     }
+    // SAFETY: optval is non-null (checked above) and points to at least 4 readable bytes.
     unsafe { std::ptr::read_unaligned(optval.cast::<i32>()) }
 }
 
@@ -910,6 +863,7 @@ fn read_i64(optval: *const libc::c_void, optvallen: usize) -> i64 {
     if optval.is_null() || optvallen < 8 {
         return 0;
     }
+    // SAFETY: optval is non-null (checked above) and points to at least 8 readable bytes.
     unsafe { std::ptr::read_unaligned(optval.cast::<i64>()) }
 }
 
@@ -917,6 +871,7 @@ fn read_string(optval: *const libc::c_void, optvallen: usize) -> String {
     if optval.is_null() || optvallen == 0 {
         return String::new();
     }
+    // SAFETY: optval is non-null with optvallen > 0 (checked above).
     let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
     String::from_utf8_lossy(slice).into_owned()
 }
@@ -927,9 +882,11 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> [u8; 32] {
     }
     let mut key = [0u8; 32];
     if optvallen == 32 {
+        // SAFETY: optval is non-null (checked above) and optvallen == 32.
         let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 32) };
         key.copy_from_slice(slice);
     } else if optvallen >= 40 {
+        // SAFETY: optval is non-null (checked above) and optvallen >= 40.
         let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 40) };
         let Ok(s) = std::str::from_utf8(slice) else {
             return key;
@@ -947,10 +904,12 @@ fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_in
     if optval.is_null() || optvallen.is_null() {
         return 0;
     }
+    // SAFETY: optvallen is non-null (checked above); reading the available size.
     let avail = unsafe { *optvallen };
     if avail < 4 {
         return crate::error::fail(libc::EINVAL);
     }
+    // SAFETY: optval is non-null with at least 4 bytes available (checked above).
     unsafe {
         std::ptr::write_unaligned(optval.cast::<i32>(), val);
         *optvallen = 4;
@@ -962,10 +921,12 @@ fn write_i64(optval: *mut libc::c_void, optvallen: *mut usize, val: i64) -> c_in
     if optval.is_null() || optvallen.is_null() {
         return 0;
     }
+    // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
     if avail < 8 {
         return crate::error::fail(libc::EINVAL);
     }
+    // SAFETY: optval is non-null with at least 8 bytes available (checked above).
     unsafe {
         std::ptr::write_unaligned(optval.cast::<i64>(), val);
         *optvallen = 8;
@@ -977,8 +938,10 @@ fn write_bytes(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) ->
     if optval.is_null() || optvallen.is_null() {
         return 0;
     }
+    // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
     let copy_len = data.len().min(avail);
+    // SAFETY: optval is non-null with at least copy_len bytes available.
     unsafe {
         std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), copy_len);
         *optvallen = data.len();
@@ -990,8 +953,11 @@ fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -
     if optval.is_null() || optvallen.is_null() {
         return 0;
     }
+    // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
     let copy_len = data.len().min(avail);
+    // SAFETY: optval is non-null with at least copy_len bytes; null-terminator
+    // only written when buffer has room.
     unsafe {
         std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), copy_len);
         if copy_len < avail {
@@ -1006,10 +972,12 @@ fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -
     if optval.is_null() || optvallen.is_null() {
         return 0;
     }
+    // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
     if avail >= 41
         && let Ok(z85) = omq_compio::proto::z85::encode(key)
     {
+        // SAFETY: optval has at least 41 bytes available (checked above).
         unsafe {
             std::ptr::copy_nonoverlapping(z85.as_ptr(), optval.cast::<u8>(), 40);
             *(optval.cast::<u8>()).add(40) = 0;
@@ -1018,6 +986,7 @@ fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -
         return 0;
     }
     if avail >= 32 {
+        // SAFETY: optval has at least 32 bytes available (checked above).
         unsafe {
             std::ptr::copy_nonoverlapping(key.as_ptr(), optval.cast::<u8>(), 32);
             *optvallen = 32;

@@ -158,7 +158,7 @@ pub extern "C" fn zmq_ctx_shutdown(ctx_ptr: *mut libc::c_void) -> c_int {
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    // Borrow without consuming.
+    // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     ctx.terminated.store(true, Ordering::Release);
     0
@@ -169,7 +169,7 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    // Consume the Box so we can drop it properly.
+    // SAFETY: ctx_ptr came from Box::into_raw in zmq_ctx_new; reclaiming ownership.
     let arc = unsafe { *Box::from_raw(ctx_ptr.cast::<Arc<OmqContext>>()) };
 
     // Signal termination to all io threads.
@@ -219,6 +219,7 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     match option {
         ZMQ_IO_THREADS => {
@@ -242,6 +243,7 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     match option {
         ZMQ_IO_THREADS => c_int::try_from(ctx.io_threads.len()).unwrap_or(c_int::MAX),

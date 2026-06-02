@@ -61,25 +61,26 @@ impl std::fmt::Debug for NotifyFd {
 
 #[cfg(target_os = "linux")]
 impl NotifyFd {
-    fn new() -> Self {
+    fn new() -> Option<Self> {
         // Non-semaphore: a single read returns the accumulated count
         // and resets to 0. This allows O(1) drain instead of O(N).
+        // SAFETY: eventfd returns a valid fd on success, -1 on failure.
         let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
-        assert!(
-            recv_fd >= 0,
-            "eventfd() failed: {}",
-            std::io::Error::last_os_error()
-        );
+        if recv_fd < 0 {
+            return None;
+        }
+        // SAFETY: same as above.
         let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
-        assert!(
-            send_fd >= 0,
-            "eventfd() failed: {}",
-            std::io::Error::last_os_error()
-        );
-        Self { recv_fd, send_fd }
+        if send_fd < 0 {
+            // SAFETY: recv_fd is a valid open fd from the successful eventfd call above.
+            unsafe { libc::close(recv_fd) };
+            return None;
+        }
+        Some(Self { recv_fd, send_fd })
     }
 
     fn close(&self) {
+        // SAFETY: recv_fd and send_fd are valid fds opened by new().
         unsafe {
             libc::close(self.recv_fd);
             libc::close(self.send_fd);
@@ -88,6 +89,7 @@ impl NotifyFd {
 
     pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
         let val: u64 = 1;
+        // SAFETY: fd is a valid eventfd; writing 8 bytes atomically increments the counter.
         unsafe {
             libc::write(fd, (&raw const val).cast::<libc::c_void>(), 8);
         }
@@ -96,39 +98,45 @@ impl NotifyFd {
 
 #[cfg(not(target_os = "linux"))]
 impl NotifyFd {
-    fn new() -> Self {
+    fn new() -> Option<Self> {
         let mut fds = [-1i32; 2];
+        // SAFETY: fds is a valid 2-element array; pipe() writes two fds into it on success.
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert!(
-            rc == 0,
-            "pipe() failed: {}",
-            std::io::Error::last_os_error()
-        );
+        if rc != 0 {
+            return None;
+        }
+        // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
         let (recv_read, recv_write) = (fds[0], fds[1]);
+        // SAFETY: same as above.
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert!(
-            rc == 0,
-            "pipe() failed: {}",
-            std::io::Error::last_os_error()
-        );
+        if rc != 0 {
+            // SAFETY: recv_read and recv_write are valid open fds.
+            unsafe {
+                libc::close(recv_read);
+                libc::close(recv_write);
+            }
+            return None;
+        }
+        // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
         let (send_read, send_write) = (fds[0], fds[1]);
-        Self {
+        Some(Self {
             recv_read,
             recv_write,
             send_read,
             send_write,
-        }
+        })
     }
 
     fn close(&self) {
+        // SAFETY: all fds are valid, opened by new().
         unsafe {
             libc::close(self.recv_read);
             libc::close(self.recv_write);
@@ -139,6 +147,7 @@ impl NotifyFd {
 
     pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
         let b: u8 = 1;
+        // SAFETY: fd is a valid pipe write end; writing 1 byte signals readiness.
         unsafe {
             libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
         }
@@ -268,8 +277,12 @@ fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {
 
 fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     let capacity = {
-        let s_ov = sender.overlay.lock().unwrap();
-        let r_ov = receiver.overlay.lock().unwrap();
+        let Ok(s_ov) = sender.overlay.lock() else {
+            return;
+        };
+        let Ok(r_ov) = receiver.overlay.lock() else {
+            return;
+        };
         let shwm = s_ov.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
         let rhwm = r_ov.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
         shwm.min(rhwm).max(16)
@@ -281,7 +294,8 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     let recv_fd = receiver.notify.recv_write;
 
     let (bsend, brecv) = crate::inproc_bypass::create_bypass(capacity, recv_fd);
-    // Safety: called from zmq_bind/zmq_connect before any send/recv.
+    // SAFETY: called from zmq_bind/zmq_connect before any send/recv,
+    // so no concurrent access to the UnsafeCells.
     unsafe { *sender.bypass_send.get() = Some(bsend) };
     unsafe { *receiver.bypass_recv.get() = Some(brecv) };
 }
@@ -290,17 +304,17 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
 /// bypass pipes for eligible pairs.
 fn register_inproc_bind(sock: &Arc<OmqSocket>, name: &str) {
     let ctx = &sock.ctx;
-    ctx.inproc_binds
-        .lock()
-        .unwrap()
-        .insert(name.to_owned(), Arc::downgrade(sock));
+    let Ok(mut binds) = ctx.inproc_binds.lock() else {
+        return;
+    };
+    binds.insert(name.to_owned(), Arc::downgrade(sock));
+    drop(binds);
 
-    let waiters = ctx
-        .inproc_waiting
-        .lock()
-        .unwrap()
-        .remove(name)
-        .unwrap_or_default();
+    let Ok(mut waiting) = ctx.inproc_waiting.lock() else {
+        return;
+    };
+    let waiters = waiting.remove(name).unwrap_or_default();
+    drop(waiting);
     for w in waiters {
         if let Some(connector) = w.upgrade()
             && is_bypass_eligible(connector.socket_type, sock.socket_type)
@@ -321,9 +335,8 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
     let binder = ctx
         .inproc_binds
         .lock()
-        .unwrap()
-        .get(name)
-        .and_then(std::sync::Weak::upgrade);
+        .ok()
+        .and_then(|g| g.get(name).and_then(std::sync::Weak::upgrade));
 
     if let Some(binder) = binder {
         if is_bypass_eligible(sock.socket_type, binder.socket_type) {
@@ -334,10 +347,8 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
             };
             try_install_bypass(sender, receiver);
         }
-    } else {
-        ctx.inproc_waiting
-            .lock()
-            .unwrap()
+    } else if let Ok(mut waiting) = ctx.inproc_waiting.lock() {
+        waiting
             .entry(name.to_owned())
             .or_default()
             .push(Arc::downgrade(sock));
@@ -351,6 +362,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         set_errno(libc::EFAULT);
         return std::ptr::null_mut();
     }
+    // SAFETY: caller must pass a valid context pointer from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     if ctx.terminated.load(Ordering::Acquire) {
         set_errno(ETERM);
@@ -365,7 +377,10 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         return std::ptr::null_mut();
     }
 
-    let notify = NotifyFd::new();
+    let Some(notify) = NotifyFd::new() else {
+        set_errno(libc::EMFILE);
+        return std::ptr::null_mut();
+    };
     let thread_idx = ctx.assign_thread();
     let id = next_socket_id();
 
@@ -493,6 +508,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+    // SAFETY: sock_ptr came from Box::into_raw in zmq_socket; reclaiming ownership.
     let arc = unsafe { *Box::from_raw(sock_ptr.cast::<Arc<OmqSocket>>()) };
 
     // Remove socket from registry on its io thread.
@@ -522,10 +538,12 @@ unsafe fn parse_endpoint_args(
     if sock_ptr.is_null() || addr.is_null() {
         return Err(libc::EFAULT);
     }
+    // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
     if sock.ctx.terminated.load(Ordering::Acquire) {
         return Err(ETERM);
     }
+    // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
         return Err(libc::EINVAL);
     };
@@ -551,7 +569,9 @@ unsafe fn parse_group_args(
     if sock_ptr.is_null() || cstr.is_null() {
         return Err(libc::EFAULT);
     }
+    // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: cstr is non-null (checked above); caller guarantees a valid C string.
     let Ok(g) = unsafe { CStr::from_ptr(cstr) }.to_str() else {
         return Err(libc::EINVAL);
     };
@@ -576,9 +596,13 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     };
 
     // ZMQ_IPV6: rewrite wildcard bind to IPv6 unspecified (dual-stack).
-    if sock.overlay.lock().unwrap().ipv6 {
+    let Ok(ov) = sock.overlay.lock() else {
+        return fail(ETERM);
+    };
+    if ov.ipv6 {
         endpoint = ipv6_rewrite_wildcard(endpoint);
     }
+    drop(ov);
 
     ensure_materialized(sock);
 
@@ -590,7 +614,9 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
 
     match result {
         Ok(Ok(resolved)) => {
-            *sock.last_endpoint.lock().unwrap() = resolved.or(Some(addr_str.clone()));
+            if let Ok(mut ep) = sock.last_endpoint.lock() {
+                *ep = resolved.or(Some(addr_str.clone()));
+            }
             if addr_str.starts_with("inproc://") {
                 register_inproc_bind(sock, &addr_str);
             }
@@ -616,7 +642,9 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
 
     match result {
         Ok(Ok(())) => {
-            *sock.last_endpoint.lock().unwrap() = Some(addr_str.clone());
+            if let Ok(mut ep) = sock.last_endpoint.lock() {
+                *ep = Some(addr_str.clone());
+            }
             if addr_str.starts_with("inproc://") {
                 register_inproc_connect(sock, &addr_str);
             }
@@ -700,7 +728,9 @@ pub extern "C" fn zmq_socket_monitor(
     if addr.is_null() {
         return 0;
     }
+    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
         return fail(libc::EINVAL);
     };

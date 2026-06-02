@@ -77,7 +77,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
     };
 
     // Inproc bypass: push directly to lock-free SPSC ring.
-    // Safety: zmq contract guarantees single-threaded access per socket.
+    // SAFETY: zmq contract guarantees single-threaded access per socket.
     if let Some(bypass) = unsafe { &mut *sock.bypass_send.get() } {
         return match bypass.push(msg) {
             Ok(()) => len as c_int,
@@ -124,6 +124,7 @@ pub extern "C" fn zmq_send(
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
     if sock
         .ctx
@@ -136,6 +137,7 @@ pub extern "C" fn zmq_send(
     let bytes = if buf.is_null() || len == 0 {
         Bytes::new()
     } else {
+        // SAFETY: buf is non-null with len readable bytes (caller contract).
         Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) })
     };
 
@@ -163,6 +165,7 @@ pub extern "C" fn zmq_recv(
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
     if sock
         .ctx
@@ -209,7 +212,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
 
     // Inproc bypass: pop directly from lock-free SPSC ring.
-    // Safety: zmq contract guarantees single-threaded access per socket.
+    // SAFETY: zmq contract guarantees single-threaded access per socket.
     if let Some(bypass) = unsafe { &mut *sock.bypass_recv.get() } {
         let msg = if dontwait {
             match bypass.pop() {
@@ -292,6 +295,7 @@ fn copy_to_buf(buf: *mut libc::c_void, buf_len: usize, src: &[u8]) {
         return;
     }
     let copy_len = src.len().min(buf_len);
+    // SAFETY: buf is non-null with buf_len writable bytes; copy_len <= buf_len.
     unsafe {
         std::ptr::copy_nonoverlapping(src.as_ptr(), buf.cast::<u8>(), copy_len);
     }
