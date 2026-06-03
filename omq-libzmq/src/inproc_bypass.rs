@@ -281,6 +281,18 @@ impl Drop for RingProducer {
     }
 }
 
+impl Drop for BypassSend {
+    fn drop(&mut self) {
+        self.pipe.closed.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for BypassRecv {
+    fn drop(&mut self) {
+        self.pipe.closed.store(true, Ordering::Release);
+    }
+}
+
 // ── Bypass sender / receiver ────────────────────────────────────────
 
 /// Sender half installed on the PUSH socket's `OmqSocket`.
@@ -294,7 +306,7 @@ pub(crate) struct BypassSend {
 #[derive(Debug)]
 pub(crate) struct BypassRecv {
     pub(crate) consumer: RingConsumer,
-    pipe: Arc<InprocPipe>,
+    pub(crate) pipe: Arc<InprocPipe>,
 }
 
 /// Create a bypass pair for an inproc connection.

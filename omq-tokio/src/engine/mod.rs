@@ -12,5 +12,6 @@ pub mod direct_io;
 pub mod driver;
 
 pub use driver::{
-    ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut, RecvSink, YringSink,
+    ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut, RecvSink, RecvSinkConfig,
+    YringSink,
 };

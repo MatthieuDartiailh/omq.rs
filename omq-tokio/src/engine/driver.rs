@@ -42,6 +42,61 @@ pub struct YringSink {
     pub space: Arc<tokio::sync::Notify>,
 }
 
+/// Shared config for creating and recycling [`RecvSink::Yring`] instances.
+/// The actor refills `slot` with a fresh yring pair on peer disconnect;
+/// the external consumer picks up the new consumer from
+/// `pending_consumer`.
+pub struct RecvSinkConfig {
+    pub slot: std::sync::Mutex<Option<RecvSink>>,
+    pub pending_consumer: std::sync::Mutex<Option<yring::Consumer<Message>>>,
+    signal: Arc<dyn Fn() + Send + Sync>,
+    space: Arc<tokio::sync::Notify>,
+    cap: usize,
+}
+
+impl std::fmt::Debug for RecvSinkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecvSinkConfig")
+            .field("cap", &self.cap)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RecvSinkConfig {
+    pub fn new(
+        initial_sink: RecvSink,
+        signal: Arc<dyn Fn() + Send + Sync>,
+        space: Arc<tokio::sync::Notify>,
+        cap: usize,
+    ) -> Self {
+        Self {
+            slot: std::sync::Mutex::new(Some(initial_sink)),
+            pending_consumer: std::sync::Mutex::new(None),
+            signal,
+            space,
+            cap,
+        }
+    }
+
+    /// Create a fresh yring pair. Puts the `RecvSink` in `slot` and the
+    /// consumer in `pending_consumer`. No-op if the slot already contains
+    /// a sink.
+    pub fn refill(&self) {
+        let mut guard = self.slot.lock().unwrap();
+        if guard.is_some() {
+            return;
+        }
+        let (prod, cons) = yring::spsc(self.cap);
+        let f = self.signal.clone();
+        *guard = Some(RecvSink::Yring(YringSink {
+            producer: prod,
+            signal: Box::new(move || f()),
+            space: self.space.clone(),
+        }));
+        *self.pending_consumer.lock().unwrap() = Some(cons);
+    }
+}
+
 impl std::fmt::Debug for RecvSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

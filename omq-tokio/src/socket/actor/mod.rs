@@ -145,6 +145,8 @@ struct PeerEntry {
     /// Used to decide whether to restart the dial after a mid-session drop.
     is_client: bool,
     direct_io_rx: Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
+    /// SPSC ring for this inproc peer (None for wire/stream peers).
+    spsc: Option<Arc<crate::transport::inproc::InprocSpsc>>,
 }
 
 struct ListenerEntry {
@@ -212,7 +214,7 @@ pub(crate) struct SocketDriver {
     pending_direct_io_rx:
         Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
-    recv_sink_slot: Option<Arc<std::sync::Mutex<Option<crate::engine::RecvSink>>>>,
+    recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
 }
 
 impl SocketDriver {
@@ -234,7 +236,7 @@ impl SocketDriver {
         req_awaiting_reply: Arc<AtomicBool>,
         direct_io: super::handle::DirectIoSlot,
         direct_io_pending: super::handle::DirectIoPending,
-        recv_sink_slot: Option<Arc<std::sync::Mutex<Option<crate::engine::RecvSink>>>>,
+        recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -274,7 +276,7 @@ impl SocketDriver {
             direct_io_pending,
             pending_direct_io_rx: None,
             compression_pool: None,
-            recv_sink_slot,
+            recv_sink_config,
         }
     }
 

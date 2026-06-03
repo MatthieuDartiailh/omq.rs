@@ -58,11 +58,6 @@ pub(crate) type SpscSendRing = Arc<RwLock<Option<Arc<InprocSpsc>>>>;
 /// sockets skip the `RwLock` read entirely.
 pub(crate) type SpscSendRingActive = Arc<AtomicBool>;
 
-/// Shared slot for injecting a [`RecvSink`] into the driver. The actor
-/// takes it on the first peer connection. `None` = use the default
-/// `async_channel` path.
-pub type RecvSinkSlot = Arc<std::sync::Mutex<Option<crate::engine::RecvSink>>>;
-
 /// Shared recv notification. All inproc producers notify this.
 pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
 
@@ -99,6 +94,7 @@ impl SpscAwareRecv {
         }
         let consumers = self.consumers.read().unwrap().clone();
         let mut cache = self.inproc_cache.lock().unwrap();
+        let mut has_disconnected = false;
         for p in &consumers {
             if let Ok(mut consumer) = p.consumer.try_lock() {
                 let got = consumer.prefetch();
@@ -107,10 +103,20 @@ impl SpscAwareRecv {
                         cache.push_back(msg);
                     }
                     consumer.release();
+                } else if consumer.is_disconnected() {
+                    has_disconnected = true;
                 }
             }
         }
-        cache.pop_front()
+        let result = cache.pop_front();
+        drop(cache);
+        if has_disconnected {
+            self.consumers
+                .write()
+                .unwrap()
+                .retain(|p| p.consumer.try_lock().map_or(true, |c| !c.is_disconnected()));
+        }
+        result
     }
 
     #[expect(clippy::needless_continue)]
@@ -211,22 +217,21 @@ impl Socket {
         Self::new_inner(socket_type, options, None)
     }
 
-    /// Like [`Socket::new`], but installs a [`RecvSinkSlot`] that the
-    /// actor will use for the first peer's driver instead of the
-    /// internal `async_channel`. Used by omq-libzmq to bypass the
-    /// recv-pump relay.
-    pub fn new_with_recv_sink_slot(
+    /// Like [`Socket::new`], but installs a [`RecvSinkConfig`] that the
+    /// actor will use for the first peer's driver (and refill on
+    /// disconnect). Used by omq-libzmq to bypass the recv-pump relay.
+    pub fn new_with_recv_sink_config(
         socket_type: SocketType,
         options: Options,
-        slot: RecvSinkSlot,
+        config: Arc<crate::engine::RecvSinkConfig>,
     ) -> Self {
-        Self::new_inner(socket_type, options, Some(slot))
+        Self::new_inner(socket_type, options, Some(config))
     }
 
     fn new_inner(
         socket_type: SocketType,
         options: Options,
-        recv_sink_slot: Option<RecvSinkSlot>,
+        recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     ) -> Self {
         options
             .validate()
@@ -270,7 +275,7 @@ impl Socket {
             req_awaiting_reply.clone(),
             direct_io.clone(),
             direct_io_pending.clone(),
-            recv_sink_slot,
+            recv_sink_config,
         );
         spawn_driver(driver);
         Self {

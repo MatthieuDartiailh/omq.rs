@@ -195,6 +195,8 @@ pub(crate) struct OmqSocket {
     pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
     /// Backpressure: recv pump waits on this when the recv ring is full.
     pub recv_space: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    /// Shared config for recycling the recv fast yring on peer churn.
+    pub recv_sink_config: std::sync::OnceLock<Arc<omq_tokio::engine::RecvSinkConfig>>,
     pub last_endpoint: Mutex<Option<String>>,
     pub notify: NotifyFd,
     pub bound_or_connected: AtomicBool,
@@ -389,6 +391,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         recv_cons: std::cell::UnsafeCell::new(None),
         inner: std::sync::OnceLock::new(),
         recv_space: std::sync::OnceLock::new(),
+        recv_sink_config: std::sync::OnceLock::new(),
         last_endpoint: Mutex::new(None),
         notify,
         bound_or_connected: AtomicBool::new(false),
@@ -402,6 +405,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
 /// options, then start the recv pump. Called once on first bind/connect
 /// so that options set between `zmq_socket` and first bind/connect take
 /// effect.
+#[expect(clippy::too_many_lines)]
 pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     // CAS guarantees exactly one thread wins the materialization race.
     if sock
@@ -445,14 +449,22 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
 
     // Build the RecvSink::Yring for the driver's direct fast path.
     let signal_fd = recv_signal_fd;
-    let fast_space = recv_space.clone();
+    let signal_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || NotifyFd::signal_recv(signal_fd));
     let recv_sink = omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
         producer: fast_prod,
-        signal: Box::new(move || NotifyFd::signal_recv(signal_fd)),
-        space: fast_space,
+        signal: Box::new({
+            let f = signal_cb.clone();
+            move || f()
+        }),
+        space: recv_space.clone(),
     });
-    let recv_sink_slot: omq_tokio::socket::handle::RecvSinkSlot =
-        Arc::new(std::sync::Mutex::new(Some(recv_sink)));
+    let recv_sink_cfg = Arc::new(omq_tokio::engine::RecvSinkConfig::new(
+        recv_sink,
+        signal_cb,
+        recv_space.clone(),
+        cap,
+    ));
+    let _ = sock.recv_sink_config.set(recv_sink_cfg.clone());
 
     // Build the inner socket ON the tokio io thread.
     // Socket::new() calls tokio::spawn internally (spawn_driver), so it
@@ -461,10 +473,10 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     sock.ctx.submit(
         sock.thread_idx,
         Box::new(move || {
-            let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_slot(
+            let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_config(
                 socket_type,
                 opts,
-                recv_sink_slot,
+                recv_sink_cfg,
             ));
 
             // Recv pump: relay from async_channel into the pump yring.

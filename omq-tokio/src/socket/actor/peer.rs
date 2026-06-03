@@ -63,6 +63,19 @@ impl SocketDriver {
                 reason,
             });
         }
+        // Mark the removed peer's SPSC ring as inactive so the send
+        // fast path stops targeting it. Don't remove it from the
+        // consumers Vec yet: the recv side may still have unconsumed
+        // messages. SpscAwareRecv::try_drain_consumers cleans up
+        // disconnected consumers lazily after they're drained.
+        if let Some(ref peer) = peer
+            && let Some(ref removed_spsc) = peer.spsc
+        {
+            removed_spsc
+                .recv_ready
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        self.update_send_ring();
         // Clear the DirectIo slot if the disconnected peer owned it.
         // This unblocks the eligibility check for the next peer's
         // DirectIo installation.
@@ -70,6 +83,11 @@ impl SocketDriver {
             && guard.as_ref().is_some_and(|dio| dio.peer_id == peer_id)
         {
             *guard = None;
+        }
+        // Refill the RecvSink slot so the next wire peer gets the fast
+        // yring path instead of falling back to the recv pump.
+        if let Some(ref config) = self.recv_sink_config {
+            config.refill();
         }
         match self.socket_type {
             SocketType::Req if self.peers.is_empty() => {
@@ -89,6 +107,32 @@ impl SocketDriver {
             _ => {}
         }
         peer
+    }
+
+    /// Re-evaluate the SPSC send ring. Enables it when exactly one
+    /// peer with an SPSC ring exists; disables it otherwise.
+    fn update_send_ring(&mut self) {
+        let mut sole_spsc: Option<&Arc<crate::transport::inproc::InprocSpsc>> = None;
+        let mut count = 0;
+        for p in self.peers.values() {
+            if let Some(ref s) = p.spsc {
+                count += 1;
+                if count > 1 {
+                    break;
+                }
+                sole_spsc = Some(s);
+            }
+        }
+        if count == 1 && self.peers.len() == 1 {
+            let s = sole_spsc.unwrap();
+            *self.send_ring.write().unwrap() = Some(s.clone());
+            self.send_ring_active
+                .store(true, std::sync::atomic::Ordering::Release);
+        } else {
+            *self.send_ring.write().unwrap() = None;
+            self.send_ring_active
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 
     fn evict_peer_for_handover(&mut self, peer_id: u64) {
@@ -284,9 +328,9 @@ impl SocketDriver {
         let driver = if can_bypass_actor_recv(self.socket_type) {
             let can_use_yring = !matches!(self.socket_type, SocketType::Req);
             let from_slot = if can_use_yring {
-                self.recv_sink_slot
+                self.recv_sink_config
                     .as_ref()
-                    .and_then(|slot| slot.lock().unwrap().take())
+                    .and_then(|cfg| cfg.slot.lock().unwrap().take())
             } else {
                 None
             };
@@ -312,14 +356,13 @@ impl SocketDriver {
                 endpoint,
                 is_client: !is_server,
                 direct_io_rx,
+                spsc: None,
             },
         );
 
         // Disable send fast path when a second peer of any type connects.
         if self.peers.len() > 1 {
-            *self.send_ring.write().unwrap() = None;
-            self.send_ring_active
-                .store(false, std::sync::atomic::Ordering::Release);
+            self.update_send_ring();
             self.pending_direct_io_rx = None;
             if let Ok(mut guard) = self.direct_io.try_lock() {
                 *guard = None;
@@ -359,13 +402,12 @@ impl SocketDriver {
                 endpoint,
                 is_client: !is_server,
                 direct_io_rx: None,
+                spsc: None,
             },
         );
 
         if self.peers.len() > 1 {
-            *self.send_ring.write().unwrap() = None;
-            self.send_ring_active
-                .store(false, std::sync::atomic::Ordering::Release);
+            self.update_send_ring();
         }
 
         self.send_strategy
@@ -416,6 +458,13 @@ impl SocketDriver {
             .with_socket_type(conn.peer.socket_type)
             .with_identity(conn.peer.identity.clone());
 
+        let InprocConn {
+            out,
+            in_rx,
+            peer: _peer,
+            spsc,
+        } = conn;
+
         // Insert the peer BEFORE spawning the driver - same race
         // protection as in the byte-stream path. `info` stays None
         // until the synthesised HandshakeSucceeded lands; that
@@ -435,6 +484,7 @@ impl SocketDriver {
                 endpoint,
                 is_client: !is_server,
                 direct_io_rx: None,
+                spsc: spsc.clone(),
             },
         );
 
@@ -444,15 +494,7 @@ impl SocketDriver {
             None
         };
 
-        let InprocConn {
-            out,
-            in_rx,
-            peer: _peer,
-            spsc,
-        } = conn;
-
         // Per-peer SPSC: always add to consumers Vec (recv side).
-        // Send fast path ring: single-peer only.
         if let Some(ref s) = spsc {
             self.consumers.write().unwrap().push(s.clone());
             if can_bypass_actor_recv(self.socket_type) {
@@ -460,17 +502,8 @@ impl SocketDriver {
                     .store(true, std::sync::atomic::Ordering::Release);
             }
             self.spsc_activated.notify_one();
-
-            if self.peers.len() == 1 {
-                *self.send_ring.write().unwrap() = Some(s.clone());
-                self.send_ring_active
-                    .store(true, std::sync::atomic::Ordering::Release);
-            } else {
-                *self.send_ring.write().unwrap() = None;
-                self.send_ring_active
-                    .store(false, std::sync::atomic::Ordering::Release);
-            }
         }
+        self.update_send_ring();
 
         tokio::spawn(inproc_peer_driver(
             inbox_rx,

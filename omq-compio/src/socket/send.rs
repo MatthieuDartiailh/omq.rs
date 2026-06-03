@@ -154,9 +154,12 @@ impl Socket {
         let st = self.inner().socket_type;
         // Inproc ypipe fast path: single cross-thread peer, no routing
         // needed. Bypasses Mutex, PeerOut clone, generation check.
-        if matches!(st, SocketType::Push | SocketType::Pair) && !pre_send_needs_type_state(st) {
+        if matches!(st, SocketType::Push | SocketType::Pair)
+            && !pre_send_needs_type_state(st)
+            && self.inner().out_peer_count.load(Ordering::Acquire) == 1
+        {
             let pipes = unsafe { &mut *self.inner().inproc_send_pipes.get() };
-            if let [Some(pipe)] = pipes.as_mut_slice() {
+            if let Some(pipe) = pipes.iter_mut().find_map(|p| p.as_mut()) {
                 let mut msg = msg;
                 loop {
                     let listener = pipe.space_event.listen();

@@ -18,7 +18,7 @@ pub use r#async::{AsyncConsumer, AsyncProducer, async_spsc};
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[repr(align(64))]
 pub(crate) struct Padded<T>(pub(crate) T);
@@ -30,6 +30,9 @@ pub(crate) struct Ring<T> {
     pub(crate) head: Padded<AtomicUsize>,
     /// Last flushed position. Written by producer, read by consumer.
     pub(crate) flush: Padded<AtomicUsize>,
+    /// Set by `Producer::drop`. Lets the consumer detect that no more
+    /// data will ever arrive.
+    pub(crate) producer_dropped: AtomicBool,
 }
 
 // SAFETY: Ring<T> is Send because all shared mutable state is accessed through
@@ -52,6 +55,7 @@ impl<T> Ring<T> {
             mask: cap - 1,
             head: Padded(AtomicUsize::new(0)),
             flush: Padded(AtomicUsize::new(0)),
+            producer_dropped: AtomicBool::new(false),
         }
     }
 
@@ -187,6 +191,7 @@ impl<T> Producer<T> {
 impl<T> Drop for Producer<T> {
     fn drop(&mut self) {
         self.ring.flush.0.store(self.tail, Ordering::Release);
+        self.ring.producer_dropped.store(true, Ordering::Release);
     }
 }
 
@@ -326,6 +331,14 @@ impl<T> Consumer<T> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.ring.consumer_is_empty(self.head, self.cached_flush)
+    }
+
+    /// The producer has been dropped and all flushed items have been
+    /// consumed. No more data will ever arrive.
+    #[inline]
+    pub fn is_disconnected(&self) -> bool {
+        self.ring.producer_dropped.load(Ordering::Acquire)
+            && self.head == self.ring.flush.0.load(Ordering::Acquire)
     }
 
     #[inline]
