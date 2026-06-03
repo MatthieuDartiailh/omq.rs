@@ -121,6 +121,55 @@ impl DropQueue {
         }
     }
 
+    /// Non-blocking push. Returns `Ok(())` on success, `Err(msg)` if the
+    /// queue is full (Block policy) or closed. `DropNewest` and `DropOldest`
+    /// never return `Err` for capacity reasons.
+    pub(crate) fn try_send(&self, msg: Message) -> core::result::Result<(), Message> {
+        match self.policy {
+            OnMute::Block => {
+                if let Some(ref slots) = self.inner.slots {
+                    match slots.try_acquire() {
+                        Ok(permit) => permit.forget(),
+                        Err(_) => return Err(msg),
+                    }
+                }
+                match self.inner.queue.push(msg) {
+                    Ok(()) => {
+                        self.inner.recv_notify.notify_one();
+                        Ok(())
+                    }
+                    Err(PushError::Closed(m)) => Err(m),
+                    Err(PushError::Full(_)) => unreachable!("permit guarantees a free slot"),
+                }
+            }
+            OnMute::DropNewest => {
+                match self.inner.queue.push(msg) {
+                    Ok(()) => self.inner.recv_notify.notify_one(),
+                    Err(PushError::Full(_)) => {}
+                    Err(PushError::Closed(m)) => return Err(m),
+                }
+                Ok(())
+            }
+            OnMute::DropOldest => {
+                let mut item = msg;
+                loop {
+                    match self.inner.queue.push(item) {
+                        Ok(()) => {
+                            self.inner.recv_notify.notify_one();
+                            return Ok(());
+                        }
+                        Err(PushError::Full(back)) => {
+                            let _ = self.inner.queue.pop();
+                            item = back;
+                        }
+                        Err(PushError::Closed(m)) => return Err(m),
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.inner.queue.len()
     }
@@ -156,8 +205,6 @@ impl QueueReceiver {
     /// being polled.
     pub(crate) async fn recv(&self) -> Option<Message> {
         loop {
-            // Create the Notified future first so any push that arrives
-            // between the second try_pop and the await is not lost.
             let notified = self.inner.recv_notify.notified();
             if let Some(msg) = self.try_pop() {
                 return Some(msg);
@@ -233,5 +280,55 @@ mod tests {
         q.close();
         let result = recv_task.await.unwrap();
         assert!(result.is_none(), "closed queue should return None");
+    }
+
+    #[test]
+    fn try_send_block_succeeds_when_space() {
+        let (q, rx) = DropQueue::new(2, OnMute::Block);
+        q.try_send(Message::single("a")).unwrap();
+        q.try_send(Message::single("b")).unwrap();
+        let got = rx.try_pop().unwrap();
+        assert_eq!(got.part_bytes(0).unwrap(), &b"a"[..]);
+        rx.release_permits(1);
+    }
+
+    #[test]
+    fn try_send_block_returns_err_when_full() {
+        let (q, _rx) = DropQueue::new(1, OnMute::Block);
+        q.try_send(Message::single("a")).unwrap();
+        let err = q.try_send(Message::single("b")).unwrap_err();
+        assert_eq!(err.part_bytes(0).unwrap(), &b"b"[..]);
+    }
+
+    #[test]
+    fn try_send_drop_newest_silent() {
+        let (q, rx) = DropQueue::new(1, OnMute::DropNewest);
+        q.try_send(Message::single("a")).unwrap();
+        q.try_send(Message::single("b")).unwrap();
+        let got = rx.try_pop().unwrap();
+        assert_eq!(got.part_bytes(0).unwrap(), &b"a"[..]);
+        assert!(rx.try_pop().is_none());
+    }
+
+    #[test]
+    fn try_send_drop_oldest_keeps_latest() {
+        let (q, rx) = DropQueue::new(2, OnMute::DropOldest);
+        q.try_send(Message::single("a")).unwrap();
+        q.try_send(Message::single("b")).unwrap();
+        q.try_send(Message::single("c")).unwrap();
+        let got_b = rx.try_pop().unwrap();
+        let got_c = rx.try_pop().unwrap();
+        assert_eq!(got_b.part_bytes(0).unwrap(), &b"b"[..]);
+        assert_eq!(got_c.part_bytes(0).unwrap(), &b"c"[..]);
+    }
+
+    #[tokio::test]
+    async fn try_send_wakes_receiver() {
+        let (q, rx) = DropQueue::new(4, OnMute::Block);
+        let recv_task = tokio::spawn(async move { rx.recv().await });
+        tokio::task::yield_now().await;
+        q.try_send(Message::single("hello")).unwrap();
+        let msg = recv_task.await.unwrap().unwrap();
+        assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
     }
 }

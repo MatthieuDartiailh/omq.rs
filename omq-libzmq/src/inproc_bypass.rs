@@ -1,14 +1,15 @@
 //! Lock-free inproc bypass: connects `zmq_send` and `zmq_recv` directly
-//! via a SPSC ring, completely bypassing the io thread for eligible
+//! via a SPSC byte ring, completely bypassing the io thread for eligible
 //! socket types (PUSH/PULL).
 //!
 //! The bypass is installed when both sides of an inproc connection
-//! are present (bind + connect, either order). The sender pushes
-//! `Message` into the ring from its C thread; the receiver pops from
-//! its C thread. Zero channel crossings, zero io thread involvement.
+//! are present (bind + connect, either order). The sender writes raw
+//! payload bytes into the ring from its C thread; the receiver reads
+//! them out on its C thread. Zero channel crossings, zero io thread
+//! involvement, zero per-message heap allocation.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::socket::NotifyFd;
 
@@ -33,26 +34,276 @@ impl std::fmt::Debug for InprocPipe {
     }
 }
 
+// ── SPSC byte ring ──────────────────────────────────────────────────
+//
+// Variable-length entries: [len: u32][payload: [u8; len]].
+// When remaining contiguous space is too small for the next entry's
+// header, a wrap sentinel (len = u32::MAX) is written and the
+// producer wraps to offset 0. The consumer recognizes the sentinel
+// and wraps its read position.
+
+const HEADER_SIZE: usize = 4;
+const WRAP_SENTINEL: u32 = u32::MAX;
+
+struct RingBuf {
+    buf: Box<[u8]>,
+    capacity: usize,
+    /// Producer write position (mod capacity).
+    tail: AtomicUsize,
+    /// Consumer read position (mod capacity).
+    head: AtomicUsize,
+}
+
+impl std::fmt::Debug for RingBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RingBuf")
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RingBuf {
+    fn new(capacity: usize) -> Self {
+        let cap = capacity.next_power_of_two();
+        Self {
+            buf: vec![0u8; cap].into_boxed_slice(),
+            capacity: cap,
+            tail: AtomicUsize::new(0),
+            head: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    fn free_space(&self, tail: usize, head: usize) -> usize {
+        self.capacity - (tail - head)
+    }
+}
+
+pub(crate) struct RingProducer {
+    ring: Arc<RingBuf>,
+    tail: usize,
+    cached_head: usize,
+}
+
+pub(crate) struct RingConsumer {
+    ring: Arc<RingBuf>,
+    head: usize,
+    cached_tail: usize,
+}
+
+impl std::fmt::Debug for RingProducer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RingProducer").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RingConsumer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RingConsumer").finish_non_exhaustive()
+    }
+}
+
+// SAFETY: the ring buffer is shared via Arc. Producer and consumer
+// access disjoint regions (producer writes [tail..], consumer reads
+// [head..]). Atomic head/tail provide synchronization.
+unsafe impl Send for RingProducer {}
+unsafe impl Send for RingConsumer {}
+
+fn ring_pair(capacity: usize) -> (RingProducer, RingConsumer) {
+    let ring = Arc::new(RingBuf::new(capacity));
+    (
+        RingProducer {
+            ring: ring.clone(),
+            tail: 0,
+            cached_head: 0,
+        },
+        RingConsumer {
+            ring,
+            head: 0,
+            cached_tail: 0,
+        },
+    )
+}
+
+impl RingProducer {
+    /// Try to write `[len: u32][payload]` into the ring.
+    /// Returns false if not enough space.
+    #[inline]
+    fn try_push(&mut self, data: &[u8]) -> bool {
+        let entry_size = HEADER_SIZE + data.len();
+        let cap = self.ring.capacity;
+        let mask = cap - 1;
+        let tail = self.tail;
+        let tail_offset = tail & mask;
+
+        // Check if we have enough total free space.
+        let mut free = self.ring.free_space(tail, self.cached_head);
+        if free < entry_size + HEADER_SIZE {
+            self.cached_head = self.ring.head.load(Ordering::Acquire);
+            free = self.ring.free_space(tail, self.cached_head);
+            if free < entry_size + HEADER_SIZE {
+                return false;
+            }
+        }
+
+        let contiguous = cap - tail_offset;
+        if contiguous < entry_size {
+            // Not enough contiguous space at the end. Write wrap sentinel
+            // and try from offset 0.
+            if free < contiguous + entry_size + HEADER_SIZE {
+                self.cached_head = self.ring.head.load(Ordering::Acquire);
+                free = self.ring.free_space(tail, self.cached_head);
+                if free < contiguous + entry_size + HEADER_SIZE {
+                    return false;
+                }
+            }
+            // SAFETY: tail_offset..tail_offset+4 is within buf (contiguous >= HEADER_SIZE
+            // because capacity is a power of two and entry_size >= HEADER_SIZE).
+            unsafe {
+                let dst = self.ring.buf.as_ptr().add(tail_offset).cast_mut();
+                std::ptr::copy_nonoverlapping(
+                    WRAP_SENTINEL.to_ne_bytes().as_ptr(),
+                    dst,
+                    HEADER_SIZE,
+                );
+            }
+            self.tail = tail + contiguous;
+            self.write_entry(data);
+        } else {
+            self.write_entry(data);
+        }
+        true
+    }
+
+    #[inline]
+    fn write_entry(&mut self, data: &[u8]) {
+        let cap = self.ring.capacity;
+        let mask = cap - 1;
+        let offset = self.tail & mask;
+        let len = data.len() as u32;
+        // SAFETY: caller guaranteed sufficient contiguous space.
+        unsafe {
+            let base = self.ring.buf.as_ptr().add(offset).cast_mut();
+            std::ptr::copy_nonoverlapping(len.to_ne_bytes().as_ptr(), base, HEADER_SIZE);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), base.add(HEADER_SIZE), data.len());
+        }
+        self.tail += HEADER_SIZE + data.len();
+    }
+
+    /// Publish all written entries to the consumer. Returns true if
+    /// the ring was empty from the consumer's perspective before this
+    /// flush (i.e., the consumer had caught up to the previous tail).
+    #[inline]
+    fn flush(&mut self) -> bool {
+        let prev_tail = self.ring.tail.load(Ordering::Relaxed);
+        let head = self.ring.head.load(Ordering::Acquire);
+        self.ring.tail.store(self.tail, Ordering::Release);
+        prev_tail == head
+    }
+}
+
+impl RingConsumer {
+    /// Try to read the next entry. Returns a `(ptr, len)` slice into
+    /// the ring buffer. The data is valid until the next `release` call.
+    #[inline]
+    fn try_peek(&mut self) -> Option<(*const u8, usize)> {
+        if self.head == self.cached_tail {
+            self.cached_tail = self.ring.tail.load(Ordering::Acquire);
+            if self.head == self.cached_tail {
+                return None;
+            }
+        }
+        let cap = self.ring.capacity;
+        let mask = cap - 1;
+        let offset = self.head & mask;
+        // SAFETY: head..head+4 is within published region.
+        let len = unsafe {
+            let mut bytes = [0u8; HEADER_SIZE];
+            std::ptr::copy_nonoverlapping(
+                self.ring.buf.as_ptr().add(offset),
+                bytes.as_mut_ptr(),
+                HEADER_SIZE,
+            );
+            u32::from_ne_bytes(bytes)
+        };
+        if len == WRAP_SENTINEL {
+            let contiguous = cap - offset;
+            self.head += contiguous;
+            let new_offset = self.head & mask;
+            debug_assert_eq!(new_offset, 0);
+            if self.head == self.cached_tail {
+                self.cached_tail = self.ring.tail.load(Ordering::Acquire);
+                if self.head == self.cached_tail {
+                    return None;
+                }
+            }
+            let actual_len = unsafe {
+                let mut bytes = [0u8; HEADER_SIZE];
+                std::ptr::copy_nonoverlapping(
+                    self.ring.buf.as_ptr().add(new_offset),
+                    bytes.as_mut_ptr(),
+                    HEADER_SIZE,
+                );
+                u32::from_ne_bytes(bytes)
+            };
+            debug_assert_ne!(actual_len, WRAP_SENTINEL);
+            Some(unsafe {
+                (
+                    self.ring.buf.as_ptr().add(new_offset + HEADER_SIZE),
+                    actual_len as usize,
+                )
+            })
+        } else {
+            Some(unsafe {
+                (
+                    self.ring.buf.as_ptr().add(offset + HEADER_SIZE),
+                    len as usize,
+                )
+            })
+        }
+    }
+
+    /// Advance past the last peeked entry and publish the new head.
+    #[inline]
+    fn advance_and_release(&mut self, len: usize) {
+        self.head += HEADER_SIZE + len;
+        self.ring.head.store(self.head, Ordering::Release);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.head == self.ring.tail.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for RingProducer {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+// ── Bypass sender / receiver ────────────────────────────────────────
+
 /// Sender half installed on the PUSH socket's `OmqSocket`.
 #[derive(Debug)]
 pub(crate) struct BypassSend {
-    pub(crate) producer: yring::Producer<omq_tokio::Message>,
+    pub(crate) producer: RingProducer,
     pub(crate) pipe: Arc<InprocPipe>,
 }
 
 /// Receiver half installed on the PULL socket's `OmqSocket`.
 #[derive(Debug)]
 pub(crate) struct BypassRecv {
-    pub(crate) consumer: yring::Consumer<omq_tokio::Message>,
+    pub(crate) consumer: RingConsumer,
     pipe: Arc<InprocPipe>,
 }
 
-/// Create a bypass pair for an inproc PUSH/PULL connection.
+/// Create a bypass pair for an inproc connection.
+/// `byte_capacity` is the total byte ring size (will be rounded up to power of two).
 pub(crate) fn create_bypass(
-    capacity: usize,
+    byte_capacity: usize,
     recv_signal_fd: std::os::unix::io::RawFd,
 ) -> (BypassSend, BypassRecv) {
-    let (producer, consumer) = yring::spsc(capacity);
+    let (producer, consumer) = ring_pair(byte_capacity);
     let pipe = Arc::new(InprocPipe {
         closed: AtomicBool::new(false),
         recv_signal_fd,
@@ -69,63 +320,73 @@ pub(crate) fn create_bypass(
 }
 
 impl BypassSend {
-    /// Push + flush a message. Returns Err(msg) if full.
-    /// Signals the receiver's eventfd if the ring was empty before flush.
+    /// Try to push raw payload bytes. Returns false if full.
+    /// Signals the receiver's eventfd on empty-to-non-empty transitions.
     #[inline]
-    pub(crate) fn push(&mut self, msg: omq_tokio::Message) -> Result<(), omq_tokio::Message> {
-        self.producer.push(msg)?;
-        if let yring::FlushResult::Flushed {
-            was_empty: true, ..
-        } = self.producer.flush_and_check()
-        {
+    pub(crate) fn push(&mut self, data: &[u8]) -> bool {
+        if !self.producer.try_push(data) {
+            return false;
+        }
+        if self.producer.flush() {
             NotifyFd::signal_recv(self.pipe.recv_signal_fd);
         }
-        Ok(())
+        true
     }
 
     /// Blocking push: parks the sender thread until ring space is available.
-    pub(crate) fn push_blocking(&mut self, mut msg: omq_tokio::Message) {
+    pub(crate) fn push_blocking(&mut self, data: &[u8]) {
+        if self.push(data) {
+            return;
+        }
         loop {
-            match self.push(msg) {
-                Ok(()) => return,
-                Err(returned) => {
-                    msg = returned;
-                    {
-                        let mut guard = self.pipe.sender_thread.lock().unwrap();
-                        *guard = Some(std::thread::current());
-                    }
-                    self.pipe.sender_waiting.store(true, Ordering::Release);
-                    // Re-check after publishing to avoid missed wakeup.
-                    if self.producer.is_full() {
-                        std::thread::park();
-                    }
-                    self.pipe.sender_waiting.store(false, Ordering::Relaxed);
-                }
+            {
+                let mut guard = self.pipe.sender_thread.lock().unwrap();
+                *guard = Some(std::thread::current());
             }
+            self.pipe.sender_waiting.store(true, Ordering::Release);
+            if !self.producer.try_push(data) {
+                std::thread::park();
+                self.pipe.sender_waiting.store(false, Ordering::Relaxed);
+                continue;
+            }
+            self.pipe.sender_waiting.store(false, Ordering::Relaxed);
+            if self.producer.flush() {
+                NotifyFd::signal_recv(self.pipe.recv_signal_fd);
+            }
+            return;
         }
     }
 }
 
 impl BypassRecv {
-    /// Prefetch + pop a message. Returns None if empty.
-    /// Drains the recv eventfd when the ring becomes empty so poll
-    /// sees the fd as not-readable after all messages are consumed.
-    /// Unparks a blocked sender when space becomes available.
+    /// Peek at the next message's payload. Returns a raw pointer + length
+    /// into the ring buffer. Caller must call `advance` after consuming.
     #[inline]
-    pub(crate) fn pop(&mut self) -> Option<omq_tokio::Message> {
-        let msg = self.consumer.prefetch_and_pop();
-        if msg.is_some() {
-            if self.consumer.is_empty() {
-                drain_recv_fd(self.pipe.recv_signal_fd);
-            }
-            if self.pipe.sender_waiting.load(Ordering::Acquire)
-                && let Ok(guard) = self.pipe.sender_thread.lock()
-                && let Some(t) = guard.as_ref()
-            {
-                t.unpark();
-            }
+    pub(crate) fn peek(&mut self) -> Option<(*const u8, usize)> {
+        let result = self.consumer.try_peek();
+        if result.is_some()
+            && self.pipe.sender_waiting.load(Ordering::Acquire)
+            && let Ok(guard) = self.pipe.sender_thread.lock()
+            && let Some(t) = guard.as_ref()
+        {
+            t.unpark();
         }
-        msg
+        result
+    }
+
+    /// Advance past the last peeked entry. Drains the eventfd when the
+    /// ring becomes empty so `libc::poll` sees the fd as not-readable.
+    #[inline]
+    pub(crate) fn advance(&mut self, len: usize) {
+        self.consumer.advance_and_release(len);
+        if self.consumer.is_empty() {
+            drain_recv_fd(self.pipe.recv_signal_fd);
+        }
+    }
+
+    /// Check if the ring is empty.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.consumer.is_empty()
     }
 }
 

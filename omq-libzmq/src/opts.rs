@@ -8,6 +8,8 @@ use bytes::Bytes;
 use omq_tokio::MechanismSetup;
 use omq_tokio::options::{KeepAlive, ReconnectPolicy};
 
+use crate::socket::DEFAULT_HWM;
+
 macro_rules! lock_overlay {
     ($sock:expr) => {
         match $sock.overlay.lock() {
@@ -122,8 +124,8 @@ impl SocketOverlay {
             },
         };
         omq_tokio::Options {
-            send_hwm: self.send_hwm,
-            recv_hwm: self.recv_hwm,
+            send_hwm: self.send_hwm.or(Some(DEFAULT_HWM as u32)),
+            recv_hwm: self.recv_hwm.or(Some(DEFAULT_HWM as u32)),
             linger: self.linger,
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
@@ -645,11 +647,11 @@ pub extern "C" fn zmq_getsockopt(
                 // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock_arc.recv_cons.get() }
                     .as_ref()
-                    .is_some_and(|c| !c.is_empty())
+                    .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty())
                 // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock_arc.bypass_recv.get() }
                     .as_ref()
-                    .is_some_and(|br| !br.consumer.is_empty());
+                    .is_some_and(|br| !br.is_empty());
             if has_data {
                 events |= ZMQ_POLLIN;
             }

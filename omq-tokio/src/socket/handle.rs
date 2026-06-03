@@ -54,6 +54,15 @@ pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
 /// Single-peer send fast path ring. Actor sets/clears.
 pub(crate) type SpscSendRing = Arc<RwLock<Option<Arc<InprocSpsc>>>>;
 
+/// Fast-path guard: true when `send_ring` contains `Some`. Lets TCP-only
+/// sockets skip the `RwLock` read entirely.
+pub(crate) type SpscSendRingActive = Arc<AtomicBool>;
+
+/// Shared slot for injecting a [`RecvSink`] into the driver. The actor
+/// takes it on the first peer connection. `None` = use the default
+/// `async_channel` path.
+pub type RecvSinkSlot = Arc<std::sync::Mutex<Option<crate::engine::RecvSink>>>;
+
 /// Shared recv notification. All inproc producers notify this.
 pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
 
@@ -74,6 +83,8 @@ struct SpscAwareRecv {
     activated: SpscActivated,
     /// Single-peer send fast path ring (None when sender has >1 peer).
     send_ring: Arc<std::sync::RwLock<Option<Arc<InprocSpsc>>>>,
+    /// True when `send_ring` is `Some`. Lets the hot path skip the `RwLock`.
+    send_ring_active: Arc<AtomicBool>,
     /// Batched inproc messages drained from consumers.
     inproc_cache: std::sync::Mutex<std::collections::VecDeque<Message>>,
 }
@@ -197,6 +208,26 @@ impl Socket {
     /// bytes, heartbeat TTL overflow, etc.) or if `conflate` is set on an
     /// incompatible socket type.
     pub fn new(socket_type: SocketType, options: Options) -> Self {
+        Self::new_inner(socket_type, options, None)
+    }
+
+    /// Like [`Socket::new`], but installs a [`RecvSinkSlot`] that the
+    /// actor will use for the first peer's driver instead of the
+    /// internal `async_channel`. Used by omq-libzmq to bypass the
+    /// recv-pump relay.
+    pub fn new_with_recv_sink_slot(
+        socket_type: SocketType,
+        options: Options,
+        slot: RecvSinkSlot,
+    ) -> Self {
+        Self::new_inner(socket_type, options, Some(slot))
+    }
+
+    fn new_inner(
+        socket_type: SocketType,
+        options: Options,
+        recv_sink_slot: Option<RecvSinkSlot>,
+    ) -> Self {
         options
             .validate()
             .expect("Options::validate failed in Socket::new");
@@ -208,23 +239,16 @@ impl Socket {
         );
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.unwrap_or(1024).max(16) as usize);
-        // Conflate currently affects send-side queues only (per-peer
-        // queue cap=1 + DropOldest in fan_out / round_robin). The
-        // recv-side adaptation needs a drop-oldest async_channel
-        // wrapper that's not yet in place; recv_hwm is honored as
-        // before. The headline PUB-conflate use case works.
         let (recv_tx, recv_rx) =
             async_channel::bounded::<Message>(options.recv_hwm.unwrap_or(1024).max(16) as usize);
         let monitor = MonitorPublisher::new();
-        // Build the send strategy here so we can hand a submitter clone to
-        // `Inner` for the actor-bypass fast path, while the strategy itself
-        // moves into the driver.
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
         let send_submitter = send_strategy.submitter();
         let consumers: Arc<RwLock<Vec<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(Vec::new()));
         let recv_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
         let spsc_activated: SpscActivated = Arc::new(tokio::sync::Notify::new());
         let send_ring: Arc<RwLock<Option<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(None));
+        let send_ring_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let direct_io: DirectIoSlot = Arc::new(tokio::sync::Mutex::new(None));
@@ -237,15 +261,16 @@ impl Socket {
             cancel.clone(),
             monitor.clone(),
             send_strategy,
-            send_submitter.clone(),
             consumers.clone(),
             send_ring.clone(),
+            send_ring_active.clone(),
             recv_notify.clone(),
             spsc_activated.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
             direct_io.clone(),
             direct_io_pending.clone(),
+            recv_sink_slot,
         );
         spawn_driver(driver);
         Self {
@@ -258,6 +283,7 @@ impl Socket {
                     recv_notify,
                     activated: spsc_activated,
                     send_ring,
+                    send_ring_active,
                     inproc_cache: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 },
                 monitor,
@@ -378,61 +404,83 @@ impl Socket {
                 // SPSC send fast path: push directly to ring.
                 // Gated on recv_ready (set by recv-side actor after
                 // installing the ring). Single-peer only.
-                let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
-                if let Some(ref pair) = spsc
-                    && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
-                    && pair
-                        .max_message_size
-                        .is_none_or(|max| msg.byte_len() <= max)
-                    && let Ok(mut producer) = pair.producer.try_lock()
-                    && !producer.is_full()
-                {
-                    let _ = producer.push(msg);
-                    producer.flush();
-                    pair.recv_notify.notify_one();
-                    return Ok(());
+                if self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
+                    let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
+                    if let Some(ref pair) = spsc
+                        && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+                        && pair
+                            .max_message_size
+                            .is_none_or(|max| msg.byte_len() <= max)
+                        && let Ok(mut producer) = pair.producer.try_lock()
+                        && !producer.is_full()
+                    {
+                        let _ = producer.push(msg);
+                        producer.flush();
+                        pair.recv_notify.notify_one();
+                        return Ok(());
+                    }
                 }
                 self.inner.send_submitter.send(msg).await
             }
         }
     }
 
-    /// Non-blocking send. Returns `Ok(())` on success, `Err(TrySendError)`
-    /// on failure. `Full(msg)` returns the message so the caller can retry.
+    /// Non-blocking send. Routes through the `SendSubmitter` directly
+    /// (no actor hop), mirroring `send()` but synchronously. Returns
+    /// `Full(msg)` when the outbound queue is at HWM so the caller can
+    /// retry or fall back to the async `send()`.
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
-        if let Err(e) = check_pre_send_frame_count(self.inner.socket_type, &msg) {
-            return Err(TrySendError::Error(e));
-        }
-        // SPSC ring bypass for single-peer socket types (PUSH/PULL, etc.).
-        let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
-        if let Some(ref pair) = spsc
-            && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
-            && pair
-                .max_message_size
-                .is_none_or(|max| msg.byte_len() <= max)
-            && let Ok(mut producer) = pair.producer.try_lock()
-            && !producer.is_full()
-        {
-            let _ = producer.push(msg);
-            producer.flush();
-            pair.recv_notify.notify_one();
-            return Ok(());
-        }
-
-        let (ack, _rx) = oneshot::channel();
-        self.inner
-            .cmd_tx
-            .try_send(SocketCommand::Send { msg, ack })
-            .map_err(|e| {
-                use tokio::sync::mpsc::error::TrySendError as MpscTrySendError;
-                match e {
-                    MpscTrySendError::Full(SocketCommand::Send { msg, .. }) => {
-                        TrySendError::Full(msg)
-                    }
-                    MpscTrySendError::Full(_) => unreachable!(),
-                    MpscTrySendError::Closed(_) => TrySendError::Closed,
+        match self.inner.socket_type {
+            SocketType::Req => {
+                if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
+                    return Err(TrySendError::Error(Error::Protocol(
+                        "REQ socket must receive a reply before sending again".into(),
+                    )));
                 }
-            })
+                let msg = Message::with_prefix(Bytes::new(), msg);
+                let result = self.inner.send_submitter.try_send(msg);
+                if result.is_ok() {
+                    self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
+                }
+                result
+            }
+            SocketType::Rep => {
+                let msg = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .pre_send(self.inner.socket_type, msg)
+                    .map_err(TrySendError::Error)?;
+                self.inner.send_submitter.try_send(msg)
+            }
+            SocketType::Router | SocketType::Server => {
+                check_pre_send_frame_count(self.inner.socket_type, &msg)
+                    .map_err(TrySendError::Error)?;
+                self.inner.send_submitter.try_send(msg)
+            }
+            _ => {
+                check_pre_send_frame_count(self.inner.socket_type, &msg)
+                    .map_err(TrySendError::Error)?;
+                if self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
+                    let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
+                    if let Some(ref pair) = spsc
+                        && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+                        && pair
+                            .max_message_size
+                            .is_none_or(|max| msg.byte_len() <= max)
+                        && let Ok(mut producer) = pair.producer.try_lock()
+                        && !producer.is_full()
+                    {
+                        let _ = producer.push(msg);
+                        producer.flush();
+                        pair.recv_notify.notify_one();
+                        return Ok(());
+                    }
+                }
+                self.inner.send_submitter.try_send(msg)
+            }
+        }
     }
 
     /// Receive the next message. Blocks until one is available or the socket

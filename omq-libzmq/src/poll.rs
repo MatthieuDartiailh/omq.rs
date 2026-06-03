@@ -95,11 +95,11 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
                 // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock.recv_cons.get() }
                     .as_ref()
-                    .is_some_and(|c| !c.is_empty())
+                    .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty())
                 // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock.bypass_recv.get() }
                     .as_ref()
-                    .is_some_and(|br| !br.consumer.is_empty());
+                    .is_some_and(|br| !br.is_empty());
             if has_buffered {
                 item.revents |= ZMQ_POLLIN;
             }

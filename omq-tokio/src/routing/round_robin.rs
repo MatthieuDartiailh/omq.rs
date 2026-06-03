@@ -28,6 +28,15 @@ impl Submitter {
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         self.queue.send(msg).await
     }
+
+    pub(crate) fn try_send(
+        &self,
+        msg: Message,
+    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+        self.queue
+            .try_send(msg)
+            .map_err(crate::socket::handle::TrySendError::Full)
+    }
 }
 
 /// Round-robin send strategy.

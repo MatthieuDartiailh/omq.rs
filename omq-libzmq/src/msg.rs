@@ -410,13 +410,12 @@ pub extern "C" fn zmq_msg_send(
     };
 
     if !group.is_empty() {
-        let Ok(mut accum) = sock_arc.send_accum.lock() else {
-            return crate::error::fail(crate::error::ETERM);
-        };
+        // SAFETY: zmq contract guarantees single-threaded access per socket.
+        let accum = unsafe { &mut *sock_arc.send_accum.get() };
         accum.push(group);
     }
 
-    let ret = crate::send_recv::send_bytes(sock_arc, bytes, flags);
+    let ret = crate::send_recv::send_bytes(sock_arc, &bytes, flags);
     if ret >= 0 {
         zmq_msg_close(msg);
     }

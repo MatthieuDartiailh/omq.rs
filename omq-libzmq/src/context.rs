@@ -54,7 +54,7 @@ impl OmqContext {
                 .name(name)
                 .spawn(move || {
                     let rt = tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(2)
+                        .worker_threads(1)
                         .enable_all()
                         .build()
                         .expect("omq-libzmq: tokio runtime");

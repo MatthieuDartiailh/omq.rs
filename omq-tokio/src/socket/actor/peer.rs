@@ -282,7 +282,18 @@ impl SocketDriver {
         // from the connection driver into the user-facing recv channel,
         // skipping the actor's event loop.
         let driver = if can_bypass_actor_recv(self.socket_type) {
-            driver.with_recv_direct(self.recv_tx.clone())
+            let can_use_yring = !matches!(self.socket_type, SocketType::Req);
+            let from_slot = if can_use_yring {
+                self.recv_sink_slot
+                    .as_ref()
+                    .and_then(|slot| slot.lock().unwrap().take())
+            } else {
+                None
+            };
+            match from_slot {
+                Some(sink) => driver.with_recv_sink(sink),
+                None => driver.with_recv_direct(self.recv_tx.clone()),
+            }
         } else {
             driver
         };
@@ -307,6 +318,8 @@ impl SocketDriver {
         // Disable send fast path when a second peer of any type connects.
         if self.peers.len() > 1 {
             *self.send_ring.write().unwrap() = None;
+            self.send_ring_active
+                .store(false, std::sync::atomic::Ordering::Release);
             self.pending_direct_io_rx = None;
             if let Ok(mut guard) = self.direct_io.try_lock() {
                 *guard = None;
@@ -351,6 +364,8 @@ impl SocketDriver {
 
         if self.peers.len() > 1 {
             *self.send_ring.write().unwrap() = None;
+            self.send_ring_active
+                .store(false, std::sync::atomic::Ordering::Release);
         }
 
         self.send_strategy
@@ -448,8 +463,12 @@ impl SocketDriver {
 
             if self.peers.len() == 1 {
                 *self.send_ring.write().unwrap() = Some(s.clone());
+                self.send_ring_active
+                    .store(true, std::sync::atomic::Ordering::Release);
             } else {
                 *self.send_ring.write().unwrap() = None;
+                self.send_ring_active
+                    .store(false, std::sync::atomic::Ordering::Release);
             }
         }
 

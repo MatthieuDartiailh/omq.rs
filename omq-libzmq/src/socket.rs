@@ -153,6 +153,15 @@ impl NotifyFd {
     }
 }
 
+/// Dual yring consumers for the recv path.
+#[derive(Debug)]
+pub(crate) struct RecvConsumers {
+    /// Filled directly by the first peer's `ConnectionDriver`.
+    pub fast: yring::Consumer<omq_tokio::Message>,
+    /// Filled by the recv pump task (fallback for second+ peers).
+    pub pump: yring::Consumer<omq_tokio::Message>,
+}
+
 #[expect(dead_code)]
 #[derive(Debug)]
 pub(crate) struct OmqSocket {
@@ -164,7 +173,8 @@ pub(crate) struct OmqSocket {
     pub sndtimeo_ms: AtomicI64,
     pub rcvtimeo_ms: AtomicI64,
     /// Accumulator for SNDMORE multipart assembly.
-    pub send_accum: Mutex<Vec<Bytes>>,
+    /// `UnsafeCell` because zmq guarantees single-threaded socket access.
+    pub send_accum: std::cell::UnsafeCell<Vec<Bytes>>,
     /// Lock-free inproc bypass (sender half). Set once during connect;
     /// accessed only from the `zmq_send` caller thread (ZMQ's single-thread
     /// contract per socket).
@@ -176,11 +186,11 @@ pub(crate) struct OmqSocket {
     /// True when `recv_drain` is non-empty. Checked without the lock so the
     /// mutex is skipped entirely on the common single-frame recv path.
     pub drain_nonempty: AtomicBool,
-    /// Recv yring consumer. Filled by the recv pump on the tokio
-    /// thread. Drained by `zmq_recv` on the C thread. Lock-free SPSC
-    /// with batched prefetch.
+    /// Dual yring consumers. `fast` is filled directly by the first
+    /// peer's `ConnectionDriver` (bypasses `async_channel` + recv pump).
+    /// `pump` is filled by the recv pump task for second+ peers.
     /// Accessed only from the `zmq_recv` caller thread.
-    pub recv_cons: std::cell::UnsafeCell<Option<yring::Consumer<omq_tokio::Message>>>,
+    pub recv_cons: std::cell::UnsafeCell<Option<RecvConsumers>>,
     /// The inner omq-tokio socket. Send+Sync, stored directly.
     pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
     /// Backpressure: recv pump waits on this when the recv ring is full.
@@ -266,7 +276,10 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     #[cfg(not(target_os = "linux"))]
     let recv_fd = receiver.notify.recv_write;
 
-    let (bsend, brecv) = crate::inproc_bypass::create_bypass(capacity, recv_fd);
+    // Byte ring capacity: enough for `capacity` messages at a generous
+    // average size. Rounded up to a power of two internally.
+    let byte_ring_cap = capacity * 1024;
+    let (bsend, brecv) = crate::inproc_bypass::create_bypass(byte_ring_cap, recv_fd);
     // SAFETY: called from zmq_bind/zmq_connect before any send/recv,
     // so no concurrent access to the UnsafeCells.
     unsafe { *sender.bypass_send.get() = Some(bsend) };
@@ -368,7 +381,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         overlay: Mutex::new(SocketOverlay::default()),
         sndtimeo_ms: AtomicI64::new(-1),
         rcvtimeo_ms: AtomicI64::new(-1),
-        send_accum: Mutex::new(Vec::new()),
+        send_accum: std::cell::UnsafeCell::new(Vec::new()),
         bypass_send: std::cell::UnsafeCell::new(None),
         bypass_recv: std::cell::UnsafeCell::new(None),
         recv_drain: Mutex::new(VecDeque::new()),
@@ -416,12 +429,30 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     #[cfg(not(target_os = "linux"))]
     let recv_signal_fd = sock.notify.recv_write;
 
-    let (mut recv_prod, recv_cons) = yring::spsc(recv_hwm.max(16));
+    let cap = recv_hwm.max(16);
+    let (fast_prod, fast_cons) = yring::spsc(cap);
+    let (mut pump_prod, pump_cons) = yring::spsc(cap);
     // SAFETY: called once during materialization before any recv.
-    unsafe { *sock.recv_cons.get() = Some(recv_cons) };
+    unsafe {
+        *sock.recv_cons.get() = Some(RecvConsumers {
+            fast: fast_cons,
+            pump: pump_cons,
+        });
+    };
 
     let recv_space = Arc::new(tokio::sync::Notify::new());
     let _ = sock.recv_space.set(recv_space.clone());
+
+    // Build the RecvSink::Yring for the driver's direct fast path.
+    let signal_fd = recv_signal_fd;
+    let fast_space = recv_space.clone();
+    let recv_sink = omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
+        producer: fast_prod,
+        signal: Box::new(move || NotifyFd::signal_recv(signal_fd)),
+        space: fast_space,
+    });
+    let recv_sink_slot: omq_tokio::socket::handle::RecvSinkSlot =
+        Arc::new(std::sync::Mutex::new(Some(recv_sink)));
 
     // Build the inner socket ON the tokio io thread.
     // Socket::new() calls tokio::spawn internally (spawn_driver), so it
@@ -430,20 +461,26 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     sock.ctx.submit(
         sock.thread_idx,
         Box::new(move || {
-            let inner = Arc::new(omq_tokio::Socket::new(socket_type, opts));
+            let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_slot(
+                socket_type,
+                opts,
+                recv_sink_slot,
+            ));
 
-            // Recv pump: relay from omq socket into yring.
-            // Signal eventfd only on empty-to-non-empty transitions.
+            // Recv pump: relay from async_channel into the pump yring.
+            // Handles second+ peers whose drivers push to async_channel.
+            // For the single-peer case, the async_channel stays empty
+            // and this task idles.
             let s_recv = inner.clone();
             let recv_pump = tokio::spawn(async move {
                 while let Ok(msg) = s_recv.recv().await {
                     let mut m = msg;
                     loop {
-                        match recv_prod.push(m) {
+                        match pump_prod.push(m) {
                             Ok(()) => {
                                 if let yring::FlushResult::Flushed {
                                     was_empty: true, ..
-                                } = recv_prod.flush_and_check()
+                                } = pump_prod.flush_and_check()
                                 {
                                     NotifyFd::signal_recv(recv_signal_fd);
                                 }
@@ -454,11 +491,11 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
                                 let notified = recv_space.notified();
                                 tokio::pin!(notified);
                                 notified.as_mut().enable();
-                                match recv_prod.push(m) {
+                                match pump_prod.push(m) {
                                     Ok(()) => {
                                         if let yring::FlushResult::Flushed {
                                             was_empty: true, ..
-                                        } = recv_prod.flush_and_check()
+                                        } = pump_prod.flush_and_check()
                                         {
                                             NotifyFd::signal_recv(recv_signal_fd);
                                         }

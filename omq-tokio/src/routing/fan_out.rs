@@ -46,6 +46,57 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
+    pub(crate) fn try_send(
+        &self,
+        msg: Message,
+    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+        let (forwarded, group) = match self.mode {
+            FanOutMode::SubscriptionPrefix => (msg, None),
+            FanOutMode::Group => {
+                if msg.len() != 2 {
+                    return Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
+                        "RADIO send requires [group, body] (2 parts)".into(),
+                    )));
+                }
+                let group_bytes = msg.part_bytes(0).unwrap_or_default();
+                if group_bytes.len() > u8::MAX as usize {
+                    return Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
+                        "RADIO group name too long (max 255 bytes)".into(),
+                    )));
+                }
+                let group = String::from_utf8_lossy(&group_bytes).into_owned();
+                (msg, Some(group))
+            }
+        };
+
+        let targets: SmallVec<[DropQueue; 8]> = {
+            let g = self.inner.lock().expect("fanout inner poisoned");
+            g.peers
+                .values()
+                .filter(|p| match (self.mode, group.as_deref()) {
+                    (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
+                    (FanOutMode::SubscriptionPrefix, _) => {
+                        p.subscriptions.matches(&first_frame_bytes(&forwarded))
+                    }
+                    (FanOutMode::Group, None) => false,
+                })
+                .map(|p| p.queue.clone())
+                .collect()
+        };
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let last = targets.len() - 1;
+        for q in &targets[..last] {
+            if let Err(m) = q.try_send(forwarded.clone()) {
+                return Err(crate::socket::handle::TrySendError::Full(m));
+            }
+        }
+        targets[last]
+            .try_send(forwarded)
+            .map_err(crate::socket::handle::TrySendError::Full)
+    }
+
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = match self.mode {
             FanOutMode::SubscriptionPrefix => (msg, None),

@@ -36,6 +36,38 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
+    pub(crate) fn try_send(
+        &self,
+        mut msg: Message,
+    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+        if msg.is_empty() {
+            return Err(crate::socket::handle::TrySendError::Error(
+                Error::Unroutable,
+            ));
+        }
+        let identity = msg.pop_front().unwrap();
+
+        let queue: Option<DropQueue> = {
+            let g = self.inner.lock().expect("identity inner poisoned");
+            g.identity_to_peer
+                .get(&identity)
+                .and_then(|peer_id| g.peers.get(peer_id))
+                .map(|p| p.queue.clone())
+        };
+
+        let Some(q) = queue else {
+            if self.router_mandatory {
+                return Err(crate::socket::handle::TrySendError::Error(
+                    Error::Unroutable,
+                ));
+            }
+            return Ok(());
+        };
+
+        q.try_send(msg)
+            .map_err(crate::socket::handle::TrySendError::Full)
+    }
+
     pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
         if msg.is_empty() {
             return Err(Error::Unroutable);
