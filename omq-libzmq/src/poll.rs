@@ -1,4 +1,4 @@
-//! `zmq_poll` -- multiplexed I/O readiness via epoll/poll on eventfds.
+//! `zmq_poll` -- multiplexed I/O readiness via poll on eventfds.
 
 use std::ffi::c_int;
 use std::sync::Arc;
@@ -20,9 +20,6 @@ pub struct ZmqPollItem {
     pub revents: libc::c_short,
 }
 
-/// Collect the raw fd to poll for each item's requested event direction.
-/// Returns a Vec of `libc::pollfd` entries and a parallel mapping back to
-/// the item index + event mask that produced each entry.
 fn build_pollfds(items: &[ZmqPollItem]) -> (Vec<libc::pollfd>, Vec<(usize, libc::c_short)>) {
     let mut pfds = Vec::new();
     let mut map = Vec::new();
@@ -53,7 +50,7 @@ fn build_pollfds(items: &[ZmqPollItem]) -> (Vec<libc::pollfd>, Vec<(usize, libc:
 
                 pfds.push(libc::pollfd {
                     fd,
-                    events: libc::POLLIN, // eventfd readable = has credits
+                    events: libc::POLLIN,
                     revents: 0,
                 });
                 map.push((i, ZMQ_POLLOUT));
@@ -74,16 +71,13 @@ fn build_pollfds(items: &[ZmqPollItem]) -> (Vec<libc::pollfd>, Vec<(usize, libc:
                 events,
                 revents: 0,
             });
-            map.push((i, 0)); // 0 = raw fd, map revents directly
+            map.push((i, 0));
         }
     }
 
     (pfds, map)
 }
 
-/// Check zmq sockets for immediately available data (`recv_drain` or `recv_rx`)
-/// without blocking. This catches frames already buffered in userspace that
-/// the eventfd doesn't reflect (e.g. remaining multipart frames).
 fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
     let mut ready = 0i32;
     for item in items.iter_mut() {
@@ -98,7 +92,10 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
             let has_buffered = sock
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed)
-                || sock.recv_rx.get().is_some_and(|rx| !rx.is_empty())
+                // SAFETY: zmq contract guarantees single-threaded access per socket.
+                || unsafe { &*sock.recv_cons.get() }
+                    .as_ref()
+                    .is_some_and(|c| !c.is_empty())
                 // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock.bypass_recv.get() }
                     .as_ref()
@@ -117,8 +114,6 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
     ready
 }
 
-/// Drain all pending eventfd counters for zmq socket items so that
-/// `libc::poll` only wakes on messages that arrive after this point.
 fn drain_eventfds(items: &[ZmqPollItem]) {
     for item in items {
         if item.socket.is_null() {
@@ -169,13 +164,11 @@ pub extern "C" fn zmq_poll(
     // SAFETY: items is non-null (checked above) with nitems elements.
     let items_slice = unsafe { std::slice::from_raw_parts_mut(items, n) };
 
-    // Fast path: check userspace buffers first (multipart drain, channel).
     let ready = check_immediate(items_slice);
     if ready > 0 || timeout_ms == 0 {
         return ready;
     }
 
-    // Build pollfd array from eventfds / raw fds.
     let (mut pfds, map) = build_pollfds(items_slice);
     if pfds.is_empty() {
         if timeout_ms > 0 {
@@ -184,9 +177,6 @@ pub extern "C" fn zmq_poll(
         return 0;
     }
 
-    // Drain stale eventfd counters before blocking so libc::poll only
-    // wakes on genuinely new data. Then re-check: messages may have
-    // arrived between check_immediate and drain_eventfds.
     drain_eventfds(items_slice);
     let ready = check_immediate(items_slice);
     if ready > 0 {
@@ -211,7 +201,6 @@ pub extern "C" fn zmq_poll(
         return 0;
     }
 
-    // Map poll results back to zmq items.
     for item in items_slice.iter_mut() {
         item.revents = 0;
     }
@@ -223,7 +212,6 @@ pub extern "C" fn zmq_poll(
         let (item_idx, zmq_event) = map[pfd_idx];
 
         if zmq_event == 0 {
-            // Raw fd: translate poll revents to ZMQ revents.
             if (pfd.revents & libc::POLLIN) != 0 {
                 items_slice[item_idx].revents |= ZMQ_POLLIN;
             }
@@ -234,7 +222,6 @@ pub extern "C" fn zmq_poll(
                 items_slice[item_idx].revents |= ZMQ_POLLERR;
             }
         } else {
-            // zmq socket eventfd became readable -> set the corresponding event.
             items_slice[item_idx].revents |= zmq_event;
         }
     }

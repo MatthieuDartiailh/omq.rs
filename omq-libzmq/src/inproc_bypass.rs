@@ -36,14 +36,14 @@ impl std::fmt::Debug for InprocPipe {
 /// Sender half installed on the PUSH socket's `OmqSocket`.
 #[derive(Debug)]
 pub(crate) struct BypassSend {
-    pub(crate) producer: yring::Producer<omq_compio::Message>,
+    pub(crate) producer: yring::Producer<omq_tokio::Message>,
     pub(crate) pipe: Arc<InprocPipe>,
 }
 
 /// Receiver half installed on the PULL socket's `OmqSocket`.
 #[derive(Debug)]
 pub(crate) struct BypassRecv {
-    pub(crate) consumer: yring::Consumer<omq_compio::Message>,
+    pub(crate) consumer: yring::Consumer<omq_tokio::Message>,
     pipe: Arc<InprocPipe>,
 }
 
@@ -72,7 +72,7 @@ impl BypassSend {
     /// Push + flush a message. Returns Err(msg) if full.
     /// Signals the receiver's eventfd if the ring was empty before flush.
     #[inline]
-    pub(crate) fn push(&mut self, msg: omq_compio::Message) -> Result<(), omq_compio::Message> {
+    pub(crate) fn push(&mut self, msg: omq_tokio::Message) -> Result<(), omq_tokio::Message> {
         self.producer.push(msg)?;
         if let yring::FlushResult::Flushed {
             was_empty: true, ..
@@ -84,7 +84,7 @@ impl BypassSend {
     }
 
     /// Blocking push: parks the sender thread until ring space is available.
-    pub(crate) fn push_blocking(&mut self, mut msg: omq_compio::Message) {
+    pub(crate) fn push_blocking(&mut self, mut msg: omq_tokio::Message) {
         loop {
             match self.push(msg) {
                 Ok(()) => return,
@@ -112,7 +112,7 @@ impl BypassRecv {
     /// sees the fd as not-readable after all messages are consumed.
     /// Unparks a blocked sender when space becomes available.
     #[inline]
-    pub(crate) fn pop(&mut self) -> Option<omq_compio::Message> {
+    pub(crate) fn pop(&mut self) -> Option<omq_tokio::Message> {
         let msg = self.consumer.prefetch_and_pop();
         if msg.is_some() {
             if self.consumer.is_empty() {

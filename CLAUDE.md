@@ -20,7 +20,7 @@ out-of-tree (maturin etc.).
 - **`yring`** -- bounded SPSC ring buffer for inproc transport.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq.so` /
   `.a`). Drop-in replacement: ships `zmq.h`, implements the `zmq_*`
-  API. Backed by `omq-compio`.
+  API. Backed by `omq-tokio`.
 - **`bindings/pyomq`** -- PyO3 wrapper over `omq-compio`. Own `Cargo.lock`.
   Build: `cd bindings/pyomq && maturin develop --release`.
 

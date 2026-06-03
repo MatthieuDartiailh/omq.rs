@@ -1,4 +1,4 @@
-//! omq-libzmq -- libzmq-compatible C interface backed by omq-compio.
+//! omq-libzmq -- libzmq-compatible C interface backed by omq-tokio.
 #![expect(clippy::not_unsafe_ptr_arg_deref)]
 
 mod consts;

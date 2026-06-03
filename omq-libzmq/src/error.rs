@@ -70,8 +70,8 @@ pub(crate) fn map_io_err(e: &std::io::Error) -> c_int {
     }
 }
 
-pub(crate) fn map_omq_err(e: &omq_compio::error::Error) -> c_int {
-    use omq_compio::error::Error;
+pub(crate) fn map_omq_err(e: &omq_tokio::error::Error) -> c_int {
+    use omq_tokio::error::Error;
     match e {
         Error::WouldBlock | Error::Timeout => libc::EAGAIN,
         Error::Closed => ETERM,

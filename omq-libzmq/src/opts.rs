@@ -5,8 +5,8 @@ use std::ffi::c_int;
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_compio::MechanismSetup;
-use omq_compio::options::{KeepAlive, ReconnectPolicy};
+use omq_tokio::MechanismSetup;
+use omq_tokio::options::{KeepAlive, ReconnectPolicy};
 
 macro_rules! lock_overlay {
     ($sock:expr) => {
@@ -71,7 +71,7 @@ pub(crate) enum MechanismOverlay {
 }
 
 impl SocketOverlay {
-    pub(crate) fn to_options(&self) -> omq_compio::Options {
+    pub(crate) fn to_options(&self) -> omq_tokio::Options {
         let keepalive = match self.tcp_keepalive {
             1 => KeepAlive::Enabled {
                 idle: self.tcp_keepalive_idle.unwrap_or(Duration::from_mins(1)),
@@ -89,23 +89,23 @@ impl SocketOverlay {
         let mechanism = match &self.mechanism {
             MechanismOverlay::Null => MechanismSetup::Null,
             MechanismOverlay::PlainServer => MechanismSetup::PlainServer {
-                authenticator: omq_compio::Authenticator::new(|_| true),
+                authenticator: omq_tokio::Authenticator::new(|_| true),
             },
             MechanismOverlay::PlainClient { username, password } => MechanismSetup::PlainClient {
                 username: username.clone(),
                 password: password.clone(),
             },
             MechanismOverlay::CurveServer { secret_key } => {
-                let sec = omq_compio::CurveSecretKey::from_bytes(*secret_key);
+                let sec = omq_tokio::CurveSecretKey::from_bytes(*secret_key);
                 let crypto_sec = crypto_box::SecretKey::from(*secret_key);
                 let crypto_pub = crypto_sec.public_key();
-                let pubk = omq_compio::CurvePublicKey::from_bytes(*crypto_pub.as_bytes());
+                let pubk = omq_tokio::CurvePublicKey::from_bytes(*crypto_pub.as_bytes());
                 MechanismSetup::CurveServer {
-                    our_keypair: omq_compio::CurveKeypair {
+                    our_keypair: omq_tokio::CurveKeypair {
                         secret: sec,
                         public: pubk,
                     },
-                    cookie_keyring: std::sync::Arc::new(omq_compio::CurveCookieKeyring::new()),
+                    cookie_keyring: std::sync::Arc::new(omq_tokio::CurveCookieKeyring::new()),
                     authenticator: None,
                 }
             }
@@ -114,14 +114,14 @@ impl SocketOverlay {
                 secret_key,
                 server_key,
             } => MechanismSetup::CurveClient {
-                our_keypair: omq_compio::CurveKeypair {
-                    secret: omq_compio::CurveSecretKey::from_bytes(*secret_key),
-                    public: omq_compio::CurvePublicKey::from_bytes(*public_key),
+                our_keypair: omq_tokio::CurveKeypair {
+                    secret: omq_tokio::CurveSecretKey::from_bytes(*secret_key),
+                    public: omq_tokio::CurvePublicKey::from_bytes(*public_key),
                 },
-                server_public: omq_compio::CurvePublicKey::from_bytes(*server_key),
+                server_public: omq_tokio::CurvePublicKey::from_bytes(*server_key),
             },
         };
-        omq_compio::Options {
+        omq_tokio::Options {
             send_hwm: self.send_hwm,
             recv_hwm: self.recv_hwm,
             linger: self.linger,
@@ -525,18 +525,21 @@ fn do_subscribe(
         })
     };
     crate::socket::ensure_materialized(sock_arc);
+    let Some(inner) = sock_arc.inner.get() else {
+        return crate::error::fail(crate::error::ETERM);
+    };
     let result = if subscribe {
         crate::socket::with_socket(
             &sock_arc.ctx,
             sock_arc.thread_idx,
-            sock_arc.id,
+            inner,
             move |s| async move { s.subscribe(prefix).await },
         )
     } else {
         crate::socket::with_socket(
             &sock_arc.ctx,
             sock_arc.thread_idx,
-            sock_arc.id,
+            inner,
             move |s| async move { s.unsubscribe(prefix).await },
         )
     };
@@ -601,7 +604,7 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, i32::from(more))
         }
         ZMQ_TYPE => {
-            use omq_compio::SocketType;
+            use omq_tokio::SocketType;
             let v: i32 = match sock_arc.socket_type {
                 SocketType::Pair => 0,
                 SocketType::Pub => 1,
@@ -639,7 +642,10 @@ pub extern "C" fn zmq_getsockopt(
             let has_data = sock_arc
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed)
-                || sock_arc.recv_rx.get().is_some_and(|rx| !rx.is_empty())
+                // SAFETY: zmq contract guarantees single-threaded access per socket.
+                || unsafe { &*sock_arc.recv_cons.get() }
+                    .as_ref()
+                    .is_some_and(|c| !c.is_empty())
                 // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock_arc.bypass_recv.get() }
                     .as_ref()
@@ -891,7 +897,7 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> [u8; 32] {
         let Ok(s) = std::str::from_utf8(slice) else {
             return key;
         };
-        if let Ok(decoded) = omq_compio::proto::z85::decode(s)
+        if let Ok(decoded) = omq_tokio::proto::z85::decode(s)
             && decoded.len() == 32
         {
             key.copy_from_slice(&decoded);
@@ -975,7 +981,7 @@ fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
     if avail >= 41
-        && let Ok(z85) = omq_compio::proto::z85::encode(key)
+        && let Ok(z85) = omq_tokio::proto::z85::encode(key)
     {
         // SAFETY: optval has at least 41 bytes available (checked above).
         unsafe {

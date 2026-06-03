@@ -1,6 +1,6 @@
 //! CURVE key utilities and Z85 encode/decode.
 
-use omq_compio::proto::z85;
+use omq_tokio::proto::z85;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_curve_keypair(
@@ -10,7 +10,7 @@ pub extern "C" fn zmq_curve_keypair(
     if z85_public_key.is_null() || z85_secret_key.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    let kp = omq_compio::CurveKeypair::generate();
+    let kp = omq_tokio::CurveKeypair::generate();
     let pub_z85 = kp.public.to_z85();
     let sec_z85 = kp.secret.to_z85();
     // SAFETY: both pointers are non-null (checked above) and point to
@@ -38,12 +38,12 @@ pub extern "C" fn zmq_curve_public(
             .to_str()
             .unwrap_or("")
     };
-    let Ok(sec) = omq_compio::CurveSecretKey::from_z85(sec_str) else {
+    let Ok(sec) = omq_tokio::CurveSecretKey::from_z85(sec_str) else {
         return crate::error::fail(libc::EINVAL);
     };
     let crypto_sec = crypto_box::SecretKey::from(*sec.as_bytes());
     let crypto_pub = crypto_sec.public_key();
-    let pub_key = omq_compio::CurvePublicKey::from_bytes(*crypto_pub.as_bytes());
+    let pub_key = omq_tokio::CurvePublicKey::from_bytes(*crypto_pub.as_bytes());
     let pub_z85 = pub_key.to_z85();
     // SAFETY: z85_public_key is non-null (checked above); at least 41 bytes available.
     unsafe {

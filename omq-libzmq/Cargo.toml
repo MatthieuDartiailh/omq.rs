@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "libzmq-compatible C interface backed by omq (omq-compio)."
+description = "libzmq-compatible C interface backed by omq (omq-tokio)."
 readme = "README.md"
 keywords = ["zeromq", "high-performance", "ffi", "libzmq", "c-api"]
 categories = ["network-programming", "api-bindings"]
@@ -19,16 +19,15 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 workspace = true
 
 [dependencies]
-omq-compio = { path = "../omq-compio", version = "0.12.0", features = ["plain", "curve", "lz4", "zstd"] }
+omq-tokio = { path = "../omq-tokio", version = "0.13.0", features = ["plain", "curve", "lz4", "zstd"] }
 yring = { path = "../yring", version = "0.2.2" }
-compio = { git = "https://github.com/compio-rs/compio.git", tag = "v0.19.0-rc.2", features = ["runtime"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
 bytes = "1.11.0"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 rustc-hash = "2.1.0"
-futures = { version = "0.3", default-features = false, features = ["async-await"] }
 crypto_box = "0.9"
 libc = "0.2"
 
 [dev-dependencies]
-omq-compio = { path = "../omq-compio" }
+omq-tokio = { path = "../omq-tokio" }
 libc = "0.2"

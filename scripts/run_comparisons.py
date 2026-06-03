@@ -18,6 +18,7 @@ Usage:
 import argparse
 import json
 import os
+import random
 import re
 import signal
 import subprocess
@@ -756,8 +757,8 @@ def main():
         help="update COMPARISONS.md tables from JSONL",
     )
     parser.add_argument(
-        "--base-port", type=int, default=15_555,
-        help="base TCP port (default: 15555)",
+        "--base-port", type=int, default=0,
+        help="base TCP port (default: random ephemeral)",
     )
     parser.add_argument(
         "--id", type=str, default=None,
@@ -794,7 +795,8 @@ def main():
         versions.append(f"omq-libzmq {cargo_version('omq-libzmq')}")
     print(" vs ".join(versions), file=sys.stderr)
 
-    run_benchmarks(binaries, transports, sizes, run_latency, args.base_port, run_id,
+    base_port = args.base_port or random.randint(20_000, 40_000)
+    run_benchmarks(binaries, transports, sizes, run_latency, base_port, run_id,
                    duration=duration, rounds=rounds,
                    latency_iterations=args.latency_iterations,
                    latency_warmup=args.latency_warmup,

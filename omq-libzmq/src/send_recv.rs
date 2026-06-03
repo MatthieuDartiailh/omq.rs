@@ -1,4 +1,9 @@
 //! `zmq_send` / `zmq_recv` entry points.
+//!
+//! Send: direct `Handle::block_on(socket.send())`, no relay.
+//! Recv: yring SPSC relay with batched prefetch. The recv pump on the
+//! tokio thread fills the ring; the C thread drains it lock-free.
+//! Blocking recv parks on the eventfd via `libc::poll`.
 #![expect(clippy::cast_possible_wrap)]
 
 use std::ffi::c_int;
@@ -6,18 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use flume::{RecvTimeoutError, TryRecvError};
 
 use crate::consts::{ZMQ_DONTWAIT, ZMQ_SNDMORE};
 use crate::error::{ETERM, fail};
 use crate::socket::OmqSocket;
 
-/// Core send dispatch. Takes ownership of an already-constructed [`Bytes`].
-///
-/// Returns the number of bytes sent on success, or a negative errno on error.
-/// Callers that construct `bytes` from a raw-pointer + length should use the
-/// raw `len` as the success return value; here we use `bytes.len()` which is
-/// identical for all well-formed callers.
+/// Core send dispatch. Direct `block_on(socket.send())` for the hot path.
 pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c_int {
     let len = bytes.len();
 
@@ -29,17 +28,19 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
         return fail(libc::EMSGSIZE);
     }
 
-    // XSUB: intercept subscription frames (\x01topic / \x00topic) and
-    // route to subscribe/unsubscribe instead of the send path.
-    if sock.socket_type == omq_compio::SocketType::XSub && !bytes.is_empty() {
+    // XSUB: intercept subscription frames.
+    if sock.socket_type == omq_tokio::SocketType::XSub && !bytes.is_empty() {
         crate::socket::ensure_materialized(sock);
+        let Some(inner) = sock.inner.get() else {
+            return fail(ETERM);
+        };
         let (subscribe, prefix) = match bytes[0] {
             0x01 => (true, bytes.slice(1..)),
             0x00 => (false, bytes.slice(1..)),
             _ => (true, bytes.clone()),
         };
         let result =
-            crate::socket::with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+            crate::socket::with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
                 if subscribe {
                     s.subscribe(prefix).await
                 } else {
@@ -68,11 +69,11 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
             return fail(ETERM);
         };
         if accum.is_empty() {
-            omq_compio::Message::single(bytes)
+            omq_tokio::Message::single(bytes)
         } else {
             let mut v: Vec<Bytes> = accum.drain(..).collect();
             v.push(bytes);
-            omq_compio::Message::multipart(v)
+            omq_tokio::Message::multipart(v)
         }
     };
 
@@ -91,32 +92,32 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, bytes: Bytes, flags: c_int) -> c
         return len as c_int;
     }
 
-    let Some(send_tx) = sock.send_tx.get() else {
+    let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
+    let handle = sock.ctx.handle(sock.thread_idx);
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
 
-    let result = if dontwait {
-        match send_tx.try_send(msg) {
-            Ok(()) => Ok(()),
-            Err(flume::TrySendError::Full(_)) => Err(libc::EAGAIN),
-            Err(flume::TrySendError::Disconnected(_)) => Err(ETERM),
+    let s = inner.clone();
+    if dontwait {
+        match handle.block_on(async { tokio::time::timeout(Duration::ZERO, s.send(msg)).await }) {
+            Ok(Ok(())) => len as c_int,
+            Ok(Err(_)) => fail(ETERM),
+            Err(_elapsed) => fail(libc::EAGAIN),
         }
     } else if sndtimeo > 0 {
         let timeout = Duration::from_millis(sndtimeo as u64);
-        match send_tx.send_timeout(msg, timeout) {
-            Ok(()) => Ok(()),
-            Err(flume::SendTimeoutError::Timeout(_)) => Err(libc::EAGAIN),
-            Err(flume::SendTimeoutError::Disconnected(_)) => Err(ETERM),
+        match handle.block_on(async { tokio::time::timeout(timeout, s.send(msg)).await }) {
+            Ok(Ok(())) => len as c_int,
+            Ok(Err(_)) => fail(ETERM),
+            Err(_elapsed) => fail(libc::EAGAIN),
         }
     } else {
-        send_tx.send(msg).map_err(|_| ETERM)
-    };
-
-    match result {
-        Ok(()) => len as c_int,
-        Err(e) => fail(e),
+        match handle.block_on(s.send(msg)) {
+            Ok(()) => len as c_int,
+            Err(_) => fail(ETERM),
+        }
     }
 }
 
@@ -157,7 +158,6 @@ pub extern "C" fn zmq_send_const(
     len: usize,
     flags: c_int,
 ) -> c_int {
-    // We always copy; the const hint is advisory only.
     zmq_send(sock_ptr, buf, len, flags)
 }
 
@@ -190,16 +190,36 @@ pub extern "C" fn zmq_recv(
     }
 }
 
-/// Pop one frame from the socket, honouring flags/timeout.
-///
-/// Returns `(frame_bytes, more)` where `more` is true when the current
-/// multipart message has additional frames waiting in `recv_drain`.
-/// On error returns the errno value to pass to `fail()`.
+/// Signal the recv pump that space is available in the recv ring.
+#[inline]
+fn signal_recv_space(sock: &OmqSocket) {
+    if let Some(n) = sock.recv_space.get() {
+        n.notify_one();
+    }
+}
+
+/// Block on the recv eventfd until readable or timeout.
+/// Returns 0 on readable, -1 on timeout/error.
+fn wait_recv_eventfd(sock: &OmqSocket, timeout_ms: c_int) -> c_int {
+    #[cfg(target_os = "linux")]
+    let fd = sock.notify.recv_fd;
+    #[cfg(not(target_os = "linux"))]
+    let fd = sock.notify.recv_read;
+
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: pfd is a valid single-element pollfd.
+    unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) }
+}
+
+/// Pop one frame from the socket, honoring flags/timeout.
 pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
     // Drain leftover frames from a partially-consumed multipart message.
-    // drain_nonempty lets us skip the Mutex acquire on the common single-frame path.
     if sock.drain_nonempty.load(Ordering::Relaxed) {
         let Ok(mut drain) = sock.recv_drain.lock() else {
             return Err(ETERM);
@@ -217,15 +237,14 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
 
-    // Inproc bypass: pop directly from lock-free SPSC ring.
-    // Drain recv_rx first: messages delivered via the normal omq-compio
-    // inproc path before bypass was installed land there and must be
-    // consumed in order before switching to the bypass ring.
+    // Inproc bypass path.
     // SAFETY: zmq contract guarantees single-threaded access per socket.
     if let Some(bypass) = unsafe { &mut *sock.bypass_recv.get() } {
-        if let Some(rx) = sock.recv_rx.get()
-            && let Ok(m) = rx.try_recv()
+        // Drain yring first (messages from before bypass was installed).
+        if let Some(cons) = unsafe { &mut *sock.recv_cons.get() }
+            && let Some(m) = cons.prefetch_and_pop()
         {
+            signal_recv_space(sock);
             return decompose_message(sock, &m);
         }
         let msg = if dontwait {
@@ -244,39 +263,53 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         return decompose_message(sock, &msg);
     }
 
-    let Some(rx) = sock.recv_rx.get() else {
+    // SAFETY: zmq contract guarantees single-threaded access per socket.
+    let Some(cons) = (unsafe { &mut *sock.recv_cons.get() }) else {
         return Err(ETERM);
     };
 
-    let msg = if dontwait {
-        match rx.try_recv() {
-            Ok(m) => m,
-            Err(TryRecvError::Empty) => return Err(libc::EAGAIN),
-            Err(TryRecvError::Disconnected) => return Err(ETERM),
-        }
-    } else if rcvtimeo > 0 {
-        let timeout = Duration::from_millis(rcvtimeo as u64);
-        match rx.recv_timeout(timeout) {
-            Ok(m) => m,
-            Err(RecvTimeoutError::Timeout) => return Err(libc::EAGAIN),
-            Err(RecvTimeoutError::Disconnected) => return Err(ETERM),
-        }
-    } else {
-        match rx.recv() {
-            Ok(m) => m,
-            Err(_) => return Err(ETERM),
-        }
-    };
+    // Fast path: pop from local prefetch cache (zero atomics after
+    // the initial prefetch batch).
+    if let Some(m) = cons.prefetch_and_pop() {
+        signal_recv_space(sock);
+        return decompose_message(sock, &m);
+    }
 
-    decompose_message(sock, &msg)
+    if dontwait {
+        return Err(libc::EAGAIN);
+    }
+
+    // Blocking path: park on the eventfd until the pump signals data.
+    if rcvtimeo > 0 {
+        let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(libc::EAGAIN);
+            }
+            let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
+            wait_recv_eventfd(sock, ms);
+            if let Some(m) = cons.prefetch_and_pop() {
+                signal_recv_space(sock);
+                return decompose_message(sock, &m);
+            }
+        }
+    }
+
+    // Infinite timeout.
+    loop {
+        wait_recv_eventfd(sock, -1);
+        if let Some(m) = cons.prefetch_and_pop() {
+            signal_recv_space(sock);
+            return decompose_message(sock, &m);
+        }
+    }
 }
 
-/// Extract the first frame from a `Message` and stash remaining parts
-/// in `recv_drain` for subsequent `RCVMORE` calls.
-fn decompose_message(sock: &OmqSocket, msg: &omq_compio::Message) -> Result<(Bytes, bool), c_int> {
+fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
-    let dish = sock.socket_type == omq_compio::SocketType::Dish;
+    let dish = sock.socket_type == omq_tokio::SocketType::Dish;
     let nparts = msg.len();
 
     if nparts <= 1 && !dish {
@@ -303,7 +336,6 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_compio::Message) -> Result<(Byt
     Ok((head, remaining < nparts))
 }
 
-/// Copy `src` into the caller-supplied buffer (truncate if needed).
 fn copy_to_buf(buf: *mut libc::c_void, buf_len: usize, src: &[u8]) {
     if buf.is_null() || buf_len == 0 {
         return;
