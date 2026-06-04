@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use rzmq::{Context, Msg, Socket, SocketType};
+use rzmq::{Context, Msg, SocketType};
 
 
 fn print_latency(rtts: &[u64], iterations: usize) {

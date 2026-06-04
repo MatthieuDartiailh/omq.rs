@@ -291,7 +291,7 @@ def draw_latency_panel(
     L.append(svg_text(mid_x, y_top - 17, title, size=13, weight="700", fill="#111827"))
 
     # gridlines
-    step = nice_step(lat_max, 6)
+    step = nice_step(lat_max, 10)
     v = step
     while v <= lat_max:
         yy = y_lat(v)
@@ -382,32 +382,48 @@ def detect_hardware() -> str | None:
     return None
 
 
+def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float):
+    legend_items = [(k, LABELS[k]) for k in impls if k in COLORS]
+    item_w = 125
+    total_w = len(legend_items) * item_w
+    start_x = mid_x - total_w / 2
+
+    for i, (key, label) in enumerate(legend_items):
+        lx = start_x + i * item_w
+        c = COLORS[key]
+        L.append(
+            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
+            f' stroke="{c}" stroke-width="2.5"/>'
+        )
+        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
+        L.append(
+            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
+            f' font-size="11" font-weight="500">{label}</text>'
+        )
+
+
 def generate_chart(data: dict, impls: list[str], transport_label: str,
                    log_gbs: bool = False,
                    fixed_msg_max: float | None = None,
                    fixed_gbs_max: float | None = None,
-                   fixed_lat_max: float | None = None,
                    hw_label: str | None = None) -> str:
     sizes = data["sizes"]
     tput = data["tput"]
-    lat = data["lat"]
     n = len(sizes)
     if n < 2:
         print(f"WARNING: only {n} data points for {transport_label}", file=sys.stderr)
         if n == 0:
             return ""
 
-    has_latency = any(s in lat and any(name in lat[s] for name in impls) for s in sizes)
-
     hw_offset = 14 if hw_label else 0
     svg_w = 850
-    svg_h = (670 if has_latency else 400) + hw_offset
+    svg_h = 400 + hw_offset
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
 
     t1_y_top = 35 + hw_offset
-    t1_y_bot = (370 if has_latency else 305) + hw_offset
+    t1_y_bot = 305 + hw_offset
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
 
@@ -431,37 +447,8 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
             f' fill="#9ca3af" font-size="10">{hw_label}</text>'
         )
 
-    if has_latency:
-        t2_y_top = t1_y_bot + 80
-        t2_y_bot = t2_y_top + 120
-        draw_latency_panel(
-            L, sizes, xs, lat, impls, x_left, x_right, t2_y_top, t2_y_bot,
-            f"REQ/REP latency: {transport_label} (p50 µs, lower is better)",
-            fixed_lat_max=fixed_lat_max,
-        )
-        leg_y = t2_y_bot + 60
-    else:
-        leg_y = t1_y_bot + 60
-
-    # legend
-    mid_x = (x_left + x_right) / 2
-    legend_items = [(k, LABELS[k]) for k in impls if k in COLORS]
-    item_w = 125
-    total_w = len(legend_items) * item_w
-    start_x = mid_x - total_w / 2
-
-    for i, (key, label) in enumerate(legend_items):
-        lx = start_x + i * item_w
-        c = COLORS[key]
-        L.append(
-            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
-            f' stroke="{c}" stroke-width="2.5"/>'
-        )
-        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
-        L.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
-            f' font-size="11" font-weight="500">{label}</text>'
-        )
+    leg_y = t1_y_bot + 60
+    _draw_impl_legend(L, impls, mid_x, leg_y)
 
     # line-type legend (dashed = msg/s, solid = GB/s)
     lt_y = leg_y + 22
@@ -494,6 +481,57 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
     return "\n".join(L) + "\n"
 
 
+def generate_latency_chart(data: dict, impls: list[str], transport_label: str,
+                           fixed_lat_max: float | None = None,
+                           hw_label: str | None = None) -> str:
+    sizes = data["sizes"]
+    lat = data["lat"]
+    n = len(sizes)
+    if n < 2:
+        return ""
+
+    has_latency = any(s in lat and any(name in lat[s] for name in impls) for s in sizes)
+    if not has_latency:
+        return ""
+
+    hw_offset = 14 if hw_label else 0
+    svg_w = 850
+    svg_h = 280 + hw_offset
+    x_left, x_right = 90, 760
+    plot_w = x_right - x_left
+    mid_x = (x_left + x_right) / 2
+
+    y_top = 35 + hw_offset
+    y_bot = y_top + 150
+
+    xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
+
+    L = []
+    L.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
+        f' font-family="system-ui, -apple-system, sans-serif">'
+    )
+    L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
+
+    if hw_label:
+        L.append(
+            f'  <text x="{mid_x}" y="{y_top - 3}" text-anchor="middle"'
+            f' fill="#9ca3af" font-size="10">{hw_label}</text>'
+        )
+
+    draw_latency_panel(
+        L, sizes, xs, lat, impls, x_left, x_right, y_top, y_bot,
+        f"REQ/REP latency: {transport_label} (p50 µs, lower is better)",
+        fixed_lat_max=fixed_lat_max,
+    )
+
+    leg_y = y_bot + 50
+    _draw_impl_legend(L, impls, mid_x, leg_y)
+
+    L.append("</svg>")
+    return "\n".join(L) + "\n"
+
+
 def load_pubsub_data(transport: str, impls: list[str], peers: int) -> dict:
     rows = load_jsonl()
     t_rows = [r for r in rows
@@ -515,8 +553,8 @@ def load_pubsub_data(transport: str, impls: list[str], peers: int) -> dict:
             seen[key] = run_id
             msgs_s = r.get("msgs_s", 0)
             mbps = r.get("mbps", 0)
-            # Aggregate bandwidth: per-sub rate × peer count.
-            gbs = mbps * peers / 1000.0
+            # mbps is already aggregate (per-sub × peers) from run_comparisons.
+            gbs = mbps / 1000.0
             tput.setdefault(size, {})[impl_name] = (msgs_s, gbs)
 
     sizes = sorted(s for s in tput if s <= 32768)
@@ -641,58 +679,43 @@ def generate_pubsub_chart(
 
 
 def main():
-    FIXED_MSG_MAX = 25e6
-    FIXED_GBS_MAX = 6.0
-    FIXED_LAT_MAX = 100.0
-    FIXED_INPROC_LAT_MAX = 25.0
+    FIXED_MSG_MAX = 20e6
+    FIXED_GBS_MAX = 5.0
+    FIXED_LAT_MAX = 150.0
+    FIXED_INPROC_LAT_MAX = 40.0
     hw = detect_hardware()
 
-    # TCP chart
     tcp_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq", "omq-libzmq"]
-    tcp_data = load_data("tcp", tcp_impls)
-
-    if tcp_data["sizes"]:
-        svg = generate_chart(tcp_data, tcp_impls, "TCP loopback, 2-process",
-                             fixed_msg_max=FIXED_MSG_MAX,
-                             fixed_gbs_max=FIXED_GBS_MAX,
-                             fixed_lat_max=FIXED_LAT_MAX,
-                             hw_label=hw)
-        out = REPO / "doc" / "charts" / "pushpull" / "comparison_tcp.svg"
-        out.write_text(svg)
-        print(f"Written: {out}", file=sys.stderr)
-    else:
-        print("No TCP data found", file=sys.stderr)
-
-    # IPC chart
     ipc_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq", "omq-libzmq"]
-    ipc_data = load_data("ipc", ipc_impls)
-
-    if ipc_data["sizes"]:
-        svg = generate_chart(ipc_data, ipc_impls, "IPC, 2-process",
-                             fixed_msg_max=FIXED_MSG_MAX,
-                             fixed_gbs_max=FIXED_GBS_MAX,
-                             fixed_lat_max=FIXED_LAT_MAX,
-                             hw_label=hw)
-        out = REPO / "doc" / "charts" / "pushpull" / "comparison_ipc.svg"
-        out.write_text(svg)
-        print(f"Written: {out}", file=sys.stderr)
-    else:
-        print("No IPC data found", file=sys.stderr)
-
-    # Inproc chart
     inproc_impls = ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio", "rzmq", "omq-libzmq"]
-    inproc_data = load_data("inproc", inproc_impls)
 
-    if inproc_data["sizes"]:
-        svg = generate_chart(inproc_data, inproc_impls, "inproc", log_gbs=True,
-                             fixed_msg_max=FIXED_MSG_MAX,
-                             fixed_lat_max=FIXED_INPROC_LAT_MAX,
+    for transport, impls, label, log_gbs in [
+        ("tcp", tcp_impls, "TCP loopback, 2-process", False),
+        ("ipc", ipc_impls, "IPC, 2-process", False),
+        ("inproc", inproc_impls, "inproc", True),
+    ]:
+        data = load_data(transport, impls)
+        if not data["sizes"]:
+            print(f"No {transport} data found", file=sys.stderr)
+            continue
+
+        msg_max = 10e6 if transport == "inproc" else FIXED_MSG_MAX
+        svg = generate_chart(data, impls, label, log_gbs=log_gbs,
+                             fixed_msg_max=msg_max,
+                             fixed_gbs_max=None if log_gbs else FIXED_GBS_MAX,
                              hw_label=hw)
-        out = REPO / "doc" / "charts" / "pushpull" / "comparison_inproc.svg"
+        out = REPO / "doc" / "charts" / "pushpull" / f"comparison_{transport}.svg"
         out.write_text(svg)
         print(f"Written: {out}", file=sys.stderr)
-    else:
-        print("No inproc data found", file=sys.stderr)
+
+        lat_max = FIXED_INPROC_LAT_MAX if transport == "inproc" else FIXED_LAT_MAX
+        svg = generate_latency_chart(data, impls, label,
+                                     fixed_lat_max=lat_max, hw_label=hw)
+        if svg:
+            out = REPO / "doc" / "charts" / "reqrep" / f"comparison_{transport}.svg"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(svg)
+            print(f"Written: {out}", file=sys.stderr)
 
     # PUB/SUB charts
     PUBSUB_MSG_MAX = 10e6

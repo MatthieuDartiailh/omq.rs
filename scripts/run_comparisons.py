@@ -228,7 +228,10 @@ def run_throughput_cell(
     rounds: int = DEFAULT_ROUNDS,
 ) -> dict | None:
     best = None
-    for _ in range(rounds):
+    # Extra retries for inproc: compio cross-thread waker bug causes
+    # intermittent hangs. With 5s timeout per attempt, retries are cheap.
+    effective_rounds = max(rounds, 5) if transport == "inproc" else rounds
+    for _ in range(effective_rounds):
         result = _run_throughput_once(binary, transport, addr, size,
                                       inproc_subcmd, duration)
         if result and (best is None or result["msgs_s"] > best["msgs_s"]):
@@ -242,7 +245,10 @@ def _run_throughput_once(
 ) -> dict | None:
     dur = str(duration)
     if transport == "inproc":
-        output = capture_process(binary, inproc_subcmd, addr, str(size), dur)
+        # Shorter timeout: inproc finishes in ~2.5s or hangs forever
+        # (compio cross-thread waker bug). 5s catches hangs faster.
+        output = capture_process(binary, inproc_subcmd, addr, str(size), dur,
+                                 timeout=5)
         return parse_throughput(output, size)
 
     push = spawn_process(binary, "push", addr, str(size))
@@ -580,7 +586,7 @@ IMPLS = {
     },
     "zmq.rs": {
         "prefix": "q",
-        "transports": ["tcp", "ipc"],
+        "transports": ["tcp"],
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
         "supports_pubsub": True,
