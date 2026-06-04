@@ -24,7 +24,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 [How to beat libzmq](doc/performance.md) | [Comparison tables](COMPARISONS.md)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
 </p>
 
 <details>
