@@ -257,6 +257,53 @@ def _run_throughput_once(
     return parse_throughput(output, size)
 
 
+def run_pubsub_cell(
+    binary: str, transport: str, addr: str, size: int, peers: int,
+    inproc_subcmd: str = "inproc-pubsub",
+    duration: float = DEFAULT_DURATION,
+    rounds: int = DEFAULT_ROUNDS,
+) -> dict | None:
+    best = None
+    for _ in range(rounds):
+        result = _run_pubsub_once(binary, transport, addr, size, peers,
+                                  inproc_subcmd, duration)
+        if result and (best is None or result["msgs_s"] > best["msgs_s"]):
+            best = result
+    return best
+
+
+def _run_pubsub_once(
+    binary: str, transport: str, addr: str, size: int, peers: int,
+    inproc_subcmd: str, duration: float,
+) -> dict | None:
+    dur = str(duration)
+    if transport == "inproc":
+        output = capture_process(binary, inproc_subcmd, addr, str(size), dur,
+                                 str(peers))
+        result = parse_throughput(output, size)
+    else:
+        pub_ = spawn_process(binary, "pub", addr, str(size))
+        time.sleep(0.15)
+        if pub_.poll() is not None:
+            print(f"WARNING: pub died (rc={pub_.returncode}) for {binary} {addr}",
+                  file=sys.stderr)
+            return None
+        drain_subs = []
+        try:
+            for _ in range(peers - 1):
+                drain_subs.append(spawn_process(binary, "sub", addr, str(size), dur))
+            time.sleep(0.05)
+            output = capture_process(binary, "sub", addr, str(size), dur)
+        finally:
+            kill_process(pub_)
+            for s in drain_subs:
+                kill_process(s)
+        result = parse_throughput(output, size)
+    if result and peers > 1:
+        result["mbps"] *= peers
+    return result
+
+
 def run_latency_cell(
     binary: str, transport: str, addr: str, size: int,
     inproc_subcmd: str = "inproc-latency",
@@ -503,6 +550,8 @@ IMPLS = {
         "transports": ["tcp", "inproc", "ipc", "ws"],
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
+        "inproc_pubsub_subcmd": "inproc-pubsub",
+        "supports_pubsub": True,
     },
     "omq-compio-st": {
         "binary_from": "omq-compio",
@@ -518,32 +567,42 @@ IMPLS = {
         "transports": ["tcp", "inproc", "ipc", "ws"],
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
+        "inproc_pubsub_subcmd": "inproc-pubsub",
+        "supports_pubsub": True,
     },
     "libzmq": {
         "prefix": "z",
         "transports": ["tcp", "inproc", "ipc", "ws"],
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
+        "inproc_pubsub_subcmd": "inproc-pubsub",
+        "supports_pubsub": True,
     },
     "zmq.rs": {
         "prefix": "q",
         "transports": ["tcp", "ipc"],
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
+        "supports_pubsub": True,
     },
     "rzmq": {
         "prefix": "r",
         "transports": ["tcp", "inproc", "ipc"],
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
+        "supports_pubsub": True,
     },
     "omq-libzmq": {
         "prefix": "m",
         "transports": ["tcp", "inproc", "ipc"],
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
+        "inproc_pubsub_subcmd": "inproc-pubsub",
+        "supports_pubsub": True,
     },
 }
+
+PUBSUB_PEER_COUNTS = [1, 8]
 
 
 def build_peers(impl_names: set[str], ws_needed: bool):
@@ -596,7 +655,7 @@ def build_peers(impl_names: set[str], ws_needed: bool):
             cwd=ROOT, check=True,
         )
         src = ROOT / "scripts" / "libzmq_bench_peer.c"
-        out = ROOT / "scripts" / "omq_zmq_bench_peer"
+        out = ROOT / "scripts" / "omq_libzmq_bench_peer"
         inc = ROOT / "omq-libzmq" / "include"
         lib_dir = ROOT / "target" / "release"
         subprocess.run(
@@ -615,6 +674,8 @@ def run_benchmarks(
     transports: list[str],
     sizes: list[int],
     run_latency: bool,
+    run_pubsub: bool,
+    pubsub_peers: list[int],
     base_port: int,
     run_id: str,
     duration: float = DEFAULT_DURATION,
@@ -709,6 +770,56 @@ def run_benchmarks(
                         line += f"    {'—':>24s}"
                 print(line, file=sys.stderr)
 
+        # pub/sub throughput
+        if not run_pubsub:
+            continue
+        pubsub_active = {
+            name: path for name, path in active.items()
+            if IMPLS[name].get("supports_pubsub")
+        }
+        if pubsub_active:
+            for peers in pubsub_peers:
+                print(f"\n── pub/sub {peers}p: {transport} ──", file=sys.stderr)
+                header = "".join(f"  {name:>22s}" for name in pubsub_active)
+                print(f"{'size':>10s}{header}", file=sys.stderr)
+
+                for idx, size in enumerate(sizes):
+                    cells = {}
+                    for name, binary in pubsub_active.items():
+                        impl_def = IMPLS[name]
+                        prefix = impl_def["prefix"]
+                        port_offset = 200 + peers * 50 + idx
+                        addr = addr_for(transport, prefix, port_offset, base_port)
+                        subcmd = impl_def.get("inproc_pubsub_subcmd",
+                                              "inproc-pubsub")
+                        result = run_pubsub_cell(
+                            binary, transport, addr, size, peers,
+                            inproc_subcmd=subcmd,
+                            duration=duration, rounds=rounds,
+                        )
+                        cells[name] = result
+                        if result:
+                            append_jsonl({
+                                "run_id": run_id,
+                                "impl": name,
+                                "kind": "pub_sub",
+                                "transport": transport,
+                                "peers": peers,
+                                "msg_size": size,
+                                "msgs_s": round(result["msgs_s"], 1),
+                                "mbps": round(result["mbps"], 1),
+                            })
+
+                    line = f"{size_label(size):>10s}"
+                    for name in pubsub_active:
+                        r = cells.get(name)
+                        if r:
+                            line += (f"  {r['msgs_s']:>9.0f} msg/s"
+                                     f" {r['mbps']:>6.1f} MB/s")
+                        else:
+                            line += f"  {'—':>9s} msg/s {'—':>6s} MB/s"
+                    print(line, file=sys.stderr)
+
     print(file=sys.stderr)
 
 
@@ -739,6 +850,14 @@ def main():
     parser.add_argument(
         "--no-latency", action="store_true",
         help="skip REQ/REP latency benchmarks (on by default)",
+    )
+    parser.add_argument(
+        "--no-pubsub", action="store_true",
+        help="skip PUB/SUB throughput benchmarks",
+    )
+    parser.add_argument(
+        "--pubsub-peers", type=str, default=None,
+        help=f"comma-separated peer counts for PUB/SUB (default: {','.join(str(p) for p in PUBSUB_PEER_COUNTS)})",
     )
     parser.add_argument(
         "--latency-iterations", type=int, default=LATENCY_ITERATIONS,
@@ -776,6 +895,11 @@ def main():
         rounds = args.rounds if args.rounds is not None else DEFAULT_ROUNDS
     run_id = args.id or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     run_latency = not args.no_latency
+    run_pubsub = not args.no_pubsub
+    pubsub_peers = (
+        [int(x) for x in args.pubsub_peers.split(",")]
+        if args.pubsub_peers else PUBSUB_PEER_COUNTS
+    )
     ws_needed = "ws" in transports
 
     impl_names = set(args.impls) if args.impls else set(IMPLS.keys())
@@ -796,7 +920,8 @@ def main():
     print(" vs ".join(versions), file=sys.stderr)
 
     base_port = args.base_port or random.randint(20_000, 40_000)
-    run_benchmarks(binaries, transports, sizes, run_latency, base_port, run_id,
+    run_benchmarks(binaries, transports, sizes, run_latency,
+                   run_pubsub, pubsub_peers, base_port, run_id,
                    duration=duration, rounds=rounds,
                    latency_iterations=args.latency_iterations,
                    latency_warmup=args.latency_warmup,

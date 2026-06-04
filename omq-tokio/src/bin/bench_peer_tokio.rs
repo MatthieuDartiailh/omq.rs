@@ -96,6 +96,24 @@ async fn main() {
             let warmup: usize = args[5].parse().expect("warmup");
             run_req(ep, size, iterations, warmup).await;
         }
+        Some("pub") => {
+            let ep = parse_ep(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            run_pub(ep, size).await;
+        }
+        Some("sub") => {
+            let ep = parse_ep(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            run_sub(ep, size, Duration::from_secs_f64(duration)).await;
+        }
+        Some("inproc-pubsub") => {
+            let name = args[2].clone();
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            let peers: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
+            run_inproc_pubsub(name, size, Duration::from_secs_f64(duration), peers).await;
+        }
         Some("wire-size") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
@@ -129,6 +147,125 @@ async fn main() {
     }
 }
 
+async fn retry_bind(sock: &Socket, ep: &Endpoint) {
+    for attempt in 0..20 {
+        match sock.bind(ep.clone()).await {
+            Ok(_) => return,
+            Err(e) if attempt < 19 => {
+                eprintln!("bind retry {attempt}: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("bind failed after retries: {e}"),
+        }
+    }
+}
+
+async fn run_pub(ep: Endpoint, size: usize) {
+    let pub_ = Socket::new(
+        SocketType::Pub,
+        bench_options(size).on_mute(omq_tokio::OnMute::Block),
+    );
+    retry_bind(&pub_, &ep).await;
+    let payload = bench_payload(size);
+    loop {
+        if pub_.send(Message::single(payload.clone())).await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn run_sub(ep: Endpoint, size: usize, duration: Duration) {
+    let sub = Socket::new(SocketType::Sub, bench_options(size));
+    sub.connect(ep.clone()).await.expect("sub connect");
+    sub.subscribe(Bytes::new()).await.expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        sub.recv().await.unwrap();
+        count += 1;
+        while sub.try_recv().is_ok() {
+            count += 1;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!("{count} {elapsed:.6} {size}");
+    eprint_pull_summary(&ep, count, elapsed, size);
+}
+
+async fn run_inproc_pubsub(name: String, size: usize, duration: Duration, peers: usize) {
+    let ep = Endpoint::Inproc { name };
+    let pub_ = Socket::new(
+        SocketType::Pub,
+        bench_options(size).on_mute(omq_tokio::OnMute::Block),
+    );
+    pub_.bind(ep.clone()).await.expect("pub bind");
+
+    let mut subs = Vec::with_capacity(peers);
+    for _ in 0..peers {
+        let s = Socket::new(SocketType::Sub, bench_options(size));
+        s.connect(ep.clone()).await.expect("sub connect");
+        s.subscribe(Bytes::new()).await.expect("subscribe");
+        subs.push(s);
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let payload = Bytes::from(vec![b'x'; size]);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let pub_handle = tokio::spawn(async move {
+        loop {
+            if pub_.send(Message::single(payload.clone())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Drain all non-measured subscribers so PUB doesn't block on HWM.
+    let mut drain_handles = Vec::new();
+    let stop_c = stop.clone();
+    for s in subs.drain(1..) {
+        let stop_c = stop_c.clone();
+        drain_handles.push(tokio::spawn(async move {
+            while !stop_c.load(std::sync::atomic::Ordering::Relaxed) {
+                if s.recv().await.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let measured = subs.into_iter().next().unwrap();
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        measured.recv().await.unwrap();
+        count += 1;
+        while measured.try_recv().is_ok() {
+            count += 1;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    pub_handle.abort();
+    for h in drain_handles {
+        h.abort();
+    }
+    println!("{count} {elapsed:.6} {size}");
+}
+
 fn bench_options(msg_size: usize) -> Options {
     let mut o = Options::default();
     if msg_size >= 2 * 1024 * 1024 {
@@ -144,10 +281,12 @@ fn bench_options(msg_size: usize) -> Options {
 
 async fn run_push(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options(size));
-    push.bind(ep).await.expect("push bind");
+    retry_bind(&push, &ep).await;
     let payload = bench_payload(size);
     loop {
-        push.send(Message::single(payload.clone())).await.unwrap();
+        if push.send(Message::single(payload.clone())).await.is_err() {
+            break;
+        }
     }
 }
 
@@ -301,7 +440,7 @@ async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup
 
 async fn run_rep(ep: Endpoint, size: usize) {
     let rep = Socket::new(SocketType::Rep, bench_options(size));
-    rep.bind(ep).await.expect("rep bind");
+    retry_bind(&rep, &ep).await;
     loop {
         let msg = rep.recv().await.unwrap();
         rep.send(msg).await.unwrap();
