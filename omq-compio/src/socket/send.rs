@@ -568,6 +568,10 @@ impl Socket {
                 .map(|(_, p)| p.out.clone())
                 .collect()
         };
+        if stream_targets.is_empty() {
+            crate::yield_now().await;
+            return Ok(());
+        }
         for peer in stream_targets {
             let _ = peer.send(msg.clone()).await;
         }
@@ -589,6 +593,10 @@ impl Socket {
                 })
                 .collect()
         };
+        if targets.is_empty() {
+            crate::yield_now().await;
+            return Ok(());
+        }
         for peer in targets {
             let _ = peer.send(msg.clone()).await;
         }
