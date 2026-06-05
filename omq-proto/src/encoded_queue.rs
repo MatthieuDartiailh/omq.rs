@@ -112,6 +112,14 @@ impl EncodedQueue {
         }
     }
 
+    pub fn push_shared_chunks(&mut self, chunks: &[Bytes]) {
+        self.flush_flat_to_chunks();
+        for chunk in chunks {
+            self.total_bytes += chunk.len();
+            self.chunks.push_back(chunk.clone());
+        }
+    }
+
     pub fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         let take = max_chunks.min(self.chunks.len());
         let chunk_bytes: usize = self.chunks.iter().take(take).map(Bytes::len).sum();

@@ -38,6 +38,11 @@ impl SubscriptionSet {
         }
     }
 
+    /// True if the empty prefix has been subscribed (match-all).
+    pub fn is_subscribe_all(&self) -> bool {
+        self.subscribe_all
+    }
+
     /// True if `topic` is matched by any subscription. O(M) walk.
     pub fn matches(&self, topic: &[u8]) -> bool {
         if self.subscribe_all {
