@@ -16,6 +16,8 @@ Usage:
 """
 
 import argparse
+import atexit
+import glob
 import json
 import os
 import random
@@ -28,6 +30,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _cleanup_ipc_sockets():
+    """Remove stale IPC socket files left by benchmark peers."""
+    for p in glob.glob(str(ROOT / "@omq-bench-cmp-*")):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
 COMPARISONS_MD = ROOT / "COMPARISONS.md"
@@ -608,7 +619,7 @@ IMPLS = {
     },
 }
 
-PUBSUB_PEER_COUNTS = [1, 8]
+PUBSUB_PEER_COUNTS = [1, 8, 64]
 
 
 def build_peers(impl_names: set[str], ws_needed: bool):
@@ -690,6 +701,8 @@ def run_benchmarks(
     latency_warmup: int = LATENCY_WARMUP,
     latency_timeout: int = LATENCY_TIMEOUT,
 ):
+    _cleanup_ipc_sockets()
+    atexit.register(_cleanup_ipc_sockets)
     for transport in transports:
         active = {
             name: path for name, path in binaries.items()

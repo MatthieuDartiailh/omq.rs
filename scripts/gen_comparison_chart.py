@@ -721,7 +721,7 @@ def main():
     PUBSUB_MSG_MAX = 10e6
     PUBSUB_GBS_MAX = 8.0
     pubsub_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq", "omq-libzmq"]
-    pubsub_peer_counts = [1, 8]
+    pubsub_peer_counts = [1, 8, 64]
 
     for transport, label, log in [
         ("tcp", "TCP loopback", False),
@@ -741,7 +741,7 @@ def main():
             scale_overrides={
                 1: (PUBSUB_MSG_MAX, 6.0),
                 8: (2e6, PUBSUB_GBS_MAX),
-                64: (500e3, PUBSUB_GBS_MAX),
+                64: (300e3, 12.0),
             },
             hw_label=hw,
         )

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 294" font-family="system-ui, -apple-system, sans-serif">
   <rect width="850" height="294" fill="white"/>
-  <text x="425.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Intel Core i7-8700B @ 3.20GHz, 6 cores, performance governor, turbo off</text>
+  <text x="425.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Intel Core i7-8700B @ 3.20GHz, 6 cores</text>
   <text x="425.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">REQ/REP latency: IPC, 2-process (p50 µs, lower is better)</text>
   <line x1="90.0" y1="179.0" x2="760.0" y2="179.0" stroke="#e5e7eb" stroke-width="1"/>
   <text x="82.0" y="179.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">20</text>

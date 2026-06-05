@@ -151,7 +151,7 @@
   <text x="648.3" y="333.0" text-anchor="middle" fill="#374151" font-size="8.5">8 KiB</text>
   <text x="704.2" y="333.0" text-anchor="middle" fill="#374151" font-size="8.5">16 KiB</text>
   <text x="760.0" y="333.0" text-anchor="middle" fill="#374151" font-size="8.5">32 KiB</text>
-  <text x="425.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Intel Core i7-8700B @ 3.20GHz, 6 cores, performance governor, turbo off</text>
+  <text x="425.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Intel Core i7-8700B @ 3.20GHz, 6 cores</text>
   <line x1="50" y1="379" x2="64" y2="379" stroke="#eab308" stroke-width="2.5"/>
   <circle cx="57" cy="379" r="2.5" fill="#eab308"/>
   <text x="70" y="383" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5</text>
