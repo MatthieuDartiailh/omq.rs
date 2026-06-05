@@ -46,7 +46,7 @@ crypto_box = { version = "0.9", features = ["std"], optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
 subtle = { version = "2", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"], optional = true }
-lz4rip = { version = "0.1.0", default-features = false, optional = true }
+lz4rip = { version = "0.2.0", default-features = false, optional = true }
 rand = "0.10"
 zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"], optional = true }
 patricia_tree = "0.10"
