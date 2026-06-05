@@ -1,5 +1,7 @@
 //! PUB / SUB integration tests.
 
+mod test_support;
+
 use std::time::Duration;
 
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
@@ -175,4 +177,75 @@ async fn sub_replays_subscriptions_on_new_peer() {
     assert_eq!(m.part_bytes(0).unwrap(), &b"x.hello"[..]);
     let other = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
+}
+
+/// Multiple TCP subscribers with `subscribe_all`. Exercises the
+/// `all_subscribe_all` fast path in `FanOutSend`.
+#[tokio::test]
+async fn pub_tcp_multi_sub_all_receive() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let port = test_support::bind_loopback(&pub_).await;
+
+    let mut subs = Vec::new();
+    for _ in 0..4 {
+        let s = Socket::new(SocketType::Sub, Options::default());
+        s.subscribe(bytes::Bytes::new()).await.unwrap();
+        s.connect(test_support::tcp_loopback(port)).await.unwrap();
+        subs.push(s);
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for i in 0u32..20 {
+        pub_.send(Message::single(i.to_le_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+
+    for sub in &subs {
+        let m = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+            .await
+            .expect("sub timed out")
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap().len(), 4);
+    }
+}
+
+/// Subscriber churn: connect, receive, drop, repeat. The
+/// `all_subscribe_all` / `all_queues` cache must be invalidated and
+/// rebuilt correctly on peer remove + re-add.
+#[tokio::test]
+async fn pub_tcp_subscriber_churn() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let port = test_support::bind_loopback(&pub_).await;
+
+    for round in 0..3u32 {
+        let s1 = Socket::new(SocketType::Sub, Options::default());
+        s1.subscribe(bytes::Bytes::new()).await.unwrap();
+        s1.connect(test_support::tcp_loopback(port)).await.unwrap();
+
+        let s2 = Socket::new(SocketType::Sub, Options::default());
+        s2.subscribe(bytes::Bytes::new()).await.unwrap();
+        s2.connect(test_support::tcp_loopback(port)).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let tag = format!("round-{round}");
+        pub_.send(Message::single(tag.clone())).await.unwrap();
+
+        let m1 = tokio::time::timeout(Duration::from_secs(2), s1.recv())
+            .await
+            .expect("s1 timed out")
+            .unwrap();
+        assert_eq!(m1.part_bytes(0).unwrap(), tag.as_bytes());
+
+        let m2 = tokio::time::timeout(Duration::from_secs(2), s2.recv())
+            .await
+            .expect("s2 timed out")
+            .unwrap();
+        assert_eq!(m2.part_bytes(0).unwrap(), tag.as_bytes());
+
+        drop(s1);
+        drop(s2);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

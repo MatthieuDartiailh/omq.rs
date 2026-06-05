@@ -248,3 +248,37 @@ async fn three_req_to_one_rep_direct_io_routing() {
         );
     }
 }
+
+/// REP serves multiple REQ clients that connect and disconnect in
+/// sequence. Each new REQ must complete a full request/reply cycle.
+#[tokio::test]
+async fn rep_tcp_serves_sequential_clients() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let port = test_support::bind_loopback(&rep).await;
+
+    for round in 0..4u32 {
+        let req = Socket::new(SocketType::Req, Options::default());
+        req.connect(tcp_ep(port)).await.unwrap();
+
+        let question = format!("q-{round}");
+        req.send(Message::single(question.clone())).await.unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+            .await
+            .expect("rep.recv timed out")
+            .unwrap();
+        assert_eq!(got.part_bytes(0).unwrap(), question.as_bytes());
+
+        let answer = format!("a-{round}");
+        rep.send(Message::single(answer.clone())).await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
+            .await
+            .expect("req.recv timed out")
+            .unwrap();
+        assert_eq!(reply.part_bytes(0).unwrap(), answer.as_bytes());
+
+        drop(req);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
