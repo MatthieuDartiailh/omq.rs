@@ -19,6 +19,7 @@
 //! connection.
 
 use bytes::Bytes;
+use lz4rip::block::{self, Compressor, Decompressor};
 use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
@@ -53,33 +54,6 @@ const MIN_COMPRESS_WITH_DICT: usize = 128;
 /// Maximum LZ4 dictionary size in bytes (RFC §6.2).
 pub const MAX_DICT_BYTES: usize = 8192;
 
-// Dict-aware bindings missing from `lz4-sys` 1.11. The symbols live in
-// the `liblz4` static lib that `lz4-sys` already links (`links = "lz4"`).
-unsafe extern "C" {
-    fn LZ4_loadDict(
-        stream: *mut lz4_sys::LZ4StreamEncode,
-        dictionary: *const u8,
-        dictSize: i32,
-    ) -> i32;
-    fn LZ4_compress_fast_continue(
-        stream: *mut lz4_sys::LZ4StreamEncode,
-        src: *const u8,
-        dst: *mut u8,
-        srcSize: i32,
-        dstCapacity: i32,
-        acceleration: i32,
-    ) -> i32;
-    fn LZ4_decompress_safe_usingDict(
-        src: *const u8,
-        dst: *mut u8,
-        compressedSize: i32,
-        maxDecompressedSize: i32,
-        dictStart: *const u8,
-        dictSize: i32,
-    ) -> i32;
-    fn LZ4_resetStream(stream: *mut lz4_sys::LZ4StreamEncode);
-}
-
 /// Send-side per-connection LZ4 state.
 pub struct Lz4Encoder {
     /// Outbound dict, validated at construction. Shipped on the first
@@ -94,21 +68,10 @@ pub struct Lz4Encoder {
     block_size: usize,
     /// Reusable compression output buffer.
     out_buf: Vec<u8>,
-    /// Cached LZ4 compress stream for dict-aware compression.
-    stream: *mut lz4_sys::LZ4StreamEncode,
+    /// Reusable block compressor (optionally dict-seeded).
+    compressor: Compressor,
     /// User override for the compression threshold.
     threshold_override: Option<usize>,
-}
-
-// LZ4 streams are pure data; no thread-locals or globals are touched.
-unsafe impl Send for Lz4Encoder {}
-
-impl Drop for Lz4Encoder {
-    fn drop(&mut self) {
-        if !self.stream.is_null() {
-            unsafe { lz4_sys::LZ4_freeStream(self.stream) };
-        }
-    }
 }
 
 impl Default for Lz4Encoder {
@@ -119,7 +82,7 @@ impl Default for Lz4Encoder {
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
             out_buf: Vec::new(),
-            stream: std::ptr::null_mut(),
+            compressor: Compressor::new(),
             threshold_override: None,
         }
     }
@@ -146,13 +109,14 @@ impl Lz4Encoder {
     /// [`MAX_DICT_BYTES`].
     pub fn with_send_dict(dict: Bytes) -> Result<Self> {
         validate_dict(&dict, "LZ4", MAX_DICT_BYTES)?;
+        let compressor = Compressor::with_dict(&dict);
         Ok(Self {
             send_dict: Some(dict),
             send_dict_shipped: false,
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
             out_buf: Vec::new(),
-            stream: std::ptr::null_mut(),
+            compressor,
             threshold_override: None,
         })
     }
@@ -213,18 +177,22 @@ impl Lz4Encoder {
         self.send_dict.is_none() || self.send_dict_shipped
     }
 
-    /// Create a pool encoder with the same config but its own stream.
+    /// Create a pool encoder with the same config but its own compressor.
     /// The returned encoder has `send_dict_shipped = true` (never
-    /// re-ships the dict) and a lazy-initialized stream.
+    /// re-ships the dict) and a fresh compressor.
     #[must_use]
     pub fn new_offload(&self) -> Self {
+        let compressor = match &self.send_dict {
+            Some(d) => Compressor::with_dict(d),
+            None => Compressor::new(),
+        };
         Self {
             send_dict: self.send_dict.clone(),
             send_dict_shipped: true,
             max_message_size: self.max_message_size,
             block_size: self.block_size,
             out_buf: Vec::new(),
-            stream: std::ptr::null_mut(),
+            compressor,
             threshold_override: self.threshold_override,
         }
     }
@@ -249,7 +217,6 @@ impl Lz4Encoder {
         Ok(out)
     }
 
-    #[expect(clippy::cast_possible_wrap)]
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
         let plain = part.as_bytes();
         if plain.len() < self.effective_threshold() {
@@ -258,25 +225,14 @@ impl Lz4Encoder {
         if plain.len() > self.block_size {
             return self.encode_part_multiblock(&plain);
         }
-        let src_i32 = plain.len() as i32;
-        let bound = unsafe { lz4_sys::LZ4_compressBound(src_i32) };
-        if bound <= 0 {
-            return Err(Error::Protocol(format!(
-                "lz4 compressBound rejected input of {} bytes",
-                plain.len()
-            )));
+        let bound = block::get_maximum_output_size(plain.len());
+        if self.out_buf.len() < ENVELOPE_LZ4B + bound {
+            self.out_buf.resize(ENVELOPE_LZ4B + bound, 0);
         }
-        let max = bound as usize;
-        if self.out_buf.len() < ENVELOPE_LZ4B + max {
-            self.out_buf.resize(ENVELOPE_LZ4B + max, 0);
-        }
-        ensure_stream(&mut self.stream)?;
-        let n = compress_block(
-            self.stream,
-            self.send_dict.as_ref(),
-            plain.as_ref(),
-            &mut self.out_buf[ENVELOPE_LZ4B..],
-        )?;
+        let n = self
+            .compressor
+            .compress_into(&plain, &mut self.out_buf[ENVELOPE_LZ4B..])
+            .map_err(|e| Error::Protocol(format!("lz4 compress: {e}")))?;
         // RFC §5.4: passthrough if the compressed envelope is no smaller
         // than the plaintext envelope.
         if n + ENVELOPE_LZ4B >= plain.len() + ENVELOPE_PLAIN {
@@ -289,12 +245,11 @@ impl Lz4Encoder {
         )))
     }
 
-    #[expect(clippy::cast_possible_wrap)]
     fn encode_part_multiblock(&mut self, plain: &[u8]) -> Result<Payload> {
         let total = plain.len();
         let block_size = self.block_size;
         let num_blocks = total.div_ceil(block_size);
-        let block_bound = unsafe { lz4_sys::LZ4_compressBound(block_size as i32) } as usize;
+        let block_bound = block::get_maximum_output_size(block_size);
         let max_out = ENVELOPE_LZ4B + num_blocks * (4 + block_bound);
         if self.out_buf.len() < max_out {
             self.out_buf.resize(max_out, 0);
@@ -304,14 +259,12 @@ impl Lz4Encoder {
         self.out_buf[4..12].copy_from_slice(&(total as u64).to_le_bytes());
         let mut pos = ENVELOPE_LZ4B;
 
-        ensure_stream(&mut self.stream)?;
         for chunk in plain.chunks(block_size) {
-            let n = compress_block(
-                self.stream,
-                self.send_dict.as_ref(),
-                chunk,
-                &mut self.out_buf[pos + 4..],
-            )?;
+            let n = self
+                .compressor
+                .compress_into(chunk, &mut self.out_buf[pos + 4..])
+                .map_err(|e| Error::Protocol(format!("lz4 compress: {e}")))?;
+            #[expect(clippy::cast_possible_truncation)]
             self.out_buf[pos..pos + 4].copy_from_slice(&(n as u32).to_le_bytes());
             pos += 4 + n;
         }
@@ -325,8 +278,8 @@ impl Lz4Encoder {
 /// Receive-side per-connection LZ4 state.
 #[derive(Debug)]
 pub struct Lz4Decoder {
-    /// Inbound dict installed on receipt of the peer's LZ4D shipment.
-    recv_dict: Option<Bytes>,
+    /// Inbound decompressor, created on receipt of the peer's LZ4D shipment.
+    decompressor: Option<Decompressor>,
     /// Decompression budget, in bytes. `None` = use the absolute ceiling.
     max_message_size: Option<usize>,
     /// Per-block decompressed size limit. Must match the encoder's value.
@@ -338,7 +291,7 @@ pub struct Lz4Decoder {
 impl Default for Lz4Decoder {
     fn default() -> Self {
         Self {
-            recv_dict: None,
+            decompressor: None,
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
             max_recv_dict_size: MAX_DICT_BYTES,
@@ -401,7 +354,7 @@ impl Lz4Decoder {
                 SENTINEL_LZ4B => {
                     out.push_part_payload(decode_lz4b(
                         &bytes[4..],
-                        self.recv_dict.as_ref(),
+                        self.decompressor.as_ref(),
                         &mut budget_left,
                         self.block_size,
                     )?);
@@ -409,7 +362,7 @@ impl Lz4Decoder {
                 SENTINEL_LZ4M => {
                     out.push_part_payload(decode_lz4m(
                         &bytes[4..],
-                        self.recv_dict.as_ref(),
+                        self.decompressor.as_ref(),
                         &mut budget_left,
                         self.block_size,
                     )?);
@@ -420,14 +373,14 @@ impl Lz4Decoder {
                             "LZ4D dict shipment must be a single-part message".into(),
                         ));
                     }
-                    if self.recv_dict.is_some() {
+                    if self.decompressor.is_some() {
                         return Err(Error::Protocol(
                             "LZ4D shipped twice on the same connection".into(),
                         ));
                     }
                     let dict = bytes.slice(4..);
                     validate_dict(&dict, "LZ4", self.max_recv_dict_size)?;
-                    self.recv_dict = Some(dict);
+                    self.decompressor = Some(Decompressor::with_dict(&dict));
                     return Ok(None);
                 }
                 _ => {
@@ -439,52 +392,9 @@ impl Lz4Decoder {
     }
 }
 
-fn ensure_stream(stream: &mut *mut lz4_sys::LZ4StreamEncode) -> Result<()> {
-    if stream.is_null() {
-        *stream = unsafe { lz4_sys::LZ4_createStream() };
-        if stream.is_null() {
-            return Err(Error::Protocol("lz4 createStream returned null".into()));
-        }
-    }
-    Ok(())
-}
-
-#[expect(clippy::cast_possible_wrap)]
-fn compress_block(
-    stream: *mut lz4_sys::LZ4StreamEncode,
-    dict: Option<&Bytes>,
-    src: &[u8],
-    dst: &mut [u8],
-) -> Result<usize> {
-    let src_i32 = i32::try_from(src.len())
-        .map_err(|_| Error::Protocol("LZ4 block input exceeds i32".into()))?;
-    let dst_i32 = i32::try_from(dst.len())
-        .map_err(|_| Error::Protocol("LZ4 block output capacity exceeds i32".into()))?;
-    let n = match dict {
-        Some(d) => unsafe {
-            LZ4_resetStream(stream);
-            LZ4_loadDict(stream, d.as_ptr(), d.len() as i32);
-            LZ4_compress_fast_continue(stream, src.as_ptr(), dst.as_mut_ptr(), src_i32, dst_i32, 1)
-        },
-        None => unsafe {
-            lz4_sys::LZ4_compress_default(
-                src.as_ptr().cast(),
-                dst.as_mut_ptr().cast(),
-                src_i32,
-                dst_i32,
-            )
-        },
-    };
-    if n <= 0 {
-        return Err(Error::Protocol(format!("lz4 compress returned {n}")));
-    }
-    Ok(n as usize)
-}
-
-#[expect(clippy::cast_possible_wrap)]
 fn decode_lz4b(
     body: &[u8],
-    dict: Option<&Bytes>,
+    decompressor: Option<&Decompressor>,
     budget: &mut Option<usize>,
     block_size: usize,
 ) -> Result<Payload> {
@@ -503,34 +413,15 @@ fn decode_lz4b(
         ));
     }
     take_budget(budget, decompressed_size)?;
-    let block_len = i32::try_from(block.len())
-        .map_err(|_| Error::Protocol("LZ4B block length exceeds i32".into()))?;
-    let dst_cap = decompressed_size as i32;
     let mut out = vec![0u8; decompressed_size];
-    let n = match dict {
-        Some(d) => unsafe {
-            LZ4_decompress_safe_usingDict(
-                block.as_ptr(),
-                out.as_mut_ptr(),
-                block_len,
-                dst_cap,
-                d.as_ptr(),
-                d.len() as i32,
-            )
-        },
-        None => unsafe {
-            lz4_sys::LZ4_decompress_safe(
-                block.as_ptr().cast(),
-                out.as_mut_ptr().cast(),
-                block_len,
-                dst_cap,
-            )
-        },
+    let n = match decompressor {
+        Some(d) => d
+            .decompress_into(block, &mut out)
+            .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
+        None => block::decompress_into(block, &mut out)
+            .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
     };
-    if n < 0 {
-        return Err(Error::Protocol(format!("lz4 decompress returned {n}")));
-    }
-    if n as usize != decompressed_size {
+    if n != decompressed_size {
         return Err(Error::Protocol(
             "LZ4B decompressed length does not match declared".into(),
         ));
@@ -538,10 +429,9 @@ fn decode_lz4b(
     Ok(Payload::from_bytes(Bytes::from(out)))
 }
 
-#[expect(clippy::cast_possible_wrap)]
 fn decode_lz4m(
     body: &[u8],
-    dict: Option<&Bytes>,
+    decompressor: Option<&Decompressor>,
     budget: &mut Option<usize>,
     block_size: usize,
 ) -> Result<Payload> {
@@ -569,39 +459,21 @@ fn decode_lz4m(
         if src_pos + compressed_len > body.len() {
             return Err(Error::Protocol("LZ4M truncated block data".into()));
         }
-        let block = &body[src_pos..src_pos + compressed_len];
+        let block_data = &body[src_pos..src_pos + compressed_len];
         src_pos += compressed_len;
 
         let remaining = decompressed_size - dst_pos;
         let block_decompressed = remaining.min(block_size);
-        let block_len = i32::try_from(compressed_len)
-            .map_err(|_| Error::Protocol("LZ4M block length exceeds i32".into()))?;
-        let dst_cap = block_decompressed as i32;
 
-        let n = match dict {
-            Some(d) => unsafe {
-                LZ4_decompress_safe_usingDict(
-                    block.as_ptr(),
-                    out[dst_pos..].as_mut_ptr(),
-                    block_len,
-                    dst_cap,
-                    d.as_ptr(),
-                    d.len() as i32,
-                )
-            },
-            None => unsafe {
-                lz4_sys::LZ4_decompress_safe(
-                    block.as_ptr().cast(),
-                    out[dst_pos..].as_mut_ptr().cast(),
-                    block_len,
-                    dst_cap,
-                )
-            },
+        let n = match decompressor {
+            Some(d) => d
+                .decompress_into(block_data, &mut out[dst_pos..dst_pos + block_decompressed])
+                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
+            None => {
+                block::decompress_into(block_data, &mut out[dst_pos..dst_pos + block_decompressed])
+                    .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?
+            }
         };
-        if n < 0 {
-            return Err(Error::Protocol(format!("lz4 decompress returned {n}")));
-        }
-        let n = n as usize;
         if n != block_decompressed {
             return Err(Error::Protocol(
                 "LZ4M block decompressed length mismatch".into(),
@@ -968,7 +840,6 @@ mod tests {
         assert!(offload.send_dict_shipped);
         assert_eq!(offload.block_size, TEST_BLOCK);
         assert_eq!(offload.threshold_override, Some(256));
-        assert!(offload.stream.is_null());
     }
 
     #[test]
