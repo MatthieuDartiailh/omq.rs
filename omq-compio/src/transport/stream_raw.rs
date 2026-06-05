@@ -89,7 +89,7 @@ pub(crate) async fn run(
                     }
                 }
                 DriverCommand::Close => break,
-                DriverCommand::SendCommand(_) => {}
+                DriverCommand::SendEncoded(_) | DriverCommand::SendCommand(_) => {}
             }
         }
         write_stop.notify(usize::MAX);

@@ -119,9 +119,7 @@ pub(crate) fn spawn_radio_sender(
                             let _ = sock.send(&dgram).await;
                         }
                     }
-                    // SendCommand on UDP is meaningless (no JOIN/LEAVE
-                    // exchange on the wire); discard.
-                    Some(DriverCommand::SendCommand(_)) => {},
+                    Some(DriverCommand::SendEncoded(_) | DriverCommand::SendCommand(_)) => {},
                     Some(DriverCommand::Close) | None => break,
                 }
             }

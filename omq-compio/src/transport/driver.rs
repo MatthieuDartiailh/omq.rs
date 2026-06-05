@@ -104,6 +104,7 @@ impl DriverLoopState {
 #[derive(Debug)]
 pub enum DriverCommand {
     SendMessage(Message),
+    SendEncoded(std::sync::Arc<smallvec::SmallVec<[bytes::Bytes; 4]>>),
     SendCommand(Command),
     Close,
 }
@@ -252,6 +253,10 @@ impl DriverLoopState {
                         eq.encode_auto(&m);
                     }
                 }
+                DriverCommand::SendEncoded(chunks) => {
+                    let mut eq = state.encoded_queue.borrow_mut();
+                    eq.push_shared_chunks(&chunks);
+                }
                 DriverCommand::SendCommand(c) => {
                     io.codec.send_command(&c)?;
                 }
@@ -296,6 +301,11 @@ impl DriverLoopState {
                 match cmd {
                     DriverCommand::SendMessage(m) => {
                         self.encode_outbound_message(state, &m, cap).await?
+                    }
+                    DriverCommand::SendEncoded(chunks) => {
+                        let mut eq = state.encoded_queue.borrow_mut();
+                        eq.push_shared_chunks(&chunks);
+                        eq.total_bytes() >= cap
                     }
                     DriverCommand::SendCommand(c) => {
                         let mut io = state.lock_io();

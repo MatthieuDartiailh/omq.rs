@@ -825,6 +825,7 @@ async fn inproc_peer_driver(
                             return;
                         }
                     }
+                    Some(DriverCommand::SendEncoded(_)) => {}
                     Some(DriverCommand::SendCommand(c)) => {
                         if out.send(InboundFrame::Command(Box::new(c))).await.is_err() {
                             return;

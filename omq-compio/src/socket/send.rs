@@ -125,6 +125,41 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
     Ok(true)
 }
 
+/// Push pre-encoded ZMTP chunks directly into a peer's `EncodedQueue`,
+/// bypassing the flume channel. Returns `true` on success.
+///
+/// Falls back (returns `false`) when the peer uses crypto, transforms,
+/// WebSocket framing, hasn't finished the handshake, or when the
+/// queue is already borrowed or above the capacity cap.
+fn direct_push_encoded(
+    state: &DirectIoState,
+    encoded: &smallvec::SmallVec<[bytes::Bytes; 4]>,
+) -> bool {
+    const DIRECT_CAP: usize = 512 * 1024;
+    const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
+
+    if state.uses_crypto || state.has_transform {
+        return false;
+    }
+    #[cfg(feature = "ws")]
+    if state.is_ws {
+        return false;
+    }
+    if !state.handshake_done.get() {
+        return false;
+    }
+    let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
+        return false;
+    };
+    if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
+        return false;
+    }
+    eq.push_shared_chunks(encoded);
+    drop(eq);
+    state.signal_encoded();
+    true
+}
+
 /// Whether `Socket::send` must run `TypeState::pre_send` for this
 /// socket type. Stateful for REQ / REP (envelope + alternation);
 /// stateless validation for draft-RFC types (Client / Scatter /
@@ -579,9 +614,43 @@ impl Socket {
     }
 
     async fn send_pub_filtered(&self, msg: Message) -> Result<()> {
+        let inner = self.inner();
+        if inner
+            .pub_sub_dirty
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            inner.recompute_pub_all_match_all();
+        }
+        if inner.pub_all_match_all.get() {
+            let targets = unsafe { &*inner.pub_all_match_cache.get() };
+            if targets.is_empty() {
+                crate::yield_now().await;
+                return Ok(());
+            }
+            if targets.len() > 1 && inner.pub_all_wire.get() {
+                let encoded = pre_encode_compio(&msg);
+                let dio_cache = unsafe { &*inner.pub_direct_io_cache.get() };
+                if dio_cache.len() == targets.len() {
+                    for (i, state) in dio_cache.iter().enumerate() {
+                        if !direct_push_encoded(state, &encoded) {
+                            let _ = targets[i].send(msg.clone()).await;
+                        }
+                    }
+                } else {
+                    for peer in targets {
+                        let _ = peer.send(msg.clone()).await;
+                    }
+                }
+                return Ok(());
+            }
+            for peer in targets {
+                let _ = peer.send(msg.clone()).await;
+            }
+            return Ok(());
+        }
         let topic = msg.part_bytes(0).unwrap_or_default();
         let targets: Vec<PeerOut> = {
-            let peers = self.inner().out_peers.read().expect("peers lock");
+            let peers = inner.out_peers.read().expect("peers lock");
             peers
                 .iter()
                 .filter_map(|(_, slot)| {
@@ -764,9 +833,39 @@ impl Socket {
     }
 
     fn try_send_pub_filtered(&self, msg: &Message) {
+        let inner = self.inner();
+        if inner
+            .pub_sub_dirty
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            inner.recompute_pub_all_match_all();
+        }
+        if inner.pub_all_match_all.get() {
+            let targets = unsafe { &*inner.pub_all_match_cache.get() };
+            if targets.len() > 1 && inner.pub_all_wire.get() {
+                let encoded = pre_encode_compio(msg);
+                let dio_cache = unsafe { &*inner.pub_direct_io_cache.get() };
+                if dio_cache.len() == targets.len() {
+                    for (i, state) in dio_cache.iter().enumerate() {
+                        if !direct_push_encoded(state, &encoded) {
+                            let _ = targets[i].try_send_immediate(msg.clone());
+                        }
+                    }
+                } else {
+                    for peer in targets {
+                        let _ = peer.try_send_immediate(msg.clone());
+                    }
+                }
+                return;
+            }
+            for peer in targets {
+                let _ = peer.try_send_immediate(msg.clone());
+            }
+            return;
+        }
         let topic = msg.part_bytes(0).unwrap_or_default();
         let targets: Vec<PeerOut> = {
-            let peers = self.inner().out_peers.read().expect("peers lock");
+            let peers = inner.out_peers.read().expect("peers lock");
             peers
                 .iter()
                 .filter_map(|(_, slot)| {
@@ -829,4 +928,12 @@ impl Socket {
         }
         Ok(())
     }
+}
+
+fn pre_encode_compio(msg: &Message) -> std::sync::Arc<smallvec::SmallVec<[bytes::Bytes; 4]>> {
+    let mut eq = omq_proto::encoded_queue::EncodedQueue::new();
+    eq.encode_auto(msg);
+    let mut buf = Vec::new();
+    eq.drain_into_vec(&mut buf, 1024);
+    std::sync::Arc::new(smallvec::SmallVec::from_vec(buf))
 }

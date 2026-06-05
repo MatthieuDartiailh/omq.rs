@@ -508,6 +508,7 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
         peer_address,
         peer_sub,
         peer_groups,
+        pub_sub_dirty: Some(inner.pub_sub_dirty.clone()),
     };
     let inner_for_exit = inner.clone();
     let endpoint_for_exit = endpoint;

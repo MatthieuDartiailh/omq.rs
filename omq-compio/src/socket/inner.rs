@@ -8,10 +8,11 @@
 //!
 //! [`Socket`]: super::Socket
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::VecDeque;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -284,6 +285,23 @@ pub(super) struct SocketInner {
     /// `None` for non-round-robin socket types (PUB/XPUB/RADIO/
     /// ROUTER use per-peer queues; XSUB uses fan-out; SUB/PULL/DISH
     /// don't send).
+    /// Set by subscribe/cancel handlers (in the driver task) and by
+    /// `insert_peer_slot`/`release_slot`. Checked by the PUB send fast
+    /// path to know when to recompute `pub_all_match_all`.
+    pub(super) pub_sub_dirty: Arc<AtomicBool>,
+    /// True when every outbound peer has `subscribe_all`. When set, the
+    /// PUB send path uses `pub_all_match_cache` to skip the peer filter.
+    pub(super) pub_all_match_all: Cell<bool>,
+    /// True when all outbound peers are Wire (not Inproc). Pre-encoded
+    /// fan-out only works for wire peers.
+    pub(super) pub_all_wire: Cell<bool>,
+    /// Cached list of all outbound `PeerOut`s for the subscribe-all fast
+    /// path. Valid only when `pub_all_match_all` is true.
+    pub(super) pub_all_match_cache: UnsafeCell<SmallVec<[PeerOut; 8]>>,
+    /// Cached `DirectIoState` handles for the direct-write PUB fan-out.
+    /// Valid only when `pub_all_match_all && pub_all_wire` are both true.
+    /// Parallel to `pub_all_match_cache` (same peer order).
+    pub(super) pub_direct_io_cache: UnsafeCell<SmallVec<[Arc<DirectIoState>; 8]>>,
     pub(super) shared_send_tx: RwLock<Option<super::shared_queue::SharedQueueSender>>,
     pub(super) shared_send_rx: Option<super::shared_queue::SharedQueueReceiver>,
     /// Round-robin counter for `Socket::send` peer selection on
@@ -412,6 +430,11 @@ impl SocketInner {
             udp_dialers: RwLock::new(Vec::new()),
             listeners: RwLock::new(Vec::new()),
             dialers: RwLock::new(Vec::new()),
+            pub_sub_dirty: Arc::new(AtomicBool::new(true)),
+            pub_all_match_all: Cell::new(false),
+            pub_all_wire: Cell::new(false),
+            pub_all_match_cache: UnsafeCell::new(SmallVec::new()),
+            pub_direct_io_cache: UnsafeCell::new(SmallVec::new()),
             shared_send_tx: RwLock::new(shared_send_tx),
             shared_send_rx,
             rr_index: AtomicUsize::new(0),
@@ -465,6 +488,7 @@ impl SocketInner {
                 .insert(conn_id, id.clone());
         }
         self.rebuild_peer_keys();
+        self.pub_sub_dirty.store(true, Ordering::Release);
         self.on_peer_ready.notify(usize::MAX);
         idx
     }
@@ -535,6 +559,43 @@ impl SocketInner {
         // Stale entries are harmless since connection_ids are
         // monotonic and never reused.
         self.rebuild_peer_keys();
+        self.pub_sub_dirty.store(true, Ordering::Release);
         self.peers_gen.fetch_add(1, Ordering::Release);
+    }
+
+    pub(super) fn recompute_pub_all_match_all(&self) {
+        let peers = self.out_peers.read().expect("peers lock");
+        let all_match = !peers.is_empty()
+            && peers.iter().all(|(_, slot)| {
+                slot.peer_sub
+                    .as_ref()
+                    .is_some_and(|s| s.read().expect("peer_sub lock").is_subscribe_all())
+            });
+        let all_wire = !peers.is_empty()
+            && peers
+                .iter()
+                .all(|(_, slot)| matches!(&slot.out, PeerOut::Wire(_)));
+        self.pub_all_match_all.set(all_match);
+        self.pub_all_wire.set(all_wire);
+        if all_match {
+            let cached: SmallVec<[PeerOut; 8]> = peers.iter().map(|(_, s)| s.out.clone()).collect();
+            unsafe { *self.pub_all_match_cache.get() = cached };
+            if all_wire {
+                let dio: SmallVec<[Arc<DirectIoState>; 8]> = peers
+                    .iter()
+                    .filter_map(|(_, slot)| {
+                        slot.direct_io
+                            .as_ref()
+                            .and_then(|h| h.read().expect("direct_io handle lock").clone())
+                    })
+                    .collect();
+                unsafe { *self.pub_direct_io_cache.get() = dio };
+            } else {
+                unsafe { (*self.pub_direct_io_cache.get()).clear() };
+            }
+        } else {
+            unsafe { (*self.pub_direct_io_cache.get()).clear() };
+        }
+        self.pub_sub_dirty.store(false, Ordering::Release);
     }
 }

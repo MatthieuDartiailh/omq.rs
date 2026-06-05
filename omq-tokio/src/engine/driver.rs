@@ -295,6 +295,10 @@ pub struct DriverConfig {
 pub enum DriverCommand {
     /// Queue an application message for send.
     SendMessage(Message),
+    /// Pre-encoded wire bytes. Pushed directly into the transmit buffer,
+    /// skipping per-message encoding. Used by PUB fan-out when all peers
+    /// share the same wire format (NULL mechanism, no per-peer crypto).
+    SendEncoded(std::sync::Arc<smallvec::SmallVec<[bytes::Bytes; 4]>>),
     /// Queue a ZMTP command for send (SUBSCRIBE, CANCEL, JOIN, LEAVE, ...).
     SendCommand(Command),
     /// Initiate clean shutdown.
@@ -729,6 +733,10 @@ where
                             first,
                             match inbox.try_recv() {
                                 Ok(DriverCommand::SendMessage(m)) => Some(m),
+                                Ok(DriverCommand::SendEncoded(chunks)) => {
+                                    eq.push_shared_chunks(&chunks);
+                                    None
+                                }
                                 Ok(DriverCommand::SendCommand(c)) => {
                                     let _ = codec.send_command(&c);
                                     None
@@ -753,6 +761,10 @@ where
                             drain_writes(&mut writer, &mut codec).await.ok();
                             return Ok(());
                         }
+                    }
+                    Some(DriverCommand::SendEncoded(chunks)) => {
+                        eq.push_shared_chunks(&chunks);
+                        flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
                     }
                     Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
                     Some(DriverCommand::Close) | None => {
@@ -841,6 +853,9 @@ async fn drain_on_cancel<W: AsyncWrite + Unpin>(
         match cmd {
             DriverCommand::SendMessage(msg) => {
                 encode_msg(&msg, encoder, codec, eq, passthrough).ok();
+            }
+            DriverCommand::SendEncoded(chunks) => {
+                eq.push_shared_chunks(&chunks);
             }
             DriverCommand::SendCommand(c) => {
                 let _ = codec.send_command(&c);
@@ -1275,6 +1290,9 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
                                 encode_msg(&m, encoder, codec, eq, passthrough)?;
                                 count += 1;
                             }
+                            Ok(DriverCommand::SendEncoded(chunks)) => {
+                                eq.push_shared_chunks(&chunks);
+                            }
                             Ok(DriverCommand::SendCommand(c)) => {
                                 let _ = codec.send_command(&c);
                             }
@@ -1292,6 +1310,11 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
                     while codec.has_pending_transmit() {
                         flush_once(&mut *w, codec).await?;
                     }
+                }
+                Some(DriverCommand::SendEncoded(chunks)) => {
+                    eq.push_shared_chunks(&chunks);
+                    let mut w = writer.lock().await;
+                    flush_encoded_queue(&mut *w, eq, drain_buf).await?;
                 }
                 Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
                 Some(DriverCommand::Close) | None => {

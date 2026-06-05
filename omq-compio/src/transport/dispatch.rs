@@ -24,6 +24,7 @@ pub(crate) struct MonitorCtx {
     pub peer_address: Option<std::net::SocketAddr>,
     pub peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
     pub peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<bytes::Bytes>>>>,
+    pub pub_sub_dirty: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub(super) enum Drained {
@@ -53,6 +54,9 @@ async fn handle_sub_cmd(
                 Command::Subscribe(_) => s.add(&prefix),
                 Command::Cancel(_) => s.remove(&prefix),
                 _ => {}
+            }
+            if let Some(dirty) = &ctx.pub_sub_dirty {
+                dirty.store(true, std::sync::atomic::Ordering::Release);
             }
         }
         match &cmd {
