@@ -299,31 +299,28 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         }
     }
     if let Some(bypass) = unsafe { &mut *sock.bypass_recv.get() } {
-        // Drain yring first (messages from before bypass was installed).
+        // Drain yring first (messages from before bypass was installed,
+        // or multipart messages that went through the regular tokio path
+        // because the send-side bypass was skipped for SNDMORE batches).
         if let Some(cons) = unsafe { &mut *sock.recv_cons.get() }
             && let Some(m) = try_pop_dual(cons, sock)
         {
             signal_recv_space(sock);
             return decompose_message(sock, &m);
         }
-        let (ptr, len) = if dontwait {
-            match bypass.peek() {
-                Some(entry) => entry,
-                None => return Err(libc::EAGAIN),
-            }
-        } else {
-            loop {
-                if let Some(entry) = bypass.peek() {
-                    break entry;
-                }
-                std::thread::yield_now();
-            }
-        };
-        // SAFETY: ptr/len are valid for the peeked entry.
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-        let bytes = Bytes::copy_from_slice(slice);
-        bypass.advance(len);
-        return Ok((bytes, false));
+        if let Some(entry) = bypass.peek() {
+            let (ptr, len) = entry;
+            let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+            let bytes = Bytes::copy_from_slice(slice);
+            bypass.advance(len);
+            return Ok((bytes, false));
+        }
+        if dontwait {
+            return Err(libc::EAGAIN);
+        }
+        // Fall through to the blocking recv path below: the message
+        // might arrive via the regular tokio path (yring/dual consumer)
+        // rather than the bypass ring.
     }
 
     // SAFETY: zmq contract guarantees single-threaded access per socket.
