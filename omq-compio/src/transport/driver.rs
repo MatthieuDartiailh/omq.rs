@@ -35,8 +35,8 @@ use omq_proto::proto::transform::MessageDecoder;
 use omq_proto::proto::{Command, Event, SocketType};
 
 use crate::socket::DirectIoState;
+use crate::socket::TaggedFrame;
 use crate::transport::dispatch::{Drained, MonitorCtx, SnapshotSink, dispatch_drained_events};
-use crate::transport::inproc::InboundFrame;
 use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader};
 use crate::transport::recv_stream::{StreamArmOutcome, pull_stream};
 
@@ -104,6 +104,7 @@ impl DriverLoopState {
 #[derive(Debug)]
 pub enum DriverCommand {
     SendMessage(Message),
+    SendEncoded(std::sync::Arc<smallvec::SmallVec<[bytes::Bytes; 4]>>),
     SendCommand(Command),
     Close,
 }
@@ -252,6 +253,10 @@ impl DriverLoopState {
                         eq.encode_auto(&m);
                     }
                 }
+                DriverCommand::SendEncoded(chunks) => {
+                    let mut eq = state.encoded_queue.borrow_mut();
+                    eq.push_shared_chunks(&chunks);
+                }
                 DriverCommand::SendCommand(c) => {
                     io.codec.send_command(&c)?;
                 }
@@ -296,6 +301,11 @@ impl DriverLoopState {
                 match cmd {
                     DriverCommand::SendMessage(m) => {
                         self.encode_outbound_message(state, &m, cap).await?
+                    }
+                    DriverCommand::SendEncoded(chunks) => {
+                        let mut eq = state.encoded_queue.borrow_mut();
+                        eq.push_shared_chunks(&chunks);
+                        eq.total_bytes() >= cap
                     }
                     DriverCommand::SendCommand(c) => {
                         let mut io = state.lock_io();
@@ -365,7 +375,7 @@ pub(crate) async fn run_connection(
     options: Options,
     inbox: Receiver<DriverCommand>,
     shared_msg_rx: Option<crate::socket::shared_queue::SharedQueueReceiver>,
-    peer_in_tx: blume::Sender<InboundFrame>,
+    peer_in_tx: blume::Sender<TaggedFrame>,
     snapshot_sink: Box<dyn SnapshotSink>,
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {
@@ -437,12 +447,14 @@ pub(crate) async fn run_connection(
         let drained = ls.drain_codec_events(&state, monitor_ctx.as_ref(), hb_interval)?;
 
         // 2) Dispatch drained events outside the lock.
+        let conn_id = monitor_ctx.as_ref().map_or(0, |c| c.connection_id);
         if dispatch_drained_events(
             drained,
             socket_type,
             &peer_in_tx,
             &*snapshot_sink,
             monitor_ctx.as_ref(),
+            conn_id,
             &ls.peer_identity,
         )
         .await?

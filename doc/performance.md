@@ -937,21 +937,128 @@ never reallocates, and `wrap_index` is a single well-predicted branch.
 The `Vec` traded ring buffer indexing for `ptr::read` + `set_len`
 bookkeeping with no net gain. Reverted.
 
+## omq-libzmq: direct yring recv bypass
+
+The omq-libzmq compat layer originally relayed received messages
+through three thread crossings:
+
+```
+driver → async_channel → recv_pump_task → yring → eventfd → C thread
+```
+
+The recv pump task called `Socket::recv().await` in a loop, pushed
+each message into a yring, and signaled an eventfd on
+empty-to-non-empty transitions. The C thread parked on the eventfd
+via `libc::poll()` and drained the yring.
+
+This architecture caused massive throughput variance (0.1-5M msg/s
+for 8 B TCP) while real libzmq held steady at 6.5M. The variance
+came from non-deterministic tokio worker scheduling: when the recv
+pump task was slow to wake from `epoll_wait`, the pipeline stalled.
+
+The fix bypasses the `async_channel` and recv pump entirely for the
+first connected peer. The `ConnectionDriver` pushes decoded messages
+directly into the yring and signals the eventfd:
+
+```
+driver → yring → eventfd → C thread
+```
+
+One thread crossing instead of three. The driver replicates the
+recv pump's push-flush-signal logic inline in `RecvSink::Yring::send`.
+Backpressure uses the same `tokio::sync::Notify` the recv pump used:
+when the yring is full, the driver awaits `space.notified()`, which
+the C thread signals after each pop.
+
+### Why the dead end didn't apply
+
+The general omq-tokio "per-peer wire yring for recv" approach failed
+because `tokio::sync::Notify` drops notifications when the driver
+pushes multiple messages without yielding. omq-libzmq doesn't use
+`tokio::sync::Notify` for recv signaling at all. The C thread does
+`libc::poll()` on an eventfd, which is level-triggered and never
+loses signals. The driver writes to the eventfd via a `Box<dyn Fn()>`
+callback, sidestepping the Notify problem entirely.
+
+### Two yrings: SPSC constraint
+
+The yring is SPSC (one producer, one consumer). Multiple
+`ConnectionDriver`s can't share a producer. The solution is two
+yrings:
+
+- **fast yring**: producer owned by the first peer's driver.
+- **pump yring**: producer owned by the recv pump task.
+
+The C thread drains the fast consumer first, then the pump consumer.
+Both signal the same eventfd. For the single-peer case (benchmarks,
+most production deployments), the pump yring stays empty and the recv
+pump idles on the `async_channel`.
+
+### Peer churn
+
+The fast yring is a one-shot optimization tied to the first peer's
+lifetime. The `RecvSink::Yring` is stored in a shared
+`Arc<Mutex<Option<RecvSink>>>` slot. The actor takes it for the
+first `ConnectionDriver` when `peers.is_empty()`. Subsequent peers
+find the slot empty and get the `async_channel` path.
+
+When the first peer disconnects, the driver drops the yring
+producer. `Producer::Drop` calls `flush()` (Release store), so
+the consumer sees all remaining messages. After draining them,
+`prefetch_and_pop()` returns `None` permanently. All subsequent
+traffic flows through the recv pump. No races: the slot is
+mutex-protected, the actor processes peer events sequentially,
+and the eventfd fd outlives the signal closure.
+
+Reconnects after the first peer disconnects use the recv pump.
+The fast yring is not restored. This is the pre-optimization
+behavior and only matters for long-lived sockets that cycle
+through many peer lifetimes.
+
+### Send-path fixes
+
+Two additional fixes reduced send-path overhead:
+
+**`send_accum` Mutex to `UnsafeCell`.** The SNDMORE accumulator was
+behind a `Mutex` locked on every `zmq_send`, even for single-part
+messages (the common case). Replaced with `UnsafeCell` under the zmq
+single-threaded socket contract. Same justification as the existing
+`bypass_send` / `bypass_recv` fields.
+
+**`send_ring` `RwLock` guard.** `Socket::try_send` took an `RwLock`
+read guard on the inproc SPSC ring on every call, even for TCP
+connections where the ring is always `None`. Added an `AtomicBool`
+flag (`send_ring_active`) checked before the `RwLock`. TCP sockets
+never touch the lock.
+
+### REQ exclusion
+
+REQ sockets are excluded from the yring bypass because
+`Socket::recv()` applies post-recv processing (strips the empty
+delimiter frame, clears `req_awaiting_reply`). The recv pump
+provides this processing by calling `Socket::recv()`. Bypassing it
+would deliver raw messages with the delimiter still attached.
+
+### Result
+
+8 B TCP: 1.1M to 4.7M msg/s (4.3x). 32 B TCP: 1.0M to 6.4M msg/s
+(6.4x).
+
 ## What remains
 
-**Per-peer wire yring for recv.** Replacing the MPMC
-`async_channel` on the recv_direct path with per-peer yring SPSC
-rings (same pattern as inproc) would eliminate the channel
-overhead. Dead end: `tokio::sync::Notify` notifications are lost
-when the driver pushes multiple messages in a tight loop
-(driver's `while codec.poll_message()` doesn't yield between
-messages). The Notify stores at most one permit; subsequent
-`notify_one()` calls are no-ops. The consumer's
-`try_drain_consumers()` should prefetch all available items, but
-empirically hangs after ~28/30 messages in the random_sizes test.
-Root cause unclear. Possibly a subtle interaction between the
-biased select's `notified()` registration and the producer's
-`flush()` visibility. Needs investigation.
+**Per-peer wire yring for recv (general omq-tokio).** The
+omq-libzmq bypass above works because the C thread uses eventfd,
+not `tokio::sync::Notify`. The general omq-tokio path still uses
+`async_channel` for `recv_direct`. Replacing it with per-peer yring
+SPSC rings hits the same `Notify` dead end: notifications are lost
+when the driver pushes multiple messages in a tight loop (driver's
+`while codec.poll_message()` doesn't yield between messages). The
+Notify stores at most one permit; subsequent `notify_one()` calls
+are no-ops. The consumer's `try_drain_consumers()` should prefetch
+all available items, but empirically hangs after ~28/30 messages in
+the random_sizes test. Root cause unclear. Possibly a subtle
+interaction between the biased select's `notified()` registration
+and the producer's `flush()` visibility.
 
 **Same-thread inproc (~4M).** Uses blume (no ypipe). The ypipe
 ring cannot serve same-thread sequential send-all-then-recv-all

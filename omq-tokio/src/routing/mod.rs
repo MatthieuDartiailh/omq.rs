@@ -64,6 +64,20 @@ impl SendSubmitter {
             Self::Identity(s) => s.send(msg).await,
         }
     }
+
+    pub(crate) fn try_send(
+        &self,
+        msg: Message,
+    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+        match self {
+            Self::None => Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
+                "socket type does not support send".into(),
+            ))),
+            Self::RoundRobin(s) => s.try_send(msg),
+            Self::FanOut(s) => s.try_send(msg),
+            Self::Identity(s) => s.try_send(msg),
+        }
+    }
 }
 
 impl SendStrategy {

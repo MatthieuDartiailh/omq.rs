@@ -23,6 +23,145 @@ use super::direct_io::{DirectIo, SharedWriter};
 use crate::routing::drop_queue::QueueReceiver;
 use omq_proto::encoded_queue::EncodedQueue;
 
+/// Where the driver routes decoded inbound messages.
+///
+/// `Channel`: the existing path via `async_channel` (pure-Rust callers).
+/// `Yring`: direct push to a lock-free SPSC ring + external signal,
+/// used by omq-libzmq to eliminate the recv-pump relay task.
+pub enum RecvSink {
+    Channel(async_channel::Sender<Message>),
+    Yring(YringSink),
+}
+
+/// Yring-based recv sink. Pushes decoded messages directly into a
+/// lock-free SPSC ring and signals the consumer via a callback on
+/// empty-to-non-empty transitions.
+pub struct YringSink {
+    pub producer: yring::Producer<Message>,
+    pub signal: Box<dyn Fn() + Send + Sync>,
+    pub space: Arc<tokio::sync::Notify>,
+}
+
+/// Shared config for creating and recycling [`RecvSink::Yring`] instances.
+/// The actor refills `slot` with a fresh yring pair on peer disconnect;
+/// the external consumer picks up the new consumer from
+/// `pending_consumer`.
+pub struct RecvSinkConfig {
+    pub slot: std::sync::Mutex<Option<RecvSink>>,
+    pub pending_consumer: std::sync::Mutex<Option<yring::Consumer<Message>>>,
+    signal: Arc<dyn Fn() + Send + Sync>,
+    space: Arc<tokio::sync::Notify>,
+    cap: usize,
+}
+
+impl std::fmt::Debug for RecvSinkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecvSinkConfig")
+            .field("cap", &self.cap)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RecvSinkConfig {
+    pub fn new(
+        initial_sink: RecvSink,
+        signal: Arc<dyn Fn() + Send + Sync>,
+        space: Arc<tokio::sync::Notify>,
+        cap: usize,
+    ) -> Self {
+        Self {
+            slot: std::sync::Mutex::new(Some(initial_sink)),
+            pending_consumer: std::sync::Mutex::new(None),
+            signal,
+            space,
+            cap,
+        }
+    }
+
+    /// Create a fresh yring pair. Puts the `RecvSink` in `slot` and the
+    /// consumer in `pending_consumer`. No-op if the slot already contains
+    /// a sink.
+    pub fn refill(&self) {
+        let mut guard = self.slot.lock().unwrap();
+        if guard.is_some() {
+            return;
+        }
+        let (prod, cons) = yring::spsc(self.cap);
+        let f = self.signal.clone();
+        *guard = Some(RecvSink::Yring(YringSink {
+            producer: prod,
+            signal: Box::new(move || f()),
+            space: self.space.clone(),
+        }));
+        *self.pending_consumer.lock().unwrap() = Some(cons);
+    }
+}
+
+impl std::fmt::Debug for RecvSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Channel(tx) => f.debug_tuple("Channel").field(tx).finish(),
+            Self::Yring(y) => f
+                .debug_struct("Yring")
+                .field("producer", &y.producer)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl std::fmt::Debug for YringSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("YringSink")
+            .field("producer", &self.producer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RecvSink {
+    async fn send(&mut self, m: Message) -> bool {
+        match self {
+            Self::Channel(tx) => tx.send(m).await.is_ok(),
+            Self::Yring(sink) => {
+                let mut msg = m;
+                loop {
+                    match sink.producer.push(msg) {
+                        Ok(()) => {
+                            if let yring::FlushResult::Flushed {
+                                was_empty: true, ..
+                            } = sink.producer.flush_and_check()
+                            {
+                                (sink.signal)();
+                            }
+                            return true;
+                        }
+                        Err(returned) => {
+                            msg = returned;
+                            let notified = sink.space.notified();
+                            tokio::pin!(notified);
+                            notified.as_mut().enable();
+                            match sink.producer.push(msg) {
+                                Ok(()) => {
+                                    if let yring::FlushResult::Flushed {
+                                        was_empty: true, ..
+                                    } = sink.producer.flush_and_check()
+                                    {
+                                        (sink.signal)();
+                                    }
+                                    return true;
+                                }
+                                Err(returned2) => {
+                                    msg = returned2;
+                                    notified.await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Batch-encode messages, then flush. Two modes:
 ///
 /// **Direct** (no encoder or offloading disabled): encode each message
@@ -126,7 +265,7 @@ struct DriverState<'a, R> {
     encoder: &'a mut Option<MessageEncoder>,
     decoder: Option<&'a mut MessageDecoder>,
     shared_msg_rx: Option<&'a QueueReceiver>,
-    recv_direct: Option<&'a async_channel::Sender<Message>>,
+    recv_direct: &'a mut Option<RecvSink>,
     last_input: &'a mut Instant,
     passthrough: Option<&'a (Bytes, usize)>,
 }
@@ -156,6 +295,10 @@ pub struct DriverConfig {
 pub enum DriverCommand {
     /// Queue an application message for send.
     SendMessage(Message),
+    /// Pre-encoded wire bytes. Pushed directly into the transmit buffer,
+    /// skipping per-message encoding. Used by PUB fan-out when all peers
+    /// share the same wire format (NULL mechanism, no per-peer crypto).
+    SendEncoded(std::sync::Arc<smallvec::SmallVec<[bytes::Bytes; 4]>>),
     /// Queue a ZMTP command for send (SUBSCRIBE, CANCEL, JOIN, LEAVE, ...).
     SendCommand(Command),
     /// Initiate clean shutdown.
@@ -211,7 +354,7 @@ where
     /// the `SocketDriver` actor's event loop. Only set for socket types where
     /// the recv path is a plain fair-queue delivery with no per-type
     /// post-processing (no `TypeState::post_recv`, no identity-prefix).
-    recv_direct: Option<async_channel::Sender<Message>>,
+    recv_direct: Option<RecvSink>,
     /// When set, the driver hands off the stream + codec to a `DirectIo`
     /// after the ZMTP handshake completes, then exits. The `Socket` handle
     /// does I/O directly on the user task, eliminating all data-path
@@ -315,7 +458,15 @@ where
     /// post-processing.
     #[must_use]
     pub fn with_recv_direct(mut self, tx: async_channel::Sender<Message>) -> Self {
-        self.recv_direct = Some(tx);
+        self.recv_direct = Some(RecvSink::Channel(tx));
+        self
+    }
+
+    /// Install a custom recv sink. The driver pushes decoded messages
+    /// into this sink instead of the internal `async_channel`.
+    #[must_use]
+    pub fn with_recv_sink(mut self, sink: RecvSink) -> Self {
+        self.recv_direct = Some(sink);
         self
     }
 
@@ -361,7 +512,7 @@ where
             mut encoder,
             mut decoder,
             shared_msg_rx,
-            recv_direct,
+            mut recv_direct,
             mut direct_io_tx,
             compression_pool,
             offload_threshold,
@@ -417,7 +568,7 @@ where
                 };
                 if direct_io_armed {
                     direct_io_msgs.push_back(m);
-                } else if !route_message(m, recv_direct.as_ref(), &peer_out, peer_id).await {
+                } else if !route_message(m, &mut recv_direct, &peer_out, peer_id).await {
                     return Ok(());
                 }
             }
@@ -470,7 +621,7 @@ where
 
                 // Route any messages decoded during the handoff window.
                 for m in direct_io_msgs.drain(..) {
-                    if !route_message(m, recv_direct.as_ref(), &peer_out, peer_id).await {
+                    if !route_message(m, &mut recv_direct, &peer_out, peer_id).await {
                         return Ok(());
                     }
                 }
@@ -490,7 +641,7 @@ where
                         encoder: &mut encoder,
                         decoder: decoder.as_mut(),
                         shared_msg_rx: shared_msg_rx.as_ref(),
-                        recv_direct: recv_direct.as_ref(),
+                        recv_direct: &mut recv_direct,
                         last_input: &mut last_input,
                         passthrough: passthrough.as_ref(),
                     },
@@ -582,6 +733,10 @@ where
                             first,
                             match inbox.try_recv() {
                                 Ok(DriverCommand::SendMessage(m)) => Some(m),
+                                Ok(DriverCommand::SendEncoded(chunks)) => {
+                                    eq.push_shared_chunks(&chunks);
+                                    None
+                                }
                                 Ok(DriverCommand::SendCommand(c)) => {
                                     let _ = codec.send_command(&c);
                                     None
@@ -606,6 +761,10 @@ where
                             drain_writes(&mut writer, &mut codec).await.ok();
                             return Ok(());
                         }
+                    }
+                    Some(DriverCommand::SendEncoded(chunks)) => {
+                        eq.push_shared_chunks(&chunks);
+                        flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
                     }
                     Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
                     Some(DriverCommand::Close) | None => {
@@ -694,6 +853,9 @@ async fn drain_on_cancel<W: AsyncWrite + Unpin>(
         match cmd {
             DriverCommand::SendMessage(msg) => {
                 encode_msg(&msg, encoder, codec, eq, passthrough).ok();
+            }
+            DriverCommand::SendEncoded(chunks) => {
+                eq.push_shared_chunks(&chunks);
             }
             DriverCommand::SendCommand(c) => {
                 let _ = codec.send_command(&c);
@@ -873,12 +1035,12 @@ fn encode_msg(
 /// Returns `true` if sent, `false` if the receiving channel closed.
 async fn route_message(
     m: Message,
-    recv_direct: Option<&async_channel::Sender<Message>>,
+    recv_direct: &mut Option<RecvSink>,
     peer_out: &mpsc::Sender<(u64, PeerOut)>,
     peer_id: u64,
 ) -> bool {
     match recv_direct {
-        Some(tx) => tx.send(m).await.is_ok(),
+        Some(sink) => sink.send(m).await,
         None => peer_out
             .send((peer_id, PeerOut::Event(Event::Message(m))))
             .await
@@ -1128,6 +1290,9 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
                                 encode_msg(&m, encoder, codec, eq, passthrough)?;
                                 count += 1;
                             }
+                            Ok(DriverCommand::SendEncoded(chunks)) => {
+                                eq.push_shared_chunks(&chunks);
+                            }
                             Ok(DriverCommand::SendCommand(c)) => {
                                 let _ = codec.send_command(&c);
                             }
@@ -1145,6 +1310,11 @@ async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
                     while codec.has_pending_transmit() {
                         flush_once(&mut *w, codec).await?;
                     }
+                }
+                Some(DriverCommand::SendEncoded(chunks)) => {
+                    eq.push_shared_chunks(&chunks);
+                    let mut w = writer.lock().await;
+                    flush_encoded_queue(&mut *w, eq, drain_buf).await?;
                 }
                 Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
                 Some(DriverCommand::Close) | None => {

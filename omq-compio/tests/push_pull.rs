@@ -271,3 +271,60 @@ async fn push_delivers_to_alive_peer_after_dead_slot() {
         .unwrap();
     assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"second");
 }
+
+/// TCP PUSH/PULL with peer churn: PULL connects, receives, disconnects;
+/// new PULL connects and must receive subsequent messages.
+#[compio::test]
+async fn push_tcp_survives_pull_churn() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    let port = test_support::bind_loopback(&push).await;
+
+    for round in 0..3u32 {
+        let pull = Socket::new(SocketType::Pull, Options::default());
+        pull.connect(tcp_ep(port)).await.unwrap();
+        compio::time::sleep(Duration::from_millis(100)).await;
+
+        let tag = format!("round-{round}");
+        push.send(Message::single(tag.clone())).await.unwrap();
+
+        let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
+            .await
+            .expect("pull timed out")
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap(), tag.as_bytes());
+        drop(pull);
+        compio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// TCP PUSH delivers all messages across multiple TCP PULLs.
+#[compio::test]
+async fn push_tcp_multi_pull_all_delivered() {
+    const N: usize = 300;
+    let push = Socket::new(SocketType::Push, Options::default());
+    let port = test_support::bind_loopback(&push).await;
+
+    let total = Arc::new(AtomicUsize::new(0));
+    let mut recv_tasks = Vec::new();
+    for _ in 0..3 {
+        let p = Socket::new(SocketType::Pull, Options::default());
+        p.connect(tcp_ep(port)).await.unwrap();
+        let t = total.clone();
+        recv_tasks.push(compio::runtime::spawn(async move {
+            while let Ok(Ok(_)) = compio::time::timeout(Duration::from_millis(500), p.recv()).await
+            {
+                t.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    }
+    compio::time::sleep(Duration::from_millis(300)).await;
+
+    for i in 0..N {
+        push.send(Message::single(format!("m-{i}"))).await.unwrap();
+    }
+
+    for t in recv_tasks {
+        let _ = t.await;
+    }
+    assert_eq!(total.load(Ordering::SeqCst), N, "every message must arrive");
+}

@@ -43,3 +43,21 @@ pub use runtime::{
     DEFAULT_BUFFER_POOL_COUNT, DEFAULT_BUFFER_POOL_LEN, ProactorBuilderExt, build_default_runtime,
 };
 pub use socket::Socket;
+
+/// Yield to the runtime once, allowing other spawned tasks to make
+/// progress. Used in fan-out send paths that may return `Ok(())`
+/// without awaiting anything (e.g. PUB with no matching subscribers),
+/// which would otherwise starve the single-threaded compio executor.
+pub(crate) async fn yield_now() {
+    let mut ready = false;
+    std::future::poll_fn(|cx| {
+        if ready {
+            std::task::Poll::Ready(())
+        } else {
+            ready = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}

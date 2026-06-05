@@ -51,6 +51,7 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
     unsafe { libc::_exit(0) };
 }
 
+#[expect(clippy::too_many_lines)]
 fn main() {
     unsafe {
         libc::signal(
@@ -122,6 +123,24 @@ fn main() {
                 let warmup: usize = args[5].parse().expect("warmup");
                 run_inproc_st_latency(name, size, iterations, warmup).await;
             }
+            Some("pub") => {
+                let ep = parse_ep(&args[2]);
+                let size: usize = args[3].parse().expect("msg_size");
+                run_pub(ep, size).await;
+            }
+            Some("sub") => {
+                let ep = parse_ep(&args[2]);
+                let size: usize = args[3].parse().expect("msg_size");
+                let duration: f64 = args[4].parse().expect("duration_secs");
+                run_sub(ep, size, Duration::from_secs_f64(duration)).await;
+            }
+            Some("inproc-pubsub") => {
+                let name = args[2].clone();
+                let size: usize = args[3].parse().expect("msg_size");
+                let duration: f64 = args[4].parse().expect("duration_secs");
+                let peers: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
+                run_inproc_pubsub(name, size, Duration::from_secs_f64(duration), peers).await;
+            }
             Some("latency-mt") => {
                 let ep = parse_ep(&args[2]);
                 let size: usize = args[3].parse().expect("msg_size");
@@ -151,18 +170,35 @@ fn main() {
     });
 }
 
+async fn retry_bind(sock: &Socket, ep: &Endpoint) {
+    for attempt in 0..20 {
+        match sock.bind(ep.clone()).await {
+            Ok(_) => return,
+            Err(e) if attempt < 19 => {
+                eprintln!("bind retry {attempt}: {e}");
+                compio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("bind failed after retries: {e}"),
+        }
+    }
+}
+
 async fn run_push(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options(size));
-    push.bind(ep).await.expect("push bind");
+    retry_bind(&push, &ep).await;
     let payload = vec![b'x'; size];
     if size <= omq_proto::message::MAX_INLINE_MESSAGE {
         loop {
-            push.send(Message::from_slice(&payload)).await.unwrap();
+            if push.send(Message::from_slice(&payload)).await.is_err() {
+                break;
+            }
         }
     } else {
         let msg = Message::single(payload);
         loop {
-            push.send(msg.clone()).await.unwrap();
+            if push.send(msg.clone()).await.is_err() {
+                break;
+            }
         }
     }
 }
@@ -202,7 +238,7 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
             .expect("push runtime");
         rt.block_on(async move {
             let push = Socket::new(SocketType::Push, bench_options(size));
-            push.bind(push_ep).await.expect("push bind");
+            push.bind(push_ep).await.unwrap();
             push_ready.wait();
             let payload = Bytes::from(vec![b'x'; size]);
             while !push_stop.load(Ordering::Relaxed) {
@@ -311,7 +347,7 @@ fn with_commas(s: &str) -> String {
 
 async fn run_rep(ep: Endpoint, size: usize) {
     let rep = Socket::new(SocketType::Rep, bench_options(size));
-    rep.bind(ep).await.expect("rep bind");
+    retry_bind(&rep, &ep).await;
     loop {
         let msg = rep.recv().await.unwrap();
         rep.send(msg).await.unwrap();
@@ -368,7 +404,7 @@ async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup
             .expect("rep runtime");
         rt.block_on(async move {
             let rep = Socket::new(SocketType::Rep, Options::default());
-            rep.bind(rep_ep).await.expect("rep bind");
+            rep.bind(rep_ep).await.unwrap();
             rep_ready.wait();
             loop {
                 let msg = rep.recv().await.unwrap();
@@ -411,7 +447,7 @@ async fn run_inproc_st_latency(name: String, size: usize, iterations: usize, war
     let rep_ep = ep.clone();
     compio::runtime::spawn(async move {
         let rep = Socket::new(SocketType::Rep, Options::default());
-        rep.bind(rep_ep).await.expect("rep bind");
+        rep.bind(rep_ep).await.unwrap();
         loop {
             let msg = rep.recv().await.unwrap();
             rep.send(msg).await.unwrap();
@@ -464,7 +500,7 @@ async fn run_latency_mt(ep: Endpoint, size: usize, iterations: usize, warmup: us
             .expect("rep runtime");
         rt.block_on(async move {
             let rep = Socket::new(SocketType::Rep, bench_options(size));
-            rep.bind(rep_ep).await.expect("rep bind");
+            rep.bind(rep_ep).await.unwrap();
             rep_ready.wait();
             loop {
                 let msg = rep.recv().await.unwrap();
@@ -502,10 +538,109 @@ async fn run_latency_mt(ep: Endpoint, size: usize, iterations: usize, warmup: us
     std::process::exit(0);
 }
 
+async fn run_pub(ep: Endpoint, size: usize) {
+    let pub_ = Socket::new(
+        SocketType::Pub,
+        bench_options(size).on_mute(omq_compio::OnMute::Block),
+    );
+    retry_bind(&pub_, &ep).await;
+    let payload = vec![b'x'; size];
+    loop {
+        if pub_.send(Message::from_slice(&payload)).await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn run_sub(ep: Endpoint, size: usize, duration: Duration) {
+    let sub = Socket::new(SocketType::Sub, bench_options(size));
+    sub.connect(ep.clone()).await.expect("sub connect");
+    sub.subscribe(Bytes::new()).await.expect("subscribe");
+
+    compio::time::sleep(Duration::from_millis(500)).await;
+
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        sub.recv().await.unwrap();
+        count += 1;
+        while sub.try_recv().is_ok() {
+            count += 1;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!("{count} {elapsed:.6} {size}");
+    eprint_pull_summary(&ep, count, elapsed, size);
+}
+
+async fn run_inproc_pubsub(name: String, size: usize, duration: Duration, peers: usize) {
+    let ep = Endpoint::Inproc { name };
+    let pub_ = Socket::new(
+        SocketType::Pub,
+        bench_options(size).on_mute(omq_compio::OnMute::Block),
+    );
+    pub_.bind(ep.clone()).await.unwrap();
+
+    let mut subs = Vec::with_capacity(peers);
+    for _ in 0..peers {
+        let s = Socket::new(SocketType::Sub, bench_options(size));
+        s.connect(ep.clone()).await.expect("sub connect");
+        s.subscribe(Bytes::new()).await.expect("subscribe");
+        subs.push(s);
+    }
+    compio::time::sleep(Duration::from_millis(200)).await;
+
+    let payload = Bytes::from(vec![b'x'; size]);
+    compio::runtime::spawn(async move {
+        loop {
+            if pub_.send(Message::single(payload.clone())).await.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
+
+    // Drain non-measured subs so PUB doesn't stall on HWM.
+    for s in subs.drain(1..) {
+        compio::runtime::spawn(async move {
+            loop {
+                if s.recv().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    compio::time::sleep(Duration::from_millis(500)).await;
+
+    let measured = subs.into_iter().next().unwrap();
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        measured.recv().await.unwrap();
+        count += 1;
+        while measured.try_recv().is_ok() {
+            count += 1;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!("{count} {elapsed:.6} {size}");
+    std::process::exit(0);
+}
+
 async fn run_inproc_same_thread(name: String, size: usize, duration: Duration) {
     let ep = Endpoint::Inproc { name };
     let push = Socket::new(SocketType::Push, bench_options(size));
-    push.bind(ep.clone()).await.expect("push bind");
+    push.bind(ep.clone()).await.unwrap();
     let pull = Socket::new(SocketType::Pull, bench_options(size));
     pull.connect(ep).await.expect("pull connect");
 

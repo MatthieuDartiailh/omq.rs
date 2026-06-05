@@ -102,19 +102,25 @@ impl Socket {
                 let in_tx = self.inner().in_tx.clone();
                 let recv_event = self.inner().inproc_recv_event.clone();
                 let parked = self.inner().inproc_parked.clone();
+                let conn_id = self
+                    .inner()
+                    .next_connection_id
+                    .fetch_add(1, Ordering::Relaxed);
 
                 if inproc::is_bound(&name) {
-                    let conn = inproc::connect(&name, snapshot, in_tx, recv_event, parked).await?;
-                    finish_inproc_connect(self.inner(), name, conn);
+                    let conn = inproc::connect(&name, snapshot, in_tx, conn_id, recv_event, parked)
+                        .await?;
+                    finish_inproc_connect(self.inner(), name, conn, conn_id);
                 } else {
                     let inner = self.inner().clone();
                     compio::runtime::spawn(async move {
                         let Ok(conn) =
-                            inproc::connect(&name, snapshot, in_tx, recv_event, parked).await
+                            inproc::connect(&name, snapshot, in_tx, conn_id, recv_event, parked)
+                                .await
                         else {
                             return;
                         };
-                        finish_inproc_connect(&inner, name, conn);
+                        finish_inproc_connect(&inner, name, conn, conn_id);
                     })
                     .detach();
                 }
@@ -169,7 +175,7 @@ impl Socket {
         );
         let in_tx = inner.in_tx.clone();
         compio::runtime::spawn(async move {
-            stream_raw::run(stream, writer.into(), identity, in_tx, cmd_rx).await;
+            stream_raw::run(stream, writer.into(), conn_id, in_tx, cmd_rx).await;
             inner.release_slot(slot_idx);
         })
         .detach();
@@ -205,8 +211,12 @@ impl Socket {
     }
 }
 
-fn finish_inproc_connect(inner: &Arc<SocketInner>, name: String, conn: inproc::InprocConn) {
-    let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+fn finish_inproc_connect(
+    inner: &Arc<SocketInner>,
+    name: String,
+    conn: inproc::InprocConn,
+    conn_id: u64,
+) {
     let ep = Endpoint::Inproc { name: name.clone() };
     inner
         .monitor

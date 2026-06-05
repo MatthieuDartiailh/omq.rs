@@ -13,11 +13,12 @@ use omq_proto::message::Message;
 use omq_proto::proto::{Event, SocketType};
 use omq_proto::routing::{RecvCategory, recv_category};
 
-use crate::transport::inproc::InboundFrame;
+use omq_proto::inproc::InboundFrame;
+
 use crate::transport::peer_io::PeerIo;
 
 use super::Socket;
-use super::inner::DirectIoState;
+use super::inner::{DirectIoState, TaggedFrame};
 
 enum RecvAction {
     Return(Option<Message>),
@@ -373,6 +374,7 @@ impl Socket {
                             cache.push_back(msg);
                         }
                         c.release();
+                        recv_state.space_events[idx].notify(usize::MAX);
                     }
                     if !cache.is_empty() {
                         recv_state.fq_index = idx + 1;
@@ -424,11 +426,10 @@ impl Socket {
         }
     }
 
-    fn process_inbound_frame(&self, frame: InboundFrame) -> Result<Option<Message>> {
+    fn process_inbound_frame(&self, tagged: TaggedFrame) -> Result<Option<Message>> {
         let st = self.inner().socket_type;
-        match frame {
-            InboundFrame::Message(full) => {
-                let crate::transport::inproc::InboundMessage { peer_identity, msg } = full;
+        match tagged.frame {
+            InboundFrame::Message(msg) => {
                 if let Some(max) = self.inner().options.max_message_size
                     && msg.byte_len() > max
                 {
@@ -438,7 +439,14 @@ impl Socket {
                     return Ok(None);
                 }
                 let msg = if is_identity_recv(st) {
-                    let id = peer_identity.unwrap_or_default();
+                    let id = self
+                        .inner()
+                        .conn_id_to_identity
+                        .read()
+                        .expect("conn_id_to_identity lock")
+                        .get(&tagged.connection_id)
+                        .cloned()
+                        .unwrap_or_default();
                     Message::with_prefix(id, msg)
                 } else {
                     msg
@@ -652,11 +660,10 @@ impl Socket {
         }
     }
 
-    fn process_inproc_frame_for_direct(&self, frame: InboundFrame) -> Result<Option<Message>> {
+    fn process_inproc_frame_for_direct(&self, tagged: TaggedFrame) -> Result<Option<Message>> {
         let max = self.inner().options.max_message_size;
-        match frame {
-            InboundFrame::Message(full) => {
-                let crate::transport::inproc::InboundMessage { msg, .. } = full;
+        match tagged.frame {
+            InboundFrame::Message(msg) => {
                 if max.is_some_and(|m| msg.byte_len() > m) {
                     return Ok(None);
                 }

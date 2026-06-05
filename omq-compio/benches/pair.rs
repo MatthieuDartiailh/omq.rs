@@ -115,6 +115,11 @@ fn run_cell_threaded(
                         compio::time::timeout(Duration::from_millis(20), receiver.recv()).await
                     {
                         recv_count.fetch_add(1, Ordering::Relaxed);
+                        let mut drained = 0u64;
+                        while receiver.try_recv().is_ok() {
+                            drained += 1;
+                        }
+                        recv_count.fetch_add(drained as usize, Ordering::Relaxed);
                     }
                 }
             });

@@ -37,7 +37,6 @@ pub(super) fn install_inproc_peer(
     endpoint: Endpoint,
     connection_id: u64,
 ) {
-    let our_identity = inner.inproc_identity.clone();
     let peer_identity = conn.peer.identity.clone();
     let snap = conn.peer.clone();
     let info = PeerInfo {
@@ -65,7 +64,7 @@ pub(super) fn install_inproc_peer(
     };
     let out = PeerOut::Inproc {
         sender: conn.out,
-        our_identity,
+        connection_id: conn.remote_connection_id,
     };
     let idx = inner.insert_peer_slot(
         PeerSlot {
@@ -89,12 +88,19 @@ pub(super) fn install_inproc_peer(
                     .peer_recv_event
                     .expect("eligible must have peer_recv_event"),
                 parked: conn.peer_parked.expect("eligible must have peer_parked"),
+                space_event: conn
+                    .send_space_event
+                    .expect("eligible must have send_space_event"),
                 cross_thread: conn.cross_thread,
             });
         }
         if let Some(consumer) = conn.spsc_recv {
             let recv = unsafe { &mut *inner.inproc_recv.get() };
             recv.consumers.push(consumer);
+            recv.space_events.push(
+                conn.recv_space_event
+                    .expect("eligible must have recv_space_event"),
+            );
         }
     }
     inner.inproc_recv_event.notify(usize::MAX);
@@ -180,13 +186,18 @@ impl crate::transport::dispatch::SnapshotSink for WireSnapshotSink {
         }
         if !identity.is_empty() {
             let mut table = self.inner.identity_to_slot.write().expect("identity table");
-            if let Some(old_idx) = table.insert(identity, self.slot_idx)
+            if let Some(old_idx) = table.insert(identity.clone(), self.slot_idx)
                 && old_idx != self.slot_idx
             {
                 drop(table);
                 self.inner.evict_peer_for_handover(old_idx);
             }
         }
+        self.inner
+            .conn_id_to_identity
+            .write()
+            .expect("conn_id_to_identity lock")
+            .insert(self.connection_id, identity);
         let _ = self.tx.send(snap);
     }
 }
@@ -497,6 +508,7 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
         peer_address,
         peer_sub,
         peer_groups,
+        pub_sub_dirty: Some(inner.pub_sub_dirty.clone()),
     };
     let inner_for_exit = inner.clone();
     let endpoint_for_exit = endpoint;

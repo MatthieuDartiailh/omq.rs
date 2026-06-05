@@ -46,6 +46,61 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
+    pub(crate) fn try_send(
+        &self,
+        msg: Message,
+    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+        let (forwarded, group) = match self.mode {
+            FanOutMode::SubscriptionPrefix => (msg, None),
+            FanOutMode::Group => {
+                if msg.len() != 2 {
+                    return Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
+                        "RADIO send requires [group, body] (2 parts)".into(),
+                    )));
+                }
+                let group_bytes = msg.part_bytes(0).unwrap_or_default();
+                if group_bytes.len() > u8::MAX as usize {
+                    return Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
+                        "RADIO group name too long (max 255 bytes)".into(),
+                    )));
+                }
+                let group = String::from_utf8_lossy(&group_bytes).into_owned();
+                (msg, Some(group))
+            }
+        };
+
+        let targets: SmallVec<[DropQueue; 8]> = {
+            let g = self.inner.lock().expect("fanout inner poisoned");
+            if g.all_subscribe_all && matches!(self.mode, FanOutMode::SubscriptionPrefix) {
+                g.all_queues.clone()
+            } else {
+                g.peers
+                    .values()
+                    .filter(|p| match (self.mode, group.as_deref()) {
+                        (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
+                        (FanOutMode::SubscriptionPrefix, _) => {
+                            p.subscriptions.matches(&first_frame_bytes(&forwarded))
+                        }
+                        (FanOutMode::Group, None) => false,
+                    })
+                    .map(|p| p.queue.clone())
+                    .collect()
+            }
+        };
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let last = targets.len() - 1;
+        for q in &targets[..last] {
+            if let Err(m) = q.try_send(forwarded.clone()) {
+                return Err(crate::socket::handle::TrySendError::Full(m));
+            }
+        }
+        targets[last]
+            .try_send(forwarded)
+            .map_err(crate::socket::handle::TrySendError::Full)
+    }
+
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = match self.mode {
             FanOutMode::SubscriptionPrefix => (msg, None),
@@ -76,17 +131,21 @@ impl Submitter {
         // `.await`.
         let targets: SmallVec<[DropQueue; 8]> = {
             let g = self.inner.lock().expect("fanout inner poisoned");
-            g.peers
-                .values()
-                .filter(|p| match (self.mode, group.as_deref()) {
-                    (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
-                    (FanOutMode::SubscriptionPrefix, _) => {
-                        p.subscriptions.matches(&first_frame_bytes(&forwarded))
-                    }
-                    (FanOutMode::Group, None) => false,
-                })
-                .map(|p| p.queue.clone())
-                .collect()
+            if g.all_subscribe_all && matches!(self.mode, FanOutMode::SubscriptionPrefix) {
+                g.all_queues.clone()
+            } else {
+                g.peers
+                    .values()
+                    .filter(|p| match (self.mode, group.as_deref()) {
+                        (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
+                        (FanOutMode::SubscriptionPrefix, _) => {
+                            p.subscriptions.matches(&first_frame_bytes(&forwarded))
+                        }
+                        (FanOutMode::Group, None) => false,
+                    })
+                    .map(|p| p.queue.clone())
+                    .collect()
+            }
         };
         if targets.is_empty() {
             return Ok(());
@@ -112,6 +171,12 @@ pub(crate) struct FanOutSend {
 #[derive(Debug)]
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
+    /// True when every peer has `subscribe_all` set. When true,
+    /// `all_queues` is valid and the send path can skip per-peer
+    /// subscription matching entirely.
+    all_subscribe_all: bool,
+    /// Pre-built queue list for the subscribe-all fast path.
+    all_queues: SmallVec<[DropQueue; 8]>,
 }
 
 #[derive(Debug)]
@@ -133,12 +198,29 @@ struct Defaults {
     on_mute: omq_proto::options::OnMute,
 }
 
+impl FanOutInner {
+    fn recompute_subscribe_all(&mut self) {
+        self.all_subscribe_all = !self.peers.is_empty()
+            && self
+                .peers
+                .values()
+                .all(|p| p.subscriptions.is_subscribe_all());
+        if self.all_subscribe_all {
+            self.all_queues = self.peers.values().map(|p| p.queue.clone()).collect();
+        } else {
+            self.all_queues.clear();
+        }
+    }
+}
+
 impl FanOutSend {
     pub(crate) fn new(options: &Options, mode: FanOutMode) -> Self {
         let (hwm, on_mute) = super::effective_queue_params(options);
         Self {
             inner: Arc::new(Mutex::new(FanOutInner {
                 peers: FxHashMap::default(),
+                all_subscribe_all: false,
+                all_queues: SmallVec::new(),
             })),
             defaults: Defaults { hwm, on_mute },
             mode,
@@ -182,12 +264,14 @@ impl FanOutSend {
                 _pump_task: pump_task,
             },
         );
+        g.recompute_subscribe_all();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.remove(&peer_id) {
             p.pump_cancel.cancel();
+            g.recompute_subscribe_all();
         }
     }
 
@@ -197,6 +281,7 @@ impl FanOutSend {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
             p.subscriptions.add(&prefix);
+            g.recompute_subscribe_all();
         }
     }
 
@@ -205,6 +290,7 @@ impl FanOutSend {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
             p.subscriptions.remove(prefix);
+            g.recompute_subscribe_all();
         }
     }
 

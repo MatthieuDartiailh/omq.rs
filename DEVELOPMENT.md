@@ -137,11 +137,12 @@ releasing.
 
 ### Cross-library comparison charts
 
-Produces `doc/charts/comparison_{tcp,ipc,inproc}.svg`:
+Produces `doc/charts/pushpull/comparison_*.svg` and
+`doc/charts/pubsub/comparison_*.svg`:
 
 ```sh
 python3 scripts/run_comparisons.py --scope omq   # bench omq-compio + omq-tokio only, reuse existing libzmq/zmq.rs baselines
-python3 scripts/gen_comparison_chart.py           # JSONL → doc/charts/comparison_*.svg
+python3 scripts/gen_comparison_chart.py           # JSONL → doc/charts/{pushpull,pubsub}/comparison_*.svg
 ```
 
 Use `--scope all` (default) to rebench all implementations when

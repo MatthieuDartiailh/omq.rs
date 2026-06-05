@@ -1,29 +1,28 @@
 use std::sync::{Arc, RwLock};
 
-use bytes::Bytes;
-
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
+use omq_proto::inproc::InboundFrame;
 use omq_proto::message::Message;
 use omq_proto::subscription::SubscriptionSet;
 
 use crate::monitor::PeerInfo;
 use crate::transport::driver::DriverCommand;
-use crate::transport::inproc::{InboundFrame, InprocPeerSnapshot};
+use crate::transport::inproc::InprocPeerSnapshot;
 
-use super::direct_io::DirectIoState;
+use super::inner::TaggedFrame;
 
 pub(super) enum PeerOut {
     Inproc {
-        sender: blume::Sender<InboundFrame>,
-        our_identity: Bytes,
+        sender: blume::Sender<TaggedFrame>,
+        connection_id: u64,
     },
     Wire(WirePeerHandle),
 }
 
 pub(super) type WirePeerHandle = Arc<RwLock<flume::Sender<DriverCommand>>>;
 
-pub(super) type DirectIoHandle = Arc<RwLock<Option<Arc<DirectIoState>>>>;
+pub(super) type DirectIoHandle = Arc<RwLock<Option<Arc<super::direct_io::DirectIoState>>>>;
 
 pub(super) struct PeerSlot {
     pub(super) out: PeerOut,
@@ -45,9 +44,12 @@ impl PeerOut {
         match self {
             Self::Inproc {
                 sender,
-                our_identity,
+                connection_id,
             } => sender
-                .send_async(InboundFrame::message_from(our_identity.clone(), msg))
+                .send_async(TaggedFrame {
+                    connection_id: *connection_id,
+                    frame: InboundFrame::Message(msg),
+                })
                 .await
                 .map_err(|_| Error::Closed),
             Self::Wire(handle) => Self::current_wire_sender(handle)
@@ -61,9 +63,12 @@ impl PeerOut {
         match self {
             Self::Inproc {
                 sender,
-                our_identity,
+                connection_id,
             } => {
-                let frame = InboundFrame::message_from(our_identity.clone(), msg);
+                let frame = TaggedFrame {
+                    connection_id: *connection_id,
+                    frame: InboundFrame::Message(msg),
+                };
                 sender.try_send(frame).map_err(|e| match e {
                     blume::TrySendError::Full(_) => Error::WouldBlock,
                     blume::TrySendError::Disconnected(_) => Error::Closed,
@@ -84,9 +89,12 @@ impl PeerOut {
         match self {
             Self::Inproc {
                 sender,
-                our_identity: _,
+                connection_id,
             } => sender
-                .send_async(InboundFrame::Command(Box::new(c)))
+                .send_async(TaggedFrame {
+                    connection_id: *connection_id,
+                    frame: InboundFrame::Command(Box::new(c)),
+                })
                 .await
                 .map_err(|_| Error::Closed),
             Self::Wire(handle) => Self::current_wire_sender(handle)
@@ -102,10 +110,10 @@ impl Clone for PeerOut {
         match self {
             Self::Inproc {
                 sender,
-                our_identity,
+                connection_id,
             } => Self::Inproc {
                 sender: sender.clone(),
-                our_identity: our_identity.clone(),
+                connection_id: *connection_id,
             },
             Self::Wire(h) => Self::Wire(h.clone()),
         }

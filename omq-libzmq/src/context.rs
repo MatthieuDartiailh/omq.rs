@@ -1,26 +1,24 @@
-//! Context: owns N io threads, each running a compio runtime.
+//! Context: owns a tokio runtime on a background thread.
 
-use std::cell::RefCell;
 use std::ffi::c_int;
 
 use rustc_hash::FxHashMap;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use omq_compio::Socket as InnerSocket;
+use tokio::runtime::Handle;
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 pub(crate) struct IoThread {
-    submit: flume::Sender<Job>,
-    // Keep the JoinHandle so the thread is joined when the context drops.
+    pub handle: Handle,
+    pub submit: flume::Sender<Job>,
     #[expect(dead_code)]
-    handle: Option<thread::JoinHandle<()>>,
+    join: Option<thread::JoinHandle<()>>,
 }
 
-/// Per-context: one omq runtime per io thread.
+/// Per-context: one tokio runtime per io thread.
 pub(crate) struct OmqContext {
     pub(crate) io_threads: Vec<IoThread>,
     pub next_thread: AtomicUsize,
@@ -30,38 +28,16 @@ pub(crate) struct OmqContext {
     pub max_sockets: AtomicI32,
     pub max_msg_size: AtomicI64,
     /// Zmq-layer inproc registry. Maps inproc name to the bound `OmqSocket`.
-    /// Used to install bypass pipes when both sides are present.
     pub(crate) inproc_binds: Mutex<FxHashMap<String, std::sync::Weak<crate::socket::OmqSocket>>>,
     /// Pending inproc connect requests waiting for a bind.
     pub(crate) inproc_waiting:
         Mutex<FxHashMap<String, Vec<std::sync::Weak<crate::socket::OmqSocket>>>>,
 }
 
-thread_local! {
-    /// Io-thread-local registry: socket id -> Rc<InnerSocket>.
-    pub(crate) static REG: RefCell<FxHashMap<u64, Rc<InnerSocket>>> =
-        RefCell::new(FxHashMap::default());
-}
-
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn next_socket_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-fn build_compio_runtime() -> std::io::Result<compio::runtime::Runtime> {
-    use omq_compio::ProactorBuilderExt;
-
-    let mut runtime_builder = compio::runtime::RuntimeBuilder::new();
-    let mut proactor = compio::driver::ProactorBuilder::new();
-    proactor.with_omq_buffer_pool();
-    if let Ok(raw) = std::env::var("OMQ_SQPOLL_IDLE_MS")
-        && let Ok(ms) = raw.parse::<u64>()
-    {
-        proactor.sqpoll_idle(std::time::Duration::from_millis(ms));
-    }
-    runtime_builder.with_proactor(proactor);
-    runtime_builder.build()
 }
 
 impl OmqContext {
@@ -72,11 +48,17 @@ impl OmqContext {
         let mut io_threads = Vec::with_capacity(n);
         for i in 0..n {
             let (tx, rx) = flume::unbounded::<Job>();
+            let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
             let name = format!("omq-libzmq-io-{i}");
-            let handle = thread::Builder::new()
+            let join = thread::Builder::new()
                 .name(name)
                 .spawn(move || {
-                    let rt = build_compio_runtime().expect("omq-libzmq: compio runtime");
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
+                        .enable_all()
+                        .build()
+                        .expect("omq-libzmq: tokio runtime");
+                    let _ = handle_tx.send(rt.handle().clone());
                     rt.block_on(async move {
                         while let Ok(job) = rx.recv_async().await {
                             job();
@@ -84,9 +66,11 @@ impl OmqContext {
                     });
                 })
                 .ok()?;
+            let handle = handle_rx.recv().ok()?;
             io_threads.push(IoThread {
+                handle,
                 submit: tx,
-                handle: Some(handle),
+                join: Some(join),
             });
         }
         Some(Arc::new(Self {
@@ -111,6 +95,10 @@ impl OmqContext {
         let _ = self.io_threads[thread_idx].submit.send(job);
     }
 
+    pub(crate) fn handle(&self, thread_idx: usize) -> &Handle {
+        &self.io_threads[thread_idx].handle
+    }
+
     pub(crate) fn socket_opened(&self) {
         self.socket_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -120,7 +108,6 @@ impl OmqContext {
         if prev == 1 {
             let (_, cvar) = &self.socket_notify;
             cvar.notify_all();
-            // Drop the lock before notify returns.
         }
     }
 }
@@ -158,7 +145,7 @@ pub extern "C" fn zmq_ctx_shutdown(ctx_ptr: *mut libc::c_void) -> c_int {
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    // Borrow without consuming.
+    // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     ctx.terminated.store(true, Ordering::Release);
     0
@@ -169,7 +156,7 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
-    // Consume the Box so we can drop it properly.
+    // SAFETY: ctx_ptr came from Box::into_raw in zmq_ctx_new; reclaiming ownership.
     let arc = unsafe { *Box::from_raw(ctx_ptr.cast::<Arc<OmqContext>>()) };
 
     // Signal termination to all io threads.
@@ -189,11 +176,6 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
         }
     }
 
-    // Drop the submit channels so each io-thread's recv_async returns Err.
-    // We need mutable access; Arc strong count should be 1 here but to be
-    // safe we use a separate channel-drop step.
-    // We can't mutate through Arc; instead we just drop the Arc which drops
-    // the IoThread vec, closing all the senders.
     drop(arc);
     0
 }
@@ -219,6 +201,7 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     match option {
         ZMQ_IO_THREADS => {
@@ -242,6 +225,7 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
     if ctx_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     match option {
         ZMQ_IO_THREADS => c_int::try_from(ctx.io_threads.len()).unwrap_or(c_int::MAX),

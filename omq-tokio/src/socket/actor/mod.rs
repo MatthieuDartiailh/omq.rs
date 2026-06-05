@@ -30,7 +30,7 @@ use super::udp::{
     spawn_dish_listener, spawn_radio_sender,
 };
 use crate::routing::{
-    RecvStrategy, SendStrategy, SendSubmitter, max_peer_count, supports_groups, supports_subscribe,
+    RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
 };
 use crate::transport::{
     Canceled, InboundFrame, InprocConn, InprocPeerSnapshot, PeerIdent, dial_with_backoff,
@@ -57,10 +57,6 @@ pub(crate) enum SocketCommand {
     },
     Connect {
         endpoint: Endpoint,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    Send {
-        msg: Message,
         ack: oneshot::Sender<Result<()>>,
     },
     Subscribe {
@@ -149,6 +145,8 @@ struct PeerEntry {
     /// Used to decide whether to restart the dial after a mid-session drop.
     is_client: bool,
     direct_io_rx: Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
+    /// SPSC ring for this inproc peer (None for wire/stream peers).
+    spsc: Option<Arc<crate::transport::inproc::InprocSpsc>>,
 }
 
 struct ListenerEntry {
@@ -183,7 +181,6 @@ pub(crate) struct SocketDriver {
     listeners: Vec<ListenerEntry>,
     dialers: Vec<DialerEntry>,
     send_strategy: SendStrategy,
-    send_submitter: SendSubmitter,
     recv_strategy: RecvStrategy,
     /// REQ / REP envelope + alternation state. Shared with the socket
     /// handle so `Socket::send` can call `pre_send` without an actor hop.
@@ -209,6 +206,7 @@ pub(crate) struct SocketDriver {
     close_ack: Option<oneshot::Sender<Result<()>>>,
     consumers: super::handle::SpscConsumers,
     send_ring: super::handle::SpscSendRing,
+    send_ring_active: super::handle::SpscSendRingActive,
     recv_notify: super::handle::SpscRecvNotify,
     spsc_activated: super::handle::SpscActivated,
     direct_io: super::handle::DirectIoSlot,
@@ -216,6 +214,7 @@ pub(crate) struct SocketDriver {
     pending_direct_io_rx:
         Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
+    recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
 }
 
 impl SocketDriver {
@@ -228,15 +227,16 @@ impl SocketDriver {
         cancel: CancellationToken,
         monitor: MonitorPublisher,
         send_strategy: SendStrategy,
-        send_submitter: SendSubmitter,
         consumers: super::handle::SpscConsumers,
         send_ring: super::handle::SpscSendRing,
+        send_ring_active: super::handle::SpscSendRingActive,
         recv_notify: super::handle::SpscRecvNotify,
         spsc_activated: super::handle::SpscActivated,
         type_state: Arc<Mutex<TypeState>>,
         req_awaiting_reply: Arc<AtomicBool>,
         direct_io: super::handle::DirectIoSlot,
         direct_io_pending: super::handle::DirectIoPending,
+        recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -256,7 +256,6 @@ impl SocketDriver {
             listeners: Vec::new(),
             dialers: Vec::new(),
             send_strategy,
-            send_submitter,
             recv_strategy,
             type_state,
             req_awaiting_reply,
@@ -270,12 +269,14 @@ impl SocketDriver {
             close_ack: None,
             consumers,
             send_ring,
+            send_ring_active,
             recv_notify,
             spsc_activated,
             direct_io,
             direct_io_pending,
             pending_direct_io_rx: None,
             compression_pool: None,
+            recv_sink_config,
         }
     }
 
@@ -364,24 +365,6 @@ impl SocketDriver {
                     self.start_dial(endpoint);
                     let _ = ack.send(Ok(()));
                 }
-            }
-            SocketCommand::Send { msg, ack } => {
-                let transformed = match self
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .pre_send(self.socket_type, msg)
-                {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let _ = ack.send(Err(e));
-                        return;
-                    }
-                };
-                let sub = self.send_submitter.clone();
-                tokio::spawn(async move {
-                    let _ = ack.send(sub.send(transformed).await);
-                });
             }
             SocketCommand::Subscribe { prefix, ack } => {
                 let res = self.apply_subscription(prefix, true).await;

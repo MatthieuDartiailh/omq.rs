@@ -1,0 +1,33 @@
+//! Shared inproc types used by both backends.
+
+use bytes::Bytes;
+
+use crate::message::Message;
+use crate::proto::SocketType;
+use crate::proto::command::Command;
+
+/// Frame exchanged between two inproc peers. Either a fully-assembled
+/// application `Message` or a ZMTP `Command` (SUBSCRIBE, CANCEL, JOIN,
+/// LEAVE, etc.). No frame headers, no greeting, no codec: both ends
+/// are in the same process.
+#[derive(Debug)]
+pub enum InboundFrame {
+    Message(Message),
+    Command(Box<Command>),
+}
+
+impl InboundFrame {
+    /// Construct a `Message` frame.
+    pub fn message(msg: Message) -> Self {
+        Self::Message(msg)
+    }
+}
+
+/// Pre-computed peer info known at connect/accept time for inproc
+/// peers. Stands in for the `READY` properties that real ZMTP
+/// exchanges over the wire.
+#[derive(Clone, Debug)]
+pub struct InprocPeerSnapshot {
+    pub socket_type: SocketType,
+    pub identity: Bytes,
+}

@@ -11,4 +11,7 @@ pub mod compression_pool;
 pub mod direct_io;
 pub mod driver;
 
-pub use driver::{ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut};
+pub use driver::{
+    ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut, RecvSink, RecvSinkConfig,
+    YringSink,
+};

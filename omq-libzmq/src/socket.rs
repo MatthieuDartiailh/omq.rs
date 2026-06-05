@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_int, c_void};
-use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,12 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::net::{IpAddr, Ipv6Addr};
 
 use bytes::Bytes;
-use omq_compio::SocketType;
-use omq_compio::endpoint::{Endpoint, Host};
+use omq_tokio::SocketType;
+use omq_tokio::endpoint::{Endpoint, Host};
 
 use std::os::raw::c_char;
 
-use crate::context::{OmqContext, REG, next_socket_id};
+use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, fail, map_omq_err, set_errno};
 use crate::opts::SocketOverlay;
 
@@ -39,7 +38,7 @@ pub(crate) const DEFAULT_HWM: usize = 1000;
 /// Eventfd-based notification pair on Linux; pipe pair on other platforms.
 #[cfg(target_os = "linux")]
 pub(crate) struct NotifyFd {
-    /// eventfd signaled (+1) for each message delivered to `recv_rx`.
+    /// eventfd signaled (+1) for each message delivered to the recv ring.
     pub recv_fd: std::os::unix::io::RawFd,
     /// eventfd signaled (+1) for each send slot freed.
     pub send_fd: std::os::unix::io::RawFd,
@@ -61,25 +60,26 @@ impl std::fmt::Debug for NotifyFd {
 
 #[cfg(target_os = "linux")]
 impl NotifyFd {
-    fn new() -> Self {
+    fn new() -> Option<Self> {
         // Non-semaphore: a single read returns the accumulated count
         // and resets to 0. This allows O(1) drain instead of O(N).
+        // SAFETY: eventfd returns a valid fd on success, -1 on failure.
         let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
-        assert!(
-            recv_fd >= 0,
-            "eventfd() failed: {}",
-            std::io::Error::last_os_error()
-        );
+        if recv_fd < 0 {
+            return None;
+        }
+        // SAFETY: same as above.
         let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
-        assert!(
-            send_fd >= 0,
-            "eventfd() failed: {}",
-            std::io::Error::last_os_error()
-        );
-        Self { recv_fd, send_fd }
+        if send_fd < 0 {
+            // SAFETY: recv_fd is a valid open fd from the successful eventfd call above.
+            unsafe { libc::close(recv_fd) };
+            return None;
+        }
+        Some(Self { recv_fd, send_fd })
     }
 
     fn close(&self) {
+        // SAFETY: recv_fd and send_fd are valid fds opened by new().
         unsafe {
             libc::close(self.recv_fd);
             libc::close(self.send_fd);
@@ -88,6 +88,7 @@ impl NotifyFd {
 
     pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
         let val: u64 = 1;
+        // SAFETY: fd is a valid eventfd; writing 8 bytes atomically increments the counter.
         unsafe {
             libc::write(fd, (&raw const val).cast::<libc::c_void>(), 8);
         }
@@ -96,39 +97,45 @@ impl NotifyFd {
 
 #[cfg(not(target_os = "linux"))]
 impl NotifyFd {
-    fn new() -> Self {
+    fn new() -> Option<Self> {
         let mut fds = [-1i32; 2];
+        // SAFETY: fds is a valid 2-element array; pipe() writes two fds into it on success.
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert!(
-            rc == 0,
-            "pipe() failed: {}",
-            std::io::Error::last_os_error()
-        );
+        if rc != 0 {
+            return None;
+        }
+        // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
         let (recv_read, recv_write) = (fds[0], fds[1]);
+        // SAFETY: same as above.
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert!(
-            rc == 0,
-            "pipe() failed: {}",
-            std::io::Error::last_os_error()
-        );
+        if rc != 0 {
+            // SAFETY: recv_read and recv_write are valid open fds.
+            unsafe {
+                libc::close(recv_read);
+                libc::close(recv_write);
+            }
+            return None;
+        }
+        // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
         unsafe {
             libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
         let (send_read, send_write) = (fds[0], fds[1]);
-        Self {
+        Some(Self {
             recv_read,
             recv_write,
             send_read,
             send_write,
-        }
+        })
     }
 
     fn close(&self) {
+        // SAFETY: all fds are valid, opened by new().
         unsafe {
             libc::close(self.recv_read);
             libc::close(self.recv_write);
@@ -139,13 +146,22 @@ impl NotifyFd {
 
     pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
         let b: u8 = 1;
+        // SAFETY: fd is a valid pipe write end; writing 1 byte signals readiness.
         unsafe {
             libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
         }
     }
 }
 
-// socket_type read in Phase 3 (ZMQ_TYPE getsockopt).
+/// Dual yring consumers for the recv path.
+#[derive(Debug)]
+pub(crate) struct RecvConsumers {
+    /// Filled directly by the first peer's `ConnectionDriver`.
+    pub fast: yring::Consumer<omq_tokio::Message>,
+    /// Filled by the recv pump task (fallback for second+ peers).
+    pub pump: yring::Consumer<omq_tokio::Message>,
+}
+
 #[expect(dead_code)]
 #[derive(Debug)]
 pub(crate) struct OmqSocket {
@@ -157,9 +173,8 @@ pub(crate) struct OmqSocket {
     pub sndtimeo_ms: AtomicI64,
     pub rcvtimeo_ms: AtomicI64,
     /// Accumulator for SNDMORE multipart assembly.
-    pub send_accum: Mutex<Vec<Bytes>>,
-    /// Send pump channel. Initialized in `ensure_materialized`.
-    pub send_tx: std::sync::OnceLock<flume::Sender<omq_compio::Message>>,
+    /// `UnsafeCell` because zmq guarantees single-threaded socket access.
+    pub send_accum: std::cell::UnsafeCell<Vec<Bytes>>,
     /// Lock-free inproc bypass (sender half). Set once during connect;
     /// accessed only from the `zmq_send` caller thread (ZMQ's single-thread
     /// contract per socket).
@@ -171,15 +186,21 @@ pub(crate) struct OmqSocket {
     /// True when `recv_drain` is non-empty. Checked without the lock so the
     /// mutex is skipped entirely on the common single-frame recv path.
     pub drain_nonempty: AtomicBool,
-    /// Initialized in `ensure_materialized` so that the channel capacity
-    /// reflects `ZMQ_RCVHWM` set between `zmq_socket` and `zmq_bind`/`zmq_connect`.
-    pub recv_rx: std::sync::OnceLock<flume::Receiver<omq_compio::Message>>,
+    /// Dual yring consumers. `fast` is filled directly by the first
+    /// peer's `ConnectionDriver` (bypasses `async_channel` + recv pump).
+    /// `pump` is filled by the recv pump task for second+ peers.
+    /// Accessed only from the `zmq_recv` caller thread.
+    pub recv_cons: std::cell::UnsafeCell<Option<RecvConsumers>>,
+    /// The inner omq-tokio socket. Send+Sync, stored directly.
+    pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
+    /// Backpressure: recv pump waits on this when the recv ring is full.
+    pub recv_space: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    /// Shared config for recycling the recv fast yring on peer churn.
+    pub recv_sink_config: std::sync::OnceLock<Arc<omq_tokio::engine::RecvSinkConfig>>,
     pub last_endpoint: Mutex<Option<String>>,
     pub notify: NotifyFd,
     pub bound_or_connected: AtomicBool,
-    /// Dropping this cancels the recv pump task via the partner `close_rx`.
-    pub close_tx: flume::Sender<()>,
-    pub close_rx: Mutex<Option<flume::Receiver<()>>>,
+    pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
 }
 
 /// Map ZMQ socket-type integer to `SocketType`.
@@ -209,54 +230,27 @@ fn map_socket_type(t: c_int) -> Option<SocketType> {
     }
 }
 
-/// Run `f` on the io thread identified by `thread_idx` and wait for the result.
-pub(crate) fn run_on<F, T>(ctx: &Arc<OmqContext>, thread_idx: usize, f: F) -> Result<T, ()>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    let (otx, orx) = flume::bounded::<T>(1);
-    ctx.submit(
-        thread_idx,
-        Box::new(move || {
-            let _ = otx.send(f());
-        }),
-    );
-    orx.recv().map_err(|_| ())
-}
-
-/// Run an async op on the socket from within the io thread.
+/// Run an async op against the socket's inner Arc and return the result.
+/// Spawns the future on the io thread's tokio runtime and blocks the
+/// calling thread until completion.
 pub(crate) fn with_socket<F, Fut, T>(
     ctx: &Arc<OmqContext>,
     thread_idx: usize,
-    id: u64,
+    inner: &Arc<omq_tokio::Socket>,
     op: F,
 ) -> Result<T, ()>
 where
-    F: FnOnce(Rc<omq_compio::Socket>) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = T> + 'static,
+    F: FnOnce(Arc<omq_tokio::Socket>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let (otx, orx) = flume::bounded::<Option<T>>(1);
-    ctx.submit(
-        thread_idx,
-        Box::new(move || {
-            let sock = REG.with(|r| r.borrow().get(&id).cloned());
-            match sock {
-                Some(s) => {
-                    compio::runtime::spawn(async move {
-                        let out = op(s).await;
-                        let _ = otx.send(Some(out));
-                    })
-                    .detach();
-                }
-                None => {
-                    let _ = otx.send(None);
-                }
-            }
-        }),
-    );
-    orx.recv().map_err(|_| ())?.ok_or(())
+    let (otx, orx) = flume::bounded::<T>(1);
+    let s = inner.clone();
+    ctx.handle(thread_idx).spawn(async move {
+        let out = op(s).await;
+        let _ = otx.send(out);
+    });
+    orx.recv().map_err(|_| ())
 }
 
 fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {
@@ -268,8 +262,12 @@ fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {
 
 fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     let capacity = {
-        let s_ov = sender.overlay.lock().unwrap();
-        let r_ov = receiver.overlay.lock().unwrap();
+        let Ok(s_ov) = sender.overlay.lock() else {
+            return;
+        };
+        let Ok(r_ov) = receiver.overlay.lock() else {
+            return;
+        };
         let shwm = s_ov.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
         let rhwm = r_ov.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
         shwm.min(rhwm).max(16)
@@ -280,8 +278,12 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     #[cfg(not(target_os = "linux"))]
     let recv_fd = receiver.notify.recv_write;
 
-    let (bsend, brecv) = crate::inproc_bypass::create_bypass(capacity, recv_fd);
-    // Safety: called from zmq_bind/zmq_connect before any send/recv.
+    // Byte ring capacity: enough for `capacity` messages at a generous
+    // average size. Rounded up to a power of two internally.
+    let byte_ring_cap = capacity * 1024;
+    let (bsend, brecv) = crate::inproc_bypass::create_bypass(byte_ring_cap, recv_fd);
+    // SAFETY: called from zmq_bind/zmq_connect before any send/recv,
+    // so no concurrent access to the UnsafeCells.
     unsafe { *sender.bypass_send.get() = Some(bsend) };
     unsafe { *receiver.bypass_recv.get() = Some(brecv) };
 }
@@ -290,17 +292,17 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
 /// bypass pipes for eligible pairs.
 fn register_inproc_bind(sock: &Arc<OmqSocket>, name: &str) {
     let ctx = &sock.ctx;
-    ctx.inproc_binds
-        .lock()
-        .unwrap()
-        .insert(name.to_owned(), Arc::downgrade(sock));
+    let Ok(mut binds) = ctx.inproc_binds.lock() else {
+        return;
+    };
+    binds.insert(name.to_owned(), Arc::downgrade(sock));
+    drop(binds);
 
-    let waiters = ctx
-        .inproc_waiting
-        .lock()
-        .unwrap()
-        .remove(name)
-        .unwrap_or_default();
+    let Ok(mut waiting) = ctx.inproc_waiting.lock() else {
+        return;
+    };
+    let waiters = waiting.remove(name).unwrap_or_default();
+    drop(waiting);
     for w in waiters {
         if let Some(connector) = w.upgrade()
             && is_bypass_eligible(connector.socket_type, sock.socket_type)
@@ -321,9 +323,8 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
     let binder = ctx
         .inproc_binds
         .lock()
-        .unwrap()
-        .get(name)
-        .and_then(std::sync::Weak::upgrade);
+        .ok()
+        .and_then(|g| g.get(name).and_then(std::sync::Weak::upgrade));
 
     if let Some(binder) = binder {
         if is_bypass_eligible(sock.socket_type, binder.socket_type) {
@@ -334,10 +335,8 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
             };
             try_install_bypass(sender, receiver);
         }
-    } else {
-        ctx.inproc_waiting
-            .lock()
-            .unwrap()
+    } else if let Ok(mut waiting) = ctx.inproc_waiting.lock() {
+        waiting
             .entry(name.to_owned())
             .or_default()
             .push(Arc::downgrade(sock));
@@ -351,6 +350,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         set_errno(libc::EFAULT);
         return std::ptr::null_mut();
     }
+    // SAFETY: caller must pass a valid context pointer from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     if ctx.terminated.load(Ordering::Acquire) {
         set_errno(ETERM);
@@ -365,11 +365,12 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         return std::ptr::null_mut();
     }
 
-    let notify = NotifyFd::new();
+    let Some(notify) = NotifyFd::new() else {
+        set_errno(libc::EMFILE);
+        return std::ptr::null_mut();
+    };
     let thread_idx = ctx.assign_thread();
     let id = next_socket_id();
-
-    let (close_tx, close_rx) = flume::bounded::<()>(1);
 
     let ctx_arc = ctx.clone();
     ctx_arc.socket_opened();
@@ -382,27 +383,29 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         overlay: Mutex::new(SocketOverlay::default()),
         sndtimeo_ms: AtomicI64::new(-1),
         rcvtimeo_ms: AtomicI64::new(-1),
-        send_accum: Mutex::new(Vec::new()),
-        send_tx: std::sync::OnceLock::new(),
+        send_accum: std::cell::UnsafeCell::new(Vec::new()),
         bypass_send: std::cell::UnsafeCell::new(None),
         bypass_recv: std::cell::UnsafeCell::new(None),
         recv_drain: Mutex::new(VecDeque::new()),
         drain_nonempty: AtomicBool::new(false),
-        recv_rx: std::sync::OnceLock::new(),
+        recv_cons: std::cell::UnsafeCell::new(None),
+        inner: std::sync::OnceLock::new(),
+        recv_space: std::sync::OnceLock::new(),
+        recv_sink_config: std::sync::OnceLock::new(),
         last_endpoint: Mutex::new(None),
         notify,
         bound_or_connected: AtomicBool::new(false),
-        close_tx,
-        close_rx: Mutex::new(Some(close_rx)),
+        recv_pump: std::sync::OnceLock::new(),
     });
 
     Box::into_raw(Box::new(sock)).cast()
 }
 
-/// Materialize the omq-compio socket on the io thread with current overlay
-/// options, then start the send/recv pump tasks. Called once on first
-/// bind/connect so that options set between `zmq_socket` and first
-/// bind/connect (identity, HWM, security, etc.) take effect.
+/// Materialize the omq-tokio socket on the io thread with current overlay
+/// options, then start the recv pump. Called once on first bind/connect
+/// so that options set between `zmq_socket` and first bind/connect take
+/// effect.
+#[expect(clippy::too_many_lines)]
 pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     // CAS guarantees exactly one thread wins the materialization race.
     if sock
@@ -410,16 +413,10 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        // Another thread already materialized (or is materializing).
-        // Wait for it to finish by briefly spinning on REG presence.
-        let id = sock.id;
-        let ctx = &sock.ctx;
-        let thread_idx = sock.thread_idx;
-        let _ = run_on(ctx, thread_idx, move || {
-            // Once this job runs, the materializing thread's run_on
-            // has already completed (jobs are FIFO on the io thread).
-            debug_assert!(REG.with(|r| r.borrow().contains_key(&id)));
-        });
+        // Another thread already materialized. Spin until inner is set.
+        while sock.inner.get().is_none() {
+            std::hint::spin_loop();
+        }
         return;
     }
     let Ok(overlay) = sock.overlay.lock() else {
@@ -427,65 +424,115 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     };
     let opts = overlay.to_options();
     let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
-    let send_hwm = overlay.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
     drop(overlay);
 
-    let (recv_tx, recv_rx) = flume::bounded::<omq_compio::Message>(recv_hwm);
-    let _ = sock.recv_rx.set(recv_rx);
-    let (send_tx, send_rx) = flume::bounded::<omq_compio::Message>(send_hwm);
-    let _ = sock.send_tx.set(send_tx);
-
     let socket_type = sock.socket_type;
-    let id = sock.id;
-    let Some(close_rx) = sock.close_rx.lock().ok().and_then(|mut g| g.take()) else {
-        return;
-    };
 
     #[cfg(target_os = "linux")]
     let recv_signal_fd = sock.notify.recv_fd;
     #[cfg(not(target_os = "linux"))]
     let recv_signal_fd = sock.notify.recv_write;
 
-    let _ = run_on(&sock.ctx, sock.thread_idx, move || {
-        let inner = Rc::new(omq_compio::Socket::new(socket_type, opts));
-        REG.with(|r| r.borrow_mut().insert(id, inner.clone()));
+    let cap = recv_hwm.max(16);
+    let (fast_prod, fast_cons) = yring::spsc(cap);
+    let (mut pump_prod, pump_cons) = yring::spsc(cap);
+    // SAFETY: called once during materialization before any recv.
+    unsafe {
+        *sock.recv_cons.get() = Some(RecvConsumers {
+            fast: fast_cons,
+            pump: pump_cons,
+        });
+    };
 
-        // Recv pump
-        let s_recv = inner.clone();
-        let close_rx2 = close_rx.clone();
-        compio::runtime::spawn(async move {
-            use futures::FutureExt as _;
-            loop {
-                futures::select! {
-                    result = s_recv.recv().fuse() => {
-                        let Ok(msg) = result else { return; };
-                        if recv_tx.send_async(msg).await.is_err() {
-                            return;
-                        }
-                        NotifyFd::signal_recv(recv_signal_fd);
-                    }
-                    _ = close_rx2.recv_async().fuse() => return,
-                }
-            }
-        })
-        .detach();
+    let recv_space = Arc::new(tokio::sync::Notify::new());
+    let _ = sock.recv_space.set(recv_space.clone());
 
-        // Send pump
-        let s_send = inner;
-        compio::runtime::spawn(async move {
-            use futures::FutureExt as _;
-            loop {
-                futures::select! {
-                    msg = send_rx.recv_async().fuse() => {
-                        let Ok(msg) = msg else { return; };
-                        let _ = s_send.send(msg).await;
-                    }
-                    _ = close_rx.recv_async().fuse() => return,
-                }
-            }
-        })
-        .detach();
+    // Build the RecvSink::Yring for the driver's direct fast path.
+    let signal_fd = recv_signal_fd;
+    let signal_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || NotifyFd::signal_recv(signal_fd));
+    let recv_sink = omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
+        producer: fast_prod,
+        signal: Box::new({
+            let f = signal_cb.clone();
+            move || f()
+        }),
+        space: recv_space.clone(),
     });
+    let recv_sink_cfg = Arc::new(omq_tokio::engine::RecvSinkConfig::new(
+        recv_sink,
+        signal_cb,
+        recv_space.clone(),
+        cap,
+    ));
+    let _ = sock.recv_sink_config.set(recv_sink_cfg.clone());
+
+    // Build the inner socket ON the tokio io thread.
+    // Socket::new() calls tokio::spawn internally (spawn_driver), so it
+    // must run within a tokio runtime context.
+    let (otx, orx) = flume::bounded(1);
+    sock.ctx.submit(
+        sock.thread_idx,
+        Box::new(move || {
+            let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_config(
+                socket_type,
+                opts,
+                recv_sink_cfg,
+            ));
+
+            // Recv pump: relay from async_channel into the pump yring.
+            // Handles second+ peers whose drivers push to async_channel.
+            // For the single-peer case, the async_channel stays empty
+            // and this task idles.
+            let s_recv = inner.clone();
+            let recv_pump = tokio::spawn(async move {
+                while let Ok(msg) = s_recv.recv().await {
+                    let mut m = msg;
+                    loop {
+                        match pump_prod.push(m) {
+                            Ok(()) => {
+                                if let yring::FlushResult::Flushed {
+                                    was_empty: true, ..
+                                } = pump_prod.flush_and_check()
+                                {
+                                    NotifyFd::signal_recv(recv_signal_fd);
+                                }
+                                break;
+                            }
+                            Err(returned) => {
+                                m = returned;
+                                let notified = recv_space.notified();
+                                tokio::pin!(notified);
+                                notified.as_mut().enable();
+                                match pump_prod.push(m) {
+                                    Ok(()) => {
+                                        if let yring::FlushResult::Flushed {
+                                            was_empty: true, ..
+                                        } = pump_prod.flush_and_check()
+                                        {
+                                            NotifyFd::signal_recv(recv_signal_fd);
+                                        }
+                                        break;
+                                    }
+                                    Err(returned2) => {
+                                        m = returned2;
+                                        notified.await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            let _ = otx.send((inner, recv_pump));
+        }),
+    );
+
+    let Ok((inner, recv_pump)) = orx.recv() else {
+        return;
+    };
+    let _ = sock.inner.set(inner);
+    let _ = sock.recv_pump.set(recv_pump);
 }
 
 #[unsafe(no_mangle)]
@@ -493,17 +540,21 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if sock_ptr.is_null() {
         return fail(libc::EFAULT);
     }
+    // SAFETY: sock_ptr came from Box::into_raw in zmq_socket; reclaiming ownership.
     let arc = unsafe { *Box::from_raw(sock_ptr.cast::<Arc<OmqSocket>>()) };
 
-    // Remove socket from registry on its io thread.
-    let id = arc.id;
-    let thread_idx = arc.thread_idx;
-    let _ = run_on(&arc.ctx, thread_idx, move || {
-        REG.with(|r| r.borrow_mut().remove(&id));
-    });
+    if let Some(h) = arc.recv_pump.get() {
+        h.abort();
+    }
+
+    // Enter the tokio runtime context so that dropping OmqSocket (and
+    // the Arc<omq_tokio::Socket> it holds) doesn't panic from missing
+    // reactor.
+    let _guard = arc.ctx.handle(arc.thread_idx).enter();
 
     arc.notify.close();
     arc.ctx.socket_closed();
+    drop(arc);
     0
 }
 
@@ -522,15 +573,17 @@ unsafe fn parse_endpoint_args(
     if sock_ptr.is_null() || addr.is_null() {
         return Err(libc::EFAULT);
     }
+    // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
     if sock.ctx.terminated.load(Ordering::Acquire) {
         return Err(ETERM);
     }
+    // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
         return Err(libc::EINVAL);
     };
     let addr_str = addr_str.to_owned();
-    let Ok(endpoint) = omq_compio::Endpoint::from_str(&addr_str) else {
+    let Ok(endpoint) = omq_tokio::Endpoint::from_str(&addr_str) else {
         return Err(libc::EINVAL);
     };
     Ok((sock, addr_str, endpoint))
@@ -551,7 +604,9 @@ unsafe fn parse_group_args(
     if sock_ptr.is_null() || cstr.is_null() {
         return Err(libc::EFAULT);
     }
+    // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: cstr is non-null (checked above); caller guarantees a valid C string.
     let Ok(g) = unsafe { CStr::from_ptr(cstr) }.to_str() else {
         return Err(libc::EINVAL);
     };
@@ -560,7 +615,7 @@ unsafe fn parse_group_args(
 
 /// Map the two-level `Result<Result<T, omq Error>, ()>` returned by
 /// `with_socket` to a C return code (0 on success).
-fn result_to_rc<T>(result: &Result<Result<T, omq_compio::error::Error>, ()>) -> c_int {
+fn result_to_rc<T>(result: &Result<Result<T, omq_tokio::error::Error>, ()>) -> c_int {
     match result {
         Ok(Ok(_)) => 0,
         Ok(Err(e)) => fail(map_omq_err(e)),
@@ -576,21 +631,31 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     };
 
     // ZMQ_IPV6: rewrite wildcard bind to IPv6 unspecified (dual-stack).
-    if sock.overlay.lock().unwrap().ipv6 {
+    let Ok(ov) = sock.overlay.lock() else {
+        return fail(ETERM);
+    };
+    if ov.ipv6 {
         endpoint = ipv6_rewrite_wildcard(endpoint);
     }
+    drop(ov);
 
     ensure_materialized(sock);
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
+
+    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
         s.bind(endpoint.clone()).await?;
         let resolved = s.last_bound_endpoint().map(|ep| ep.to_string());
-        Ok::<_, omq_compio::error::Error>(resolved)
+        Ok::<_, omq_tokio::error::Error>(resolved)
     });
 
     match result {
         Ok(Ok(resolved)) => {
-            *sock.last_endpoint.lock().unwrap() = resolved.or(Some(addr_str.clone()));
+            if let Ok(mut ep) = sock.last_endpoint.lock() {
+                *ep = resolved.or(Some(addr_str.clone()));
+            }
             if addr_str.starts_with("inproc://") {
                 register_inproc_bind(sock, &addr_str);
             }
@@ -610,13 +675,19 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
 
     ensure_materialized(sock);
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
+
+    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
         s.connect(endpoint).await
     });
 
     match result {
         Ok(Ok(())) => {
-            *sock.last_endpoint.lock().unwrap() = Some(addr_str.clone());
+            if let Ok(mut ep) = sock.last_endpoint.lock() {
+                *ep = Some(addr_str.clone());
+            }
             if addr_str.starts_with("inproc://") {
                 register_inproc_connect(sock, &addr_str);
             }
@@ -634,7 +705,11 @@ pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -
         Err(e) => return fail(e),
     };
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
+
+    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
         s.unbind(endpoint).await
     });
 
@@ -648,7 +723,11 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
         Err(e) => return fail(e),
     };
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
+
+    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
         s.disconnect(endpoint).await
     });
 
@@ -662,7 +741,10 @@ pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) ->
         Err(e) => return fail(e),
     };
     ensure_materialized(sock);
-    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
+    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
         s.join(g).await
     });
     result_to_rc(&result)
@@ -675,7 +757,10 @@ pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -
         Err(e) => return fail(e),
     };
     ensure_materialized(sock);
-    let result = with_socket(&sock.ctx, sock.thread_idx, sock.id, move |s| async move {
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
+    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
         s.leave(g).await
     });
     result_to_rc(&result)
@@ -700,7 +785,9 @@ pub extern "C" fn zmq_socket_monitor(
     if addr.is_null() {
         return 0;
     }
+    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
     let Ok(addr_str) = unsafe { CStr::from_ptr(addr) }.to_str() else {
         return fail(libc::EINVAL);
     };
@@ -709,27 +796,25 @@ pub extern "C" fn zmq_socket_monitor(
 
     ensure_materialized(sock);
 
-    let ctx_clone = sock.ctx.clone();
-    let thread_idx = sock.thread_idx;
-    let sock_id = sock.id;
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
 
-    // Subscribe to the omq monitor stream and start a forwarding task
-    // on the io thread.
-    let result = with_socket(&ctx_clone, thread_idx, sock_id, move |s| async move {
+    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
         let mut stream = s.monitor();
 
         // Create a PAIR socket for publishing events, bind it to addr.
-        let pair = std::rc::Rc::new(omq_compio::Socket::new(
-            omq_compio::SocketType::Pair,
-            omq_compio::Options::default(),
+        let pair = std::sync::Arc::new(omq_tokio::Socket::new(
+            omq_tokio::SocketType::Pair,
+            omq_tokio::Options::default(),
         ));
-        let ep = omq_compio::Endpoint::from_str(&addr_str)
-            .map_err(|e| omq_compio::error::Error::InvalidEndpoint(e.to_string()))?;
+        let ep = omq_tokio::Endpoint::from_str(&addr_str)
+            .map_err(|e| omq_tokio::error::Error::InvalidEndpoint(e.to_string()))?;
         pair.bind(ep).await?;
 
-        compio::runtime::spawn(async move {
-            use omq_compio::message::Message;
-            use omq_compio::monitor::MonitorEvent;
+        tokio::spawn(async move {
+            use omq_tokio::MonitorEvent;
+            use omq_tokio::message::Message;
 
             while let Ok(ev) = stream.recv().await {
                 let (event_id, value, endpoint): (u16, i32, String) = match &ev {
@@ -768,10 +853,9 @@ pub extern "C" fn zmq_socket_monitor(
                     break;
                 }
             }
-        })
-        .detach();
+        });
 
-        Ok::<_, omq_compio::error::Error>(())
+        Ok::<_, omq_tokio::error::Error>(())
     });
 
     match result {

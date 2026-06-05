@@ -290,3 +290,42 @@ async fn pub_accepts_zmtp30_message_form_subscribe() {
          got: {received:?}"
     );
 }
+
+/// XPUB with subscriber churn over TCP. Exercises subscription cache
+/// invalidation across connect/subscribe/disconnect cycles.
+#[tokio::test]
+async fn xpub_tcp_subscriber_churn() {
+    let xpub = Socket::new(SocketType::XPub, Options::default());
+    let mut mon = xpub.monitor();
+    xpub.bind(tcp_loopback(0)).await.unwrap();
+    let port = loop {
+        match mon.recv().await {
+            Ok(omq_tokio::MonitorEvent::Listening {
+                endpoint: Endpoint::Tcp { port, .. },
+            }) => break port,
+            Ok(_) => {}
+            other => panic!("expected Listening, got {other:?}"),
+        }
+    };
+
+    for round in 0..3u32 {
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.subscribe("").await.unwrap();
+        sub.connect(tcp_loopback(port)).await.unwrap();
+
+        // Drain XPUB subscribe notification.
+        let _ = tokio::time::timeout(Duration::from_secs(2), xpub.recv()).await;
+
+        let tag = format!("xp-{round}");
+        xpub.send(Message::single(tag.clone())).await.unwrap();
+
+        let m = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+            .await
+            .expect("sub timed out")
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap(), tag.as_bytes());
+
+        drop(sub);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

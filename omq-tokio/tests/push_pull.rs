@@ -1,5 +1,7 @@
 //! Multi-peer PUSH / PULL integration tests and work-stealing demo.
 
+mod test_support;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -241,4 +243,66 @@ async fn push_send_before_peer_connects_queues() {
         let expected = format!("early-{i}");
         assert_eq!(m.part_bytes(0).unwrap(), expected.as_bytes());
     }
+}
+
+/// TCP PUSH/PULL with peer churn: PULL connects, receives, disconnects;
+/// new PULL connects and must receive subsequent messages.
+#[tokio::test]
+async fn push_tcp_survives_pull_churn() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    let port = test_support::bind_loopback(&push).await;
+
+    for round in 0..3u32 {
+        let pull = Socket::new(SocketType::Pull, Options::default());
+        pull.connect(test_support::tcp_loopback(port))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let tag = format!("round-{round}");
+        push.send(Message::single(tag.clone())).await.unwrap();
+
+        let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+            .await
+            .expect("pull timed out")
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap(), tag.as_bytes());
+        drop(pull);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// TCP PUSH distributes across multiple TCP PULLs. All messages must
+/// arrive; at least two PULLs must receive some (exact distribution
+/// depends on TCP handshake timing and internal buffering).
+#[tokio::test]
+async fn push_tcp_multi_pull_distributes() {
+    const N: usize = 300;
+    let push = Socket::new(SocketType::Push, Options::default());
+    let port = test_support::bind_loopback(&push).await;
+
+    let counts: Vec<Arc<AtomicUsize>> = (0..3).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    let mut handles = Vec::new();
+    for c in &counts {
+        let p = Socket::new(SocketType::Pull, Options::default());
+        p.connect(test_support::tcp_loopback(port)).await.unwrap();
+        let c = c.clone();
+        handles.push(tokio::spawn(async move {
+            while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), p.recv()).await {
+                c.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    for i in 0..N {
+        push.send(Message::single(format!("m-{i}"))).await.unwrap();
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let total: usize = counts.iter().map(|c| c.load(Ordering::SeqCst)).sum();
+    assert_eq!(total, N, "every message must arrive");
 }

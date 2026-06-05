@@ -4,6 +4,7 @@ use std::ffi::{CStr, c_int};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_version(major: *mut c_int, minor: *mut c_int, patch: *mut c_int) {
+    // SAFETY: each pointer is checked for null before writing.
     unsafe {
         if !major.is_null() {
             *major = 4;
@@ -22,6 +23,7 @@ pub extern "C" fn zmq_has(capability: *const libc::c_char) -> c_int {
     if capability.is_null() {
         return 0;
     }
+    // SAFETY: capability is non-null (checked above); caller guarantees valid C string.
     let cap = unsafe { CStr::from_ptr(capability) }.to_str().unwrap_or("");
     match cap {
         "ipc" | "inproc" | "tcp" | "udp" | "zmtp3" | "curve" | "plain" => 1,
@@ -45,6 +47,7 @@ pub extern "C" fn zmq_stopwatch_stop(watch: *mut libc::c_void) -> libc::c_ulong 
     if watch.is_null() {
         return 0;
     }
+    // SAFETY: watch came from Box::into_raw in zmq_stopwatch_start; reclaiming ownership.
     let start = unsafe { *Box::from_raw(watch.cast::<std::time::Instant>()) };
     start.elapsed().as_micros() as libc::c_ulong
 }
@@ -54,6 +57,7 @@ pub extern "C" fn zmq_stopwatch_intermediate(watch: *mut libc::c_void) -> libc::
     if watch.is_null() {
         return 0;
     }
+    // SAFETY: watch came from zmq_stopwatch_start; borrowing without consuming.
     let start = unsafe { &*(watch.cast::<std::time::Instant>()) };
     start.elapsed().as_micros() as libc::c_ulong
 }
@@ -67,6 +71,7 @@ pub extern "C" fn zmq_atomic_counter_new() -> *mut libc::c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_atomic_counter_set(counter: *mut libc::c_void, value: c_int) {
     if !counter.is_null() {
+        // SAFETY: counter came from zmq_atomic_counter_new; non-null (checked above).
         let c = unsafe { &*(counter.cast::<std::sync::atomic::AtomicI32>()) };
         c.store(value, std::sync::atomic::Ordering::SeqCst);
     }
@@ -77,6 +82,7 @@ pub extern "C" fn zmq_atomic_counter_inc(counter: *mut libc::c_void) -> c_int {
     if counter.is_null() {
         return 0;
     }
+    // SAFETY: counter came from zmq_atomic_counter_new; non-null (checked above).
     let c = unsafe { &*(counter.cast::<std::sync::atomic::AtomicI32>()) };
     c.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
@@ -86,6 +92,7 @@ pub extern "C" fn zmq_atomic_counter_dec(counter: *mut libc::c_void) -> c_int {
     if counter.is_null() {
         return 0;
     }
+    // SAFETY: counter came from zmq_atomic_counter_new; non-null (checked above).
     let c = unsafe { &*(counter.cast::<std::sync::atomic::AtomicI32>()) };
     let prev = c.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     i32::from(prev > 1)
@@ -96,6 +103,7 @@ pub extern "C" fn zmq_atomic_counter_value(counter: *mut libc::c_void) -> c_int 
     if counter.is_null() {
         return 0;
     }
+    // SAFETY: counter came from zmq_atomic_counter_new; non-null (checked above).
     let c = unsafe { &*(counter.cast::<std::sync::atomic::AtomicI32>()) };
     c.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -103,8 +111,10 @@ pub extern "C" fn zmq_atomic_counter_value(counter: *mut libc::c_void) -> c_int 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_atomic_counter_destroy(counter_p: *mut *mut libc::c_void) {
     if !counter_p.is_null() {
+        // SAFETY: counter_p is non-null (checked above).
         let p = unsafe { *counter_p };
         if !p.is_null() {
+            // SAFETY: p came from Box::into_raw in zmq_atomic_counter_new.
             let _ = unsafe { Box::from_raw(p.cast::<std::sync::atomic::AtomicI32>()) };
             unsafe { *counter_p = std::ptr::null_mut() };
         }

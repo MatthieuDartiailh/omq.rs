@@ -17,13 +17,14 @@
 //! Req:  connects, runs warmup + measured round-trips, prints latency
 //!       percentiles (p50 p99 p999 max iterations) in microseconds.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use zeromq::{
-    PullSocket, PushSocket, RepSocket, ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage,
+    PubSocket, PullSocket, PushSocket, RepSocket, ReqSocket, Socket, SocketRecv, SocketSend,
+    SubSocket, ZmqMessage,
 };
 
 fn resolve_addr(s: &str) -> String {
@@ -60,9 +61,22 @@ async fn main() {
             let warmup: usize = args[5].parse().expect("warmup");
             run_req(&addr, size, iterations, warmup).await;
         }
+        Some("pub") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            run_pub(&addr, size).await;
+        }
+        Some("sub") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            run_sub(&addr, size, Duration::from_secs_f64(duration)).await;
+        }
         _ => {
             eprintln!("usage: zmqrs_bench_peer push <addr> <size>");
             eprintln!("       zmqrs_bench_peer pull <addr> <size> <duration_secs>");
+            eprintln!("       zmqrs_bench_peer pub <addr> <size>");
+            eprintln!("       zmqrs_bench_peer sub <addr> <size> <duration_secs>");
             eprintln!("       zmqrs_bench_peer rep <addr> <size>");
             eprintln!("       zmqrs_bench_peer req <addr> <size> <iterations> <warmup>");
             eprintln!("<addr>: port number or full ZMQ address (tcp:// ipc://)");
@@ -76,7 +90,11 @@ async fn run_push(addr: &str, size: usize) {
     socket.bind(addr).await.expect("push bind");
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
-        if socket.send(ZmqMessage::from(payload.clone())).await.is_err() {
+        if socket
+            .send(ZmqMessage::from(payload.clone()))
+            .await
+            .is_err()
+        {
             tokio::task::yield_now().await;
         }
     }
@@ -130,6 +148,49 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
     let p999 = percentile(&rtts, 99.9);
     let max = rtts[iterations - 1] as f64 / 1000.0;
     println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    std::process::exit(0);
+}
+
+async fn run_pub(addr: &str, size: usize) {
+    let mut socket = PubSocket::new();
+    socket.bind(addr).await.expect("pub bind");
+    let payload = Bytes::from(vec![b'x'; size]);
+    loop {
+        if socket
+            .send(ZmqMessage::from(payload.clone()))
+            .await
+            .is_err()
+        {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+async fn run_sub(addr: &str, size: usize, duration: Duration) {
+    let mut socket = SubSocket::new();
+    socket.connect(addr).await.expect("sub connect");
+    socket.subscribe("").await.expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let count = Arc::new(AtomicU64::new(0));
+    let count_recv = count.clone();
+    let recv_handle = tokio::spawn(async move {
+        loop {
+            if socket.recv().await.is_err() {
+                break;
+            }
+            count_recv.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    let t0 = Instant::now();
+    tokio::time::sleep(duration).await;
+    let elapsed = t0.elapsed().as_secs_f64();
+    let final_count = count.load(Ordering::Relaxed);
+    recv_handle.abort();
+
+    println!("{final_count} {elapsed:.6} {size}");
     std::process::exit(0);
 }
 

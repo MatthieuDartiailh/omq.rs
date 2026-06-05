@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use rzmq::{Context, Msg, Socket, SocketType};
+use rzmq::{Context, Msg, SocketType};
 
 
 fn print_latency(rtts: &[u64], iterations: usize) {
@@ -82,6 +82,17 @@ async fn main() {
             let iterations: usize = args[4].parse().expect("iterations");
             let warmup: usize = args[5].parse().expect("warmup");
             run_req(&addr, size, iterations, warmup).await;
+        }
+        Some("pub") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            run_pub(&addr, size).await;
+        }
+        Some("sub") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            run_sub(&addr, size, Duration::from_secs_f64(duration)).await;
         }
         Some("inproc") => {
             let addr = format!("inproc://{}", &args[2]);
@@ -159,6 +170,47 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
     rtts.sort_unstable();
 
     print_latency(&rtts, iterations);
+    std::process::exit(0);
+}
+
+async fn run_pub(addr: &str, size: usize) {
+    let ctx = Context::new().expect("context");
+    let pub_ = ctx.socket(SocketType::Pub).expect("pub socket");
+    pub_.bind(addr).await.expect("pub bind");
+    let payload = leaked_payload(size);
+    loop {
+        if pub_.send(Msg::from_static(payload)).await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+async fn run_sub(addr: &str, size: usize, duration: Duration) {
+    let ctx = Context::new().expect("context");
+    let sub = ctx.socket(SocketType::Sub).expect("sub socket");
+    sub.set_option(6, b"").await.expect("subscribe");
+    sub.connect(addr).await.expect("sub connect");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let count = Arc::new(AtomicU64::new(0));
+    let count_recv = count.clone();
+    let recv_handle = tokio::spawn(async move {
+        loop {
+            if sub.recv().await.is_err() {
+                break;
+            }
+            count_recv.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    let t0 = Instant::now();
+    tokio::time::sleep(duration).await;
+    let elapsed = t0.elapsed().as_secs_f64();
+    let final_count = count.load(Ordering::Relaxed);
+    recv_handle.abort();
+
+    println!("{final_count} {elapsed:.6} {size}");
     std::process::exit(0);
 }
 

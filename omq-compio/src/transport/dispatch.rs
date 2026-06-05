@@ -5,13 +5,15 @@ use smallvec::SmallVec;
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::Result;
+use omq_proto::inproc::InboundFrame;
 use omq_proto::message::Message;
 use omq_proto::proto::command::PeerProperties;
 use omq_proto::proto::{Command, SocketType};
 use omq_proto::subscription::SubscriptionSet;
 
 use crate::monitor::{MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo};
-use crate::transport::inproc::{InboundFrame, InprocPeerSnapshot};
+use crate::socket::TaggedFrame;
+use crate::transport::inproc::InprocPeerSnapshot;
 
 #[derive(Clone, Debug)]
 pub(crate) struct MonitorCtx {
@@ -22,6 +24,7 @@ pub(crate) struct MonitorCtx {
     pub peer_address: Option<std::net::SocketAddr>,
     pub peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
     pub peer_groups: Option<Arc<RwLock<rustc_hash::FxHashSet<bytes::Bytes>>>>,
+    pub pub_sub_dirty: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub(super) enum Drained {
@@ -36,7 +39,8 @@ pub(super) enum Drained {
 async fn handle_sub_cmd(
     socket_type: SocketType,
     monitor_ctx: Option<&MonitorCtx>,
-    peer_in_tx: &blume::Sender<InboundFrame>,
+    peer_in_tx: &blume::Sender<TaggedFrame>,
+    connection_id: u64,
     cmd: Command,
 ) -> std::io::Result<()> {
     let prefix = match &cmd {
@@ -50,6 +54,9 @@ async fn handle_sub_cmd(
                 Command::Subscribe(_) => s.add(&prefix),
                 Command::Cancel(_) => s.remove(&prefix),
                 _ => {}
+            }
+            if let Some(dirty) = &ctx.pub_sub_dirty {
+                dirty.store(true, std::sync::atomic::Ordering::Release);
             }
         }
         match &cmd {
@@ -68,7 +75,10 @@ async fn handle_sub_cmd(
     }
     if matches!(socket_type, SocketType::XPub) {
         let _ = peer_in_tx
-            .send_async(InboundFrame::Command(Box::new(cmd)))
+            .send_async(TaggedFrame {
+                connection_id,
+                frame: InboundFrame::Command(Box::new(cmd)),
+            })
             .await;
     }
     Ok(())
@@ -78,11 +88,12 @@ pub(super) async fn dispatch_command(
     cmd: Command,
     socket_type: SocketType,
     monitor_ctx: Option<&MonitorCtx>,
-    peer_in_tx: &blume::Sender<InboundFrame>,
+    peer_in_tx: &blume::Sender<TaggedFrame>,
+    connection_id: u64,
 ) -> Result<bool> {
     match cmd {
         Command::Subscribe(_) | Command::Cancel(_) => {
-            handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, cmd).await?;
+            handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, connection_id, cmd).await?;
         }
         Command::Join(group) => {
             if let Some(ctx) = monitor_ctx {
@@ -124,7 +135,10 @@ pub(super) async fn dispatch_command(
         }
         other => {
             if peer_in_tx
-                .send_async(InboundFrame::Command(Box::new(other)))
+                .send_async(TaggedFrame {
+                    connection_id,
+                    frame: InboundFrame::Command(Box::new(other)),
+                })
                 .await
                 .is_err()
             {
@@ -142,19 +156,12 @@ pub(crate) trait SnapshotSink {
 pub(super) async fn dispatch_drained_events(
     drained: SmallVec<[Drained; 8]>,
     socket_type: SocketType,
-    peer_in_tx: &blume::Sender<InboundFrame>,
+    peer_in_tx: &blume::Sender<TaggedFrame>,
     snapshot_sink: &dyn SnapshotSink,
     monitor_ctx: Option<&MonitorCtx>,
+    connection_id: u64,
     peer_identity: &Bytes,
 ) -> Result<bool> {
-    let needs_identity = matches!(
-        socket_type,
-        SocketType::Router
-            | SocketType::Server
-            | SocketType::Peer
-            | SocketType::Rep
-            | SocketType::Stream
-    );
     for de in drained {
         match de {
             Drained::Handshake {
@@ -188,23 +195,22 @@ pub(super) async fn dispatch_drained_events(
                             _ => None,
                         };
                         if let Some(c) = cmd {
-                            handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, c).await?;
+                            handle_sub_cmd(socket_type, monitor_ctx, peer_in_tx, connection_id, c)
+                                .await?;
                             continue;
                         }
                     }
                 }
-                let id = if needs_identity {
-                    peer_identity.clone()
-                } else {
-                    Bytes::new()
+                let frame = TaggedFrame {
+                    connection_id,
+                    frame: InboundFrame::Message(m),
                 };
-                let frame = InboundFrame::message_from(id, m);
                 if peer_in_tx.send_async(frame).await.is_err() {
                     return Ok(true);
                 }
             }
             Drained::Cmd(c) => {
-                if dispatch_command(c, socket_type, monitor_ctx, peer_in_tx).await? {
+                if dispatch_command(c, socket_type, monitor_ctx, peer_in_tx, connection_id).await? {
                     return Ok(true);
                 }
             }

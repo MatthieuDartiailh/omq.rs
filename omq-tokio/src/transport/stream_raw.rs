@@ -66,7 +66,9 @@ pub(crate) fn spawn(
                             }
                         }
                         Some(DriverCommand::Close) | None => break,
-                        Some(DriverCommand::SendCommand(_)) => {}
+                        Some(
+                            DriverCommand::SendEncoded(_) | DriverCommand::SendCommand(_),
+                        ) => {}
                     }
                 }
             }

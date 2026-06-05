@@ -52,6 +52,7 @@ pub extern "C" fn zmq_strerror(errnum: c_int) -> *const libc::c_char {
         ENOBUFS => c"No buffer space available".as_ptr(),
         ENETDOWN => c"Network is down".as_ptr(),
         EPROTONOSUPPORT => c"Protocol not supported".as_ptr(),
+        // SAFETY: libc::strerror is safe for any c_int; returns a static string.
         _ => unsafe { libc::strerror(errnum) },
     }
 }
@@ -69,8 +70,8 @@ pub(crate) fn map_io_err(e: &std::io::Error) -> c_int {
     }
 }
 
-pub(crate) fn map_omq_err(e: &omq_compio::error::Error) -> c_int {
-    use omq_compio::error::Error;
+pub(crate) fn map_omq_err(e: &omq_tokio::error::Error) -> c_int {
+    use omq_tokio::error::Error;
     match e {
         Error::WouldBlock | Error::Timeout => libc::EAGAIN,
         Error::Closed => ETERM,

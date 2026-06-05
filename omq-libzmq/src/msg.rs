@@ -53,6 +53,9 @@ impl std::fmt::Debug for OmqMsgRepr {
 const _SIZE_ASSERT: () = assert!(std::mem::size_of::<OmqMsgRepr>() == 64);
 
 #[inline]
+/// # Safety
+///
+/// `msg` must be non-null and point to a valid, initialized `OmqMsgRepr`.
 unsafe fn repr<'a>(msg: *mut OmqMsgRepr) -> &'a mut OmqMsgRepr {
     unsafe { &mut *msg }
 }
@@ -62,6 +65,7 @@ pub extern "C" fn zmq_msg_init(msg: *mut OmqMsgRepr) -> c_int {
     if msg.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: msg is non-null (checked above); zeroing the 64-byte repr.
     unsafe {
         std::ptr::write_bytes(msg, 0, 1);
     }
@@ -73,10 +77,12 @@ pub extern "C" fn zmq_msg_init_size(msg: *mut OmqMsgRepr, size: usize) -> c_int 
     if msg.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: libc::malloc is always safe to call; returns null on failure.
     let ptr = unsafe { libc::malloc(size).cast::<u8>() };
     if ptr.is_null() && size > 0 {
         return crate::error::fail(libc::ENOMEM);
     }
+    // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
     r.kind = KIND_HEAP;
     r.more = 0;
@@ -101,6 +107,7 @@ pub extern "C" fn zmq_msg_init_data(
     if msg.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
     r.kind = KIND_EXTERNAL;
     r.more = 0;
@@ -126,6 +133,7 @@ pub extern "C" fn zmq_msg_init_buffer(
         return -1;
     }
     if size > 0 && !buf.is_null() {
+        // SAFETY: msg was just initialized by zmq_msg_init_size; buf is non-null.
         let r = unsafe { repr(msg) };
         unsafe {
             std::ptr::copy_nonoverlapping(buf.cast::<u8>(), r.ptr, size);
@@ -139,6 +147,7 @@ pub extern "C" fn zmq_msg_data(msg: *mut OmqMsgRepr) -> *mut libc::c_void {
     if msg.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
     r.ptr.cast()
 }
@@ -148,6 +157,7 @@ pub extern "C" fn zmq_msg_size(msg: *const OmqMsgRepr) -> usize {
     if msg.is_null() {
         return 0;
     }
+    // SAFETY: msg is non-null (checked above).
     unsafe { (*msg).size as usize }
 }
 
@@ -156,6 +166,7 @@ pub extern "C" fn zmq_msg_more(msg: *const OmqMsgRepr) -> c_int {
     if msg.is_null() {
         return 0;
     }
+    // SAFETY: msg is non-null (checked above).
     c_int::from(unsafe { (*msg).more })
 }
 
@@ -164,16 +175,20 @@ pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
     if msg.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
     #[expect(clippy::collapsible_match)]
     match r.kind {
         KIND_HEAP => {
             if !r.ptr.is_null() {
+                // SAFETY: ptr was allocated by libc::malloc in zmq_msg_init_size.
                 unsafe { libc::free(r.ptr.cast()) };
             }
         }
         KIND_EXTERNAL => {
             if !r.free_fn.is_null() && !r.ptr.is_null() {
+                // SAFETY: free_fn was stored as a fn(*mut c_void, *mut c_void) in
+                // zmq_msg_init_data; transmuting back to the original type.
                 let ffn: unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void) =
                     unsafe { std::mem::transmute(r.free_fn) };
                 unsafe { ffn(r.ptr.cast(), r.hint) };
@@ -181,11 +196,13 @@ pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
         }
         KIND_BYTES => {
             if !r.boxed.is_null() {
+                // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
                 drop(unsafe { Box::from_raw(r.boxed.cast::<Bytes>()) });
             }
         }
         _ => {}
     }
+    // SAFETY: msg is non-null; zeroing the repr marks it as empty.
     unsafe {
         std::ptr::write_bytes(msg, 0, 1);
     }
@@ -199,6 +216,8 @@ pub extern "C" fn zmq_msg_move(dst: *mut OmqMsgRepr, src: *mut OmqMsgRepr) -> c_
     }
     // Close dst first.
     zmq_msg_close(dst);
+    // SAFETY: src and dst are non-null (checked above) and don't overlap
+    // (ZMQ API contract). Move the repr then zero src to prevent double-free.
     unsafe {
         std::ptr::copy_nonoverlapping(src, dst, 1);
         std::ptr::write_bytes(src, 0, 1);
@@ -212,12 +231,15 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
         return crate::error::fail(libc::EFAULT);
     }
     zmq_msg_close(dst);
+    // SAFETY: src is non-null (checked above).
     let s = unsafe { &*src };
     match s.kind {
         KIND_BYTES => {
             // Clone the Bytes (increments the Arc refcount).
+            // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
             let original = unsafe { &*(s.boxed.cast::<Bytes>()) };
             let cloned = Box::new(original.clone());
+            // SAFETY: dst was closed above and is ready for reinitialization.
             let d = unsafe { repr(dst) };
             d.kind = KIND_BYTES;
             d.more = s.more;
@@ -232,13 +254,16 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
         KIND_HEAP | KIND_EXTERNAL => {
             // Deep copy into a new heap allocation.
             let size = s.size as usize;
+            // SAFETY: libc::malloc is always safe to call.
             let new_ptr = unsafe { libc::malloc(size).cast::<u8>() };
             if size > 0 && new_ptr.is_null() {
                 return crate::error::fail(libc::ENOMEM);
             }
             if size > 0 {
+                // SAFETY: s.ptr is valid for size bytes; new_ptr was just allocated.
                 unsafe { std::ptr::copy_nonoverlapping(s.ptr, new_ptr, size) };
             }
+            // SAFETY: dst was closed above and is ready for reinitialization.
             let d = unsafe { repr(dst) };
             d.kind = KIND_HEAP;
             d.more = s.more;
@@ -252,6 +277,7 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
         }
         _ => {
             // Empty: just zero dst.
+            // SAFETY: dst is non-null (checked above).
             unsafe { std::ptr::write_bytes(dst, 0, 1) };
         }
     }
@@ -288,6 +314,7 @@ pub extern "C" fn zmq_msg_gets(
         crate::error::set_errno(libc::EINVAL);
         return std::ptr::null();
     }
+    // SAFETY: property is non-null (checked above); caller guarantees valid C string.
     let prop = unsafe { std::ffi::CStr::from_ptr(property) };
     match prop.to_bytes() {
         b"Socket-Type" | b"Identity" | b"Routing-Id" | b"Peer-Address" => c"".as_ptr(),
@@ -304,6 +331,7 @@ pub extern "C" fn zmq_msg_set_routing_id(msg: *mut OmqMsgRepr, routing_id: u32) 
     if msg.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
     r.reserved[0..4].copy_from_slice(&routing_id.to_le_bytes());
     0
@@ -314,6 +342,7 @@ pub extern "C" fn zmq_msg_routing_id(msg: *const OmqMsgRepr) -> u32 {
     if msg.is_null() {
         return 0;
     }
+    // SAFETY: msg is non-null (checked above).
     let bytes = unsafe { &(&(*msg).reserved)[0..4] };
     u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4]))
 }
@@ -324,10 +353,12 @@ pub extern "C" fn zmq_msg_set_group(msg: *mut OmqMsgRepr, group: *const libc::c_
     if msg.is_null() || group.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: group is non-null (checked above); caller guarantees valid C string.
     let s = unsafe { CStr::from_ptr(group) }.to_bytes();
     if s.len() > 11 {
         return crate::error::fail(libc::EINVAL);
     }
+    // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
     r.reserved[4..4 + s.len()].copy_from_slice(s);
     r.reserved[4 + s.len()] = 0;
@@ -339,6 +370,7 @@ pub extern "C" fn zmq_msg_group(msg: *const OmqMsgRepr) -> *const libc::c_char {
     if msg.is_null() {
         return c"".as_ptr();
     }
+    // SAFETY: msg is non-null (checked above); reserved area is always valid.
     unsafe { (&(*msg).reserved)[4..].as_ptr().cast() }
 }
 
@@ -359,14 +391,17 @@ pub extern "C" fn zmq_msg_send(
         return crate::error::fail(libc::EFAULT);
     }
 
+    // SAFETY: sock is non-null (checked above); caller guarantees a valid socket.
     let sock_arc = unsafe { &*(sock.cast::<Arc<crate::socket::OmqSocket>>()) };
 
     let group = msg_group_bytes(msg);
 
     // For KIND_BYTES, steal the arc instead of copying. Set boxed to null so
     // zmq_msg_close (called on success below) skips the drop.
+    // SAFETY: msg is non-null (checked above).
     let r = unsafe { &mut *msg };
     let bytes = if r.kind == KIND_BYTES && !r.boxed.is_null() {
+        // SAFETY: boxed was created by Box::into_raw; reclaiming ownership.
         let owned = unsafe { *Box::from_raw(r.boxed.cast::<Bytes>()) };
         r.boxed = std::ptr::null_mut();
         owned
@@ -375,13 +410,12 @@ pub extern "C" fn zmq_msg_send(
     };
 
     if !group.is_empty() {
-        let Ok(mut accum) = sock_arc.send_accum.lock() else {
-            return crate::error::fail(crate::error::ETERM);
-        };
+        // SAFETY: zmq contract guarantees single-threaded access per socket.
+        let accum = unsafe { &mut *sock_arc.send_accum.get() };
         accum.push(group);
     }
 
-    let ret = crate::send_recv::send_bytes(sock_arc, bytes, flags);
+    let ret = crate::send_recv::send_bytes(sock_arc, &bytes, flags);
     if ret >= 0 {
         zmq_msg_close(msg);
     }
@@ -411,6 +445,7 @@ pub extern "C" fn zmq_recvmsg(
 }
 
 fn msg_group_bytes(msg: *mut OmqMsgRepr) -> bytes::Bytes {
+    // SAFETY: caller guarantees msg is non-null.
     let r = unsafe { &*msg };
     let group_area = &r.reserved[4..];
     let nul = group_area
@@ -436,6 +471,7 @@ pub extern "C" fn zmq_msg_recv(
     if msg.is_null() || sock_ptr.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
     let sock = unsafe { &*(sock_ptr.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
     if sock
         .ctx
@@ -451,6 +487,7 @@ pub extern "C" fn zmq_msg_recv(
             let sz = frame.len();
             let boxed = Box::new(frame);
             let data_ptr = boxed.as_ptr().cast_mut();
+            // SAFETY: msg was just closed above and is ready for reinitialization.
             let r = unsafe { repr(msg) };
             r.kind = KIND_BYTES;
             r.more = u8::from(more);
@@ -472,9 +509,11 @@ pub extern "C" fn zmq_msg_recv(
 
 /// Extract a Bytes copy out of a msg without consuming ownership.
 fn extract_bytes(msg: *const OmqMsgRepr) -> Bytes {
+    // SAFETY: caller guarantees msg is non-null and initialized.
     let r = unsafe { &*msg };
     if r.ptr.is_null() || r.size == 0 {
         return Bytes::new();
     }
+    // SAFETY: r.ptr is non-null with r.size readable bytes (message invariant).
     Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(r.ptr, r.size as usize) })
 }

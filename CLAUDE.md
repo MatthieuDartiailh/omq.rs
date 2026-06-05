@@ -20,7 +20,7 @@ out-of-tree (maturin etc.).
 - **`yring`** -- bounded SPSC ring buffer for inproc transport.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq.so` /
   `.a`). Drop-in replacement: ships `zmq.h`, implements the `zmq_*`
-  API. Backed by `omq-compio`.
+  API. Backed by `omq-tokio`.
 - **`bindings/pyomq`** -- PyO3 wrapper over `omq-compio`. Own `Cargo.lock`.
   Build: `cd bindings/pyomq && maturin develop --release`.
 
@@ -59,7 +59,42 @@ only when the lint fires in some feature combinations but not others
 Lints: `missing_debug_implementations` = **deny**,
 `unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
 
-## Charts, benchmarks, and releasing
+## Comparison benchmarks
+
+Cross-implementation throughput and latency benchmarks live in
+`scripts/run_comparisons.py`. It drives standalone `bench_peer`
+binaries, one per implementation:
+
+| binary | source | impls |
+|--------|--------|-------|
+| `bench_peer_tokio` | `omq-tokio/src/bin/bench_peer_tokio.rs` | omq-tokio |
+| `bench_peer_compio` | `omq-compio/src/bin/bench_peer_compio.rs` | omq-compio, omq-compio-st |
+| `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, omq-libzmq |
+| `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
+| `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq |
+
+Each binary speaks a subcommand protocol:
+
+- `push <addr> <size>` -- bind PUSH, send forever
+- `pull <addr> <size> <duration>` -- connect PULL, count for duration,
+  print `<count> <elapsed> <size>` to stdout
+- `pub <addr> <size>` -- bind PUB, send forever
+- `sub <addr> <size> <duration>` -- connect SUB, subscribe(""),
+  count for duration
+- `inproc <name> <size> <duration>` -- in-process PUSH/PULL
+- `inproc-pubsub <name> <size> <duration> <peers>` -- in-process
+  PUB/SUB with N subscribers
+- `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>` -- latency
+
+Results go to `~/.cache/omq/comparisons.jsonl`. Charts are generated
+by `scripts/gen_comparison_chart.py` into `doc/charts/comparison_*.svg`.
+
+Per-backend criterion-style benches (separate from comparisons) live in
+`omq-tokio/benches/` and `omq-compio/benches/` with shared scaffolding
+in `benches/common/mod.rs`. Custom harness (`harness = false`), no
+external framework. Results go to `~/.cache/omq/results_{tokio,compio}.jsonl`.
+
+## Charts and releasing
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for:
 
@@ -84,8 +119,38 @@ revs link two `compio-runtime` instances -> TLS mismatch panic.
 
 ## ZMQ fundamentals
 
-Connect-before-bind always works. ZMTP reconnects automatically.
-Never suggest connection ordering as a cause for failures or hangs.
+ZMQ sockets are opaque message queues that abstract away the network.
+The user sends and receives messages. The socket handles connections,
+reconnections, framing, and multiplexing internally. The transport
+(TCP, IPC, inproc, UDP) is chosen by endpoint URI and is transparent
+to the application.
+
+Core guarantees that omq must uphold:
+
+- **Send/recv never fail due to peers.** A peer disconnecting, a TCP
+  connection dropping, or a slow consumer does not cause `send` or
+  `recv` to return an error. The socket reconnects automatically and
+  resumes delivery. The only user-visible send errors are protocol
+  violations (e.g. REQ sending twice without recv) or socket closed.
+- **Connect-before-bind works.** `connect()` queues internally and
+  waits for the bind to appear. Never suggest connection ordering as
+  a cause for failures or hangs.
+- **Automatic reconnection.** ZMTP peers reconnect on disconnect
+  with configurable backoff. The application does not manage
+  connection lifecycle.
+- **Messages are atomic.** A multipart message is delivered in full
+  or not at all. No partial delivery.
+- **HWM back-pressure, not errors.** When the outbound queue is
+  full, the socket either drops (PUB default) or blocks (PUSH
+  default, configurable via OnMute). It does not return an error.
+- **Transport-agnostic.** The same socket can bind on TCP and IPC
+  simultaneously. Inproc is in-process (no kernel, no serialization).
+- **Subscriptions are prefix-matched.** SUB subscribes to byte
+  prefixes. Empty prefix = all messages. PUB filters per subscriber.
+- **Thread safety contract.** A single socket must not be used from
+  multiple threads concurrently (ZMQ's rule). omq-tokio relaxes this
+  for async (send/recv serialize internally), but the principle holds
+  for omq-libzmq's C API.
 
 ## Architecture and internals
 
