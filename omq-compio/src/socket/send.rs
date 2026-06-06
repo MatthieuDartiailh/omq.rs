@@ -246,7 +246,7 @@ impl Socket {
             msg
         };
         match send_category(st) {
-            SendCategory::RoundRobin => self.send_round_robin(msg).await,
+            SendCategory::RoundRobin | SendCategory::Exclusive => self.send_round_robin(msg).await,
             SendCategory::IdentityRouted => self.send_identity_routed(msg).await,
             SendCategory::FanOut(kind) => match kind {
                 omq_proto::routing::FanOutKind::Group => self.send_radio(msg).await,
@@ -722,7 +722,7 @@ impl Socket {
     fn try_send_dispatch(&self, msg: &Message) -> Result<()> {
         let st = self.inner().socket_type;
         match send_category(st) {
-            SendCategory::RoundRobin => self.try_send_round_robin(msg),
+            SendCategory::RoundRobin | SendCategory::Exclusive => self.try_send_round_robin(msg),
             SendCategory::IdentityRouted => self.try_send_identity_routed(msg),
             SendCategory::FanOut(kind) => match kind {
                 omq_proto::routing::FanOutKind::Group => self.try_send_radio(msg),

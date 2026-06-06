@@ -9,6 +9,7 @@ use crate::proto::SocketType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendCategory {
     RoundRobin,
+    Exclusive,
     IdentityRouted,
     FanOut(FanOutKind),
     None,
@@ -35,10 +36,10 @@ pub const fn send_category(t: SocketType) -> SendCategory {
         SocketType::Push
         | SocketType::Dealer
         | SocketType::Req
-        | SocketType::Pair
         | SocketType::Client
-        | SocketType::Scatter
-        | SocketType::Channel => SendCategory::RoundRobin,
+        | SocketType::Scatter => SendCategory::RoundRobin,
+
+        SocketType::Pair | SocketType::Channel => SendCategory::Exclusive,
 
         SocketType::Router
         | SocketType::Rep

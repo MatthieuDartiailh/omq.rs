@@ -137,7 +137,7 @@ impl SocketDriver {
     fn update_encode_slot(&mut self) {
         use omq_proto::routing::SendCategory;
         let cat = omq_proto::routing::send_category(self.socket_type);
-        if !matches!(cat, SendCategory::RoundRobin) {
+        if !matches!(cat, SendCategory::RoundRobin | SendCategory::Exclusive) {
             return;
         }
         let mut guard = self.encode_slot.lock().expect("encode_slot");

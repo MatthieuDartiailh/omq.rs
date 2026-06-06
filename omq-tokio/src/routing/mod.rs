@@ -16,6 +16,7 @@
 //! REP envelope save/restore lives at the socket-type wiring level.
 
 pub(crate) mod drop_queue;
+pub(crate) mod exclusive;
 pub(crate) mod fair_queue;
 pub(crate) mod fan_out;
 pub(crate) mod identity;
@@ -33,6 +34,7 @@ use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 use omq_proto::routing::{FanOutKind, RecvCategory, SendCategory, recv_category, send_category};
 
+pub(crate) use exclusive::{ExclusiveSend, Submitter as ExclusiveSubmitter};
 pub(crate) use fair_queue::FairQueueRecv;
 pub(crate) use fan_out::{FanOutMode, FanOutSend, Submitter as FanOutSubmitter};
 pub(crate) use identity::{IdentityRecv, IdentitySend, Submitter as IdentitySubmitter};
@@ -43,6 +45,7 @@ pub(crate) use round_robin::{RoundRobinSend, Submitter as RoundRobinSubmitter};
 pub(crate) enum SendStrategy {
     None,
     RoundRobin(RoundRobinSend),
+    Exclusive(ExclusiveSend),
     FanOut(FanOutSend),
     Identity(IdentitySend),
 }
@@ -51,6 +54,7 @@ pub(crate) enum SendStrategy {
 pub(crate) enum SendSubmitter {
     None,
     RoundRobin(RoundRobinSubmitter),
+    Exclusive(ExclusiveSubmitter),
     FanOut(FanOutSubmitter),
     Identity(IdentitySubmitter),
 }
@@ -60,6 +64,7 @@ impl SendSubmitter {
         match self {
             Self::None => Err(Error::Protocol("socket type does not support send".into())),
             Self::RoundRobin(s) => s.send(msg).await,
+            Self::Exclusive(s) => s.send(msg).await,
             Self::FanOut(s) => s.send(msg).await,
             Self::Identity(s) => s.send(msg).await,
         }
@@ -74,6 +79,7 @@ impl SendSubmitter {
                 "socket type does not support send".into(),
             ))),
             Self::RoundRobin(s) => s.try_send(msg),
+            Self::Exclusive(s) => s.try_send(msg),
             Self::FanOut(s) => s.try_send(msg),
             Self::Identity(s) => s.try_send(msg),
         }
@@ -92,6 +98,7 @@ impl SendStrategy {
             }
             SendCategory::IdentityRouted => Self::Identity(IdentitySend::new(options)),
             SendCategory::RoundRobin => Self::RoundRobin(RoundRobinSend::new(options)),
+            SendCategory::Exclusive => Self::Exclusive(ExclusiveSend::new()),
         }
     }
 
@@ -99,6 +106,7 @@ impl SendStrategy {
         match self {
             Self::None => SendSubmitter::None,
             Self::RoundRobin(s) => SendSubmitter::RoundRobin(s.submitter()),
+            Self::Exclusive(s) => SendSubmitter::Exclusive(s.submitter()),
             Self::FanOut(s) => SendSubmitter::FanOut(s.submitter()),
             Self::Identity(s) => SendSubmitter::Identity(s.submitter()),
         }
@@ -114,6 +122,7 @@ impl SendStrategy {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.connection_added(peer_id, handle, is_inproc),
+            Self::Exclusive(s) => s.connection_added(peer_id, handle),
             Self::FanOut(s) => s.connection_added(peer_id, handle),
             Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity),
         }
@@ -132,6 +141,7 @@ impl SendStrategy {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.connection_removed(peer_id),
+            Self::Exclusive(s) => s.connection_removed(peer_id),
             Self::FanOut(s) => s.connection_removed(peer_id),
             Self::Identity(s) => s.connection_removed(peer_id),
         }
@@ -187,6 +197,7 @@ impl SendStrategy {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.shutdown(),
+            Self::Exclusive(s) => s.shutdown(),
             Self::FanOut(s) => s.shutdown(),
             Self::Identity(s) => s.shutdown(),
         }
@@ -196,6 +207,7 @@ impl SendStrategy {
         match self {
             Self::None => true,
             Self::RoundRobin(s) => s.is_drained(),
+            Self::Exclusive(s) => s.is_drained(),
             Self::FanOut(s) => s.is_drained(),
             Self::Identity(s) => s.is_drained(),
         }
