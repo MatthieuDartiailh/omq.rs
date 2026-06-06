@@ -13,7 +13,7 @@ use smallvec::SmallVec;
 
 use bytes::Bytes;
 
-use crate::engine::encode_slot;
+use crate::engine::encode_slot::{self, TryEncodeResult};
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -253,8 +253,10 @@ fn dispatch_to_targets(targets: &[PeerSend], msg: &Message) {
             let encoded = encode_slot::pre_encode(msg);
             for t in targets {
                 match t {
-                    PeerSend::Wire(slot) => {
-                        let _ = slot.try_push_encoded(&encoded);
+                    PeerSend::Wire { slot, inbox } => {
+                        if slot.try_push_encoded(&encoded) == TryEncodeResult::Ineligible {
+                            let _ = inbox.try_send(DriverCommand::SendMessage(msg.clone()));
+                        }
                     }
                     PeerSend::Inbox(tx) => {
                         let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));

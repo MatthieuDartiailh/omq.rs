@@ -32,8 +32,6 @@ pub(crate) struct PeerEncodeSlot {
     #[allow(dead_code)]
     pub(crate) has_transform: bool,
     #[allow(dead_code)]
-    pub(crate) uses_crypto: bool,
-    #[allow(dead_code)]
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
     pub(crate) dead: AtomicBool,
     pub(crate) peer_id: u64,
@@ -57,7 +55,6 @@ impl PeerEncodeSlot {
     pub(crate) fn new(
         peer_id: u64,
         has_transform: bool,
-        uses_crypto: bool,
         transform_passthrough: Option<(Bytes, usize)>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -68,7 +65,6 @@ impl PeerEncodeSlot {
             handshake_done: AtomicBool::new(false),
             msg_count: std::sync::atomic::AtomicUsize::new(0),
             has_transform,
-            uses_crypto,
             transform_passthrough,
             dead: AtomicBool::new(false),
             peer_id,
@@ -80,9 +76,6 @@ impl PeerEncodeSlot {
             return TryEncodeResult::Dead;
         }
         if !self.handshake_done.load(Ordering::Acquire) {
-            return TryEncodeResult::Ineligible;
-        }
-        if self.uses_crypto {
             return TryEncodeResult::Ineligible;
         }
 

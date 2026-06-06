@@ -111,6 +111,20 @@ impl MechanismSetup {
         }
     }
 
+    /// Whether this mechanism installs a per-frame crypto transform (CURVE,
+    /// BLAKE3ZMQ). NULL and PLAIN do not.
+    pub fn has_frame_transform(&self) -> bool {
+        match self {
+            Self::Null => false,
+            #[cfg(feature = "curve")]
+            Self::CurveServer { .. } | Self::CurveClient { .. } => true,
+            #[cfg(feature = "blake3zmq")]
+            Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => true,
+            #[cfg(feature = "plain")]
+            Self::PlainServer { .. } | Self::PlainClient { .. } => false,
+        }
+    }
+
     /// Whether this config selects the CURVE mechanism (server or client).
     #[cfg(feature = "curve")]
     pub fn is_curve(&self) -> bool {

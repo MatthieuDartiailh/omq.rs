@@ -313,13 +313,21 @@ impl SocketDriver {
             None => driver,
         };
 
-        let slot = crate::engine::encode_slot::PeerEncodeSlot::new(
-            peer_id,
-            has_transform,
-            false,
-            passthrough_info,
-        );
-        let driver = driver.with_encode_slot(slot.clone());
+        let uses_crypto = self.options.mechanism.has_frame_transform();
+        let slot = if uses_crypto {
+            None
+        } else {
+            let s = crate::engine::encode_slot::PeerEncodeSlot::new(
+                peer_id,
+                has_transform,
+                passthrough_info,
+            );
+            Some(s)
+        };
+        let driver = match slot {
+            Some(ref s) => driver.with_encode_slot(s.clone()),
+            None => driver,
+        };
 
         // Recv bypass: for socket types whose recv path is a plain fair-queue
         // delivery with no per-type post-processing, route messages directly
@@ -350,7 +358,7 @@ impl SocketDriver {
                 handle: DriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel,
-                    encode_slot: Some(slot.clone()),
+                    encode_slot: slot.clone(),
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
