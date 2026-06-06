@@ -33,6 +33,15 @@ impl EncodedQueue {
         }
     }
 
+    pub fn one_shot() -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            total_bytes: 0,
+            scratch: BytesMut::new(),
+            arena: BytesMut::new(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty() && self.arena.is_empty()
     }

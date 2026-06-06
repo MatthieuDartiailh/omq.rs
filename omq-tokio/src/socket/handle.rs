@@ -718,19 +718,19 @@ impl Socket {
     async fn send_with_encode_slot(&self, msg: Message) -> Result<()> {
         let slot = self.inner.encode_slot.lock().expect("encode_slot").clone();
         if let Some(ref slot) = slot {
-            match slot.try_encode(&msg) {
-                TryEncodeResult::Ok => return Ok(()),
-                TryEncodeResult::Dead => return Err(Error::Closed),
-                TryEncodeResult::Full => {
-                    let notified = slot.drain_notify.notified();
-                    notified.await;
-                    match slot.try_encode(&msg) {
-                        TryEncodeResult::Ok => return Ok(()),
-                        TryEncodeResult::Dead => return Err(Error::Closed),
-                        _ => {}
+            loop {
+                match slot.try_encode(&msg) {
+                    TryEncodeResult::Ok => return Ok(()),
+                    TryEncodeResult::Dead => return Err(Error::Closed),
+                    TryEncodeResult::Full => {
+                        let notified = slot.drain_notify.notified();
+                        if slot.try_encode(&msg) == TryEncodeResult::Ok {
+                            return Ok(());
+                        }
+                        notified.await;
                     }
+                    TryEncodeResult::Ineligible => break,
                 }
-                TryEncodeResult::Ineligible => {}
             }
         }
         self.inner.send_submitter.send(msg).await

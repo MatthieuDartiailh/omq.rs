@@ -549,6 +549,11 @@ where
                 () = cancel.cancelled() => {
                     if let Some(ref slot) = encode_slot {
                         slot.mark_dead();
+                        drain_buf.clear();
+                        slot.drain_into_vec(&mut drain_buf, 1024);
+                        if !drain_buf.is_empty() {
+                            let _ = flush_encode_slot_buf(&mut writer, &mut drain_buf).await;
+                        }
                     }
                     drain_on_cancel(
                         &mut inbox, shared_msg_rx.as_ref(),
@@ -713,7 +718,7 @@ where
                     slot.drain_into_vec(&mut drain_buf, 1024);
                     if !drain_buf.is_empty() {
                         flush_encode_slot_buf(&mut writer, &mut drain_buf).await?;
-                        slot.drain_notify.notify_waiters();
+                        slot.drain_notify.notify_one();
                     }
                 },
 

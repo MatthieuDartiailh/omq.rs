@@ -62,23 +62,11 @@ impl Submitter {
         };
 
         let targets = self.collect_targets(&forwarded, group.as_deref());
-        if targets.is_empty() {
-            return Ok(());
-        }
-        let encoded = encode_slot::pre_encode(&forwarded);
-        for t in &targets {
-            match t {
-                PeerSend::Wire(slot) => {
-                    let _ = slot.try_push_encoded(&encoded);
-                }
-                PeerSend::Inbox(tx) => {
-                    let _ = tx.try_send(DriverCommand::SendMessage(forwarded.clone()));
-                }
-            }
-        }
+        dispatch_to_targets(&targets, &forwarded);
         Ok(())
     }
 
+    #[expect(clippy::unused_async)]
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = match self.mode {
             FanOutMode::SubscriptionPrefix => (msg, None),
@@ -100,20 +88,7 @@ impl Submitter {
         };
 
         let targets = self.collect_targets(&forwarded, group.as_deref());
-        if targets.is_empty() {
-            return Ok(());
-        }
-        let encoded = encode_slot::pre_encode(&forwarded);
-        for t in &targets {
-            match t {
-                PeerSend::Wire(slot) => {
-                    let _ = slot.try_push_encoded(&encoded);
-                }
-                PeerSend::Inbox(tx) => {
-                    let _ = tx.send(DriverCommand::SendMessage(forwarded.clone())).await;
-                }
-            }
-        }
+        dispatch_to_targets(&targets, &forwarded);
         Ok(())
     }
 
@@ -265,6 +240,28 @@ impl FanOutSend {
     pub(crate) fn is_drained(&self) -> bool {
         let g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.values().all(|p| p.target.is_empty())
+    }
+}
+
+fn dispatch_to_targets(targets: &[PeerSend], msg: &Message) {
+    match targets.len() {
+        0 => {}
+        1 => {
+            let _ = targets[0].try_encode(msg);
+        }
+        _ => {
+            let encoded = encode_slot::pre_encode(msg);
+            for t in targets {
+                match t {
+                    PeerSend::Wire(slot) => {
+                        let _ = slot.try_push_encoded(&encoded);
+                    }
+                    PeerSend::Inbox(tx) => {
+                        let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
+                    }
+                }
+            }
+        }
     }
 }
 

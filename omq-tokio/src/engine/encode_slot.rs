@@ -135,9 +135,7 @@ impl PeerEncodeSlot {
 
     fn signal_encoded(&self) {
         self.msg_count.fetch_add(1, Ordering::Relaxed);
-        if self.driver_in_select.load(Ordering::Acquire) {
-            self.transmit_notify.notify_one();
-        }
+        self.transmit_notify.notify_one();
     }
 
     pub(crate) fn drain_into_vec(&self, buf: &mut Vec<Bytes>, max_chunks: usize) {
@@ -157,9 +155,8 @@ impl PeerEncodeSlot {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn pre_encode(msg: &Message) -> SmallVec<[Bytes; 4]> {
-    let mut eq = EncodedQueue::new();
+    let mut eq = EncodedQueue::one_shot();
     eq.encode_auto(msg);
     let mut chunks = Vec::new();
     eq.drain_into_vec(&mut chunks, 1024);
@@ -168,7 +165,7 @@ pub(crate) fn pre_encode(msg: &Message) -> SmallVec<[Bytes; 4]> {
 
 #[allow(dead_code)]
 pub(crate) fn pre_encode_prefixed(sentinel: &Bytes, msg: &Message) -> SmallVec<[Bytes; 4]> {
-    let mut eq = EncodedQueue::new();
+    let mut eq = EncodedQueue::one_shot();
     eq.encode_prefixed_auto(sentinel, msg);
     let mut chunks = Vec::new();
     eq.drain_into_vec(&mut chunks, 1024);
