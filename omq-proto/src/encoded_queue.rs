@@ -5,13 +5,13 @@ use bytes::{Bytes, BytesMut};
 use crate::message::Message;
 use crate::proto::frame;
 
-pub const FLAT_THRESHOLD: usize = 64 * 1024;
+pub const ARENA_THRESHOLD: usize = 16 * 1024;
 
 pub struct EncodedQueue {
     chunks: VecDeque<Bytes>,
     total_bytes: usize,
     scratch: BytesMut,
-    flat_buf: BytesMut,
+    arena: BytesMut,
 }
 
 impl std::fmt::Debug for EncodedQueue {
@@ -29,32 +29,32 @@ impl EncodedQueue {
             chunks: VecDeque::with_capacity(32),
             total_bytes: 0,
             scratch: BytesMut::with_capacity(9),
-            flat_buf: BytesMut::with_capacity(128 * 1024),
+            arena: BytesMut::with_capacity(128 * 1024),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty() && self.flat_buf.is_empty()
+        self.chunks.is_empty() && self.arena.is_empty()
     }
 
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
 
-    fn flush_flat_to_chunks(&mut self) {
-        if !self.flat_buf.is_empty() {
-            self.chunks.push_back(self.flat_buf.split().freeze());
+    fn flush_arena_to_chunks(&mut self) {
+        if !self.arena.is_empty() {
+            self.chunks.push_back(self.arena.split().freeze());
         }
     }
 
-    pub fn encode_flat(&mut self, msg: &Message) {
-        let before = self.flat_buf.len();
-        frame::encode_message_flat(msg, &mut self.flat_buf);
-        self.total_bytes += self.flat_buf.len() - before;
+    pub fn encode_arena(&mut self, msg: &Message) {
+        let before = self.arena.len();
+        frame::encode_message_flat(msg, &mut self.arena);
+        self.total_bytes += self.arena.len() - before;
     }
 
     pub fn encode_gather(&mut self, msg: &Message) {
-        self.flush_flat_to_chunks();
+        self.flush_arena_to_chunks();
         let before = self.chunks.len();
         frame::encode_message_gather(msg, &mut self.chunks, &mut self.scratch);
         for chunk in self.chunks.iter().skip(before) {
@@ -64,39 +64,39 @@ impl EncodedQueue {
 
     #[cfg(feature = "ws")]
     pub fn encode_ws(&mut self, msg: &Message, masked: bool) {
-        let before = self.flat_buf.len();
+        let before = self.arena.len();
         if masked {
-            frame::encode_message_flat_ws_masked(msg, &mut self.flat_buf);
+            frame::encode_message_flat_ws_masked(msg, &mut self.arena);
         } else {
-            frame::encode_message_flat_ws(msg, &mut self.flat_buf);
+            frame::encode_message_flat_ws(msg, &mut self.arena);
         }
-        self.total_bytes += self.flat_buf.len() - before;
+        self.total_bytes += self.arena.len() - before;
     }
 
-    pub fn encode_prefixed_flat(&mut self, prefix: &Bytes, msg: &Message) {
-        let before = self.flat_buf.len();
-        frame::encode_message_prefixed_flat(prefix, msg, &mut self.flat_buf);
-        self.total_bytes += self.flat_buf.len() - before;
+    pub fn encode_prefixed_arena(&mut self, prefix: &Bytes, msg: &Message) {
+        let before = self.arena.len();
+        frame::encode_message_prefixed_flat(prefix, msg, &mut self.arena);
+        self.total_bytes += self.arena.len() - before;
     }
 
     pub fn encode_auto(&mut self, msg: &Message) {
-        if msg.byte_len() < FLAT_THRESHOLD {
-            self.encode_flat(msg);
+        if msg.byte_len() < ARENA_THRESHOLD {
+            self.encode_arena(msg);
         } else {
             self.encode_gather(msg);
         }
     }
 
     pub fn encode_prefixed_auto(&mut self, prefix: &Bytes, msg: &Message) {
-        if msg.byte_len() + prefix.len() * msg.len() < FLAT_THRESHOLD {
-            self.encode_prefixed_flat(prefix, msg);
+        if msg.byte_len() + prefix.len() * msg.len() < ARENA_THRESHOLD {
+            self.encode_prefixed_arena(prefix, msg);
         } else {
             self.encode_prefixed_gather(prefix, msg);
         }
     }
 
     pub fn encode_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
-        self.flush_flat_to_chunks();
+        self.flush_arena_to_chunks();
         let before = self.chunks.len();
         frame::encode_message_prefixed_gather(prefix, msg, &mut self.chunks, &mut self.scratch);
         for chunk in self.chunks.iter().skip(before) {
@@ -105,7 +105,7 @@ impl EncodedQueue {
     }
 
     pub fn push_raw(&mut self, chunks: Vec<Bytes>) {
-        self.flush_flat_to_chunks();
+        self.flush_arena_to_chunks();
         for chunk in chunks {
             self.total_bytes += chunk.len();
             self.chunks.push_back(chunk);
@@ -113,7 +113,7 @@ impl EncodedQueue {
     }
 
     pub fn push_shared_chunks(&mut self, chunks: &[Bytes]) {
-        self.flush_flat_to_chunks();
+        self.flush_arena_to_chunks();
         for chunk in chunks {
             self.total_bytes += chunk.len();
             self.chunks.push_back(chunk.clone());
@@ -126,8 +126,8 @@ impl EncodedQueue {
         buf.extend(self.chunks.drain(..take));
         self.total_bytes = self.total_bytes.saturating_sub(chunk_bytes);
 
-        if !self.flat_buf.is_empty() && buf.len() < max_chunks {
-            let flat = self.flat_buf.split().freeze();
+        if !self.arena.is_empty() && buf.len() < max_chunks {
+            let flat = self.arena.split().freeze();
             self.total_bytes = self.total_bytes.saturating_sub(flat.len());
             buf.push(flat);
         }
@@ -188,14 +188,14 @@ mod tests {
     }
 
     #[test]
-    fn flat_and_gather_ordering() {
+    fn arena_and_gather_ordering() {
         let mut eq = EncodedQueue::new();
         let small = Message::from(Bytes::from_static(&[1; 64]));
         let large = Message::from(Bytes::from(vec![2; 128 * 1024]));
 
-        eq.encode_flat(&small);
+        eq.encode_arena(&small);
         eq.encode_gather(&large);
-        eq.encode_flat(&small);
+        eq.encode_arena(&small);
 
         let mut buf = Vec::new();
         eq.drain_into_vec(&mut buf, 1024);
