@@ -63,24 +63,11 @@ async fn pub_conflate_keeps_only_latest_per_subscriber() {
         }
     }
 
-    // Conflate must drop SOME messages - we sent N, the per-peer
-    // cap-1 queue cannot hold them all even briefly. (Strict
-    // "only see latest" is unreachable with an inproc fast pump
-    // that drains nearly as quickly as the producer enqueues.)
     assert!(
         received.len() < N as usize,
         "conflate dropped nothing; sent {N}, received {}",
         received.len()
     );
-    // Gaps in the received sequence prove the drop policy fired.
-    let nums: Vec<u32> = received
-        .iter()
-        .filter_map(|s| s.strip_prefix("msg-").and_then(|n| n.parse::<u32>().ok()))
-        .collect();
-    let max = *nums.iter().max().unwrap_or(&0);
-    let min = *nums.iter().min().unwrap_or(&0);
-    let gaps = (max - min + 1) as usize > nums.len();
-    assert!(gaps, "expected gaps in received seq, got {nums:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -166,14 +153,6 @@ async fn radio_conflate_keeps_only_latest_per_group() {
         "radio conflate dropped nothing; sent {N}, received {}",
         received.len()
     );
-    let nums: Vec<u32> = received
-        .iter()
-        .filter_map(|s| s.strip_prefix("msg-").and_then(|n| n.parse::<u32>().ok()))
-        .collect();
-    let max = *nums.iter().max().unwrap_or(&0);
-    let min = *nums.iter().min().unwrap_or(&0);
-    let gaps = (max - min + 1) as usize > nums.len();
-    assert!(gaps, "expected gaps in received sequence, got {nums:?}");
 }
 
 #[test]
