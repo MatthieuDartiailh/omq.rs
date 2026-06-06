@@ -97,9 +97,6 @@ pub(crate) enum SocketCommand {
     Close {
         ack: Option<oneshot::Sender<Result<()>>>,
     },
-    DirectIoDisconnected {
-        peer_id: u64,
-    },
 }
 
 /// Events produced inside the driver (listeners accepting, connections
@@ -144,7 +141,6 @@ struct PeerEntry {
     /// True for dialer-initiated connections; false for listener-accepted.
     /// Used to decide whether to restart the dial after a mid-session drop.
     is_client: bool,
-    direct_io_rx: Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
     /// SPSC ring for this inproc peer (None for wire/stream peers).
     spsc: Option<Arc<crate::transport::inproc::InprocSpsc>>,
 }
@@ -209,10 +205,7 @@ pub(crate) struct SocketDriver {
     send_ring_active: super::handle::SpscSendRingActive,
     recv_notify: super::handle::SpscRecvNotify,
     spsc_activated: super::handle::SpscActivated,
-    direct_io: super::handle::DirectIoSlot,
-    direct_io_pending: super::handle::DirectIoPending,
-    pending_direct_io_rx:
-        Option<futures::channel::oneshot::Receiver<crate::engine::direct_io::DirectIo>>,
+    encode_slot: super::handle::EncodeSlotHolder,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
 }
@@ -234,8 +227,7 @@ impl SocketDriver {
         spsc_activated: super::handle::SpscActivated,
         type_state: Arc<Mutex<TypeState>>,
         req_awaiting_reply: Arc<AtomicBool>,
-        direct_io: super::handle::DirectIoSlot,
-        direct_io_pending: super::handle::DirectIoPending,
+        encode_slot: super::handle::EncodeSlotHolder,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
@@ -272,9 +264,7 @@ impl SocketDriver {
             send_ring_active,
             recv_notify,
             spsc_activated,
-            direct_io,
-            direct_io_pending,
-            pending_direct_io_rx: None,
+            encode_slot,
             compression_pool: None,
             recv_sink_config,
         }
@@ -321,16 +311,6 @@ impl SocketDriver {
                         },
                     };
                     self.handle_internal_event(evt).await;
-                }
-                Ok(dio) = async {
-                    self.pending_direct_io_rx.as_mut().unwrap().await
-                }, if self.pending_direct_io_rx.is_some() => {
-                    self.pending_direct_io_rx = None;
-                    if self.peers.len() == 1 {
-                        *self.direct_io.lock().await = Some(dio);
-                    }
-                    self.direct_io_pending
-                        .store(false, std::sync::atomic::Ordering::Release);
                 }
             }
         }
@@ -402,13 +382,6 @@ impl SocketDriver {
             }
             SocketCommand::Close { ack } => {
                 self.begin_close(ack, self.options.linger);
-            }
-            SocketCommand::DirectIoDisconnected { peer_id } => {
-                self.handle_internal_event(InternalEvent::PeerClosed {
-                    peer_id,
-                    reason: DisconnectReason::PeerClosed,
-                })
-                .await;
             }
         }
     }

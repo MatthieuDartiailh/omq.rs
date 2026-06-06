@@ -279,21 +279,6 @@ pub(crate) fn supports_groups(t: SocketType) -> bool {
 
 pub(crate) use omq_proto::routing::supports_conflate;
 
-/// Whether this socket type is eligible for the direct I/O send bypass
-/// (stream + codec handed off to the `Socket` handle after handshake).
-pub(crate) fn is_direct_io_eligible(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Req
-            | SocketType::Rep
-            | SocketType::Dealer
-            | SocketType::Router
-            | SocketType::Client
-            | SocketType::Server
-            | SocketType::Pair
-    )
-}
-
 /// Resolve queue capacity + drop policy for `options`. When
 /// `conflate` is set, both are forced to (1, `DropOldest`) - that
 /// gives the "queue is just the latest message" semantics
