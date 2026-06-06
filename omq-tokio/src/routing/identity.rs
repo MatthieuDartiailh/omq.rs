@@ -18,17 +18,12 @@ use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 
-use crate::engine::encode_slot::PeerEncodeSlot;
-use crate::engine::{DriverCommand, DriverHandle};
+use crate::engine::DriverHandle;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 
-#[derive(Debug, Clone)]
-enum PeerTarget {
-    Slot(Arc<PeerEncodeSlot>),
-    Inbox(tokio::sync::mpsc::Sender<DriverCommand>),
-}
+use super::peer_send::PeerSend;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
@@ -48,7 +43,7 @@ impl Submitter {
         }
         let identity = msg.pop_front().unwrap();
 
-        let target: Option<PeerTarget> = {
+        let target: Option<PeerSend> = {
             let g = self.inner.lock().expect("identity inner poisoned");
             g.identity_to_peer
                 .get(&identity)
@@ -65,21 +60,8 @@ impl Submitter {
             return Ok(());
         };
 
-        match t {
-            PeerTarget::Slot(slot) => {
-                let _ = slot.try_encode(&msg);
-                Ok(())
-            }
-            PeerTarget::Inbox(tx) => {
-                tx.try_send(DriverCommand::SendMessage(msg))
-                    .map_err(|e| match e {
-                        tokio::sync::mpsc::error::TrySendError::Full(
-                            DriverCommand::SendMessage(m),
-                        ) => crate::socket::handle::TrySendError::Full(m),
-                        _ => crate::socket::handle::TrySendError::Closed,
-                    })
-            }
-        }
+        let _ = t.try_encode(&msg);
+        Ok(())
     }
 
     pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
@@ -88,7 +70,7 @@ impl Submitter {
         }
         let identity = msg.pop_front().unwrap();
 
-        let target: Option<PeerTarget> = {
+        let target: Option<PeerSend> = {
             let g = self.inner.lock().expect("identity inner poisoned");
             g.identity_to_peer
                 .get(&identity)
@@ -103,16 +85,7 @@ impl Submitter {
             return Ok(());
         };
 
-        match t {
-            PeerTarget::Slot(slot) => {
-                let _ = slot.try_encode(&msg);
-                Ok(())
-            }
-            PeerTarget::Inbox(tx) => tx
-                .send(DriverCommand::SendMessage(msg))
-                .await
-                .map_err(|_| Error::Closed),
-        }
+        t.send(msg).await
     }
 }
 
@@ -131,7 +104,7 @@ struct IdentityInner {
 #[derive(Debug)]
 struct IdentityPeer {
     identity: Bytes,
-    target: PeerTarget,
+    target: PeerSend,
 }
 
 impl IdentitySend {
@@ -152,11 +125,9 @@ impl IdentitySend {
         }
     }
 
+    #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle, identity: Bytes) {
-        let target = match handle.encode_slot {
-            Some(slot) => PeerTarget::Slot(slot),
-            None => PeerTarget::Inbox(handle.inbox.clone()),
-        };
+        let target = PeerSend::from_handle(&handle);
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.peers.insert(
             peer_id,
@@ -187,10 +158,7 @@ impl IdentitySend {
 
     pub(crate) fn is_drained(&self) -> bool {
         let g = self.inner.lock().expect("identity inner poisoned");
-        g.peers.values().all(|p| match &p.target {
-            PeerTarget::Slot(s) => s.is_empty(),
-            PeerTarget::Inbox(_) => true,
-        })
+        g.peers.values().all(|p| p.target.is_empty())
     }
 }
 

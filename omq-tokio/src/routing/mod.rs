@@ -20,6 +20,7 @@ pub(crate) mod exclusive;
 pub(crate) mod fair_queue;
 pub(crate) mod fan_out;
 pub(crate) mod identity;
+pub(crate) mod peer_send;
 pub(crate) mod pump;
 pub(crate) mod round_robin;
 // subscription matcher lives in omq-proto now.

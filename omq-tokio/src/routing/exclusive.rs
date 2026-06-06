@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Notify;
+
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -7,18 +9,23 @@ use omq_proto::message::Message;
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
     peer: Arc<Mutex<Option<DriverHandle>>>,
+    peer_ready: Arc<Notify>,
 }
 
 impl Submitter {
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
-        let handle = self.peer.lock().expect("exclusive peer").clone();
-        match handle {
-            Some(h) => h
-                .inbox
-                .send(DriverCommand::SendMessage(msg))
-                .await
-                .map_err(|_| Error::Closed),
-            None => Err(Error::Protocol("no peer connected".into())),
+        loop {
+            let handle = self.peer.lock().expect("exclusive peer").clone();
+            match handle {
+                Some(h) => {
+                    return h
+                        .inbox
+                        .send(DriverCommand::SendMessage(msg))
+                        .await
+                        .map_err(|_| Error::Closed);
+                }
+                None => self.peer_ready.notified().await,
+            }
         }
     }
 
@@ -37,9 +44,7 @@ impl Submitter {
                     }
                     _ => crate::socket::handle::TrySendError::Closed,
                 }),
-            None => Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
-                "no peer connected".into(),
-            ))),
+            None => Err(crate::socket::handle::TrySendError::Full(msg)),
         }
     }
 }
@@ -47,23 +52,27 @@ impl Submitter {
 #[derive(Debug)]
 pub(crate) struct ExclusiveSend {
     peer: Arc<Mutex<Option<DriverHandle>>>,
+    peer_ready: Arc<Notify>,
 }
 
 impl ExclusiveSend {
     pub(crate) fn new() -> Self {
         Self {
             peer: Arc::new(Mutex::new(None)),
+            peer_ready: Arc::new(Notify::new()),
         }
     }
 
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
             peer: self.peer.clone(),
+            peer_ready: self.peer_ready.clone(),
         }
     }
 
     pub(crate) fn connection_added(&mut self, _peer_id: u64, handle: DriverHandle) {
         *self.peer.lock().expect("exclusive peer") = Some(handle);
+        self.peer_ready.notify_waiters();
     }
 
     pub(crate) fn connection_removed(&mut self, _peer_id: u64) {

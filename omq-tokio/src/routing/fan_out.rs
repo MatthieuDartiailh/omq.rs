@@ -13,19 +13,14 @@ use smallvec::SmallVec;
 
 use bytes::Bytes;
 
-use crate::engine::encode_slot::{self, PeerEncodeSlot};
+use crate::engine::encode_slot;
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 
+use super::peer_send::PeerSend;
 use super::subscription::SubscriptionSet;
-
-#[derive(Debug, Clone)]
-enum PeerTarget {
-    Slot(Arc<PeerEncodeSlot>),
-    Inbox(tokio::sync::mpsc::Sender<DriverCommand>),
-}
 
 /// Filter mode for a fan-out send strategy.
 #[derive(Debug, Clone, Copy)]
@@ -73,10 +68,10 @@ impl Submitter {
         let encoded = encode_slot::pre_encode(&forwarded);
         for t in &targets {
             match t {
-                PeerTarget::Slot(slot) => {
+                PeerSend::Wire(slot) => {
                     let _ = slot.try_push_encoded(&encoded);
                 }
-                PeerTarget::Inbox(tx) => {
+                PeerSend::Inbox(tx) => {
                     let _ = tx.try_send(DriverCommand::SendMessage(forwarded.clone()));
                 }
             }
@@ -111,10 +106,10 @@ impl Submitter {
         let encoded = encode_slot::pre_encode(&forwarded);
         for t in &targets {
             match t {
-                PeerTarget::Slot(slot) => {
+                PeerSend::Wire(slot) => {
                     let _ = slot.try_push_encoded(&encoded);
                 }
-                PeerTarget::Inbox(tx) => {
+                PeerSend::Inbox(tx) => {
                     let _ = tx.send(DriverCommand::SendMessage(forwarded.clone())).await;
                 }
             }
@@ -122,7 +117,7 @@ impl Submitter {
         Ok(())
     }
 
-    fn collect_targets(&self, msg: &Message, group: Option<&str>) -> SmallVec<[PeerTarget; 8]> {
+    fn collect_targets(&self, msg: &Message, group: Option<&str>) -> SmallVec<[PeerSend; 8]> {
         let g = self.inner.lock().expect("fanout inner poisoned");
         if g.all_subscribe_all && matches!(self.mode, FanOutMode::SubscriptionPrefix) {
             g.all_targets.clone()
@@ -153,7 +148,7 @@ pub(crate) struct FanOutSend {
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
     all_subscribe_all: bool,
-    all_targets: SmallVec<[PeerTarget; 8]>,
+    all_targets: SmallVec<[PeerSend; 8]>,
 }
 
 #[derive(Debug)]
@@ -161,7 +156,7 @@ struct FanOutPeer {
     subscriptions: SubscriptionSet,
     groups: FxHashSet<String>,
     any_groups: bool,
-    target: PeerTarget,
+    target: PeerSend,
 }
 
 impl FanOutInner {
@@ -206,11 +201,9 @@ impl FanOutSend {
         self.add_peer(peer_id, handle, true);
     }
 
+    #[expect(clippy::needless_pass_by_value)]
     fn add_peer(&mut self, peer_id: u64, handle: DriverHandle, any_groups: bool) {
-        let target = match handle.encode_slot {
-            Some(slot) => PeerTarget::Slot(slot),
-            None => PeerTarget::Inbox(handle.inbox.clone()),
-        };
+        let target = PeerSend::from_handle(&handle);
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.insert(
             peer_id,
@@ -271,10 +264,7 @@ impl FanOutSend {
 
     pub(crate) fn is_drained(&self) -> bool {
         let g = self.inner.lock().expect("fanout inner poisoned");
-        g.peers.values().all(|p| match &p.target {
-            PeerTarget::Slot(s) => s.is_empty(),
-            PeerTarget::Inbox(_) => true,
-        })
+        g.peers.values().all(|p| p.target.is_empty())
     }
 }
 
