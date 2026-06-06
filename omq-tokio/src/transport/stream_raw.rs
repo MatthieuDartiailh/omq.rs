@@ -83,5 +83,6 @@ pub(crate) fn spawn(
     DriverHandle {
         inbox: inbox_tx,
         cancel: handle_cancel,
+        encode_slot: None,
     }
 }

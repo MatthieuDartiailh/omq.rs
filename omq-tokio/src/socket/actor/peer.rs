@@ -350,6 +350,7 @@ impl SocketDriver {
                 handle: DriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel,
+                    encode_slot: None,
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -478,6 +479,7 @@ impl SocketDriver {
                 handle: DriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
+                    encode_slot: None,
                 },
                 identity: bytes::Bytes::new(),
                 info: None,

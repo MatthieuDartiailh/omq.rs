@@ -20,6 +20,7 @@ use omq_proto::proto::{Command, Connection, Event};
 
 use super::compression_pool::CompressionPool;
 use super::direct_io::{DirectIo, SharedWriter};
+use super::encode_slot::PeerEncodeSlot;
 use crate::routing::drop_queue::QueueReceiver;
 use omq_proto::encoded_queue::EncodedQueue;
 
@@ -311,6 +312,8 @@ pub enum DriverCommand {
 pub struct DriverHandle {
     pub inbox: mpsc::Sender<DriverCommand>,
     pub cancel: CancellationToken,
+    #[expect(dead_code)]
+    pub(crate) encode_slot: Option<Arc<PeerEncodeSlot>>,
 }
 
 /// What a [`ConnectionDriver`] writes to its shared peer-event
@@ -365,6 +368,11 @@ where
     compression_pool: Option<Arc<CompressionPool>>,
     /// Minimum message `byte_len` to trigger compression offloading.
     offload_threshold: usize,
+    /// Per-peer encode slot: the socket handle encodes ZMTP frames into
+    /// this slot's `EncodedQueue`, and the driver flushes them to the
+    /// wire. Replaces the `DirectIo` pattern where the handle locked the
+    /// writer directly.
+    encode_slot: Option<Arc<PeerEncodeSlot>>,
 }
 
 impl<T> ConnectionDriver<T>
@@ -414,6 +422,7 @@ where
             direct_io_tx: None,
             compression_pool: None,
             offload_threshold: 0,
+            encode_slot: None,
         }
     }
 
@@ -481,6 +490,16 @@ where
         self
     }
 
+    /// Install a per-peer encode slot. The socket handle encodes ZMTP
+    /// frames into this slot, and the driver flushes them to the wire
+    /// via the `transmit_notify` select arm.
+    #[must_use]
+    #[expect(dead_code)]
+    pub(crate) fn with_encode_slot(mut self, slot: Arc<PeerEncodeSlot>) -> Self {
+        self.encode_slot = Some(slot);
+        self
+    }
+
     /// Run the driver to completion. Returns:
     /// - `Ok(())` on clean shutdown (peer EOF, canceled, `Close` command,
     ///   inbox dropped).
@@ -516,6 +535,7 @@ where
             mut direct_io_tx,
             compression_pool,
             offload_threshold,
+            encode_slot,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
@@ -656,12 +676,30 @@ where
                 .await;
             }
 
+            // Set handshake_done on the encode slot once the handshake
+            // completes and there's no frame transform (CURVE/BLAKE3ZMQ).
+            // The slot stays disabled for crypto connections.
+            if let Some(ref slot) = encode_slot
+                && codec.is_ready()
+                && !slot.handshake_done.load(Ordering::Relaxed)
+                && !codec.has_frame_transform()
+            {
+                slot.handshake_done.store(true, Ordering::Release);
+            }
+
             let want_write = codec.has_pending_transmit() || !eq.is_empty();
             let hb_enabled = hb_interval.is_some() && codec.is_ready();
+
+            if let Some(ref slot) = encode_slot {
+                slot.driver_in_select.store(true, Ordering::Release);
+            }
 
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
+                    if let Some(ref slot) = encode_slot {
+                        slot.mark_dead();
+                    }
                     drain_on_cancel(
                         &mut inbox, shared_msg_rx.as_ref(),
                         &mut encoder, &mut codec, &mut eq,
@@ -679,6 +717,9 @@ where
                     last_input = Instant::now();
                     let n = res?;
                     if n == 0 {
+                        if let Some(ref slot) = encode_slot {
+                            slot.mark_dead();
+                        }
                         cancel.cancel();
                         inbox.close();
                         return Ok(());
@@ -810,6 +851,22 @@ where
                     }
                 },
 
+                // Encode-slot arm: the socket handle encoded ZMTP frames
+                // into the per-peer PeerEncodeSlot. Drain + flush.
+                () = async {
+                    encode_slot.as_ref().unwrap().transmit_notify.notified().await;
+                }, if encode_slot.as_ref().is_some_and(|s| {
+                    s.handshake_done.load(Ordering::Acquire)
+                }) => {
+                    let slot = encode_slot.as_ref().unwrap();
+                    drain_buf.clear();
+                    slot.drain_into_vec(&mut drain_buf, 1024);
+                    if !drain_buf.is_empty() {
+                        flush_encode_slot_buf(&mut writer, &mut drain_buf).await?;
+                        slot.drain_notify.notify_waiters();
+                    }
+                },
+
                 // Heartbeat tick: enabled only post-handshake when
                 // `heartbeat_interval` is set.
                 () = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX)), if hb_enabled => {
@@ -824,6 +881,10 @@ where
                     // checked, so unwrap is safe. Still, handle gracefully.
                     let _ = codec.send_command(&ping);
                 }
+            }
+
+            if let Some(ref slot) = encode_slot {
+                slot.driver_in_select.store(false, Ordering::Relaxed);
             }
         }
     }
@@ -1079,6 +1140,43 @@ where
             eq.put_back_unwritten(drained, n);
         }
     }
+}
+
+async fn flush_encode_slot_buf<W>(writer: &mut W, drain_buf: &mut Vec<Bytes>) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let iovecs: SmallVec<[io::IoSlice<'_>; 64]> =
+        drain_buf.iter().map(|b| io::IoSlice::new(b)).collect();
+    let n = writer.write_vectored(&iovecs).await?;
+    drop(iovecs);
+    if n == 0 {
+        return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+    }
+    let total: usize = drain_buf.iter().map(Bytes::len).sum();
+    if n < total {
+        // Partial write: only some bytes made it. Re-queue the rest.
+        // For simplicity, retry with the remaining bytes.
+        let mut consumed = 0usize;
+        let mut remaining = Vec::new();
+        for chunk in drain_buf.drain(..) {
+            if consumed >= n {
+                remaining.push(chunk);
+            } else if consumed + chunk.len() <= n {
+                consumed += chunk.len();
+            } else {
+                let skip = n - consumed;
+                consumed = n;
+                remaining.push(chunk.slice(skip..));
+            }
+        }
+        if !remaining.is_empty() {
+            *drain_buf = remaining;
+            return Box::pin(flush_encode_slot_buf(writer, drain_buf)).await;
+        }
+    }
+    drain_buf.clear();
+    Ok(())
 }
 
 /// One write attempt. Uses `write_vectored` so multi-chunk frame
@@ -1401,11 +1499,13 @@ mod tests {
             DriverHandle {
                 inbox: c_inbox_tx,
                 cancel: c_cancel,
+                encode_slot: None,
             },
             EventAdapter { rx: c_evt_rx },
             DriverHandle {
                 inbox: s_inbox_tx,
                 cancel: s_cancel,
+                encode_slot: None,
             },
             EventAdapter { rx: s_evt_rx },
         )

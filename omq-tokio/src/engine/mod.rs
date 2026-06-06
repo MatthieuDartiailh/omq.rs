@@ -10,8 +10,11 @@
 pub mod compression_pool;
 pub mod direct_io;
 pub mod driver;
+pub(crate) mod encode_slot;
 
 pub use driver::{
     ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut, RecvSink, RecvSinkConfig,
     YringSink,
 };
+#[expect(unused_imports)]
+pub(crate) use encode_slot::PeerEncodeSlot;
