@@ -29,7 +29,7 @@ impl EncodedQueue {
             chunks: VecDeque::with_capacity(32),
             total_bytes: 0,
             scratch: BytesMut::with_capacity(9),
-            arena: BytesMut::with_capacity(128 * 1024),
+            arena: BytesMut::with_capacity(256 * 1024),
         }
     }
 
