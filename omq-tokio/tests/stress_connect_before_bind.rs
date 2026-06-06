@@ -76,7 +76,7 @@ async fn stress_push_pull(transport: &Transport, bind_side: &str) {
         push.send(Message::single("x")).await.unwrap();
         let m = tokio::time::timeout(TIMEOUT, pull.recv())
             .await
-            .expect(&format!("push/pull {bind_side}-binds round {i} timed out"))
+            .unwrap_or_else(|_| panic!("push/pull {bind_side}-binds round {i} timed out"))
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap(), &b"x"[..]);
     }
@@ -104,18 +104,14 @@ async fn stress_req_rep(transport: &Transport, bind_side: &str) {
         req.send(Message::single("q")).await.unwrap();
         let m = tokio::time::timeout(TIMEOUT, rep.recv())
             .await
-            .expect(&format!(
-                "req/rep {bind_side}-binds round {i} recv timed out"
-            ))
+            .unwrap_or_else(|_| panic!("req/rep {bind_side}-binds round {i} recv timed out"))
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap(), &b"q"[..]);
 
         rep.send(Message::single("a")).await.unwrap();
         let m = tokio::time::timeout(TIMEOUT, req.recv())
             .await
-            .expect(&format!(
-                "req/rep {bind_side}-binds round {i} reply timed out"
-            ))
+            .unwrap_or_else(|_| panic!("req/rep {bind_side}-binds round {i} reply timed out"))
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
     }
@@ -169,14 +165,14 @@ async fn stress_pair(transport: &Transport) {
         a.send(Message::single("ab")).await.unwrap();
         let m = tokio::time::timeout(TIMEOUT, b.recv())
             .await
-            .expect(&format!("pair round {i} a->b timed out"))
+            .unwrap_or_else(|_| panic!("pair round {i} a->b timed out"))
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap(), &b"ab"[..]);
 
         b.send(Message::single("ba")).await.unwrap();
         let m = tokio::time::timeout(TIMEOUT, a.recv())
             .await
-            .expect(&format!("pair round {i} b->a timed out"))
+            .unwrap_or_else(|_| panic!("pair round {i} b->a timed out"))
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap(), &b"ba"[..]);
     }
@@ -210,9 +206,7 @@ async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
         dealer.send(Message::single("hi")).await.unwrap();
         let m = tokio::time::timeout(TIMEOUT, router.recv())
             .await
-            .expect(&format!(
-                "dealer/router {bind_side}-binds round {i} timed out"
-            ))
+            .unwrap_or_else(|_| panic!("dealer/router {bind_side}-binds round {i} timed out"))
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
         assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
@@ -226,9 +220,7 @@ async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
             .unwrap();
         let m = tokio::time::timeout(TIMEOUT, dealer.recv())
             .await
-            .expect(&format!(
-                "dealer/router {bind_side}-binds round {i} reply timed out"
-            ))
+            .unwrap_or_else(|_| panic!("dealer/router {bind_side}-binds round {i} reply timed out"))
             .unwrap();
         assert_eq!(m.part_bytes(0).unwrap(), &b"yo"[..]);
     }

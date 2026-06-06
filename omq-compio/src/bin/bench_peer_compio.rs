@@ -528,19 +528,16 @@ async fn run_latency_mt(ep: Endpoint, size: usize, iterations: usize, warmup: us
     std::process::exit(0);
 }
 
-async fn run_pub(_ep: Endpoint, size: usize) {
-    use std::sync::atomic::Ordering;
+async fn run_pub(ep: Endpoint, size: usize) {
     let pub_ = Socket::new(
         SocketType::Pub,
         bench_options(size).on_mute(omq_compio::OnMute::Block),
     );
-    let bound = pub_.bind(bind_ep()).await.expect("pub bind");
+    let bound = pub_.bind(ep).await.expect("pub bind");
     print_bound_port(&bound);
     let payload = vec![b'x'; size];
-    while !STOP.load(Ordering::Relaxed) {
-        if pub_.send(Message::from_slice(&payload)).await.is_err() {
-            break;
-        }
+    loop {
+        pub_.send(Message::from_slice(&payload)).await.unwrap();
     }
 }
 
