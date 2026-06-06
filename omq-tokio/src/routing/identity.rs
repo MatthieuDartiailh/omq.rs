@@ -2,8 +2,7 @@
 //!
 //! Each peer is keyed by `(identity, connection_id)`; the identity-to-peer
 //! map holds the LATEST `peer_id` for a given identity, so a reconnect
-//! replaces the stale entry without leaking the old peer state. Avoids
-//! zmq.rs issue #190 (memory leak on identity churn).
+//! replaces the stale entry without leaking the old peer state.
 //!
 //! Send: first frame of the user message is the routing identity. Look up
 //! the matching peer; forward the rest. If no match:
@@ -18,16 +17,18 @@ use std::sync::{Arc, Mutex};
 use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
-use crate::engine::DriverHandle;
+use crate::engine::encode_slot::PeerEncodeSlot;
+use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 
-use super::drop_queue::DropQueue;
-use super::pump;
+#[derive(Debug, Clone)]
+enum PeerTarget {
+    Slot(Arc<PeerEncodeSlot>),
+    Inbox(tokio::sync::mpsc::Sender<DriverCommand>),
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
@@ -47,15 +48,15 @@ impl Submitter {
         }
         let identity = msg.pop_front().unwrap();
 
-        let queue: Option<DropQueue> = {
+        let target: Option<PeerTarget> = {
             let g = self.inner.lock().expect("identity inner poisoned");
             g.identity_to_peer
                 .get(&identity)
                 .and_then(|peer_id| g.peers.get(peer_id))
-                .map(|p| p.queue.clone())
+                .map(|p| p.target.clone())
         };
 
-        let Some(q) = queue else {
+        let Some(t) = target else {
             if self.router_mandatory {
                 return Err(crate::socket::handle::TrySendError::Error(
                     Error::Unroutable,
@@ -64,8 +65,21 @@ impl Submitter {
             return Ok(());
         };
 
-        q.try_send(msg)
-            .map_err(crate::socket::handle::TrySendError::Full)
+        match t {
+            PeerTarget::Slot(slot) => {
+                let _ = slot.try_encode(&msg);
+                Ok(())
+            }
+            PeerTarget::Inbox(tx) => {
+                tx.try_send(DriverCommand::SendMessage(msg))
+                    .map_err(|e| match e {
+                        tokio::sync::mpsc::error::TrySendError::Full(
+                            DriverCommand::SendMessage(m),
+                        ) => crate::socket::handle::TrySendError::Full(m),
+                        _ => crate::socket::handle::TrySendError::Closed,
+                    })
+            }
+        }
     }
 
     pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
@@ -74,33 +88,38 @@ impl Submitter {
         }
         let identity = msg.pop_front().unwrap();
 
-        // Snapshot the destination queue under a short lock.
-        let queue: Option<DropQueue> = {
+        let target: Option<PeerTarget> = {
             let g = self.inner.lock().expect("identity inner poisoned");
             g.identity_to_peer
                 .get(&identity)
                 .and_then(|peer_id| g.peers.get(peer_id))
-                .map(|p| p.queue.clone())
+                .map(|p| p.target.clone())
         };
 
-        let Some(q) = queue else {
+        let Some(t) = target else {
             if self.router_mandatory {
                 return Err(Error::Unroutable);
             }
             return Ok(());
         };
 
-        // `msg` now holds the remaining parts (routing frame already popped).
-        q.send(msg).await
+        match t {
+            PeerTarget::Slot(slot) => {
+                let _ = slot.try_encode(&msg);
+                Ok(())
+            }
+            PeerTarget::Inbox(tx) => tx
+                .send(DriverCommand::SendMessage(msg))
+                .await
+                .map_err(|_| Error::Closed),
+        }
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct IdentitySend {
     inner: Arc<Mutex<IdentityInner>>,
-    defaults: Defaults,
     router_mandatory: bool,
-    root_cancel: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -112,31 +131,17 @@ struct IdentityInner {
 #[derive(Debug)]
 struct IdentityPeer {
     identity: Bytes,
-    queue: DropQueue,
-    pump_cancel: CancellationToken,
-    _pump_task: JoinHandle<()>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Defaults {
-    hwm: usize,
-    on_mute: omq_proto::options::OnMute,
+    target: PeerTarget,
 }
 
 impl IdentitySend {
     pub(crate) fn new(options: &Options) -> Self {
-        let hwm = options.send_hwm.map_or(usize::MAX, |n| n as usize);
         Self {
             inner: Arc::new(Mutex::new(IdentityInner {
                 peers: FxHashMap::default(),
                 identity_to_peer: FxHashMap::default(),
             })),
-            defaults: Defaults {
-                hwm,
-                on_mute: options.on_mute,
-            },
             router_mandatory: options.router_mandatory,
-            root_cancel: CancellationToken::new(),
         }
     }
 
@@ -147,39 +152,28 @@ impl IdentitySend {
         }
     }
 
-    /// Register a peer under its declared (or generated) identity.
     pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle, identity: Bytes) {
-        let (queue, rx) = DropQueue::new(self.defaults.hwm, self.defaults.on_mute);
-        let pump_cancel = self.root_cancel.child_token();
-        let pc_clone = pump_cancel.clone();
-        let task = tokio::spawn(async move {
-            pump::drain(rx, handle, pc_clone).await;
-        });
+        let target = match handle.encode_slot {
+            Some(slot) => PeerTarget::Slot(slot),
+            None => PeerTarget::Inbox(handle.inbox.clone()),
+        };
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.peers.insert(
             peer_id,
             IdentityPeer {
                 identity: identity.clone(),
-                queue,
-                pump_cancel,
-                _pump_task: task,
+                target,
             },
         );
-        // Identity-to-peer maps to the LATEST peer_id. A reconnect replaces
-        // the stale entry so the old one is unreachable and gets cleaned up
-        // by its connection_removed.
         g.identity_to_peer.insert(identity, peer_id);
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("identity inner poisoned");
-        if let Some(p) = g.peers.remove(&peer_id) {
-            // Only remove the identity mapping if it still points at us --
-            // a newer peer with the same identity may have superseded us.
-            if g.identity_to_peer.get(&p.identity) == Some(&peer_id) {
-                g.identity_to_peer.remove(&p.identity);
-            }
-            p.pump_cancel.cancel();
+        if let Some(p) = g.peers.remove(&peer_id)
+            && g.identity_to_peer.get(&p.identity) == Some(&peer_id)
+        {
+            g.identity_to_peer.remove(&p.identity);
         }
     }
 
@@ -188,13 +182,15 @@ impl IdentitySend {
         g.identity_to_peer.get(identity).copied()
     }
 
-    pub(crate) fn shutdown(&self) {
-        self.root_cancel.cancel();
-    }
+    #[expect(clippy::unused_self)]
+    pub(crate) fn shutdown(&self) {}
 
     pub(crate) fn is_drained(&self) -> bool {
         let g = self.inner.lock().expect("identity inner poisoned");
-        g.peers.values().all(|p| p.queue.len() == 0)
+        g.peers.values().all(|p| match &p.target {
+            PeerTarget::Slot(s) => s.is_empty(),
+            PeerTarget::Inbox(_) => true,
+        })
     }
 }
 
@@ -228,9 +224,6 @@ impl IdentityRecv {
         self.recv_tx.send(wrapped).await.map_err(|_| Error::Closed)
     }
 
-    /// Produce the identity-prefixed message without sending it. Used when
-    /// the socket type applies a post-recv transform (REP) before
-    /// delivery.
     pub(crate) fn wrap(&self, peer_id: u64, msg: Message) -> Message {
         let identity = {
             let g = self.peers.lock().expect("identity recv poisoned");
