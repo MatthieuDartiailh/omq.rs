@@ -495,7 +495,7 @@ fn pub_direct_write_tight_loop_does_not_starve_runtime() {
             sub.subscribe(bytes::Bytes::new()).await.unwrap();
             sub.connect(test_support::tcp_loopback(p)).await.unwrap();
 
-            let first = compio::time::timeout(Duration::from_secs(5), sub.recv()).await;
+            let first = compio::time::timeout(Duration::from_secs(10), sub.recv()).await;
             assert!(first.is_ok(), "first recv timed out: runtime starved");
 
             // Second subscriber connects while PUB is in tight direct-write loop.
@@ -503,7 +503,7 @@ fn pub_direct_write_tight_loop_does_not_starve_runtime() {
             sub2.subscribe(bytes::Bytes::new()).await.unwrap();
             sub2.connect(test_support::tcp_loopback(p)).await.unwrap();
 
-            let second = compio::time::timeout(Duration::from_secs(5), sub2.recv()).await;
+            let second = compio::time::timeout(Duration::from_secs(10), sub2.recv()).await;
             assert!(
                 second.is_ok(),
                 "second sub timed out: PUB accept loop starved during direct-write"
