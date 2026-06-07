@@ -1,4 +1,4 @@
-//! Stress tests for `PeerEncodeSlot` refactor edge cases.
+//! Stress tests for `PeerWireSlot` refactor edge cases.
 use bytes::Bytes;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -46,7 +46,7 @@ async fn push_pull_burst_single_peer() {
 
 /// PUSH/PULL: peer churn. Encode slot must re-enable after 2->1.
 #[tokio::test]
-async fn push_pull_peer_churn_encode_slot() {
+async fn push_pull_peer_churn_wire_slot() {
     let ep = tcp_ep(free_port());
     let push = Socket::new(SocketType::Push, opts());
     let pull1 = Socket::new(SocketType::Pull, opts());
@@ -121,9 +121,9 @@ async fn pub_sub_fanout_8_peers() {
     }
 }
 
-/// ROUTER/DEALER: identity routing through `PeerEncodeSlot`.
+/// ROUTER/DEALER: identity routing through `PeerWireSlot`.
 #[tokio::test]
-async fn router_dealer_identity_encode_slot() {
+async fn router_dealer_identity_wire_slot() {
     let ep = tcp_ep(free_port());
     let router = Socket::new(SocketType::Router, opts());
     let dealer1 = Socket::new(

@@ -768,14 +768,14 @@ provides happens-before). REP keeps the Mutex because it stores
 Saves ~200 ns per send+recv pair (uncontended Mutex overhead:
 CAS + memory barrier + function call).
 
-## Tokio PeerEncodeSlot: per-peer send bypass
+## Tokio PeerWireSlot: per-peer send bypass
 
 `DirectIo` locked an `Arc<Mutex<Writer>>` from the socket handle to
 encode and write inline. This mixed encoding and I/O under one lock:
 the hold time was the full `write_vectored` syscall, blocking
 concurrent senders and the driver's read loop.
 
-`PeerEncodeSlot` separates encoding from I/O. The handle encodes
+`PeerWireSlot` separates encoding from I/O. The handle encodes
 ZMTP frames into a per-peer `EncodedQueue` under a `std::sync::Mutex`
 (nanosecond hold time, encode only). The driver flushes to the wire
 via a `transmit_notify` select arm. The handle never touches the
@@ -836,7 +836,7 @@ reads to miss wake-ups. REQ/REP IPC hung at 2048 B+.
 Send-only DirectIo avoided all three: the driver never exits, so
 it detects EOF natively, writes heartbeat PINGs directly, and
 applies backpressure through `write_all`. But the `Arc<Mutex<Writer>>`
-was still held for the full `write_vectored`. PeerEncodeSlot
+was still held for the full `write_vectored`. PeerWireSlot
 replaced this with encode-only Mutex (nanoseconds) and
 driver-exclusive writes.
 
@@ -1074,7 +1074,7 @@ throughput is bounded by blume's Mutex + VecDeque path and compio's
 per-task-poll overhead (~39% of cycles).
 
 **Tokio REQ/REP latency.** Still ~60-70 µs vs compio's ~34 µs.
-PeerEncodeSlot removed the send-side `Arc<Mutex<Writer>>` lock but
+PeerWireSlot removed the send-side `Arc<Mutex<Writer>>` lock but
 did not change the recv path: REP recv still routes through the
 actor for identity-prefix prepending. The remaining gap is the
 recv-side actor hop plus tokio's per-task wake cost.

@@ -8,8 +8,7 @@ use tokio::sync::Notify;
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::message::Message;
 
-const DIRECT_CAP: usize = 2 * 1024 * 1024;
-const DIRECT_MSG_MAX: usize = 256 * 1024;
+const WIRE_SLOT_CAP: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -20,10 +19,10 @@ pub(crate) enum TryEncodeResult {
     Ineligible,
 }
 
-pub(crate) struct PeerEncodeSlot {
+pub(crate) struct PeerWireSlot {
     eq: Mutex<EncodedQueue>,
-    pub(crate) transmit_notify: Notify,
-    pub(crate) drain_notify: Notify,
+    pub(crate) data_ready: Notify,
+    pub(crate) space_available: Notify,
     pub(crate) driver_in_select: AtomicBool,
     pub(crate) handshake_done: AtomicBool,
     pending: AtomicBool,
@@ -35,9 +34,9 @@ pub(crate) struct PeerEncodeSlot {
     pub(crate) peer_id: u64,
 }
 
-impl std::fmt::Debug for PeerEncodeSlot {
+impl std::fmt::Debug for PeerWireSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PeerEncodeSlot")
+        f.debug_struct("PeerWireSlot")
             .field("peer_id", &self.peer_id)
             .field(
                 "handshake_done",
@@ -49,7 +48,7 @@ impl std::fmt::Debug for PeerEncodeSlot {
 }
 
 #[allow(dead_code)]
-impl PeerEncodeSlot {
+impl PeerWireSlot {
     pub(crate) fn new(
         peer_id: u64,
         has_transform: bool,
@@ -57,8 +56,8 @@ impl PeerEncodeSlot {
     ) -> Arc<Self> {
         Arc::new(Self {
             eq: Mutex::new(EncodedQueue::new()),
-            transmit_notify: Notify::new(),
-            drain_notify: Notify::new(),
+            data_ready: Notify::new(),
+            space_available: Notify::new(),
             driver_in_select: AtomicBool::new(false),
             handshake_done: AtomicBool::new(false),
             pending: AtomicBool::new(false),
@@ -77,16 +76,12 @@ impl PeerEncodeSlot {
             return TryEncodeResult::Ineligible;
         }
 
-        if msg.byte_len() > DIRECT_MSG_MAX {
-            return TryEncodeResult::Ineligible;
-        }
-
         if !self.has_transform {
-            let mut eq = self.eq.lock().expect("encode_slot eq poisoned");
-            if eq.total_bytes() >= DIRECT_CAP {
+            let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
+            if eq.total_bytes() >= WIRE_SLOT_CAP {
                 return TryEncodeResult::Full;
             }
-            eq.encode_arena(msg);
+            eq.encode_auto(msg);
             drop(eq);
             self.signal_encoded();
             return TryEncodeResult::Ok;
@@ -95,11 +90,11 @@ impl PeerEncodeSlot {
         if let Some((ref sentinel, threshold)) = self.transform_passthrough
             && msg.iter().all(|part| part.len() < threshold)
         {
-            let mut eq = self.eq.lock().expect("encode_slot eq poisoned");
-            if eq.total_bytes() >= DIRECT_CAP {
+            let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
+            if eq.total_bytes() >= WIRE_SLOT_CAP {
                 return TryEncodeResult::Full;
             }
-            eq.encode_prefixed_arena(sentinel, msg);
+            eq.encode_prefixed_auto(sentinel, msg);
             drop(eq);
             self.signal_encoded();
             return TryEncodeResult::Ok;
@@ -112,8 +107,8 @@ impl PeerEncodeSlot {
         if self.dead.load(Ordering::Acquire) {
             return TryEncodeResult::Dead;
         }
-        let mut eq = self.eq.lock().expect("encode_slot eq poisoned");
-        if eq.total_bytes() >= DIRECT_CAP {
+        let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
+        if eq.total_bytes() >= WIRE_SLOT_CAP {
             return TryEncodeResult::Full;
         }
         eq.push_shared_chunks(chunks);
@@ -124,24 +119,24 @@ impl PeerEncodeSlot {
 
     fn signal_encoded(&self) {
         if !self.pending.swap(true, Ordering::Release) {
-            self.transmit_notify.notify_one();
+            self.data_ready.notify_one();
         }
     }
 
     pub(crate) fn drain_into_vec(&self, buf: &mut Vec<Bytes>, max_chunks: usize) {
-        let mut eq = self.eq.lock().expect("encode_slot eq poisoned");
+        let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
         eq.drain_into_vec(buf, max_chunks);
         self.pending.store(false, Ordering::Relaxed);
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        let eq = self.eq.lock().expect("encode_slot eq poisoned");
+        let eq = self.eq.lock().expect("wire_slot eq poisoned");
         eq.is_empty()
     }
 
     pub(crate) fn mark_dead(&self) {
         self.dead.store(true, Ordering::Release);
-        self.drain_notify.notify_waiters();
+        self.space_available.notify_waiters();
     }
 }
 

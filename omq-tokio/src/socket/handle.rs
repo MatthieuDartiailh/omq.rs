@@ -18,11 +18,11 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
-use crate::engine::encode_slot::{PeerEncodeSlot, TryEncodeResult};
+use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult};
 use crate::routing::{SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocSpsc;
 
-pub(crate) type EncodeSlotHolder = Arc<Mutex<Option<Arc<PeerEncodeSlot>>>>;
+pub(crate) type WireSlotHolder = Arc<Mutex<Option<Arc<PeerWireSlot>>>>;
 
 /// Error returned by [`Socket::try_send`].
 #[derive(Debug)]
@@ -200,7 +200,7 @@ struct Inner {
     /// ZMTP frames directly into the peer's `EncodedQueue` and the
     /// driver flushes them to the wire. Set by the actor when exactly
     /// one wire peer is active; cleared on multi-peer or disconnect.
-    encode_slot: EncodeSlotHolder,
+    wire_slot: WireSlotHolder,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
 }
 
@@ -256,7 +256,7 @@ impl Socket {
         let send_ring_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
-        let encode_slot: EncodeSlotHolder = Arc::new(Mutex::new(None));
+        let wire_slot: WireSlotHolder = Arc::new(Mutex::new(None));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -272,7 +272,7 @@ impl Socket {
             spsc_activated.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
-            encode_slot.clone(),
+            wire_slot.clone(),
             recv_sink_config,
         );
         spawn_driver(driver);
@@ -294,7 +294,7 @@ impl Socket {
                 send_submitter,
                 type_state,
                 req_awaiting_reply,
-                encode_slot,
+                wire_slot,
                 last_bound_endpoint: RwLock::new(None),
             }),
         }
@@ -352,7 +352,7 @@ impl Socket {
                 if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
                     tokio::task::yield_now().await;
                     if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
-                        if self.is_encode_slot_dead() {
+                        if self.is_wire_slot_dead() {
                             self.inner
                                 .req_awaiting_reply
                                 .store(false, Ordering::Relaxed);
@@ -364,7 +364,7 @@ impl Socket {
                     }
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
-                let result = self.send_with_encode_slot(msg).await;
+                let result = self.send_via_wire_slot(msg).await;
                 if result.is_ok() {
                     self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
                 }
@@ -404,7 +404,7 @@ impl Socket {
                         return Ok(());
                     }
                 }
-                self.send_with_encode_slot(msg).await
+                self.send_via_wire_slot(msg).await
             }
         }
     }
@@ -715,9 +715,9 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
 }
 
 impl Socket {
-    async fn send_with_encode_slot(&self, msg: Message) -> Result<()> {
+    async fn send_via_wire_slot(&self, msg: Message) -> Result<()> {
         let fast = {
-            let guard = self.inner.encode_slot.lock().expect("encode_slot");
+            let guard = self.inner.wire_slot.lock().expect("wire_slot");
             match guard.as_ref() {
                 Some(slot) => slot.try_encode(&msg),
                 None => TryEncodeResult::Ineligible,
@@ -727,14 +727,14 @@ impl Socket {
             TryEncodeResult::Ok => Ok(()),
             TryEncodeResult::Dead => Err(Error::Closed),
             TryEncodeResult::Full => {
-                let slot = self.inner.encode_slot.lock().expect("encode_slot").clone();
+                let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
                 if let Some(ref slot) = slot {
                     loop {
                         match slot.try_encode(&msg) {
                             TryEncodeResult::Ok => return Ok(()),
                             TryEncodeResult::Dead => return Err(Error::Closed),
                             TryEncodeResult::Full => {
-                                let notified = slot.drain_notify.notified();
+                                let notified = slot.space_available.notified();
                                 if slot.try_encode(&msg) == TryEncodeResult::Ok {
                                     return Ok(());
                                 }
@@ -751,7 +751,7 @@ impl Socket {
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {
-        let slot = self.inner.encode_slot.lock().expect("encode_slot").clone();
+        let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
         if let Some(ref slot) = slot {
             let mut stripped = msg.clone();
             stripped.pop_front();
@@ -764,11 +764,11 @@ impl Socket {
         self.inner.send_submitter.send(msg).await
     }
 
-    fn is_encode_slot_dead(&self) -> bool {
+    fn is_wire_slot_dead(&self) -> bool {
         self.inner
-            .encode_slot
+            .wire_slot
             .lock()
-            .expect("encode_slot")
+            .expect("wire_slot")
             .as_ref()
             .is_some_and(|s| s.dead.load(Ordering::Acquire))
     }

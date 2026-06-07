@@ -149,7 +149,7 @@ backends. Users see only `Message`. Public API: `Deref<[u8]>`
 | Runtime | Single-thread, cooperative | Multi-thread, work-stealing |
 | Linux I/O | io_uring | epoll (mio) |
 | Other platforms | macOS kqueue, Windows IOCP | macOS/BSD kqueue, Windows IOCP |
-| Hot-path send | Per-peer `EncodedQueue` under sync `try_lock` | Per-peer `PeerEncodeSlot` (`EncodedQueue` under `std::sync::Mutex`); driver flushes via `transmit_notify` select arm |
+| Hot-path send | Per-peer `EncodedQueue` under sync `try_lock` | Per-peer `PeerWireSlot` (`EncodedQueue` under `std::sync::Mutex`); driver flushes via `data_ready` select arm |
 | Hot-path recv | `RecvMulti` (multi-shot recv from io_uring `BUF_RING`) fed to codec inline | Connection driver pushes straight into user `recv_tx` |
 | Fan-in scaling | One runtime per worker thread (manual) | Free across cores via runtime |
 | Strengths | Small-message wire throughput, low syscall cost, low jitter | Multi-peer fan-in, no per-thread setup, ecosystem fit |
@@ -290,7 +290,7 @@ behind).
 | `src/socket/handle.rs` | Public `Socket` handle |
 | `src/socket/dispatch.rs` | Send-side dispatch (actor bypass for non-REQ/REP) |
 | `src/engine/driver.rs` | Per-connection `ConnectionDriver` |
-| `src/engine/encode_slot.rs` | `PeerEncodeSlot` -- per-peer encode buffer; driver flushes via `transmit_notify` |
+| `src/engine/wire_slot.rs` | `PeerWireSlot` -- per-peer wire buffer; driver flushes via `data_ready` |
 | `src/routing/mod.rs` | `SendStrategy`/`RecvStrategy` dispatch |
 | `src/routing/round_robin.rs` | Round-robin submitter |
 | `src/routing/exclusive.rs` | PAIR/CHANNEL single-peer submitter |

@@ -32,8 +32,8 @@ outbound queue.
         | TCP/IPC    | | TCP   | | inproc|   one per peer
         +----+-------+ +-+-----+ +-+-----+
              ^           ^         |
-             |           |         |    PeerEncodeSlot: handle encodes,
-             | encode    | encode  |    driver flushes via transmit_notify
+             |           |         |    PeerWireSlot: handle encodes,
+             | wire      | wire    |    driver flushes via data_ready
              | slot A    | slot B  |
         +----+-----------+---------+----+
         |     SocketDriver actor        |   <- owns peer table, type
@@ -152,7 +152,7 @@ Pump tasks are still spawned for inproc peers on round-robin sockets,
 which use a per-peer inbox channel rather than a shared receiver.
 Fan-out and identity sockets no longer use pump tasks at all: they
 send via `PeerSend` which routes directly to the per-peer
-`PeerEncodeSlot` (wire) or driver inbox (inproc).
+`PeerWireSlot` (wire) or driver inbox (inproc).
 
 ## Arena encoding (`ARENA_THRESHOLD` = 32 KiB)
 
@@ -191,22 +191,24 @@ the actor:
 |---|---|---|
 | `round_robin` | PUSH / DEALER / REQ / CLIENT / SCATTER | One shared send queue + work-stealing send pumps; per-socket HWM |
 | `exclusive` | PAIR / CHANNEL | Single-peer slot; awaits peer-ready on send-before-connect |
-| `fan_out` | PUB / XPUB / RADIO | Per-peer `PeerEncodeSlot`; subscription/group filter; conflate applies here |
-| `identity` | ROUTER / REP / SERVER / PEER | First frame is destination identity; lookup in identity table; per-peer `PeerEncodeSlot` |
+| `fan_out` | PUB / XPUB / RADIO | Per-peer `PeerWireSlot`; subscription/group filter; conflate applies here |
+| `identity` | ROUTER / REP / SERVER / PEER | First frame is destination identity; lookup in identity table; per-peer `PeerWireSlot` |
 | `fair_queue` | PULL / SUB / XSUB / GATHER / DISH | Recv-only; round-robin across peer drivers |
 | `drop_queue` | (HWM behaviour) | Bounded queue with drop-on-full when `send_hwm` reached |
 | `pump` | inproc peers | Per-peer pump task between shared queue and inbox |
 | `peer_send` | (shared type) | `PeerSend` enum (`Wire`/`Inbox`): unified per-peer send dispatch used by fan-out, identity, and exclusive strategies |
 
-## PeerEncodeSlot: per-peer send bypass
+## PeerWireSlot: per-peer send bypass
 
-Each wire peer gets a `PeerEncodeSlot` containing an `EncodedQueue`
+Each wire peer gets a `PeerWireSlot` containing an `EncodedQueue`
 behind a `std::sync::Mutex`. `Socket::send` encodes ZMTP frames into
 the slot, and the driver flushes them to the wire via a dedicated
-`transmit_notify` select arm. The handle never touches the writer.
+`data_ready` select arm. The handle never touches the writer.
+Messages of any size are accepted; small messages (<32 KiB) are
+arena-encoded, larger ones use zero-copy gather-write.
 
 The slot replaces the earlier `DirectIo` pattern where the handle
-locked an `Arc<Mutex<Writer>>` to write directly. `PeerEncodeSlot`
+locked an `Arc<Mutex<Writer>>` to write directly. `PeerWireSlot`
 is simpler: the Mutex hold time is nanoseconds (encode only, no I/O),
 there is no continuation loop, no `SharedWriter`, and the driver
 retains exclusive ownership of the write half.
@@ -221,13 +223,13 @@ Slot lifecycle:
   sockets.
 
 Signal coalescing: a `pending: AtomicBool` flag gates
-`transmit_notify.notify_one()`. The sender only notifies on
+`data_ready.notify_one()`. The sender only notifies on
 false-to-true transitions, so N rapid encodes produce one wake.
 The driver drain arm loops until the slot is empty (or
 `max_batch_bytes` reached), so messages that arrive during
 `write_vectored` are flushed without re-entering `select!`.
 
-`PeerEncodeSlot` is used by all send strategies for wire peers:
+`PeerWireSlot` is used by all send strategies for wire peers:
 
 - **RoundRobin**: single-peer fast path via `try_encode`.
 - **Exclusive**: PAIR/CHANNEL direct to slot.
@@ -239,9 +241,9 @@ The driver drain arm loops until the slot is empty (or
 Inproc peers have no slot (`PeerSend::Inbox` variant) and fall back
 to the driver's `mpsc` inbox.
 
-Caps: `DIRECT_CAP` (2 MiB total bytes in the slot's `EncodedQueue`),
-`DIRECT_MSG_MAX` (256 KiB per message). Messages exceeding either
-fall back to the driver inbox.
+Cap: `WIRE_SLOT_CAP` (2 MiB total bytes in the slot's `EncodedQueue`).
+When the slot is full, the sender waits on `space_available` until the
+driver drains enough bytes.
 
 ## Reconnect and monitor
 

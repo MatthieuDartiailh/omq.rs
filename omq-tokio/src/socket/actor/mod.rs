@@ -205,7 +205,7 @@ pub(crate) struct SocketDriver {
     send_ring_active: super::handle::SpscSendRingActive,
     recv_notify: super::handle::SpscRecvNotify,
     spsc_activated: super::handle::SpscActivated,
-    encode_slot: super::handle::EncodeSlotHolder,
+    wire_slot: super::handle::WireSlotHolder,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
 }
@@ -227,7 +227,7 @@ impl SocketDriver {
         spsc_activated: super::handle::SpscActivated,
         type_state: Arc<Mutex<TypeState>>,
         req_awaiting_reply: Arc<AtomicBool>,
-        encode_slot: super::handle::EncodeSlotHolder,
+        wire_slot: super::handle::WireSlotHolder,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
@@ -264,7 +264,7 @@ impl SocketDriver {
             send_ring_active,
             recv_notify,
             spsc_activated,
-            encode_slot,
+            wire_slot,
             compression_pool: None,
             recv_sink_config,
         }

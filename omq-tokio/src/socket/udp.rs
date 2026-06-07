@@ -137,6 +137,6 @@ pub(crate) fn fake_handle(
     DriverHandle {
         inbox,
         cancel,
-        encode_slot: None,
+        wire_slot: None,
     }
 }

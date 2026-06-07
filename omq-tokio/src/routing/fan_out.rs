@@ -1,4 +1,4 @@
-//! Fan-out send: per-peer `PeerEncodeSlot`, filtered by subscription.
+//! Fan-out send: per-peer `PeerWireSlot`, filtered by subscription.
 //!
 //! PUB and XPUB filter by SUBSCRIBE-driven prefix set; RADIO filters
 //! by joined groups. On every `send`, the message is encoded once
@@ -13,7 +13,7 @@ use smallvec::SmallVec;
 
 use bytes::Bytes;
 
-use crate::engine::encode_slot::{self, TryEncodeResult};
+use crate::engine::wire_slot::{self, TryEncodeResult};
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -250,7 +250,7 @@ fn dispatch_to_targets(targets: &[PeerSend], msg: &Message) {
             let _ = targets[0].try_encode(msg);
         }
         _ => {
-            let encoded = encode_slot::pre_encode(msg);
+            let encoded = wire_slot::pre_encode(msg);
             for t in targets {
                 match t {
                     PeerSend::Wire { slot, inbox } => {

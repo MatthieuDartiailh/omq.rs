@@ -77,12 +77,12 @@ impl SocketDriver {
         }
         self.update_send_ring();
         {
-            let mut guard = self.encode_slot.lock().expect("encode_slot");
+            let mut guard = self.wire_slot.lock().expect("wire_slot");
             if guard.as_ref().is_some_and(|s| s.peer_id == peer_id) {
                 *guard = None;
             }
         }
-        self.update_encode_slot();
+        self.update_wire_slot();
         // Refill the RecvSink slot so the next wire peer gets the fast
         // yring path instead of falling back to the recv pump.
         if let Some(ref config) = self.recv_sink_config {
@@ -134,16 +134,16 @@ impl SocketDriver {
         }
     }
 
-    fn update_encode_slot(&mut self) {
+    fn update_wire_slot(&mut self) {
         use omq_proto::routing::SendCategory;
         let cat = omq_proto::routing::send_category(self.socket_type);
         if !matches!(cat, SendCategory::RoundRobin | SendCategory::Exclusive) {
             return;
         }
-        let mut guard = self.encode_slot.lock().expect("encode_slot");
+        let mut guard = self.wire_slot.lock().expect("wire_slot");
         if self.peers.len() == 1 {
             let peer = self.peers.values().next().unwrap();
-            if let Some(ref slot) = peer.handle.encode_slot {
+            if let Some(ref slot) = peer.handle.wire_slot {
                 *guard = Some(slot.clone());
                 return;
             }
@@ -317,7 +317,7 @@ impl SocketDriver {
         let slot = if uses_crypto {
             None
         } else {
-            let s = crate::engine::encode_slot::PeerEncodeSlot::new(
+            let s = crate::engine::wire_slot::PeerWireSlot::new(
                 peer_id,
                 has_transform,
                 passthrough_info,
@@ -325,7 +325,7 @@ impl SocketDriver {
             Some(s)
         };
         let driver = match slot {
-            Some(ref s) => driver.with_encode_slot(s.clone()),
+            Some(ref s) => driver.with_wire_slot(s.clone()),
             None => driver,
         };
 
@@ -358,7 +358,7 @@ impl SocketDriver {
                 handle: DriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel,
-                    encode_slot: slot.clone(),
+                    wire_slot: slot.clone(),
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -371,7 +371,7 @@ impl SocketDriver {
         // Disable send fast paths when a second peer connects.
         if self.peers.len() > 1 {
             self.update_send_ring();
-            *self.encode_slot.lock().expect("encode_slot") = None;
+            *self.wire_slot.lock().expect("wire_slot") = None;
         }
 
         tokio::spawn(async move {
@@ -482,7 +482,7 @@ impl SocketDriver {
                 handle: DriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
-                    encode_slot: None,
+                    wire_slot: None,
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -608,7 +608,7 @@ impl SocketDriver {
         );
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;
-        self.update_encode_slot();
+        self.update_wire_slot();
     }
 
     async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {

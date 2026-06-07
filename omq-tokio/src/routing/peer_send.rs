@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::encode_slot::{PeerEncodeSlot, TryEncodeResult};
+use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult};
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -8,7 +8,7 @@ use omq_proto::message::Message;
 #[derive(Debug, Clone)]
 pub(crate) enum PeerSend {
     Wire {
-        slot: Arc<PeerEncodeSlot>,
+        slot: Arc<PeerWireSlot>,
         inbox: tokio::sync::mpsc::Sender<DriverCommand>,
     },
     Inbox(tokio::sync::mpsc::Sender<DriverCommand>),
@@ -16,7 +16,7 @@ pub(crate) enum PeerSend {
 
 impl PeerSend {
     pub(crate) fn from_handle(handle: &DriverHandle) -> Self {
-        match handle.encode_slot {
+        match handle.wire_slot {
             Some(ref slot) => Self::Wire {
                 slot: slot.clone(),
                 inbox: handle.inbox.clone(),
@@ -53,7 +53,21 @@ impl PeerSend {
         match self {
             Self::Wire { slot, inbox } => match slot.try_encode(&msg) {
                 TryEncodeResult::Ok => Ok(()),
-                TryEncodeResult::Ineligible | TryEncodeResult::Full => inbox
+                TryEncodeResult::Full => loop {
+                    let notified = slot.space_available.notified();
+                    match slot.try_encode(&msg) {
+                        TryEncodeResult::Ok => return Ok(()),
+                        TryEncodeResult::Dead => return Err(Error::Closed),
+                        TryEncodeResult::Full => notified.await,
+                        TryEncodeResult::Ineligible => {
+                            return inbox
+                                .send(DriverCommand::SendMessage(msg))
+                                .await
+                                .map_err(|_| Error::Closed);
+                        }
+                    }
+                },
+                TryEncodeResult::Ineligible => inbox
                     .send(DriverCommand::SendMessage(msg))
                     .await
                     .map_err(|_| Error::Closed),

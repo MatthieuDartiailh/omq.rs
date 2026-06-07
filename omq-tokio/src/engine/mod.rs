@@ -9,7 +9,7 @@
 
 pub mod compression_pool;
 pub mod driver;
-pub(crate) mod encode_slot;
+pub(crate) mod wire_slot;
 
 pub use driver::{
     ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut, RecvSink, RecvSinkConfig,
