@@ -313,17 +313,28 @@ impl SocketDriver {
             None => driver,
         };
 
+        let arena_threshold = self
+            .options
+            .arena_threshold
+            .unwrap_or(omq_proto::encoded_queue::ARENA_THRESHOLD);
         let uses_crypto = self.options.mechanism.has_frame_transform();
         let slot = if uses_crypto {
             None
         } else {
+            let wire_slot_cap = self
+                .options
+                .wire_slot_cap
+                .unwrap_or(crate::engine::wire_slot::WIRE_SLOT_CAP_DEFAULT);
             let s = crate::engine::wire_slot::PeerWireSlot::new(
                 peer_id,
                 has_transform,
                 passthrough_info,
+                arena_threshold,
+                wire_slot_cap,
             );
             Some(s)
         };
+        let driver = driver.with_arena_threshold(arena_threshold);
         let driver = match slot {
             Some(ref s) => driver.with_wire_slot(s.clone()),
             None => driver,

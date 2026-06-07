@@ -154,6 +154,24 @@ pub struct Options {
     /// instead of accumulating fixed-size reads through the codec.
     pub large_message_threshold: Option<usize>,
 
+    /// Payload size at which the encoder switches from contiguous arena
+    /// copies to zero-copy gather-write. Messages smaller than this are
+    /// appended into a shared 256 KiB arena buffer (one iovec per batch);
+    /// larger messages produce per-frame iovecs referencing the original
+    /// `Bytes` payload.
+    ///
+    /// `None` uses the default (`ARENA_THRESHOLD`, 32 KiB). Raise this
+    /// when payloads are owned by an external runtime (e.g. Python
+    /// refcounted objects) where the gather path's per-chunk refcount
+    /// traffic is more expensive than a flat memcpy.
+    pub arena_threshold: Option<usize>,
+
+    /// Maximum encoded bytes buffered in a per-peer wire slot before
+    /// `try_encode` returns `Full` and the message falls back to the
+    /// actor inbox. `None` uses the default (2 MiB). Larger values
+    /// allow more batching at the cost of memory per peer.
+    pub wire_slot_cap: Option<usize>,
+
     /// TLS configuration for `wss://` endpoints. Ignored for non-WSS
     /// transports. Requires the `ws` feature.
     #[cfg(feature = "ws")]
@@ -203,6 +221,8 @@ impl Default for Options {
             max_recv_dict_size: None,
             compression_offload_threshold: Some(8192),
             large_message_threshold: Some(128 * 1024),
+            arena_threshold: None,
+            wire_slot_cap: None,
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
         }
@@ -387,6 +407,22 @@ impl Options {
     #[must_use]
     pub fn disable_large_message_path(mut self) -> Self {
         self.large_message_threshold = None;
+        self
+    }
+
+    /// Set the per-`EncodedQueue` arena threshold. Messages smaller than
+    /// this are copied into a contiguous arena buffer; larger ones use
+    /// zero-copy gather-write. Default: 32 KiB.
+    #[must_use]
+    pub fn arena_threshold(mut self, bytes: usize) -> Self {
+        self.arena_threshold = Some(bytes);
+        self
+    }
+
+    /// Set the per-peer wire-slot capacity in bytes. Default: 2 MiB.
+    #[must_use]
+    pub fn wire_slot_cap(mut self, bytes: usize) -> Self {
+        self.wire_slot_cap = Some(bytes);
         self
     }
 

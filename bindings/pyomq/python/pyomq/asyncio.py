@@ -138,6 +138,10 @@ class _RecvFuture:
                     fut.set_exception(e)
                 return
             if r is not None:
+                try:
+                    os.write(fd, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+                except OSError:
+                    pass
                 loop.remove_reader(fd)
                 os.close(fd)
                 if not fut.done():

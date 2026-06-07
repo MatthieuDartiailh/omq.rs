@@ -12,6 +12,7 @@ pub struct EncodedQueue {
     total_bytes: usize,
     scratch: BytesMut,
     arena: BytesMut,
+    arena_threshold: usize,
 }
 
 impl std::fmt::Debug for EncodedQueue {
@@ -25,11 +26,16 @@ impl std::fmt::Debug for EncodedQueue {
 
 impl EncodedQueue {
     pub fn new() -> Self {
+        Self::with_arena_threshold(ARENA_THRESHOLD)
+    }
+
+    pub fn with_arena_threshold(arena_threshold: usize) -> Self {
         Self {
             chunks: VecDeque::with_capacity(32),
             total_bytes: 0,
             scratch: BytesMut::with_capacity(9),
             arena: BytesMut::with_capacity(256 * 1024),
+            arena_threshold,
         }
     }
 
@@ -39,6 +45,7 @@ impl EncodedQueue {
             total_bytes: 0,
             scratch: BytesMut::new(),
             arena: BytesMut::new(),
+            arena_threshold: ARENA_THRESHOLD,
         }
     }
 
@@ -89,7 +96,7 @@ impl EncodedQueue {
     }
 
     pub fn encode_auto(&mut self, msg: &Message) {
-        if msg.byte_len() < ARENA_THRESHOLD {
+        if msg.byte_len() < self.arena_threshold {
             self.encode_arena(msg);
         } else {
             self.encode_gather(msg);
@@ -97,7 +104,7 @@ impl EncodedQueue {
     }
 
     pub fn encode_prefixed_auto(&mut self, prefix: &Bytes, msg: &Message) {
-        if msg.byte_len() + prefix.len() * msg.len() < ARENA_THRESHOLD {
+        if msg.byte_len() + prefix.len() * msg.len() < self.arena_threshold {
             self.encode_prefixed_arena(prefix, msg);
         } else {
             self.encode_prefixed_gather(prefix, msg);

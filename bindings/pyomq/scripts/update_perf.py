@@ -208,7 +208,8 @@ payload = b'x' * {size}
 ctx = lib.Context()
 push = ctx.socket(lib.PUSH)
 push.linger = 0
-ep = push.bind('tcp://127.0.0.1:0')
+push.bind('tcp://127.0.0.1:0')
+ep = push.last_endpoint
 if isinstance(ep, bytes): ep = ep.decode()
 port = ep.rsplit(':', 1)[1]
 print(port, flush=True)
@@ -320,7 +321,8 @@ payload = b'x' * {size}
 ctx = lib.Context()
 push = ctx.socket(lib.PUSH)
 push.linger = 0
-ep = push.bind('tcp://127.0.0.1:0')
+push.bind('tcp://127.0.0.1:0')
+ep = push.last_endpoint
 if isinstance(ep, bytes): ep = ep.decode()
 port = ep.rsplit(':', 1)[1]
 print(port, flush=True)

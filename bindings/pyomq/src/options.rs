@@ -153,6 +153,8 @@ impl Overlay {
             compression_level: self.compression_level,
             compression_dict: self.compression_dict.clone(),
             compression_auto_train: self.compression_auto_train,
+            arena_threshold: Some(64 * 1024),
+            wire_slot_cap: None,
             ..Default::default()
         };
         #[cfg(feature = "plain")]

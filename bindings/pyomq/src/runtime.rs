@@ -159,10 +159,10 @@ pub fn materialize(
             let mut batch = 0u32;
             while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
                 let _ = s.send(msg).await;
+                send_notify.notify();
                 batch += 1;
                 if batch >= SEND_YIELD_INTERVAL {
                     batch = 0;
-                    send_notify.notify();
                     tokio::task::yield_now().await;
                 }
             }

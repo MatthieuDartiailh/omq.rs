@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::message::Message;
 
-const WIRE_SLOT_CAP: usize = 2 * 1024 * 1024;
+pub(crate) const WIRE_SLOT_CAP_DEFAULT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -21,6 +21,7 @@ pub(crate) enum TryEncodeResult {
 
 pub(crate) struct PeerWireSlot {
     eq: Mutex<EncodedQueue>,
+    cap: usize,
     pub(crate) data_ready: Notify,
     pub(crate) space_available: Notify,
     pub(crate) driver_in_select: AtomicBool,
@@ -53,9 +54,12 @@ impl PeerWireSlot {
         peer_id: u64,
         has_transform: bool,
         transform_passthrough: Option<(Bytes, usize)>,
+        arena_threshold: usize,
+        cap: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
-            eq: Mutex::new(EncodedQueue::new()),
+            eq: Mutex::new(EncodedQueue::with_arena_threshold(arena_threshold)),
+            cap,
             data_ready: Notify::new(),
             space_available: Notify::new(),
             driver_in_select: AtomicBool::new(false),
@@ -78,7 +82,7 @@ impl PeerWireSlot {
 
         if !self.has_transform {
             let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-            if eq.total_bytes() >= WIRE_SLOT_CAP {
+            if eq.total_bytes() >= self.cap {
                 return TryEncodeResult::Full;
             }
             eq.encode_auto(msg);
@@ -91,7 +95,7 @@ impl PeerWireSlot {
             && msg.iter().all(|part| part.len() < threshold)
         {
             let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-            if eq.total_bytes() >= WIRE_SLOT_CAP {
+            if eq.total_bytes() >= self.cap {
                 return TryEncodeResult::Full;
             }
             eq.encode_prefixed_auto(sentinel, msg);
@@ -108,7 +112,7 @@ impl PeerWireSlot {
             return TryEncodeResult::Dead;
         }
         let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-        if eq.total_bytes() >= WIRE_SLOT_CAP {
+        if eq.total_bytes() >= self.cap {
             return TryEncodeResult::Full;
         }
         eq.push_shared_chunks(chunks);

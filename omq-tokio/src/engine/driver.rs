@@ -335,6 +335,7 @@ where
     /// wire. Replaces the `DirectIo` pattern where the handle locked the
     /// writer directly.
     wire_slot: Option<Arc<PeerWireSlot>>,
+    arena_threshold: usize,
 }
 
 impl<T> ConnectionDriver<T>
@@ -384,6 +385,7 @@ where
             compression_pool: None,
             offload_threshold: 0,
             wire_slot: None,
+            arena_threshold: omq_proto::encoded_queue::ARENA_THRESHOLD,
         }
     }
 
@@ -449,6 +451,12 @@ where
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_arena_threshold(mut self, threshold: usize) -> Self {
+        self.arena_threshold = threshold;
+        self
+    }
+
     /// Run the driver to completion. Returns:
     /// - `Ok(())` on clean shutdown (peer EOF, canceled, `Close` command,
     ///   inbox dropped).
@@ -484,12 +492,13 @@ where
             compression_pool,
             offload_threshold,
             wire_slot,
+            arena_threshold,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
-        let mut eq = EncodedQueue::new();
+        let mut eq = EncodedQueue::with_arena_threshold(arena_threshold);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> =
