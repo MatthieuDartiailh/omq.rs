@@ -142,6 +142,41 @@ unless `OMQ_BENCH_NO_WRITE=1`.
 Compression benchmarks run separately with bandwidth limiting.
 See [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md) for commands and results.
 
+### Cross-implementation comparison benchmarks
+
+`scripts/run_comparisons.py` drives standalone `bench_peer` binaries:
+
+| binary | source | impls |
+|--------|--------|-------|
+| `bench_peer_tokio` | `omq-tokio/src/bin/bench_peer_tokio.rs` | omq-tokio |
+| `bench_peer_compio` | `omq-compio/src/bin/bench_peer_compio.rs` | omq-compio, omq-compio-st |
+| `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, omq-libzmq |
+| `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
+| `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq |
+
+Each binary speaks a subcommand protocol:
+
+- `push <addr> <size>` -- bind PUSH, send forever
+- `pull <addr> <size> <duration>` -- connect PULL, count for duration,
+  print `<count> <elapsed> <size>` to stdout
+- `pub <addr> <size>` -- bind PUB, send forever
+- `sub <addr> <size> <duration>` -- connect SUB, subscribe(""),
+  count for duration
+- `inproc <name> <size> <duration>` -- in-process PUSH/PULL
+- `inproc-pubsub <name> <size> <duration> <peers>` -- in-process
+  PUB/SUB with N subscribers
+- `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>` -- latency
+
+Results go to `~/.cache/omq/comparisons.jsonl`. Charts are generated
+by `scripts/gen_comparison_chart.py` into
+`doc/charts/{pushpull,pubsub,reqrep}/comparison_*.svg`.
+
+Per-backend criterion-style benches (separate from comparisons) live in
+`omq-tokio/benches/` and `omq-compio/benches/` with shared scaffolding
+in `benches/common/mod.rs`. Custom harness (`harness = false`), no
+external framework. Results go to
+`~/.cache/omq/results_{tokio,compio}.jsonl`.
+
 ## Updating charts
 
 After performance-relevant changes, regenerate the charts before

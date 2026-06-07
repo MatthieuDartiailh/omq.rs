@@ -59,47 +59,10 @@ only when the lint fires in some feature combinations but not others
 Lints: `missing_debug_implementations` = **deny**,
 `unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
 
-## Comparison benchmarks
+## Benchmarks, charts, releasing
 
-Cross-implementation throughput and latency benchmarks live in
-`scripts/run_comparisons.py`. It drives standalone `bench_peer`
-binaries, one per implementation:
-
-| binary | source | impls |
-|--------|--------|-------|
-| `bench_peer_tokio` | `omq-tokio/src/bin/bench_peer_tokio.rs` | omq-tokio |
-| `bench_peer_compio` | `omq-compio/src/bin/bench_peer_compio.rs` | omq-compio, omq-compio-st |
-| `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, omq-libzmq |
-| `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
-| `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq |
-
-Each binary speaks a subcommand protocol:
-
-- `push <addr> <size>` -- bind PUSH, send forever
-- `pull <addr> <size> <duration>` -- connect PULL, count for duration,
-  print `<count> <elapsed> <size>` to stdout
-- `pub <addr> <size>` -- bind PUB, send forever
-- `sub <addr> <size> <duration>` -- connect SUB, subscribe(""),
-  count for duration
-- `inproc <name> <size> <duration>` -- in-process PUSH/PULL
-- `inproc-pubsub <name> <size> <duration> <peers>` -- in-process
-  PUB/SUB with N subscribers
-- `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>` -- latency
-
-Results go to `~/.cache/omq/comparisons.jsonl`. Charts are generated
-by `scripts/gen_comparison_chart.py` into `doc/charts/comparison_*.svg`.
-
-Per-backend criterion-style benches (separate from comparisons) live in
-`omq-tokio/benches/` and `omq-compio/benches/` with shared scaffolding
-in `benches/common/mod.rs`. Custom harness (`harness = false`), no
-external framework. Results go to `~/.cache/omq/results_{tokio,compio}.jsonl`.
-
-## Charts and releasing
-
-See [`DEVELOPMENT.md`](DEVELOPMENT.md) for:
-
-- **Updating charts** -- comparison, compression, and pyomq bindings SVGs
-- **Releasing** -- dep graph, semver rules, cascade, publish order, pyomq tag separation
+See [`DEVELOPMENT.md`](DEVELOPMENT.md) for comparison benchmark infra,
+chart generation, and release process.
 
 **interop_compio dep constraint:** `omq-tokio/Cargo.toml`'s compio
 dev-dep must use the same git rev as `omq-compio`'s dep. Different
@@ -124,6 +87,16 @@ The user sends and receives messages. The socket handles connections,
 reconnections, framing, and multiplexing internally. The transport
 (TCP, IPC, inproc, UDP) is chosen by endpoint URI and is transparent
 to the application.
+
+**Reliability is non-negotiable.** ZMQ users expect the library to
+Just Work. No errors from peer failures. No hangs. No stuck states.
+Connections self-heal automatically. Back-pressure is applied silently.
+The library must always take the optimal performance path and recover
+from any transient failure without user intervention. A ZMQ library
+that surfaces transport-level errors to the user, requires manual
+reconnection, or gets stuck in a degraded state is broken. Never
+propose a fix that weakens self-healing, adds user-visible failure
+modes, or trades reliability for convenience.
 
 Core guarantees that omq must uphold:
 
@@ -152,19 +125,46 @@ Core guarantees that omq must uphold:
   for async (send/recv serialize internally), but the principle holds
   for omq-libzmq's C API.
 
-## Architecture and internals
+## Architecture summary
 
-Three-layer split: codec (omq-proto) is sans-I/O, backends own the
-I/O loop. Two queues per socket: one inbound, one outbound.
-See `doc/` for details:
+Three-layer split: `omq-proto` (sans-I/O ZMTP codec) -> backend
+(`omq-tokio` or `omq-compio`) -> user `Socket` API. Two queues per
+socket: one inbound, one outbound. Per-connection driver tasks bridge
+queues and wire. Full detail in `doc/`:
+[`architecture.md`](doc/architecture.md),
+[`tokio.md`](doc/tokio.md),
+[`compio.md`](doc/compio.md),
+[`performance.md`](doc/performance.md),
+[`libzmq/`](doc/libzmq/).
 
-- [`doc/architecture.md`](doc/architecture.md) -- diagrams, two-queue model, message types, transport/mechanism tables
-- [`doc/compio.md`](doc/compio.md) -- compio internals: key types, DirectIoState, EncodedQueue, driver loop, recv-direct
-- [`doc/tokio.md`](doc/tokio.md) -- tokio internals: actor shape, send/recv bypass, routing strategies
-- [`doc/performance.md`](doc/performance.md) -- omq's performance journey: design decisions, dead ends, profiling. Technical and brief. No em-dashes, no frill.
-- [`doc/libzmq/errors.md`](doc/libzmq/errors.md) -- libzmq error handling catalog
-- [`doc/libzmq/gaps.md`](doc/libzmq/gaps.md) -- error handling gap analysis vs omq
-- [`doc/libzmq/perf.md`](doc/libzmq/perf.md) -- libzmq performance internals reference
+**omq-proto key types.** `Connection`: ZMTP codec state machine
+(`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
+`EncodedQueue`: arena (256 KiB) + gather-write encoder used by both
+backends. Small messages (<32 KiB `ARENA_THRESHOLD`) go contiguously
+into the arena (1 iovec per batch). Large messages use zero-copy
+gather-write (Arc-bumped `Bytes` chunks). `Message`/`Payload`: 64 B
+each (one cache line), inline variants (55 B / 62 B).
+
+**omq-tokio hot path.** `SocketDriver` actor owns peer table and
+type state. Send bypass: `Socket::send` skips actor for non-REQ/REP
+via `SendSubmitter` (flume MPMC). Per-peer `PeerWireSlot`
+(`EncodedQueue` under `std::sync::Mutex`, nanosecond hold): handle
+encodes, driver flushes via `data_ready` select arm. `PeerSend` enum
+(`Wire`/`Inbox`) dispatches fan-out/identity/exclusive to per-peer
+slots without pump tasks. Recv bypass: `ConnectionDriver` pushes
+straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER go
+through actor for identity routing.
+
+**omq-compio hot path.** Single-threaded, cooperative. `DirectIoState`
+per wire peer: `EncodedQueueCell` (Cell-based borrow, no atomics) for
+send bypass. `recv_claim: AtomicU8` arbitrates driver vs user owning
+the read path (direct-recv). Multi-shot recv from io_uring `BUF_RING`
+pool. Cell fields (`driver_in_select`, `handshake_done`) avoid atomic
+overhead on the single-thread runtime.
+
+**Inproc.** No ZMTP, no driver. Cross-thread SPSC via `yring`
+(lock-free ring buffer, 64 B `Message` by value). Same-thread via
+`blume` (batching MPSC, swap-drain consumer).
 
 ## Conventions
 
