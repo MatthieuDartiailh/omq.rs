@@ -288,10 +288,10 @@ def _run_throughput_once(
 ) -> dict | None:
     dur = str(duration)
     if transport == "inproc":
-        # Shorter timeout: inproc finishes in ~2.5s or hangs forever
-        # (compio cross-thread waker bug). 5s catches hangs faster.
-        output = capture_process(binary, inproc_subcmd, addr, str(size), dur,
-                                 timeout=5)
+        fresh_name = f"{addr}-{next_addr_id()}"
+        timeout_s = max(int(duration) + 5, 8)
+        output = capture_process(binary, inproc_subcmd, fresh_name, str(size),
+                                 dur, timeout=timeout_s)
         return parse_throughput(output, size)
 
     addr = _fresh_addr(addr)
@@ -335,8 +335,10 @@ def _run_pubsub_once(
 ) -> dict | None:
     dur = str(duration)
     if transport == "inproc":
-        output = capture_process(binary, inproc_subcmd, addr, str(size), dur,
-                                 str(peers))
+        fresh_name = f"{addr}-{next_addr_id()}"
+        timeout_s = max(int(duration) + 5, 8)
+        output = capture_process(binary, inproc_subcmd, fresh_name, str(size),
+                                 dur, str(peers), timeout=timeout_s)
         result = parse_throughput(output, size)
     else:
         addr = _fresh_addr(addr)
@@ -377,8 +379,9 @@ def run_latency_cell(
     timeout: int = LATENCY_TIMEOUT,
 ) -> dict | None:
     if transport == "inproc":
+        fresh_name = f"{addr}-{next_addr_id()}"
         output = capture_process(
-            binary, inproc_subcmd, addr, str(size),
+            binary, inproc_subcmd, fresh_name, str(size),
             str(iterations), str(warmup),
             timeout=timeout,
         )
