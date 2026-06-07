@@ -1,11 +1,15 @@
-//! PUB/SUB fan-out throughput. PUB sends N, each SUB receives all N.
-//! `msgs/s` reported is publish rate.
+//! PUB/SUB fan-out throughput. PUB sends for a timed window, each SUB
+//! counts received messages. Reported rate is the PUB send rate.
 
 #[path = "common/mod.rs"]
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
 use bytes::Bytes;
-use omq_tokio::{Message, OnMute, Options, Socket, SocketType};
+use omq_tokio::{Message, Options, Socket, SocketType};
 
 const PATTERN: &str = "pub_sub";
 const PEER_COUNTS: &[usize] = &[3];
@@ -37,9 +41,7 @@ fn main() {
 
 async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
     let ep = common::endpoint(transport, seq);
-    // Default PUB on_mute is drop_newest. The bench needs strict
-    // delivery (we count exactly k receives per sub) - opt into block.
-    let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
     pub_.bind(ep.clone()).await.expect("bind PUB");
 
     let mut subs: Vec<Socket> = Vec::with_capacity(peers);
@@ -59,47 +61,68 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     }
 
     let payload = common::payload(size);
-    let pub_ = std::sync::Arc::new(pub_);
-    let subs = std::sync::Arc::new(subs);
+    let stop = Arc::new(AtomicBool::new(false));
+    let recv_count = Arc::new(AtomicUsize::new(0));
 
-    let burst = |k: usize| {
-        let pub_ = pub_.clone();
-        let subs = subs.clone();
-        let payload = payload.clone();
-        async move {
-            let send_handle = {
-                let pub_ = pub_.clone();
-                let payload = payload.clone();
-                tokio::spawn(async move {
-                    for _ in 0..k {
-                        pub_.send(Message::single(payload.clone())).await.unwrap();
+    let mut recv_handles = Vec::with_capacity(subs.len());
+    for s in subs {
+        let stop = stop.clone();
+        let recv_count = recv_count.clone();
+        recv_handles.push(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(20), s.recv()).await {
+                    recv_count.fetch_add(1, Ordering::Relaxed);
+                    while s.try_recv().is_ok() {
+                        recv_count.fetch_add(1, Ordering::Relaxed);
                     }
-                })
-            };
-            let mut recv_handles = Vec::with_capacity(subs.len());
-            for i in 0..subs.len() {
-                let s = subs.clone();
-                recv_handles.push(tokio::spawn(async move {
-                    for _ in 0..k {
-                        s[i].recv().await.unwrap();
-                    }
-                }));
+                }
             }
-            for h in recv_handles {
-                let _ = h.await;
-            }
-            let _ = send_handle.await;
+            drop(s);
+        }));
+    }
+
+    // warmup
+    let warmup_end = Instant::now() + common::WARMUP_DURATION;
+    while Instant::now() < warmup_end {
+        let _ = pub_.send(Message::single(payload.clone())).await;
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let n_rounds = common::rounds();
+    let round_dur = common::round_duration();
+    let mut best_msgs_s = 0.0f64;
+    let mut best_elapsed = Duration::ZERO;
+    let mut best_n = 0usize;
+
+    for _ in 0..n_rounds {
+        recv_count.store(0, Ordering::Relaxed);
+        let t0 = Instant::now();
+        let end = t0 + round_dur;
+        let mut sent = 0usize;
+        while Instant::now() < end {
+            let _ = pub_.send(Message::single(payload.clone())).await;
+            sent += 1;
         }
-    };
-
-    let cell = common::measure_min_of(size, 1, burst).await;
-    if let Ok(subs) = std::sync::Arc::try_unwrap(subs) {
-        for s in subs {
-            let _ = s.close().await;
+        let elapsed = t0.elapsed();
+        let msgs_s = sent as f64 / elapsed.as_secs_f64();
+        if msgs_s > best_msgs_s {
+            best_msgs_s = msgs_s;
+            best_elapsed = elapsed;
+            best_n = sent;
         }
     }
-    if let Ok(pub_) = std::sync::Arc::try_unwrap(pub_) {
-        let _ = pub_.close().await;
+
+    stop.store(true, Ordering::Relaxed);
+    for h in recv_handles {
+        let _ = h.await;
     }
-    cell
+
+    let mbps = (best_n * size) as f64 / best_elapsed.as_secs_f64() / 1_000_000.0;
+    common::Cell {
+        n: best_n,
+        elapsed: best_elapsed,
+        mbps,
+        msgs_s: best_msgs_s,
+        cpu_time: Duration::ZERO,
+    }
 }

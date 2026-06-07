@@ -121,6 +121,20 @@ impl PeerWireSlot {
         TryEncodeResult::Ok
     }
 
+    pub(crate) fn try_push_pre_encoded(&self, data: &[u8]) -> TryEncodeResult {
+        if self.dead.load(Ordering::Acquire) {
+            return TryEncodeResult::Dead;
+        }
+        let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
+        if eq.total_bytes() >= self.cap {
+            return TryEncodeResult::Full;
+        }
+        eq.push_pre_encoded(data);
+        drop(eq);
+        self.signal_encoded();
+        TryEncodeResult::Ok
+    }
+
     fn signal_encoded(&self) {
         if !self.pending.swap(true, Ordering::Release) {
             self.data_ready.notify_one();
@@ -144,6 +158,7 @@ impl PeerWireSlot {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn pre_encode(msg: &Message) -> SmallVec<[Bytes; 4]> {
     let mut eq = EncodedQueue::one_shot();
     eq.encode_auto(msg);

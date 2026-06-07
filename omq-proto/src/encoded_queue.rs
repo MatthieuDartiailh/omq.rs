@@ -57,6 +57,20 @@ impl EncodedQueue {
         self.total_bytes
     }
 
+    pub fn arena_bytes(&self) -> &[u8] {
+        &self.arena
+    }
+
+    pub fn clear_arena(&mut self) {
+        self.arena.clear();
+        self.total_bytes = 0;
+    }
+
+    pub fn push_pre_encoded(&mut self, data: &[u8]) {
+        self.arena.extend_from_slice(data);
+        self.total_bytes += data.len();
+    }
+
     fn flush_arena_to_chunks(&mut self) {
         if !self.arena.is_empty() {
             self.chunks.push_back(self.arena.split().freeze());

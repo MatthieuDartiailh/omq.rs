@@ -339,22 +339,30 @@ def _run_pubsub_once(
                                  str(peers))
         result = parse_throughput(output, size)
     else:
+        addr = _fresh_addr(addr)
+        cleanup_ipc_socket(addr)
         pub_ = spawn_process(binary, "pub", addr, str(size))
-        time.sleep(0.15)
-        if pub_.poll() is not None:
-            print(f"WARNING: pub died (rc={pub_.returncode}) for {binary} {addr}",
-                  file=sys.stderr)
-            return None
+        if transport in ("ipc", "ws"):
+            time.sleep(0.2)
+            connect_addr = addr
+        else:
+            port = read_bound_port(pub_)
+            if port is None:
+                kill_process(pub_)
+                return None
+            connect_addr = str(port)
         drain_subs = []
         try:
             for _ in range(peers - 1):
-                drain_subs.append(spawn_process(binary, "sub", addr, str(size), dur))
+                drain_subs.append(spawn_process(binary, "sub", connect_addr,
+                                                str(size), dur))
             time.sleep(0.05)
-            output = capture_process(binary, "sub", addr, str(size), dur)
+            output = capture_process(binary, "sub", connect_addr, str(size), dur)
         finally:
             kill_process(pub_)
             for s in drain_subs:
                 kill_process(s)
+            cleanup_ipc_socket(addr)
         result = parse_throughput(output, size)
     if result and peers > 1:
         result["mbps"] *= peers

@@ -614,7 +614,12 @@ impl Socket {
     }
 
     async fn send_pub_filtered(&self, msg: Message) -> Result<()> {
+        const YIELD_INTERVAL: u32 = 256;
+
         let inner = self.inner();
+        let count = inner.pub_send_count.get().wrapping_add(1);
+        inner.pub_send_count.set(count);
+
         if inner
             .pub_sub_dirty
             .load(std::sync::atomic::Ordering::Acquire)
@@ -641,10 +646,16 @@ impl Socket {
                         let _ = peer.send(msg.clone()).await;
                     }
                 }
+                if count.is_multiple_of(YIELD_INTERVAL) {
+                    crate::yield_now().await;
+                }
                 return Ok(());
             }
             for peer in targets {
                 let _ = peer.send(msg.clone()).await;
+            }
+            if count.is_multiple_of(YIELD_INTERVAL) {
+                crate::yield_now().await;
             }
             return Ok(());
         }
@@ -668,6 +679,9 @@ impl Socket {
         }
         for peer in targets {
             let _ = peer.send(msg.clone()).await;
+        }
+        if count.is_multiple_of(YIELD_INTERVAL) {
+            crate::yield_now().await;
         }
         Ok(())
     }

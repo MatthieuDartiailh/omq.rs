@@ -5,6 +5,7 @@
 //! (via `pre_encode`), then the pre-encoded chunks are pushed into
 //! each matching peer's `EncodedQueue`. The driver flushes to the wire.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -13,8 +14,9 @@ use smallvec::SmallVec;
 
 use bytes::Bytes;
 
-use crate::engine::wire_slot::{self, TryEncodeResult};
+use crate::engine::wire_slot::TryEncodeResult;
 use crate::engine::{DriverCommand, DriverHandle};
+use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -31,10 +33,23 @@ pub(crate) enum FanOutMode {
     Group,
 }
 
-#[derive(Debug, Clone)]
+const YIELD_INTERVAL: u32 = 256;
+
+#[derive(Debug)]
 pub(crate) struct Submitter {
     inner: Arc<Mutex<FanOutInner>>,
     mode: FanOutMode,
+    send_count: Arc<AtomicU32>,
+}
+
+impl Clone for Submitter {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            mode: self.mode,
+            send_count: self.send_count.clone(),
+        }
+    }
 }
 
 impl Submitter {
@@ -66,7 +81,6 @@ impl Submitter {
         Ok(())
     }
 
-    #[expect(clippy::unused_async)]
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = match self.mode {
             FanOutMode::SubscriptionPrefix => (msg, None),
@@ -89,6 +103,9 @@ impl Submitter {
 
         let targets = self.collect_targets(&forwarded, group.as_deref());
         dispatch_to_targets(&targets, &forwarded);
+        if self.send_count.fetch_add(1, Ordering::Relaxed) % YIELD_INTERVAL == YIELD_INTERVAL - 1 {
+            tokio::task::yield_now().await;
+        }
         Ok(())
     }
 
@@ -165,6 +182,7 @@ impl FanOutSend {
         Submitter {
             inner: self.inner.clone(),
             mode: self.mode,
+            send_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -250,19 +268,30 @@ fn dispatch_to_targets(targets: &[PeerSend], msg: &Message) {
             let _ = targets[0].try_encode(msg);
         }
         _ => {
-            let encoded = wire_slot::pre_encode(msg);
-            for t in targets {
-                match t {
-                    PeerSend::Wire { slot, inbox } => {
-                        if slot.try_push_encoded(&encoded) == TryEncodeResult::Ineligible {
-                            let _ = inbox.try_send(DriverCommand::SendMessage(msg.clone()));
+            use std::cell::RefCell;
+            thread_local! {
+                static SCRATCH: RefCell<EncodedQueue> = RefCell::new(
+                    EncodedQueue::one_shot(),
+                );
+            }
+            SCRATCH.with(|cell| {
+                let eq = &mut *cell.borrow_mut();
+                eq.encode_auto(msg);
+                let encoded = eq.arena_bytes();
+                for t in targets {
+                    match t {
+                        PeerSend::Wire { slot, inbox } => {
+                            if slot.try_push_pre_encoded(encoded) == TryEncodeResult::Ineligible {
+                                let _ = inbox.try_send(DriverCommand::SendMessage(msg.clone()));
+                            }
+                        }
+                        PeerSend::Inbox(tx) => {
+                            let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
                         }
                     }
-                    PeerSend::Inbox(tx) => {
-                        let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
-                    }
                 }
-            }
+                eq.clear_arena();
+            });
         }
     }
 }

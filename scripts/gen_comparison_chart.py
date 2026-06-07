@@ -150,6 +150,7 @@ def draw_throughput_panel(
     title: str, log_gbs: bool = False,
     fixed_msg_max: float | None = None,
     fixed_gbs_max: float | None = None,
+    msg_break: tuple[float, float] | None = None,
 ):
     import math
 
@@ -175,8 +176,17 @@ def draw_throughput_panel(
     else:
         tput_max = fixed_gbs_max if fixed_gbs_max else gbs_max * 1.15
 
-    def y_msg(v):
-        return y_bot - (v / msg_max) * h
+    if msg_break:
+        break_val, bottom_frac = msg_break
+        y_break = y_bot - bottom_frac * h
+
+        def y_msg(v):
+            if v <= break_val:
+                return y_bot - (v / break_val) * bottom_frac * h
+            return y_break - ((v - break_val) / (msg_max - break_val)) * (1 - bottom_frac) * h
+    else:
+        def y_msg(v):
+            return y_bot - (v / msg_max) * h
 
     def y_tput(v):
         if log_gbs:
@@ -189,20 +199,45 @@ def draw_throughput_panel(
     L.append(svg_text(mid_x, y_top - 17, title, size=13, weight="700", fill="#111827"))
 
     # msg/s gridlines (left axis)
-    step_msg = nice_step(msg_max, 12)
-    v = step_msg
-    while v <= msg_max:
-        yy = y_msg(v)
-        L.append(svg_line(x_left, yy, x_right, yy))
-        millions = v / 1e6
-        if millions >= 1 and millions == int(millions):
-            label = f"{int(millions)}M"
-        elif v >= 1e6:
-            label = f"{millions:.1f}M"
-        else:
-            label = f"{v / 1e3:.0f}k"
-        L.append(svg_text(x_left - 8, yy, label, anchor="end", baseline="middle"))
-        v += step_msg
+    if msg_break:
+        _bv, _ = msg_break
+        step_lo = nice_step(_bv, 4)
+        v = step_lo
+        while v < _bv:
+            yy = y_msg(v)
+            L.append(svg_line(x_left, yy, x_right, yy))
+            label = f"{v / 1e3:.0f}k" if v < 1e6 else f"{int(v / 1e6)}M"
+            L.append(svg_text(x_left - 8, yy, label, anchor="end", baseline="middle"))
+            v += step_lo
+        step_hi = nice_step(msg_max - _bv, 10)
+        v = math.ceil(_bv / step_hi) * step_hi
+        while v <= msg_max:
+            yy = y_msg(v)
+            L.append(svg_line(x_left, yy, x_right, yy))
+            millions = v / 1e6
+            if millions >= 1 and millions == int(millions):
+                label = f"{int(millions)}M"
+            elif v >= 1e6:
+                label = f"{millions:.1f}M"
+            else:
+                label = f"{v / 1e3:.0f}k"
+            L.append(svg_text(x_left - 8, yy, label, anchor="end", baseline="middle"))
+            v += step_hi
+    else:
+        step_msg = nice_step(msg_max, 12)
+        v = step_msg
+        while v <= msg_max:
+            yy = y_msg(v)
+            L.append(svg_line(x_left, yy, x_right, yy))
+            millions = v / 1e6
+            if millions >= 1 and millions == int(millions):
+                label = f"{int(millions)}M"
+            elif v >= 1e6:
+                label = f"{millions:.1f}M"
+            else:
+                label = f"{v / 1e3:.0f}k"
+            L.append(svg_text(x_left - 8, yy, label, anchor="end", baseline="middle"))
+            v += step_msg
 
     # GB/s gridlines (right axis, dashed)
     if log_gbs:
@@ -240,6 +275,22 @@ def draw_throughput_panel(
     L.append(svg_line(x_left, y_top, x_left, y_bot, stroke="#9ca3af", width=1.5))
     L.append(svg_line(x_right, y_top, x_right, y_bot, stroke="#9ca3af", width=1.5))
     L.append(svg_line(x_left, y_bot, x_right, y_bot, stroke="#9ca3af", width=1.5))
+
+    if msg_break:
+        _, _bf = msg_break
+        yb = y_bot - _bf * h
+        gap = 6
+        L.append(
+            f'  <rect x="{x_left - 1:.1f}" y="{yb - gap:.1f}"'
+            f' width="3" height="{2 * gap}" fill="white"/>'
+        )
+        L.append(
+            f'  <path d="M {x_left - 5:.1f},{yb + gap:.1f}'
+            f' L {x_left + 5:.1f},{yb + 1:.1f}'
+            f' M {x_left - 5:.1f},{yb - 1:.1f}'
+            f' L {x_left + 5:.1f},{yb - gap:.1f}"'
+            f' stroke="#9ca3af" stroke-width="1.5" fill="none"/>'
+        )
 
     # axis labels
     mid_y = (y_top + y_bot) / 2
@@ -406,6 +457,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
                    log_gbs: bool = False,
                    fixed_msg_max: float | None = None,
                    fixed_gbs_max: float | None = None,
+                   msg_break: tuple[float, float] | None = None,
                    hw_label: str | None = None) -> str:
     sizes = data["sizes"]
     tput = data["tput"]
@@ -417,13 +469,13 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
     hw_offset = 14 if hw_label else 0
     svg_w = 850
-    svg_h = 400 + hw_offset
+    svg_h = 480 + hw_offset
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
 
     t1_y_top = 35 + hw_offset
-    t1_y_bot = 305 + hw_offset
+    t1_y_bot = 385 + hw_offset
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
 
@@ -440,6 +492,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
         log_gbs=log_gbs,
         fixed_msg_max=fixed_msg_max,
         fixed_gbs_max=fixed_gbs_max,
+        msg_break=msg_break,
     )
     if hw_label:
         L.append(
@@ -680,7 +733,7 @@ def generate_pubsub_chart(
 
 def main():
     FIXED_MSG_MAX = 20e6
-    FIXED_GBS_MAX = 5.0
+    FIXED_GBS_MAX = 6.0
     FIXED_LAT_MAX = 150.0
     FIXED_INPROC_LAT_MAX = 40.0
     hw = detect_hardware()
@@ -700,9 +753,11 @@ def main():
             continue
 
         msg_max = 10e6 if transport == "inproc" else FIXED_MSG_MAX
+        msg_break = (1e6, 0.25) if not log_gbs else None
         svg = generate_chart(data, impls, label, log_gbs=log_gbs,
                              fixed_msg_max=msg_max,
                              fixed_gbs_max=None if log_gbs else FIXED_GBS_MAX,
+                             msg_break=msg_break,
                              hw_label=hw)
         out = REPO / "doc" / "charts" / "pushpull" / f"comparison_{transport}.svg"
         out.write_text(svg)

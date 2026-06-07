@@ -302,6 +302,7 @@ pub(super) struct SocketInner {
     /// Valid only when `pub_all_match_all && pub_all_wire` are both true.
     /// Parallel to `pub_all_match_cache` (same peer order).
     pub(super) pub_direct_io_cache: UnsafeCell<SmallVec<[Arc<DirectIoState>; 8]>>,
+    pub(super) pub_send_count: Cell<u32>,
     pub(super) shared_send_tx: RwLock<Option<super::shared_queue::SharedQueueSender>>,
     pub(super) shared_send_rx: Option<super::shared_queue::SharedQueueReceiver>,
     /// Round-robin counter for `Socket::send` peer selection on
@@ -435,6 +436,7 @@ impl SocketInner {
             pub_all_wire: Cell::new(false),
             pub_all_match_cache: UnsafeCell::new(SmallVec::new()),
             pub_direct_io_cache: UnsafeCell::new(SmallVec::new()),
+            pub_send_count: Cell::new(0),
             shared_send_tx: RwLock::new(shared_send_tx),
             shared_send_rx,
             rr_index: AtomicUsize::new(0),

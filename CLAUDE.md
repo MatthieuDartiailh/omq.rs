@@ -125,6 +125,19 @@ Core guarantees that omq must uphold:
   for async (send/recv serialize internally), but the principle holds
   for omq-libzmq's C API.
 
+## Performance invariants
+
+Fan-out sockets (PUB, XPUB, RADIO) send the same message to many
+peers. The wire bytes are identical for all peers on the same
+transport when no per-peer encryption is active. **Encode once,
+distribute the encoded bytes.** Never encode, compress, or frame the
+same message N times for N subscribers. The correct pattern: encode
+into a scratch buffer, then memcpy the pre-encoded bytes into each
+peer's `EncodedQueue` via `push_pre_encoded`. This applies equally
+to ZMTP framing, compression transforms (lz4, zstd), and any future
+wire-level transforms. Per-peer encoding is only justified when the
+wire bytes genuinely differ per peer (e.g. per-peer encryption keys).
+
 ## Architecture summary
 
 Three-layer split: `omq-proto` (sans-I/O ZMTP codec) -> backend
