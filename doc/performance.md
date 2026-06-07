@@ -66,8 +66,8 @@ copies on the hot path for medium and large messages:
 copy) from `Socket::send` through frame encoding to the kernel
 `writev`. `encode_message_gather` pushes the payload `Bytes`
 reference directly into the iovec list; only the 2-9 byte frame
-header is serialized. For small messages below `FLAT_THRESHOLD`
-(32 KiB), contiguous encoding into a shared `flat_buf` is faster
+header is serialized. For small messages below `ARENA_THRESHOLD`
+(32 KiB), contiguous encoding into the arena buffer is faster
 than per-message gather-write.
 
 **Recv.** For frames above `large_message_threshold` (128 KiB),
@@ -179,13 +179,11 @@ At 128 B throughput peaks, the sender issued `writev` with 1000+
 tiny iovecs (2 per message: header + payload). Kernel limit is
 1024 per call.
 
-Fix: `EncodedQueue` keeps a `flat_buf: BytesMut`. Messages below
-`FLAT_THRESHOLD` (compio: 32 KiB, tokio: 48 KiB) are written
-contiguously into `flat_buf`. N small messages -> one iovec for
-the whole batch. Above the threshold, the original chunk-list path
+Fix: `EncodedQueue` keeps an `arena: BytesMut` (256 KiB initial
+capacity). Messages below `ARENA_THRESHOLD` (32 KiB) are written
+contiguously into the arena. N small messages produce one iovec for
+the whole batch. Above the threshold, the gather-write path
 wins because memcpy of a large payload would dominate.
-
-Thresholds differ because per-iovec cost differs between runtimes.
 
 **128 B TCP compio: 1.48M -> ~3.00M msg/s.** Past libzmq's 2.95M.
 
@@ -480,7 +478,7 @@ After wire-transport work, inproc-mt at 32 B ran at 2.13M msg/s
 -- 25% slower than TCP (2.86M). TCP, which encodes ZMTP frames
 and crosses the kernel, was beating a direct in-process channel.
 
-TCP's advantage: batching. Many small messages into one `flat_buf`,
+TCP's advantage: batching. Many small messages into one arena buffer,
 one io_uring SQE. Two cross-core cache-line transfers for the
 whole batch. Inproc used `flume::bounded` -- per-message atomics
 and wakeups. Two cache-line round-trips per message (~40-80 ns
@@ -626,7 +624,7 @@ changes during the benchmark. Two fixes:
 temporary `Payload` struct (64 B) for each part of an inline message,
 copying the data in and then reading it back out. `iter_slices` yields
 `&[u8]` directly from the message's inline storage. One fewer 32 B
-memcpy per message on the flat-encode path.
+memcpy per message on the arena-encode path.
 
 **`direct_send_io: UnsafeCell<Option<(Arc<DirectIoState>, u64)>>`.**
 Caches the `DirectIoState` reference with a generation stamp. The
@@ -770,29 +768,36 @@ provides happens-before). REP keeps the Mutex because it stores
 Saves ~200 ns per send+recv pair (uncontended Mutex overhead:
 CAS + memory barrier + function call).
 
-## Tokio direct I/O: single-peer send bypass
+## Tokio PeerEncodeSlot: per-peer send bypass
 
-For single-peer connections (REQ/REP/DEALER/ROUTER/CLIENT/SERVER/
-PAIR), the driver hands off the wire writer to a `DirectIo` struct
-after the ZMTP handshake. `Socket::send` encodes ZMTP frames via
-`EncodedQueue` and writes directly to the wire. Zero task hops on
-the send path.
+`DirectIo` locked an `Arc<Mutex<Writer>>` from the socket handle to
+encode and write inline. This mixed encoding and I/O under one lock:
+the hold time was the full `write_vectored` syscall, blocking
+concurrent senders and the driver's read loop.
 
-The driver continues running after handoff in a continuation loop.
-It keeps the reader and codec, handles recv (via `recv_direct` or
-`peer_out`), heartbeat PINGs, EOF detection, and fallback writes
-for messages routed through `send_submitter`. The writer is shared
-between `DirectIo` and the driver via `Arc<Mutex<Writer>>`.
+`PeerEncodeSlot` separates encoding from I/O. The handle encodes
+ZMTP frames into a per-peer `EncodedQueue` under a `std::sync::Mutex`
+(nanosecond hold time, encode only). The driver flushes to the wire
+via a `transmit_notify` select arm. The handle never touches the
+writer.
 
-When a second peer connects, the actor drops the pending oneshot
-receiver (canceling any in-flight install) and clears the slot.
-Routing socket types (REP, ROUTER, SERVER) would misroute replies
-to the first peer's stream otherwise.
+Every wire peer gets a slot, not just single-peer sockets. FanOut
+(PUB/XPUB/RADIO) encodes the message once via `pre_encode()` and
+pushes shared chunks into each matching peer's slot. Identity
+(ROUTER/REP/SERVER) looks up the peer by routing identity and
+encodes into the target's slot. This eliminated all pump tasks for
+fan-out and identity strategies.
 
-Disabled when a frame transform is active (CURVE, BLAKE3ZMQ).
-The codec's encrypt-in-place flow cannot use the flat-encode path.
+Signal coalescing: a `pending: AtomicBool` gates
+`transmit_notify.notify_one()`. N rapid encodes produce one wake.
+The driver drain arm loops until the slot is empty (or
+`max_batch_bytes`), flushing messages that arrive during
+`write_vectored` without re-entering `select!`.
 
-### Dead end: bidirectional DirectIo (driver exits after handoff)
+Disabled when a frame transform (CURVE, BLAKE3ZMQ) is active.
+The codec's encrypt-in-place flow needs the codec's internal state.
+
+### Dead end: DirectIo with bidirectional handoff
 
 Goal: eliminate both send and recv task hops. Hand reader, writer,
 and codec to `DirectIo`, let the driver exit, do all I/O inline
@@ -828,10 +833,12 @@ EOF detection (replacing `probe_connection`). Zero-timeout reads
 left stale waker registrations in tokio's reactor, causing real
 reads to miss wake-ups. REQ/REP IPC hung at 2048 B+.
 
-Send-only DirectIo avoids all three: the driver never exits, so
+Send-only DirectIo avoided all three: the driver never exits, so
 it detects EOF natively, writes heartbeat PINGs directly, and
-applies backpressure through `write_all`. Cost: recv goes through
-the driver (~3 µs per message on the latency path).
+applies backpressure through `write_all`. But the `Arc<Mutex<Writer>>`
+was still held for the full `write_vectored`. PeerEncodeSlot
+replaced this with encode-only Mutex (nanoseconds) and
+driver-exclusive writes.
 
 ### ChunkedInputBuf front-cache
 
@@ -1065,6 +1072,12 @@ ring cannot serve same-thread sequential send-all-then-recv-all
 patterns without deadlock or ordering violations. Same-thread
 throughput is bounded by blume's Mutex + VecDeque path and compio's
 per-task-poll overhead (~39% of cycles).
+
+**Tokio REQ/REP latency.** Still ~60-70 µs vs compio's ~34 µs.
+PeerEncodeSlot removed the send-side `Arc<Mutex<Writer>>` lock but
+did not change the recv path: REP recv still routes through the
+actor for identity-prefix prepending. The remaining gap is the
+recv-side actor hop plus tokio's per-task wake cost.
 
 ## WebSocket transport (ZWS/2.0)
 

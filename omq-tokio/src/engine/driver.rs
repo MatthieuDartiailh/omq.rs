@@ -708,17 +708,28 @@ where
 
                 // Encode-slot arm: the socket handle encoded ZMTP frames
                 // into the per-peer PeerEncodeSlot. Drain + flush.
+                // Loops until the slot is empty so messages that accumulate
+                // during write_vectored are flushed without re-entering select.
                 () = async {
                     encode_slot.as_ref().unwrap().transmit_notify.notified().await;
                 }, if encode_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
                     let slot = encode_slot.as_ref().unwrap();
-                    drain_buf.clear();
-                    slot.drain_into_vec(&mut drain_buf, 1024);
-                    if !drain_buf.is_empty() {
+                    let mut batch_bytes = 0usize;
+                    loop {
+                        drain_buf.clear();
+                        slot.drain_into_vec(&mut drain_buf, 1024);
+                        if drain_buf.is_empty() {
+                            break;
+                        }
+                        batch_bytes +=
+                            drain_buf.iter().map(Bytes::len).sum::<usize>();
                         flush_encode_slot_buf(&mut writer, &mut drain_buf).await?;
                         slot.drain_notify.notify_one();
+                        if batch_bytes >= max_batch_bytes() {
+                            break;
+                        }
                     }
                 },
 

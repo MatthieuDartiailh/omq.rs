@@ -8,10 +8,8 @@ use tokio::sync::Notify;
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::message::Message;
 
-#[allow(dead_code)]
-const DIRECT_CAP: usize = 512 * 1024;
-#[allow(dead_code)]
-const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
+const DIRECT_CAP: usize = 2 * 1024 * 1024;
+const DIRECT_MSG_MAX: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -28,7 +26,7 @@ pub(crate) struct PeerEncodeSlot {
     pub(crate) drain_notify: Notify,
     pub(crate) driver_in_select: AtomicBool,
     pub(crate) handshake_done: AtomicBool,
-    msg_count: std::sync::atomic::AtomicUsize,
+    pending: AtomicBool,
     #[allow(dead_code)]
     pub(crate) has_transform: bool,
     #[allow(dead_code)]
@@ -63,7 +61,7 @@ impl PeerEncodeSlot {
             drain_notify: Notify::new(),
             driver_in_select: AtomicBool::new(false),
             handshake_done: AtomicBool::new(false),
-            msg_count: std::sync::atomic::AtomicUsize::new(0),
+            pending: AtomicBool::new(false),
             has_transform,
             transform_passthrough,
             dead: AtomicBool::new(false),
@@ -79,14 +77,16 @@ impl PeerEncodeSlot {
             return TryEncodeResult::Ineligible;
         }
 
+        if msg.byte_len() > DIRECT_MSG_MAX {
+            return TryEncodeResult::Ineligible;
+        }
+
         if !self.has_transform {
             let mut eq = self.eq.lock().expect("encode_slot eq poisoned");
-            if eq.total_bytes() >= DIRECT_CAP
-                || self.msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
-            {
+            if eq.total_bytes() >= DIRECT_CAP {
                 return TryEncodeResult::Full;
             }
-            eq.encode_auto(msg);
+            eq.encode_arena(msg);
             drop(eq);
             self.signal_encoded();
             return TryEncodeResult::Ok;
@@ -96,12 +96,10 @@ impl PeerEncodeSlot {
             && msg.iter().all(|part| part.len() < threshold)
         {
             let mut eq = self.eq.lock().expect("encode_slot eq poisoned");
-            if eq.total_bytes() >= DIRECT_CAP
-                || self.msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
-            {
+            if eq.total_bytes() >= DIRECT_CAP {
                 return TryEncodeResult::Full;
             }
-            eq.encode_prefixed_auto(sentinel, msg);
+            eq.encode_prefixed_arena(sentinel, msg);
             drop(eq);
             self.signal_encoded();
             return TryEncodeResult::Ok;
@@ -115,9 +113,7 @@ impl PeerEncodeSlot {
             return TryEncodeResult::Dead;
         }
         let mut eq = self.eq.lock().expect("encode_slot eq poisoned");
-        if eq.total_bytes() >= DIRECT_CAP
-            || self.msg_count.load(Ordering::Relaxed) >= DIRECT_MSG_CAP
-        {
+        if eq.total_bytes() >= DIRECT_CAP {
             return TryEncodeResult::Full;
         }
         eq.push_shared_chunks(chunks);
@@ -127,14 +123,15 @@ impl PeerEncodeSlot {
     }
 
     fn signal_encoded(&self) {
-        self.msg_count.fetch_add(1, Ordering::Relaxed);
-        self.transmit_notify.notify_one();
+        if !self.pending.swap(true, Ordering::Release) {
+            self.transmit_notify.notify_one();
+        }
     }
 
     pub(crate) fn drain_into_vec(&self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         let mut eq = self.eq.lock().expect("encode_slot eq poisoned");
         eq.drain_into_vec(buf, max_chunks);
-        self.msg_count.store(0, Ordering::Relaxed);
+        self.pending.store(false, Ordering::Relaxed);
     }
 
     pub(crate) fn is_empty(&self) -> bool {

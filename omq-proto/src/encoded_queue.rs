@@ -5,7 +5,7 @@ use bytes::{Bytes, BytesMut};
 use crate::message::Message;
 use crate::proto::frame;
 
-pub const ARENA_THRESHOLD: usize = 16 * 1024;
+pub const ARENA_THRESHOLD: usize = 32 * 1024;
 
 pub struct EncodedQueue {
     chunks: VecDeque<Bytes>,

@@ -716,24 +716,38 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
 
 impl Socket {
     async fn send_with_encode_slot(&self, msg: Message) -> Result<()> {
-        let slot = self.inner.encode_slot.lock().expect("encode_slot").clone();
-        if let Some(ref slot) = slot {
-            loop {
-                match slot.try_encode(&msg) {
-                    TryEncodeResult::Ok => return Ok(()),
-                    TryEncodeResult::Dead => return Err(Error::Closed),
-                    TryEncodeResult::Full => {
-                        let notified = slot.drain_notify.notified();
-                        if slot.try_encode(&msg) == TryEncodeResult::Ok {
-                            return Ok(());
-                        }
-                        notified.await;
-                    }
-                    TryEncodeResult::Ineligible => break,
-                }
+        let fast = {
+            let guard = self.inner.encode_slot.lock().expect("encode_slot");
+            match guard.as_ref() {
+                Some(slot) => slot.try_encode(&msg),
+                None => TryEncodeResult::Ineligible,
             }
+        };
+        match fast {
+            TryEncodeResult::Ok => Ok(()),
+            TryEncodeResult::Dead => Err(Error::Closed),
+            TryEncodeResult::Full => {
+                let slot = self.inner.encode_slot.lock().expect("encode_slot").clone();
+                if let Some(ref slot) = slot {
+                    loop {
+                        match slot.try_encode(&msg) {
+                            TryEncodeResult::Ok => return Ok(()),
+                            TryEncodeResult::Dead => return Err(Error::Closed),
+                            TryEncodeResult::Full => {
+                                let notified = slot.drain_notify.notified();
+                                if slot.try_encode(&msg) == TryEncodeResult::Ok {
+                                    return Ok(());
+                                }
+                                notified.await;
+                            }
+                            TryEncodeResult::Ineligible => break,
+                        }
+                    }
+                }
+                self.inner.send_submitter.send(msg).await
+            }
+            TryEncodeResult::Ineligible => self.inner.send_submitter.send(msg).await,
         }
-        self.inner.send_submitter.send(msg).await
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {
