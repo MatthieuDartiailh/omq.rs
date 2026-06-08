@@ -236,16 +236,13 @@ impl Overlay {
             &self.blake3zmq_serverkey,
         ) {
             let public = backend::Blake3ZmqPublicKey(
-                <[u8; 32]>::try_from(pk.as_slice())
-                    .map_err(|_| bad_key("BLAKE3ZMQ_PUBLICKEY"))?,
+                <[u8; 32]>::try_from(pk.as_slice()).map_err(|_| bad_key("BLAKE3ZMQ_PUBLICKEY"))?,
             );
             let secret = backend::Blake3ZmqSecretKey(
-                <[u8; 32]>::try_from(sk.as_slice())
-                    .map_err(|_| bad_key("BLAKE3ZMQ_SECRETKEY"))?,
+                <[u8; 32]>::try_from(sk.as_slice()).map_err(|_| bad_key("BLAKE3ZMQ_SECRETKEY"))?,
             );
             let server_public = backend::Blake3ZmqPublicKey(
-                <[u8; 32]>::try_from(svk.as_slice())
-                    .map_err(|_| bad_key("BLAKE3ZMQ_SERVERKEY"))?,
+                <[u8; 32]>::try_from(svk.as_slice()).map_err(|_| bad_key("BLAKE3ZMQ_SERVERKEY"))?,
             );
             let keypair = backend::Blake3ZmqKeypair { public, secret };
             opts.mechanism = omq_proto::options::MechanismConfig::Blake3ZmqClient {

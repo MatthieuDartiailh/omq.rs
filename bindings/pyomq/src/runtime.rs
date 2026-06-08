@@ -195,7 +195,7 @@ pub fn materialize(
                                 Ok(()) => {
                                     recv_prod.flush();
                                     recv_notify.notify();
-        
+
                                     global_recv_ready.notify();
                                     break;
                                 }
