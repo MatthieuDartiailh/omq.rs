@@ -132,6 +132,7 @@ impl SpscAwareRecv {
                         return res.map_err(|_| Error::Closed);
                     }
                     () = self.activated.notified() => continue,
+                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => continue,
                 }
             } else {
                 let notified = self.recv_notify.notified();

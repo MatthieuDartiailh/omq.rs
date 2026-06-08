@@ -150,7 +150,11 @@ impl RecvSink {
                                 }
                                 Err(returned2) => {
                                     msg = returned2;
-                                    notified.await;
+                                    tokio::select! {
+                                        biased;
+                                        () = notified => {}
+                                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                                    }
                                 }
                             }
                         }
@@ -512,6 +516,8 @@ where
             .heartbeat_ttl
             .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
             .unwrap_or(0);
+        let hb_sleep = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX));
+        tokio::pin!(hb_sleep);
         loop {
             if handshake_deadline.is_some() && codec.is_ready() {
                 handshake_deadline = None;
@@ -740,8 +746,9 @@ where
                 },
 
                 // Heartbeat tick: enabled only post-handshake when
-                // `heartbeat_interval` is set.
-                () = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX)), if hb_enabled => {
+                // `heartbeat_interval` is set. Uses a persistent pinned
+                // sleep so the safety-net timeout doesn't reset it.
+                () = &mut hb_sleep, if hb_enabled => {
                     if last_input.elapsed() > hb_timeout {
                         return Err(Error::Timeout);
                     }
@@ -749,10 +756,15 @@ where
                         ttl_deciseconds: hb_ttl_deciseconds,
                         context: Bytes::new(),
                     };
-                    // send_command returns Err only if not ready; we just
-                    // checked, so unwrap is safe. Still, handle gracefully.
                     let _ = codec.send_command(&ping);
+                    hb_sleep.as_mut().reset(
+                        tokio::time::Instant::now() + hb_interval.unwrap(),
+                    );
                 }
+
+                // Safety net: re-check all state in case a notification
+                // was lost.
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
 
             if let Some(ref slot) = wire_slot {

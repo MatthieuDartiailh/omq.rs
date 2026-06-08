@@ -617,8 +617,8 @@ impl Socket {
         const YIELD_INTERVAL: u32 = 256;
 
         let inner = self.inner();
-        let count = inner.pub_send_count.get().wrapping_add(1);
-        inner.pub_send_count.set(count);
+        let count = inner.send_count.get().wrapping_add(1);
+        inner.send_count.set(count);
 
         if inner
             .pub_sub_dirty

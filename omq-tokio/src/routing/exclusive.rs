@@ -24,7 +24,13 @@ impl Submitter {
                         .await
                         .map_err(|_| Error::Closed);
                 }
-                None => self.peer_ready.notified().await,
+                None => {
+                    tokio::select! {
+                        biased;
+                        () = self.peer_ready.notified() => {}
+                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    }
+                }
             }
         }
     }

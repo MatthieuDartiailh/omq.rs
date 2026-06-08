@@ -405,6 +405,7 @@ pub(crate) async fn run_connection(
     let mut cmd_fut = pin!(inbox.recv_async().fuse());
     let mut transmit_ready_fut = pin!(state.transmit_ready.listen().fuse());
     let mut eof_fut = pin!(Fuse::terminated());
+    let mut safety_timeout = pin!(compio::time::sleep(Duration::from_millis(10)).fuse());
     let mut eof_was_active = false;
 
     loop {
@@ -597,6 +598,11 @@ pub(crate) async fn run_connection(
             }
             () = transmit_ready_fut.as_mut() => {
                 ls.codec_maybe_dirty = true;
+            }
+            () = safety_timeout.as_mut() => {
+                safety_timeout.set(
+                    compio::time::sleep(Duration::from_millis(10)).fuse(),
+                );
             }
         }
     }

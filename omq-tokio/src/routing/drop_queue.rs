@@ -212,7 +212,11 @@ impl QueueReceiver {
             if self.inner.queue.is_closed() && self.inner.queue.is_empty() {
                 return None;
             }
-            notified.await;
+            tokio::select! {
+                biased;
+                () = notified => {}
+                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
         }
     }
 }

@@ -58,7 +58,13 @@ impl PeerSend {
                     match slot.try_encode(&msg) {
                         TryEncodeResult::Ok => return Ok(()),
                         TryEncodeResult::Dead => return Err(Error::Closed),
-                        TryEncodeResult::Full => notified.await,
+                        TryEncodeResult::Full => {
+                            tokio::select! {
+                                biased;
+                                () = notified => {}
+                                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                            }
+                        }
                         TryEncodeResult::Ineligible => {
                             return inbox
                                 .send(DriverCommand::SendMessage(msg))

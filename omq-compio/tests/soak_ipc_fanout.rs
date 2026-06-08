@@ -20,7 +20,7 @@ use omq_compio::{Message, OnMute, Options, Socket, SocketType, build_default_run
 
 fn block_on_and_drain<F: std::future::Future>(rt: &compio::runtime::Runtime, fut: F) -> F::Output {
     let out = rt.block_on(fut);
-    while rt.run() {}
+    rt.enter(|| while rt.run() {});
     out
 }
 
