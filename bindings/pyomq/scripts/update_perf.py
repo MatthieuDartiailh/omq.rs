@@ -831,7 +831,31 @@ def _detect_hardware():
                 break
         cores = os.cpu_count()
         if cpu and cores:
-            return f"{cpu}, {cores} cores"
+            label = f"{cpu}, {cores} cores"
+            extras = []
+            try:
+                gov = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").read().strip()
+                if gov == "performance":
+                    extras.append("performance governor")
+            except OSError:
+                pass
+            for path, off_val in [
+                ("/sys/devices/system/cpu/intel_pstate/no_turbo", "1"),
+                ("/sys/devices/system/cpu/cpufreq/boost", "0"),
+            ]:
+                try:
+                    if open(path).read().strip() == off_val:
+                        extras.append("turbo off")
+                    break
+                except OSError:
+                    continue
+            if not extras:
+                hw_extras = os.environ.get("OMQ_HW_EXTRAS")
+                if hw_extras:
+                    extras.extend(hw_extras.split(","))
+            if extras:
+                label += ", " + ", ".join(extras)
+            return label
     except OSError:
         pass
     return None

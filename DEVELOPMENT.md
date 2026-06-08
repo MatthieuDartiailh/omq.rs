@@ -180,35 +180,51 @@ external framework. Results go to
 ## Updating charts
 
 After performance-relevant changes, regenerate the charts before
-releasing.
+releasing. All chart generators read `OMQ_HW_EXTRAS` for the subtitle
+when sysfs governor/turbo files are not accessible (e.g. in a VM):
+
+```sh
+export OMQ_HW_EXTRAS="performance governor,turbo off"
+```
 
 ### Cross-library comparison charts
 
-Produces `doc/charts/pushpull/comparison_*.svg` and
-`doc/charts/pubsub/comparison_*.svg`:
+Produces `doc/charts/{pushpull,pubsub,reqrep}/comparison_*.svg`,
+`doc/charts/pushpull/fan{out,in}_tcp.svg`:
 
 ```sh
 python3 scripts/run_comparisons.py --impl omq-compio --impl omq-tokio   # omq only, reuse existing libzmq/zmq.rs baselines
-python3 scripts/gen_comparison_chart.py                                  # JSONL → doc/charts/{pushpull,pubsub}/comparison_*.svg
+python3 scripts/gen_comparison_chart.py                                  # JSONL → SVG
 ```
 
 Omit `--impl` to rebench all implementations when libzmq or zmq.rs
 baselines are stale.
 
+### Mechanism charts
+
+Produces `doc/charts/mechanism/{tokio,compio}.svg`:
+
+```sh
+cargo bench -p omq-tokio  --bench mechanism --features plain,curve,blake3zmq
+cargo bench -p omq-compio --bench mechanism --features plain,curve,blake3zmq
+python3 scripts/gen_mechanism_chart.py
+```
+
 ### Compression charts
 
-Produces `doc/charts/compression/compio_2048.svg` and `doc/charts/compression/tokio_2048.svg`:
+Produces `doc/charts/compression/{compio,tokio}_2048.svg`:
 
 ```sh
 cargo bench -p omq-compio --bench compression --features lz4,zstd  # → ~/.cache/omq/results_compression_compio.jsonl
 cargo bench -p omq-tokio  --bench compression --features lz4,zstd  # → ~/.cache/omq/results_compression_tokio.jsonl
-python3 scripts/gen_compression_chart.py --backend compio           # JSONL → doc/charts/compression/compio_*.svg
-python3 scripts/gen_compression_chart.py --backend tokio            # JSONL → doc/charts/compression/tokio_*.svg
+python3 scripts/gen_compression_chart.py --backend compio           # JSONL → SVG
+python3 scripts/gen_compression_chart.py --backend tokio            # JSONL → SVG
 ```
 
-### pyomq bindings chart
+### pyomq bindings charts
 
-Produces `bindings/pyomq/doc/charts/bindings.svg`:
+Produces `doc/charts/throughput_bindings.svg` and
+`doc/charts/latency_bindings.svg`:
 
 ```sh
 cd bindings/pyomq
