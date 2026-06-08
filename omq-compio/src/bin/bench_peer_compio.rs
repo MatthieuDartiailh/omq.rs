@@ -146,6 +146,17 @@ fn main() {
                 let peers: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
                 run_inproc_pubsub(name, size, Duration::from_secs_f64(duration), peers).await;
             }
+            Some("push-connect") => {
+                let ep = parse_ep(&args[2]);
+                let size: usize = args[3].parse().expect("msg_size");
+                run_push_connect(ep, size).await;
+            }
+            Some("pull-bind") => {
+                let ep = parse_ep(&args[2]);
+                let size: usize = args[3].parse().expect("msg_size");
+                let duration: f64 = args[4].parse().expect("duration_secs");
+                run_pull_bind(ep, size, Duration::from_secs_f64(duration)).await;
+            }
             Some("latency-mt") => {
                 let ep = parse_ep(&args[2]);
                 let size: usize = args[3].parse().expect("msg_size");
@@ -190,6 +201,47 @@ async fn run_push(ep: Endpoint, size: usize) {
             push.send(msg.clone()).await.unwrap();
         }
     }
+}
+
+async fn run_push_connect(ep: Endpoint, size: usize) {
+    let push = Socket::new(SocketType::Push, bench_options_client(size));
+    push.connect(ep).await.expect("push connect");
+    let payload = vec![b'x'; size];
+    if size <= omq_proto::message::MAX_INLINE_MESSAGE {
+        loop {
+            push.send(Message::from_slice(&payload)).await.unwrap();
+        }
+    } else {
+        let msg = Message::single(payload);
+        loop {
+            push.send(msg.clone()).await.unwrap();
+        }
+    }
+}
+
+async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
+    let pull = Socket::new(SocketType::Pull, bench_options_server(size));
+    let bound = pull.bind(ep.clone()).await.expect("pull bind");
+    print_bound_port(&bound);
+
+    compio::time::sleep(Duration::from_millis(500)).await;
+
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        pull.recv().await.unwrap();
+        count += 1;
+        while pull.try_recv().is_ok() {
+            count += 1;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!("{count} {elapsed:.6} {size}");
+    eprint_pull_summary(&ep, count, elapsed, size);
 }
 
 fn bench_options(msg_size: usize) -> Options {

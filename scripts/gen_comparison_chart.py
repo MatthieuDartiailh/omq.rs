@@ -622,6 +622,7 @@ def generate_pubsub_chart(
     fixed_gbs_max: float | None = None,
     scale_overrides: dict[int, tuple[float, float | None, bool | None]] | None = None,
     hw_label: str | None = None,
+    title_fn: "Callable[[int, str], str] | None" = None,
 ) -> str:
     panels = [(p, d) for p, d in panels if d["sizes"]]
     if not panels:
@@ -661,7 +662,11 @@ def generate_pubsub_chart(
                 for i in range(len(p_sizes))]
         y_top = hw_offset + 35 + idx * (panel_h + gap)
         y_bot = y_top + panel_h
-        sub_label = "1 subscriber" if peers == 1 else f"{peers} subscribers"
+        if title_fn:
+            panel_title = title_fn(peers, transport_label)
+        else:
+            sub_label = "1 subscriber" if peers == 1 else f"{peers} subscribers"
+            panel_title = f"PUB/SUB throughput, {sub_label}: {transport_label}"
         p_msg_max = fixed_msg_max
         p_gbs_max = fixed_gbs_max
         p_log_gbs = log_gbs
@@ -674,7 +679,7 @@ def generate_pubsub_chart(
         draw_throughput_panel(
             L, p_sizes, p_xs, data["tput"], impls,
             x_left, x_right, y_top, y_bot,
-            f"PUB/SUB throughput, {sub_label}: {transport_label}",
+            panel_title,
             log_gbs=p_log_gbs,
             fixed_msg_max=p_msg_max,
             fixed_gbs_max=p_gbs_max,
@@ -729,6 +734,35 @@ def generate_pubsub_chart(
 
     L.append("</svg>")
     return "\n".join(L) + "\n"
+
+
+def load_fanio_data(transport: str, impls: list[str], peers: int,
+                     kind: str) -> dict:
+    rows = load_jsonl()
+    t_rows = [r for r in rows
+              if r.get("transport") == transport
+              and r.get("kind") == kind
+              and r.get("peers") == peers]
+
+    tput: dict[int, dict[str, tuple[float, float]]] = {}
+    seen: dict[tuple, str] = {}
+
+    for r in t_rows:
+        impl_name = r.get("impl")
+        if impl_name not in impls:
+            continue
+        run_id = r.get("run_id", "")
+        size = r.get("msg_size")
+        key = (impl_name, size)
+        if key not in seen or run_id >= seen[key]:
+            seen[key] = run_id
+            msgs_s = r.get("msgs_s", 0)
+            mbps = r.get("mbps", 0)
+            gbs = mbps / 1000.0
+            tput.setdefault(size, {})[impl_name] = (msgs_s, gbs)
+
+    sizes = sorted(s for s in tput if s <= 32768)
+    return {"sizes": sizes, "tput": tput}
 
 
 def main():
@@ -802,6 +836,39 @@ def main():
         )
         if svg:
             out = REPO / "doc" / "charts" / "pubsub" / f"comparison_{transport}.svg"
+            out.write_text(svg)
+            print(f"Written: {out}", file=sys.stderr)
+
+
+    # Fan-out / fan-in charts (TCP only)
+    fanio_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq", "omq-libzmq"]
+    fanio_peers = [2, 4, 8]
+
+    def fanout_title(peers, tl):
+        return f"PUSH fan-out (1 PUSH → {peers} PULL): {tl}"
+
+    def fanin_title(peers, tl):
+        return f"PUSH fan-in ({peers} PUSH → 1 PULL): {tl}"
+
+    for kind, tfn, dir_name in [
+        ("fan_out", fanout_title, "pushpull"),
+        ("fan_in", fanin_title, "pushpull"),
+    ]:
+        panels = [
+            (p, load_fanio_data("tcp", fanio_impls, p, kind))
+            for p in fanio_peers
+        ]
+        if not any(d["sizes"] for _, d in panels):
+            continue
+        svg = generate_pubsub_chart(
+            panels, fanio_impls, "TCP loopback",
+            hw_label=hw,
+            title_fn=tfn,
+        )
+        if svg:
+            slug = kind.replace("_", "")
+            out = REPO / "doc" / "charts" / dir_name / f"{slug}_tcp.svg"
+            out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
 

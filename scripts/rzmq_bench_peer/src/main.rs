@@ -94,6 +94,17 @@ async fn main() {
             let duration: f64 = args[4].parse().expect("duration_secs");
             run_sub(&addr, size, Duration::from_secs_f64(duration)).await;
         }
+        Some("push-connect") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            run_push_connect(&addr, size).await;
+        }
+        Some("pull-bind") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            run_pull_bind(&addr, size, Duration::from_secs_f64(duration)).await;
+        }
         Some("inproc") => {
             let addr = format!("inproc://{}", &args[2]);
             let size: usize = args[3].parse().expect("msg_size");
@@ -170,6 +181,46 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
     rtts.sort_unstable();
 
     print_latency(&rtts, iterations);
+    std::process::exit(0);
+}
+
+async fn run_push_connect(addr: &str, size: usize) {
+    let ctx = Context::new().expect("context");
+    let push = ctx.socket(SocketType::Push).expect("push socket");
+    push.connect(addr).await.expect("push connect");
+    let payload = leaked_payload(size);
+    loop {
+        if push.send(Msg::from_static(payload)).await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+async fn run_pull_bind(addr: &str, size: usize, duration: Duration) {
+    let ctx = Context::new().expect("context");
+    let pull = ctx.socket(SocketType::Pull).expect("pull socket");
+    pull.bind(addr).await.expect("pull bind");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let count = Arc::new(AtomicU64::new(0));
+    let count_recv = count.clone();
+    let recv_handle = tokio::spawn(async move {
+        loop {
+            if pull.recv().await.is_err() {
+                break;
+            }
+            count_recv.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    let t0 = Instant::now();
+    tokio::time::sleep(duration).await;
+    let elapsed = t0.elapsed().as_secs_f64();
+    let final_count = count.load(Ordering::Relaxed);
+    recv_handle.abort();
+
+    println!("{final_count} {elapsed:.6} {size}");
     std::process::exit(0);
 }
 

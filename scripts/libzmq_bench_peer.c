@@ -163,6 +163,72 @@ done:;
         zmq_msg_close(&msg);
         zmq_close(sock);
 
+    } else if (strcmp(role, "push-connect") == 0) {
+        void *sock = zmq_socket(ctx, ZMQ_PUSH);
+        if (!sock) die("zmq_socket PUSH");
+        if (zmq_connect(sock, addr) != 0) die("zmq_connect");
+
+        char *buf = calloc(1, size);
+        if (!buf) { perror("calloc"); exit(1); }
+        memset(buf, 'x', size);
+
+        for (;;) {
+            if (zmq_send(sock, buf, size, 0) < 0) break;
+        }
+        free(buf);
+        zmq_close(sock);
+
+    } else if (strcmp(role, "pull-bind") == 0) {
+        if (argc < 5) goto usage;
+        double duration = atof(argv[4]);
+
+        void *sock = zmq_socket(ctx, ZMQ_PULL);
+        if (!sock) die("zmq_socket PULL");
+        if (zmq_bind(sock, addr) != 0) die("zmq_bind");
+        print_bound_port(sock);
+
+        zmq_msg_t msg;
+        zmq_msg_init(&msg);
+
+        double warmup_end = now_secs() + 0.5;
+        while (now_secs() < warmup_end) {
+            int rc = zmq_msg_recv(&msg, sock, ZMQ_DONTWAIT);
+            if (rc < 0) {
+                struct timespec ts = {0, 100000};
+                nanosleep(&ts, NULL);
+            }
+        }
+
+        long long count = 0;
+        double t0 = now_secs();
+        double deadline = t0 + duration;
+
+        zmq_pollitem_t items[1];
+        items[0].socket = sock;
+        items[0].events = ZMQ_POLLIN;
+
+        for (;;) {
+            double remaining = deadline - now_secs();
+            if (remaining <= 0) break;
+            long timeout_ms = (long)(remaining * 1000.0);
+            if (timeout_ms < 1) timeout_ms = 1;
+            int rc = zmq_poll(items, 1, timeout_ms);
+            if (rc < 0) break;
+            if (rc == 0) break;
+            if (items[0].revents & ZMQ_POLLIN) {
+                while (zmq_msg_recv(&msg, sock, ZMQ_DONTWAIT) >= 0) {
+                    count++;
+                    if (now_secs() >= deadline) goto done_pull_bind;
+                }
+            }
+        }
+done_pull_bind:;
+        double elapsed = now_secs() - t0;
+        printf("%lld %.6f %d\n", count, elapsed, size);
+
+        zmq_msg_close(&msg);
+        zmq_close(sock);
+
     } else if (strcmp(role, "inproc") == 0) {
         if (argc < 5) goto usage;
         const char *name = argv[2];
