@@ -342,6 +342,29 @@ impl Connection {
         }
     }
 
+    /// Temporarily remove the frame transform so the caller can run
+    /// encryption on a blocking thread. Must be restored via
+    /// [`restore_transform`] before the next `send_message` call.
+    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    pub fn take_transform(&mut self) -> Option<FrameTransform> {
+        self.transform.take()
+    }
+
+    /// Put back a transform previously removed by [`take_transform`].
+    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    pub fn restore_transform(&mut self, tx: FrameTransform) {
+        self.transform = Some(tx);
+    }
+
+    /// Emit pre-encrypted frames produced by
+    /// [`FrameTransform::encrypt_message`] into the outbound buffer.
+    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    pub fn emit_encrypted_frames(&mut self, frames: &[(FrameFlags, Bytes)]) {
+        for (flags, payload) in frames {
+            self.emit_frame(*flags, Payload::from_bytes(payload.clone()));
+        }
+    }
+
     /// Whether WS framing is active. When true, outbound data must be
     /// encoded as WS binary frames, not raw ZMTP frames.
     #[cfg(feature = "ws")]
@@ -378,7 +401,10 @@ impl Connection {
 /// (MORE | LONG | COMMAND), and `length_bytes` is the 1-byte short or
 /// 8-byte big-endian long encoding of `ciphertext_len`.
 #[cfg(feature = "blake3zmq")]
-fn blake3zmq_aad(flags: crate::message::FrameFlags, ciphertext_len: usize) -> ([u8; 9], usize) {
+pub(crate) fn blake3zmq_aad(
+    flags: crate::message::FrameFlags,
+    ciphertext_len: usize,
+) -> ([u8; 9], usize) {
     let mut wire_flags = 0u8;
     if flags.more {
         wire_flags |= frame::FLAG_MORE;

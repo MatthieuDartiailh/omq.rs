@@ -119,6 +119,17 @@ async fn main() {
             let peers: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
             run_inproc_pubsub(name, size, Duration::from_secs_f64(duration), peers).await;
         }
+        Some("push-connect") => {
+            let ep = parse_ep(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            run_push_connect(ep, size).await;
+        }
+        Some("pull-bind") => {
+            let ep = parse_ep(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            run_pull_bind(ep, size, Duration::from_secs_f64(duration)).await;
+        }
         Some("wire-size") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
@@ -270,14 +281,114 @@ fn bench_options(msg_size: usize) -> Options {
     o
 }
 
+fn bench_options_server(msg_size: usize) -> Options {
+    let o = bench_options(msg_size);
+    match mechanism_env().as_deref() {
+        None | Some("null") => o,
+        #[cfg(feature = "plain")]
+        Some("plain") => o.plain_server(|_| true),
+        #[cfg(feature = "curve")]
+        Some("curve") => o.curve_server(bench_curve_server_keypair()),
+        #[cfg(feature = "blake3zmq")]
+        Some("blake3zmq") => o.blake3zmq_server(bench_b3_server_keypair()),
+        Some(other) => panic!("unknown OMQ_BENCH_MECHANISM: {other}"),
+    }
+}
+
+fn bench_options_client(msg_size: usize) -> Options {
+    let o = bench_options(msg_size);
+    match mechanism_env().as_deref() {
+        None | Some("null") => o,
+        #[cfg(feature = "plain")]
+        Some("plain") => o.plain_client("bench", "bench"),
+        #[cfg(feature = "curve")]
+        Some("curve") => {
+            let client_kp = bench_curve_client_keypair();
+            let server_pub = bench_curve_server_keypair().public;
+            o.curve_client(client_kp, server_pub)
+        }
+        #[cfg(feature = "blake3zmq")]
+        Some("blake3zmq") => {
+            let client_kp = bench_b3_client_keypair();
+            let server_pub = bench_b3_server_keypair().public;
+            o.blake3zmq_client(client_kp, server_pub)
+        }
+        Some(other) => panic!("unknown OMQ_BENCH_MECHANISM: {other}"),
+    }
+}
+
+fn mechanism_env() -> Option<String> {
+    std::env::var("OMQ_BENCH_MECHANISM")
+        .ok()
+        .map(|s| s.to_ascii_lowercase())
+}
+
+#[cfg(feature = "curve")]
+fn bench_curve_server_keypair() -> omq_tokio::CurveKeypair {
+    let secret = omq_tokio::CurveSecretKey::from_bytes([0x01; 32]);
+    let public = secret.derive_public();
+    omq_tokio::CurveKeypair { public, secret }
+}
+
+#[cfg(feature = "curve")]
+fn bench_curve_client_keypair() -> omq_tokio::CurveKeypair {
+    let secret = omq_tokio::CurveSecretKey::from_bytes([0x02; 32]);
+    let public = secret.derive_public();
+    omq_tokio::CurveKeypair { public, secret }
+}
+
+#[cfg(feature = "blake3zmq")]
+fn bench_b3_server_keypair() -> omq_tokio::Blake3ZmqKeypair {
+    omq_tokio::Blake3ZmqKeypair::from_secret(omq_tokio::Blake3ZmqSecretKey([0x03; 32]))
+}
+
+#[cfg(feature = "blake3zmq")]
+fn bench_b3_client_keypair() -> omq_tokio::Blake3ZmqKeypair {
+    omq_tokio::Blake3ZmqKeypair::from_secret(omq_tokio::Blake3ZmqSecretKey([0x04; 32]))
+}
+
 async fn run_push(ep: Endpoint, size: usize) {
-    let push = Socket::new(SocketType::Push, bench_options(size));
+    let push = Socket::new(SocketType::Push, bench_options_server(size));
     let bound = push.bind(ep).await.expect("push bind");
     print_bound_port(&bound);
     let payload = bench_payload(size);
     loop {
         push.send(Message::single(payload.clone())).await.unwrap();
     }
+}
+
+async fn run_push_connect(ep: Endpoint, size: usize) {
+    let push = Socket::new(SocketType::Push, bench_options_client(size));
+    push.connect(ep).await.expect("push connect");
+    let payload = bench_payload(size);
+    loop {
+        push.send(Message::single(payload.clone())).await.unwrap();
+    }
+}
+
+async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
+    let pull = Socket::new(SocketType::Pull, bench_options_server(size));
+    let bound = pull.bind(ep.clone()).await.expect("pull bind");
+    print_bound_port(&bound);
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        pull.recv().await.unwrap();
+        count += 1;
+        while pull.try_recv().is_ok() {
+            count += 1;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!("{count} {elapsed:.6} {size}");
+    eprint_pull_summary(&ep, count, elapsed, size);
 }
 
 async fn run_inproc(name: String, size: usize, duration: Duration) {
@@ -316,7 +427,7 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
 }
 
 async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
-    let pull = Socket::new(SocketType::Pull, bench_options(size));
+    let pull = Socket::new(SocketType::Pull, bench_options_client(size));
     pull.connect(ep.clone()).await.expect("pull connect");
 
     tokio::time::sleep(Duration::from_millis(500)).await;

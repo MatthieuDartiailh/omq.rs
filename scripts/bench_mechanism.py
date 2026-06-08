@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""2-process mechanism benchmark for omq-compio.
+"""2-process mechanism benchmark for omq-tokio and omq-compio.
 
 Spawns separate PUSH (bind) and PULL (connect) processes per cell,
 each configured via OMQ_BENCH_MECHANISM env var. Results go to
-~/.cache/omq/results_compio.jsonl (same file as the per-backend benches).
+~/.cache/omq/results_{backend}.jsonl.
 
 Usage:
-  scripts/bench_mechanism.py                        # default 3 sizes
-  scripts/bench_mechanism.py --chart-sizes           # all 16 chart sizes
-  OMQ_BENCH_SIZES=128,2048 scripts/bench_mechanism.py
+  scripts/bench_mechanism.py tokio                  # default 3 sizes
+  scripts/bench_mechanism.py compio --chart-sizes    # all 16 chart sizes
+  OMQ_BENCH_SIZES=128,2048 scripts/bench_mechanism.py tokio
 """
 
 import json
@@ -23,14 +23,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
-JSONL_PATH = CACHE_DIR / "results_compio.jsonl"
 
 DEFAULT_SIZES = [2_048, 8_192, 32_768]
 CHART_SIZES = [
     8, 16, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096,
     8_192, 16_384, 32_768, 65_536, 131_072, 262_144,
 ]
-MECHANISMS = ["NULL", "PLAIN", "CURVE", "BLAKE3ZMQ"]
+MECHANISMS = ["PLAIN", "CURVE", "BLAKE3ZMQ"]
 
 DURATION = float(os.environ.get("OMQ_BENCH_DURATION", "2.0"))
 ROUNDS = int(os.environ.get("OMQ_BENCH_ROUNDS", "3"))
@@ -50,11 +49,13 @@ def fmt_size(b: int) -> str:
     return f"{b} B"
 
 
-def cargo_build():
-    print("==> building bench_peer_compio...", file=sys.stderr)
+def cargo_build(backend: str):
+    pkg = f"omq-{backend}"
+    bin_name = f"bench_peer_{backend}"
+    print(f"==> building {bin_name}...", file=sys.stderr)
     subprocess.run(
-        ["cargo", "build", "--release", "-p", "omq-compio",
-         "--bin", "bench_peer_compio",
+        ["cargo", "build", "--release", "-p", pkg,
+         "--bin", bin_name,
          "--features", "plain,curve,blake3zmq", "-q"],
         cwd=ROOT, check=True,
     )
@@ -162,7 +163,7 @@ def run_id() -> str:
     )
 
 
-def append_jsonl(rid: str, mechanism: str, size: int, result: dict):
+def append_jsonl(jsonl_path: Path, rid: str, mechanism: str, size: int, result: dict):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     row = json.dumps({
         "run_id": rid,
@@ -175,39 +176,51 @@ def append_jsonl(rid: str, mechanism: str, size: int, result: dict):
         "mbps": result["mbps"],
         "msgs_s": result["msgs_s"],
     })
-    with open(JSONL_PATH, "a") as f:
+    with open(jsonl_path, "a") as f:
         f.write(row + "\n")
 
 
 def main():
-    cargo_build()
-    binary = str(ROOT / "target" / "release" / "bench_peer_compio")
-    sz = sizes()
-    rid = run_id()
+    backends = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not backends:
+        print("usage: bench_mechanism.py <tokio|compio> [--chart-sizes]",
+              file=sys.stderr)
+        sys.exit(1)
 
-    print(f"mechanism bench (2-process, TCP) | {len(sz)} sizes | "
-          f"rounds={ROUNDS} duration={DURATION}s", file=sys.stderr)
-    print(file=sys.stderr)
+    for backend in backends:
+        if backend not in ("tokio", "compio"):
+            print(f"unknown backend: {backend}", file=sys.stderr)
+            sys.exit(1)
 
-    header = f"  {'size':>6}"
-    for m in MECHANISMS:
-        header += f" | {'msg/s':>10}  {'MB/s':>8}"
-    print(header, file=sys.stderr)
-    print(f"  {'-' * (len(header) - 2)}", file=sys.stderr)
+        jsonl_path = CACHE_DIR / f"results_{backend}.jsonl"
+        cargo_build(backend)
+        binary = str(ROOT / "target" / "release" / f"bench_peer_{backend}")
+        sz = sizes()
+        rid = run_id()
 
-    for size in sz:
-        line = f"  {fmt_size(size):>6}"
-        for mechanism in MECHANISMS:
-            result = run_cell(binary, mechanism.lower(), size)
-            if result:
-                append_jsonl(rid, mechanism, size, result)
-                line += f" | {result['msgs_s']:>10,.0f}  {result['mbps']:>8.1f}"
-            else:
-                line += f" | {'—':>10}  {'—':>8}"
-        print(line, file=sys.stderr)
+        print(f"mechanism bench (2-process, TCP, omq-{backend}) | {len(sz)} sizes | "
+              f"rounds={ROUNDS} duration={DURATION}s", file=sys.stderr)
+        print(file=sys.stderr)
 
-    print(file=sys.stderr)
-    print(f"Results appended to {JSONL_PATH}", file=sys.stderr)
+        header = f"  {'size':>6}"
+        for m in MECHANISMS:
+            header += f" | {'msg/s':>10}  {'MB/s':>8}"
+        print(header, file=sys.stderr)
+        print(f"  {'-' * (len(header) - 2)}", file=sys.stderr)
+
+        for size in sz:
+            line = f"  {fmt_size(size):>6}"
+            for mechanism in MECHANISMS:
+                result = run_cell(binary, mechanism.lower(), size)
+                if result:
+                    append_jsonl(jsonl_path, rid, mechanism, size, result)
+                    line += f" | {result['msgs_s']:>10,.0f}  {result['mbps']:>8.1f}"
+                else:
+                    line += f" | {'—':>10}  {'—':>8}"
+            print(line, file=sys.stderr)
+
+        print(file=sys.stderr)
+        print(f"Results appended to {jsonl_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -91,7 +91,7 @@ pub fn encode_frame_into(frame: &Frame, out: &mut VecDeque<Bytes>, scratch: &mut
 // ---- Message-level frame encoding (NULL mechanism, no transform) ----
 
 #[inline]
-fn write_frame_header(buf: &mut BytesMut, more: bool, payload_len: usize) {
+pub(crate) fn write_frame_header(buf: &mut BytesMut, more: bool, payload_len: usize) {
     let flags = u8::from(more);
     if payload_len > MAX_SHORT_FRAME_SIZE {
         buf.extend_from_slice(&[
@@ -202,66 +202,10 @@ pub fn encode_message_prefixed_flat(prefix: &[u8], msg: &Message, buf: &mut Byte
     });
 }
 
-/// Encode all frames of `msg` as separate header + payload `Bytes` chunks
-/// for gather-write (`writev`). Large payloads avoid copying; only the
-/// frame header is serialized into `scratch`.
-pub fn encode_message_gather(msg: &Message, chunks: &mut VecDeque<Bytes>, scratch: &mut BytesMut) {
-    let parts = msg.parts_payload();
-    let n = parts.len();
-    for (i, part) in parts.iter().enumerate() {
-        if scratch.capacity() < MAX_FRAME_HEADER_LEN {
-            *scratch = BytesMut::with_capacity(64 * 1024);
-        }
-        let more = i + 1 < n;
-        let payload_len = part.len();
-        let flags = u8::from(more);
-        if payload_len > MAX_SHORT_FRAME_SIZE {
-            scratch.put_u8(flags | FLAG_LONG);
-            scratch.put_u64(payload_len as u64);
-        } else {
-            scratch.put_u8(flags);
-            scratch.put_u8(payload_len as u8);
-        }
-        chunks.push_back(scratch.split().freeze());
-        let b = part.as_bytes();
-        if !b.is_empty() {
-            chunks.push_back(b);
-        }
-    }
-}
-
-/// Like [`encode_message_gather`] but prepends `prefix` to each part payload.
-pub fn encode_message_prefixed_gather(
-    prefix: &[u8],
-    msg: &Message,
-    chunks: &mut VecDeque<Bytes>,
-    scratch: &mut BytesMut,
-) {
-    let parts = msg.parts_payload();
-    let n = parts.len();
-    let prefix_bytes = Bytes::copy_from_slice(prefix);
-    for (i, part) in parts.iter().enumerate() {
-        if scratch.capacity() < MAX_FRAME_HEADER_LEN {
-            *scratch = BytesMut::with_capacity(64 * 1024);
-        }
-        let more = i + 1 < n;
-        let payload_len = prefix.len() + part.len();
-        let flags = u8::from(more);
-        if payload_len > MAX_SHORT_FRAME_SIZE {
-            scratch.put_u8(flags | FLAG_LONG);
-            scratch.put_u64(payload_len as u64);
-        } else {
-            scratch.put_u8(flags);
-            scratch.put_u8(payload_len as u8);
-        }
-        chunks.push_back(scratch.split().freeze());
-        chunks.push_back(prefix_bytes.clone());
-        let b = part.as_bytes();
-        if !b.is_empty() {
-            chunks.push_back(b);
-        }
-    }
-}
+// Message-level gather encoding moved to `EncodedQueue` methods, which
+// write frame headers directly into the arena and track payloads as
+// external entries. Single-frame gather encoding (`encode_frame_into`)
+// remains here for mechanism handshake command frames.
 
 /// A frame header parsed without consuming any bytes from the buffer.
 /// Returned by [`peek_frame_header`].

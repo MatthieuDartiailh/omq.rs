@@ -152,10 +152,11 @@ queues and wire. Full detail in `doc/`:
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
-`EncodedQueue`: arena (256 KiB) + gather-write encoder used by both
-backends. Small messages (<32 KiB `ARENA_THRESHOLD`) go contiguously
-into the arena (1 iovec per batch). Large messages use zero-copy
-gather-write (Arc-bumped `Bytes` chunks). `Message`/`Payload`: 64 B
+`EncodedQueue`: arena (256 KiB) + entry-based encoder used by both
+backends. Frame headers are always written into the arena. Small
+messages (<96 KiB `ARENA_THRESHOLD`) go contiguously into the arena
+(1 iovec per batch). Large payloads are tracked as external `Bytes`
+entries (zero-copy gather-write). `Message`/`Payload`: 64 B
 each (one cache line), inline variants (55 B / 62 B).
 
 **omq-tokio hot path.** `SocketDriver` actor owns peer table and

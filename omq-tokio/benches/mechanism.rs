@@ -1,4 +1,4 @@
-//! PUSH/PULL over TCP with NULL vs PLAIN vs CURVE vs BLAKE3ZMQ mechanisms.
+//! PUSH/PULL over TCP with PLAIN vs CURVE vs BLAKE3ZMQ mechanisms.
 //!
 //! Measures real end-to-end throughput including handshake, encryption,
 //! and decryption overhead. Single peer, loopback TCP.
@@ -28,19 +28,6 @@ fn main() {
 
         let sizes = common::sizes();
         let mut seq = 0usize;
-
-        println!("--- NULL (tcp) ---");
-        for &size in &sizes {
-            seq += 1;
-            let cell = common::with_timeout(
-                &format!("NULL/{size}B"),
-                run_cell(Options::default(), Options::default(), size, seq),
-            )
-            .await;
-            common::print_cell(size, cell);
-            common::append_jsonl(PATTERN, "NULL", 1, size, cell);
-        }
-        println!();
 
         println!("--- PLAIN (tcp) ---");
         for &size in &sizes {

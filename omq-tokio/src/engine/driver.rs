@@ -682,8 +682,8 @@ where
                 },
 
                 // Wire-slot arm: the socket handle encoded ZMTP frames
-                // into the per-peer PeerWireSlot. Drain into the local
-                // EncodedQueue, then flush via the shared path.
+                // into the per-peer PeerWireSlot. Drain and write
+                // directly, bypassing the local EncodedQueue.
                 () = async {
                     wire_slot.as_ref().unwrap().data_ready.notified().await;
                 }, if wire_slot.as_ref().is_some_and(|s| {
@@ -699,9 +699,7 @@ where
                         }
                         batch_bytes +=
                             drain_buf.iter().map(Bytes::len).sum::<usize>();
-                        eq.push_shared_chunks(&drain_buf);
-                        drain_buf.clear();
-                        flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
+                        write_chunks(&mut writer, &mut drain_buf).await?;
                         slot.space_available.notify_one();
                         if batch_bytes >= max_batch_bytes() {
                             break;
@@ -1031,6 +1029,41 @@ where
             eq.put_back_unwritten(drained, n);
         }
     }
+}
+
+async fn write_chunks<W>(writer: &mut W, chunks: &mut Vec<Bytes>) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    while !chunks.is_empty() {
+        let iovecs: SmallVec<[io::IoSlice<'_>; 64]> =
+            chunks.iter().map(|b| io::IoSlice::new(b)).collect();
+        let n = writer.write_vectored(&iovecs).await?;
+        drop(iovecs);
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        }
+        let total: usize = chunks.iter().map(Bytes::len).sum();
+        if n >= total {
+            chunks.clear();
+        } else {
+            let mut skip = n;
+            let mut first_kept = 0;
+            for (i, chunk) in chunks.iter().enumerate() {
+                if skip >= chunk.len() {
+                    skip -= chunk.len();
+                    first_kept = i + 1;
+                } else {
+                    break;
+                }
+            }
+            chunks.drain(..first_kept);
+            if skip > 0 && !chunks.is_empty() {
+                chunks[0] = chunks[0].slice(skip..);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One write attempt. Uses `write_vectored` so multi-chunk frame

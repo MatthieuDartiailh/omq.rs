@@ -426,11 +426,72 @@ impl SecurityMechanism {
     clippy::large_enum_variant,
     reason = "created once per connection, inline avoids per-frame indirection"
 )]
-pub(crate) enum FrameTransform {
+pub enum FrameTransform {
     #[cfg(feature = "curve")]
     Curve(CurveTransform),
     #[cfg(feature = "blake3zmq")]
     Blake3Zmq(blake3zmq::Blake3ZmqTransform),
+}
+
+#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+impl FrameTransform {
+    /// Encrypt all parts of a message, returning `(flags, encrypted_payload)`
+    /// pairs ready for [`Connection::emit_encrypted_frames`]. Advances the
+    /// internal counter. The caller must hold `&mut self` exclusively.
+    pub fn encrypt_message(
+        &mut self,
+        msg: &crate::message::Message,
+    ) -> crate::error::Result<smallvec::SmallVec<[(crate::message::FrameFlags, bytes::Bytes); 4]>>
+    {
+        let parts = msg.parts_payload();
+        let n = parts.len();
+        let mut out = smallvec::SmallVec::with_capacity(n);
+        for (i, part) in parts.iter().enumerate() {
+            let more = i + 1 < n;
+            let (flags, payload) = self.encrypt_part(more, part)?;
+            out.push((flags, payload));
+        }
+        Ok(out)
+    }
+
+    fn encrypt_part(
+        &mut self,
+        more: bool,
+        part: &crate::message::Payload,
+    ) -> crate::error::Result<(crate::message::FrameFlags, bytes::Bytes)> {
+        use crate::message::FrameFlags;
+        match self {
+            #[cfg(feature = "curve")]
+            Self::Curve(tx) => {
+                let plaintext = part.as_bytes();
+                let body = tx.encrypt_message(more, false, &plaintext)?;
+                let mut wire = bytes::BytesMut::with_capacity(8 + body.len());
+                bytes::BufMut::put_u8(&mut wire, b"MESSAGE".len() as u8);
+                bytes::BufMut::put_slice(&mut wire, b"MESSAGE");
+                bytes::BufMut::put_slice(&mut wire, &body);
+                let flags = if more {
+                    FrameFlags::MORE
+                } else {
+                    FrameFlags::LAST
+                };
+                Ok((flags, wire.freeze()))
+            }
+            #[cfg(feature = "blake3zmq")]
+            Self::Blake3Zmq(tx) => {
+                const TAG_LEN: usize = 32;
+                let flags = if more {
+                    FrameFlags::MORE
+                } else {
+                    FrameFlags::LAST
+                };
+                let plaintext = part.as_bytes();
+                let (aad, aad_len) =
+                    super::connection::blake3zmq_aad(flags, plaintext.len() + TAG_LEN);
+                let ciphertext = tx.encrypt(&aad[..aad_len], &plaintext)?;
+                Ok((flags, bytes::Bytes::from(ciphertext)))
+            }
+        }
+    }
 }
 
 /// NULL mechanism: exchange READY commands, done.

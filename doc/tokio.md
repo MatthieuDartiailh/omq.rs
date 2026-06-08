@@ -154,26 +154,34 @@ Fan-out and identity sockets no longer use pump tasks at all: they
 send via `PeerSend` which routes directly to the per-peer
 `PeerWireSlot` (wire) or driver inbox (inproc).
 
-## Arena encoding (`ARENA_THRESHOLD` = 32 KiB)
+## Arena encoding (`ARENA_THRESHOLD` = 96 KiB)
 
 Both backends use `EncodedQueue` with a contiguous `arena: BytesMut`
-(256 KiB initial capacity). Messages below `ARENA_THRESHOLD` (32 KiB)
-are encoded contiguously into the arena via `encode_arena`. N small
-messages land in one contiguous region, producing one iovec for the
-batch instead of 2N. Messages at or above the threshold use the
-gather-write path (`encode_gather`): header into a scratch buffer,
-payload chunks Arc-bumped into the `chunks` deque, flushed via
-`write_vectored`.
+(256 KiB initial capacity) and an `entries: VecDeque<Entry>` where
+each entry is either an arena range or an external `Bytes`. Frame
+headers (2-9 bytes) are always written into the arena. Messages
+below `ARENA_THRESHOLD` (96 KiB) are encoded contiguously into the
+arena via `encode_arena`: header + payload land in one region, so N
+small messages produce one iovec for the batch instead of 2N.
+Messages at or above the threshold use the gather path
+(`encode_gather`): header goes into the arena, payload `Bytes` are
+tracked as `Entry::External` (zero-copy, no memcpy). At drain time,
+arena ranges are frozen into `Bytes::slice()` sharing one backing
+allocation.
 
-The threshold was renamed from `FLAT_THRESHOLD` and lowered from
-64 KiB to 32 KiB. At 64 KiB even 32 KiB messages were memcpyed
-into the arena instead of using zero-copy gather-write. 32 KiB is
-closer to the crossover where memcpy cost exceeds per-`Bytes`-chunk
-`IoSlice` overhead.
+The gather functions (`encode_message_gather`,
+`encode_message_prefixed_gather`) moved from `frame.rs` into
+`EncodedQueue` methods, which write frame headers directly into the
+arena and track payloads as external entries. The per-frame
+`scratch: BytesMut` is eliminated.
 
 The arena path is disabled when a frame transform (CURVE, BLAKE3ZMQ)
 is active, since those require the codec's encrypt-in-place flow via
-`send_message`.
+`send_message`. `Connection` exposes `take_transform()` /
+`restore_transform()` / `emit_encrypted_frames()` and `FrameTransform`
+exposes `encrypt_message()` as infrastructure for future per-peer
+encryption offloading, but the routing strategies do not wire this up
+yet.
 
 ## 128 KiB read buffer
 
@@ -204,8 +212,10 @@ Each wire peer gets a `PeerWireSlot` containing an `EncodedQueue`
 behind a `std::sync::Mutex`. `Socket::send` encodes ZMTP frames into
 the slot, and the driver flushes them to the wire via a dedicated
 `data_ready` select arm. The handle never touches the writer.
-Messages of any size are accepted; small messages (<32 KiB) are
-arena-encoded, larger ones use zero-copy gather-write.
+Messages of any size are accepted; small messages (<96 KiB) are
+arena-encoded, larger ones use zero-copy gather-write. The driver
+drain arm writes drained chunks directly to the socket via
+`write_chunks`, bypassing the driver's local `EncodedQueue`.
 
 The slot replaces the earlier `DirectIo` pattern where the handle
 locked an `Arc<Mutex<Writer>>` to write directly. `PeerWireSlot`

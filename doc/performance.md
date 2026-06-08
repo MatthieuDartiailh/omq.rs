@@ -64,10 +64,10 @@ copies on the hot path for medium and large messages:
 
 **Send.** `Bytes` payloads are Arc-cloned (refcount bump, no data
 copy) from `Socket::send` through frame encoding to the kernel
-`writev`. `encode_message_gather` pushes the payload `Bytes`
-reference directly into the iovec list; only the 2-9 byte frame
-header is serialized. For small messages below `ARENA_THRESHOLD`
-(32 KiB), contiguous encoding into the arena buffer is faster
+`writev`. `EncodedQueue::encode_gather` writes the 2-9 byte frame
+header into the arena and tracks the payload `Bytes` as an external
+entry in the iovec list. For small messages below `ARENA_THRESHOLD`
+(96 KiB), contiguous encoding into the arena buffer is faster
 than per-message gather-write.
 
 **Recv.** For frames above `large_message_threshold` (128 KiB),
@@ -180,7 +180,7 @@ tiny iovecs (2 per message: header + payload). Kernel limit is
 1024 per call.
 
 Fix: `EncodedQueue` keeps an `arena: BytesMut` (256 KiB initial
-capacity). Messages below `ARENA_THRESHOLD` (32 KiB) are written
+capacity). Messages below `ARENA_THRESHOLD` (96 KiB) are written
 contiguously into the arena. N small messages produce one iovec for
 the whole batch. Above the threshold, the gather-write path
 wins because memcpy of a large payload would dominate.
@@ -794,8 +794,14 @@ The driver drain arm loops until the slot is empty (or
 `max_batch_bytes`), flushing messages that arrive during
 `write_vectored` without re-entering `select!`.
 
+The driver drain arm writes drained chunks directly to the socket
+via `write_chunks`, bypassing the driver's local `EncodedQueue`.
+
 Disabled when a frame transform (CURVE, BLAKE3ZMQ) is active.
-The codec's encrypt-in-place flow needs the codec's internal state.
+`Connection` now exposes `take_transform()` / `restore_transform()` /
+`emit_encrypted_frames()` and `FrameTransform` exposes
+`encrypt_message()` as infrastructure for future per-peer encryption
+offloading, but the routing strategies do not wire this up yet.
 
 ### Dead end: DirectIo with bidirectional handoff
 

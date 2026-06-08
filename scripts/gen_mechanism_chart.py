@@ -16,24 +16,62 @@ def fmt_size(b: int) -> str:
     return f"{b} B"
 
 
-def _nice_ceil(v):
-    if v <= 0:
-        return 1
-    exp = math.floor(math.log10(v))
-    base = 10 ** exp
-    for m in [1, 2, 5, 10]:
-        candidate = m * base
-        if candidate >= v:
-            return candidate
-    return 10 * base
-
-
 def _fmt_y_rate(val):
     if val >= 1_000_000:
         return f"{val / 1_000_000:g}M"
     if val >= 1_000:
         return f"{val / 1_000:g}k"
     return f"{val:g}"
+
+
+def _nice_ticks(max_val, target_count=6) -> list[float]:
+    raw = max_val / target_count
+    mag = 10 ** math.floor(math.log10(raw))
+    for step in [1, 2, 5, 10]:
+        s = step * mag
+        if max_val / s <= target_count + 1:
+            return [s * i for i in range(1, int(max_val / s) + 1)]
+    return [max_val]
+
+
+def detect_hardware() -> str | None:
+    try:
+        cpu = None
+        for line in open("/proc/cpuinfo"):
+            if line.startswith("model name"):
+                cpu = line.split(":", 1)[1].strip()
+                cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
+                break
+        cores = os.cpu_count()
+        if cpu and cores:
+            label = f"{cpu}, {cores} cores"
+            extras = []
+            try:
+                gov = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").read().strip()
+                if gov == "performance":
+                    extras.append("performance governor")
+            except OSError:
+                pass
+            for path, off_val in [
+                ("/sys/devices/system/cpu/intel_pstate/no_turbo", "1"),
+                ("/sys/devices/system/cpu/cpufreq/boost", "0"),
+            ]:
+                try:
+                    if open(path).read().strip() == off_val:
+                        extras.append("turbo off")
+                    break
+                except OSError:
+                    continue
+            if not extras:
+                hw_extras = os.environ.get("OMQ_HW_EXTRAS")
+                if hw_extras:
+                    extras.extend(hw_extras.split(","))
+            if extras:
+                label += ", " + ", ".join(extras)
+            return label
+    except OSError:
+        pass
+    return None
 
 
 def load_data(jsonl: Path) -> dict:
@@ -54,7 +92,7 @@ def load_data(jsonl: Path) -> dict:
         key = (r["transport"], r["msg_size"])
         latest[key] = r
 
-    mechanisms = ["NULL", "PLAIN", "CURVE", "BLAKE3ZMQ"]
+    mechanisms = ["PLAIN", "CURVE", "BLAKE3ZMQ"]
     all_sizes = sorted({k[1] for k in latest})
     sizes = [s for s in all_sizes if all((m, s) in latest for m in mechanisms)]
 
@@ -67,9 +105,9 @@ def load_data(jsonl: Path) -> dict:
     for s in sizes:
         for m in mechanisms:
             r = latest[(m, s)]
-            mbps = r["mbps"]
+            gbs = r["mbps"] / 1000.0
             msgs = r["msgs_s"]
-            series[m].append((msgs, mbps / 1024))
+            series[m].append((msgs, gbs))
 
     return {"sizes": sizes, "series": series}
 
@@ -79,29 +117,45 @@ def generate_svg(data: dict, backend: str) -> str:
     series = data["series"]
     n = len(sizes)
 
+    hw_label = detect_hardware()
+    hw_offset = 14 if hw_label else 0
+
     x_left, x_right = 90, 760
-    y_top, y_bot = 45, 350
-    svg_h = 440
+    y_top = 49 + hw_offset
+    y_bot = 370 + hw_offset
+    svg_h = 460 + hw_offset
     plot_w = x_right - x_left
     plot_h = y_bot - y_top
+    mid_x = (x_left + x_right) / 2
 
     xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
 
     all_msgs = [pt[0] for pts in series.values() for pt in pts if pt[0] > 0]
-    msg_max = _nice_ceil(max(all_msgs)) if all_msgs else 10e6
-    tput_max = 10.0    # GB/s
+    all_gbs = [pt[1] for pts in series.values() for pt in pts if pt[1] > 0]
+
+    msg_lo = math.floor(math.log10(min(all_msgs) * 0.8))
+    msg_hi = math.ceil(math.log10(max(all_msgs) * 1.15))
+    gbs_lo = math.floor(math.log10(min(all_gbs) * 0.8))
+    gbs_hi = math.ceil(math.log10(max(all_gbs) * 1.15))
 
     def y_msg(v):
         if v <= 0:
             return y_bot
-        return y_bot - (v / msg_max) * plot_h
+        frac = (math.log10(v) - msg_lo) / (msg_hi - msg_lo)
+        return y_bot - frac * plot_h
 
     def y_tput(v):
-        return y_bot - (v / tput_max) * plot_h
+        if v <= 0:
+            return y_bot
+        frac = (math.log10(v) - gbs_lo) / (gbs_hi - gbs_lo)
+        return y_bot - frac * plot_h
 
-    colors = {"NULL": "#9ca3af", "PLAIN": "#374151", "CURVE": "#dc2626", "BLAKE3ZMQ": "#2563eb"}
-    labels = {"NULL": "NULL", "PLAIN": "PLAIN", "CURVE": "CURVE", "BLAKE3ZMQ": "BLAKE3ZMQ"}
-    order = ["NULL", "PLAIN", "CURVE", "BLAKE3ZMQ"]
+    colors = {
+        "PLAIN": "#374151",
+        "CURVE": "#dc2626",
+        "BLAKE3ZMQ": "#2563eb",
+    }
+    order = ["PLAIN", "CURVE", "BLAKE3ZMQ"]
 
     L = []
     L.append(
@@ -110,33 +164,70 @@ def generate_svg(data: dict, backend: str) -> str:
     )
     L.append(f'  <rect width="850" height="{svg_h}" fill="white"/>')
 
-    # Left-axis: msg/s linear scale
-    n_l_ticks = 5
-    for i in range(n_l_ticks + 1):
-        val = i * msg_max / n_l_ticks
-        yy = y_msg(val)
+    # Title
+    L.append(
+        f'  <text x="{mid_x:.1f}" y="{32 + hw_offset:.1f}" text-anchor="middle"'
+        f' fill="#111827" font-size="13" font-weight="700">'
+        f'PUSH/PULL throughput: mechanism overhead, TCP loopback'
+        f' (omq-{backend}, higher is better)</text>'
+    )
+    if hw_label:
         L.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
-        )
-        L.append(
-            f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">'
-            f'{_fmt_y_rate(val)}</text>'
+            f'  <text x="{mid_x:.1f}" y="{y_top - 3:.1f}" text-anchor="middle"'
+            f' fill="#9ca3af" font-size="10">{hw_label}</text>'
         )
 
-    # Right-axis: throughput (dashed)
-    for v in [2, 4, 6, 8]:
-        yy = y_tput(v)
-        L.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>'
-        )
-        L.append(
-            f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#6b7280" font-size="10">'
-            f'{v} GB/s</text>'
-        )
+    # Left axis: msg/s log scale
+    for decade in range(msg_lo, msg_hi + 1):
+        base = 10 ** decade
+        for mult in [1, 2, 5]:
+            v = base * mult
+            if v < 10 ** msg_lo or v > 10 ** msg_hi:
+                continue
+            yy = y_msg(v)
+            if mult == 1:
+                L.append(
+                    f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
+                    f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"/>'
+                )
+                L.append(
+                    f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
+                    f' dominant-baseline="middle" fill="#374151" font-size="10">'
+                    f'{_fmt_y_rate(v)}</text>'
+                )
+            else:
+                L.append(
+                    f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
+                    f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"'
+                    f' stroke-dasharray="2,8"/>'
+                )
+
+    # Right axis: throughput log scale
+    for decade in range(gbs_lo, gbs_hi + 1):
+        base = 10 ** decade
+        for mult in [1, 2, 5]:
+            v = base * mult
+            if v < 10 ** gbs_lo or v > 10 ** gbs_hi:
+                continue
+            yy = y_tput(v)
+            if mult == 1:
+                L.append(
+                    f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
+                    f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"'
+                    f' stroke-dasharray="3,6"/>'
+                )
+                label = f"{v:g}"
+                L.append(
+                    f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
+                    f' dominant-baseline="middle" fill="#6b7280" font-size="10">'
+                    f'{label} GB/s</text>'
+                )
+            else:
+                L.append(
+                    f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
+                    f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"'
+                    f' stroke-dasharray="2,8"/>'
+                )
 
     # Vertical gridlines
     for x in xs:
@@ -162,27 +253,16 @@ def generate_svg(data: dict, backend: str) -> str:
     # X-axis labels
     for i, s in enumerate(sizes):
         L.append(
-            f'  <text x="{xs[i]:.1f}" y="{y_bot + 16}" text-anchor="middle"'
-            f' fill="#374151" font-size="9.5">{fmt_size(s)}</text>'
+            f'  <text x="{xs[i]:.1f}" y="{y_bot + 14}" text-anchor="middle"'
+            f' fill="#374151" font-size="8.5">{fmt_size(s)}</text>'
         )
 
-    # Axis titles
+    # Left axis title
     mid_y = (y_top + y_bot) / 2
-    mid_x = (x_left + x_right) / 2
     L.append(
         f'  <text x="40" y="{mid_y:.1f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="11" font-weight="600"'
+        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{mid_y:.1f})">msg/s</text>'
-    )
-    L.append(
-        f'  <text x="812" y="{mid_y:.1f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#6b7280" font-size="11" font-weight="600"'
-        f' transform="rotate(90,812,{mid_y:.1f})">throughput</text>'
-    )
-    L.append(
-        f'  <text x="{mid_x:.1f}" y="22" text-anchor="middle" fill="#111827"'
-        f' font-size="14" font-weight="700">'
-        f'PUSH/PULL throughput: mechanism overhead (omq-{backend}, TCP)</text>'
     )
 
     # Dashed msg/s lines
@@ -211,34 +291,51 @@ def generate_svg(data: dict, backend: str) -> str:
                 f' fill="{colors[name]}" stroke="white" stroke-width="1"/>'
             )
 
-    # Legend
-    leg_y1 = y_bot + 38
-    leg_y2 = leg_y1 + 12
-    legend_xs = [107, 277, 477, 647]
+    # Mechanism legend (colored lines with dots)
+    leg_y = y_bot + 40
+    item_w = 140
+    total_w = len(order) * item_w
+    start_x = mid_x - total_w / 2
+
     for i, name in enumerate(order):
-        lx = legend_xs[i]
+        lx = start_x + i * item_w
         c = colors[name]
         L.append(
-            f'  <line x1="{lx}" y1="{leg_y1}" x2="{lx + 14}" y2="{leg_y1}"'
-            f' stroke="{c}" stroke-width="2" stroke-dasharray="4,3"/>'
-        )
-        L.append(
-            f'  <line x1="{lx}" y1="{leg_y2}" x2="{lx + 14}" y2="{leg_y2}"'
+            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
             f' stroke="{c}" stroke-width="2.5"/>'
         )
+        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
         L.append(
-            f'  <text x="{lx + 18}" y="{leg_y1 + 4}" fill="#374151" font-size="10"'
-            f' font-weight="500">{labels[name]}</text>'
+            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
+            f' font-size="11" font-weight="500">{name}</text>'
         )
 
-    footer_y = y_bot + 68
-    L.append(
-        f'  <text x="{mid_x:.1f}" y="{footer_y}" text-anchor="middle"'
-        f' fill="#9ca3af" font-size="9">'
-        f'dashed = msg/s (left) · solid = throughput (right)</text>'
-    )
-    L.append("</svg>")
+    # Line-type legend (dashed = msg/s, solid = GB/s)
+    lt_y = leg_y + 22
+    lt_total = 340
+    lt_start = mid_x - lt_total / 2
 
+    L.append(
+        f'  <line x1="{lt_start:.0f}" y1="{lt_y}" x2="{lt_start + 20:.0f}" y2="{lt_y}"'
+        f' stroke="#6b7280" stroke-width="2" stroke-dasharray="6,4"/>'
+    )
+    L.append(
+        f'  <text x="{lt_start + 26:.0f}" y="{lt_y + 4}" fill="#6b7280"'
+        f' font-size="10">msg/s (left axis, log)</text>'
+    )
+
+    lt_right = lt_start + 180
+    L.append(
+        f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 20:.0f}" y2="{lt_y}"'
+        f' stroke="#6b7280" stroke-width="2"/>'
+    )
+    L.append(f'  <circle cx="{lt_right + 10:.0f}" cy="{lt_y}" r="2" fill="#6b7280"/>')
+    L.append(
+        f'  <text x="{lt_right + 26:.0f}" y="{lt_y + 4}" fill="#6b7280"'
+        f' font-size="10">throughput / GB/s (right axis, log)</text>'
+    )
+
+    L.append("</svg>")
     return "\n".join(L) + "\n"
 
 

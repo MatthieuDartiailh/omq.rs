@@ -249,7 +249,7 @@ behind).
 |------|------|
 | `src/message.rs` | `Payload` + `Message` enums, inline/single/multi variants |
 | `src/proto/connection/` | `Connection` -- the sans-I/O ZMTP codec + state machine (inbound, outbound, mod) |
-| `src/proto/frame.rs` | ZMTP frame encoding/decoding, `send_message_flat` |
+| `src/proto/frame.rs` | ZMTP frame encoding/decoding, `encode_message_flat`, `write_frame_header` |
 | `src/proto/greeting.rs` | ZMTP greeting state machine |
 | `src/proto/command.rs` | ZMTP commands (SUBSCRIBE, PING, etc.) |
 | `src/proto/chunked_buf.rs` | `ChunkedInputBuf` -- zero-copy multi-chunk input buffer |
@@ -258,7 +258,7 @@ behind).
 | `src/proto/zws.rs` | ZWS/2.0 frame codec (feature `ws`) |
 | `src/endpoint.rs` | URI parsing (`tcp://`, `ipc://`, `lz4+tcp://`, `ws://`, etc.) |
 | `src/options.rs` | `Options` builder (HWM, identity, keepalive, mechanism) |
-| `src/encoded_queue.rs` | `EncodedQueue` -- arena + gather-write encoder (used by both backends) |
+| `src/encoded_queue.rs` | `EncodedQueue` -- arena + entry-based gather-write encoder (used by both backends) |
 | `src/routing.rs` | Socket-type-to-routing-strategy categorization (`SendCategory`, `RecvCategory`) |
 | `src/subscription.rs` | Patricia-trie prefix matcher for SUB/XSUB |
 

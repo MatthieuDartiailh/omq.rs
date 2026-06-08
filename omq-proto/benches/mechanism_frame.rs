@@ -5,7 +5,6 @@
 //! counter increment, AAD construction) is sub-nanosecond and not
 //! distinguished here - we go straight at the primitives:
 //!
-//! - **NULL**       baseline; no crypto, just `Bytes::copy_from_slice`.
 //! - **CURVE**      one `crypto_box::SalsaBox` seal (XSalsa20 +
 //!   Poly1305 16-byte tag, RFC 26).
 //! - **BLAKE3ZMQ**  `ChaCha20` (legacy) + BLAKE3 keyed MAC (no per-message KDF).
@@ -39,19 +38,17 @@ const TARGET_NS_PER_CELL: u64 = 200_000_000; // 200 ms
 
 fn main() {
     println!("Mechanism per-frame microbench");
-    println!(
-        "primitives: NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20+BLAKE3 MAC)"
-    );
+    println!("primitives: CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20+BLAKE3 MAC)");
     println!(
         "target wall-time per cell: ~{} ms\n",
         TARGET_NS_PER_CELL / 1_000_000
     );
 
     println!(
-        "  {:>6} | {:>14} | {:>14} | {:>14}",
-        "size", "NULL ns/op", "CURVE", "BLAKE3ZMQ"
+        "  {:>6} | {:>14} | {:>14}",
+        "size", "CURVE ns/op", "BLAKE3ZMQ"
     );
-    println!("  {}", "-".repeat(64));
+    println!("  {}", "-".repeat(46));
 
     let enc_key: [u8; 32] = black_box([0x42u8; 32]);
     let auth_key: [u8; 32] = black_box([0x43u8; 32]);
@@ -68,9 +65,6 @@ fn main() {
     for size in active_sizes {
         let plain = vec![0xACu8; size];
 
-        let null_ns = bench(|| {
-            black_box(bytes::Bytes::copy_from_slice(black_box(&plain)));
-        });
         let curve_ns = bench(|| {
             black_box(
                 salsa
@@ -84,26 +78,24 @@ fn main() {
         });
 
         println!(
-            "  {:>6} | {:>14} | {:>14} | {:>14}",
+            "  {:>6} | {:>14} | {:>14}",
             size,
-            format!("{null_ns:>5} ns"),
             format!("{curve_ns:>5} ns"),
             format!("{b3_ns:>5} ns"),
         );
-        rows.push((size, null_ns, curve_ns, b3_ns));
+        rows.push((size, curve_ns, b3_ns));
     }
 
     println!();
     println!(
-        "  {:>6} | {:>14} | {:>14} | {:>14}",
-        "size", "NULL MiB/s", "CURVE", "BLAKE3ZMQ"
+        "  {:>6} | {:>14} | {:>14}",
+        "size", "CURVE MiB/s", "BLAKE3ZMQ"
     );
-    println!("  {}", "-".repeat(64));
-    for (size, null_ns, curve_ns, b3_ns) in rows {
+    println!("  {}", "-".repeat(46));
+    for (size, curve_ns, b3_ns) in rows {
         println!(
-            "  {:>6} | {:>14} | {:>14} | {:>14}",
+            "  {:>6} | {:>14} | {:>14}",
             size,
-            mibps(size, null_ns),
             mibps(size, curve_ns),
             mibps(size, b3_ns),
         );
