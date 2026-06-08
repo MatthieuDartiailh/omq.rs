@@ -360,15 +360,14 @@ fn transport_crypto_config(
                 omq_proto::proto::connection::WsRole::Client
             }
         };
-        let actual_crypto = !matches!(mechanism, omq_proto::MechanismSetup::Null);
         return TransportConfig {
-            uses_crypto: actual_crypto,
+            uses_crypto: mechanism.has_frame_transform(),
             ws_role: Some(ws_role),
         };
     }
     let _ = (endpoint, role);
     TransportConfig {
-        uses_crypto: !matches!(mechanism, omq_proto::MechanismSetup::Null),
+        uses_crypto: mechanism.has_frame_transform(),
         #[cfg(feature = "ws")]
         ws_role: None,
     }

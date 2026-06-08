@@ -241,6 +241,18 @@ where
     out
 }
 
+/// Like [`block_on_and_drain`] but leaks the runtime instead of
+/// draining. Use when connection-driver safety-net timers cause a
+/// double-panic during drain (compio timer TLS issue).
+pub(crate) fn block_on_and_leak<F>(runtime: compio::runtime::Runtime, fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    let out = runtime.block_on(fut);
+    std::mem::forget(runtime);
+    out
+}
+
 pub(crate) async fn wait_connected(socks: &[&omq_compio::Socket]) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

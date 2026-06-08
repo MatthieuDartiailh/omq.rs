@@ -422,6 +422,10 @@ impl SecurityMechanism {
 /// send/recv dispatch.
 #[cfg(any(feature = "curve", feature = "blake3zmq"))]
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "created once per connection, inline avoids per-frame indirection"
+)]
 pub(crate) enum FrameTransform {
     #[cfg(feature = "curve")]
     Curve(CurveTransform),

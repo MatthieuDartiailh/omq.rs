@@ -74,7 +74,7 @@ revs link two `compio-runtime` instances -> TLS mismatch panic.
 |---------|------|------|
 | `plain` | PLAIN auth (RFC 24) | - |
 | `curve` | CURVE handshake (RFC 26) | `crypto_box`, `crypto_secretbox` |
-| `blake3zmq` | BLAKE3 + ChaCha20 mechanism | `blake3`, `chacha20-blake3` (git, AVX2), `x25519-dalek` |
+| `blake3zmq` | BLAKE3 + ChaCha20 mechanism | `blake3`, `chacha20` (legacy), `x25519-dalek` |
 | `lz4` | `lz4+tcp://` transform | `lz4-sys` (needs `cc`) |
 | `zstd` | `zstd+tcp://` transform | `zstd-safe` (needs `cc`) |
 | `fuzz` | fuzz test suites | - |

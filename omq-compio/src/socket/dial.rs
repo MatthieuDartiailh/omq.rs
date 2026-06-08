@@ -208,7 +208,7 @@ async fn dial_supervisor<F, Fut>(
         let (_cmd_tx, cmd_rx) =
             reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
 
-        let uses_crypto = !matches!(inner.options.mechanism, omq_proto::MechanismSetup::Null);
+        let uses_crypto = inner.options.mechanism.has_frame_transform();
         let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
             role,
             inner.socket_type,

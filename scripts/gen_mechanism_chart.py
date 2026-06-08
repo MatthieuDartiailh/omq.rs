@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/mechanism.svg from omq-compio bench JSONL data."""
+"""Generate doc/charts/mechanism/{compio,tokio}.svg from bench JSONL data."""
 
 import json
 import math
@@ -54,9 +54,14 @@ def load_data(jsonl: Path) -> dict:
         key = (r["transport"], r["msg_size"])
         latest[key] = r
 
-    mechanisms = ["NULL", "CURVE", "BLAKE3ZMQ"]
+    mechanisms = ["NULL", "PLAIN", "CURVE", "BLAKE3ZMQ"]
     all_sizes = sorted({k[1] for k in latest})
     sizes = [s for s in all_sizes if all((m, s) in latest for m in mechanisms)]
+
+    size_filter = os.environ.get("OMQ_CHART_SIZES")
+    if size_filter:
+        allowed = {int(x) for x in size_filter.split(",") if x.strip()}
+        sizes = [s for s in sizes if s in allowed]
 
     series: dict[str, list[tuple[float, float]]] = {m: [] for m in mechanisms}
     for s in sizes:
@@ -69,7 +74,7 @@ def load_data(jsonl: Path) -> dict:
     return {"sizes": sizes, "series": series}
 
 
-def generate_svg(data: dict) -> str:
+def generate_svg(data: dict, backend: str) -> str:
     sizes = data["sizes"]
     series = data["series"]
     n = len(sizes)
@@ -94,9 +99,9 @@ def generate_svg(data: dict) -> str:
     def y_tput(v):
         return y_bot - (v / tput_max) * plot_h
 
-    colors = {"NULL": "#374151", "CURVE": "#dc2626", "BLAKE3ZMQ": "#2563eb"}
-    labels = {"NULL": "NULL (no crypto)", "CURVE": "CURVE", "BLAKE3ZMQ": "BLAKE3ZMQ"}
-    order = ["NULL", "CURVE", "BLAKE3ZMQ"]
+    colors = {"NULL": "#9ca3af", "PLAIN": "#374151", "CURVE": "#dc2626", "BLAKE3ZMQ": "#2563eb"}
+    labels = {"NULL": "NULL", "PLAIN": "PLAIN", "CURVE": "CURVE", "BLAKE3ZMQ": "BLAKE3ZMQ"}
+    order = ["NULL", "PLAIN", "CURVE", "BLAKE3ZMQ"]
 
     L = []
     L.append(
@@ -177,7 +182,7 @@ def generate_svg(data: dict) -> str:
     L.append(
         f'  <text x="{mid_x:.1f}" y="22" text-anchor="middle" fill="#111827"'
         f' font-size="14" font-weight="700">'
-        f'PUSH/PULL throughput: mechanism overhead, 2-process (omq-compio, TCP)</text>'
+        f'PUSH/PULL throughput: mechanism overhead (omq-{backend}, TCP)</text>'
     )
 
     # Dashed msg/s lines
@@ -209,7 +214,7 @@ def generate_svg(data: dict) -> str:
     # Legend
     leg_y1 = y_bot + 38
     leg_y2 = leg_y1 + 12
-    legend_xs = [147, 387, 587]
+    legend_xs = [107, 277, 477, 647]
     for i, name in enumerate(order):
         lx = legend_xs[i]
         c = colors[name]
@@ -239,23 +244,29 @@ def generate_svg(data: dict) -> str:
 
 def main():
     cache_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
-    jsonl = cache_dir / "results_compio.jsonl"
+    repo = Path(__file__).resolve().parent.parent
+    out_dir = repo / "doc" / "charts" / "mechanism"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    if not jsonl.exists():
-        print(f"ERROR: {jsonl} not found", file=sys.stderr)
-        sys.exit(1)
+    backends = sys.argv[1:] if len(sys.argv) > 1 else ["compio", "tokio"]
 
-    data = load_data(jsonl)
-    if not data["sizes"]:
-        print("No mechanism data in JSONL. Run: cargo bench -p omq-compio "
-              "--bench mechanism --features 'curve blake3zmq'", file=sys.stderr)
-        sys.exit(1)
+    for backend in backends:
+        jsonl = cache_dir / f"results_{backend}.jsonl"
+        if not jsonl.exists():
+            print(f"SKIP: {jsonl} not found", file=sys.stderr)
+            continue
 
-    svg = generate_svg(data)
+        data = load_data(jsonl)
+        if not data["sizes"]:
+            print(f"SKIP: no mechanism data in {jsonl.name}. Run: "
+                  f"cargo bench -p omq-{backend} --bench mechanism "
+                  f"--features 'plain curve blake3zmq'", file=sys.stderr)
+            continue
 
-    output = repo / "doc" / "charts" / "mechanism.svg"
-    output.write_text(svg)
-    print(f"Written: {output}", file=sys.stderr)
+        svg = generate_svg(data, backend)
+        output = out_dir / f"{backend}.svg"
+        output.write_text(svg)
+        print(f"Written: {output}", file=sys.stderr)
 
 
 if __name__ == "__main__":

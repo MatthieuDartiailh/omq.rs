@@ -1,10 +1,10 @@
-//! PUSH/PULL over TCP with NULL vs CURVE vs BLAKE3ZMQ mechanisms.
+//! PUSH/PULL over TCP with NULL vs PLAIN vs CURVE vs BLAKE3ZMQ mechanisms.
 //!
 //! Measures real end-to-end throughput including handshake, encryption,
 //! and decryption overhead. Single peer, loopback TCP.
 //!
 //! Run:
-//!   cargo bench -p omq-compio --bench mechanism --features 'curve blake3zmq'
+//!   cargo bench -p omq-compio --bench mechanism --features 'plain curve blake3zmq'
 
 #[path = "common/mod.rs"]
 mod common;
@@ -18,14 +18,6 @@ use omq_compio::{
 };
 
 const PATTERN: &str = "mechanism";
-const DEFAULT_SIZES: &[usize] = &[2_048, 8_192, 32_768];
-
-fn sizes() -> Vec<usize> {
-    if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
-        return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
-    }
-    DEFAULT_SIZES.to_vec()
-}
 
 fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
     use compio::driver::ProactorBuilder;
@@ -35,11 +27,15 @@ fn build_runtime() -> std::io::Result<compio::runtime::Runtime> {
     RuntimeBuilder::new().with_proactor(p).build()
 }
 
+fn accept_all(_: &omq_compio::MechanismPeerInfo) -> bool {
+    true
+}
+
 fn main() {
     eprintln!("mechanism pid={}", std::process::id());
     common::print_header("PUSH/PULL mechanism (tcp)");
 
-    let sizes = sizes();
+    let sizes = common::sizes();
     let mut seq = 0usize;
 
     println!("--- NULL (tcp) ---");
@@ -48,6 +44,20 @@ fn main() {
         let cell = run_cell(Options::default(), Options::default(), size, seq);
         common::print_cell(size, cell);
         common::append_jsonl(PATTERN, "NULL", 1, size, cell);
+    }
+    println!();
+
+    println!("--- PLAIN (tcp) ---");
+    for &size in &sizes {
+        seq += 1;
+        let cell = run_cell(
+            Options::default().plain_server(accept_all),
+            Options::default().plain_client("bench", "bench"),
+            size,
+            seq,
+        );
+        common::print_cell(size, cell);
+        common::append_jsonl(PATTERN, "PLAIN", 1, size, cell);
     }
     println!();
 
@@ -109,7 +119,7 @@ fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usize) -> 
         let ready = ready.clone();
         std::thread::spawn(move || {
             let rt = build_runtime().expect("pull runtime");
-            common::block_on_and_drain(rt, async move {
+            common::block_on_and_leak(rt, async move {
                 let pull = Socket::new(SocketType::Pull, pull_opts);
                 pull.bind(ep).await.expect("bind PULL");
                 ready.wait();
@@ -137,7 +147,7 @@ fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usize) -> 
         let ready = ready.clone();
         std::thread::spawn(move || {
             let rt = build_runtime().expect("push runtime");
-            common::block_on_and_drain(rt, async move {
+            common::block_on_and_leak(rt, async move {
                 ready.wait();
                 let push = Socket::new(SocketType::Push, push_opts);
                 let mut mon = push.monitor();

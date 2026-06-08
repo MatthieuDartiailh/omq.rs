@@ -8,23 +8,14 @@
 //! - **NULL**       baseline; no crypto, just `Bytes::copy_from_slice`.
 //! - **CURVE**      one `crypto_box::SalsaBox` seal (XSalsa20 +
 //!   Poly1305 16-byte tag, RFC 26).
-//! - **BLAKE3ZMQ**  one `chacha20-blake3` AEAD seal (ChaCha20 + keyed
-//!   BLAKE3 32-byte tag, RFC §10).
+//! - **BLAKE3ZMQ**  `ChaCha20` (legacy) + BLAKE3 keyed MAC (no per-message KDF).
 //!
 //! Run: `cargo bench -p omq-proto --bench mechanism_frame --features 'curve blake3zmq'`
-//!
-//! omq-proto pins a fork of `chacha20-blake3` adding
-//! `#[target_feature(enable = "avx2")]` to the AVX2/AVX512 functions,
-//! so the SIMD paths light up under stock release flags. Without that
-//! patch you also need `RUSTFLAGS='-C target-cpu=native'` to get
-//! equivalent numbers; without either, BLAKE3ZMQ drops to ~50 MiB/s
-//! at bulk sizes. `crypto_box` (CURVE) does not have a SIMD path for
-//! salsa20 either way.
 
 use std::hint::black_box;
 use std::time::Instant;
 
-use chacha20_blake3::ChaCha20Blake3;
+use chacha20_blake3::Session20;
 use crypto_box::{SalsaBox, SecretKey, aead::Aead};
 
 const DEFAULT_SIZES: &[usize] = &[128, 2_048, 8_192];
@@ -48,7 +39,9 @@ const TARGET_NS_PER_CELL: u64 = 200_000_000; // 200 ms
 
 fn main() {
     println!("Mechanism per-frame microbench");
-    println!("primitives: NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20-BLAKE3)");
+    println!(
+        "primitives: NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20+BLAKE3 MAC)"
+    );
     println!(
         "target wall-time per cell: ~{} ms\n",
         TARGET_NS_PER_CELL / 1_000_000
@@ -60,12 +53,9 @@ fn main() {
     );
     println!("  {}", "-".repeat(64));
 
-    // Defeat constant-folding by going through black_box for the key
-    // and nonce material. Without this, LLVM hoists/precomputes parts
-    // of the BLAKE3 KDF for the short-payload cases.
-    let key_b3: [u8; 32] = black_box([0x42u8; 32]);
-    let nonce_b3: [u8; 24] = black_box([0x11u8; 24]);
-    let cipher_b3 = ChaCha20Blake3::new(key_b3);
+    let enc_key: [u8; 32] = black_box([0x42u8; 32]);
+    let auth_key: [u8; 32] = black_box([0x43u8; 32]);
+    let nonce: [u8; 8] = black_box([0x11u8; 8]);
     let aad: &[u8] = &[];
 
     let secret_a = SecretKey::generate(&mut crypto_box::aead::OsRng);
@@ -89,7 +79,8 @@ fn main() {
             );
         });
         let b3_ns = bench(|| {
-            black_box(cipher_b3.encrypt(&nonce_b3, black_box(&plain), aad));
+            let mut session = Session20::new(enc_key, auth_key, nonce);
+            black_box(session.encrypt(black_box(&plain), aad));
         });
 
         println!(

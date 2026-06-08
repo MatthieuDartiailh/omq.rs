@@ -25,7 +25,7 @@ pub const COOKIE_LEN: usize = 24 + 32 + 32 + 32 + 32;
 pub const COOKIE_PLAIN_LEN: usize = 32 + 32 + 32;
 /// Vouch box: `Encrypt(C'(32) || S(32))` produces 32+32+tag(32) = 96 bytes.
 pub const VOUCH_BOX_LEN: usize = 32 + 32 + 32;
-/// AEAD tag size (chacha20-blake3).
+/// AEAD tag size (BLAKE3 keyed MAC).
 pub const TAG_LEN: usize = 32;
 /// X25519 key size.
 pub const KEY_LEN: usize = 32;
