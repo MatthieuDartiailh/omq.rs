@@ -11,7 +11,7 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 |-|-|
 | Thread-per-core | One compio runtime per thread, no cross-thread sync on the hot path |
 | io_uring multi-shot recv | One persistent SQE per connection, no re-arming |
-| Direct-encode send | Encodes ZMTP frames into `EncodedQueue` under a sync mutex, bypassing the driver. Small messages (< 32 KiB) packed into one flat buffer, one `writev` call. |
+| Direct-encode send | Encodes ZMTP frames into `EncodedQueue` under a sync mutex, bypassing the driver. Small messages (< 96 KiB) packed into one arena buffer, one `writev` call. |
 | Direct-recv | `Socket::recv` claims the read side from the driver and feeds the codec inline. Saves ~12 µs per round-trip. |
 | Large-message recv | Payloads above 128 KiB accumulated into a pre-allocated `BytesMut`. Frames above pool capacity fall back to one-shot read. |
 

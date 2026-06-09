@@ -182,7 +182,7 @@ EncodedQueue {
   scratch: BytesMut,         // reused header buffer -- zero alloc post-warmup
 }
 
-const ARENA_THRESHOLD: usize = 32 * 1024;
+const ARENA_THRESHOLD: usize = 96 * 1024;
 ```
 
 Two encoding paths, chosen per message:
