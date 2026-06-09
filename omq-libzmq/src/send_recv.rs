@@ -116,7 +116,18 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
 
     match inner.try_send(msg) {
-        Ok(()) => len as c_int,
+        Ok(()) => {
+            // SAFETY: zmq contract guarantees single-threaded access per socket.
+            let (count, bytes) = unsafe { &mut *sock.send_yield.get() };
+            *count += 1;
+            *bytes += len;
+            if *count >= 64 || *bytes >= 1_024 * 1_024 {
+                *count = 0;
+                *bytes = 0;
+                std::thread::yield_now();
+            }
+            len as c_int
+        }
         Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => fail(ETERM),
         Err(omq_tokio::TrySendError::Full(_)) if dontwait => fail(libc::EAGAIN),
         Err(omq_tokio::TrySendError::Full(mut msg)) => {

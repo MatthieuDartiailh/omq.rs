@@ -40,6 +40,7 @@ pub(crate) struct Submitter {
     inner: Arc<Mutex<FanOutInner>>,
     mode: FanOutMode,
     send_count: Arc<AtomicU32>,
+    xpub_nodrop: bool,
 }
 
 impl Clone for Submitter {
@@ -48,6 +49,7 @@ impl Clone for Submitter {
             inner: self.inner.clone(),
             mode: self.mode,
             send_count: self.send_count.clone(),
+            xpub_nodrop: self.xpub_nodrop,
         }
     }
 }
@@ -77,6 +79,9 @@ impl Submitter {
         };
 
         let targets = self.collect_targets(&forwarded, group.as_deref());
+        if self.xpub_nodrop && !targets_have_space(&targets) {
+            return Err(crate::socket::handle::TrySendError::Full(forwarded));
+        }
         dispatch_to_targets(&targets, &forwarded);
         Ok(())
     }
@@ -102,6 +107,11 @@ impl Submitter {
         };
 
         let targets = self.collect_targets(&forwarded, group.as_deref());
+        if self.xpub_nodrop {
+            while !targets_have_space(&targets) {
+                tokio::task::yield_now().await;
+            }
+        }
         dispatch_to_targets(&targets, &forwarded);
         if self.send_count.fetch_add(1, Ordering::Relaxed) % YIELD_INTERVAL == YIELD_INTERVAL - 1 {
             tokio::task::yield_now().await;
@@ -134,6 +144,7 @@ impl Submitter {
 pub(crate) struct FanOutSend {
     inner: Arc<Mutex<FanOutInner>>,
     mode: FanOutMode,
+    xpub_nodrop: bool,
 }
 
 #[derive(Debug)]
@@ -167,7 +178,7 @@ impl FanOutInner {
 }
 
 impl FanOutSend {
-    pub(crate) fn new(_options: &Options, mode: FanOutMode) -> Self {
+    pub(crate) fn new(options: &Options, mode: FanOutMode) -> Self {
         Self {
             inner: Arc::new(Mutex::new(FanOutInner {
                 peers: FxHashMap::default(),
@@ -175,6 +186,7 @@ impl FanOutSend {
                 all_targets: SmallVec::new(),
             })),
             mode,
+            xpub_nodrop: options.xpub_nodrop,
         }
     }
 
@@ -183,6 +195,7 @@ impl FanOutSend {
             inner: self.inner.clone(),
             mode: self.mode,
             send_count: Arc::new(AtomicU32::new(0)),
+            xpub_nodrop: self.xpub_nodrop,
         }
     }
 
@@ -259,6 +272,13 @@ impl FanOutSend {
         let g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.values().all(|p| p.target.is_empty())
     }
+}
+
+fn targets_have_space(targets: &[PeerSend]) -> bool {
+    targets.iter().all(|t| match t {
+        PeerSend::Wire { slot, .. } => slot.has_space(),
+        PeerSend::Inbox(_) => true,
+    })
 }
 
 fn dispatch_to_targets(targets: &[PeerSend], msg: &Message) {

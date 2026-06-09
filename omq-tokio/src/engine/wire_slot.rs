@@ -147,6 +147,14 @@ impl PeerWireSlot {
         self.pending.store(false, Ordering::Relaxed);
     }
 
+    pub(crate) fn has_space(&self) -> bool {
+        if self.dead.load(Ordering::Acquire) {
+            return false;
+        }
+        let eq = self.eq.lock().expect("wire_slot eq poisoned");
+        eq.total_bytes() < self.cap
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         let eq = self.eq.lock().expect("wire_slot eq poisoned");
         eq.is_empty()
