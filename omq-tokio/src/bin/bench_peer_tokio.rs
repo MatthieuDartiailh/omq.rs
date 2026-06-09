@@ -59,6 +59,7 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
 }
 
 #[tokio::main]
+#[expect(clippy::too_many_lines)]
 async fn main() {
     unsafe {
         libc::signal(
