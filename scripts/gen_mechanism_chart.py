@@ -118,6 +118,8 @@ def generate_svg(data: dict, backend: str, *, axis_limits=None) -> str:
     n = len(sizes)
 
     hw_label = detect_hardware()
+    if hw_label:
+        hw_label = "Linux VM on a 2018 Mac Mini, " + hw_label
     hw_offset = 14 if hw_label else 0
 
     x_left, x_right = 90, 760

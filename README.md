@@ -1,21 +1,12 @@
 # ØMQ.rs
 
-[![CI](https://github.com/paddor/omq.rs/actions/workflows/ci.yml/badge.svg)](https://github.com/paddor/omq.rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/omq-tokio?color=e9573f)](https://crates.io/crates/omq-tokio)
-[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-%3E%3D%201.93-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
-
-> **15.2M msg/s** inproc | **23.5M msg/s** ipc | **23.7M msg/s** tcp
->
-> **2.3 µs** inproc latency | **28.4 µs** ipc | **36.1 µs** tcp
->
 > **~3x** libzmq TCP throughput | **2x** lower TCP latency
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
 - Two async backends: **tokio** (default, Linux/macOS) and **compio** (io_uring, Linux)
 - 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `zstd+tcp://`)
-- 4 security mechanisms: NULL, PLAIN, CURVE, BLAKE3ZMQ
+- 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
 
@@ -26,13 +17,6 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
 </p>
-
-<details>
-<summary>PUB/SUB throughput: TCP</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/comparison_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
-</p>
-</details>
 
 <details>
 <summary>More PUSH/PULL: fan-out, fan-in, IPC, inproc</summary>
@@ -51,6 +35,16 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 </details>
 
 <details>
+<summary>Compression throughput: lz4 / zstd</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/compio_2048.svg" alt="Compression throughput: omq-compio" width="850">
+</p>
+</details>
+
+<details>
 <summary>REQ/REP latency: TCP</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/comparison_tcp.svg" alt="REQ/REP latency: TCP" width="850">
@@ -58,22 +52,19 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 </details>
 
 <details>
-<summary>Mechanisms: NULL / PLAIN / CURVE / BLAKE3ZMQ</summary>
+<summary>PUB/SUB throughput: TCP</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/comparison_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
+</p>
+</details>
+
+<details>
+<summary>Mechanisms: PLAIN / CURVE / BLAKE3ZMQ</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/tokio.svg" alt="Mechanisms: omq-tokio" width="850">
 </p>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/compio.svg" alt="Mechanisms: omq-compio" width="850">
-</p>
-</details>
-
-<details>
-<summary>Compression throughput: lz4 / zstd</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/compio_2048.svg" alt="Compression throughput: omq-compio" width="850">
 </p>
 </details>
 
@@ -137,7 +128,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)) | Byte-in / events-out; no async, no traits on the hot path. Mirrors `rustls::ConnectionCommon`. |
 | **Per-socket HWM** | Work-stealing send pumps on round-robin patterns; per-connection queues on fan-out and identity-routed patterns. |
 | **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
-| **Zero-copy send and recv** | Send: `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
+| **Zero-copy send and recv** | Send: large `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
 | **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |
 | **zstd dictionary auto-training** | Trains from first 1k messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |
 | **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
