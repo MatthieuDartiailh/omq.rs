@@ -1113,8 +1113,16 @@ dominates at every size.
 **What WS costs vs TCP.** On the same box, omq-tokio over
 `tcp://` does 5.9M msg/s at 128 B and 4.5 GB/s at 8 KiB. The WS
 overhead comes from: (1) per-frame WS header + client-side XOR
-masking, (2) no gather I/O (each WS message is an independent
-tungstenite write), (3) the HTTP upgrade handshake at connect time.
+masking, (2) the HTTP upgrade handshake at connect time.
+
+**Post-tungstenite.** The numbers above were measured with
+tungstenite. It has since been replaced with a hand-rolled sans-I/O
+WebSocket codec in `omq-proto` and WS connections now route through
+the same TCP driver path. Two subsequent optimizations applied the
+small-message recv and send fast paths (`try_advance_ready_ws`,
+`encode_and_push_flat_ws`) to WS frames, yielding ~3x on the
+compio send+recv hot path. The table above has not been re-measured
+with the current codec.
 
 ## Cache-line-aligned inline thresholds
 

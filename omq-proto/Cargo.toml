@@ -19,7 +19,7 @@ workspace = true
 # No C compiler required, no crypto deps. Opt in to features:
 #   curve     CURVE encrypted-handshake (RFC 26)
 #   blake3zmq omq-native BLAKE3+ChaCha20 mechanism
-#   lz4       lz4+tcp:// transport (bundles liblz4; needs cc)
+#   lz4       lz4+tcp:// transport (pure Rust; lz4rip)
 #   zstd      zstd+tcp:// transport (bundles libzstd; needs cc)
 default = []
 curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:subtle", "dep:x25519-dalek", "dep:zeroize"]
