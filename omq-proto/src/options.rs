@@ -21,6 +21,7 @@ const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
 /// Per-socket configuration.
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     /// Send-side high-water mark, total for the socket. `None` = unbounded.
     pub send_hwm: Option<u32>,
@@ -172,6 +173,11 @@ pub struct Options {
     /// allow more batching at the cost of memory per peer.
     pub wire_slot_cap: Option<usize>,
 
+    /// `XPUB_NODROP`: when true, PUB/XPUB `try_send` returns `Full`
+    /// instead of silently dropping the message when any subscriber's
+    /// wire slot is at capacity.
+    pub xpub_nodrop: bool,
+
     /// TLS configuration for `wss://` endpoints. Ignored for non-WSS
     /// transports. Requires the `ws` feature.
     #[cfg(feature = "ws")]
@@ -223,6 +229,7 @@ impl Default for Options {
             large_message_threshold: Some(128 * 1024),
             arena_threshold: None,
             wire_slot_cap: None,
+            xpub_nodrop: false,
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
         }

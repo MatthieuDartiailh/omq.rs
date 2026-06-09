@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use omq::{Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
     args.get(index).map_or_else(

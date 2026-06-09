@@ -146,12 +146,12 @@ pub(crate) fn build_peer_io(
     decoder: Option<MessageDecoder>,
     #[cfg(feature = "ws")] ws_role: Option<omq_proto::proto::connection::WsRole>,
     #[cfg(feature = "ws")] leftover: Option<bytes::Bytes>,
-) -> std::io::Result<(
+) -> (
     SharedPeerIo,
     Option<crate::transport::peer_io::CancellableRecvStream>,
-)> {
+) {
     let recv_stream = if reader.supports_multishot() {
-        Some(reader.build_recv_stream()?)
+        Some(reader.build_recv_stream())
     } else {
         None
     };
@@ -178,7 +178,7 @@ pub(crate) fn build_peer_io(
         reader,
         handshake_done: false,
     }));
-    Ok((peer_io, recv_stream))
+    (peer_io, recv_stream)
 }
 
 /// Encode a user message through the appropriate path (transform /
@@ -763,16 +763,14 @@ impl DriverLoopState {
 
     async fn flush_codec_to_wire(&mut self, state: &DirectIoState) -> Result<bool> {
         let mut writer = state.writer.lock().await;
-        let (chunks, total) = {
-            let mut io = state.lock_io();
+        let chunks = {
+            let io = state.lock_io();
             if io.codec.has_pending_transmit() {
                 let mut c = io.codec.clone_transmit_chunks();
                 if c.len() > 1024 {
                     c.truncate(1024);
                 }
-                let t: usize = c.iter().map(Bytes::len).sum();
-                io.codec.advance_transmit(t);
-                (c, t)
+                c
             } else {
                 self.codec_maybe_dirty = false;
                 return Ok(false);
@@ -781,22 +779,12 @@ impl DriverLoopState {
         if chunks.is_empty() {
             return Ok(false);
         }
-        let (res, returned) = writer.write_vectored(chunks).await;
+        let (res, _returned) = writer.write_vectored(chunks).await;
         let written = res.map_err(Error::Io)?;
-        if written == 0 {
-            state
-                .encoded_queue
-                .borrow_mut()
-                .put_back_unwritten(returned, 0);
-            return Ok(false);
+        if written > 0 {
+            state.lock_io().codec.advance_transmit(written);
         }
-        if written < total {
-            state
-                .encoded_queue
-                .borrow_mut()
-                .put_back_unwritten(returned, written);
-        }
-        Ok(true)
+        Ok(written > 0)
     }
 
     async fn flush_encoded_queue(&mut self, state: &DirectIoState) -> Result<bool> {

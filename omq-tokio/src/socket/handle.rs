@@ -726,14 +726,13 @@ impl Socket {
         };
         match fast {
             TryEncodeResult::Ok => Ok(()),
-            TryEncodeResult::Dead => Err(Error::Closed),
             TryEncodeResult::Full => {
                 let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
                 if let Some(ref slot) = slot {
                     loop {
                         match slot.try_encode(&msg) {
                             TryEncodeResult::Ok => return Ok(()),
-                            TryEncodeResult::Dead => return Err(Error::Closed),
+                            TryEncodeResult::Dead | TryEncodeResult::Ineligible => break,
                             TryEncodeResult::Full => {
                                 let notified = slot.space_available.notified();
                                 if slot.try_encode(&msg) == TryEncodeResult::Ok {
@@ -741,13 +740,14 @@ impl Socket {
                                 }
                                 notified.await;
                             }
-                            TryEncodeResult::Ineligible => break,
                         }
                     }
                 }
                 self.inner.send_submitter.send(msg).await
             }
-            TryEncodeResult::Ineligible => self.inner.send_submitter.send(msg).await,
+            TryEncodeResult::Dead | TryEncodeResult::Ineligible => {
+                self.inner.send_submitter.send(msg).await
+            }
         }
     }
 
@@ -758,8 +758,7 @@ impl Socket {
             stripped.pop_front();
             match slot.try_encode(&stripped) {
                 TryEncodeResult::Ok => return Ok(()),
-                TryEncodeResult::Dead => return Err(Error::Closed),
-                TryEncodeResult::Full | TryEncodeResult::Ineligible => {}
+                TryEncodeResult::Dead | TryEncodeResult::Full | TryEncodeResult::Ineligible => {}
             }
         }
         self.inner.send_submitter.send(msg).await

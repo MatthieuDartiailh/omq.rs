@@ -2,7 +2,7 @@
 
 ## Workspace layout
 
-Seven-crate Cargo workspace; `bindings/` is excluded and built
+Six-crate Cargo workspace; `bindings/` is excluded and built
 out-of-tree (maturin etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
@@ -14,8 +14,6 @@ out-of-tree (maturin etc.).
   Works on Linux and macOS (and likely other mio targets).
 - **`omq-compio`** -- single-threaded compio backend (io_uring on
   Linux, IOCP on Windows). Not available on macOS.
-- **`omq`** -- facade crate. Re-exports one backend via Cargo features:
-  `tokio-backend` (default) or `compio-backend`. Mutually exclusive.
 - **`blume`** -- batching MPSC channel for `omq-compio` inbound delivery.
 - **`yring`** -- bounded SPSC ring buffer for inproc transport.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq.so` /
@@ -48,7 +46,7 @@ errors. Run all three before every `git push`:
 
 ```sh
 cargo clippy --workspace --all-targets                # default features
-cargo clippy --workspace --all-targets --all-features # feature-gated paths (omq facade compile_error! is expected here: both backends are mutually exclusive)
+cargo clippy --workspace --all-targets --all-features # feature-gated paths
 (cd bindings/pyomq && cargo clippy --all-targets)     # separate workspace
 ```
 

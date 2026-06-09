@@ -30,6 +30,7 @@ ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfi
 # `cargo test`. Run with `cargo test --features fuzz`.
 fuzz = []
 soak = []
+compio-interop = ["dep:omq-compio", "dep:compio"]
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.15.0", default-features = false }
@@ -48,19 +49,21 @@ socket2 = "0.6"
 libc = "0.2"
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 rustls-native-certs = { version = "0.8", optional = true }
-rustls-pemfile = { version = "2", optional = true }
+rustls-pemfile = { version = "2.2", optional = true }
 rustls-pki-types = { version = "1", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
+omq-compio = { path = "../omq-compio", optional = true, default-features = false, features = ["ws"] }
+compio = { git = "https://github.com/compio-rs/compio.git", rev = "cf746eb8", optional = true, features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync"] }
 
 [dev-dependencies]
 tokio = { version = "1.52.0", features = ["test-util"] }
 rcgen = "0.14"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-# Cross-runtime interop tests drive a compio backend on a dedicated
-# thread while the tokio backend runs in the test's own runtime.
-omq-compio = { path = "../omq-compio", default-features = false, features = ["ws"] }
-compio = { git = "https://github.com/compio-rs/compio.git", tag = "v0.19.0-rc.2", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync"] }
 zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"] }
+
+[[test]]
+name = "interop_compio"
+required-features = ["compio-interop"]
 
 [[bin]]
 name = "bench_peer_tokio"

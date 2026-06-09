@@ -144,6 +144,7 @@ impl SocketOverlay {
             send_buffer_size: self.sndbuf,
             recv_buffer_size: self.rcvbuf,
             mechanism,
+            xpub_nodrop: self.xpub_nodrop,
             ..Default::default()
         }
     }

@@ -188,3 +188,79 @@ async fn curve_pub_sub() {
     }
     panic!("SUB never received over CURVE");
 }
+
+/// Regression test: flush_codec_to_wire partial-write ordering bug.
+/// See `blake3zmq_large_messages_tcp_partial_write` for details.
+#[test]
+fn curve_large_messages_tcp_partial_write() {
+    const MSG_SIZE: usize = 8 * 1024;
+    const MSG_COUNT: usize = 2000;
+
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+
+    let (port_tx, port_rx) = std::sync::mpsc::channel();
+
+    let pull_kp = server_kp;
+    let recv_handle = std::thread::spawn(move || {
+        let recv_rt = omq_compio::runtime::build_default_runtime().unwrap();
+        recv_rt.block_on(async {
+            let pull = Socket::new(SocketType::Pull, Options::default().curve_server(pull_kp));
+            let mut mon = pull.monitor();
+            pull.bind(tcp_loopback(0)).await.unwrap();
+            let port = match mon.recv().await.unwrap() {
+                omq_compio::MonitorEvent::Listening {
+                    endpoint: Endpoint::Tcp { port, .. },
+                } => port,
+                other => panic!("{other:?}"),
+            };
+            port_tx.send(port).unwrap();
+
+            let payload: Vec<u8> = (0..MSG_SIZE).map(|i| (i % 251) as u8).collect();
+            for i in 0..MSG_COUNT {
+                let m = compio::time::timeout(Duration::from_secs(10), pull.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("timeout waiting for message {i}"))
+                    .unwrap_or_else(|e| panic!("recv error on message {i}: {e}"));
+                let body = m.part_bytes(0).unwrap();
+                assert_eq!(body.len(), MSG_SIZE, "message {i}: wrong length");
+                assert_eq!(&body[..], &payload[..], "message {i}: content mismatch");
+            }
+
+            let mut accepted = 0usize;
+            while let Ok(Ok(ev)) =
+                compio::time::timeout(Duration::from_millis(100), mon.recv()).await
+            {
+                if matches!(ev, omq_compio::MonitorEvent::Accepted { .. }) {
+                    accepted += 1;
+                }
+            }
+            assert!(
+                accepted <= 1,
+                "unexpected reconnections: {accepted} accepts"
+            );
+        });
+    });
+
+    let port = port_rx.recv().unwrap();
+    let send_rt = omq_compio::runtime::build_default_runtime().unwrap();
+    let _ = send_rt.block_on(async {
+        let push = Socket::new(
+            SocketType::Push,
+            Options::default()
+                .linger(Duration::from_secs(10))
+                .curve_client(client_kp, server_pub),
+        );
+        push.connect(tcp_loopback(port)).await.unwrap();
+
+        let payload: Vec<u8> = (0..MSG_SIZE).map(|i| (i % 251) as u8).collect();
+        let msg = Message::single(payload);
+        for _ in 0..MSG_COUNT {
+            push.send(msg.clone()).await.unwrap();
+        }
+        push.close().await.unwrap();
+    });
+
+    recv_handle.join().unwrap();
+}

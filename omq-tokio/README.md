@@ -15,6 +15,10 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 | Flat-buf encoding | Small messages (< 48 KiB) packed into one `BytesMut`, one `write_all` per batch |
 | Shared-queue work stealing | Round-robin types (PUSH/DEALER) share one `flume` queue. Each connection driver polls it in a `select!` arm, draining up to 256 messages per wakeup. |
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
+</p>
+
 ## Usage
 
 ```rust
@@ -30,7 +34,6 @@ push.send(Message::single("hello")).await?;
 let msg = pull.recv().await?;
 ```
 
-Most users should depend on the `omq` facade crate instead of `omq-tokio` directly.
 `cargo add omq` picks this backend by default.
 
 ## Internals

@@ -167,8 +167,8 @@ impl Server {
         let hello_box = &hello_body[2 + KEY_LEN + 96..];
 
         // dh1 = X25519(s, C'); decrypt hello_box.
-        let dh1 = x25519(&self.permanent.secret, &cn_public)?;
-        let hello_key = kdf(ctx!("HELLO key"), &[&dh1]);
+        let dh1 = Zeroizing::new(x25519(&self.permanent.secret, &cn_public)?);
+        let hello_key = kdf(ctx!("HELLO key"), &[&*dh1]);
         let hello_nonce = kdf24(ctx!("HELLO nonce"), &[&cn_public]);
         aead_decrypt(&hello_key, &hello_nonce, hello_box, b"HELLO")?;
 
@@ -178,6 +178,7 @@ impl Server {
 
         // Generate server ephemeral keypair.
         let (sn_secret, sn_public) = ephemeral_keypair();
+        let sn_secret = Zeroizing::new(sn_secret);
 
         // Build cookie: nonce(24) || Encrypt(C' || s' || h1, aad="COOKIE").
         // Current keyring key seals; INITIATE side tries current then
@@ -193,7 +194,7 @@ impl Server {
         debug_assert_eq!(cookie.len(), COOKIE_LEN);
 
         // Welcome box: Encrypt(S' || cookie, aad="WELCOME")
-        let welcome_key = kdf(ctx!("WELCOME key"), &[&dh1]);
+        let welcome_key = kdf(ctx!("WELCOME key"), &[&*dh1]);
         let welcome_nonce = kdf24(ctx!("WELCOME nonce"), &[&self.transcript]);
         let mut welcome_plain = Vec::with_capacity(KEY_LEN + cookie.len());
         welcome_plain.extend_from_slice(&sn_public);
@@ -256,15 +257,15 @@ impl Server {
             return Err(self.fail("cookie plaintext wrong size"));
         }
         let cn_public: X25519Public = cookie_plain[..KEY_LEN].try_into().unwrap();
-        let sn_secret: X25519Secret = cookie_plain[KEY_LEN..2 * KEY_LEN].try_into().unwrap();
+        let sn_secret = Zeroizing::new(cookie_plain[KEY_LEN..2 * KEY_LEN].try_into().unwrap());
         let h1: Hash = cookie_plain[2 * KEY_LEN..3 * KEY_LEN].try_into().unwrap();
 
         // Reconstruct welcome_wire deterministically and recompute h2.
         // chacha20-blake3 with fixed key+nonce+plaintext+aad emits the
         // same ciphertext+tag as the original WELCOME, so the bytes
         // hash to the same h2 the client also computed.
-        let dh1 = x25519(&self.permanent.secret, &cn_public)?;
-        let welcome_key_recovered = kdf(ctx!("WELCOME key"), &[&dh1]);
+        let dh1 = Zeroizing::new(x25519(&self.permanent.secret, &cn_public)?);
+        let welcome_key_recovered = kdf(ctx!("WELCOME key"), &[&*dh1]);
         let welcome_nonce_recovered = kdf24(ctx!("WELCOME nonce"), &[&h1]);
         let sn_public = x25519_basepoint(&sn_secret);
         let mut welcome_plain = Vec::with_capacity(KEY_LEN + COOKIE_LEN);
@@ -281,11 +282,11 @@ impl Server {
         self.transcript = h2;
 
         // dh2 = X25519(s', C')
-        let dh2 = x25519(&sn_secret, &cn_public)?;
+        let dh2 = Zeroizing::new(x25519(&sn_secret, &cn_public)?);
 
         // Decrypt initiate_box with dh2 || h2 derived key/nonce.
-        let initiate_key = kdf(ctx!("INITIATE key"), &[&dh2, &self.transcript]);
-        let initiate_nonce = kdf24(ctx!("INITIATE nonce"), &[&dh2, &self.transcript]);
+        let initiate_key = kdf(ctx!("INITIATE key"), &[&*dh2, &self.transcript]);
+        let initiate_nonce = kdf24(ctx!("INITIATE nonce"), &[&*dh2, &self.transcript]);
         let initiate_ciphertext = &initiate_body[COOKIE_LEN..];
         let initiate_plain = aead_decrypt(
             &initiate_key,
@@ -301,9 +302,9 @@ impl Server {
         let peer_metadata = initiate_plain[KEY_LEN + VOUCH_BOX_LEN..].to_vec();
 
         // Verify vouch.
-        let dh3 = x25519(&sn_secret, &client_permanent)?;
-        let vouch_key = kdf(ctx!("VOUCH key"), &[&dh3]);
-        let vouch_nonce = kdf24(ctx!("VOUCH nonce"), &[&dh3]);
+        let dh3 = Zeroizing::new(x25519(&sn_secret, &client_permanent)?);
+        let vouch_key = kdf(ctx!("VOUCH key"), &[&*dh3]);
+        let vouch_nonce = kdf24(ctx!("VOUCH nonce"), &[&*dh3]);
         let vouch_plain = aead_decrypt(&vouch_key, &vouch_nonce, vouch_box, b"VOUCH")?;
         if vouch_plain.len() != KEY_LEN + KEY_LEN {
             return Err(self.fail("vouch plaintext wrong size"));
@@ -342,8 +343,8 @@ impl Server {
 
         // Build READY: ready_box = Encrypt(metadata, aad="READY") under
         // KDF("READY key", dh2 || h3) / KDF24("READY nonce", dh2 || h3).
-        let ready_key = kdf(ctx!("READY key"), &[&dh2, &self.transcript]);
-        let ready_nonce = kdf24(ctx!("READY nonce"), &[&dh2, &self.transcript]);
+        let ready_key = kdf(ctx!("READY key"), &[&*dh2, &self.transcript]);
+        let ready_nonce = kdf24(ctx!("READY nonce"), &[&*dh2, &self.transcript]);
         let ready_box = aead_encrypt(&ready_key, &ready_nonce, &self.metadata, b"READY");
 
         // Update transcript: h4 = H(h3 || READY_wire_bytes).
@@ -407,12 +408,12 @@ pub struct Client {
 enum ClientState {
     Initial,
     AwaitingWelcome {
-        cn_secret: X25519Secret,
+        cn_secret: Zeroizing<X25519Secret>,
         cn_public: X25519Public,
-        dh1: Hash,
+        dh1: Zeroizing<Hash>,
     },
     AwaitingReady {
-        dh2: Hash,
+        dh2: Zeroizing<Hash>,
     },
     Done {
         peer_metadata: Vec<u8>,
@@ -445,9 +446,10 @@ impl Client {
             return Err(self.fail("client tried to build_hello out of state"));
         }
         let (cn_secret, cn_public) = ephemeral_keypair();
-        let dh1 = x25519(&cn_secret, &self.server_public)?;
+        let cn_secret = Zeroizing::new(cn_secret);
+        let dh1 = Zeroizing::new(x25519(&cn_secret, &self.server_public)?);
 
-        let hello_key = kdf(ctx!("HELLO key"), &[&dh1]);
+        let hello_key = kdf(ctx!("HELLO key"), &[&*dh1]);
         let hello_nonce = kdf24(ctx!("HELLO nonce"), &[&cn_public]);
         let hello_box = aead_encrypt(&hello_key, &hello_nonce, &[0u8; 64], b"HELLO");
 
@@ -490,7 +492,7 @@ impl Client {
             )));
         }
 
-        let welcome_key = kdf(ctx!("WELCOME key"), &[&dh1]);
+        let welcome_key = kdf(ctx!("WELCOME key"), &[&*dh1]);
         let welcome_nonce = kdf24(ctx!("WELCOME nonce"), &[&self.transcript]);
         let welcome_plain = aead_decrypt(&welcome_key, &welcome_nonce, welcome_body, b"WELCOME")?;
         if welcome_plain.len() != KEY_LEN + COOKIE_LEN {
@@ -504,12 +506,13 @@ impl Client {
         self.transcript = hash_chain(&self.transcript, &welcome_wire);
 
         // dh2 = X25519(c', S')
-        let dh2 = x25519(&cn_secret, &sn_public)?;
+        let dh2 = Zeroizing::new(x25519(&cn_secret, &sn_public)?);
 
         // Build vouch: Encrypt(C' || S, aad="VOUCH") under dh3.
-        let dh3 = x25519(&self.permanent.secret, &sn_public)?;
-        let vouch_key = kdf(ctx!("VOUCH key"), &[&dh3]);
-        let vouch_nonce = kdf24(ctx!("VOUCH nonce"), &[&dh3]);
+        let dh3 = Zeroizing::new(x25519(&self.permanent.secret, &sn_public)?);
+
+        let vouch_key = kdf(ctx!("VOUCH key"), &[&*dh3]);
+        let vouch_nonce = kdf24(ctx!("VOUCH nonce"), &[&*dh3]);
         let mut vouch_plain = Vec::with_capacity(KEY_LEN + KEY_LEN);
         vouch_plain.extend_from_slice(&cn_public);
         vouch_plain.extend_from_slice(&self.server_public);
@@ -517,8 +520,8 @@ impl Client {
         debug_assert_eq!(vouch_box.len(), VOUCH_BOX_LEN);
 
         // Build initiate_box: Encrypt(C || vouch_box || metadata, aad="INITIATE")
-        let initiate_key = kdf(ctx!("INITIATE key"), &[&dh2, &self.transcript]);
-        let initiate_nonce = kdf24(ctx!("INITIATE nonce"), &[&dh2, &self.transcript]);
+        let initiate_key = kdf(ctx!("INITIATE key"), &[&*dh2, &self.transcript]);
+        let initiate_nonce = kdf24(ctx!("INITIATE nonce"), &[&*dh2, &self.transcript]);
         let mut initiate_plain = Vec::new();
         initiate_plain.extend_from_slice(&self.permanent.public);
         initiate_plain.extend_from_slice(&vouch_box);
@@ -547,8 +550,8 @@ impl Client {
             return Err(self.fail("client saw READY out of state"));
         };
 
-        let ready_key = kdf(ctx!("READY key"), &[&dh2, &self.transcript]);
-        let ready_nonce = kdf24(ctx!("READY nonce"), &[&dh2, &self.transcript]);
+        let ready_key = kdf(ctx!("READY key"), &[&*dh2, &self.transcript]);
+        let ready_nonce = kdf24(ctx!("READY nonce"), &[&*dh2, &self.transcript]);
         let ready_plain = aead_decrypt(&ready_key, &ready_nonce, ready_body, b"READY")?;
 
         // Update transcript: h4 = H(h3 || READY_wire_bytes).

@@ -5,7 +5,7 @@
 //!
 //!     cargo run -p zguide-tokio-01-req-rep --bin broker [frontend] [backend]
 
-use omq::{Endpoint, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
     args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))

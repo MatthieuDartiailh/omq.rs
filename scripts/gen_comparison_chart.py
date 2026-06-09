@@ -28,11 +28,11 @@ COLORS = {
 
 LABELS = {
     "libzmq": "libzmq v4.3.5",
-    "omq-compio": "omq-compio (MT)",
+    "omq-compio": "omq-compio",
     "omq-compio-st": "omq-compio (ST)",
     "omq-tokio": "omq-tokio",
     "zmq.rs": "zmq.rs v0.6.0",
-    "rzmq": "rzmq v0.5.15",
+    "rzmq": "rzmq v0.5.18",
     "omq-libzmq": "omq-libzmq",
 }
 
@@ -297,7 +297,7 @@ def draw_throughput_panel(
     L.append(svg_text(40, mid_y, "msg/s", weight="600", rotate=-90))
 
     # dashed msg/s lines
-    draw_order = [name for name in ["rzmq", "zmq.rs", "libzmq", "omq-libzmq", "omq-tokio", "omq-compio-st", "omq-compio"]
+    draw_order = [name for name in ["rzmq", "zmq.rs", "libzmq", "omq-tokio", "omq-compio-st", "omq-compio"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -362,7 +362,7 @@ def draw_latency_panel(
     mid_y = (y_top + y_bot) / 2
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
-    draw_order = [name for name in ["libzmq", "omq-libzmq", "omq-tokio", "rzmq", "zmq.rs", "omq-compio-st", "omq-compio"]
+    draw_order = [name for name in ["libzmq", "omq-tokio", "rzmq", "zmq.rs", "omq-compio-st", "omq-compio"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -433,8 +433,9 @@ def detect_hardware() -> str | None:
     return None
 
 
-def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float):
-    legend_items = [(k, LABELS[k]) for k in impls if k in COLORS]
+def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float,
+                      label_overrides: dict | None = None):
+    legend_items = [(k, (label_overrides or {}).get(k, LABELS[k])) for k in impls if k in COLORS]
     item_w = 125
     total_w = len(legend_items) * item_w
     start_x = mid_x - total_w / 2
@@ -458,7 +459,8 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
                    fixed_msg_max: float | None = None,
                    fixed_gbs_max: float | None = None,
                    msg_break: tuple[float, float] | None = None,
-                   hw_label: str | None = None) -> str:
+                   hw_label: str | None = None,
+                   label_overrides: dict | None = None) -> str:
     sizes = data["sizes"]
     tput = data["tput"]
     n = len(sizes)
@@ -501,7 +503,7 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
         )
 
     leg_y = t1_y_bot + 60
-    _draw_impl_legend(L, impls, mid_x, leg_y)
+    _draw_impl_legend(L, impls, mid_x, leg_y, label_overrides=label_overrides)
 
     # line-type legend (dashed = msg/s, solid = GB/s)
     lt_y = leg_y + 22
@@ -536,7 +538,8 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
 
 def generate_latency_chart(data: dict, impls: list[str], transport_label: str,
                            fixed_lat_max: float | None = None,
-                           hw_label: str | None = None) -> str:
+                           hw_label: str | None = None,
+                           label_overrides: dict | None = None) -> str:
     sizes = data["sizes"]
     lat = data["lat"]
     n = len(sizes)
@@ -579,7 +582,7 @@ def generate_latency_chart(data: dict, impls: list[str], transport_label: str,
     )
 
     leg_y = y_bot + 50
-    _draw_impl_legend(L, impls, mid_x, leg_y)
+    _draw_impl_legend(L, impls, mid_x, leg_y, label_overrides=label_overrides)
 
     L.append("</svg>")
     return "\n".join(L) + "\n"
@@ -771,10 +774,12 @@ def main():
     FIXED_LAT_MAX = 150.0
     FIXED_INPROC_LAT_MAX = 40.0
     hw = detect_hardware()
+    if hw:
+        hw = "Linux VM on a 2018 Mac Mini, " + hw
 
-    tcp_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq", "omq-libzmq"]
-    ipc_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq", "omq-libzmq"]
-    inproc_impls = ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio", "rzmq", "omq-libzmq"]
+    tcp_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
+    ipc_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
+    inproc_impls = ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio", "rzmq"]
 
     for transport, impls, label, log_gbs in [
         ("tcp", tcp_impls, "TCP loopback, 2-process", False),
@@ -788,18 +793,21 @@ def main():
 
         msg_max = 10e6 if transport == "inproc" else FIXED_MSG_MAX
         msg_break = (1e6, 0.25) if not log_gbs else None
+        inproc_overrides = {"omq-compio": "omq-compio (MT)"} if transport == "inproc" else None
         svg = generate_chart(data, impls, label, log_gbs=log_gbs,
                              fixed_msg_max=msg_max,
                              fixed_gbs_max=None if log_gbs else FIXED_GBS_MAX,
                              msg_break=msg_break,
-                             hw_label=hw)
+                             hw_label=hw,
+                             label_overrides=inproc_overrides)
         out = REPO / "doc" / "charts" / "pushpull" / f"comparison_{transport}.svg"
         out.write_text(svg)
         print(f"Written: {out}", file=sys.stderr)
 
         lat_max = FIXED_INPROC_LAT_MAX if transport == "inproc" else FIXED_LAT_MAX
         svg = generate_latency_chart(data, impls, label,
-                                     fixed_lat_max=lat_max, hw_label=hw)
+                                     fixed_lat_max=lat_max, hw_label=hw,
+                                     label_overrides=inproc_overrides)
         if svg:
             out = REPO / "doc" / "charts" / "reqrep" / f"comparison_{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -809,7 +817,7 @@ def main():
     # PUB/SUB charts
     PUBSUB_MSG_MAX = 10e6
     PUBSUB_GBS_MAX = 8.0
-    pubsub_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq", "omq-libzmq"]
+    pubsub_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
     pubsub_peer_counts = [1, 8, 64]
 
     for transport, label, log in [
@@ -828,8 +836,8 @@ def main():
             fixed_msg_max=PUBSUB_MSG_MAX,
             fixed_gbs_max=None if log else PUBSUB_GBS_MAX,
             scale_overrides={
-                1: (PUBSUB_MSG_MAX, 6.0),
-                8: (2e6, PUBSUB_GBS_MAX),
+                1: (PUBSUB_MSG_MAX, 8.0),
+                8: (2e6, 8.0),
                 64: (300e3, 12.0),
             },
             hw_label=hw,
@@ -841,7 +849,7 @@ def main():
 
 
     # Fan-out / fan-in charts (TCP only)
-    fanio_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq", "omq-libzmq"]
+    fanio_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
     fanio_peers = [2, 4, 8]
 
     def fanout_title(peers, tl):

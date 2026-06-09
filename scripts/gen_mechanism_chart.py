@@ -112,12 +112,14 @@ def load_data(jsonl: Path) -> dict:
     return {"sizes": sizes, "series": series}
 
 
-def generate_svg(data: dict, backend: str) -> str:
+def generate_svg(data: dict, backend: str, *, axis_limits=None) -> str:
     sizes = data["sizes"]
     series = data["series"]
     n = len(sizes)
 
     hw_label = detect_hardware()
+    if hw_label:
+        hw_label = "Linux VM on a 2018 Mac Mini, " + hw_label
     hw_offset = 14 if hw_label else 0
 
     x_left, x_right = 90, 760
@@ -130,13 +132,15 @@ def generate_svg(data: dict, backend: str) -> str:
 
     xs = [x_left + i * plot_w / (n - 1) for i in range(n)]
 
-    all_msgs = [pt[0] for pts in series.values() for pt in pts if pt[0] > 0]
-    all_gbs = [pt[1] for pts in series.values() for pt in pts if pt[1] > 0]
-
-    msg_lo = math.floor(math.log10(min(all_msgs) * 0.8))
-    msg_hi = math.ceil(math.log10(max(all_msgs) * 1.15))
-    gbs_lo = math.floor(math.log10(min(all_gbs) * 0.8))
-    gbs_hi = math.ceil(math.log10(max(all_gbs) * 1.15))
+    if axis_limits:
+        msg_lo, msg_hi, gbs_lo, gbs_hi = axis_limits
+    else:
+        all_msgs = [pt[0] for pts in series.values() for pt in pts if pt[0] > 0]
+        all_gbs = [pt[1] for pts in series.values() for pt in pts if pt[1] > 0]
+        msg_lo = math.floor(math.log10(min(all_msgs) * 0.8))
+        msg_hi = math.ceil(math.log10(max(all_msgs) * 1.15))
+        gbs_lo = math.floor(math.log10(min(all_gbs) * 0.8))
+        gbs_hi = math.ceil(math.log10(max(all_gbs) * 1.15))
 
     def y_msg(v):
         if v <= 0:
@@ -185,22 +189,19 @@ def generate_svg(data: dict, backend: str) -> str:
             if v < 10 ** msg_lo or v > 10 ** msg_hi:
                 continue
             yy = y_msg(v)
-            if mult == 1:
-                L.append(
-                    f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
-                    f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"/>'
-                )
-                L.append(
-                    f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-                    f' dominant-baseline="middle" fill="#374151" font-size="10">'
-                    f'{_fmt_y_rate(v)}</text>'
-                )
-            else:
-                L.append(
-                    f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
-                    f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"'
-                    f' stroke-dasharray="2,8"/>'
-                )
+            is_decade = mult == 1
+            L.append(
+                f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
+                f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"'
+                f'{" stroke-dasharray=\"2,8\"" if not is_decade else ""}/>'
+            )
+            L.append(
+                f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
+                f' dominant-baseline="middle"'
+                f' fill="{"#374151" if is_decade else "#9ca3af"}"'
+                f' font-size="{"10" if is_decade else "9"}">'
+                f'{_fmt_y_rate(v)}</text>'
+            )
 
     # Right axis: throughput log scale
     for decade in range(gbs_lo, gbs_hi + 1):
@@ -210,24 +211,20 @@ def generate_svg(data: dict, backend: str) -> str:
             if v < 10 ** gbs_lo or v > 10 ** gbs_hi:
                 continue
             yy = y_tput(v)
-            if mult == 1:
-                L.append(
-                    f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
-                    f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"'
-                    f' stroke-dasharray="3,6"/>'
-                )
-                label = f"{v:g}"
-                L.append(
-                    f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-                    f' dominant-baseline="middle" fill="#6b7280" font-size="10">'
-                    f'{label} GB/s</text>'
-                )
-            else:
-                L.append(
-                    f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
-                    f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"'
-                    f' stroke-dasharray="2,8"/>'
-                )
+            is_decade = mult == 1
+            label = f"{v:g}" if v >= 1 else f"{v:.3g}"
+            L.append(
+                f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}"'
+                f' y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"'
+                f' stroke-dasharray="{"3,6" if is_decade else "2,8"}"/>'
+            )
+            L.append(
+                f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
+                f' dominant-baseline="middle"'
+                f' fill="{"#6b7280" if is_decade else "#9ca3af"}"'
+                f' font-size="{"10" if is_decade else "9"}">'
+                f'{label} GB/s</text>'
+            )
 
     # Vertical gridlines
     for x in xs:
@@ -347,6 +344,7 @@ def main():
 
     backends = sys.argv[1:] if len(sys.argv) > 1 else ["compio", "tokio"]
 
+    all_data = {}
     for backend in backends:
         jsonl = cache_dir / f"results_{backend}.jsonl"
         if not jsonl.exists():
@@ -359,8 +357,23 @@ def main():
                   f"cargo bench -p omq-{backend} --bench mechanism "
                   f"--features 'plain curve blake3zmq'", file=sys.stderr)
             continue
+        all_data[backend] = data
 
-        svg = generate_svg(data, backend)
+    axis_limits = None
+    if len(all_data) > 1:
+        all_msgs = [pt[0] for d in all_data.values()
+                     for pts in d["series"].values() for pt in pts if pt[0] > 0]
+        all_gbs = [pt[1] for d in all_data.values()
+                    for pts in d["series"].values() for pt in pts if pt[1] > 0]
+        axis_limits = (
+            math.floor(math.log10(min(all_msgs) * 0.8)),
+            math.ceil(math.log10(max(all_msgs) * 1.15)),
+            math.floor(math.log10(min(all_gbs) * 0.8)),
+            math.ceil(math.log10(max(all_gbs) * 1.15)),
+        )
+
+    for backend, data in all_data.items():
+        svg = generate_svg(data, backend, axis_limits=axis_limits)
         output = out_dir / f"{backend}.svg"
         output.write_text(svg)
         print(f"Written: {output}", file=sys.stderr)

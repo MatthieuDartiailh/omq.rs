@@ -35,7 +35,7 @@ zstd = ["dep:zstd-safe"]
 ws = []
 
 [dependencies]
-blake3 = { version = "1", optional = true }
+blake3 = { version = "1.8", optional = true }
 bytes = "1.11.0"
 chacha20-blake3 = { version = "0.10.0", optional = true }
 crypto_box = { version = "0.9", features = ["std"], optional = true }

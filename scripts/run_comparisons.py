@@ -760,7 +760,7 @@ IMPLS = {
     },
     "zmq.rs": {
         "prefix": "q",
-        "transports": ["tcp"],
+        "transports": ["tcp", "ipc"],
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
         "supports_pubsub": True,

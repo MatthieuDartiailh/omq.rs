@@ -15,11 +15,14 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 | Direct-recv | `Socket::recv` claims the read side from the driver and feeds the codec inline. Saves ~12 µs per round-trip. |
 | Large-message recv | Payloads above 128 KiB accumulated into a pre-allocated `BytesMut`. Frames above pool capacity fall back to one-shot read. |
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
+</p>
+
 ## Usage
 
 ```rust
-use omq::Socket;
-use omq::prelude::*;
+use omq_compio::{Socket, SocketType, Options, Message};
 
 let push = Socket::new(SocketType::Push, Options::default());
 push.bind("tcp://127.0.0.1:5555".parse()?).await?;
@@ -31,7 +34,11 @@ push.send(Message::single("hello")).await?;
 let msg = pull.recv().await?;
 ```
 
-Most users should depend on the `omq` facade crate instead of `omq-compio` directly.
+Not yet published to crates.io (blocked on an unpublished compio revision). Install from git:
+
+```sh
+cargo add omq-compio --git https://github.com/paddor/omq.rs
+```
 
 ## Internals
 
