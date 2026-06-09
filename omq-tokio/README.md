@@ -12,7 +12,7 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 |-|-|
 | Multi-threaded | Concurrent `send`/`recv` from multiple tasks is safe |
 | Actor with bypass | `SocketDriver` actor owns mutable state. Common message path bypasses it: `send` pushes into the routing strategy directly, `recv` pulls from the user channel directly. |
-| Flat-buf encoding | Small messages (< 48 KiB) packed into one `BytesMut`, one `write_all` per batch |
+| Arena encoding | Small messages (< 96 KiB) packed into one `BytesMut`, one `write_all` per batch |
 | Shared-queue work stealing | Round-robin types (PUSH/DEALER) share one `flume` queue. Each connection driver polls it in a `select!` arm, draining up to 256 messages per wakeup. |
 
 <p align="center">
@@ -39,7 +39,7 @@ let msg = pull.recv().await?;
 ## Internals
 
 [`doc/tokio.md`](../doc/tokio.md) covers the actor shape, send/recv bypass, routing
-strategies, and flat-buf encoding threshold.
+strategies, and arena encoding threshold.
 
 ## License
 
