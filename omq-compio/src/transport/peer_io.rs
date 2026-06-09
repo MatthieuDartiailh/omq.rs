@@ -27,9 +27,9 @@ use compio::BufResult;
 use compio::driver::op::{RecvFlags, RecvMulti};
 use compio::driver::{BufferRef, ToSharedFd};
 use compio::io::{AsyncRead, AsyncWrite};
-use compio::net::{OwnedWriteHalf, TcpStream, UnixStream};
+use compio::net::{TcpStream, UnixStream};
 use compio::runtime::fd::AsyncFd;
-use compio::runtime::{CancelToken, Runtime, submit_multi};
+use compio::runtime::{CancelToken, Runtime, SubmitMultiStream, submit_multi};
 use futures::Stream;
 
 use omq_proto::proto::connection::Connection;
@@ -103,22 +103,29 @@ impl WireReader {
     /// `ProactorBuilder`).
     ///
     /// [`SharedFd`]: compio::driver::SharedFd
-    pub(crate) fn build_recv_stream(&self) -> io::Result<CancellableRecvStream> {
-        let pool = Runtime::current().buffer_pool()?;
+    pub(crate) fn build_recv_stream(&self) -> CancellableRecvStream {
         let cancel = CancelToken::new();
         let stream: RecvStream = match self {
             Self::Tcp(fd) => {
-                let op = RecvMulti::new(fd.to_shared_fd(), &pool, 0, RecvFlags::empty())?;
-                Box::pin(submit_multi(op).into_managed(pool))
+                let shared_fd = fd.to_shared_fd();
+                Box::pin(SubmitMultiStream::new(move || {
+                    let pool = Runtime::current().buffer_pool()?;
+                    let op = RecvMulti::new(shared_fd.clone(), &pool, 0, RecvFlags::empty())?;
+                    Ok(submit_multi(op).into_managed(pool))
+                }))
             }
             Self::Ipc(fd) => {
-                let op = RecvMulti::new(fd.to_shared_fd(), &pool, 0, RecvFlags::empty())?;
-                Box::pin(submit_multi(op).into_managed(pool))
+                let shared_fd = fd.to_shared_fd();
+                Box::pin(SubmitMultiStream::new(move || {
+                    let pool = Runtime::current().buffer_pool()?;
+                    let op = RecvMulti::new(shared_fd.clone(), &pool, 0, RecvFlags::empty())?;
+                    Ok(submit_multi(op).into_managed(pool))
+                }))
             }
             #[cfg(feature = "ws")]
             Self::Wss(_) => unreachable!("TLS streams use one-shot reads"),
         };
-        Ok(CancellableRecvStream { stream, cancel })
+        CancellableRecvStream { stream, cancel }
     }
 
     /// Clone the underlying fd into an owned [`WireRecvFd`]. The clone
@@ -238,8 +245,8 @@ impl From<AsyncFd<UnixStream>> for WireReader {
 
 /// Wire writer half. Mirrors [`WireReader`].
 pub(crate) enum WireWriter {
-    Tcp(OwnedWriteHalf<TcpStream>),
-    Ipc(OwnedWriteHalf<UnixStream>),
+    Tcp(AsyncFd<TcpStream>),
+    Ipc(AsyncFd<UnixStream>),
     #[cfg(feature = "ws")]
     Wss(super::ws::SharedTls),
 }
@@ -284,14 +291,14 @@ impl WireWriter {
     }
 }
 
-impl From<OwnedWriteHalf<TcpStream>> for WireWriter {
-    fn from(w: OwnedWriteHalf<TcpStream>) -> Self {
+impl From<AsyncFd<TcpStream>> for WireWriter {
+    fn from(w: AsyncFd<TcpStream>) -> Self {
         Self::Tcp(w)
     }
 }
 
-impl From<OwnedWriteHalf<UnixStream>> for WireWriter {
-    fn from(w: OwnedWriteHalf<UnixStream>) -> Self {
+impl From<AsyncFd<UnixStream>> for WireWriter {
+    fn from(w: AsyncFd<UnixStream>) -> Self {
         Self::Ipc(w)
     }
 }

@@ -143,7 +143,7 @@ impl LocalStream {
             *self.0.lock().await = Some(RecvStreamState::OneShot);
             return Ok(());
         }
-        let new_stream = io.reader.build_recv_stream()?;
+        let new_stream = io.reader.build_recv_stream();
         drop(io);
         *self.0.lock().await = Some(RecvStreamState::MultiShot(new_stream));
         Ok(())

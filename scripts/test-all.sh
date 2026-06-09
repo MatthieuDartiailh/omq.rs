@@ -140,16 +140,7 @@ par run cargo test -p omq-compio --features "$all_features"
 par_wait
 
 # ---------------------------------------------------------------- #
-# 4) Facade crate, both backend choices. Verifies the public API
-#    re-exports compile and the `BACKEND` const reflects the
-#    selected backend.
-# ---------------------------------------------------------------- #
-par run cargo test -p omq
-par run cargo test -p omq --no-default-features --features tokio-backend
-par_wait
-
-# ---------------------------------------------------------------- #
-# 5) Hand-rolled fuzz suites (~1 M iters each; slow). Opt in with
+# 4) Hand-rolled fuzz suites (~1 M iters each; slow). Opt in with
 #    `OMQ_FUZZ=1`.
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
@@ -159,7 +150,7 @@ if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
 fi
 
 # ---------------------------------------------------------------- #
-# 6) pyomq sync + asyncio + cross-impl interop. Built out-of-tree
+# 5) pyomq sync + asyncio + cross-impl interop. Built out-of-tree
 #    (its own Cargo.lock + maturin); skip when the dev venv isn't
 #    set up. `OMQ_SKIP_PYOMQ=1` overrides.
 # ---------------------------------------------------------------- #

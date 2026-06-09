@@ -8,6 +8,7 @@
 //! them out on its C thread. Zero channel crossings, zero io thread
 //! involvement, zero per-message heap allocation.
 
+use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -46,7 +47,7 @@ const HEADER_SIZE: usize = 4;
 const WRAP_SENTINEL: u32 = u32::MAX;
 
 struct RingBuf {
-    buf: Box<[u8]>,
+    buf: Box<[UnsafeCell<u8>]>,
     capacity: usize,
     /// Producer write position (mod capacity).
     tail: AtomicUsize,
@@ -66,7 +67,10 @@ impl RingBuf {
     fn new(capacity: usize) -> Self {
         let cap = capacity.next_power_of_two();
         Self {
-            buf: vec![0u8; cap].into_boxed_slice(),
+            buf: (0..cap)
+                .map(|_| UnsafeCell::new(0u8))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             capacity: cap,
             tail: AtomicUsize::new(0),
             head: AtomicUsize::new(0),
@@ -109,6 +113,7 @@ impl std::fmt::Debug for RingConsumer {
 unsafe impl Send for RingProducer {}
 unsafe impl Send for RingConsumer {}
 
+#[expect(clippy::arc_with_non_send_sync)]
 fn ring_pair(capacity: usize) -> (RingProducer, RingConsumer) {
     let ring = Arc::new(RingBuf::new(capacity));
     (
@@ -160,7 +165,7 @@ impl RingProducer {
             // SAFETY: tail_offset..tail_offset+4 is within buf (contiguous >= HEADER_SIZE
             // because capacity is a power of two and entry_size >= HEADER_SIZE).
             unsafe {
-                let dst = self.ring.buf.as_ptr().add(tail_offset).cast_mut();
+                let dst = self.ring.buf[tail_offset].get();
                 std::ptr::copy_nonoverlapping(
                     WRAP_SENTINEL.to_ne_bytes().as_ptr(),
                     dst,
@@ -183,7 +188,7 @@ impl RingProducer {
         let len = data.len() as u32;
         // SAFETY: caller guaranteed sufficient contiguous space.
         unsafe {
-            let base = self.ring.buf.as_ptr().add(offset).cast_mut();
+            let base = self.ring.buf[offset].get();
             std::ptr::copy_nonoverlapping(len.to_ne_bytes().as_ptr(), base, HEADER_SIZE);
             std::ptr::copy_nonoverlapping(data.as_ptr(), base.add(HEADER_SIZE), data.len());
         }
@@ -220,7 +225,7 @@ impl RingConsumer {
         let len = unsafe {
             let mut bytes = [0u8; HEADER_SIZE];
             std::ptr::copy_nonoverlapping(
-                self.ring.buf.as_ptr().add(offset),
+                self.ring.buf[offset].get(),
                 bytes.as_mut_ptr(),
                 HEADER_SIZE,
             );
@@ -240,26 +245,22 @@ impl RingConsumer {
             let actual_len = unsafe {
                 let mut bytes = [0u8; HEADER_SIZE];
                 std::ptr::copy_nonoverlapping(
-                    self.ring.buf.as_ptr().add(new_offset),
+                    self.ring.buf[new_offset].get(),
                     bytes.as_mut_ptr(),
                     HEADER_SIZE,
                 );
                 u32::from_ne_bytes(bytes)
             };
             debug_assert_ne!(actual_len, WRAP_SENTINEL);
-            Some(unsafe {
-                (
-                    self.ring.buf.as_ptr().add(new_offset + HEADER_SIZE),
-                    actual_len as usize,
-                )
-            })
+            Some((
+                self.ring.buf[new_offset + HEADER_SIZE].get().cast_const(),
+                actual_len as usize,
+            ))
         } else {
-            Some(unsafe {
-                (
-                    self.ring.buf.as_ptr().add(offset + HEADER_SIZE),
-                    len as usize,
-                )
-            })
+            Some((
+                self.ring.buf[offset + HEADER_SIZE].get().cast_const(),
+                len as usize,
+            ))
         }
     }
 

@@ -209,7 +209,7 @@ async fn dial_supervisor<F, Fut>(
             reset_peer_channel(&inner, &handle, &info_holder, peer_sub.as_ref());
 
         let uses_crypto = inner.options.mechanism.has_frame_transform();
-        let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
+        let (peer_io, recv_stream) = crate::transport::driver::build_peer_io(
             role,
             inner.socket_type,
             &inner.options,
@@ -219,9 +219,7 @@ async fn dial_supervisor<F, Fut>(
             None,
             #[cfg(feature = "ws")]
             None,
-        ) else {
-            continue;
-        };
+        );
         let state = DirectIoState::new(
             peer_io,
             peer.writer,
@@ -336,14 +334,12 @@ pub(super) fn connect_tcp_with_reconnect(
                         }
                         None => (None, None, false, None),
                     };
-                let read_clone = stream.clone();
-                let read_fd = compio::runtime::fd::AsyncFd::new(read_clone).map_err(|e| {
+                let fd = compio::runtime::fd::AsyncFd::new(stream).map_err(|e| {
                     omq_proto::error::Error::Io(std::io::Error::other(e.to_string()))
                 })?;
-                let (_, writer) = stream.into_split();
                 Ok(ConnectedPeer {
-                    writer: writer.into(),
-                    reader: read_fd.into(),
+                    writer: fd.clone().into(),
+                    reader: fd.into(),
                     peer_addr,
                     peer_ident,
                     has_transform,
@@ -408,14 +404,12 @@ pub(super) fn connect_ipc_with_reconnect(
                 if let Ok(poll_fd) = stream.to_poll_fd() {
                     let _ = opts.apply_socket_buffers(&poll_fd);
                 }
-                let read_clone = stream.clone();
-                let read_fd = compio::runtime::fd::AsyncFd::new(read_clone).map_err(|e| {
+                let fd = compio::runtime::fd::AsyncFd::new(stream).map_err(|e| {
                     omq_proto::error::Error::Io(std::io::Error::other(e.to_string()))
                 })?;
-                let (_, writer) = stream.into_split();
                 Ok(ConnectedPeer {
-                    writer: writer.into(),
-                    reader: read_fd.into(),
+                    writer: fd.clone().into(),
+                    reader: fd.into(),
                     peer_addr: None,
                     peer_ident: PeerIdent::Path(ep_ident),
                     has_transform: false,

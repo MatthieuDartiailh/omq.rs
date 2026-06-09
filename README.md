@@ -1,7 +1,7 @@
 # ØMQ.rs
 
 [![CI](https://github.com/paddor/omq.rs/actions/workflows/ci.yml/badge.svg)](https://github.com/paddor/omq.rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/omq?color=e9573f)](https://crates.io/crates/omq)
+[![crates.io](https://img.shields.io/crates/v/omq-tokio?color=e9573f)](https://crates.io/crates/omq-tokio)
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-%3E%3D%201.93-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
@@ -17,7 +17,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `zstd+tcp://`)
 - 4 security mechanisms: NULL, PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
-- Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/)), zmq.rs drop-in ([omq-zeromq](omq-zeromq/))
+- Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
 
 ### vs libzmq and other implementations
 
@@ -35,28 +35,16 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 </details>
 
 <details>
-<summary>PUSH fan-out (1 PUSH → N PULL): TCP</summary>
+<summary>More PUSH/PULL: fan-out, fan-in, IPC, inproc</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout_tcp.svg" alt="PUSH fan-out: TCP" width="850">
 </p>
-</details>
-
-<details>
-<summary>PUSH fan-in (N PUSH → 1 PULL): TCP</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin_tcp.svg" alt="PUSH fan-in: TCP" width="850">
 </p>
-</details>
-
-<details>
-<summary>PUSH/PULL throughput: IPC</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
 </p>
-</details>
-
-<details>
-<summary>PUSH/PULL throughput: inproc</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
 </p>
@@ -70,28 +58,20 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 </details>
 
 <details>
-<summary>Mechanism overhead: omq-tokio (NULL / PLAIN / CURVE / BLAKE3ZMQ)</summary>
+<summary>Mechanisms: NULL / PLAIN / CURVE / BLAKE3ZMQ</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/tokio.svg" alt="Mechanism overhead: omq-tokio" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/tokio.svg" alt="Mechanisms: omq-tokio" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/compio.svg" alt="Mechanisms: omq-compio" width="850">
 </p>
 </details>
 
 <details>
-<summary>Mechanism overhead: omq-compio (NULL / PLAIN / CURVE / BLAKE3ZMQ)</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/compio.svg" alt="Mechanism overhead: omq-compio" width="850">
-</p>
-</details>
-
-<details>
-<summary>Compression throughput: omq-tokio (lz4 / zstd, dict 2 KiB)</summary>
+<summary>Compression throughput: lz4 / zstd</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
 </p>
-</details>
-
-<details>
-<summary>Compression throughput: omq-compio (lz4 / zstd, dict 2 KiB)</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/compio_2048.svg" alt="Compression throughput: omq-compio" width="850">
 </p>
@@ -103,14 +83,18 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 > **Experimental.** The API is unstable and may change without notice. Not yet battle-tested in production. Bug reports and testing in real workloads are very welcome.
 
 ```sh
-cargo add omq                     # tokio backend (default)
-cargo add omq --no-default-features --features compio-backend
+cargo add omq-tokio               # default: multi-thread tokio (Linux/macOS)
 ```
 
-If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv — just async Rust:
+Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `interop_compio` test suites:
+
+- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS)
+- [`omq-compio`](omq-compio/): single-thread io_uring/IOCP (Linux; not yet on crates.io)
+
+If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
 
 ```rust
-use omq::{Message, Options, Socket, SocketType};
+use omq_tokio::{Message, Options, Socket, SocketType};
 
 let push = Socket::new(SocketType::Push, Options::default());
 push.connect("tcp://127.0.0.1:5555".parse()?).await?;
@@ -121,13 +105,6 @@ pull.bind("tcp://127.0.0.1:5555".parse()?).await?;
 let msg = pull.recv().await?;
 assert_eq!(&msg[0], b"hello");
 ```
-
-`omq` is a thin facade; pick one backend at build time:
-
-- `tokio-backend` (default): multi-thread tokio + mio ([`omq-tokio`](omq-tokio/))
-- `compio-backend`: single-thread io_uring/IOCP ([`omq-compio`](omq-compio/))
-
-Identical public `Socket` API on both, verified by `coverage_matrix` + `interop_compio` test suites.
 
 ## Cargo features
 
@@ -141,7 +118,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `plain`           | PLAIN username/password auth (RFC 24)             | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
 | `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
-| `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4-sys` |
+| `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4rip` |
 | `zstd`            | `zstd+tcp://` compression transport ([RFC](https://github.com/paddor/omq-zstd/blob/main/RFC.md)) | `zstd-safe` (vends `libzstd`; needs `cc`) |
 | `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
 
@@ -167,20 +144,17 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 ## Workspace
 
-Nine crates, one repo. The facade re-exports one backend; the rest are
-independent, versioned, and published separately.
+Seven crates, one repo.
 
 | Crate | What it does |
 |-------|-------------|
-| [`omq`](omq/) | Facade: re-exports `omq-compio` or `omq-tokio` at build time |
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions |
-| [`omq-tokio`](omq-tokio/) | Default backend: multi-thread tokio |
-| [`omq-compio`](omq-compio/) | io_uring backend: single-thread io_uring / IOCP |
+| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS) |
+| [`omq-compio`](omq-compio/) | Single-thread io_uring / IOCP backend (Linux) |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
-| [`omq-zeromq`](omq-zeromq/) | Drop-in replacement for the [`zeromq`](https://crates.io/crates/zeromq) Rust crate |
 | [`blume`](blume/) | Batching MPSC channel with swap-drain consumer |
 | [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch |
-| [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-compio, sync + asyncio) |
+| [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) |
 
 ## Testing
 

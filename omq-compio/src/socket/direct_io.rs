@@ -204,10 +204,7 @@ pub(crate) async fn one_shot_recv_and_feed(
                     drop(io);
                     break OneShotLargeRecvOutcome::Took;
                 }
-                let new_stream = match io.reader.build_recv_stream() {
-                    Ok(s) => s,
-                    Err(e) => break OneShotLargeRecvOutcome::IoErr(e),
-                };
+                let new_stream = io.reader.build_recv_stream();
                 drop(io);
                 **sguard = Some(RecvStreamState::MultiShot(new_stream));
                 state.multishot_rearms.fetch_add(1, Ordering::Relaxed);

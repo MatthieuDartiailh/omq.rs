@@ -305,15 +305,13 @@ pub(super) fn install_ws_peer(
     };
     match upgraded.transport {
         WsTransport::Plain(stream) => {
-            let read_clone = stream.clone();
-            let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
+            let Ok(fd) = compio::runtime::fd::AsyncFd::new(stream) else {
                 return;
             };
-            let (_, writer) = stream.into_split();
             install_accepted_wire_peer_with_leftover(
                 inner,
-                read_fd.into(),
-                writer.into(),
+                fd.clone().into(),
+                fd.into(),
                 role,
                 endpoint,
                 connection_id,
@@ -403,7 +401,7 @@ fn install_accepted_wire_peer_with_leftover(
     let uses_crypto = tc.uses_crypto;
     #[cfg(feature = "ws")]
     let ws_role = tc.ws_role;
-    let Ok((peer_io, recv_stream)) = crate::transport::driver::build_peer_io(
+    let (peer_io, recv_stream) = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
         &inner.options,
@@ -413,9 +411,7 @@ fn install_accepted_wire_peer_with_leftover(
         ws_role,
         #[cfg(feature = "ws")]
         leftover,
-    ) else {
-        return;
-    };
+    );
     #[cfg(feature = "ws")]
     let is_ws = ws_role.is_some();
     #[cfg(feature = "ws")]

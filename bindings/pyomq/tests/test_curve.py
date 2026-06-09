@@ -7,20 +7,6 @@ import pytest
 import pyomq as zmq
 
 
-def test_curve_keypair_raises_without_feature():
-    if zmq.has("curve"):
-        pytest.skip("curve is compiled; error path not reachable")
-    with pytest.raises(zmq.error.NotImplementedError):
-        zmq.curve_keypair()
-
-
-def test_curve_public_raises_without_feature():
-    if zmq.has("curve"):
-        pytest.skip("curve is compiled; error path not reachable")
-    with pytest.raises(zmq.error.NotImplementedError):
-        zmq.curve_public(b"x" * 40)
-
-
 @pytest.mark.skipif(not zmq.has("curve"), reason="curve feature not compiled")
 def test_curve_keypair_returns_two_z85_bytes():
     pub, sec = zmq.curve_keypair()

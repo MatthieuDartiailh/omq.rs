@@ -113,15 +113,13 @@ impl Socket {
                 inner
                     .monitor
                     .accepted(ep_for_task.clone(), PeerIdent::Socket(addr), conn_id);
-                let read_clone = stream.clone();
-                let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
+                let Ok(fd) = compio::runtime::fd::AsyncFd::new(stream) else {
                     continue;
                 };
-                let (_, writer) = stream.into_split();
                 install_accepted_wire_peer(
                     &inner,
-                    read_fd.into(),
-                    writer.into(),
+                    fd.clone().into(),
+                    fd.into(),
                     Role::Server,
                     ep_for_task.clone(),
                     conn_id,
@@ -163,15 +161,13 @@ impl Socket {
                     PeerIdent::Path(ident_path.clone()),
                     conn_id,
                 );
-                let read_clone = stream.clone();
-                let Ok(read_fd) = compio::runtime::fd::AsyncFd::new(read_clone) else {
+                let Ok(fd) = compio::runtime::fd::AsyncFd::new(stream) else {
                     continue;
                 };
-                let (_, writer) = stream.into_split();
                 install_accepted_wire_peer(
                     &inner,
-                    read_fd.into(),
-                    writer.into(),
+                    fd.clone().into(),
+                    fd.into(),
                     Role::Server,
                     ep_for_task.clone(),
                     conn_id,
@@ -216,7 +212,8 @@ impl Socket {
                 let cap = super::cmd_channel_capacity(&inner.options);
                 let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
                 let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
-                let (_, writer) = stream.clone().into_split();
+                let writer_fd = compio::runtime::fd::AsyncFd::new(stream.clone())
+                    .expect("AsyncFd for STREAM writer");
                 let slot_idx = inner.insert_peer_slot(
                     PeerSlot {
                         out: PeerOut::Wire(handle),
@@ -233,7 +230,7 @@ impl Socket {
                 let inner2 = inner.clone();
                 let in_tx = inner.in_tx.clone();
                 compio::runtime::spawn(async move {
-                    stream_raw::run(stream, writer.into(), conn_id, in_tx, cmd_rx).await;
+                    stream_raw::run(stream, writer_fd.into(), conn_id, in_tx, cmd_rx).await;
                     inner2.release_slot(slot_idx);
                 })
                 .detach();

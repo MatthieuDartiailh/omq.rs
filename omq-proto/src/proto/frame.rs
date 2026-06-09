@@ -272,7 +272,11 @@ pub(crate) fn try_decode_frame(buf: &mut ChunkedInputBuf) -> Result<Option<Frame
     let Some(hdr) = peek_frame_header(buf)? else {
         return Ok(None);
     };
-    if buf.len() < hdr.header_len + hdr.payload_len {
+    let total = hdr
+        .header_len
+        .checked_add(hdr.payload_len)
+        .ok_or_else(|| Error::Protocol("frame size overflow".into()))?;
+    if buf.len() < total {
         return Ok(None);
     }
     buf.advance(hdr.header_len);

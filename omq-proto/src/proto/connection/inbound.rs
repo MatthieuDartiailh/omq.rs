@@ -197,7 +197,7 @@ impl Connection {
         }
         if let Some(max) = self.config.max_message_size
             && let Some(hdr) = frame::peek_frame_header(&self.in_buf)?
-            && hdr.payload_len + size_of::<Payload>() > max
+            && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
         {
             return Err(Error::MessageTooLarge {
                 size: hdr.payload_len,
@@ -381,7 +381,7 @@ impl Connection {
             return Ok(None);
         };
         if let Some(max) = self.config.max_message_size
-            && hdr.payload_len + size_of::<Payload>() > max
+            && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
         {
             return Err(Error::MessageTooLarge {
                 size: hdr.payload_len,
@@ -553,13 +553,21 @@ impl Connection {
                 return Ok(());
             };
 
-            let total_frame = ws_hdr.header_len + ws_hdr.payload_len as usize;
+            let payload_len = usize::try_from(ws_hdr.payload_len).map_err(|_| {
+                Error::Protocol(format!(
+                    "WS payload length {} exceeds platform usize",
+                    ws_hdr.payload_len
+                ))
+            })?;
+            let total_frame = ws_hdr
+                .header_len
+                .checked_add(payload_len)
+                .ok_or_else(|| Error::Protocol("WS frame size overflow".into()))?;
             if self.in_buf.len() < total_frame {
                 return Ok(());
             }
 
             self.in_buf.advance(ws_hdr.header_len);
-            let payload_len = ws_hdr.payload_len as usize;
 
             match ws_hdr.opcode {
                 ws_codec::OP_BINARY_CODE => {

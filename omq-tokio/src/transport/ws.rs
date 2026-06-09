@@ -296,7 +296,6 @@ pub(crate) async fn connect(
     })
 }
 
-#[expect(clippy::unnecessary_wraps)]
 fn build_tls_connector(accept_invalid_certs: bool) -> Result<tokio_rustls::TlsConnector> {
     use std::sync::Arc;
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -309,7 +308,14 @@ fn build_tls_connector(accept_invalid_certs: bool) -> Result<tokio_rustls::TlsCo
             .set_certificate_verifier(Arc::new(NoVerify));
     } else {
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().expect("load system certs") {
+        let cert_result = rustls_native_certs::load_native_certs();
+        if cert_result.certs.is_empty() && !cert_result.errors.is_empty() {
+            return Err(crate::Error::Io(std::io::Error::other(format!(
+                "failed to load system certificates: {:?}",
+                cert_result.errors
+            ))));
+        }
+        for cert in cert_result.certs {
             let _ = roots.add(cert);
         }
         config = rustls::ClientConfig::builder()

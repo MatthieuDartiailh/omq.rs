@@ -159,7 +159,8 @@ impl Socket {
         let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
         let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
         let inner = self.inner().clone();
-        let (_, writer) = stream.clone().into_split();
+        let writer_fd =
+            compio::runtime::fd::AsyncFd::new(stream.clone()).expect("AsyncFd for STREAM writer");
         let slot_idx = inner.insert_peer_slot(
             PeerSlot {
                 out: PeerOut::Wire(handle),
@@ -175,7 +176,7 @@ impl Socket {
         );
         let in_tx = inner.in_tx.clone();
         compio::runtime::spawn(async move {
-            stream_raw::run(stream, writer.into(), conn_id, in_tx, cmd_rx).await;
+            stream_raw::run(stream, writer_fd.into(), conn_id, in_tx, cmd_rx).await;
             inner.release_slot(slot_idx);
         })
         .detach();

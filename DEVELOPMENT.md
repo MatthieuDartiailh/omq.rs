@@ -240,14 +240,13 @@ Omit `--impl` to rebench both pyomq and pyzmq.
 ### Dependency graph (publish order)
 
 ```
-omq-proto ─────────────────────────────────┐
-blume ──────────────┐                      │
-yring ──────────────┤                      │
-                    ├─ omq-compio ─┬─ omq ─┤
-                    │              ├─ omq-libzmq
-                    │              └─ pyomq (maturin, not cargo)
-                    └─ omq-tokio ──┬─ omq
-                                   └─ omq-zeromq
+omq-proto ─────────────────────────────┐
+blume ──────────────┐                  │
+yring ──────────────┤                  │
+                    ├─ omq-compio      │
+                    │                  │
+                    └─ omq-tokio ──┬─ omq-libzmq
+                                   └─ pyomq (maturin, not cargo)
 ```
 
 ### Automation (release-plz)
@@ -275,7 +274,7 @@ crate must be configured as a trusted publisher on crates.io.
    `## [x.y.z]` section below `## [Unreleased]` in `CHANGELOG.md`.
    Never modify existing versioned sections.
 
-3. **Update zguide examples.** Bump `omq` version in
+3. **Update zguide examples.** Bump `omq-tokio`/`omq-compio` version in
    `examples/zguide-*/*/Cargo.toml`.
 
 4. **Merge the release PR.** release-plz tags and publishes to
@@ -287,8 +286,8 @@ crate must be configured as a trusted publisher on crates.io.
 
 ### Crates to check
 
-`omq-proto`, `blume`, `yring`, `omq-compio`, `omq-tokio`, `omq`,
-`omq-libzmq`, `omq-zeromq`, `pyomq`. Don't skip the small ones.
+`omq-proto`, `blume`, `yring`, `omq-compio`, `omq-tokio`,
+`omq-libzmq`, `pyomq`. Don't skip the small ones.
 
 ## Constraints
 
