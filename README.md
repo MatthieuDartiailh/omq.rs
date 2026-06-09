@@ -12,7 +12,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 
 ### vs libzmq and other implementations
 
-[How to beat libzmq](doc/performance.md) | [Comparison tables](COMPARISONS.md)
+[How to beat libzmq](doc/performance.md)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
@@ -172,18 +172,14 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 ## Further reading
 
 - [BENCHMARKS.md](BENCHMARKS.md): throughput / latency tables across
-  transports, message sizes, and backends.
+  message patterns, transports, message sizes, and backends.
 - [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp / zstd+tcp
   throughput on bandwidth-limited links with structured JSON payloads.
-- [COMPARISONS.md](COMPARISONS.md): two-process benchmarks against
-  libzmq and zmq.rs.
 - [doc/architecture.md](doc/architecture.md): three-layer split, two-queue
   socket model, backend comparison.
 - [doc/compio.md](doc/compio.md): compio backend internals.
 - [doc/tokio.md](doc/tokio.md): tokio backend internals.
 - [doc/performance.md](doc/performance.md): how omq beat libzmq.
-- [doc/migration_from_rust_zmq.md](doc/migration_from_rust_zmq.md):
-  API mapping and feature mapping for rust-zmq users.
 
 ## Platform and requirements
 
