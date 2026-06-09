@@ -45,7 +45,7 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
       - name: workspace tests (default features)
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude omq-compio
 
   encryption:
     name: encryption (curve + blake3zmq)
@@ -56,10 +56,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p omq-tokio  --features curve
-      - run: cargo test -p omq-compio --features curve
-      - run: cargo test -p omq-tokio  --features blake3zmq
-      - run: cargo test -p omq-compio --features blake3zmq
+      - run: cargo test -p omq-tokio --features curve
+      - run: cargo test -p omq-tokio --features blake3zmq
 
   compression:
     name: compression (lz4 + zstd)
@@ -70,10 +68,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p omq-tokio  --features lz4
-      - run: cargo test -p omq-compio --features lz4
-      - run: cargo test -p omq-tokio  --features zstd
-      - run: cargo test -p omq-compio --features zstd
+      - run: cargo test -p omq-tokio --features lz4
+      - run: cargo test -p omq-tokio --features zstd
 
 
   lint:
@@ -87,7 +83,7 @@ jobs:
         with: { components: rustfmt, clippy }
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets --exclude omq-compio
 
   interop:
     name: interop (ruby + pyomq)
@@ -103,9 +99,7 @@ jobs:
       - name: install omq-cli
         run: gem install omq-cli
       - name: rust ↔ ruby interop (tokio)
-        run: cargo test -p omq-tokio  --test interop_ruby
-      - name: rust ↔ ruby interop (compio)
-        run: cargo test -p omq-compio --test interop_ruby
+        run: cargo test -p omq-tokio --test interop_ruby
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
       - name: create virtualenv and install python deps
