@@ -109,7 +109,7 @@ harness = false
 [[bench]]
 name = "mechanism"
 harness = false
-required-features = ["curve", "blake3zmq"]
+required-features = ["plain", "curve", "blake3zmq"]
 
 [[example]]
 name = "profile_ws"

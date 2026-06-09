@@ -3,10 +3,9 @@
 //! Exercises the send path with multiple receivers contending.
 //! Complement to `push_pull.rs` which measures fan-in (N PUSH → 1 PULL).
 //!
-//! Single-runtime inproc is omitted: a single compio thread cannot drive
-//! 1 sender + N receivers concurrently without cooperative interleaving,
-//! which distorts the measurement. Use inproc-mt (separate threads) for
-//! the inproc transport.
+//! Inproc is omitted: single-runtime can't drive 1 sender + N receivers
+//! concurrently, and cross-thread inproc has an intermittent wakeup race
+//! in compio (compio-rs/compio#911).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -44,29 +43,17 @@ fn main() {
     let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
 
     let mut seq = 0usize;
-    let mut transports = common::all_transports();
-    if let Some(pos) = transports.iter().position(|t| t == "inproc") {
-        transports[pos] = "inproc-mt".to_string();
-    }
-    for transport in transports {
+    let transports = common::all_transports();
+    for transport in transports.iter().filter(|t| *t != "inproc") {
         for &peers in peer_counts {
-            common::print_subheader(&transport, peers);
+            common::print_subheader(transport, peers);
             for &size in &common::sizes() {
                 seq += 1;
                 let label = format!("{transport}/{peers}peer/{size}B");
-                let cell = run_cell_threaded(
-                    if transport == "inproc-mt" {
-                        "inproc"
-                    } else {
-                        &transport
-                    },
-                    peers,
-                    size,
-                    seq,
-                )
-                .unwrap_or_else(|e| panic!("{label} panicked: {e:?}"));
+                let cell = run_cell_threaded(transport, peers, size, seq)
+                    .unwrap_or_else(|e| panic!("{label} panicked: {e:?}"));
                 common::print_cell(size, cell);
-                common::append_jsonl(PATTERN, &transport, peers, size, cell);
+                common::append_jsonl(PATTERN, transport, peers, size, cell);
             }
             println!();
         }

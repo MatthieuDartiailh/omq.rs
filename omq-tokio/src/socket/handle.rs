@@ -18,12 +18,11 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
-use crate::engine::direct_io::DirectIo;
+use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult};
 use crate::routing::{SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocSpsc;
 
-pub(crate) type DirectIoSlot = Arc<tokio::sync::Mutex<Option<DirectIo>>>;
-pub(crate) type DirectIoPending = Arc<AtomicBool>;
+pub(crate) type WireSlotHolder = Arc<Mutex<Option<Arc<PeerWireSlot>>>>;
 
 /// Error returned by [`Socket::try_send`].
 #[derive(Debug)]
@@ -133,6 +132,7 @@ impl SpscAwareRecv {
                         return res.map_err(|_| Error::Closed);
                     }
                     () = self.activated.notified() => continue,
+                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => continue,
                 }
             } else {
                 let notified = self.recv_notify.notified();
@@ -197,10 +197,11 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
-    /// Direct I/O bypass: when set, send does TCP I/O directly on the
-    /// user task, eliminating the send-path cross-task wakeup. Recv
-    /// stays on the driver (which continues running after handoff).
-    direct_io: DirectIoSlot,
+    /// Single-peer encode fast path. When set, the handle encodes
+    /// ZMTP frames directly into the peer's `EncodedQueue` and the
+    /// driver flushes them to the wire. Set by the actor when exactly
+    /// one wire peer is active; cleared on multi-peer or disconnect.
+    wire_slot: WireSlotHolder,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
 }
 
@@ -256,8 +257,7 @@ impl Socket {
         let send_ring_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
-        let direct_io: DirectIoSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let direct_io_pending: DirectIoPending = Arc::new(AtomicBool::new(false));
+        let wire_slot: WireSlotHolder = Arc::new(Mutex::new(None));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -273,8 +273,7 @@ impl Socket {
             spsc_activated.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
-            direct_io.clone(),
-            direct_io_pending.clone(),
+            wire_slot.clone(),
             recv_sink_config,
         );
         spawn_driver(driver);
@@ -296,7 +295,7 @@ impl Socket {
                 send_submitter,
                 type_state,
                 req_awaiting_reply,
-                direct_io,
+                wire_slot,
                 last_bound_endpoint: RwLock::new(None),
             }),
         }
@@ -352,32 +351,21 @@ impl Socket {
         match self.inner.socket_type {
             SocketType::Req => {
                 if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
-                    // The driver detects peer disconnect (EOF) and resets
-                    // req_awaiting_reply via on_peer_disconnected. Give
-                    // the actor a chance to process PeerClosed, then check
-                    // if the DirectIo is dead.
                     tokio::task::yield_now().await;
                     if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
-                        let guard = self.inner.direct_io.lock().await;
-                        if guard.as_ref().is_some_and(DirectIo::is_dead) {
-                            let peer_id = guard.as_ref().unwrap().peer_id;
-                            drop(guard);
-                            self.clear_direct_io_slot(peer_id).await;
+                        if self.is_wire_slot_dead() {
                             self.inner
                                 .req_awaiting_reply
                                 .store(false, Ordering::Relaxed);
                         } else {
-                            drop(guard);
-                            if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
-                                return Err(Error::Protocol(
-                                    "REQ socket must receive a reply before sending again".into(),
-                                ));
-                            }
+                            return Err(Error::Protocol(
+                                "REQ socket must receive a reply before sending again".into(),
+                            ));
                         }
                     }
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
-                let result = self.send_with_direct_io(msg).await;
+                let result = self.send_via_wire_slot(msg).await;
                 if result.is_ok() {
                     self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
                 }
@@ -390,19 +378,11 @@ impl Socket {
                     .lock()
                     .expect("type_state")
                     .pre_send(self.inner.socket_type, msg)?;
-                // pre_send restores the saved envelope which includes the
-                // peer identity (added by wrap_for_transform on recv). The
-                // identity routing strategy normally strips it; DirectIo
-                // bypasses that, so strip it here.
-                return self.send_via_direct_io_or_submitter(msg, true).await;
+                return self.send_identity_routed(msg).await;
             }
-            SocketType::Router | SocketType::Server => {
+            SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Stream => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                return self.send_via_direct_io_or_submitter(msg, true).await;
-            }
-            _ if is_direct_io_eligible(self.inner.socket_type) => {
-                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                return self.send_with_direct_io(msg).await;
+                return self.send_identity_routed(msg).await;
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
@@ -425,7 +405,7 @@ impl Socket {
                         return Ok(());
                     }
                 }
-                self.inner.send_submitter.send(msg).await
+                self.send_via_wire_slot(msg).await
             }
         }
     }
@@ -735,69 +715,63 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
     }
 }
 
-use crate::routing::is_direct_io_eligible;
-
 impl Socket {
-    /// Try the `DirectIo` fast path, stripping the `routing_id` frame
-    /// when `strip_routing_id` is true (Rep / Router / Server). Falls
-    /// back to the shared `SendSubmitter` when no `DirectIo` is installed.
-    async fn send_via_direct_io_or_submitter(
-        &self,
-        mut msg: Message,
-        strip_routing_id: bool,
-    ) -> Result<()> {
-        let guard = self.inner.direct_io.lock().await;
-        if let Some(dio) = guard.as_ref() {
-            let peer_id = dio.peer_id;
-            if strip_routing_id {
-                let _routing_id = msg.pop_front();
+    async fn send_via_wire_slot(&self, msg: Message) -> Result<()> {
+        let fast = {
+            let guard = self.inner.wire_slot.lock().expect("wire_slot");
+            match guard.as_ref() {
+                Some(slot) => slot.try_encode(&msg),
+                None => TryEncodeResult::Ineligible,
             }
-            return match dio.send_msg(&msg).await {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    drop(guard);
-                    self.clear_direct_io_slot(peer_id).await;
-                    Err(e)
+        };
+        match fast {
+            TryEncodeResult::Ok => Ok(()),
+            TryEncodeResult::Dead => Err(Error::Closed),
+            TryEncodeResult::Full => {
+                let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
+                if let Some(ref slot) = slot {
+                    loop {
+                        match slot.try_encode(&msg) {
+                            TryEncodeResult::Ok => return Ok(()),
+                            TryEncodeResult::Dead => return Err(Error::Closed),
+                            TryEncodeResult::Full => {
+                                let notified = slot.space_available.notified();
+                                if slot.try_encode(&msg) == TryEncodeResult::Ok {
+                                    return Ok(());
+                                }
+                                notified.await;
+                            }
+                            TryEncodeResult::Ineligible => break,
+                        }
+                    }
                 }
-            };
+                self.inner.send_submitter.send(msg).await
+            }
+            TryEncodeResult::Ineligible => self.inner.send_submitter.send(msg).await,
         }
-        drop(guard);
+    }
+
+    async fn send_identity_routed(&self, msg: Message) -> Result<()> {
+        let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
+        if let Some(ref slot) = slot {
+            let mut stripped = msg.clone();
+            stripped.pop_front();
+            match slot.try_encode(&stripped) {
+                TryEncodeResult::Ok => return Ok(()),
+                TryEncodeResult::Dead => return Err(Error::Closed),
+                TryEncodeResult::Full | TryEncodeResult::Ineligible => {}
+            }
+        }
         self.inner.send_submitter.send(msg).await
     }
 
-    async fn send_with_direct_io(&self, msg: Message) -> Result<()> {
-        {
-            let guard = self.inner.direct_io.lock().await;
-            if let Some(dio) = guard.as_ref() {
-                if let Ok(()) = dio.send_msg(&msg).await {
-                    return Ok(());
-                }
-                let failed_peer_id = dio.peer_id;
-                drop(guard);
-                self.clear_direct_io_slot(failed_peer_id).await;
-                return self.inner.send_submitter.send(msg).await;
-            }
-        }
-        self.inner.send_submitter.send(msg).await
-    }
-
-    async fn clear_direct_io_slot(&self, expected_peer_id: u64) {
-        let mut guard = self.inner.direct_io.lock().await;
-        if guard
+    fn is_wire_slot_dead(&self) -> bool {
+        self.inner
+            .wire_slot
+            .lock()
+            .expect("wire_slot")
             .as_ref()
-            .is_some_and(|dio| dio.peer_id != expected_peer_id)
-        {
-            return;
-        }
-        if let Some(dio) = guard.take() {
-            let peer_id = dio.peer_id;
-            drop(guard);
-            let _ = self
-                .inner
-                .cmd_tx
-                .send(SocketCommand::DirectIoDisconnected { peer_id })
-                .await;
-        }
+            .is_some_and(|s| s.dead.load(Ordering::Acquire))
     }
 }
 

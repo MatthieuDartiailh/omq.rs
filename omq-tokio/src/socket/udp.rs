@@ -134,5 +134,9 @@ pub(crate) fn fake_handle(
     inbox: mpsc::Sender<DriverCommand>,
     cancel: CancellationToken,
 ) -> DriverHandle {
-    DriverHandle { inbox, cancel }
+    DriverHandle {
+        inbox,
+        cancel,
+        wire_slot: None,
+    }
 }

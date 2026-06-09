@@ -28,6 +28,62 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 </p>
 
 <details>
+<summary>PUB/SUB throughput: TCP</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/comparison_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
+</p>
+</details>
+
+<details>
+<summary>PUSH fan-out (1 PUSH → N PULL): TCP</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout_tcp.svg" alt="PUSH fan-out: TCP" width="850">
+</p>
+</details>
+
+<details>
+<summary>PUSH fan-in (N PUSH → 1 PULL): TCP</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin_tcp.svg" alt="PUSH fan-in: TCP" width="850">
+</p>
+</details>
+
+<details>
+<summary>PUSH/PULL throughput: IPC</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
+</p>
+</details>
+
+<details>
+<summary>PUSH/PULL throughput: inproc</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
+</p>
+</details>
+
+<details>
+<summary>REQ/REP latency: TCP</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/comparison_tcp.svg" alt="REQ/REP latency: TCP" width="850">
+</p>
+</details>
+
+<details>
+<summary>Mechanism overhead: omq-tokio (NULL / PLAIN / CURVE / BLAKE3ZMQ)</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/tokio.svg" alt="Mechanism overhead: omq-tokio" width="850">
+</p>
+</details>
+
+<details>
+<summary>Mechanism overhead: omq-compio (NULL / PLAIN / CURVE / BLAKE3ZMQ)</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/compio.svg" alt="Mechanism overhead: omq-compio" width="850">
+</p>
+</details>
+
+<details>
 <summary>Compression throughput: omq-tokio (lz4 / zstd, dict 2 KiB)</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">

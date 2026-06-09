@@ -339,15 +339,20 @@ impl DriverLoopState {
         state: &DirectIoState,
         cap: usize,
     ) -> Result<()> {
+        // Cooperative single-thread: uncapped try_recv() lets one driver
+        // monopolize the shared queue; byte cap only fires for large msgs.
+        const MAX_DRAIN: usize = 64;
+        let mut count = 0usize;
         let mut next = Some(first);
         while let Some(m) = next.take() {
+            count += 1;
             let cap_reached = if state.handshake_done.get() {
                 self.encode_outbound_message(state, &m, cap).await?
             } else {
                 self.pending_cmds.push_back(DriverCommand::SendMessage(m));
                 false
             };
-            if cap_reached {
+            if cap_reached || count >= MAX_DRAIN {
                 break;
             }
             next = shared.try_recv();
@@ -405,6 +410,7 @@ pub(crate) async fn run_connection(
     let mut cmd_fut = pin!(inbox.recv_async().fuse());
     let mut transmit_ready_fut = pin!(state.transmit_ready.listen().fuse());
     let mut eof_fut = pin!(Fuse::terminated());
+    let mut safety_timeout = pin!(compio::time::sleep(Duration::from_millis(10)).fuse());
     let mut eof_was_active = false;
 
     loop {
@@ -597,6 +603,11 @@ pub(crate) async fn run_connection(
             }
             () = transmit_ready_fut.as_mut() => {
                 ls.codec_maybe_dirty = true;
+            }
+            () = safety_timeout.as_mut() => {
+                safety_timeout.set(
+                    compio::time::sleep(Duration::from_millis(10)).fuse(),
+                );
             }
         }
     }

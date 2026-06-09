@@ -96,11 +96,13 @@ This is the core simplification over libzmq's pipe-per-peer plus
 dedicated I/O thread model. It also avoids head-of-line blocking
 patterns where a single non-draining peer freezes the socket.
 
-Round-robin patterns (`PUSH`, `DEALER`, `REQ`, `PAIR`, `CLIENT`,
-`CHANNEL`, `SCATTER`) use this shape directly. Fan-out patterns (`PUB`,
-`XPUB`, `RADIO`) fan from one outbound queue into per-peer subscription
-filters. Identity-routed patterns (`ROUTER`, `REP`, `SERVER`, `PEER`)
-look up the peer by destination identity and bypass the shared queue.
+Round-robin patterns (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`)
+use this shape directly. Exclusive patterns (`PAIR`, `CHANNEL`) have
+at most one peer and skip the shared queue entirely. Fan-out patterns
+(`PUB`, `XPUB`, `RADIO`) fan from one outbound queue into per-peer
+subscription filters. Identity-routed patterns (`ROUTER`, `REP`,
+`SERVER`, `PEER`) look up the peer by destination identity and bypass
+the shared queue.
 
 ## Message and Payload types
 
@@ -147,7 +149,7 @@ backends. Users see only `Message`. Public API: `Deref<[u8]>`
 | Runtime | Single-thread, cooperative | Multi-thread, work-stealing |
 | Linux I/O | io_uring | epoll (mio) |
 | Other platforms | macOS kqueue, Windows IOCP | macOS/BSD kqueue, Windows IOCP |
-| Hot-path send | Per-peer `EncodedQueue` under sync `try_lock` | Single-peer: `DirectIo` encodes into `EncodedQueue` and writes inline; multi-peer: flume queue to driver |
+| Hot-path send | Per-peer `EncodedQueue` under sync `try_lock` | Per-peer `PeerWireSlot` (`EncodedQueue` under `std::sync::Mutex`); driver flushes via `data_ready` select arm |
 | Hot-path recv | `RecvMulti` (multi-shot recv from io_uring `BUF_RING`) fed to codec inline | Connection driver pushes straight into user `recv_tx` |
 | Fan-in scaling | One runtime per worker thread (manual) | Free across cores via runtime |
 | Strengths | Small-message wire throughput, low syscall cost, low jitter | Multi-peer fan-in, no per-thread setup, ecosystem fit |
@@ -247,7 +249,7 @@ behind).
 |------|------|
 | `src/message.rs` | `Payload` + `Message` enums, inline/single/multi variants |
 | `src/proto/connection/` | `Connection` -- the sans-I/O ZMTP codec + state machine (inbound, outbound, mod) |
-| `src/proto/frame.rs` | ZMTP frame encoding/decoding, `send_message_flat` |
+| `src/proto/frame.rs` | ZMTP frame encoding/decoding, `encode_message_flat`, `write_frame_header` |
 | `src/proto/greeting.rs` | ZMTP greeting state machine |
 | `src/proto/command.rs` | ZMTP commands (SUBSCRIBE, PING, etc.) |
 | `src/proto/chunked_buf.rs` | `ChunkedInputBuf` -- zero-copy multi-chunk input buffer |
@@ -256,6 +258,7 @@ behind).
 | `src/proto/zws.rs` | ZWS/2.0 frame codec (feature `ws`) |
 | `src/endpoint.rs` | URI parsing (`tcp://`, `ipc://`, `lz4+tcp://`, `ws://`, etc.) |
 | `src/options.rs` | `Options` builder (HWM, identity, keepalive, mechanism) |
+| `src/encoded_queue.rs` | `EncodedQueue` -- arena + entry-based gather-write encoder (used by both backends) |
 | `src/routing.rs` | Socket-type-to-routing-strategy categorization (`SendCategory`, `RecvCategory`) |
 | `src/subscription.rs` | Patricia-trie prefix matcher for SUB/XSUB |
 
@@ -265,8 +268,7 @@ behind).
 |------|------|
 | `src/socket/handle.rs` | Public `Socket` handle -- send/recv/connect/bind/close |
 | `src/socket/inner.rs` | `SocketInner` -- shared socket state, peer slots |
-| `src/socket/direct_io.rs` | `DirectIoState` -- per-wire-peer fast-path state |
-| `src/socket/encoded_queue.rs` | `EncodedQueue` -- flat-buf + gather-write encoder |
+| `src/socket/direct_io.rs` | `DirectIoState` -- per-wire-peer fast-path state (Cell-based fields, EncodedQueueCell) |
 | `src/socket/send.rs` | Send strategies (round-robin, fan-out, identity) |
 | `src/socket/recv.rs` | Recv path, direct-recv claim arbitration |
 | `src/socket/dial.rs` | TCP/IPC dial supervisors with reconnect |
@@ -288,12 +290,13 @@ behind).
 | `src/socket/handle.rs` | Public `Socket` handle |
 | `src/socket/dispatch.rs` | Send-side dispatch (actor bypass for non-REQ/REP) |
 | `src/engine/driver.rs` | Per-connection `ConnectionDriver` |
-| `src/engine/direct_io.rs` | Single-peer `DirectIo` send bypass with `EncodedQueue` |
-| `src/engine/encoded_queue.rs` | `EncodedQueue` -- flat-buf + gather-write encoder |
+| `src/engine/wire_slot.rs` | `PeerWireSlot` -- per-peer wire buffer; driver flushes via `data_ready` |
 | `src/routing/mod.rs` | `SendStrategy`/`RecvStrategy` dispatch |
 | `src/routing/round_robin.rs` | Round-robin submitter |
+| `src/routing/exclusive.rs` | PAIR/CHANNEL single-peer submitter |
 | `src/routing/fan_out.rs` | PUB/XPUB/RADIO fan-out with subscription filter |
 | `src/routing/identity.rs` | ROUTER/REP/SERVER identity routing |
+| `src/routing/peer_send.rs` | `PeerSend` enum -- unified per-peer send dispatch (`Wire`/`Inbox`) |
 | `src/routing/fair_queue.rs` | PULL/SUB fair-queue recv |
 | `src/transport/tcp.rs` | TCP bind/connect with reconnect |
 | `src/transport/ipc.rs` | IPC bind/connect |

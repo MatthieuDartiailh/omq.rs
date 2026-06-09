@@ -168,9 +168,25 @@ def libzmq_version() -> str:
 def spawn_process(binary: str, *args: str) -> subprocess.Popen:
     return subprocess.Popen(
         [binary, *args],
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        text=True,
     )
+
+
+def read_bound_port(proc: subprocess.Popen, timeout: float = 5.0) -> int | None:
+    """Read 'PORT <n>' from the process's first stdout line."""
+    import selectors
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    ready = sel.select(timeout=timeout)
+    sel.close()
+    if not ready:
+        return None
+    line = proc.stdout.readline().strip()
+    if line.startswith("PORT "):
+        return int(line.split()[1])
+    return None
 
 
 def capture_process(binary: str, *args: str, timeout: int = 15) -> str:
@@ -188,6 +204,15 @@ def capture_process(binary: str, *args: str, timeout: int = 15) -> str:
         proc.kill()
         proc.wait()
         return ""
+
+
+def cleanup_ipc_socket(addr: str):
+    if addr.startswith("ipc://") and not addr.startswith("ipc://@"):
+        path = addr[len("ipc://"):]
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
 
 def kill_process(proc: subprocess.Popen):
@@ -250,27 +275,42 @@ def run_throughput_cell(
     return best
 
 
+def _fresh_addr(addr: str) -> str:
+    """Return a unique variant of an IPC address to avoid kernel cleanup races."""
+    if addr.startswith("ipc://"):
+        return f"{addr}-{next_addr_id()}"
+    return addr
+
+
 def _run_throughput_once(
     binary: str, transport: str, addr: str, size: int,
     inproc_subcmd: str, duration: float,
 ) -> dict | None:
     dur = str(duration)
     if transport == "inproc":
-        # Shorter timeout: inproc finishes in ~2.5s or hangs forever
-        # (compio cross-thread waker bug). 5s catches hangs faster.
-        output = capture_process(binary, inproc_subcmd, addr, str(size), dur,
-                                 timeout=5)
+        fresh_name = f"{addr}-{next_addr_id()}"
+        timeout_s = max(int(duration) + 5, 8)
+        output = capture_process(binary, inproc_subcmd, fresh_name, str(size),
+                                 dur, timeout=timeout_s)
         return parse_throughput(output, size)
 
+    addr = _fresh_addr(addr)
+    cleanup_ipc_socket(addr)
     push = spawn_process(binary, "push", addr, str(size))
-    time.sleep(0.15)
-    if push.poll() is not None:
-        print(f"WARNING: push died (rc={push.returncode}) for {binary} {addr}", file=sys.stderr)
-        return None
+    if transport in ("ipc", "ws"):
+        time.sleep(0.2)
+        connect_addr = addr
+    else:
+        port = read_bound_port(push)
+        if port is None:
+            kill_process(push)
+            return None
+        connect_addr = str(port)
     try:
-        output = capture_process(binary, "pull", addr, str(size), dur)
+        output = capture_process(binary, "pull", connect_addr, str(size), dur)
     finally:
         kill_process(push)
+        cleanup_ipc_socket(addr)
     return parse_throughput(output, size)
 
 
@@ -295,30 +335,134 @@ def _run_pubsub_once(
 ) -> dict | None:
     dur = str(duration)
     if transport == "inproc":
-        output = capture_process(binary, inproc_subcmd, addr, str(size), dur,
-                                 str(peers))
+        fresh_name = f"{addr}-{next_addr_id()}"
+        timeout_s = max(int(duration) + 5, 8)
+        output = capture_process(binary, inproc_subcmd, fresh_name, str(size),
+                                 dur, str(peers), timeout=timeout_s)
         result = parse_throughput(output, size)
     else:
+        addr = _fresh_addr(addr)
+        cleanup_ipc_socket(addr)
         pub_ = spawn_process(binary, "pub", addr, str(size))
-        time.sleep(0.15)
-        if pub_.poll() is not None:
-            print(f"WARNING: pub died (rc={pub_.returncode}) for {binary} {addr}",
-                  file=sys.stderr)
-            return None
+        if transport in ("ipc", "ws"):
+            time.sleep(0.2)
+            connect_addr = addr
+        else:
+            port = read_bound_port(pub_)
+            if port is None:
+                kill_process(pub_)
+                return None
+            connect_addr = str(port)
         drain_subs = []
         try:
             for _ in range(peers - 1):
-                drain_subs.append(spawn_process(binary, "sub", addr, str(size), dur))
+                drain_subs.append(spawn_process(binary, "sub", connect_addr,
+                                                str(size), dur))
             time.sleep(0.05)
-            output = capture_process(binary, "sub", addr, str(size), dur)
+            output = capture_process(binary, "sub", connect_addr, str(size), dur)
         finally:
             kill_process(pub_)
             for s in drain_subs:
                 kill_process(s)
+            cleanup_ipc_socket(addr)
         result = parse_throughput(output, size)
     if result and peers > 1:
         result["mbps"] *= peers
     return result
+
+
+def run_fanout_cell(
+    binary: str, transport: str, addr: str, size: int, peers: int,
+    duration: float = DEFAULT_DURATION,
+    rounds: int = DEFAULT_ROUNDS,
+) -> dict | None:
+    best = None
+    for _ in range(rounds):
+        result = _run_fanout_once(binary, transport, addr, size, peers, duration)
+        if result and (best is None or result["msgs_s"] > best["msgs_s"]):
+            best = result
+    return best
+
+
+def _run_fanout_once(
+    binary: str, transport: str, addr: str, size: int, peers: int,
+    duration: float,
+) -> dict | None:
+    addr = _fresh_addr(addr)
+    cleanup_ipc_socket(addr)
+    push = spawn_process(binary, "push", addr, str(size))
+    if transport in ("ipc", "ws"):
+        time.sleep(0.2)
+        connect_addr = addr
+    else:
+        port = read_bound_port(push)
+        if port is None:
+            kill_process(push)
+            return None
+        connect_addr = str(port)
+    drains = []
+    try:
+        for _ in range(peers - 1):
+            drains.append(spawn_process(binary, "pull", connect_addr,
+                                        str(size), str(duration)))
+        time.sleep(0.05)
+        output = capture_process(binary, "pull", connect_addr, str(size),
+                                 str(duration))
+    finally:
+        kill_process(push)
+        for d in drains:
+            kill_process(d)
+        cleanup_ipc_socket(addr)
+    result = parse_throughput(output, size)
+    if result and peers > 1:
+        result["mbps"] *= peers
+    return result
+
+
+def run_fanin_cell(
+    binary: str, transport: str, addr: str, size: int, peers: int,
+    duration: float = DEFAULT_DURATION,
+    rounds: int = DEFAULT_ROUNDS,
+) -> dict | None:
+    best = None
+    for _ in range(rounds):
+        result = _run_fanin_once(binary, transport, addr, size, peers, duration)
+        if result and (best is None or result["msgs_s"] > best["msgs_s"]):
+            best = result
+    return best
+
+
+def _run_fanin_once(
+    binary: str, transport: str, addr: str, size: int, peers: int,
+    duration: float,
+) -> dict | None:
+    addr = _fresh_addr(addr)
+    cleanup_ipc_socket(addr)
+    dur = str(duration)
+    pull = spawn_process(binary, "pull-bind", addr, str(size), dur)
+    if transport in ("ipc", "ws"):
+        time.sleep(0.2)
+        connect_addr = addr
+    else:
+        port = read_bound_port(pull)
+        if port is None:
+            kill_process(pull)
+            return None
+        connect_addr = str(port)
+    pushers = []
+    try:
+        for _ in range(peers):
+            pushers.append(spawn_process(binary, "push-connect", connect_addr,
+                                         str(size)))
+        stdout, _ = pull.communicate(timeout=max(int(duration) + 10, 15))
+    except subprocess.TimeoutExpired:
+        kill_process(pull)
+        stdout = ""
+    finally:
+        for p in pushers:
+            kill_process(p)
+        cleanup_ipc_socket(addr)
+    return parse_throughput(stdout, size)
 
 
 def run_latency_cell(
@@ -329,43 +473,62 @@ def run_latency_cell(
     timeout: int = LATENCY_TIMEOUT,
 ) -> dict | None:
     if transport == "inproc":
+        fresh_name = f"{addr}-{next_addr_id()}"
         output = capture_process(
-            binary, inproc_subcmd, addr, str(size),
+            binary, inproc_subcmd, fresh_name, str(size),
             str(iterations), str(warmup),
             timeout=timeout,
         )
         return parse_latency(output)
 
+    addr = _fresh_addr(addr)
+    cleanup_ipc_socket(addr)
     rep = spawn_process(binary, "rep", addr, str(size))
-    time.sleep(0.2)
-    if rep.poll() is not None:
-        print(f"WARNING: rep died (rc={rep.returncode}) for {binary} {addr}", file=sys.stderr)
-        return None
+    if transport in ("ipc", "ws"):
+        time.sleep(0.2)
+        connect_addr = addr
+    else:
+        port = read_bound_port(rep)
+        if port is None:
+            kill_process(rep)
+            return None
+        connect_addr = str(port)
     try:
         output = capture_process(
-            binary, "req", addr, str(size),
+            binary, "req", connect_addr, str(size),
             str(iterations), str(warmup),
             timeout=timeout,
         )
     finally:
         kill_process(rep)
+        cleanup_ipc_socket(addr)
     return parse_latency(output)
 
 
 # ── address generation ────────────────────────────────────────────
 
-def addr_for(transport: str, prefix: str, idx: int, base_port: int) -> str:
+_addr_counter = 0
+
+def next_addr_id() -> int:
+    global _addr_counter
+    _addr_counter += 1
+    return _addr_counter
+
+def addr_for(transport: str, prefix: str, idx: int, base_port: int,
+             *, impl_name: str = "") -> str:
+    uid = next_addr_id()
     if transport == "tcp":
-        offsets = {"c": 0, "t": 100, "z": 200, "q": 300, "s": 400, "r": 1000, "m": 1200}
-        return str(base_port + offsets.get(prefix, 0) + idx)
+        return "0"
     if transport == "ws":
         offsets = {"c": 500, "t": 600, "z": 700, "q": 800, "s": 900, "r": 1100, "m": 1300}
         return f"ws://127.0.0.1:{base_port + offsets.get(prefix, 500) + idx}/"
     if transport == "ipc":
-        return f"ipc://@omq-bench-cmp-{prefix}-{idx}"
+        if impl_name in ("zmq.rs", "rzmq", "rust-zmq"):
+            return f"ipc:///tmp/omq-bench-cmp-{prefix}-{uid}"
+        return f"ipc://@omq-bench-cmp-{prefix}-{uid}"
     if transport == "inproc":
-        return f"bench-cmp-{prefix}-{idx}"
-    return str(base_port + idx)
+        return f"bench-cmp-{prefix}-{uid}"
+    return "0"
 
 
 # ── JSONL I/O ─────────────────────────────────────────────────────
@@ -620,6 +783,8 @@ IMPLS = {
 }
 
 PUBSUB_PEER_COUNTS = [1, 8, 64]
+FANOUT_PEER_COUNTS = [2, 4, 8]
+FANIN_PEER_COUNTS = [2, 4, 8]
 
 
 def build_peers(impl_names: set[str], ws_needed: bool):
@@ -700,6 +865,10 @@ def run_benchmarks(
     latency_iterations: int = LATENCY_ITERATIONS,
     latency_warmup: int = LATENCY_WARMUP,
     latency_timeout: int = LATENCY_TIMEOUT,
+    run_fanout: bool = False,
+    fanout_peers: list[int] | None = None,
+    run_fanin: bool = False,
+    fanin_peers: list[int] | None = None,
 ):
     _cleanup_ipc_sockets()
     atexit.register(_cleanup_ipc_sockets)
@@ -721,7 +890,8 @@ def run_benchmarks(
             for name, binary in active.items():
                 impl_def = IMPLS[name]
                 prefix = impl_def["prefix"]
-                addr = addr_for(transport, prefix, idx, base_port)
+                addr = addr_for(transport, prefix, idx, base_port,
+                               impl_name=name)
                 subcmd = impl_def.get("inproc_tput_subcmd", "inproc")
                 result = run_throughput_cell(binary, transport, addr, size,
                                             inproc_subcmd=subcmd,
@@ -758,7 +928,8 @@ def run_benchmarks(
                 for name, binary in active.items():
                     impl_def = IMPLS[name]
                     prefix = impl_def["prefix"]
-                    addr = addr_for(transport, prefix, idx + len(sizes), base_port)
+                    addr = addr_for(transport, prefix, idx + len(sizes), base_port,
+                                   impl_name=name)
                     subcmd = impl_def.get("inproc_lat_subcmd", "inproc-latency")
                     result = run_latency_cell(binary, transport, addr, size,
                                              inproc_subcmd=subcmd,
@@ -790,12 +961,13 @@ def run_benchmarks(
                 print(line, file=sys.stderr)
 
         # pub/sub throughput
-        if not run_pubsub:
-            continue
-        pubsub_active = {
-            name: path for name, path in active.items()
-            if IMPLS[name].get("supports_pubsub")
-        }
+        if run_pubsub:
+            pubsub_active = {
+                name: path for name, path in active.items()
+                if IMPLS[name].get("supports_pubsub")
+            }
+        else:
+            pubsub_active = {}
         if pubsub_active:
             for peers in pubsub_peers:
                 print(f"\n── pub/sub {peers}p: {transport} ──", file=sys.stderr)
@@ -831,6 +1003,90 @@ def run_benchmarks(
 
                     line = f"{size_label(size):>10s}"
                     for name in pubsub_active:
+                        r = cells.get(name)
+                        if r:
+                            line += (f"  {r['msgs_s']:>9.0f} msg/s"
+                                     f" {r['mbps']:>6.1f} MB/s")
+                        else:
+                            line += f"  {'—':>9s} msg/s {'—':>6s} MB/s"
+                    print(line, file=sys.stderr)
+
+        # fan-out (1 PUSH → N PULL)
+        if run_fanout and transport == "tcp":
+            for peers in (fanout_peers or FANOUT_PEER_COUNTS):
+                print(f"\n── fan-out {peers}p: {transport} ──", file=sys.stderr)
+                header = "".join(f"  {name:>22s}" for name in active)
+                print(f"{'size':>10s}{header}", file=sys.stderr)
+
+                for idx, size in enumerate(sizes):
+                    cells = {}
+                    for name, binary in active.items():
+                        impl_def = IMPLS[name]
+                        prefix = impl_def["prefix"]
+                        port_offset = 300 + peers * 50 + idx
+                        addr = addr_for(transport, prefix, port_offset,
+                                        base_port, impl_name=name)
+                        result = run_fanout_cell(
+                            binary, transport, addr, size, peers,
+                            duration=duration, rounds=rounds,
+                        )
+                        cells[name] = result
+                        if result:
+                            append_jsonl({
+                                "run_id": run_id,
+                                "impl": name,
+                                "kind": "fan_out",
+                                "transport": transport,
+                                "peers": peers,
+                                "msg_size": size,
+                                "msgs_s": round(result["msgs_s"], 1),
+                                "mbps": round(result["mbps"], 1),
+                            })
+
+                    line = f"{size_label(size):>10s}"
+                    for name in active:
+                        r = cells.get(name)
+                        if r:
+                            line += (f"  {r['msgs_s']:>9.0f} msg/s"
+                                     f" {r['mbps']:>6.1f} MB/s")
+                        else:
+                            line += f"  {'—':>9s} msg/s {'—':>6s} MB/s"
+                    print(line, file=sys.stderr)
+
+        # fan-in (N PUSH → 1 PULL)
+        if run_fanin and transport == "tcp":
+            for peers in (fanin_peers or FANIN_PEER_COUNTS):
+                print(f"\n── fan-in {peers}p: {transport} ──", file=sys.stderr)
+                header = "".join(f"  {name:>22s}" for name in active)
+                print(f"{'size':>10s}{header}", file=sys.stderr)
+
+                for idx, size in enumerate(sizes):
+                    cells = {}
+                    for name, binary in active.items():
+                        impl_def = IMPLS[name]
+                        prefix = impl_def["prefix"]
+                        port_offset = 400 + peers * 50 + idx
+                        addr = addr_for(transport, prefix, port_offset,
+                                        base_port, impl_name=name)
+                        result = run_fanin_cell(
+                            binary, transport, addr, size, peers,
+                            duration=duration, rounds=rounds,
+                        )
+                        cells[name] = result
+                        if result:
+                            append_jsonl({
+                                "run_id": run_id,
+                                "impl": name,
+                                "kind": "fan_in",
+                                "transport": transport,
+                                "peers": peers,
+                                "msg_size": size,
+                                "msgs_s": round(result["msgs_s"], 1),
+                                "mbps": round(result["mbps"], 1),
+                            })
+
+                    line = f"{size_label(size):>10s}"
+                    for name in active:
                         r = cells.get(name)
                         if r:
                             line += (f"  {r['msgs_s']:>9.0f} msg/s"
@@ -891,6 +1147,22 @@ def main():
         help=f"timeout in seconds for latency subprocess (default: {LATENCY_TIMEOUT})",
     )
     parser.add_argument(
+        "--fanout", action="store_true",
+        help="run PUSH fan-out benchmarks (1 PUSH → N PULL, TCP only)",
+    )
+    parser.add_argument(
+        "--fanout-peers", type=str, default=None,
+        help=f"comma-separated peer counts for fan-out (default: {','.join(str(p) for p in FANOUT_PEER_COUNTS)})",
+    )
+    parser.add_argument(
+        "--fanin", action="store_true",
+        help="run PUSH fan-in benchmarks (N PUSH → 1 PULL, TCP only)",
+    )
+    parser.add_argument(
+        "--fanin-peers", type=str, default=None,
+        help=f"comma-separated peer counts for fan-in (default: {','.join(str(p) for p in FANIN_PEER_COUNTS)})",
+    )
+    parser.add_argument(
         "--update-markdown", action="store_true",
         help="update COMPARISONS.md tables from JSONL",
     )
@@ -939,12 +1211,24 @@ def main():
     print(" vs ".join(versions), file=sys.stderr)
 
     base_port = args.base_port or random.randint(20_000, 40_000)
+    fanout_peers = (
+        [int(x) for x in args.fanout_peers.split(",")]
+        if args.fanout_peers else None
+    )
+    fanin_peers = (
+        [int(x) for x in args.fanin_peers.split(",")]
+        if args.fanin_peers else None
+    )
     run_benchmarks(binaries, transports, sizes, run_latency,
                    run_pubsub, pubsub_peers, base_port, run_id,
                    duration=duration, rounds=rounds,
                    latency_iterations=args.latency_iterations,
                    latency_warmup=args.latency_warmup,
-                   latency_timeout=args.latency_timeout)
+                   latency_timeout=args.latency_timeout,
+                   run_fanout=args.fanout,
+                   fanout_peers=fanout_peers,
+                   run_fanin=args.fanin,
+                   fanin_peers=fanin_peers)
 
     if args.update_markdown:
         update_comparisons_md(transports)

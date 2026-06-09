@@ -76,14 +76,13 @@ impl SocketDriver {
                 .store(false, std::sync::atomic::Ordering::Release);
         }
         self.update_send_ring();
-        // Clear the DirectIo slot if the disconnected peer owned it.
-        // This unblocks the eligibility check for the next peer's
-        // DirectIo installation.
-        if let Ok(mut guard) = self.direct_io.try_lock()
-            && guard.as_ref().is_some_and(|dio| dio.peer_id == peer_id)
         {
-            *guard = None;
+            let mut guard = self.wire_slot.lock().expect("wire_slot");
+            if guard.as_ref().is_some_and(|s| s.peer_id == peer_id) {
+                *guard = None;
+            }
         }
+        self.update_wire_slot();
         // Refill the RecvSink slot so the next wire peer gets the fast
         // yring path instead of falling back to the recv pump.
         if let Some(ref config) = self.recv_sink_config {
@@ -133,6 +132,23 @@ impl SocketDriver {
             self.send_ring_active
                 .store(false, std::sync::atomic::Ordering::Release);
         }
+    }
+
+    fn update_wire_slot(&mut self) {
+        use omq_proto::routing::SendCategory;
+        let cat = omq_proto::routing::send_category(self.socket_type);
+        if !matches!(cat, SendCategory::RoundRobin | SendCategory::Exclusive) {
+            return;
+        }
+        let mut guard = self.wire_slot.lock().expect("wire_slot");
+        if self.peers.len() == 1 {
+            let peer = self.peers.values().next().unwrap();
+            if let Some(ref slot) = peer.handle.wire_slot {
+                *guard = Some(slot.clone());
+                return;
+            }
+        }
+        *guard = None;
     }
 
     fn evict_peer_for_handover(&mut self, peer_id: u64) {
@@ -262,11 +278,11 @@ impl SocketDriver {
             large_message_threshold: self.options.large_message_threshold.unwrap_or(0),
         };
         let has_encoder = MessageEncoder::for_endpoint(&endpoint, &self.options);
-        let codec_has_transform = codec.has_frame_transform() || has_encoder.is_some();
-        #[cfg(feature = "ws")]
-        let is_ws = matches!(&stream, AnyStream::Ws(_));
-        #[cfg(not(feature = "ws"))]
-        let is_ws = false;
+        let has_transform = has_encoder.is_some();
+        let passthrough_info = has_encoder
+            .as_ref()
+            .and_then(|(enc, _)| enc.passthrough_info())
+            .map(|(s, t)| (s.clone(), t));
         let driver = ConnectionDriver::with_config(
             stream,
             codec,
@@ -297,28 +313,31 @@ impl SocketDriver {
             None => driver,
         };
 
-        // Direct I/O bypass: hand the stream + codec to the Socket
-        // handle after the ZMTP handshake so send/recv do TCP I/O
-        // directly on the user task (zero data-path wakeups).
-        let use_direct_io = is_direct_io_eligible(self.socket_type)
-            && self.peers.is_empty()
-            && !codec_has_transform
-            && !is_ws
-            && self.direct_io.try_lock().is_ok_and(|g| g.is_none());
-
-        let (direct_io_tx, direct_io_rx) = if use_direct_io {
-            let (tx, rx) = futures::channel::oneshot::channel();
-            self.direct_io_pending
-                .store(true, std::sync::atomic::Ordering::Release);
-            (Some(tx), Some(rx))
+        let arena_threshold = self
+            .options
+            .arena_threshold
+            .unwrap_or(omq_proto::encoded_queue::ARENA_THRESHOLD);
+        let uses_crypto = self.options.mechanism.has_frame_transform();
+        let slot = if uses_crypto {
+            None
         } else {
-            (None, None)
+            let wire_slot_cap = self
+                .options
+                .wire_slot_cap
+                .unwrap_or(crate::engine::wire_slot::WIRE_SLOT_CAP_DEFAULT);
+            let s = crate::engine::wire_slot::PeerWireSlot::new(
+                peer_id,
+                has_transform,
+                passthrough_info,
+                arena_threshold,
+                wire_slot_cap,
+            );
+            Some(s)
         };
-
-        let driver = if let Some(tx) = direct_io_tx {
-            driver.with_direct_io_tx(tx)
-        } else {
-            driver
+        let driver = driver.with_arena_threshold(arena_threshold);
+        let driver = match slot {
+            Some(ref s) => driver.with_wire_slot(s.clone()),
+            None => driver,
         };
 
         // Recv bypass: for socket types whose recv path is a plain fair-queue
@@ -350,23 +369,20 @@ impl SocketDriver {
                 handle: DriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel,
+                    wire_slot: slot.clone(),
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint,
                 is_client: !is_server,
-                direct_io_rx,
                 spsc: None,
             },
         );
 
-        // Disable send fast path when a second peer of any type connects.
+        // Disable send fast paths when a second peer connects.
         if self.peers.len() > 1 {
             self.update_send_ring();
-            self.pending_direct_io_rx = None;
-            if let Ok(mut guard) = self.direct_io.try_lock() {
-                *guard = None;
-            }
+            *self.wire_slot.lock().expect("wire_slot") = None;
         }
 
         tokio::spawn(async move {
@@ -401,7 +417,6 @@ impl SocketDriver {
                 info: None,
                 endpoint,
                 is_client: !is_server,
-                direct_io_rx: None,
                 spsc: None,
             },
         );
@@ -478,12 +493,12 @@ impl SocketDriver {
                 handle: DriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
+                    wire_slot: None,
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint,
                 is_client: !is_server,
-                direct_io_rx: None,
                 spsc: spsc.clone(),
             },
         );
@@ -604,12 +619,7 @@ impl SocketDriver {
         );
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;
-
-        if let Some(p) = self.peers.get_mut(&peer_id)
-            && let Some(rx) = p.direct_io_rx.take()
-        {
-            self.pending_direct_io_rx = Some(rx);
-        }
+        self.update_wire_slot();
     }
 
     async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
@@ -730,8 +740,6 @@ impl SocketDriver {
         });
     }
 }
-
-use crate::routing::is_direct_io_eligible;
 
 fn can_bypass_actor_recv(t: SocketType) -> bool {
     matches!(

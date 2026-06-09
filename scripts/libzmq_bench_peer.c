@@ -41,6 +41,18 @@ static void die(const char *msg) {
     exit(1);
 }
 
+static void print_bound_port(void *sock) {
+    char ep[256];
+    size_t ep_len = sizeof(ep);
+    if (zmq_getsockopt(sock, ZMQ_LAST_ENDPOINT, ep, &ep_len) == 0) {
+        char *colon = strrchr(ep, ':');
+        if (colon) {
+            printf("PORT %s\n", colon + 1);
+            fflush(stdout);
+        }
+    }
+}
+
 /* Returns a zmq address string. If s looks like a bare port number, expands
  * it to tcp://127.0.0.1:<port>. Otherwise returns s unchanged (caller must
  * not free the returned pointer if it equals s). */
@@ -89,6 +101,7 @@ int main(int argc, char **argv) {
         void *sock = zmq_socket(ctx, ZMQ_PUSH);
         if (!sock) die("zmq_socket PUSH");
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
+        print_bound_port(sock);
 
         char *buf = calloc(1, size);
         if (!buf) { perror("calloc"); exit(1); }
@@ -144,6 +157,72 @@ int main(int argc, char **argv) {
             }
         }
 done:;
+        double elapsed = now_secs() - t0;
+        printf("%lld %.6f %d\n", count, elapsed, size);
+
+        zmq_msg_close(&msg);
+        zmq_close(sock);
+
+    } else if (strcmp(role, "push-connect") == 0) {
+        void *sock = zmq_socket(ctx, ZMQ_PUSH);
+        if (!sock) die("zmq_socket PUSH");
+        if (zmq_connect(sock, addr) != 0) die("zmq_connect");
+
+        char *buf = calloc(1, size);
+        if (!buf) { perror("calloc"); exit(1); }
+        memset(buf, 'x', size);
+
+        for (;;) {
+            if (zmq_send(sock, buf, size, 0) < 0) break;
+        }
+        free(buf);
+        zmq_close(sock);
+
+    } else if (strcmp(role, "pull-bind") == 0) {
+        if (argc < 5) goto usage;
+        double duration = atof(argv[4]);
+
+        void *sock = zmq_socket(ctx, ZMQ_PULL);
+        if (!sock) die("zmq_socket PULL");
+        if (zmq_bind(sock, addr) != 0) die("zmq_bind");
+        print_bound_port(sock);
+
+        zmq_msg_t msg;
+        zmq_msg_init(&msg);
+
+        double warmup_end = now_secs() + 0.5;
+        while (now_secs() < warmup_end) {
+            int rc = zmq_msg_recv(&msg, sock, ZMQ_DONTWAIT);
+            if (rc < 0) {
+                struct timespec ts = {0, 100000};
+                nanosleep(&ts, NULL);
+            }
+        }
+
+        long long count = 0;
+        double t0 = now_secs();
+        double deadline = t0 + duration;
+
+        zmq_pollitem_t items[1];
+        items[0].socket = sock;
+        items[0].events = ZMQ_POLLIN;
+
+        for (;;) {
+            double remaining = deadline - now_secs();
+            if (remaining <= 0) break;
+            long timeout_ms = (long)(remaining * 1000.0);
+            if (timeout_ms < 1) timeout_ms = 1;
+            int rc = zmq_poll(items, 1, timeout_ms);
+            if (rc < 0) break;
+            if (rc == 0) break;
+            if (items[0].revents & ZMQ_POLLIN) {
+                while (zmq_msg_recv(&msg, sock, ZMQ_DONTWAIT) >= 0) {
+                    count++;
+                    if (now_secs() >= deadline) goto done_pull_bind;
+                }
+            }
+        }
+done_pull_bind:;
         double elapsed = now_secs() - t0;
         printf("%lld %.6f %d\n", count, elapsed, size);
 
@@ -216,6 +295,7 @@ done_inproc:;
         int block = 1;
         zmq_setsockopt(sock, ZMQ_XPUB_NODROP, &block, sizeof(block));
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
+        print_bound_port(sock);
 
         char *buf = calloc(1, size);
         if (!buf) { perror("calloc"); exit(1); }
@@ -284,32 +364,14 @@ done_sub:;
         double duration = atof(argv[4]);
         int peers = argc >= 6 ? atoi(argv[5]) : 1;
 
-        typedef struct { void *ctx; const char *name; int size; } InprocPubArg;
-        InprocPubArg pub_arg = { ctx, name, size };
-
-        void *inproc_pub_thread(void *arg_) {
-            InprocPubArg *a = arg_;
-            char taddr[256];
-            snprintf(taddr, sizeof(taddr), "inproc://%s", a->name);
-            void *sock = zmq_socket(a->ctx, ZMQ_PUB);
-            if (!sock || zmq_bind(sock, taddr) != 0) return NULL;
-            int block = 1;
-            zmq_setsockopt(sock, ZMQ_XPUB_NODROP, &block, sizeof(block));
-            char *buf = calloc(1, a->size);
-            memset(buf, 'x', a->size);
-            for (;;) {
-                if (zmq_send(sock, buf, a->size, 0) < 0) break;
-            }
-            free(buf);
-            zmq_close(sock);
-            return NULL;
-        }
-
-        pthread_t pub_tid;
-        pthread_create(&pub_tid, NULL, inproc_pub_thread, &pub_arg);
-
         char inproc_addr[256];
         snprintf(inproc_addr, sizeof(inproc_addr), "inproc://%s", name);
+
+        void *pub_sock = zmq_socket(ctx, ZMQ_PUB);
+        if (!pub_sock) die("zmq_socket PUB");
+        int block = 1;
+        zmq_setsockopt(pub_sock, ZMQ_XPUB_NODROP, &block, sizeof(block));
+        if (zmq_bind(pub_sock, inproc_addr) != 0) die("zmq_bind PUB");
 
         void *subs[64];
         int actual_peers = peers < 64 ? peers : 64;
@@ -320,16 +382,40 @@ done_sub:;
             if (zmq_connect(subs[i], inproc_addr) != 0) die("zmq_connect");
         }
 
+        typedef struct { void *sock; int size; } InprocPubSendArg;
+        InprocPubSendArg send_arg = { pub_sock, size };
+
+        void *inproc_pub_send_thread(void *arg_) {
+            InprocPubSendArg *a = arg_;
+            char *buf = calloc(1, a->size);
+            memset(buf, 'x', a->size);
+            for (;;) {
+                if (zmq_send(a->sock, buf, a->size, 0) < 0) break;
+            }
+            free(buf);
+            return NULL;
+        }
+
+        pthread_t pub_tid;
+        pthread_create(&pub_tid, NULL, inproc_pub_send_thread, &send_arg);
+
         zmq_msg_t msg;
         zmq_msg_init(&msg);
 
-        double warmup_end = now_secs() + 0.5;
-        while (now_secs() < warmup_end) {
+        double warmup_deadline = now_secs() + 5.0;
+        int got_first = 0;
+        while (!got_first && now_secs() < warmup_deadline) {
             int rc = zmq_msg_recv(&msg, subs[0], ZMQ_DONTWAIT);
-            if (rc < 0) {
-                struct timespec ts = {0, 100000};
+            if (rc >= 0) {
+                got_first = 1;
+            } else {
+                struct timespec ts = {0, 1000000};
                 nanosleep(&ts, NULL);
             }
+        }
+        double warmup_end = now_secs() + 0.5;
+        while (now_secs() < warmup_end) {
+            zmq_msg_recv(&msg, subs[0], ZMQ_DONTWAIT);
         }
 
         long long count = 0;
@@ -366,6 +452,7 @@ done_inproc_pubsub:;
         void *sock = zmq_socket(ctx, ZMQ_REP);
         if (!sock) die("zmq_socket REP");
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
+        print_bound_port(sock);
 
         zmq_msg_t msg;
         zmq_msg_init(&msg);

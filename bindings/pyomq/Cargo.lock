@@ -115,9 +115,9 @@ dependencies = [
 
 [[package]]
 name = "chacha20-blake3"
-version = "0.9.13"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0a8f2f3886d4d40375f7e43b2be364af83e06786d5c89b1e2e19e73d24ac58b"
+checksum = "55d7729707a8889ea911e9c775c5af9eba82e98ed1588e18b0ec7ae3a51c71bd"
 dependencies = [
  "blake3",
  "constant_time_eq 0.5.0",
@@ -528,9 +528,9 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "lz4rip"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f91ddb992c5d30b533aedd3e89ad5ac9d49903bb08b68707de4e0fcae5deaac"
+checksum = "37000121ace766b90aad42c9073751bf504ab545e41178bfd9cce043cc202d16"
 
 [[package]]
 name = "memchr"

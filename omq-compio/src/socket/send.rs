@@ -246,7 +246,7 @@ impl Socket {
             msg
         };
         match send_category(st) {
-            SendCategory::RoundRobin => self.send_round_robin(msg).await,
+            SendCategory::RoundRobin | SendCategory::Exclusive => self.send_round_robin(msg).await,
             SendCategory::IdentityRouted => self.send_identity_routed(msg).await,
             SendCategory::FanOut(kind) => match kind {
                 omq_proto::routing::FanOutKind::Group => self.send_radio(msg).await,
@@ -614,7 +614,12 @@ impl Socket {
     }
 
     async fn send_pub_filtered(&self, msg: Message) -> Result<()> {
+        const YIELD_INTERVAL: u32 = 256;
+
         let inner = self.inner();
+        let count = inner.send_count.get().wrapping_add(1);
+        inner.send_count.set(count);
+
         if inner
             .pub_sub_dirty
             .load(std::sync::atomic::Ordering::Acquire)
@@ -641,10 +646,16 @@ impl Socket {
                         let _ = peer.send(msg.clone()).await;
                     }
                 }
+                if count.is_multiple_of(YIELD_INTERVAL) {
+                    crate::yield_now().await;
+                }
                 return Ok(());
             }
             for peer in targets {
                 let _ = peer.send(msg.clone()).await;
+            }
+            if count.is_multiple_of(YIELD_INTERVAL) {
+                crate::yield_now().await;
             }
             return Ok(());
         }
@@ -668,6 +679,9 @@ impl Socket {
         }
         for peer in targets {
             let _ = peer.send(msg.clone()).await;
+        }
+        if count.is_multiple_of(YIELD_INTERVAL) {
+            crate::yield_now().await;
         }
         Ok(())
     }
@@ -722,7 +736,7 @@ impl Socket {
     fn try_send_dispatch(&self, msg: &Message) -> Result<()> {
         let st = self.inner().socket_type;
         match send_category(st) {
-            SendCategory::RoundRobin => self.try_send_round_robin(msg),
+            SendCategory::RoundRobin | SendCategory::Exclusive => self.try_send_round_robin(msg),
             SendCategory::IdentityRouted => self.try_send_identity_routed(msg),
             SendCategory::FanOut(kind) => match kind {
                 omq_proto::routing::FanOutKind::Group => self.try_send_radio(msg),

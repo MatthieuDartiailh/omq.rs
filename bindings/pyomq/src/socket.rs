@@ -655,7 +655,9 @@ impl Socket {
         let Some(m) = m else {
             return Ok(());
         };
-        py.allow_threads(|| runtime::destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump));
+        py.allow_threads(|| {
+            runtime::destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump)
+        });
         Ok(())
     }
 

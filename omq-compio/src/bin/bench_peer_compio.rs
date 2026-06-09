@@ -28,22 +28,27 @@ use std::net::Ipv4Addr;
 
 fn parse_ep(s: &str) -> Endpoint {
     if let Ok(port) = s.parse::<u16>() {
-        Endpoint::Tcp {
+        return Endpoint::Tcp {
             host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
             port,
-        }
-    } else if let Some((ip, port)) = s.split_once(':') {
-        if let (Ok(addr), Ok(port)) = (ip.parse::<Ipv4Addr>(), port.parse::<u16>()) {
-            return Endpoint::Tcp {
-                host: Host::Ip(addr.into()),
-                port,
-            };
-        }
-        s.parse()
-            .expect("valid endpoint (port, ip:port, or full URI)")
-    } else {
-        s.parse()
-            .expect("valid endpoint (port, ip:port, or full URI)")
+        };
+    }
+    if let Some((ip, port_str)) = s.split_once(':')
+        && let Ok(addr) = ip.parse::<Ipv4Addr>()
+        && let Ok(port) = port_str.parse::<u16>()
+    {
+        return Endpoint::Tcp {
+            host: Host::Ip(addr.into()),
+            port,
+        };
+    }
+    s.parse()
+        .expect("valid endpoint (port, ip:port, or full URI)")
+}
+
+fn print_bound_port(ep: &Endpoint) {
+    if let Endpoint::Tcp { port, .. } = ep {
+        println!("PORT {port}");
     }
 }
 
@@ -141,6 +146,17 @@ fn main() {
                 let peers: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
                 run_inproc_pubsub(name, size, Duration::from_secs_f64(duration), peers).await;
             }
+            Some("push-connect") => {
+                let ep = parse_ep(&args[2]);
+                let size: usize = args[3].parse().expect("msg_size");
+                run_push_connect(ep, size).await;
+            }
+            Some("pull-bind") => {
+                let ep = parse_ep(&args[2]);
+                let size: usize = args[3].parse().expect("msg_size");
+                let duration: f64 = args[4].parse().expect("duration_secs");
+                run_pull_bind(ep, size, Duration::from_secs_f64(duration)).await;
+            }
             Some("latency-mt") => {
                 let ep = parse_ep(&args[2]);
                 let size: usize = args[3].parse().expect("msg_size");
@@ -170,37 +186,62 @@ fn main() {
     });
 }
 
-async fn retry_bind(sock: &Socket, ep: &Endpoint) {
-    for attempt in 0..20 {
-        match sock.bind(ep.clone()).await {
-            Ok(_) => return,
-            Err(e) if attempt < 19 => {
-                eprintln!("bind retry {attempt}: {e}");
-                compio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(e) => panic!("bind failed after retries: {e}"),
-        }
-    }
-}
-
 async fn run_push(ep: Endpoint, size: usize) {
-    let push = Socket::new(SocketType::Push, bench_options(size));
-    retry_bind(&push, &ep).await;
+    let push = Socket::new(SocketType::Push, bench_options_server(size));
+    let bound = push.bind(ep).await.expect("push bind");
+    print_bound_port(&bound);
     let payload = vec![b'x'; size];
     if size <= omq_proto::message::MAX_INLINE_MESSAGE {
         loop {
-            if push.send(Message::from_slice(&payload)).await.is_err() {
-                break;
-            }
+            push.send(Message::from_slice(&payload)).await.unwrap();
         }
     } else {
         let msg = Message::single(payload);
         loop {
-            if push.send(msg.clone()).await.is_err() {
-                break;
-            }
+            push.send(msg.clone()).await.unwrap();
         }
     }
+}
+
+async fn run_push_connect(ep: Endpoint, size: usize) {
+    let push = Socket::new(SocketType::Push, bench_options_client(size));
+    push.connect(ep).await.expect("push connect");
+    let payload = vec![b'x'; size];
+    if size <= omq_proto::message::MAX_INLINE_MESSAGE {
+        loop {
+            push.send(Message::from_slice(&payload)).await.unwrap();
+        }
+    } else {
+        let msg = Message::single(payload);
+        loop {
+            push.send(msg.clone()).await.unwrap();
+        }
+    }
+}
+
+async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
+    let pull = Socket::new(SocketType::Pull, bench_options_server(size));
+    let bound = pull.bind(ep.clone()).await.expect("pull bind");
+    print_bound_port(&bound);
+
+    compio::time::sleep(Duration::from_millis(500)).await;
+
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        pull.recv().await.unwrap();
+        count += 1;
+        while pull.try_recv().is_ok() {
+            count += 1;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!("{count} {elapsed:.6} {size}");
+    eprint_pull_summary(&ep, count, elapsed, size);
 }
 
 fn bench_options(msg_size: usize) -> Options {
@@ -213,6 +254,72 @@ fn bench_options(msg_size: usize) -> Options {
         o = o.recv_buffer_size(buf).send_buffer_size(buf);
     }
     o
+}
+
+fn bench_options_server(msg_size: usize) -> Options {
+    let o = bench_options(msg_size);
+    match mechanism_env().as_deref() {
+        None | Some("null") => o,
+        #[cfg(feature = "plain")]
+        Some("plain") => o.plain_server(|_| true),
+        #[cfg(feature = "curve")]
+        Some("curve") => o.curve_server(bench_curve_server_keypair()),
+        #[cfg(feature = "blake3zmq")]
+        Some("blake3zmq") => o.blake3zmq_server(bench_b3_server_keypair()),
+        Some(other) => panic!("unknown OMQ_BENCH_MECHANISM: {other}"),
+    }
+}
+
+fn bench_options_client(msg_size: usize) -> Options {
+    let o = bench_options(msg_size);
+    match mechanism_env().as_deref() {
+        None | Some("null") => o,
+        #[cfg(feature = "plain")]
+        Some("plain") => o.plain_client("bench", "bench"),
+        #[cfg(feature = "curve")]
+        Some("curve") => {
+            let client_kp = bench_curve_client_keypair();
+            let server_pub = bench_curve_server_keypair().public;
+            o.curve_client(client_kp, server_pub)
+        }
+        #[cfg(feature = "blake3zmq")]
+        Some("blake3zmq") => {
+            let client_kp = bench_b3_client_keypair();
+            let server_pub = bench_b3_server_keypair().public;
+            o.blake3zmq_client(client_kp, server_pub)
+        }
+        Some(other) => panic!("unknown OMQ_BENCH_MECHANISM: {other}"),
+    }
+}
+
+fn mechanism_env() -> Option<String> {
+    std::env::var("OMQ_BENCH_MECHANISM")
+        .ok()
+        .map(|s| s.to_ascii_lowercase())
+}
+
+#[cfg(feature = "curve")]
+fn bench_curve_server_keypair() -> omq_compio::CurveKeypair {
+    let secret = omq_compio::CurveSecretKey::from_bytes([0x01; 32]);
+    let public = secret.derive_public();
+    omq_compio::CurveKeypair { public, secret }
+}
+
+#[cfg(feature = "curve")]
+fn bench_curve_client_keypair() -> omq_compio::CurveKeypair {
+    let secret = omq_compio::CurveSecretKey::from_bytes([0x02; 32]);
+    let public = secret.derive_public();
+    omq_compio::CurveKeypair { public, secret }
+}
+
+#[cfg(feature = "blake3zmq")]
+fn bench_b3_server_keypair() -> omq_compio::Blake3ZmqKeypair {
+    omq_compio::Blake3ZmqKeypair::from_secret(omq_compio::Blake3ZmqSecretKey([0x03; 32]))
+}
+
+#[cfg(feature = "blake3zmq")]
+fn bench_b3_client_keypair() -> omq_compio::Blake3ZmqKeypair {
+    omq_compio::Blake3ZmqKeypair::from_secret(omq_compio::Blake3ZmqSecretKey([0x04; 32]))
 }
 
 async fn run_inproc(name: String, size: usize, duration: Duration) {
@@ -273,7 +380,7 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
 }
 
 async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
-    let pull = Socket::new(SocketType::Pull, bench_options(size));
+    let pull = Socket::new(SocketType::Pull, bench_options_client(size));
     pull.connect(ep.clone()).await.expect("pull connect");
 
     compio::time::sleep(Duration::from_millis(500)).await;
@@ -347,7 +454,8 @@ fn with_commas(s: &str) -> String {
 
 async fn run_rep(ep: Endpoint, size: usize) {
     let rep = Socket::new(SocketType::Rep, bench_options(size));
-    retry_bind(&rep, &ep).await;
+    let bound = rep.bind(ep).await.expect("rep bind");
+    print_bound_port(&bound);
     loop {
         let msg = rep.recv().await.unwrap();
         rep.send(msg).await.unwrap();
@@ -543,12 +651,11 @@ async fn run_pub(ep: Endpoint, size: usize) {
         SocketType::Pub,
         bench_options(size).on_mute(omq_compio::OnMute::Block),
     );
-    retry_bind(&pub_, &ep).await;
+    let bound = pub_.bind(ep).await.expect("pub bind");
+    print_bound_port(&bound);
     let payload = vec![b'x'; size];
     loop {
-        if pub_.send(Message::from_slice(&payload)).await.is_err() {
-            break;
-        }
+        pub_.send(Message::from_slice(&payload)).await.unwrap();
     }
 }
 

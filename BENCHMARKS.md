@@ -465,7 +465,8 @@ without it BLAKE3ZMQ drops to ~50 MiB/s at bulk sizes. CURVE plateaus at
 <!-- END mechanism_frame -->
 
 <p align="center">
-  <img src="doc/charts/mechanism.svg" alt="Mechanism overhead" width="850">
+  <img src="doc/charts/mechanism/compio.svg" alt="Mechanism overhead (compio)" width="850">
+  <img src="doc/charts/mechanism/tokio.svg" alt="Mechanism overhead (tokio)" width="850">
 </p>
 
 ## Reproducing
@@ -494,7 +495,7 @@ python3 scripts/run_comparisons.py --scope omq    # omq-only refresh
 
 # Charts (SVG, generated from JSONL data):
 python3 scripts/gen_comparison_chart.py          # doc/charts/comparison_tcp.svg + comparison_inproc.svg
-python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism.svg
+python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism/{compio,tokio}.svg
 
 # Compression charts require a bench run first (writes JSONL):
 #   1. Rate-limit loopback:

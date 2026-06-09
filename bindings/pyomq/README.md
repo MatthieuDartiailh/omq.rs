@@ -54,12 +54,9 @@ subscriptions; messages are sent as multipart `[group, body]`.
 
 ## Backend
 
-pyomq is built on `omq-compio` (single-threaded io_uring on Linux). The runtime
+pyomq is built on `omq-tokio` (multi-threaded tokio runtime). The runtime
 runs on a dedicated background thread; every Python call releases the GIL
-across the runtime trip. This is the only backend pyomq supports — the
-`omq-tokio` backend exists in the upstream Rust workspace for callers that need
-a multi-thread tokio integration, but pyomq's per-call overhead is shaped
-around compio's single-thread invariant.
+across the runtime trip.
 
 ## Performance
 
@@ -77,15 +74,15 @@ See [BENCHMARKS.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS.md) fo
 <!-- PROXY_PERF:START -->
 |                    | pyomq     | pyzmq     | ratio     |
 |--------------------|----------:|----------:|----------:|
-| PUSH/PULL msg/s    |   774 k/s |   522 k/s | **1.48×** |
-| REQ/REP rt/s       |  12,569/s |   6,221/s | **2.02×** |
+| PUSH/PULL msg/s    |  2.24 M/s |  1.63 M/s | **1.37×** |
+| REQ/REP rt/s       |   6,647/s |   4,424/s | **1.50×** |
 <!-- PROXY_PERF:END -->
 
-pyomq's `proxy()` forwards directly between sockets on the compio thread —
-no rings, no Python per-message overhead. pyzmq's `zmq.proxy()` calls libzmq's
-C-level `zmq_proxy`. PUSH/PULL forwarding is throughput-bound and pyomq is ~2.5×
-faster. REQ/REP proxy is latency-bound (4 TCP hops per round-trip); pyomq is
-~1.7× faster thanks to direct socket forwarding.
+pyomq's `proxy()` forwards directly between sockets on the tokio runtime,
+no Python per-message overhead. pyzmq's `zmq.proxy()` calls libzmq's
+C-level `zmq_proxy`. PUSH/PULL forwarding is throughput-bound and pyomq is
+~1.4x faster. REQ/REP proxy is latency-bound (4 TCP hops per round-trip);
+pyomq is ~1.7x faster thanks to direct socket forwarding.
 
 Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure, regenerate the chart, and update the proxy table.
 

@@ -26,8 +26,8 @@ use std::sync::Arc;
 
 use super::cookie::CookieKeyring;
 use super::crypto::{
-    Hash, Nonce24, X25519Public, X25519Secret, aead_decrypt, aead_encrypt, ephemeral_keypair, kdf,
-    kdf24, x25519, x25519_basepoint,
+    Hash, Nonce8, Nonce24, X25519Public, X25519Secret, aead_decrypt, aead_encrypt,
+    ephemeral_keypair, kdf, kdf8, kdf24, x25519, x25519_basepoint,
 };
 use super::wire::{
     COOKIE_LEN, COOKIE_PLAIN_LEN, HELLO_PAYLOAD_LEN, KEY_LEN, NONCE_LEN, PROTOCOL_ID, TAG_LEN,
@@ -68,15 +68,18 @@ impl std::fmt::Debug for Keypair {
     }
 }
 
-/// Post-handshake symmetric session state. Each direction is
-/// independent: client→server and server→client get their own
-/// `(key, nonce)` pair from `derive_sessions`.
+/// Post-handshake symmetric session state. Each direction gets its own
+/// `(enc_key, auth_key, nonce)` triple from `derive_sessions`. The
+/// data-phase transform reuses these across all messages (no
+/// per-message KDF); the `ChaCha` block counter increments continuously.
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct SessionKeys {
-    pub c2s_key: Hash,
-    pub c2s_nonce: Nonce24,
-    pub s2c_key: Hash,
-    pub s2c_nonce: Nonce24,
+    pub c2s_enc_key: Hash,
+    pub c2s_auth_key: Hash,
+    pub c2s_nonce: Nonce8,
+    pub s2c_enc_key: Hash,
+    pub s2c_auth_key: Hash,
+    pub s2c_nonce: Nonce8,
 }
 
 impl std::fmt::Debug for SessionKeys {
@@ -653,10 +656,12 @@ fn build_cookie(
 fn derive_sessions(h4: &Hash, dh2: &Hash) -> SessionKeys {
     let ikm: &[&[u8]] = &[h4, dh2];
     SessionKeys {
-        c2s_key: kdf(ctx!("client->server key"), ikm),
-        c2s_nonce: kdf24(ctx!("client->server nonce"), ikm),
-        s2c_key: kdf(ctx!("server->client key"), ikm),
-        s2c_nonce: kdf24(ctx!("server->client nonce"), ikm),
+        c2s_enc_key: kdf(ctx!("client->server enc key"), ikm),
+        c2s_auth_key: kdf(ctx!("client->server auth key"), ikm),
+        c2s_nonce: kdf8(ctx!("client->server nonce"), ikm),
+        s2c_enc_key: kdf(ctx!("server->client enc key"), ikm),
+        s2c_auth_key: kdf(ctx!("server->client auth key"), ikm),
+        s2c_nonce: kdf8(ctx!("server->client nonce"), ikm),
     }
 }
 

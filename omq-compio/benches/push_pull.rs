@@ -53,10 +53,7 @@ fn main() {
     let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);
 
     let mut seq = 0usize;
-    let mut transports = common::all_transports();
-    if let Some(pos) = transports.iter().position(|t| t == "inproc") {
-        transports.insert(pos + 1, "inproc-mt".to_string());
-    }
+    let transports = common::all_transports();
     for transport in transports {
         for &peers in peer_counts {
             common::print_subheader(&transport, peers);

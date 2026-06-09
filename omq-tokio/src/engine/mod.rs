@@ -8,8 +8,8 @@
 //! The socket actor composes one of these per peer.
 
 pub mod compression_pool;
-pub mod direct_io;
 pub mod driver;
+pub(crate) mod wire_slot;
 
 pub use driver::{
     ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut, RecvSink, RecvSinkConfig,

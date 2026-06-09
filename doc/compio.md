@@ -162,7 +162,7 @@ during reads). On compio's cooperative single-thread runtime
 `encoder.try_lock()` always succeeds when called from the sender, since
 no other task runs concurrently. The encoded output goes into
 `EncodedQueue` -- the same flush path as the NULL passthrough -- so the
-transform path benefits from drain-vec reuse and flat-buf batching just
+transform path benefits from drain-vec reuse and arena batching just
 like uncompressed messages.
 
 ## `EncodedQueue` -- the direct-encode bypass
@@ -171,34 +171,34 @@ When `has_transform == false` (NULL mechanism, no compression),
 `Socket::send` encodes ZMTP frames directly into an `EncodedQueue`
 via `EncodedQueueCell` (a `Cell<bool>` borrow flag +
 `UnsafeCell<EncodedQueue>`, with a RAII guard). The driver drains the
-queue and calls `write_vectored` (or `write_all` for the flat region)
+queue and calls `write_vectored` (or `write_all` for the arena region)
 in step 3b.
 
 ```
 EncodedQueue {
   chunks: VecDeque<Bytes>,   // large-message chunks: header + Arc-bumped payload
-  flat_buf: BytesMut,        // contiguous backing for small messages (< FLAT_THRESHOLD)
+  arena: BytesMut,           // contiguous backing for small messages (< ARENA_THRESHOLD)
   total_bytes: usize,        // for cap detection (512 KB default)
   scratch: BytesMut,         // reused header buffer -- zero alloc post-warmup
 }
 
-const FLAT_THRESHOLD: usize = 32 * 1024;
+const ARENA_THRESHOLD: usize = 32 * 1024;
 ```
 
 Two encoding paths, chosen per message:
 
-**Small messages (total bytes < `FLAT_THRESHOLD`)** -- `encode_flat`:
+**Small messages (total bytes < `ARENA_THRESHOLD`)** -- `encode_arena`:
 1. Writes `[flags, size]` header + all payload bytes contiguously into
-   `flat_buf`.
+   the arena.
 2. No `Bytes` allocation; no Arc bump. N small messages land in one
    contiguous region.
-3. At flush, `flat_buf.split().freeze()` produces one `Bytes` covering
+3. At flush, `arena.split().freeze()` produces one `Bytes` covering
    all N messages -> **1 iovec** for N messages (vs. 2N for the
    large-message path).
 
-**Large messages (total bytes >= `FLAT_THRESHOLD`)** --
+**Large messages (total bytes >= `ARENA_THRESHOLD`)** --
 `encode_and_push`:
-1. `flat_buf` is first flushed to `chunks` (one `split().freeze()`) to
+1. The arena is first flushed to `chunks` (one `split().freeze()`) to
    maintain wire order.
 2. Writes header into `scratch`, calls `scratch.split().freeze()` ->
    owned `Bytes`.
@@ -216,7 +216,7 @@ and prepends unwritten chunks to the front.
 a plain bool test (no atomic CAS); frame encoding is inlined
 without going through the codec's transmit buffer (no
 `clone_transmit_chunks` + `advance_transmit`); and packing N small
-frames into one `BytesMut` region cuts the iovec count from 2N to 1,
+frames into one arena region cuts the iovec count from 2N to 1,
 reducing `writev` overhead and improving kernel batching.
 
 ## `PeerIo` -- codec, transform, and reader
@@ -446,7 +446,7 @@ Two race-recheck signals harden the boundary:
 1. Check handshake_done (Cell read)
 2. encoded_queue.try_borrow_mut() -- if busy (driver flushing), return false
 3. Check total_bytes < 512 KB cap
-4. if msg.byte_len() < FLAT_THRESHOLD: encode_flat(msg) -> flat_buf (copy, 0 Arc bumps)
+4. if msg.byte_len() < ARENA_THRESHOLD: encode_arena(msg) -> arena (copy, 0 Arc bumps)
    else: encode_and_push(msg) -> chunks (header Bytes + Arc-bump payload)
 5. if driver_in_select: transmit_ready.notify(1)
 6. Return true
@@ -466,7 +466,7 @@ queue.
 4. Drop encoder lock
 5. encoded_queue.try_borrow_mut() -- if busy, return false
 6. Check total_bytes < 512 KB cap
-7. For each wire message: encode_flat (< FLAT_THRESHOLD) or encode_and_push
+7. For each wire message: encode_arena (< ARENA_THRESHOLD) or encode_and_push
 8. Drop encoded_queue lock
 9. if driver_in_select: transmit_ready.notify(1)
 10. Return true

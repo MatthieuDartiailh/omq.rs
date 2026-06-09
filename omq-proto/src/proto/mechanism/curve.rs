@@ -67,7 +67,7 @@ fn validate_dh_not_zero(our_secret: &SecretKey, peer_public: &[u8; 32]) -> Resul
 
 /// Per-direction frame transform: encrypts outgoing application frames as
 /// MESSAGE commands, decrypts incoming MESSAGE commands.
-pub(crate) struct CurveTransform {
+pub struct CurveTransform {
     /// Box keyed on (our transient secret, peer transient public).
     salsa: SalsaBox,
     /// Outgoing MESSAGE nonce counter.

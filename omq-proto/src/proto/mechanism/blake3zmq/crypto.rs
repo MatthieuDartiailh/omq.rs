@@ -9,11 +9,9 @@
 //! | `BLAKE3-derive-key(ctx, ikm)` | `blake3` (KDF)     |
 //! | `Encrypt`/`Decrypt` AEAD      | `chacha20-blake3`  |
 //!
-//! Everything here is a thin pass-through. Higher-level handshake state
-//! lives in `super::server` / `super::client` (next slice). This module
-//! is the cryptographic primitive layer; functions are pure (no `&mut
-//! self`) except for ephemeral keypair generation, which calls the OS
-//! RNG.
+//! The AEAD construction (handshake boxes) uses `ChaCha20Blake3` which
+//! derives per-invocation subkeys internally. The data-phase transform
+//! in `transform.rs` uses `Session20` which skips the per-message KDF.
 
 use chacha20_blake3::ChaCha20Blake3;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -27,8 +25,10 @@ pub type X25519Public = [u8; 32];
 pub type X25519Secret = [u8; 32];
 /// BLAKE3 output / KDF output / shared secret - all 32 bytes.
 pub type Hash = [u8; 32];
-/// 24-byte AEAD nonce (XChaCha20-style).
+/// 24-byte nonce passed to handshake AEAD.
 pub type Nonce24 = [u8; 24];
+/// 8-byte DJB `ChaCha` nonce (data-phase sessions).
+pub type Nonce8 = [u8; 8];
 
 /// Generate a fresh ephemeral X25519 keypair from the OS RNG.
 /// Returns `(secret, public)`. The caller owns the secret bytes and is
@@ -37,6 +37,12 @@ pub fn ephemeral_keypair() -> (X25519Secret, X25519Public) {
     let secret = StaticSecret::random();
     let public = PublicKey::from(&secret);
     (secret.to_bytes(), public.to_bytes())
+}
+
+/// Derive the X25519 public key from a secret key.
+pub fn derive_public(secret: &X25519Secret) -> X25519Public {
+    let s = StaticSecret::from(*secret);
+    PublicKey::from(&s).to_bytes()
 }
 
 /// Compute the X25519 shared secret. Per RFC §9.1 + §9.3, the caller
@@ -98,14 +104,27 @@ pub fn kdf24(context: &str, ikm: &[&[u8]]) -> Nonce24 {
     out
 }
 
-/// AEAD encrypt: `chacha20-blake3` with 32-byte key, 24-byte nonce.
-/// Output is `ciphertext || tag` (tag = 32 bytes).
+/// `KDF8(ctx, ikm)` - `BLAKE3-derive-key(ctx, ikm)` truncated to 8
+/// bytes. DJB-layout `ChaCha` nonce for data-phase sessions.
+pub fn kdf8(context: &str, ikm: &[&[u8]]) -> Nonce8 {
+    let mut out = [0u8; 8];
+    let mut h = blake3::Hasher::new_derive_key(context);
+    for part in ikm {
+        h.update(part);
+    }
+    h.finalize_xof().fill(&mut out);
+    out
+}
+
+/// AEAD encrypt via `ChaCha20Blake3`. Derives per-invocation subkeys
+/// internally. Output is `ciphertext || tag` (tag = 32 bytes).
 pub fn aead_encrypt(key: &Hash, nonce: &Nonce24, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     ChaCha20Blake3::new(*key).encrypt(nonce, plaintext, aad)
 }
 
-/// AEAD decrypt. Verifies the 32-byte tag and returns the plaintext.
-/// Errors as `HandshakeFailed` on tag mismatch or short input.
+/// AEAD decrypt via `ChaCha20Blake3`. Verifies the 32-byte tag and
+/// returns the plaintext. Errors as `HandshakeFailed` on tag mismatch
+/// or short input.
 pub fn aead_decrypt(key: &Hash, nonce: &Nonce24, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
     ChaCha20Blake3::new(*key)
         .decrypt(nonce, ciphertext, aad)
@@ -180,6 +199,14 @@ mod tests {
         let k32 = kdf("ctx", &[ikm]);
         let k24 = kdf24("ctx", &[ikm]);
         assert_eq!(&k32[..24], &k24[..]);
+    }
+
+    #[test]
+    fn kdf8_is_prefix_of_kdf32() {
+        let ikm = b"some shared input";
+        let k32 = kdf("ctx", &[ikm]);
+        let k8 = kdf8("ctx", &[ikm]);
+        assert_eq!(&k32[..8], &k8[..]);
     }
 
     #[test]

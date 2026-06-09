@@ -62,6 +62,12 @@ impl Blake3ZmqKeypair {
             secret: Blake3ZmqSecretKey(sec),
         }
     }
+
+    /// Construct a keypair from a secret key, deriving the public half.
+    pub fn from_secret(secret: Blake3ZmqSecretKey) -> Self {
+        let public = Blake3ZmqPublicKey(crypto::derive_public(&secret.0));
+        Self { public, secret }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

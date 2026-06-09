@@ -115,6 +115,18 @@ maturin develop --release
 OMQ_SOAK_DURATION_SECS=120 python3 -m pytest tests/soak/ -v --tb=short
 ```
 
+## Stress tests
+
+Connect-before-bind and reconnection stress: 200 rounds per
+socket-type/transport/bind-role combo. Covers PUSH/PULL, REQ/REP,
+PUB/SUB, PAIR, DEALER/ROUTER across TCP, IPC, and inproc with both
+sides taking the bind role. Single-threaded to catch hangs.
+
+```sh
+cargo test -p omq-compio --test stress_connect_before_bind -- --test-threads=1
+cargo test -p omq-tokio  --test stress_connect_before_bind -- --test-threads=1
+```
+
 ## Benchmarks
 
 ```sh
@@ -130,47 +142,98 @@ unless `OMQ_BENCH_NO_WRITE=1`.
 Compression benchmarks run separately with bandwidth limiting.
 See [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md) for commands and results.
 
+### Cross-implementation comparison benchmarks
+
+`scripts/run_comparisons.py` drives standalone `bench_peer` binaries:
+
+| binary | source | impls |
+|--------|--------|-------|
+| `bench_peer_tokio` | `omq-tokio/src/bin/bench_peer_tokio.rs` | omq-tokio |
+| `bench_peer_compio` | `omq-compio/src/bin/bench_peer_compio.rs` | omq-compio, omq-compio-st |
+| `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, omq-libzmq |
+| `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
+| `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq |
+
+Each binary speaks a subcommand protocol:
+
+- `push <addr> <size>` -- bind PUSH, send forever
+- `pull <addr> <size> <duration>` -- connect PULL, count for duration,
+  print `<count> <elapsed> <size>` to stdout
+- `pub <addr> <size>` -- bind PUB, send forever
+- `sub <addr> <size> <duration>` -- connect SUB, subscribe(""),
+  count for duration
+- `inproc <name> <size> <duration>` -- in-process PUSH/PULL
+- `inproc-pubsub <name> <size> <duration> <peers>` -- in-process
+  PUB/SUB with N subscribers
+- `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>` -- latency
+
+Results go to `~/.cache/omq/comparisons.jsonl`. Charts are generated
+by `scripts/gen_comparison_chart.py` into
+`doc/charts/{pushpull,pubsub,reqrep}/comparison_*.svg`.
+
+Per-backend criterion-style benches (separate from comparisons) live in
+`omq-tokio/benches/` and `omq-compio/benches/` with shared scaffolding
+in `benches/common/mod.rs`. Custom harness (`harness = false`), no
+external framework. Results go to
+`~/.cache/omq/results_{tokio,compio}.jsonl`.
+
 ## Updating charts
 
 After performance-relevant changes, regenerate the charts before
-releasing.
+releasing. All chart generators read `OMQ_HW_EXTRAS` for the subtitle
+when sysfs governor/turbo files are not accessible (e.g. in a VM):
+
+```sh
+export OMQ_HW_EXTRAS="performance governor,turbo off"
+```
 
 ### Cross-library comparison charts
 
-Produces `doc/charts/pushpull/comparison_*.svg` and
-`doc/charts/pubsub/comparison_*.svg`:
+Produces `doc/charts/{pushpull,pubsub,reqrep}/comparison_*.svg`,
+`doc/charts/pushpull/fan{out,in}_tcp.svg`:
 
 ```sh
-python3 scripts/run_comparisons.py --scope omq   # bench omq-compio + omq-tokio only, reuse existing libzmq/zmq.rs baselines
-python3 scripts/gen_comparison_chart.py           # JSONL → doc/charts/{pushpull,pubsub}/comparison_*.svg
+python3 scripts/run_comparisons.py --impl omq-compio --impl omq-tokio   # omq only, reuse existing libzmq/zmq.rs baselines
+python3 scripts/gen_comparison_chart.py                                  # JSONL → SVG
 ```
 
-Use `--scope all` (default) to rebench all implementations when
-libzmq or zmq.rs baselines are stale.
+Omit `--impl` to rebench all implementations when libzmq or zmq.rs
+baselines are stale.
+
+### Mechanism charts
+
+Produces `doc/charts/mechanism/{tokio,compio}.svg`:
+
+```sh
+cargo bench -p omq-tokio  --bench mechanism --features plain,curve,blake3zmq
+cargo bench -p omq-compio --bench mechanism --features plain,curve,blake3zmq
+python3 scripts/gen_mechanism_chart.py
+```
 
 ### Compression charts
 
-Produces `doc/charts/compression/compio_2048.svg` and `doc/charts/compression/tokio_2048.svg`:
+Produces `doc/charts/compression/{compio,tokio}_2048.svg`:
 
 ```sh
 cargo bench -p omq-compio --bench compression --features lz4,zstd  # → ~/.cache/omq/results_compression_compio.jsonl
 cargo bench -p omq-tokio  --bench compression --features lz4,zstd  # → ~/.cache/omq/results_compression_tokio.jsonl
-python3 scripts/gen_compression_chart.py --backend compio           # JSONL → doc/charts/compression/compio_*.svg
-python3 scripts/gen_compression_chart.py --backend tokio            # JSONL → doc/charts/compression/tokio_*.svg
+python3 scripts/gen_compression_chart.py --backend compio           # JSONL → SVG
+python3 scripts/gen_compression_chart.py --backend tokio            # JSONL → SVG
 ```
 
-### pyomq bindings chart
+### pyomq bindings charts
 
-Produces `bindings/pyomq/doc/charts/bindings.svg`:
+Produces `doc/charts/throughput_bindings.svg` and
+`doc/charts/latency_bindings.svg`:
 
 ```sh
 cd bindings/pyomq
 maturin develop --release
-python scripts/update_perf.py --scope pyomq  # bench pyomq only, reuse existing pyzmq baseline
+python scripts/update_perf.py --impl pyomq   # bench pyomq only, reuse existing pyzmq baseline
 python scripts/update_perf.py --chart-only   # regenerate SVG from existing JSONL
 ```
 
-Use `--scope all` (default) to rebench both pyomq and pyzmq.
+Omit `--impl` to rebench both pyomq and pyzmq.
 
 ## Releasing
 

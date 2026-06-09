@@ -35,8 +35,8 @@ workspace root lock file.
 
 ```sh
 maturin develop --release
-python scripts/update_perf.py              # full (pyomq + pyzmq)
-python scripts/update_perf.py --scope pyomq  # reuse latest pyzmq baseline
+python scripts/update_perf.py                # full (pyomq + pyzmq)
+python scripts/update_perf.py --impl pyomq   # reuse latest pyzmq baseline
 python scripts/update_perf.py --chart-only   # regenerate SVG from JSONL
 ```
 

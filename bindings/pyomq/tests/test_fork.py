@@ -1,10 +1,15 @@
 """Verify sockets re-materialize correctly after fork."""
 
-import multiprocessing
 import os
 import time
 
+import pytest
+
 import pyomq as zmq
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded, use of fork:DeprecationWarning"
+)
 
 
 def _child_recv(ep, result_fd):

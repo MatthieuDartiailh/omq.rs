@@ -1,9 +1,8 @@
 //! Per-connection driver: one tokio task per live peer connection.
 
-use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
@@ -19,7 +18,7 @@ use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut
 use omq_proto::proto::{Command, Connection, Event};
 
 use super::compression_pool::CompressionPool;
-use super::direct_io::{DirectIo, SharedWriter};
+use super::wire_slot::PeerWireSlot;
 use crate::routing::drop_queue::QueueReceiver;
 use omq_proto::encoded_queue::EncodedQueue;
 
@@ -151,7 +150,11 @@ impl RecvSink {
                                 }
                                 Err(returned2) => {
                                     msg = returned2;
-                                    notified.await;
+                                    tokio::select! {
+                                        biased;
+                                        () = notified => {}
+                                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                                    }
                                 }
                             }
                         }
@@ -240,36 +243,6 @@ fn max_batch_bytes() -> usize {
     })
 }
 
-/// Heartbeat settings derived from [`DriverConfig`] at driver start.
-/// Bundled to avoid passing three loose scalars.
-struct HeartbeatConfig {
-    interval: Option<Duration>,
-    timeout: Duration,
-    ttl_deciseconds: u16,
-}
-
-/// Shared mutable state passed from [`ConnectionDriver::run_inner_body`]
-/// to [`run_direct_io_continuation`]. Destructured immediately by the
-/// callee so `tokio::select!` can borrow individual fields.
-struct DriverState<'a, R> {
-    reader: &'a mut R,
-    codec: &'a mut Connection,
-    read_buf: &'a mut BytesMut,
-    eq: &'a mut EncodedQueue,
-    drain_buf: &'a mut Vec<Bytes>,
-    inbox: &'a mut mpsc::Receiver<DriverCommand>,
-    peer_out: &'a mpsc::Sender<(u64, PeerOut)>,
-    peer_id: u64,
-    cancel: &'a CancellationToken,
-    config: &'a DriverConfig,
-    encoder: &'a mut Option<MessageEncoder>,
-    decoder: Option<&'a mut MessageDecoder>,
-    shared_msg_rx: Option<&'a QueueReceiver>,
-    recv_direct: &'a mut Option<RecvSink>,
-    last_input: &'a mut Instant,
-    passthrough: Option<&'a (Bytes, usize)>,
-}
-
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
 #[derive(Debug, Clone, Copy, Default)]
@@ -311,6 +284,7 @@ pub enum DriverCommand {
 pub struct DriverHandle {
     pub inbox: mpsc::Sender<DriverCommand>,
     pub cancel: CancellationToken,
+    pub(crate) wire_slot: Option<Arc<PeerWireSlot>>,
 }
 
 /// What a [`ConnectionDriver`] writes to its shared peer-event
@@ -355,16 +329,17 @@ where
     /// the recv path is a plain fair-queue delivery with no per-type
     /// post-processing (no `TypeState::post_recv`, no identity-prefix).
     recv_direct: Option<RecvSink>,
-    /// When set, the driver hands off the stream + codec to a `DirectIo`
-    /// after the ZMTP handshake completes, then exits. The `Socket` handle
-    /// does I/O directly on the user task, eliminating all data-path
-    /// cross-task wakeups.
-    direct_io_tx: Option<futures::channel::oneshot::Sender<DirectIo>>,
     /// Shared pool of raw compression contexts for offloading large-message
     /// compression to blocking threads.
     compression_pool: Option<Arc<CompressionPool>>,
     /// Minimum message `byte_len` to trigger compression offloading.
     offload_threshold: usize,
+    /// Per-peer encode slot: the socket handle encodes ZMTP frames into
+    /// this slot's `EncodedQueue`, and the driver flushes them to the
+    /// wire. Replaces the `DirectIo` pattern where the handle locked the
+    /// writer directly.
+    wire_slot: Option<Arc<PeerWireSlot>>,
+    arena_threshold: usize,
 }
 
 impl<T> ConnectionDriver<T>
@@ -411,9 +386,10 @@ where
             decoder: None,
             shared_msg_rx: None,
             recv_direct: None,
-            direct_io_tx: None,
             compression_pool: None,
             offload_threshold: 0,
+            wire_slot: None,
+            arena_threshold: omq_proto::encoded_queue::ARENA_THRESHOLD,
         }
     }
 
@@ -470,14 +446,18 @@ where
         self
     }
 
-    /// After handshake, hand off the stream + codec to a `DirectIo` and
-    /// exit. The `Socket` handle does I/O directly on the user task.
+    /// Install a per-peer encode slot. The socket handle encodes ZMTP
+    /// frames into this slot, and the driver flushes them to the wire
+    /// via the `data_ready` select arm.
     #[must_use]
-    pub(crate) fn with_direct_io_tx(
-        mut self,
-        tx: futures::channel::oneshot::Sender<DirectIo>,
-    ) -> Self {
-        self.direct_io_tx = Some(tx);
+    pub(crate) fn with_wire_slot(mut self, slot: Arc<PeerWireSlot>) -> Self {
+        self.wire_slot = Some(slot);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_arena_threshold(mut self, threshold: usize) -> Self {
+        self.arena_threshold = threshold;
         self
     }
 
@@ -513,15 +493,16 @@ where
             mut decoder,
             shared_msg_rx,
             mut recv_direct,
-            mut direct_io_tx,
             compression_pool,
             offload_threshold,
+            wire_slot,
+            arena_threshold,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
-        let mut eq = EncodedQueue::new();
+        let mut eq = EncodedQueue::with_arena_threshold(arena_threshold);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> =
@@ -535,29 +516,18 @@ where
             .heartbeat_ttl
             .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
             .unwrap_or(0);
-        let mut direct_io_armed = false;
-        let mut direct_io_msgs: VecDeque<Message> = VecDeque::new();
-
+        let hb_sleep = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX));
+        tokio::pin!(hb_sleep);
         loop {
-            // Clear the handshake deadline once we're past it.
             if handshake_deadline.is_some() && codec.is_ready() {
                 handshake_deadline = None;
             }
 
-            // 1a. Drain control-plane events (handshake, commands) first
-            // so HandshakeSucceeded reaches the actor before any data
-            // messages — the actor needs the peer identity map populated
-            // before it can apply post_recv transforms (REP envelope).
             while let Some(ev) = codec.poll_event() {
                 if peer_out.send((peer_id, PeerOut::Event(ev))).await.is_err() {
                     return Ok(());
                 }
             }
-            // 1b. Drain decoded application messages (data plane).
-            // When a DirectIo handoff is armed, queue messages for the
-            // handoff instead of routing through the actor — the actor
-            // would apply post_recv transforms (identity prefix) that
-            // conflict with DirectIo's inline processing.
             while let Some(m) = codec.poll_message() {
                 let m = match decoder.as_mut() {
                     Some(dec) => match dec.decode(m)? {
@@ -566,104 +536,38 @@ where
                     },
                     None => m,
                 };
-                if direct_io_armed {
-                    direct_io_msgs.push_back(m);
-                } else if !route_message(m, &mut recv_direct, &peer_out, peer_id).await {
+                if !route_message(m, &mut recv_direct, &peer_out, peer_id).await {
                     return Ok(());
                 }
             }
 
-            // Direct I/O handoff (two-phase): after the handshake
-            // completes, arm the flag. The select loop runs one more
-            // iteration so the shared_msg_rx arm can drain any queued
-            // messages. On the NEXT iteration the handoff fires.
-            if handshake_deadline.is_none()
-                && direct_io_tx.is_some()
+            // Set handshake_done on the encode slot once the handshake
+            // completes and there's no frame transform (CURVE/BLAKE3ZMQ).
+            // The slot stays disabled for crypto connections.
+            if let Some(ref slot) = wire_slot
                 && codec.is_ready()
-                && !direct_io_armed
+                && !slot.handshake_done.load(Ordering::Relaxed)
+                && !codec.has_frame_transform()
             {
-                if codec.has_frame_transform() {
-                    direct_io_tx = None;
-                } else {
-                    direct_io_armed = true;
-                }
-            } else if direct_io_armed && direct_io_tx.is_some() {
-                // Flush READY and any pending codec output first, then
-                // drain messages queued before DirectIo was ready.
-                while codec.has_pending_transmit() {
-                    flush_once(&mut writer, &mut codec).await?;
-                }
-                if let Some(ref rx) = shared_msg_rx {
-                    let mut n = 0usize;
-                    while let Some(msg) = rx.try_pop() {
-                        encode_msg(
-                            &msg,
-                            &mut encoder,
-                            &mut codec,
-                            &mut eq,
-                            passthrough.as_ref(),
-                        )?;
-                        n += 1;
-                    }
-                    if n > 0 {
-                        rx.release_permits(n);
-                        flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
-                    }
-                }
-
-                // Hand off the writer to DirectIo. The driver keeps
-                // running for recv, heartbeat, and fallback writes.
-                let shared_writer: SharedWriter =
-                    Arc::new(tokio::sync::Mutex::new(Box::new(writer)));
-                let dio_dead = Arc::new(AtomicBool::new(false));
-                let dio = DirectIo::new(shared_writer.clone(), dio_dead.clone(), peer_id);
-                let _ = direct_io_tx.take().unwrap().send(dio);
-
-                // Route any messages decoded during the handoff window.
-                for m in direct_io_msgs.drain(..) {
-                    if !route_message(m, &mut recv_direct, &peer_out, peer_id).await {
-                        return Ok(());
-                    }
-                }
-
-                return run_direct_io_continuation(
-                    DriverState {
-                        reader: &mut reader,
-                        codec: &mut codec,
-                        read_buf: &mut read_buf,
-                        eq: &mut eq,
-                        drain_buf: &mut drain_buf,
-                        inbox: &mut inbox,
-                        peer_out: &peer_out,
-                        peer_id,
-                        cancel: &cancel,
-                        config: &config,
-                        encoder: &mut encoder,
-                        decoder: decoder.as_mut(),
-                        shared_msg_rx: shared_msg_rx.as_ref(),
-                        recv_direct: &mut recv_direct,
-                        last_input: &mut last_input,
-                        passthrough: passthrough.as_ref(),
-                    },
-                    HeartbeatConfig {
-                        interval: hb_interval,
-                        timeout: hb_timeout,
-                        ttl_deciseconds: hb_ttl_deciseconds,
-                    },
-                    shared_writer,
-                    &dio_dead,
-                )
-                .await;
+                slot.handshake_done.store(true, Ordering::Release);
             }
 
             let want_write = codec.has_pending_transmit() || !eq.is_empty();
             let hb_enabled = hb_interval.is_some() && codec.is_ready();
 
+            if let Some(ref slot) = wire_slot {
+                slot.driver_in_select.store(true, Ordering::Release);
+            }
+
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
+                    if let Some(ref slot) = wire_slot {
+                        slot.mark_dead();
+                    }
                     drain_on_cancel(
                         &mut inbox, shared_msg_rx.as_ref(),
+                        wire_slot.as_ref(),
                         &mut encoder, &mut codec, &mut eq,
                         &mut drain_buf, &mut writer, passthrough.as_ref(),
                     ).await;
@@ -679,6 +583,9 @@ where
                     last_input = Instant::now();
                     let n = res?;
                     if n == 0 {
+                        if let Some(ref slot) = wire_slot {
+                            slot.mark_dead();
+                        }
                         cancel.cancel();
                         inbox.close();
                         return Ok(());
@@ -774,7 +681,33 @@ where
                     }
                 },
 
-                // Direct shared-queue arm: batch-encodes up to
+                // Wire-slot arm: the socket handle encoded ZMTP frames
+                // into the per-peer PeerWireSlot. Drain and write
+                // directly, bypassing the local EncodedQueue.
+                () = async {
+                    wire_slot.as_ref().unwrap().data_ready.notified().await;
+                }, if wire_slot.as_ref().is_some_and(|s| {
+                    s.handshake_done.load(Ordering::Acquire)
+                }) => {
+                    let slot = wire_slot.as_ref().unwrap();
+                    let mut batch_bytes = 0usize;
+                    loop {
+                        drain_buf.clear();
+                        slot.drain_into_vec(&mut drain_buf, 1024);
+                        if drain_buf.is_empty() {
+                            break;
+                        }
+                        batch_bytes +=
+                            drain_buf.iter().map(Bytes::len).sum::<usize>();
+                        write_chunks(&mut writer, &mut drain_buf).await?;
+                        slot.space_available.notify_one();
+                        if batch_bytes >= max_batch_bytes() {
+                            break;
+                        }
+                    }
+                },
+
+                // Shared-queue arm: batch-encodes up to
                 // SHARED_MAX_BATCH_MSGS messages per wakeup then flushes
                 // them all in one or a few write_vectored calls.
                 msg = async {
@@ -811,8 +744,9 @@ where
                 },
 
                 // Heartbeat tick: enabled only post-handshake when
-                // `heartbeat_interval` is set.
-                () = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX)), if hb_enabled => {
+                // `heartbeat_interval` is set. Uses a persistent pinned
+                // sleep so the safety-net timeout doesn't reset it.
+                () = &mut hb_sleep, if hb_enabled => {
                     if last_input.elapsed() > hb_timeout {
                         return Err(Error::Timeout);
                     }
@@ -820,10 +754,19 @@ where
                         ttl_deciseconds: hb_ttl_deciseconds,
                         context: Bytes::new(),
                     };
-                    // send_command returns Err only if not ready; we just
-                    // checked, so unwrap is safe. Still, handle gracefully.
                     let _ = codec.send_command(&ping);
+                    hb_sleep.as_mut().reset(
+                        tokio::time::Instant::now() + hb_interval.unwrap(),
+                    );
                 }
+
+                // Safety net: re-check all state in case a notification
+                // was lost.
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+
+            if let Some(ref slot) = wire_slot {
+                slot.driver_in_select.store(false, Ordering::Relaxed);
             }
         }
     }
@@ -842,6 +785,7 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 async fn drain_on_cancel<W: AsyncWrite + Unpin>(
     inbox: &mut mpsc::Receiver<DriverCommand>,
     shared_msg_rx: Option<&QueueReceiver>,
+    wire_slot: Option<&Arc<PeerWireSlot>>,
     encoder: &mut Option<MessageEncoder>,
     codec: &mut Connection,
     eq: &mut EncodedQueue,
@@ -849,6 +793,12 @@ async fn drain_on_cancel<W: AsyncWrite + Unpin>(
     writer: &mut W,
     passthrough: Option<&(Bytes, usize)>,
 ) {
+    if let Some(slot) = wire_slot {
+        drain_buf.clear();
+        slot.drain_into_vec(drain_buf, 1024);
+        eq.push_shared_chunks(drain_buf);
+        drain_buf.clear();
+    }
     while let Ok(cmd) = inbox.try_recv() {
         match cmd {
             DriverCommand::SendMessage(msg) => {
@@ -1081,6 +1031,41 @@ where
     }
 }
 
+async fn write_chunks<W>(writer: &mut W, chunks: &mut Vec<Bytes>) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    while !chunks.is_empty() {
+        let iovecs: SmallVec<[io::IoSlice<'_>; 64]> =
+            chunks.iter().map(|b| io::IoSlice::new(b)).collect();
+        let n = writer.write_vectored(&iovecs).await?;
+        drop(iovecs);
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        }
+        let total: usize = chunks.iter().map(Bytes::len).sum();
+        if n >= total {
+            chunks.clear();
+        } else {
+            let mut skip = n;
+            let mut first_kept = 0;
+            for (i, chunk) in chunks.iter().enumerate() {
+                if skip >= chunk.len() {
+                    skip -= chunk.len();
+                    first_kept = i + 1;
+                } else {
+                    break;
+                }
+            }
+            chunks.drain(..first_kept);
+            if skip > 0 && !chunks.is_empty() {
+                chunks[0] = chunks[0].slice(skip..);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One write attempt. Uses `write_vectored` so multi-chunk frame
 /// payloads (compression sentinels, CURVE nonces, etc.) hit the kernel
 /// as a single gather-write - no userspace memcpy. Partial writes are
@@ -1111,220 +1096,6 @@ where
         flush_once(writer, codec).await?;
     }
     writer.flush().await
-}
-
-/// Post-handoff continuation: the driver keeps reading from the wire,
-/// routing messages, handling heartbeat, and writing via the shared
-/// writer. `DirectIo` handles user sends on the caller's task.
-#[expect(clippy::too_many_lines)]
-async fn run_direct_io_continuation<R: AsyncRead + Unpin>(
-    state: DriverState<'_, R>,
-    hb: HeartbeatConfig,
-    writer: SharedWriter,
-    dio_dead: &AtomicBool,
-) -> Result<()> {
-    let DriverState {
-        reader,
-        codec,
-        read_buf,
-        eq,
-        drain_buf,
-        inbox,
-        peer_out,
-        peer_id,
-        cancel,
-        config,
-        encoder,
-        mut decoder,
-        shared_msg_rx,
-        recv_direct,
-        last_input,
-        passthrough,
-    } = state;
-    let HeartbeatConfig {
-        interval: hb_interval,
-        timeout: hb_timeout,
-        ttl_deciseconds: hb_ttl_deciseconds,
-    } = hb;
-    let hb_enabled = hb_interval.is_some();
-
-    loop {
-        while let Some(ev) = codec.poll_event() {
-            if peer_out.send((peer_id, PeerOut::Event(ev))).await.is_err() {
-                return Ok(());
-            }
-        }
-        while let Some(m) = codec.poll_message() {
-            let m = match decoder {
-                Some(ref mut dec) => match dec.decode(m)? {
-                    Some(plain) => plain,
-                    None => continue,
-                },
-                None => m,
-            };
-            if !route_message(m, recv_direct, peer_out, peer_id).await {
-                return Ok(());
-            }
-        }
-
-        let want_write = codec.has_pending_transmit() || !eq.is_empty();
-
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                let mut w = writer.lock().await;
-                drain_on_cancel(
-                    inbox, shared_msg_rx, encoder, codec, eq,
-                    drain_buf, &mut *w, passthrough,
-                ).await;
-                return Ok(());
-            }
-
-            res = reader.read_buf(read_buf) => {
-                *last_input = Instant::now();
-                let n = res?;
-                if n == 0 {
-                    dio_dead.store(true, Ordering::Release);
-                    cancel.cancel();
-                    inbox.close();
-                    return Ok(());
-                }
-                let chunk = if decoder.is_some() {
-                    let b = Bytes::copy_from_slice(read_buf);
-                    read_buf.clear();
-                    b
-                } else {
-                    let chunk = read_buf.split().freeze();
-                    if read_buf.capacity() < READ_BUF_SIZE {
-                        read_buf.reserve(READ_BUF_SIZE);
-                    }
-                    chunk
-                };
-                if let Err(e) = codec.handle_input(chunk) {
-                    while let Some(ev) = codec.poll_event() {
-                        let _ = peer_out
-                            .send((peer_id, PeerOut::Event(ev)))
-                            .await;
-                    }
-                    dio_dead.store(true, Ordering::Release);
-                    return Err(e);
-                }
-                handle_large_messages(codec, reader, config, last_input).await?;
-            }
-
-            res = async {
-                let mut w = writer.lock().await;
-                flush_encoded_queue(&mut *w, eq, drain_buf).await?;
-                flush_once(&mut *w, codec).await
-            }, if want_write => {
-                res?;
-            }
-
-            msg = async {
-                if let Some(rx) = shared_msg_rx {
-                    rx.recv().await
-                } else {
-                    std::future::pending().await
-                }
-            }, if codec.is_ready() => {
-                match msg {
-                    None => {
-                        let mut w = writer.lock().await;
-                        drain_writes(&mut *w, codec).await.ok();
-                        return Ok(());
-                    }
-                    Some(first) => {
-                        encode_msg(&first, encoder, codec, eq, passthrough)?;
-                        let mut count = 1usize;
-                        let mut bytes = first.byte_len();
-                        while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
-                            match shared_msg_rx.and_then(QueueReceiver::try_pop) {
-                                Some(next) => {
-                                    bytes += next.byte_len();
-                                    encode_msg(&next, encoder, codec, eq, passthrough)?;
-                                    count += 1;
-                                }
-                                None => break,
-                            }
-                        }
-                        let mut w = writer.lock().await;
-                        flush_encoded_queue(&mut *w, eq, drain_buf).await?;
-                        while codec.has_pending_transmit() {
-                            flush_once(&mut *w, codec).await?;
-                        }
-                        drop(w);
-                        if let Some(rx) = shared_msg_rx {
-                            rx.release_permits(count);
-                        }
-                    }
-                }
-            },
-
-            () = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX)), if hb_enabled => {
-                if last_input.elapsed() > hb_timeout {
-                    dio_dead.store(true, Ordering::Release);
-                    return Err(Error::Timeout);
-                }
-                let ping = Command::Ping {
-                    ttl_deciseconds: hb_ttl_deciseconds,
-                    context: Bytes::new(),
-                };
-                let _ = codec.send_command(&ping);
-                if codec.has_pending_transmit() {
-                    let mut w = writer.lock().await;
-                    while codec.has_pending_transmit() {
-                        flush_once(&mut *w, codec).await?;
-                    }
-                }
-            }
-
-            cmd = inbox.recv() => match cmd {
-                Some(DriverCommand::SendMessage(first)) => {
-                    encode_msg(&first, encoder, codec, eq, passthrough)?;
-                    let mut count = 1usize;
-                    let mut bytes = first.byte_len();
-                    while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
-                        match inbox.try_recv() {
-                            Ok(DriverCommand::SendMessage(m)) => {
-                                bytes += m.byte_len();
-                                encode_msg(&m, encoder, codec, eq, passthrough)?;
-                                count += 1;
-                            }
-                            Ok(DriverCommand::SendEncoded(chunks)) => {
-                                eq.push_shared_chunks(&chunks);
-                            }
-                            Ok(DriverCommand::SendCommand(c)) => {
-                                let _ = codec.send_command(&c);
-                            }
-                            Ok(DriverCommand::Close) => {
-                                let mut w = writer.lock().await;
-                                flush_encoded_queue(&mut *w, eq, drain_buf).await?;
-                                drain_writes(&mut *w, codec).await.ok();
-                                return Ok(());
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    let mut w = writer.lock().await;
-                    flush_encoded_queue(&mut *w, eq, drain_buf).await?;
-                    while codec.has_pending_transmit() {
-                        flush_once(&mut *w, codec).await?;
-                    }
-                }
-                Some(DriverCommand::SendEncoded(chunks)) => {
-                    eq.push_shared_chunks(&chunks);
-                    let mut w = writer.lock().await;
-                    flush_encoded_queue(&mut *w, eq, drain_buf).await?;
-                }
-                Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
-                Some(DriverCommand::Close) | None => {
-                    let mut w = writer.lock().await;
-                    drain_writes(&mut *w, codec).await.ok();
-                    return Ok(());
-                }
-            },
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1401,11 +1172,13 @@ mod tests {
             DriverHandle {
                 inbox: c_inbox_tx,
                 cancel: c_cancel,
+                wire_slot: None,
             },
             EventAdapter { rx: c_evt_rx },
             DriverHandle {
                 inbox: s_inbox_tx,
                 cancel: s_cancel,
+                wire_slot: None,
             },
             EventAdapter { rx: s_evt_rx },
         )
