@@ -12,7 +12,6 @@ Usage:
   scripts/run_comparisons.py --impl omq-compio --impl libzmq  # subset
   scripts/run_comparisons.py --transport tcp         # TCP only
   scripts/run_comparisons.py --no-latency           # skip REQ/REP latency
-  scripts/run_comparisons.py --update-markdown      # update COMPARISONS.md tables
 """
 
 import argparse
@@ -21,7 +20,6 @@ import glob
 import json
 import os
 import random
-import re
 import signal
 import subprocess
 import sys
@@ -41,12 +39,8 @@ def _cleanup_ipc_sockets():
             pass
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
-COMPARISONS_MD = ROOT / "COMPARISONS.md"
-
 FULL_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [32, 1024, 4096]
-TABLE_SIZES = [32, 1024, 4096]
-
 DEFAULT_DURATION = float(os.environ.get("OMQ_BENCH_DURATION", "2.0"))
 QUICK_DURATION = 1.5
 DEFAULT_ROUNDS = int(os.environ.get("OMQ_BENCH_ROUNDS", "3"))
@@ -64,58 +58,6 @@ def size_label(n: int) -> str:
     if n >= 1024:
         return f"{n // 1024} KiB"
     return f"{n} B"
-
-
-def format_si(v: float | None) -> str:
-    if v is None or v <= 0:
-        return "—"
-    if v >= 1e6:
-        return f"{v / 1e6:.2f}M"
-    if v >= 100e3:
-        return f"{v / 1e3:.0f}k"
-    if v >= 1e3:
-        return f"{v / 1e3:.1f}k"
-    return f"{v:.0f}"
-
-
-def format_mbps(v: float | None) -> str:
-    if v is None or v <= 0:
-        return "—"
-    if v >= 1000:
-        return f"{v / 1000:.1f} GB/s"
-    return f"{v:.0f} MB/s"
-
-
-def format_us(v: float | None) -> str:
-    if v is None or v <= 0:
-        return "—"
-    if v >= 10_000:
-        return f"{v / 1000:.0f} ms"
-    if v >= 1_000:
-        return f"{v / 1000:.1f} ms"
-    if v >= 100:
-        return f"{v:.0f} µs"
-    if v >= 10:
-        return f"{v:.1f} µs"
-    return f"{v:.2f} µs"
-
-
-def speedup_str(val: float | None, ref: float | None) -> str:
-    if not val or not ref or ref <= 0:
-        return "—"
-    r = val / ref
-    if r >= 1.1:
-        return f"**{r:.1f}×**"
-    return f"{r:.2f}×"
-
-
-def latency_speedup_str(ref: float | None, val: float | None) -> str:
-    if not val or not ref or val <= 0:
-        return "—"
-    r = ref / val
-    if r >= 1.1:
-        return f"**{r:.1f}×**"
-    return f"{r:.2f}×"
 
 
 # ── build ─────────────────────────────────────────────────────────
@@ -537,187 +479,6 @@ def append_jsonl(row: dict):
     JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(JSONL_PATH, "a") as f:
         f.write(json.dumps(row, separators=(",", ":")) + "\n")
-
-
-def load_jsonl() -> list[dict]:
-    if not JSONL_PATH.exists():
-        return []
-    rows = []
-    for line in JSONL_PATH.read_text().splitlines():
-        line = line.strip()
-        if line:
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return rows
-
-
-def latest_by_key(rows: list[dict], key_fields: list[str]) -> dict[tuple, dict]:
-    result: dict[tuple, dict] = {}
-    for row in rows:
-        key = tuple(row.get(f) for f in key_fields)
-        prev = result.get(key)
-        if prev is None or row.get("run_id", "") >= prev.get("run_id", ""):
-            result[key] = row
-    return result
-
-
-# ── markdown table update ─────────────────────────────────────────
-
-def replace_block(text: str, marker: str, content: str) -> str:
-    b = f"<!-- BEGIN {marker} -->"
-    e = f"<!-- END {marker} -->"
-    pattern = re.compile(re.escape(b) + r".*?" + re.escape(e), re.DOTALL)
-    if not pattern.search(text):
-        print(f"WARNING: marker {b} not found in COMPARISONS.md", file=sys.stderr)
-        return text
-    return pattern.sub(f"{b}\n{content}{e}", text)
-
-
-def build_throughput_table(
-    latest: dict[tuple, dict],
-    ref_impl: str,
-    impls: list[tuple[str, str]],
-) -> str:
-    cols = ["Size", f"{ref_impl} msg/s", f"{ref_impl} MB/s"]
-    for _, label in impls:
-        cols += [f"{label} msg/s", f"{label} MB/s", f"{label} ×"]
-
-    md = "| " + " | ".join(cols) + " |\n"
-    md += "|" + "|".join(["---"] * len(cols)) + "|\n"
-
-    for size in TABLE_SIZES:
-        ref_key = (ref_impl, "throughput", size)
-        ref_row = latest.get(ref_key)
-        ref_msgs = format_si(ref_row["msgs_s"] if ref_row else None)
-        ref_bw = format_mbps(ref_row["mbps"] if ref_row else None)
-
-        cells = [size_label(size), ref_msgs, ref_bw]
-        for impl_name, _ in impls:
-            key = (impl_name, "throughput", size)
-            row = latest.get(key)
-            cells.append(format_si(row["msgs_s"] if row else None))
-            cells.append(format_mbps(row["mbps"] if row else None))
-            val = row["msgs_s"] if row else None
-            ref_val = ref_row["msgs_s"] if ref_row else None
-            cells.append(speedup_str(val, ref_val))
-
-        md += "| " + " | ".join(cells) + " |\n"
-
-    md += "\n"
-    return md
-
-
-def build_latency_table(
-    latest: dict[tuple, dict],
-    ref_impl: str,
-    impls: list[tuple[str, str]],
-) -> str:
-    cols = ["Size", f"{ref_impl} p50", f"{ref_impl} p99"]
-    for _, label in impls:
-        cols += [f"{label} p50", f"{label} p99", f"{label} ×"]
-
-    md = "| " + " | ".join(cols) + " |\n"
-    md += "|" + "|".join(["---"] * len(cols)) + "|\n"
-
-    for size in TABLE_SIZES:
-        ref_key = (ref_impl, "latency", size)
-        ref_row = latest.get(ref_key)
-        ref_p50 = format_us(ref_row["p50_us"] if ref_row else None)
-        ref_p99 = format_us(ref_row["p99_us"] if ref_row else None)
-
-        cells = [size_label(size), ref_p50, ref_p99]
-        for impl_name, _ in impls:
-            key = (impl_name, "latency", size)
-            row = latest.get(key)
-            cells.append(format_us(row["p50_us"] if row else None))
-            cells.append(format_us(row["p99_us"] if row else None))
-            ref_p50_val = ref_row["p50_us"] if ref_row else None
-            val_p50 = row["p50_us"] if row else None
-            cells.append(latency_speedup_str(ref_p50_val, val_p50))
-
-        md += "| " + " | ".join(cells) + " |\n"
-
-    md += "\n"
-    return md
-
-
-def update_comparisons_md(transports: list[str]):
-    rows = load_jsonl()
-    if not rows:
-        print("No JSONL data to update from", file=sys.stderr)
-        return
-
-    text = COMPARISONS_MD.read_text()
-
-    for transport in transports:
-        t_rows = [r for r in rows if r.get("transport") == transport]
-        if not t_rows:
-            continue
-
-        latest = latest_by_key(t_rows, ["impl", "kind", "msg_size"])
-        data = {(r["impl"], r["kind"], r["msg_size"]): r for r in latest.values()}
-
-        available_impls = {r.get("impl") for r in t_rows}
-
-        # libzmq comparison tables
-        if "libzmq" not in available_impls:
-            print(
-                f"WARNING: no libzmq data for {transport}, tables will have gaps",
-                file=sys.stderr,
-            )
-
-        if transport == "inproc":
-            compio_impls = [
-                ("omq-compio", "compio-mt"),
-                ("omq-compio-st", "compio-st"),
-            ]
-        else:
-            compio_impls = [("omq-compio", "omq-compio")]
-
-        tput_compio = build_throughput_table(data, "libzmq", compio_impls)
-        text = replace_block(text, f"libzmq_comparison_{transport}_compio", tput_compio)
-
-        tput_tokio = build_throughput_table(
-            data, "libzmq", [("omq-tokio", "omq-tokio")],
-        )
-        text = replace_block(text, f"libzmq_comparison_{transport}_tokio", tput_tokio)
-
-        # zmq.rs comparison tables (TCP and IPC, not inproc/ws)
-        if transport in ("tcp", "ipc"):
-            if "zmq.rs" not in available_impls and transport in ("tcp", "ipc"):
-                print(
-                    f"WARNING: no zmq.rs data for {transport}, tables will have gaps",
-                    file=sys.stderr,
-                )
-
-            zmqrs_compio = build_throughput_table(
-                data, "zmq.rs", [("omq-compio", "omq-compio")],
-            )
-            text = replace_block(text, f"zmqrs_comparison_{transport}_compio", zmqrs_compio)
-
-            zmqrs_tokio = build_throughput_table(
-                data, "zmq.rs", [("omq-tokio", "omq-tokio")],
-            )
-            text = replace_block(text, f"zmqrs_comparison_{transport}_tokio", zmqrs_tokio)
-
-        # latency tables
-        lat_table = build_latency_table(
-            data, "libzmq",
-            [("omq-compio", "omq-compio"), ("omq-tokio", "omq-tokio")],
-        )
-        text = replace_block(text, f"libzmq_latency_{transport}", lat_table)
-
-        if transport in ("tcp", "ipc"):
-            zmqrs_lat = build_latency_table(
-                data, "zmq.rs",
-                [("omq-compio", "omq-compio"), ("omq-tokio", "omq-tokio")],
-            )
-            text = replace_block(text, f"zmqrs_latency_{transport}", zmqrs_lat)
-
-    COMPARISONS_MD.write_text(text)
-    print(f"Updated {COMPARISONS_MD}", file=sys.stderr)
 
 
 # ── impl definitions ─────────────────────────────────────────────
@@ -1163,10 +924,6 @@ def main():
         help=f"comma-separated peer counts for fan-in (default: {','.join(str(p) for p in FANIN_PEER_COUNTS)})",
     )
     parser.add_argument(
-        "--update-markdown", action="store_true",
-        help="update COMPARISONS.md tables from JSONL",
-    )
-    parser.add_argument(
         "--base-port", type=int, default=0,
         help="base TCP port (default: random ephemeral)",
     )
@@ -1229,9 +986,6 @@ def main():
                    fanout_peers=fanout_peers,
                    run_fanin=args.fanin,
                    fanin_peers=fanin_peers)
-
-    if args.update_markdown:
-        update_comparisons_md(transports)
 
 
 if __name__ == "__main__":

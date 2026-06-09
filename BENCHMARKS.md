@@ -70,12 +70,6 @@ without it BLAKE3ZMQ drops to ~50 MiB/s at bulk sizes. CURVE plateaus at
   <img src="doc/charts/mechanism/tokio.svg" alt="Mechanism overhead (tokio)" width="850">
 </p>
 
-## Cross-library comparisons
-
-See [COMPARISONS.md](COMPARISONS.md) for two-process TCP benchmarks against
-libzmq and zmq.rs. Run `python3 scripts/run_comparisons.py --update-markdown`
-to refresh those tables.
-
 ## Compression transport benchmarks
 
 See [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md) for bandwidth-limited throughput charts
@@ -104,7 +98,7 @@ OMQ_BENCH_TRANSPORTS=tcp OMQ_BENCH_PEERS=3 OMQ_BENCH_SIZES=128,2048,32768 cargo 
 # Two-process comparison (requires libzmq installed for --scope all):
 python3 scripts/run_comparisons.py               # full sweep, all impls
 python3 scripts/run_comparisons.py --quick-run    # 3 sizes only
-python3 scripts/run_comparisons.py --scope omq    # omq-only refresh
+python3 scripts/run_comparisons.py --impl omq-tokio --impl omq-compio  # omq-only refresh
 
 # Charts (SVG, generated from JSONL data):
 python3 scripts/gen_comparison_chart.py          # doc/charts/pushpull/ + reqrep/ + pubsub/
