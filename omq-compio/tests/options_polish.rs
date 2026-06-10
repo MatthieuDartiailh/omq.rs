@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
-use omq_compio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType, TrySendError};
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -131,11 +131,13 @@ async fn try_send_no_peers_returns_would_block() {
     push.bind(inproc_ep("try-send-nopeer-compio"))
         .await
         .unwrap();
-    // No peer connected; shared queue has capacity but no peer means WouldBlock.
-    assert!(matches!(
-        push.try_send(Message::single("x")),
-        Err(Error::WouldBlock)
-    ));
+    // No peer connected; shared queue has capacity but no peer means Full.
+    // The returned message must be the original so the caller can retry.
+    let returned = match push.try_send(Message::single("x")) {
+        Err(TrySendError::Full(m)) => m,
+        other => panic!("expected TrySendError::Full, got {other:?}"),
+    };
+    assert_eq!(&*returned.part_bytes(0).unwrap(), b"x");
 }
 
 #[compio::test]

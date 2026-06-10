@@ -528,9 +528,9 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "lz4rip"
-version = "0.2.1"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37000121ace766b90aad42c9073751bf504ab545e41178bfd9cce043cc202d16"
+checksum = "3264b05295ea46f2a6d7d0bdd5471225019ab56b95b221d19a5fb72b91665016"
 
 [[package]]
 name = "memchr"
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-channel",
  "bytes",
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "pyomq"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bytes",
  "flume",
@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "atomic-waker",
  "futures-core",

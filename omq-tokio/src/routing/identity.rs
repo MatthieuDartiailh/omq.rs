@@ -35,11 +35,9 @@ impl Submitter {
     pub(crate) fn try_send(
         &self,
         mut msg: Message,
-    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         if msg.is_empty() {
-            return Err(crate::socket::handle::TrySendError::Error(
-                Error::Unroutable,
-            ));
+            return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
         }
         let identity = msg.pop_front().unwrap();
 
@@ -53,9 +51,7 @@ impl Submitter {
 
         let Some(t) = target else {
             if self.router_mandatory {
-                return Err(crate::socket::handle::TrySendError::Error(
-                    Error::Unroutable,
-                ));
+                return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
             }
             return Ok(());
         };

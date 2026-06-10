@@ -58,18 +58,18 @@ impl Submitter {
     pub(crate) fn try_send(
         &self,
         msg: Message,
-    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         let (forwarded, group) = match self.mode {
             FanOutMode::SubscriptionPrefix => (msg, None),
             FanOutMode::Group => {
                 if msg.len() != 2 {
-                    return Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
+                    return Err(omq_proto::error::TrySendError::Error(Error::Protocol(
                         "RADIO send requires [group, body] (2 parts)".into(),
                     )));
                 }
                 let group_bytes = msg.part_bytes(0).unwrap_or_default();
                 if group_bytes.len() > u8::MAX as usize {
-                    return Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
+                    return Err(omq_proto::error::TrySendError::Error(Error::Protocol(
                         "RADIO group name too long (max 255 bytes)".into(),
                     )));
                 }
@@ -80,7 +80,7 @@ impl Submitter {
 
         let targets = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop && !targets_have_space(&targets) {
-            return Err(crate::socket::handle::TrySendError::Full(forwarded));
+            return Err(omq_proto::error::TrySendError::Full(forwarded));
         }
         dispatch_to_targets(&targets, &forwarded);
         Ok(())

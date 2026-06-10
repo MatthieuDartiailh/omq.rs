@@ -446,7 +446,11 @@ impl omq_proto::socket_api::SocketApi for Socket {
         self.recv().await
     }
     fn try_send(&self, msg: omq_proto::message::Message) -> Result<()> {
-        self.try_send(msg)
+        self.try_send(msg).map_err(|e| match e {
+            omq_proto::error::TrySendError::Full(_) => Error::WouldBlock,
+            omq_proto::error::TrySendError::Closed => Error::Closed,
+            omq_proto::error::TrySendError::Error(e) => e,
+        })
     }
     fn try_recv(&self) -> Result<omq_proto::message::Message> {
         self.try_recv()

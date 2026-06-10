@@ -21,7 +21,7 @@ pub use omq_proto::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecre
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, IpcPath, KeepAlive,
     MechanismConfig, MechanismSetup, Message, MessageIter, OnMute, Options, ReconnectPolicy,
-    Result, SocketType, is_compatible,
+    Result, SocketType, TrySendError, is_compatible,
 };
 
 pub use omq_proto::endpoint;

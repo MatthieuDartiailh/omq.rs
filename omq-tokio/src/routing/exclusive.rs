@@ -38,7 +38,7 @@ impl Submitter {
     pub(crate) fn try_send(
         &self,
         msg: Message,
-    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         let handle = self.peer.lock().expect("exclusive peer").clone();
         match handle {
             Some(h) => h
@@ -46,11 +46,11 @@ impl Submitter {
                 .try_send(DriverCommand::SendMessage(msg))
                 .map_err(|e| match e {
                     tokio::sync::mpsc::error::TrySendError::Full(DriverCommand::SendMessage(m)) => {
-                        crate::socket::handle::TrySendError::Full(m)
+                        omq_proto::error::TrySendError::Full(m)
                     }
-                    _ => crate::socket::handle::TrySendError::Closed,
+                    _ => omq_proto::error::TrySendError::Closed,
                 }),
-            None => Err(crate::socket::handle::TrySendError::Full(msg)),
+            None => Err(omq_proto::error::TrySendError::Full(msg)),
         }
     }
 }

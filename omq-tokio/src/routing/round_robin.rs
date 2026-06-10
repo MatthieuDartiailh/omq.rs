@@ -32,10 +32,10 @@ impl Submitter {
     pub(crate) fn try_send(
         &self,
         msg: Message,
-    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         self.queue
             .try_send(msg)
-            .map_err(crate::socket::handle::TrySendError::Full)
+            .map_err(omq_proto::error::TrySendError::Full)
     }
 }
 

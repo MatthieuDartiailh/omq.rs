@@ -1,6 +1,10 @@
 //! Error and Result types.
 
+use std::fmt;
+
 use thiserror::Error;
+
+use crate::message::Message;
 
 /// Convenience alias with `Error` as the default error type.
 pub type Result<T, E = Error> = core::result::Result<T, E>;
@@ -45,3 +49,26 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// Error returned by `Socket::try_send`.
+#[derive(Debug)]
+pub enum TrySendError {
+    /// Channel full (HWM reached). Contains the message for retry.
+    Full(Message),
+    /// Socket closed.
+    Closed,
+    /// Protocol or framing error.
+    Error(Error),
+}
+
+impl fmt::Display for TrySendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full(_) => write!(f, "send queue full"),
+            Self::Closed => write!(f, "socket closed"),
+            Self::Error(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for TrySendError {}

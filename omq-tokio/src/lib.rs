@@ -26,7 +26,7 @@ pub use omq_proto::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecre
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, IpcPath, KeepAlive,
     MechanismConfig, MechanismSetup, Message, MessageIter, OnMute, Options, ReconnectPolicy,
-    Result, SocketType, is_compatible,
+    Result, SocketType, TrySendError, is_compatible,
 };
 
 // Sub-modules of omq_proto are re-exported under their original
@@ -40,5 +40,5 @@ pub use omq_proto::proto;
 
 pub use socket::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
-    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket, TrySendError,
+    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket,
 };
