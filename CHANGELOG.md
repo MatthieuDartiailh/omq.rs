@@ -6,16 +6,136 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## 2026-06-10
+
 ### Removed
 
-- `priority` feature: per-pipe priority tiers. The feature was unused by
-  any downstream consumer and doubled the routing architecture (145 cfg
-  markers across 32 files). Can be re-introduced with a cleaner design
-  (e.g. a trait-based routing strategy) if demand materializes.
+- `priority` feature and `ConnectOpts`/`Socket::connect_with`. The
+  feature was unused by any downstream consumer and doubled the routing
+  architecture (145 cfg markers across 32 files). Can be re-introduced
+  with a cleaner design if demand materializes.
 
-### omq 0.12.2
+### omq-proto 0.16.0
 
-- Breaking: `tokio-backend` is now the default Cargo feature (was `compio-backend`). Users who relied on the default must either add `--no-default-features --features compio-backend` or leave their `Cargo.toml` as-is (no change needed for tokio users).
+- **Breaking:** `MechanismSetup` variants renamed (`keypair` ->
+  `our_keypair`); `MechanismConfig` merged into `MechanismSetup`.
+  `MechanismSetup` is now `#[non_exhaustive]`.
+- **Breaking:** `Options` gains new fields: `arena_threshold`,
+  `wire_slot_cap`, `compression_offload_threshold`, `xpub_nodrop`.
+- **Breaking:** `MonitorEvent` discriminant values changed
+  (`PeerCommand` 7 -> 11, `Closed` 8 -> 12).
+- **Breaking:** `SendCategory::Exclusive` variant added.
+- **Breaking:** `ConnectOpts` module removed.
+- **Breaking:** `encode_message_prefixed_gather` and
+  `encode_message_gather` removed (replaced by `EncodedQueue`
+  entry-based encoding).
+- `EncodedQueue` moved from backends into `omq-proto`. Entry-based
+  arena encoder: frame headers always go into the arena, small messages
+  (< `ARENA_THRESHOLD` = 96 KiB) are contiguous (1 iovec per batch),
+  large payloads tracked as external `Bytes` entries (zero-copy
+  gather-write). Arena capacity increased from 128 KiB to 256 KiB.
+- `SubscriptionSet::is_subscribe_all()` for PUB subscription elision.
+- `EncodedQueue::push_shared_chunks()` and `push_pre_encoded()` for
+  encode-once fan-out.
+- Cache-line-aligned inline thresholds: `Message` inlines up to 55 B
+  (was 39 B), `Payload` up to 62 B (was 38 B). Both are 64 B (one
+  cache line). Eliminates the 39-to-40 B throughput cliff (+35% at
+  40 B).
+- `Message::from_slice(&[u8])` for zero-alloc inline construction of
+  small messages (up to 55 B). No heap allocation, no refcounting.
+- BLAKE3ZMQ ported to `chacha20-blake3` crate (`Session20` API).
+  `SessionKeys` fields renamed to separate enc/auth keys.
+- LZ4 compression: replaced `lz4-sys` (C FFI) with `lz4rip` (pure
+  Rust). No C compiler required for the `lz4` feature.
+- WebSocket fast paths: `try_advance_ready_ws()` for recv,
+  `encode_and_push_flat_ws()` for send. ~3x throughput improvement
+  on the WS hot path.
+- 10 ms safety-net timers on all notification-based await points to
+  prevent indefinite hangs from lost wakeups.
+
+### omq-tokio 0.14.0
+
+- **Breaking:** `DirectIo` module removed, replaced by
+  `PeerWireSlot`. `Socket::connect_with` removed. `InboundFrame` and
+  `InprocPeerSnapshot` moved to `omq-proto`. `DriverHandle` gains
+  private `wire_slot` field. `DriverCommand::SendEncoded` variant
+  added.
+- PeerWireSlot: per-peer `EncodedQueue` under `std::sync::Mutex`
+  (nanosecond hold time, encode only). The handle encodes ZMTP frames
+  into the slot; the driver flushes to the wire via a
+  `transmit_notify` select arm. Eliminates all pump tasks for fan-out
+  and identity routing. Signal coalescing via `pending: AtomicBool`
+  gates `notify_one()`.
+- `PeerSend` enum (`Wire`/`Inbox`) dispatches fan-out, identity, and
+  exclusive strategies to per-peer slots without pump tasks.
+- Exclusive routing strategy for PAIR/CHANNEL sockets.
+- Fan-out (PUB/XPUB/RADIO): encode message once via `pre_encode()`,
+  push shared chunks into each matching peer's slot. Per-peer encoding
+  eliminated for non-encrypted transports.
+- PUB/SUB subscription elision: skip the Trie lookup when all peers
+  are subscribe-all.
+- Read-path zero-copy: `BytesMut` + `read_buf` replaces
+  `Vec<u8>` + `Bytes::copy_from_slice`. 100-150% throughput gain at
+  64 B through 4 KiB.
+- REQ send bypass: `TypeState` shared via `Arc<Mutex<TypeState>>`,
+  `Socket::send` locks inline and pushes through `SendSubmitter`.
+- REQ recv bypass: driver pushes directly to `recv_tx`;
+  `Socket::recv` applies `post_recv_req_direct` inline.
+- Atomic REQ alternation flag: `AtomicBool` replaces the shared
+  `Mutex<TypeState>` for REQ sockets. Saves ~200 ns per send+recv
+  pair.
+- Specialized `try_recv` fast path for PULL/PAIR: direct
+  `cache.pop_front()` then lock + `swap_messages` + pop. No function
+  calls, no `Result` wrapping. `try_recv` self-time dropped from 29%
+  to 15%.
+- `ChunkedInputBuf` front-cache: front chunk pulled out of `VecDeque`
+  into a dedicated `front: Bytes` field. `peek_frame_header` dropped
+  from 12.3% to 10.1%.
+- Inproc recv_direct: `spawn_inproc_peer` passes `recv_tx` directly
+  to the inproc driver, bypassing the actor.
+- Configurable `arena_threshold` and `wire_slot_cap` per socket.
+- Fix: lost-wakeup race and hang on inproc peer exit in recv.
+- Fix: stale `identity_to_slot` entries after driver exit (47
+  reconnect tests added).
+- Fix: silent message loss, WS mechanism panic, and frame size
+  truncation.
+- Fix: `PeerSend` falls back to driver inbox when encode slot is
+  ineligible.
+- Fix: flush encode slot on cancel, fix `FanOut` per-message
+  allocation.
+- Fix: remove `DIRECT_MSG_MAX` to prevent wire_slot message
+  reordering.
+- Fix: `SO_REUSEADDR` set on TCP listener sockets.
+- Fix: free inproc names from registry on `signal_close`.
+
+### omq-libzmq 0.4.3
+
+- Port from omq-compio to omq-tokio backend.
+- Direct yring recv bypass: `ConnectionDriver` pushes decoded messages
+  directly into the yring and signals the eventfd. One thread crossing
+  instead of three. 8 B TCP: 1.1M -> 4.7M msg/s (4.3x).
+- `send_accum` Mutex replaced with `UnsafeCell`; `send_ring` RwLock
+  guarded by `AtomicBool` flag for TCP sockets.
+- Yield every 64 msgs or 1 MiB sent to prevent starvation.
+- `XPUB_NODROP` socket option.
+- Fix: inproc bypass recv hang on multipart messages.
+- Fix: inproc bypass recv starvation and blocking send.
+- Harden FFI layer against panics with SAFETY comments.
+
+### blume 0.4.0
+
+- **Breaking:** `Receiver` is no longer `Sync` or `RefUnwindSafe`.
+  Internal `Mutex` in the consumer cache replaced with `RefCell` for
+  single-threaded consumers (matches the blume MPSC contract).
+
+### yring 0.3.0
+
+- **Breaking:** `Producer::flush()` and `AsyncProducer::flush()` now
+  return `()` (was `bool`).
+- Producer-side backpressure for async SPSC ring.
+- `flush()` reduced to a single Release store (was Acquire + Release).
+- Batch consumer pops with deferred Release store in `release()`.
+- Deduplicate sync/async ring operations into shared `Ring<T>`.
 
 ## [0.2.14] - 2026-05-25
 
