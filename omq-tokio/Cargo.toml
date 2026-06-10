@@ -52,7 +52,7 @@ rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = { version = "2.2", optional = true }
 rustls-pki-types = { version = "1", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
-omq-compio = { path = "../omq-compio", optional = true, default-features = false, features = ["ws"] }
+omq-compio = { version = "0.12.0", path = "../omq-compio", optional = true, default-features = false, features = ["ws"] }
 compio = { version = "0.19.0", git = "https://github.com/compio-rs/compio.git", rev = "cf746eb8", optional = true, features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync"] }
 
 [dev-dependencies]
