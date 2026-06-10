@@ -10,7 +10,7 @@ runtime backends differ. Detail lives in [`compio.md`](compio.md),
 ```
 +------------------------------------------------------------------+
 |  user code                                                       |
-|  +-> omq (facade, picks one backend at build time):              |
+|  depends directly on one backend crate:                          |
 |         omq-tokio   (default, multi-thread, mio/epoll/kqueue)    |
 |         omq-compio  (single-thread io_uring/IOCP)                |
 +------------------------------------------------------------------+

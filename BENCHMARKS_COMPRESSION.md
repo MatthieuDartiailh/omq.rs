@@ -15,10 +15,10 @@ on a constrained link). Charts show projected throughput at 10 Gbps,
   (<= 2 KiB), the receiver is the bottleneck, so neither level matters.
 
 <p align="center">
-  <img src="doc/charts/compression/compio_2048.svg" alt="Compression throughput: omq-compio" width="850">
+  <img src="doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
 </p>
 <p align="center">
-  <img src="doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
+  <img src="doc/charts/compression/compio_2048.svg" alt="Compression throughput: omq-compio" width="850">
 </p>
 
 ### Compression thresholds
@@ -71,12 +71,12 @@ No kernel-level rate limiting is used; slow-link simulation via `tc`/`netem`
 is unreliable on loopback due to kernel buffering.
 
 ```sh
-cargo bench -p omq-compio --features lz4,zstd --bench compression
 cargo bench -p omq-tokio  --features lz4,zstd --bench compression
+cargo bench -p omq-compio --features lz4,zstd --bench compression
 
 # Generate charts
-python3 scripts/gen_compression_chart.py --backend compio
 python3 scripts/gen_compression_chart.py --backend tokio
+python3 scripts/gen_compression_chart.py --backend compio
 ```
 
 Environment variables:
