@@ -52,7 +52,7 @@ libc = "0.2"
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = { version = "2.2", optional = true }
-rustls-pki-types = { version = "1", optional = true }
+rustls-pki-types = { version = "1.14", optional = true }
 compio-tls = { git = "https://github.com/compio-rs/compio.git", rev = "cf746eb8", optional = true, default-features = false, features = ["rustls"] }
 
 
