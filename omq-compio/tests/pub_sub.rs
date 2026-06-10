@@ -304,9 +304,9 @@ fn pub_tcp_multi_sub_direct_write() {
 }
 
 /// PUB over lz4+tcp with multiple subscribe-all subscribers. The
-/// direct-write fan-out path must fall back to regular SendMessage
+/// direct-write fan-out path must fall back to regular `SendMessage`
 /// for transform peers (pre-encoded ZMTP frames lack the compression
-/// sentinel). This test catches the bug where SendEncoded bypassed
+/// sentinel). This test catches the bug where `SendEncoded` bypassed
 /// the transform.
 #[cfg(feature = "lz4")]
 #[test]

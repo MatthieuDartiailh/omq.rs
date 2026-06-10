@@ -149,7 +149,7 @@ async fn blake3zmq_pub_sub() {
     panic!("SUB never received over BLAKE3ZMQ");
 }
 
-/// Regression test for flush_codec_to_wire partial-write ordering bug.
+/// Regression test for `flush_codec_to_wire` partial-write ordering bug.
 ///
 /// The bug: on partial TCP write, unwritten codec bytes were placed
 /// into `EncodedQueue` instead of staying in the codec. Next
@@ -159,7 +159,7 @@ async fn blake3zmq_pub_sub() {
 ///
 /// Sender runs on a separate thread with its own compio runtime so
 /// its driver can saturate the TCP send buffer without cooperative
-/// scheduling draining it. Small SO_SNDBUF forces partial writes.
+/// scheduling draining it. Small `SO_SNDBUF` forces partial writes.
 #[test]
 fn blake3zmq_large_messages_tcp_partial_write() {
     const MSG_SIZE: usize = 8 * 1024;
@@ -217,7 +217,7 @@ fn blake3zmq_large_messages_tcp_partial_write() {
 
     let port = port_rx.recv().unwrap();
     let send_rt = omq_compio::runtime::build_default_runtime().unwrap();
-    let _ = send_rt.block_on(async {
+    send_rt.block_on(async {
         let push = Socket::new(
             SocketType::Push,
             Options::default()
