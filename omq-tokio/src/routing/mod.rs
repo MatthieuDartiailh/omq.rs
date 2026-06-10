@@ -35,6 +35,11 @@ use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 use omq_proto::routing::{FanOutKind, RecvCategory, SendCategory, recv_category, send_category};
 
+/// Max messages one shared-queue consumer batch-encodes before flushing.
+/// Scaled down per peer by [`RoundRobinSend`] to improve distribution
+/// fairness when multiple drivers compete on the same queue.
+pub(crate) const SHARED_MAX_BATCH_MSGS: usize = 256;
+
 pub(crate) use exclusive::{ExclusiveSend, Submitter as ExclusiveSubmitter};
 pub(crate) use fair_queue::FairQueueRecv;
 pub(crate) use fan_out::{FanOutMode, FanOutSend, Submitter as FanOutSubmitter};

@@ -45,6 +45,7 @@ pub(crate) struct DropQueue {
 #[derive(Clone, Debug)]
 pub(crate) struct QueueReceiver {
     inner: Arc<Inner>,
+    peer_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl DropQueue {
@@ -66,6 +67,7 @@ impl DropQueue {
         });
         let receiver = QueueReceiver {
             inner: inner.clone(),
+            peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         (Self { inner, policy }, receiver)
     }
@@ -196,6 +198,24 @@ impl QueueReceiver {
         if let Some(ref slots) = self.inner.slots {
             slots.add_permits(n);
         }
+    }
+
+    /// Fair share of the current queue for one driver.
+    ///
+    /// Single peer: full batch (no competition). Multiple peers: each
+    /// driver takes at most `queue_len / peers` to leave work for
+    /// others, but always at least 1.
+    pub(crate) fn batch_limit(&self) -> usize {
+        let peers = self.peer_count.load(std::sync::atomic::Ordering::Relaxed);
+        if peers <= 1 {
+            return super::SHARED_MAX_BATCH_MSGS;
+        }
+        (self.inner.queue.len() / peers).clamp(1, super::SHARED_MAX_BATCH_MSGS)
+    }
+
+    pub(crate) fn set_peer_count(&self, n: usize) {
+        self.peer_count
+            .store(n, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Async pop. Waits until a message is available or the queue is closed.

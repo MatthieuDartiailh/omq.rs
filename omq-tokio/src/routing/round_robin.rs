@@ -50,6 +50,7 @@ pub(crate) struct RoundRobinSend {
     queue: DropQueue,
     shared_rx: QueueReceiver,
     root_cancel: CancellationToken,
+    peer_count: usize,
 }
 
 impl RoundRobinSend {
@@ -60,6 +61,7 @@ impl RoundRobinSend {
             queue,
             shared_rx,
             root_cancel: CancellationToken::new(),
+            peer_count: 0,
         }
     }
 
@@ -75,6 +77,8 @@ impl RoundRobinSend {
         handle: DriverHandle,
         is_inproc: bool,
     ) {
+        self.peer_count += 1;
+        self.shared_rx.set_peer_count(self.peer_count);
         if is_inproc {
             // inproc_peer_driver reads from inbox (mpsc), not from shared_rx.
             // Spawn a forwarding pump. The pump self-cancels when the peer's
@@ -86,8 +90,9 @@ impl RoundRobinSend {
         // Byte-stream: driver reads from shared_rx directly; no pump needed.
     }
 
-    #[expect(clippy::unused_self)]
     pub(crate) fn connection_removed(&mut self, _peer_id: u64) {
+        self.peer_count = self.peer_count.saturating_sub(1);
+        self.shared_rx.set_peer_count(self.peer_count);
         // Byte-stream drivers self-cancel via their CancellationToken.
         // Inproc pumps self-cancel when peer inbox closes (driver exits).
     }

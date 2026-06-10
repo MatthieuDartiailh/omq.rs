@@ -5,8 +5,8 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-omq-tokio = { version = "0.13.0", path = "../../../omq-tokio" }
-compio = { git = "https://github.com/compio-rs/compio.git", rev = "453ed63", features = ["macros", "runtime", "time"] }
+omq-compio = { path = "../../../omq-compio" }
+compio = { git = "https://github.com/compio-rs/compio.git", rev = "cf746eb8", features = ["macros", "runtime", "time"] }
 bytes = "1"
 
 [[bin]]

@@ -1,11 +1,11 @@
 //! `ZGuide` 03 — Pipeline worker.
 //!
 //! PULL connects to ventilator, PUSH connects to sink. Forwards each
-//! task with a worker ID prefix. Exits on "END" sentinel.
+//! task with a worker ID prefix. Runs until killed.
 //!
 //!     cargo run -p zguide-compio-03-pipeline --bin worker [vent_ep] [sink_ep] [worker_id]
 
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
     args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
@@ -33,10 +33,6 @@ async fn main() {
     loop {
         let msg = pull.recv().await.unwrap();
         let body = msg_str(&msg, 0);
-        if body == "END" {
-            println!("worker-{id}: done");
-            break;
-        }
         let result = format!("worker-{id}:{body}");
         push.send(Message::single(result)).await.unwrap();
     }

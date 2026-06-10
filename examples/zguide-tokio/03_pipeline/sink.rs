@@ -2,6 +2,7 @@
 //!
 //! PULL socket binds and collects results from workers. Prints
 //! per-worker distribution when the expected count is reached.
+//! The run script kills idle workers after the sink exits.
 //!
 //!     cargo run -p zguide-tokio-03-pipeline --bin sink [sink_ep] [expected_count]
 
@@ -21,7 +22,7 @@ fn msg_str(msg: &Message, idx: usize) -> String {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let sink_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-03-sink");
-    let expected: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
+    let expected: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
 
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(sink_ep.clone()).await.unwrap();

@@ -11,6 +11,10 @@ use event_listener::Event;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
+/// Max messages one shared-queue consumer drains before yielding.
+/// Scaled down per peer by [`SharedQueueReceiver::batch_limit`].
+const MAX_DRAIN: usize = 64;
+
 struct Inner {
     queue: ConcurrentQueue<Message>,
     recv_event: Event,
@@ -25,9 +29,13 @@ pub(crate) struct SharedQueueSender {
 #[derive(Clone)]
 pub(crate) struct SharedQueueReceiver {
     inner: Arc<Inner>,
+    peer_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-pub(crate) fn bounded(cap: usize) -> (SharedQueueSender, SharedQueueReceiver) {
+pub(crate) fn bounded(
+    cap: usize,
+    peer_count: Arc<std::sync::atomic::AtomicUsize>,
+) -> (SharedQueueSender, SharedQueueReceiver) {
     let inner = Arc::new(Inner {
         queue: ConcurrentQueue::bounded(cap),
         recv_event: Event::new(),
@@ -37,11 +45,13 @@ pub(crate) fn bounded(cap: usize) -> (SharedQueueSender, SharedQueueReceiver) {
         SharedQueueSender {
             inner: inner.clone(),
         },
-        SharedQueueReceiver { inner },
+        SharedQueueReceiver { inner, peer_count },
     )
 }
 
-pub(crate) fn unbounded() -> (SharedQueueSender, SharedQueueReceiver) {
+pub(crate) fn unbounded(
+    peer_count: Arc<std::sync::atomic::AtomicUsize>,
+) -> (SharedQueueSender, SharedQueueReceiver) {
     let inner = Arc::new(Inner {
         queue: ConcurrentQueue::unbounded(),
         recv_event: Event::new(),
@@ -51,7 +61,7 @@ pub(crate) fn unbounded() -> (SharedQueueSender, SharedQueueReceiver) {
         SharedQueueSender {
             inner: inner.clone(),
         },
-        SharedQueueReceiver { inner },
+        SharedQueueReceiver { inner, peer_count },
     )
 }
 
@@ -104,6 +114,19 @@ impl SharedQueueReceiver {
         let msg = self.inner.queue.pop().ok()?;
         self.inner.send_event.notify(1);
         Some(msg)
+    }
+
+    /// Fair share of the current queue for one driver.
+    ///
+    /// Single peer: full batch (no competition). Multiple peers: each
+    /// driver takes at most `queue_len / peers` to leave work for
+    /// others, but always at least 1.
+    pub(crate) fn batch_limit(&self) -> usize {
+        let peers = self.peer_count.load(std::sync::atomic::Ordering::Relaxed);
+        if peers <= 1 {
+            return MAX_DRAIN;
+        }
+        (self.inner.queue.len() / peers).clamp(1, MAX_DRAIN)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

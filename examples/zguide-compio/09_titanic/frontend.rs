@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 

@@ -1,9 +1,9 @@
 //! `ZGuide` 03 — Ventilator (task producer).
 //!
-//! PUSH socket binds and sends N tasks followed by sentinel messages
-//! so each worker knows when to stop.
+//! PUSH socket binds and sends N tasks. Workers are killed by the
+//! run script after the sink has collected all results.
 //!
-//!     cargo run -p zguide-tokio-03-pipeline --bin ventilator [vent_ep] [n_tasks] [n_workers]
+//!     cargo run -p zguide-tokio-03-pipeline --bin ventilator [vent_ep] [n_tasks]
 
 use std::time::Duration;
 
@@ -17,14 +17,15 @@ fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let vent_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-03-ventilator");
-    let n_tasks: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
-    let n_workers: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
+    let n_tasks: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
 
-    let push = Socket::new(SocketType::Push, Options::default());
+    let push = Socket::new(
+        SocketType::Push,
+        Options::default().linger(Duration::from_secs(2)),
+    );
     push.bind(vent_ep.clone()).await.unwrap();
 
-    // Give workers time to connect.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     for i in 0..n_tasks {
         push.send(Message::single(format!("task-{i}")))
@@ -32,9 +33,6 @@ async fn main() {
             .unwrap();
     }
 
-    for _ in 0..n_workers {
-        push.send(Message::single("END")).await.unwrap();
-    }
-
-    println!("ventilator: sent {n_tasks} tasks + {n_workers} END sentinels on {vent_ep}");
+    println!("ventilator: sent {n_tasks} tasks on {vent_ep}");
+    push.close().await.unwrap();
 }
