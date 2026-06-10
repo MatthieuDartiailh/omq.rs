@@ -208,7 +208,7 @@ pub(super) struct SocketInner {
     /// Total outbound peer count. Used by the multi-peer wire fast
     /// path to distinguish single-peer (direct encode) from multi-peer
     /// (shared queue) without locking `out_peers`.
-    pub(super) out_peer_count: AtomicUsize,
+    pub(super) out_peer_count: Arc<AtomicUsize>,
     /// Count of inproc outbound peers. When zero, multi-peer wire
     /// sends skip `select_peer` entirely: all peers drain from the
     /// shared queue via their drivers.
@@ -374,10 +374,11 @@ impl SocketInner {
         } else {
             options.send_hwm.map(|h| (h as usize).max(16))
         };
+        let out_peer_count = Arc::new(AtomicUsize::new(0));
         let (shared_send_tx, shared_send_rx) = if is_round_robin_send(socket_type) {
             let (tx, rx) = match send_cap {
-                Some(cap) => super::shared_queue::bounded(cap),
-                None => super::shared_queue::unbounded(),
+                Some(cap) => super::shared_queue::bounded(cap, out_peer_count.clone()),
+                None => super::shared_queue::unbounded(out_peer_count.clone()),
             };
             (Some(tx), Some(rx))
         } else {
@@ -402,7 +403,7 @@ impl SocketInner {
             options,
             out_peers: RwLock::new(Slab::new()),
             peers_gen: AtomicU64::new(0),
-            out_peer_count: AtomicUsize::new(0),
+            out_peer_count: out_peer_count.clone(),
             inproc_out_count: AtomicUsize::new(0),
             cached_route: Mutex::new(None),
             in_tx,

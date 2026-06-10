@@ -175,7 +175,7 @@ impl RecvSink {
 /// `ready()` (small). After the batch loop, drain completed futures
 /// front-to-back into EQ and flush.
 macro_rules! batch_encode_flush {
-    ($first:expr, $try_recv:expr, $encoder:expr, $codec:expr,
+    ($first:expr, $try_recv:expr, $max_msgs:expr, $encoder:expr, $codec:expr,
      $eq:expr, $drain_buf:expr, $writer:expr, $passthrough:expr,
      $pool:expr, $threshold:expr, $pipeline:expr) => {{
         let use_pipeline = $threshold > 0
@@ -194,7 +194,8 @@ macro_rules! batch_encode_flush {
         }
         let mut count = 1usize;
         let mut bytes = $first.byte_len();
-        while count < SHARED_MAX_BATCH_MSGS && bytes < max_batch_bytes() {
+        let max_batch = $max_msgs;
+        while count < max_batch && bytes < max_batch_bytes() {
             match $try_recv {
                 Some(next) => {
                     bytes += next.byte_len();
@@ -227,8 +228,7 @@ macro_rules! batch_encode_flush {
 
 const READ_BUF_SIZE: usize = 128 * 1024;
 
-/// Max messages one shared-queue batch encodes before flushing.
-const SHARED_MAX_BATCH_MSGS: usize = 256;
+use crate::routing::SHARED_MAX_BATCH_MSGS;
 
 /// Max bytes one shared-queue batch encodes before flushing.
 /// Override at runtime via `OMQ_BATCH_BYTES`.
@@ -654,6 +654,7 @@ where
                                 }
                                 Err(_) => None,
                             },
+                            SHARED_MAX_BATCH_MSGS,
                             &mut encoder,
                             &mut codec,
                             &mut eq,
@@ -723,9 +724,13 @@ where
                             return Ok(());
                         }
                         Some(first) => {
+                            let batch_limit = shared_msg_rx
+                                .as_ref()
+                                .map_or(SHARED_MAX_BATCH_MSGS, QueueReceiver::batch_limit);
                             let count = batch_encode_flush!(
                                 first,
                                 shared_msg_rx.as_ref().and_then(QueueReceiver::try_pop),
+                                batch_limit,
                                 &mut encoder,
                                 &mut codec,
                                 &mut eq,

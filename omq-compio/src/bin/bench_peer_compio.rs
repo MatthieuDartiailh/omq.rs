@@ -322,19 +322,25 @@ fn bench_b3_client_keypair() -> omq_compio::Blake3ZmqKeypair {
     omq_compio::Blake3ZmqKeypair::from_secret(omq_compio::Blake3ZmqSecretKey([0x04; 32]))
 }
 
+// FIXME: uses channel signaling instead of a Barrier because compio's
+// single-threaded runtime intermittently loses cross-thread wakeups
+// (flume send → Waker::wake → eventfd write not picked up by
+// io_uring_enter). Reproduces ~25% of the time with the old Barrier
+// approach. Root cause is upstream in compio's driver; not yet isolated
+// into a minimal repro outside omq.
 async fn run_inproc(name: String, size: usize, duration: Duration) {
     use std::sync::{
-        Arc, Barrier,
+        Arc,
         atomic::{AtomicBool, Ordering},
     };
 
     let ep = Endpoint::Inproc { name };
     let stop = Arc::new(AtomicBool::new(false));
-    let ready = Arc::new(Barrier::new(2));
+    let (bound_tx, bound_rx) = flume::bounded::<()>(1);
+    let (connected_tx, connected_rx) = flume::bounded::<()>(1);
 
     let push_ep = ep.clone();
     let push_stop = stop.clone();
-    let push_ready = ready.clone();
     std::thread::spawn(move || {
         let buf_len = (size + 64).next_power_of_two().max(64 * 1024);
         let mut proactor = compio::driver::ProactorBuilder::new();
@@ -346,7 +352,8 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
         rt.block_on(async move {
             let push = Socket::new(SocketType::Push, bench_options(size));
             push.bind(push_ep).await.unwrap();
-            push_ready.wait();
+            let _ = bound_tx.send(());
+            let _ = connected_rx.recv_async().await;
             let payload = Bytes::from(vec![b'x'; size]);
             while !push_stop.load(Ordering::Relaxed) {
                 if push.send(Message::single(payload.clone())).await.is_err() {
@@ -356,9 +363,10 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
         });
     });
 
-    ready.wait();
+    let _ = bound_rx.recv_async().await;
     let pull = Socket::new(SocketType::Pull, bench_options(size));
     pull.connect(ep).await.expect("pull connect");
+    let _ = connected_tx.send(());
     compio::time::sleep(Duration::from_millis(500)).await;
 
     let t0 = Instant::now();
