@@ -275,7 +275,11 @@ async fn xpub_tcp_subscriber_churn() {
         sub.connect(tcp_loopback(port)).await.unwrap();
 
         // Drain XPUB subscribe notification.
-        let _ = compio::time::timeout(Duration::from_secs(2), xpub.recv()).await;
+        let sub_notif = compio::time::timeout(Duration::from_secs(2), xpub.recv())
+            .await
+            .expect("XPUB subscribe notification timed out")
+            .unwrap();
+        assert_eq!(sub_notif.part_bytes(0).unwrap()[0], 1, "expected subscribe");
 
         let tag = format!("xp-{round}");
         xpub.send(Message::single(tag.clone())).await.unwrap();

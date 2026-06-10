@@ -96,9 +96,11 @@ async fn drop_newest_silently_discards_overflow() {
         .await
         .unwrap()
         .unwrap();
-    let _ = m;
-    let extra = compio::time::timeout(Duration::from_millis(100), pull.recv()).await;
-    let _ = extra;
+    let body = m.part_bytes(0).unwrap();
+    assert!(
+        body.as_ref() == b"a" || body.as_ref() == b"b" || body.as_ref() == b"c",
+        "unexpected message: {body:?}"
+    );
 }
 
 #[compio::test]
@@ -238,7 +240,11 @@ async fn drop_oldest_keeps_newest_messages() {
         .await
         .unwrap()
         .unwrap();
-    let _ = m;
+    let body = m.part_bytes(0).unwrap();
+    assert!(
+        body.as_ref() == b"first" || body.as_ref() == b"second" || body.as_ref() == b"third",
+        "unexpected message: {body:?}"
+    );
 }
 
 #[compio::test]

@@ -96,10 +96,11 @@ async fn consumers_cleaned_on_disconnect() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     push.send(Message::from_slice(b"a")).await.unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"a");
 
     // Disconnect and reconnect multiple times. If consumers aren't
     // cleaned up, the Vec would grow unboundedly.

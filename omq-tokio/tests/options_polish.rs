@@ -111,15 +111,11 @@ async fn drop_newest_silently_discards_overflow() {
         .await
         .unwrap()
         .unwrap();
-    // Either "a" or one of the others depending on which slipped through
-    // before the queue became "full" on the actor's send loop. The point
-    // is: at most one arrives within this short window, not three.
-    let _ = m;
-    let extra = tokio::time::timeout(Duration::from_millis(100), pull.recv()).await;
-    // Best-effort: HWM=1 with DropNewest means at most a small handful
-    // ever queue up; we just confirm we don't get all three immediately.
-    // (Exact behavior around the handshake race is timing-dependent.)
-    let _ = extra;
+    let body = m.part_bytes(0).unwrap();
+    assert!(
+        body.as_ref() == b"a" || body.as_ref() == b"b" || body.as_ref() == b"c",
+        "unexpected message: {body:?}"
+    );
 }
 
 #[tokio::test]
@@ -268,10 +264,11 @@ async fn drop_oldest_keeps_newest_messages() {
         .await
         .unwrap()
         .unwrap();
-    // The exact message depends on timing of handshake vs sends, but
-    // "first" must NOT be the only one if drop-oldest fired. At minimum
-    // we verify the socket accepts DropOldest without error.
-    let _ = m;
+    let body = m.part_bytes(0).unwrap();
+    assert!(
+        body.as_ref() == b"first" || body.as_ref() == b"second" || body.as_ref() == b"third",
+        "unexpected message: {body:?}"
+    );
 }
 
 #[tokio::test]

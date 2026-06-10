@@ -254,7 +254,11 @@ async fn push_delivers_to_alive_peer_after_dead_slot() {
         pull1.connect(ep.clone()).await.unwrap();
         test_support::wait_for_handshake(&pull1).await;
         push.send(Message::single("first")).await.unwrap();
-        let _ = compio::time::timeout(Duration::from_millis(200), pull1.recv()).await;
+        let m = compio::time::timeout(Duration::from_millis(200), pull1.recv())
+            .await
+            .expect("pull1 recv timed out")
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"first");
         // pull1 drops here — slot 0 becomes dead.
     }
     compio::time::sleep(Duration::from_millis(500)).await;

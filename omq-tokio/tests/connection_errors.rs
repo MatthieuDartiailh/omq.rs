@@ -67,7 +67,11 @@ async fn server_survives_mid_session_abrupt_drop() {
         push1.connect(ep.clone()).await.unwrap();
         test_support::wait_for_handshake(&push1).await;
         push1.send(Message::single("first")).await.unwrap();
-        let _ = tokio::time::timeout(Duration::from_millis(300), pull.recv()).await;
+        let m = tokio::time::timeout(Duration::from_millis(300), pull.recv())
+            .await
+            .expect("recv timed out for first client")
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"first");
         // push1 drops here — abrupt half-close.
     }
     tokio::time::sleep(Duration::from_millis(50)).await;

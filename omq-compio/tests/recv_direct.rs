@@ -72,10 +72,11 @@ async fn heartbeat_keeps_connection_alive_under_direct_recv() {
 
     // Warm-up to confirm direct recv is engaging.
     push.send(Message::single("warm-up")).await.unwrap();
-    let _ = compio::time::timeout(Duration::from_secs(2), pull.recv())
+    let m = compio::time::timeout(Duration::from_secs(2), pull.recv())
         .await
         .expect("warm-up timeout")
         .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"warm-up");
 
     // Park PULL in a long-running direct recv across several
     // heartbeat windows (~14× the interval). Auto-PONG on each
