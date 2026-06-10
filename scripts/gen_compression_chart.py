@@ -439,7 +439,7 @@ def generate_svg(
 
 
 THREAD_MODELS = {
-    "compio": "2-thread",
+    "compio": "2-process",
     "tokio": "2-process",
 }
 

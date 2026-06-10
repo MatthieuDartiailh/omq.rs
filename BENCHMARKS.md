@@ -66,8 +66,8 @@ without it BLAKE3ZMQ drops to ~50 MiB/s at bulk sizes. CURVE plateaus at
 > production.
 
 <p align="center">
-  <img src="doc/charts/mechanism/compio.svg" alt="Mechanism overhead (compio)" width="850">
   <img src="doc/charts/mechanism/tokio.svg" alt="Mechanism overhead (tokio)" width="850">
+  <img src="doc/charts/mechanism/compio.svg" alt="Mechanism overhead (compio)" width="850">
 </p>
 
 ## Compression transport benchmarks
@@ -79,18 +79,18 @@ and are run separately from the charts above.
 ## Reproducing
 
 ```sh
-cargo bench -p omq-compio --bench push_pull
 cargo bench -p omq-tokio  --bench push_pull
-cargo bench -p omq-compio --bench req_rep
+cargo bench -p omq-compio --bench push_pull
 cargo bench -p omq-tokio  --bench req_rep
+cargo bench -p omq-compio --bench req_rep
 
 # Convenience:
 ./scripts/bench_run.rb [--all-features] [--all-sizes]    # adds results to JSONL
 ./scripts/bench_run.rb --chart-sizes                     # dense ×2 sweep for charts
 
 # WebSocket transport (requires ws feature):
-OMQ_BENCH_TRANSPORTS=ws cargo bench -p omq-compio --features ws --bench push_pull
 OMQ_BENCH_TRANSPORTS=ws cargo bench -p omq-tokio  --features ws --bench push_pull
+OMQ_BENCH_TRANSPORTS=ws cargo bench -p omq-compio --features ws --bench push_pull
 
 # Override transports / sizes / peer counts via env:
 OMQ_BENCH_TRANSPORTS=tcp OMQ_BENCH_PEERS=3 OMQ_BENCH_SIZES=128,2048,32768 cargo bench -p omq-compio --bench push_pull
@@ -106,9 +106,9 @@ python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism/{compio
 
 # Compression charts require a bench run first (writes JSONL):
 #   1. Run bench:
-#      cargo bench -p omq-compio --features lz4,zstd --bench compression
 #      cargo bench -p omq-tokio  --features lz4,zstd --bench compression
+#      cargo bench -p omq-compio --features lz4,zstd --bench compression
 #   2. Generate chart:
-python3 scripts/gen_compression_chart.py --backend compio    # doc/charts/compression/compio_2048.svg
 python3 scripts/gen_compression_chart.py --backend tokio     # doc/charts/compression/tokio_2048.svg
+python3 scripts/gen_compression_chart.py --backend compio    # doc/charts/compression/compio_2048.svg
 ```

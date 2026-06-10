@@ -23,6 +23,8 @@ jobs:
           filters: |
             code:
               - '!**/*.md'
+              - '!**/*.svg'
+              - '!**/*.py'
               - '!doc/**'
 
   test:
