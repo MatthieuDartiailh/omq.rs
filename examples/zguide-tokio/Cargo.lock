@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "bytes",
  "patricia_tree",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-channel",
  "bytes",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.2.2"
+version = "0.3.0"
 
 [[package]]
 name = "zguide-tokio-01-req-rep"

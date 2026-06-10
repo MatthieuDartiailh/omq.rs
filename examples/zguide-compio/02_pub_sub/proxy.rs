@@ -11,7 +11,7 @@
 //! NOTE: This uses SUB/PUB relay instead of the canonical XSUB/XPUB
 //! proxy because `XSUB.send()` is not yet supported.
 
-use omq_tokio::{Endpoint, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
     args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))

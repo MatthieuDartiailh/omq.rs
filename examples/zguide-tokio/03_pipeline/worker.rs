@@ -1,7 +1,7 @@
 //! `ZGuide` 03 — Pipeline worker.
 //!
 //! PULL connects to ventilator, PUSH connects to sink. Forwards each
-//! task with a worker ID prefix. Exits on "END" sentinel.
+//! task with a worker ID prefix. Runs until killed.
 //!
 //!     cargo run -p zguide-tokio-03-pipeline --bin worker [vent_ep] [sink_ep] [worker_id]
 
@@ -33,10 +33,6 @@ async fn main() {
     loop {
         let msg = pull.recv().await.unwrap();
         let body = msg_str(&msg, 0);
-        if body == "END" {
-            println!("worker-{id}: done");
-            break;
-        }
         let result = format!("worker-{id}:{body}");
         push.send(Message::single(result)).await.unwrap();
     }
