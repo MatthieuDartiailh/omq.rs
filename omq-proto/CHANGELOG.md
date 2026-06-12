@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-06-12
+
+### Added
+
+- `Message::try_as_parts(&self) -> Option<(&[u8], &[u8])>`: zero-copy accessor that returns the first two frames as a tuple without allocating, or `None` if the message does not have exactly two parts.
+
 ### Changed
 
-- **Breaking:** `Options::compression_auto_train` now defaults to `false`. Auto-training adds per-connection overhead that only pays off for small structured records on bandwidth-constrained links. Enable explicitly with `.compression_auto_train(true)` when needed.
+- `Options::compression_auto_train` now defaults to `false`. Auto-training adds per-connection overhead that only pays off for small structured records on bandwidth-constrained links. Enable explicitly with `.compression_auto_train(true)` when needed.
 
 ## [0.17.0] - 2026-06-12
 

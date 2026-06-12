@@ -28,6 +28,7 @@ const PEERS: usize = 3;
 const MSG_SIZE: usize = 131_072;
 
 #[test]
+#[expect(clippy::too_many_lines)]
 fn soak_ipc_fanout_no_message_loss() {
     let duration = soak_common::soak_duration();
 
