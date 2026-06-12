@@ -72,34 +72,23 @@ impl DropQueue {
         (Self { inner, policy }, receiver)
     }
 
-    /// Submit a message. Behaviour depends on policy:
-    /// - `Block`: await until a slot is available, then push.
-    /// - `DropNewest`: if full, discard `msg` silently and return `Ok`.
-    /// - `DropOldest`: if full, pop the head to make room, then push.
-    pub(crate) async fn send(&self, msg: Message) -> Result<()> {
-        match self.policy {
-            OnMute::Block => {
-                if let Some(ref slots) = self.inner.slots {
-                    // Bounded queue: wait for a free slot before pushing.
-                    // Consume the permit without returning it on drop; the
-                    // corresponding `add_permits(1)` call happens in `try_pop`.
-                    let permit = slots.acquire().await.map_err(|_| Error::Closed)?;
-                    permit.forget();
-                }
-                match self.inner.queue.push(msg) {
-                    Ok(()) => {
-                        self.inner.recv_notify.notify_one();
-                        Ok(())
-                    }
-                    Err(PushError::Closed(_)) => Err(Error::Closed),
-                    Err(PushError::Full(_)) => unreachable!("permit guarantees a free slot"),
-                }
+    fn push_with_permit(&self, msg: Message) -> core::result::Result<(), PushError<Message>> {
+        match self.inner.queue.push(msg) {
+            Ok(()) => {
+                self.inner.recv_notify.notify_one();
+                Ok(())
             }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn push_drop_policy(&self, msg: Message) -> core::result::Result<(), PushError<Message>> {
+        match self.policy {
             OnMute::DropNewest => {
                 match self.inner.queue.push(msg) {
                     Ok(()) => self.inner.recv_notify.notify_one(),
                     Err(PushError::Full(_)) => {}
-                    Err(PushError::Closed(_)) => return Err(Error::Closed),
+                    Err(e @ PushError::Closed(_)) => return Err(e),
                 }
                 Ok(())
             }
@@ -115,11 +104,28 @@ impl DropQueue {
                             let _ = self.inner.queue.pop();
                             item = back;
                         }
-                        Err(PushError::Closed(_)) => return Err(Error::Closed),
+                        Err(e @ PushError::Closed(_)) => return Err(e),
                     }
                 }
             }
             _ => unreachable!(),
+        }
+    }
+
+    /// Submit a message. Behaviour depends on policy:
+    /// - `Block`: await until a slot is available, then push.
+    /// - `DropNewest`: if full, discard `msg` silently and return `Ok`.
+    /// - `DropOldest`: if full, pop the head to make room, then push.
+    pub(crate) async fn send(&self, msg: Message) -> Result<()> {
+        match self.policy {
+            OnMute::Block => {
+                if let Some(ref slots) = self.inner.slots {
+                    let permit = slots.acquire().await.map_err(|_| Error::Closed)?;
+                    permit.forget();
+                }
+                self.push_with_permit(msg).map_err(|_| Error::Closed)
+            }
+            _ => self.push_drop_policy(msg).map_err(|_| Error::Closed),
         }
     }
 
@@ -135,40 +141,9 @@ impl DropQueue {
                         Err(_) => return Err(msg),
                     }
                 }
-                match self.inner.queue.push(msg) {
-                    Ok(()) => {
-                        self.inner.recv_notify.notify_one();
-                        Ok(())
-                    }
-                    Err(PushError::Closed(m)) => Err(m),
-                    Err(PushError::Full(_)) => unreachable!("permit guarantees a free slot"),
-                }
+                self.push_with_permit(msg).map_err(PushError::into_inner)
             }
-            OnMute::DropNewest => {
-                match self.inner.queue.push(msg) {
-                    Ok(()) => self.inner.recv_notify.notify_one(),
-                    Err(PushError::Full(_)) => {}
-                    Err(PushError::Closed(m)) => return Err(m),
-                }
-                Ok(())
-            }
-            OnMute::DropOldest => {
-                let mut item = msg;
-                loop {
-                    match self.inner.queue.push(item) {
-                        Ok(()) => {
-                            self.inner.recv_notify.notify_one();
-                            return Ok(());
-                        }
-                        Err(PushError::Full(back)) => {
-                            let _ = self.inner.queue.pop();
-                            item = back;
-                        }
-                        Err(PushError::Closed(m)) => return Err(m),
-                    }
-                }
-            }
-            _ => unreachable!(),
+            _ => self.push_drop_policy(msg).map_err(PushError::into_inner),
         }
     }
 

@@ -364,25 +364,10 @@ impl Socket {
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                // SPSC send fast path: push directly to ring.
-                // Gated on recv_ready (set by recv-side actor after
-                // installing the ring). Single-peer only.
-                if self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
-                    let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
-                    if let Some(ref pair) = spsc
-                        && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
-                        && pair
-                            .max_message_size
-                            .is_none_or(|max| msg.byte_len() <= max)
-                        && let Ok(mut producer) = pair.producer.try_lock()
-                        && !producer.is_full()
-                    {
-                        let _ = producer.push(msg);
-                        producer.flush();
-                        pair.recv_notify.notify_one();
-                        return Ok(());
-                    }
-                }
+                let msg = match self.try_push_spsc(msg) {
+                    Ok(()) => return Ok(()),
+                    Err(msg) => msg,
+                };
                 self.send_via_wire_slot(msg).await
             }
         }
@@ -425,22 +410,10 @@ impl Socket {
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
-                if self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
-                    let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
-                    if let Some(ref pair) = spsc
-                        && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
-                        && pair
-                            .max_message_size
-                            .is_none_or(|max| msg.byte_len() <= max)
-                        && let Ok(mut producer) = pair.producer.try_lock()
-                        && !producer.is_full()
-                    {
-                        let _ = producer.push(msg);
-                        producer.flush();
-                        pair.recv_notify.notify_one();
-                        return Ok(());
-                    }
-                }
+                let msg = match self.try_push_spsc(msg) {
+                    Ok(()) => return Ok(()),
+                    Err(msg) => msg,
+                };
                 self.inner.send_submitter.try_send(msg)
             }
         }
@@ -694,6 +667,36 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
 }
 
 impl Socket {
+    /// SPSC send fast path: push directly into the peer's yring.
+    /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
+    /// unavailable or the ring is full.
+    fn try_push_spsc(&self, msg: Message) -> core::result::Result<(), Message> {
+        if !self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
+            return Err(msg);
+        }
+        let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
+        let Some(ref pair) = spsc else {
+            return Err(msg);
+        };
+        if !pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+            || pair
+                .max_message_size
+                .is_some_and(|max| msg.byte_len() > max)
+        {
+            return Err(msg);
+        }
+        let Ok(mut producer) = pair.producer.try_lock() else {
+            return Err(msg);
+        };
+        if producer.is_full() {
+            return Err(msg);
+        }
+        let _ = producer.push(msg);
+        producer.flush();
+        pair.recv_notify.notify_one();
+        Ok(())
+    }
+
     async fn send_via_wire_slot(&self, msg: Message) -> Result<()> {
         let fast = {
             let guard = self.inner.wire_slot.lock().expect("wire_slot");
