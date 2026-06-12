@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 use crate::conversions;
 use crate::dispatch;
 use crate::error::{map_err, timeout_err};
+use crate::notification::RecvNotify;
 use crate::options;
 use crate::runtime;
 
@@ -32,117 +33,29 @@ pub(crate) struct SendBuffer {
     pub parts: Vec<Bytes>,
 }
 
-/// Notification primitive for the recv path: compio pump signals Python
-/// thread via eventfd when a message is pushed into the yring.
-///
-/// The `parking` flag avoids syscalls on the hot path. The consumer
-/// sets it before sleeping; the producer only writes to the eventfd
-/// when it sees the flag.
-pub(crate) struct RecvNotify {
-    efd: i32,
-    parking: AtomicBool,
-}
-
-unsafe impl Send for RecvNotify {}
-unsafe impl Sync for RecvNotify {}
-
-impl RecvNotify {
-    pub fn new() -> Self {
-        let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(efd >= 0, "eventfd creation failed");
-        Self {
-            efd,
-            parking: AtomicBool::new(false),
-        }
-    }
-
-    pub fn notify(&self) {
-        if self.parking.load(Ordering::Acquire) {
-            self.write_eventfd();
-        }
-    }
-
-    pub fn force_wake(&self) {
-        self.write_eventfd();
-    }
-
-    fn write_eventfd(&self) {
-        let val: u64 = 1;
-        while unsafe { libc::write(self.efd, &val as *const u64 as *const libc::c_void, 8) } < 0 {
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                break;
-            }
-        }
-    }
-
-    pub fn park_begin(&self) {
-        self.parking.store(true, Ordering::Release);
-    }
-
-    pub fn park_end(&self) {
-        self.parking.store(false, Ordering::Relaxed);
-    }
-
-    pub fn wait_timeout(&self, timeout: Duration) -> bool {
-        let mut pfd = libc::pollfd {
-            fd: self.efd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-        let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
-        if ret > 0 {
-            let mut val: u64 = 0;
-            unsafe {
-                libc::read(self.efd, &mut val as *mut u64 as *mut libc::c_void, 8);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn fd(&self) -> i32 {
-        self.efd
-    }
-
-    /// Permanently arm the eventfd so the recv pump always writes on
-    /// message arrival. Required when the fd is exposed to an external
-    /// event loop (tornado/ZMQStream, asyncio) that polls it for
-    /// readiness.
-    pub fn arm_persistent(&self) {
-        self.parking.store(true, Ordering::Release);
-    }
-
-    pub fn dup_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
-        use std::os::fd::{FromRawFd, OwnedFd};
-        let fd = unsafe { libc::dup(self.efd) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-}
-
-impl Drop for RecvNotify {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.efd) };
-    }
-}
-
+#[cfg(unix)]
 use std::sync::atomic::AtomicU32;
 
+#[cfg(unix)]
 static FORK_GEN: AtomicU32 = AtomicU32::new(0);
+#[cfg(unix)]
 static ATFORK_REGISTERED: std::sync::Once = std::sync::Once::new();
 
+#[cfg(unix)]
 extern "C" fn atfork_child() {
     FORK_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(unix)]
 pub(crate) fn register_atfork() {
     ATFORK_REGISTERED.call_once(|| unsafe {
         libc::pthread_atfork(None, None, Some(atfork_child));
     });
+}
+
+#[cfg(not(unix))]
+pub(crate) fn register_atfork() {
+    // No-op on Windows
 }
 
 /// State that exists once the underlying omq Socket is materialized.
@@ -198,7 +111,11 @@ impl SocketInner {
         if self.closed.load(Ordering::Relaxed) {
             return Err(map_err(omq_proto::error::Error::Closed));
         }
+        #[cfg(unix)]
         let fgen = FORK_GEN.load(Ordering::Relaxed);
+        #[cfg(not(unix))]
+        let fgen = 0u32; // No fork tracking on Windows
+
         {
             let slot = self.materialized.read().unwrap();
             if slot.as_ref().is_some_and(|m| m.fork_gen == fgen) {

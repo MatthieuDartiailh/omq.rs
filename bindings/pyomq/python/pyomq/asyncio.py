@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import pickle
+import sys
 import weakref
 
 from . import _native  # type: ignore[attr-defined]
@@ -24,8 +25,16 @@ from . import error
 from . import Context as _SyncContext
 from . import _next_ctx_id
 from . import (
-    FD, POLLIN, POLLOUT, SNDHWM, RCVHWM, LINGER, TYPE, LAST_ENDPOINT,
-    _TYPE_NAMES, _SOCKOPT_NAMES,
+    FD,
+    POLLIN,
+    POLLOUT,
+    SNDHWM,
+    RCVHWM,
+    LINGER,
+    TYPE,
+    LAST_ENDPOINT,
+    _TYPE_NAMES,
+    _SOCKOPT_NAMES,
 )
 
 
@@ -112,17 +121,55 @@ class _RecvFuture:
     def __await__(self):
         if self.done():
             if self._fd >= 0:
-                os.close(self._fd)
+                if sys.platform != "win32":
+                    os.close(self._fd)
                 self._fd = -1
             if self._exception is not None:
                 raise self._exception
             return self._result
 
         loop = asyncio.get_running_loop()
-        fut = loop.create_future()
         fd = self._fd
         self._fd = -1
         try_fn = self._try_fn
+
+        def _close_fd():
+            """Close file descriptor on Unix; no-op on Windows."""
+            if sys.platform != "win32":
+                os.close(fd)
+
+        # On Windows, SelectorEventLoop doesn't support add_reader().
+        # Use polling with asyncio.sleep instead.
+        if sys.platform == "win32":
+
+            async def _wait_with_executor():
+                """Wait for the result using periodic polling."""
+                while True:
+                    try:
+                        r = try_fn()
+                        if r is not None:
+                            # Try to signal the event (best-effort, may fail on Windows)
+                            try:
+                                os.write(fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+                            except (OSError, TypeError):
+                                pass
+                            _close_fd()
+                            return r
+                    except Exception as e:
+                        _close_fd()
+                        raise e
+
+                    # Sleep briefly before polling again
+                    await asyncio.sleep(0.01)
+
+            try:
+                return (yield from _wait_with_executor().__await__())
+            except Exception as e:
+                _close_fd()
+                raise e
+
+        # Unix: use add_reader for efficient event-driven I/O
+        fut = loop.create_future()
 
         def _on_readable():
             try:
@@ -133,24 +180,24 @@ class _RecvFuture:
                 r = try_fn()
             except Exception as e:
                 loop.remove_reader(fd)
-                os.close(fd)
+                _close_fd()
                 if not fut.done():
                     fut.set_exception(e)
                 return
             if r is not None:
                 try:
-                    os.write(fd, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+                    os.write(fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
                 except OSError:
                     pass
                 loop.remove_reader(fd)
-                os.close(fd)
+                _close_fd()
                 if not fut.done():
                     fut.set_result(r)
 
         def _on_cancel(f):
             if f.cancelled():
                 loop.remove_reader(fd)
-                os.close(fd)
+                _close_fd()
 
         fut.add_done_callback(_on_cancel)
         loop.add_reader(fd, _on_readable)
@@ -258,9 +305,11 @@ class Socket:
     def recv(self, flags=0, copy=True, track=False):
         if not copy:
             from pyomq import Frame
+
             async def _wrap():
                 data = await self._add_recv_event(self._sock._try_recv)
                 return Frame(data)
+
             return asyncio.ensure_future(_wrap())
         return self._add_recv_event(self._sock._try_recv)
 
@@ -276,9 +325,11 @@ class Socket:
     def recv_multipart(self, flags=0, copy=True, track=False):
         if not copy:
             from pyomq import Frame
+
             async def _wrap():
                 parts = await self._add_recv_event(self._sock._try_recv_multipart)
                 return [Frame(p) for p in parts]
+
             return asyncio.ensure_future(_wrap())
         return self._add_recv_event(self._sock._try_recv_multipart)
 
@@ -296,16 +347,22 @@ class Socket:
         try:
             result = try_fn()
         except _native.ZMQError as e:
-            os.close(fd)
+            # On Unix, close the file descriptor.
+            # On Windows, socket handles (SOCKET type) cannot be closed with os.close(),
+            # so we skip closing and let them be garbage collected.
+            if sys.platform != "win32":
+                os.close(fd)
             raise error.from_native(e) from None
         if result is not None:
-            os.close(fd)
+            if sys.platform != "win32":
+                os.close(fd)
             return _resolved_future(result)
 
         return _RecvFuture(try_fn, fd)
 
     def _send_with_backpressure(self, data, flags):
         fd = self._sock._send_fd()
+
         def try_send():
             try:
                 self._sock.send(data, flags)
@@ -314,10 +371,12 @@ class Socket:
                 if e.errno == _EAGAIN:
                     return None
                 raise
+
         return _RecvFuture(try_send, fd)
 
     def _send_multipart_with_backpressure(self, parts, flags):
         fd = self._sock._send_fd()
+
         def try_send():
             try:
                 self._sock.send_multipart(parts, flags)
@@ -326,6 +385,7 @@ class Socket:
                 if e.errno == _EAGAIN:
                     return None
                 raise
+
         return _RecvFuture(try_send, fd)
 
     # ── Serialization helpers ────────────────────────────────────────
@@ -337,9 +397,7 @@ class Socket:
         return (await self.recv(flags)).decode(encoding)
 
     def send_json(self, obj, flags=0, **kwargs):
-        return self.send(
-            json.dumps(obj, **kwargs).encode("utf-8"), flags
-        )
+        return self.send(json.dumps(obj, **kwargs).encode("utf-8"), flags)
 
     async def recv_json(self, flags=0, **kwargs):
         return json.loads(await self.recv(flags), **kwargs)
@@ -350,11 +408,9 @@ class Socket:
     async def recv_pyobj(self, flags=0):
         return pickle.loads(await self.recv(flags))
 
-    def send_serialized(self, msg, serialize, flags=0, copy=True,
-                        **kwargs):
+    def send_serialized(self, msg, serialize, flags=0, copy=True, **kwargs):
         frames = serialize(msg)
-        return self.send_multipart(frames, flags=flags, copy=copy,
-                                   **kwargs)
+        return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
 
     async def recv_serialized(self, deserialize, flags=0, copy=True):
         frames = await self.recv_multipart(flags=flags, copy=copy)
@@ -370,6 +426,7 @@ class Socket:
 
     def getsockopt(self, option):
         from pyomq import LAST_ENDPOINT
+
         if option == LAST_ENDPOINT:
             return self._last_endpoint
         try:
@@ -402,6 +459,7 @@ class Socket:
             raise error.from_native(e) from None
         except AttributeError:
             from . import ZMQNotImplementedError
+
             raise ZMQNotImplementedError("curve feature not compiled")
 
     def set_blake3zmq_auth(self, auth):
@@ -411,6 +469,7 @@ class Socket:
             raise error.from_native(e) from None
         except AttributeError:
             from . import ZMQNotImplementedError
+
             raise ZMQNotImplementedError("blake3zmq feature not compiled")
 
     def set_hwm(self, value):
@@ -504,22 +563,14 @@ class Poller:
     async def poll(self, timeout=None):
         if not self._sockets:
             return []
-        pollin_socks = [
-            s._sock
-            for k, (s, f) in self._sockets.items()
-            if f & POLLIN
-        ]
+        pollin_socks = [s._sock for k, (s, f) in self._sockets.items() if f & POLLIN]
         if not pollin_socks:
             return []
         t = None if (timeout is None or timeout < 0) else int(timeout)
         loop = asyncio.get_running_loop()
-        ready_ids = await loop.run_in_executor(
-            None, _native.wait_any, pollin_socks, t
-        )
+        ready_ids = await loop.run_in_executor(None, _native.wait_any, pollin_socks, t)
         return [
-            (self._sockets[rid][0], POLLIN)
-            for rid in ready_ids
-            if rid in self._sockets
+            (self._sockets[rid][0], POLLIN) for rid in ready_ids if rid in self._sockets
         ]
 
 

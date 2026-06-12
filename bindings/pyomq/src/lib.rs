@@ -24,6 +24,7 @@ mod context;
 mod conversions;
 mod dispatch;
 mod error;
+mod notification;
 mod options;
 mod runtime;
 mod socket;

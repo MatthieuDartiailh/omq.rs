@@ -29,14 +29,14 @@ struct RuntimeState {
     pid: u32,
     handle: Handle,
     submit: flume::Sender<Job>,
-    recv_ready: Arc<crate::socket::RecvNotify>,
+    recv_ready: Arc<crate::notification::RecvNotify>,
 }
 
 static RUNTIME: Mutex<Option<RuntimeState>> = Mutex::new(None);
 static IO_THREADS: AtomicU64 = AtomicU64::new(1);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-fn ensure_runtime() -> (Handle, flume::Sender<Job>, Arc<crate::socket::RecvNotify>) {
+fn ensure_runtime() -> (Handle, flume::Sender<Job>, Arc<crate::notification::RecvNotify>) {
     let mut guard = RUNTIME.lock().unwrap();
     let pid = std::process::id();
     if let Some(rt) = guard.as_ref()
@@ -46,7 +46,7 @@ fn ensure_runtime() -> (Handle, flume::Sender<Job>, Arc<crate::socket::RecvNotif
     }
     // First call, or child process after fork: (re)initialize.
     let (tx, rx) = flume::unbounded::<Job>();
-    let recv_ready = Arc::new(crate::socket::RecvNotify::new());
+    let recv_ready = Arc::new(crate::notification::RecvNotify::new());
     let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
     let n = IO_THREADS.load(Ordering::Relaxed) as usize;
     thread::Builder::new()
@@ -101,7 +101,7 @@ fn submit_tx() -> flume::Sender<Job> {
 
 /// Global recv notification for the current process. Recv pumps signal
 /// this after pushing a message; `wait_any` parks on it.
-pub(crate) fn recv_ready() -> Arc<crate::socket::RecvNotify> {
+pub(crate) fn recv_ready() -> Arc<crate::notification::RecvNotify> {
     ensure_runtime().2
 }
 
@@ -138,8 +138,8 @@ pub fn materialize(
     options: omq_tokio::Options,
     send_cons: yring::AsyncConsumer<omq_tokio::Message>,
     mut recv_prod: yring::Producer<omq_tokio::Message>,
-    recv_notify: Arc<crate::socket::RecvNotify>,
-    send_notify: Arc<crate::socket::RecvNotify>,
+    recv_notify: Arc<crate::notification::RecvNotify>,
+    send_notify: Arc<crate::notification::RecvNotify>,
     recv_space: Arc<tokio::sync::Notify>,
 ) -> (u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>) {
     let (otx, orx) = flume::bounded(1);

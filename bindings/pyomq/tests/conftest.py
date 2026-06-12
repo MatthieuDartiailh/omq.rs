@@ -1,6 +1,7 @@
 """Shared fixtures."""
 
 import time
+import sys
 
 import pytest
 
@@ -18,7 +19,12 @@ def inproc_endpoint(request) -> str:
 
 @pytest.fixture
 def ipc_endpoint(request) -> str:
+    # IPC transport uses Linux abstract namespace, not available on Windows
+    if sys.platform == "win32":
+        pytest.skip("IPC transport not supported on Windows")
+
     import os, hashlib
+
     # Linux abstract namespace: no filesystem entry, auto-cleaned on close.
     tag = hashlib.sha1(f"{os.getpid()}-{request.node.name}".encode()).hexdigest()[:16]
     return f"ipc://@pyomq-{tag}"

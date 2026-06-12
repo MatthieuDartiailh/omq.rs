@@ -161,10 +161,9 @@ impl AsyncSocket {
         let mat_guard = self.inner.materialized.read().unwrap();
         let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
         let recv_notify = mat.recv_notify.clone();
-        let owned_fd = recv_notify.dup_fd().map_err(|e| map_err(PError::Io(e)))?;
+        let fd = recv_notify.dup_fd().map_err(|e| map_err(PError::Io(e)))?;
         recv_notify.park_begin();
-        use std::os::fd::IntoRawFd;
-        Ok(owned_fd.into_raw_fd())
+        Ok(fd)
     }
 
     #[pyo3(name = "_send_fd")]
@@ -173,10 +172,9 @@ impl AsyncSocket {
         let mat_guard = self.inner.materialized.read().unwrap();
         let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
         let send_notify = mat.send_notify.clone();
-        let owned_fd = send_notify.dup_fd().map_err(|e| map_err(PError::Io(e)))?;
+        let fd = send_notify.dup_fd().map_err(|e| map_err(PError::Io(e)))?;
         send_notify.park_begin();
-        use std::os::fd::IntoRawFd;
-        Ok(owned_fd.into_raw_fd())
+        Ok(fd)
     }
 
     // ── Subscriptions / groups (sync) ───────────────────────────────

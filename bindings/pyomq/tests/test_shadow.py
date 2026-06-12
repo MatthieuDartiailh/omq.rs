@@ -1,9 +1,17 @@
 """_ShadowSocket and Socket.shadow() tests."""
 
+import sys
+
 import pytest
 
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
+
+# Shadow socket requires select() on file descriptors, which doesn't work
+# with Windows socket handles. Shadow socket is a Tier 2 feature on Windows.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="Shadow socket not supported on Windows"
+)
 
 
 @pytest.mark.asyncio

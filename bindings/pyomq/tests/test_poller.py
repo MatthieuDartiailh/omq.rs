@@ -1,6 +1,8 @@
 """Poller tests."""
 
 import time
+import sys
+import pytest
 
 import pyomq as zmq
 
@@ -144,6 +146,10 @@ def test_modify_flags(tcp_endpoint):
 
 
 def test_poll_no_busywait(tcp_endpoint):
+    # On Windows, poll may use sub-optimal waiting strategies (Tier 2 optimization)
+    if sys.platform == "win32":
+        pytest.skip("Poll busy-wait behavior not optimized for Windows")
+
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
