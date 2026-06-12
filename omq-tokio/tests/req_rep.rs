@@ -146,7 +146,11 @@ async fn rep_survives_client_disconnect_mid_cycle() {
         req1.send(Message::single("drop-me")).await.unwrap();
 
         // Let REP receive the request (stale envelope now held).
-        let _ = tokio::time::timeout(Duration::from_millis(300), rep.recv()).await;
+        let m = tokio::time::timeout(Duration::from_millis(300), rep.recv())
+            .await
+            .expect("REP recv timed out for first client")
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"drop-me");
         // req1 drops here: connection closes before REP replies.
     }
 

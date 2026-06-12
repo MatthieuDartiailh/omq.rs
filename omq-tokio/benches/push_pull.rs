@@ -49,10 +49,6 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     let refs: Vec<&Socket> = pushes.iter().collect();
     common::wait_connected(&refs).await;
 
-    if transport == "zstd+tcp" {
-        common::seed_zstd_train(&pushes[0], &pull).await;
-    }
-
     let payload = common::payload(size);
     let pull = std::sync::Arc::new(pull);
     let pushes = std::sync::Arc::new(pushes);

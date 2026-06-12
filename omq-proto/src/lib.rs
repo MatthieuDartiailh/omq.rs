@@ -2,7 +2,7 @@
 //!
 //! ZMTP codec, message + payload types, frame parsing, mechanism
 //! handshakes (NULL / CURVE / BLAKE3ZMQ), compression transforms
-//! (lz4 / zstd), endpoint parsing, options, and the prefix-
+//! (lz4), endpoint parsing, options, and the prefix-
 //! subscription matcher. None of this depends on a runtime -
 //! `omq-tokio` and `omq-compio` (and any future backend) embed it
 //! directly.
@@ -22,7 +22,7 @@ pub mod subscription;
 pub mod type_state;
 
 pub use endpoint::{Endpoint, EndpointRole, EndpointSpec, IpcPath};
-pub use error::{Error, Result};
+pub use error::{Error, Result, TrySendError};
 pub use message::{Frame, FrameFlags, Message, MessageIter, generated_identity};
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,

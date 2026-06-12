@@ -20,7 +20,6 @@ workspace = true
 #   curve     CURVE encrypted-handshake (RFC 26)
 #   blake3zmq omq-native BLAKE3+ChaCha20 mechanism
 #   lz4       lz4+tcp:// transport (pure Rust; lz4rip)
-#   zstd      zstd+tcp:// transport (bundles libzstd; needs cc)
 default = []
 curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:subtle", "dep:x25519-dalek", "dep:zeroize"]
 blake3zmq = [
@@ -31,8 +30,8 @@ blake3zmq = [
 ]
 plain = []
 lz4 = ["dep:lz4rip"]
-zstd = ["dep:zstd-safe"]
 ws = []
+soak = []
 
 [dependencies]
 blake3 = { version = "1.8", optional = true }
@@ -42,9 +41,8 @@ crypto_box = { version = "0.9", features = ["std"], optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
 subtle = { version = "2.6", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"], optional = true }
-lz4rip = { version = "0.3.1", default-features = false, optional = true }
+lz4rip = { version = "0.4.0", default-features = false, features = ["std"], optional = true }
 rand = "0.10"
-zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"], optional = true }
 patricia_tree = "0.10"
 smallvec = { version = "1", features = ["const_generics", "union"] }
 socket2 = { version = "0.6", features = ["all"] }

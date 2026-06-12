@@ -85,10 +85,11 @@ async fn router_mandatory_errors_on_unknown_identity() {
     // Round-trip a message so the router learns dealer-known's slot
     // and we know the connection is up.
     dealer.send(Message::single("ping")).await.unwrap();
-    let _ = compio::time::timeout(Duration::from_secs(2), router.recv())
+    let m = compio::time::timeout(Duration::from_secs(2), router.recv())
         .await
         .expect("router recv timeout")
         .unwrap();
+    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"ping");
 
     // Send to an identity nobody owns.
     let bad = Message::multipart([Bytes::from_static(b"ghost"), Bytes::from_static(b"oops")]);
@@ -105,10 +106,11 @@ async fn router_drops_unknown_identity_by_default() {
     dealer.connect(ep).await.unwrap();
 
     dealer.send(Message::single("ping")).await.unwrap();
-    let _ = compio::time::timeout(Duration::from_secs(2), router.recv())
+    let m = compio::time::timeout(Duration::from_secs(2), router.recv())
         .await
         .expect("router recv timeout")
         .unwrap();
+    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"ping");
 
     let bad = Message::multipart([Bytes::from_static(b"nope"), Bytes::from_static(b"oops")]);
     // Default is silent drop (libzmq matches).

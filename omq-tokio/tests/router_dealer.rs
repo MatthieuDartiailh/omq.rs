@@ -122,7 +122,8 @@ async fn router_handles_identity_churn_without_growth() {
         dealer.connect(ep.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         dealer.send(Message::single("ping")).await.unwrap();
-        let _ = router.recv().await.unwrap();
+        let m = router.recv().await.unwrap();
+        assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"ping");
         dealer.close().await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

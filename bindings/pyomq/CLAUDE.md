@@ -25,8 +25,8 @@ pytest -v                          # soak tests excluded by default
 cargo clippy --all-targets         # separate workspace, not --workspace
 ```
 
-Maturin enables all features (`plain`, `curve`, `blake3zmq`, `lz4`,
-`zstd`). Runtime check: `pyomq.has("curve")`.
+Maturin enables all features (`plain`, `curve`, `blake3zmq`, `lz4`).
+Runtime check: `pyomq.has("curve")`.
 
 Own `Cargo.lock` and `uv.lock` (both committed). Not part of the
 workspace root lock file.

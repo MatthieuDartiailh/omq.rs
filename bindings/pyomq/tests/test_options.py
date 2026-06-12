@@ -249,7 +249,7 @@ def test_has_feature():
     assert zmq.has("pgm") is False
     assert isinstance(zmq.has("curve"), bool)
     assert isinstance(zmq.has("lz4"), bool)
-    assert isinstance(zmq.has("zstd"), bool)
+    assert zmq.has("zstd") is False
     assert isinstance(zmq.has("plain"), bool)
     assert zmq.has("gssapi") is False
     assert zmq.has("INPROC") is True
@@ -283,16 +283,6 @@ def test_on_mute_rejects_invalid():
         ctx.term()
 
 
-def test_compression_level_round_trip():
-    ctx, s = _push()
-    try:
-        assert s.getsockopt(zmq.OMQ_COMPRESSION_LEVEL) == -3
-        s.setsockopt(zmq.OMQ_COMPRESSION_LEVEL, 5)
-        assert s.getsockopt(zmq.OMQ_COMPRESSION_LEVEL) == 5
-        s.setsockopt(zmq.OMQ_COMPRESSION_LEVEL, -1)
-        assert s.getsockopt(zmq.OMQ_COMPRESSION_LEVEL) == -1
-    finally:
-        s.close()
         ctx.term()
 
 

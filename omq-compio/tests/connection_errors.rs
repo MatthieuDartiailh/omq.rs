@@ -35,10 +35,9 @@ async fn server_survives_pre_handshake_drop() {
     // Rude clients on blocking threads: connect and immediately drop.
     for _ in 0..3 {
         let h = std::thread::spawn(move || {
-            let _ = std::net::TcpStream::connect(addr);
-            // Drop immediately — sends FIN with no ZMTP bytes.
+            std::net::TcpStream::connect(addr).expect("rude client connect");
         });
-        let _ = h.join();
+        h.join().expect("rude client thread panicked");
         compio::time::sleep(Duration::from_millis(20)).await;
     }
 
@@ -68,7 +67,11 @@ async fn server_survives_mid_session_abrupt_drop() {
         push1.connect(ep.clone()).await.unwrap();
         test_support::wait_for_handshake(&push1).await;
         push1.send(Message::single("first")).await.unwrap();
-        let _ = compio::time::timeout(Duration::from_millis(300), pull.recv()).await;
+        let m = compio::time::timeout(Duration::from_millis(300), pull.recv())
+            .await
+            .expect("recv timed out for first client")
+            .unwrap();
+        assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"first");
         // push1 drops here — abrupt half-close.
     }
     compio::time::sleep(Duration::from_millis(50)).await;
@@ -101,9 +104,9 @@ async fn abrupt_reset_mid_greeting_does_not_wedge_server() {
         let mut s = std::net::TcpStream::connect(addr).unwrap();
         // Send only the first 5 bytes of a greeting, then drop.
         let partial: [u8; 5] = [0xFF, 0x00, 0x00, 0x00, 0x00];
-        let _ = s.write_all(&partial);
+        s.write_all(&partial).expect("write partial greeting");
     });
-    let _ = h.join();
+    h.join().expect("partial-greeting thread panicked");
     compio::time::sleep(Duration::from_millis(50)).await;
 
     let push = Socket::new(SocketType::Push, Options::default());

@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use omq_proto::error::{Error, Result};
+use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 use omq_proto::routing::{SendCategory, send_category};
@@ -686,51 +686,29 @@ impl Socket {
         Ok(())
     }
 
-    /// Like [`try_send`](Self::try_send) but returns the message on failure so
-    /// the caller can retry with an async send without cloning.
-    ///
-    /// On `pre_send` failure (protocol error), the message is consumed and
-    /// cannot be recovered; `Err((e, None))` is returned. On transient
-    /// failures like `WouldBlock`, `Err((e, Some(msg)))` gives the message back.
-    pub fn try_send_or_return(
-        &self,
-        msg: Message,
-    ) -> std::result::Result<(), (Error, Option<Message>)> {
-        let st = self.inner().socket_type;
-        let msg = if pre_send_needs_type_state(st) {
-            match self
-                .inner()
-                .type_state
-                .lock()
-                .expect("type_state lock")
-                .pre_send(st, msg)
-            {
-                Ok(m) => m,
-                Err(e) => return Err((e, None)),
-            }
-        } else {
-            msg
-        };
-        self.try_send_dispatch(&msg).map_err(|e| (e, Some(msg)))
-    }
-
-    /// Non-blocking send. Returns `Err(Error::WouldBlock)` if the socket has no
-    /// connected peers yet, or if the chosen peer's outbound channel is full
-    /// (HWM reached). For fan-out socket types (PUB/XPUB/RADIO), delivers to
-    /// all peers that have capacity and succeeds; individual per-peer HWM
-    /// enforcement already handles full peers per `OnMute` policy.
-    pub fn try_send(&self, msg: Message) -> Result<()> {
+    /// Non-blocking send. Returns `Err(TrySendError::Full(msg))` if the socket
+    /// has no connected peers yet, or if the chosen peer's outbound channel is
+    /// full (HWM reached). The message is returned so the caller can retry
+    /// without reallocating. For fan-out socket types (PUB/XPUB/RADIO),
+    /// delivers to all peers that have capacity and succeeds; individual
+    /// per-peer HWM enforcement already handles full peers per `OnMute` policy.
+    pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         let st = self.inner().socket_type;
         let msg = if pre_send_needs_type_state(st) {
             self.inner()
                 .type_state
                 .lock()
                 .expect("type_state lock")
-                .pre_send(st, msg)?
+                .pre_send(st, msg)
+                .map_err(TrySendError::Error)?
         } else {
             msg
         };
-        self.try_send_dispatch(&msg)
+        self.try_send_dispatch(&msg).map_err(|e| match e {
+            Error::WouldBlock => TrySendError::Full(msg),
+            Error::Closed => TrySendError::Closed,
+            other => TrySendError::Error(other),
+        })
     }
 
     fn try_send_dispatch(&self, msg: &Message) -> Result<()> {

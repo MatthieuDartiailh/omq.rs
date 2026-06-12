@@ -1,6 +1,5 @@
 //! Public `Socket` handle.
 
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -24,28 +23,7 @@ use crate::transport::inproc::InprocSpsc;
 
 pub(crate) type WireSlotHolder = Arc<Mutex<Option<Arc<PeerWireSlot>>>>;
 
-/// Error returned by [`Socket::try_send`].
-#[derive(Debug)]
-pub enum TrySendError {
-    /// Channel full (HWM reached). Contains the message for retry.
-    Full(Message),
-    /// Socket closed.
-    Closed,
-    /// Protocol or framing error.
-    Error(Error),
-}
-
-impl fmt::Display for TrySendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Full(_) => write!(f, "send queue full"),
-            Self::Closed => write!(f, "socket closed"),
-            Self::Error(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for TrySendError {}
+pub use omq_proto::error::TrySendError;
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
 pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;

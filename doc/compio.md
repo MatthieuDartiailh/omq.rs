@@ -110,7 +110,7 @@ DirectIoState {
 
   // Fast-path send bypass (NULL mechanism, and also transform path)
   encoded_queue: EncodedQueueCell, // Cell-based borrow flag + UnsafeCell<EncodedQueue>
-  encoder: async_lock::Mutex<Option<MessageEncoder>>,  // lz4 / zstd send side
+  encoder: async_lock::Mutex<Option<MessageEncoder>>,  // lz4 send side
   has_transform: bool,             // selects encoder path over passthrough
   transform_passthrough: Option<(Bytes, usize)>,  // sentinel + threshold for bypass
   driver_in_select: Cell<bool>,    // driver is parked; notify to wake
@@ -224,7 +224,7 @@ reducing `writev` overhead and improving kernel batching.
 ```rust
 PeerIo {
   codec: Connection,               // omq-proto ZMTP codec
-  decoder: Option<MessageDecoder>, // lz4 or zstd receive-side decompressor
+  decoder: Option<MessageDecoder>, // lz4 receive-side decompressor
   reader: WireReader,              // TCP or IPC read half (kept for rearm)
   handshake_done: bool,
 }
@@ -296,18 +296,16 @@ message in OneShot mode re-arms the multi-shot stream via
 ```rust
 enum MessageEncoder {
   Lz4(Lz4Encoder),     // feature = "lz4"
-  Zstd(ZstdEncoder),   // feature = "zstd"
 }
 
 enum MessageDecoder {
   Lz4(Lz4Decoder),     // feature = "lz4"
-  Zstd(ZstdDecoder),   // feature = "zstd"
 }
 ```
 
 `MessageEncoder::for_endpoint` constructs a matched `(MessageEncoder,
-MessageDecoder)` pair for compression transports (`lz4+tcp://`,
-`zstd+tcp://`). The encoder lives in `DirectIoState::encoder`; the
+MessageDecoder)` pair for compression transports (`lz4+tcp://`).
+The encoder lives in `DirectIoState::encoder`; the
 decoder lives in `PeerIo::decoder`. They hold independent state
 (compression context, dictionary) so each can be locked separately --
 the sender and driver never contend on the same mutex for encode vs.
@@ -554,7 +552,7 @@ per `connect()`; `send_radio` encodes `[group, body]` into a datagram
 and calls `sock.send`. `DISH` `bind()` spawns a `recv_from` loop that
 decodes datagrams and checks `joined_groups` locally.
 
-### `lz4+tcp` / `zstd+tcp`
+### `lz4+tcp`
 
 Dialed and accepted as plain TCP. After the TCP connection is up, a
 matched `(MessageEncoder, MessageDecoder)` pair is constructed via

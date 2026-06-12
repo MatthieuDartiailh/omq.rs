@@ -128,10 +128,11 @@ async fn plain_authenticator_callback_runs() {
     client.connect(ep).await.unwrap();
 
     client.send(Message::single("hi")).await.unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(2), server.recv())
+    let m = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"hi");
     assert!(saw.load(Ordering::SeqCst), "authenticator must run");
 }
 

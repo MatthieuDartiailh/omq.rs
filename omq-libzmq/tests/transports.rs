@@ -1,4 +1,4 @@
-//! Transport tests: IPC, IPC abstract namespace, lz4+tcp, zstd+tcp.
+//! Transport tests: IPC, IPC abstract namespace, lz4+tcp.
 #![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
@@ -182,64 +182,5 @@ fn lz4_tcp_multiple_messages() {
 
     zmq_close(push);
     zmq_close(pull);
-    zmq_ctx_term(ctx);
-}
-
-// --- zstd+tcp compression ---
-
-#[test]
-fn zstd_tcp_push_pull() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("zstd+tcp://127.0.0.1:{port}")).unwrap();
-
-    let ctx = zmq_ctx_new();
-    let push = zmq_socket(ctx, ZMQ_PUSH);
-    let pull = zmq_socket(ctx, ZMQ_PULL);
-
-    zmq_bind(pull, addr.as_ptr());
-    zmq_connect(push, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(100));
-    set_timeo(push, 2000);
-    set_timeo(pull, 2000);
-
-    let payload = vec![0xABu8; 4096];
-    let rc = zmq_send(push, payload.as_ptr().cast(), payload.len(), 0);
-    assert_eq!(rc, 4096);
-
-    let mut buf = vec![0u8; 8192];
-    let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert_eq!(rc, 4096);
-    assert!(buf[..4096].iter().all(|&b| b == 0xAB));
-
-    zmq_close(push);
-    zmq_close(pull);
-    zmq_ctx_term(ctx);
-}
-
-#[test]
-fn zstd_tcp_pub_sub() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("zstd+tcp://127.0.0.1:{port}")).unwrap();
-
-    let ctx = zmq_ctx_new();
-    let pub_ = zmq_socket(ctx, ZMQ_PUB);
-    let sub = zmq_socket(ctx, ZMQ_SUB);
-
-    zmq_bind(pub_, addr.as_ptr());
-    zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
-    zmq_connect(sub, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(200));
-    set_timeo(sub, 2000);
-
-    let payload = vec![0x55u8; 1024];
-    zmq_send(pub_, payload.as_ptr().cast(), payload.len(), 0);
-
-    let mut buf = vec![0u8; 2048];
-    let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert_eq!(rc, 1024);
-    assert!(buf[..1024].iter().all(|&b| b == 0x55));
-
-    zmq_close(sub);
-    zmq_close(pub_);
     zmq_ctx_term(ctx);
 }

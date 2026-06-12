@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
-use omq_compio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType, TrySendError};
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -96,9 +96,11 @@ async fn drop_newest_silently_discards_overflow() {
         .await
         .unwrap()
         .unwrap();
-    let _ = m;
-    let extra = compio::time::timeout(Duration::from_millis(100), pull.recv()).await;
-    let _ = extra;
+    let body = m.part_bytes(0).unwrap();
+    assert!(
+        body.as_ref() == b"a" || body.as_ref() == b"b" || body.as_ref() == b"c",
+        "unexpected message: {body:?}"
+    );
 }
 
 #[compio::test]
@@ -131,11 +133,13 @@ async fn try_send_no_peers_returns_would_block() {
     push.bind(inproc_ep("try-send-nopeer-compio"))
         .await
         .unwrap();
-    // No peer connected; shared queue has capacity but no peer means WouldBlock.
-    assert!(matches!(
-        push.try_send(Message::single("x")),
-        Err(Error::WouldBlock)
-    ));
+    // No peer connected; shared queue has capacity but no peer means Full.
+    // The returned message must be the original so the caller can retry.
+    let returned = match push.try_send(Message::single("x")) {
+        Err(TrySendError::Full(m)) => m,
+        other => panic!("expected TrySendError::Full, got {other:?}"),
+    };
+    assert_eq!(&*returned.part_bytes(0).unwrap(), b"x");
 }
 
 #[compio::test]
@@ -236,7 +240,11 @@ async fn drop_oldest_keeps_newest_messages() {
         .await
         .unwrap()
         .unwrap();
-    let _ = m;
+    let body = m.part_bytes(0).unwrap();
+    assert!(
+        body.as_ref() == b"first" || body.as_ref() == b"second" || body.as_ref() == b"third",
+        "unexpected message: {body:?}"
+    );
 }
 
 #[compio::test]

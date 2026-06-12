@@ -8,7 +8,7 @@ out-of-tree (maturin etc.).
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
   message/payload types, greeting + frame state machines, mechanism
   handshakes (NULL / PLAIN / CURVE / BLAKE3ZMQ), compression transforms
-  (lz4 / zstd), endpoint parsing, options, subscription matcher.
+  (lz4), endpoint parsing, options, subscription matcher.
   No async, no I/O. Mirrors `rustls::ConnectionCommon` / `quinn-proto`.
 - **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
   Works on Linux and macOS (and likely other mio targets).
@@ -74,7 +74,6 @@ revs link two `compio-runtime` instances -> TLS mismatch panic.
 | `curve` | CURVE handshake (RFC 26) | `crypto_box`, `crypto_secretbox` |
 | `blake3zmq` | BLAKE3 + ChaCha20 mechanism | `blake3`, `chacha20-blake3`, `x25519-dalek` |
 | `lz4` | `lz4+tcp://` transform | `lz4rip` |
-| `zstd` | `zstd+tcp://` transform | `zstd-safe` (needs `cc`) |
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |
@@ -133,7 +132,7 @@ distribute the encoded bytes.** Never encode, compress, or frame the
 same message N times for N subscribers. The correct pattern: encode
 into a scratch buffer, then memcpy the pre-encoded bytes into each
 peer's `EncodedQueue` via `push_pre_encoded`. This applies equally
-to ZMTP framing, compression transforms (lz4, zstd), and any future
+to ZMTP framing, compression transforms (lz4), and any future
 wire-level transforms. Per-peer encoding is only justified when the
 wire bytes genuinely differ per peer (e.g. per-peer encryption keys).
 

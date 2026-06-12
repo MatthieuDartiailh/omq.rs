@@ -142,10 +142,11 @@ async fn plain_authenticator_callback_runs() {
     client.connect(ep).await.unwrap();
 
     client.send(Message::single("hi")).await.unwrap();
-    let _ = compio::time::timeout(Duration::from_secs(5), server.recv())
+    let m = compio::time::timeout(Duration::from_secs(5), server.recv())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"hi");
     assert!(saw.load(Ordering::SeqCst), "authenticator must run");
 }
 

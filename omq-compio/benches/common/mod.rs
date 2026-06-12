@@ -184,7 +184,7 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
             "omq-bench-{}-{seq}",
             std::process::id()
         ))),
-        "tcp" | "lz4+tcp" | "zstd+tcp" | "ws" => {
+        "tcp" | "lz4+tcp" | "ws" => {
             let l = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
                 .expect("bench: failed to allocate a tcp port");
             let port = l.local_addr().unwrap().port();
@@ -194,8 +194,6 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
                 "tcp" => Endpoint::Tcp { host, port },
                 #[cfg(feature = "lz4")]
                 "lz4+tcp" => Endpoint::Lz4Tcp { host, port },
-                #[cfg(feature = "zstd")]
-                "zstd+tcp" => Endpoint::ZstdTcp { host, port },
                 #[cfg(feature = "ws")]
                 "ws" => Endpoint::Ws {
                     host,
@@ -439,16 +437,6 @@ pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_siz
     );
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{row}");
-    }
-}
-
-pub(crate) async fn seed_zstd_train(push: &omq_compio::Socket, pull: &omq_compio::Socket) {
-    let sample = payload(512);
-    for _ in 0..250 {
-        push.send(omq_compio::Message::single(sample.clone()))
-            .await
-            .unwrap();
-        pull.recv().await.unwrap();
     }
 }
 

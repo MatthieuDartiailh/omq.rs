@@ -35,7 +35,7 @@ runtime backends differ. Detail lives in [`compio.md`](compio.md),
 |  Connection      ZMTP 3.x codec + state machine                  |
 |  Greeting        version negotiation                             |
 |  Mechanism       NULL / PLAIN / CURVE / BLAKE3ZMQ                |
-|  Transform       lz4 / zstd encode/decode                        |
+|  Transform       lz4 encode/decode                               |
 |  Endpoint        URI parsing                                     |
 |  Subscription    patricia-trie matcher                           |
 |  Payload/Message multi-chunk Bytes types                         |
@@ -169,7 +169,6 @@ transport cell on each backend) and `omq-tokio/tests/interop_compio.rs`
 | `inproc://name` | In-process channel; bypasses ZMTP codec entirely | both |
 | `udp://host:port` | UDP datagram (`RADIO` / `DISH` only) | both |
 | `lz4+tcp://host:port` | TCP + LZ4 transform | both, feature `lz4` |
-| `zstd+tcp://host:port` | TCP + zstd transform with optional dict training | both, feature `zstd` |
 | `ws://host:port/path` | ZeroMQ over WebSocket (ZWS/2.0, RFC 45) | both, feature `ws` |
 | `wss://host:port/path` | ZeroMQ over WebSocket with TLS | both, feature `ws` |
 
@@ -254,7 +253,7 @@ behind).
 | `src/proto/command.rs` | ZMTP commands (SUBSCRIBE, PING, etc.) |
 | `src/proto/chunked_buf.rs` | `ChunkedInputBuf` -- zero-copy multi-chunk input buffer |
 | `src/proto/mechanism/` | Mechanism dispatch + handshakes (NULL / PLAIN / CURVE / BLAKE3ZMQ) |
-| `src/proto/transform/` | LZ4 and Zstd per-part encoder/decoder |
+| `src/proto/transform/` | LZ4 per-part encoder/decoder |
 | `src/proto/zws.rs` | ZWS/2.0 frame codec (feature `ws`) |
 | `src/endpoint.rs` | URI parsing (`tcp://`, `ipc://`, `lz4+tcp://`, `ws://`, etc.) |
 | `src/options.rs` | `Options` builder (HWM, identity, keepalive, mechanism) |
@@ -314,7 +313,7 @@ stay in lockstep.
 
 **Transport.** Add an `Endpoint` variant and parser in
 `omq-proto/src/endpoint.rs`. Add `transport/<name>.rs` in each backend.
-Compression-style transports (`lz4+tcp`, `zstd+tcp`) are implemented as
+Compression-style transports (`lz4+tcp`) are implemented as
 `MessageEncoder` / `MessageDecoder` layers on top of `tcp`, not as
 separate transports.
 

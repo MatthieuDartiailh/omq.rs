@@ -189,7 +189,7 @@ async fn curve_pub_sub() {
     panic!("SUB never received over CURVE");
 }
 
-/// Regression test: flush_codec_to_wire partial-write ordering bug.
+/// Regression test: `flush_codec_to_wire` partial-write ordering bug.
 /// See `blake3zmq_large_messages_tcp_partial_write` for details.
 #[test]
 fn curve_large_messages_tcp_partial_write() {
@@ -245,7 +245,7 @@ fn curve_large_messages_tcp_partial_write() {
 
     let port = port_rx.recv().unwrap();
     let send_rt = omq_compio::runtime::build_default_runtime().unwrap();
-    let _ = send_rt.block_on(async {
+    send_rt.block_on(async {
         let push = Socket::new(
             SocketType::Push,
             Options::default()

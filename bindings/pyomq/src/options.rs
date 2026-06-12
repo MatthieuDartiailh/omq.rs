@@ -72,7 +72,6 @@ pub struct Overlay {
     #[cfg(feature = "blake3zmq")]
     pub blake3zmq_authenticator: Option<crate::blake3zmq_auth::Blake3ZmqAuthenticator>,
     pub on_mute: OnMute,
-    pub compression_level: i32,
     pub compression_dict: Option<Bytes>,
     pub compression_auto_train: bool,
 }
@@ -117,7 +116,6 @@ impl Default for Overlay {
             #[cfg(feature = "blake3zmq")]
             blake3zmq_authenticator: None,
             on_mute: OnMute::Block,
-            compression_level: -3,
             compression_dict: None,
             compression_auto_train: true,
         }
@@ -150,7 +148,6 @@ impl Overlay {
                 (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
             },
             on_mute: self.on_mute,
-            compression_level: self.compression_level,
             compression_dict: self.compression_dict.clone(),
             compression_auto_train: self.compression_auto_train,
             arena_threshold: Some(64 * 1024),
@@ -300,7 +297,6 @@ impl Overlay {
             #[cfg(feature = "blake3zmq")]
             blake3zmq_authenticator: None,
             on_mute: o.on_mute,
-            compression_level: o.compression_level,
             compression_dict: o.compression_dict.clone(),
             compression_auto_train: o.compression_auto_train,
         }
@@ -497,9 +493,6 @@ pub fn setsockopt(
                     )));
                 }
             };
-        }
-        constants::OMQ_COMPRESSION_LEVEL => {
-            ov.compression_level = value.extract::<i32>()?;
         }
         constants::OMQ_COMPRESSION_DICT => {
             let v: &[u8] = value.extract()?;
@@ -799,10 +792,6 @@ pub fn getsockopt<'py>(
                 OnMute::DropOldest => 2,
                 _ => unreachable!(),
             };
-            Ok(int_to_bound(py, v))
-        }
-        constants::OMQ_COMPRESSION_LEVEL => {
-            let v = sock.overlay.lock().unwrap().compression_level as i64;
             Ok(int_to_bound(py, v))
         }
         constants::OMQ_COMPRESSION_DICT => {

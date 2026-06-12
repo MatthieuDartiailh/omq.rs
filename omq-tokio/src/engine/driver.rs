@@ -315,7 +315,7 @@ where
     peer_id: u64,
     cancel: CancellationToken,
     config: DriverConfig,
-    /// Send-side message encoder (`lz4+tcp://`, `zstd+tcp://`).
+    /// Send-side message encoder (`lz4+tcp://`).
     encoder: Option<MessageEncoder>,
     /// Receive-side message decoder. Symmetric to `encoder`.
     decoder: Option<MessageDecoder>,
@@ -884,7 +884,7 @@ fn submit_to_pipeline(
     threshold: usize,
     pipeline: &mut OffloadPipeline,
 ) {
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    #[cfg(feature = "lz4")]
     if msg.byte_len() >= threshold
         && let Some(mut pool_enc) = pool.try_take(encoder)
     {

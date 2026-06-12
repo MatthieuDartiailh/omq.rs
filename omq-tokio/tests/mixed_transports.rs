@@ -23,9 +23,9 @@ fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn push_distributes_across_inproc_and_tcp() {
-    const N: usize = 100;
+    const N: usize = 200;
     let inproc = inproc_ep("mixed-push-tok");
 
     let push = Socket::new(SocketType::Push, Options::default());
@@ -38,21 +38,17 @@ async fn push_distributes_across_inproc_and_tcp() {
     let pull_tcp = Socket::new(SocketType::Pull, Options::default());
     pull_tcp.connect(tcp_bound).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    for i in 0..N {
-        push.send(Message::single(format!("m{i}"))).await.unwrap();
-    }
-
+    // Start recv tasks before sending so the TCP handshake completes
+    // while early messages go to inproc (which connects instantly).
     let inproc_count = Arc::new(AtomicUsize::new(0));
     let tcp_count = Arc::new(AtomicUsize::new(0));
 
     let ic = inproc_count.clone();
     let h1 = tokio::spawn(async move {
         loop {
-            match tokio::time::timeout(Duration::from_millis(300), pull_inproc.recv()).await {
+            match tokio::time::timeout(Duration::from_millis(500), pull_inproc.recv()).await {
                 Ok(Ok(_)) => {
-                    ic.fetch_add(1, Ordering::SeqCst);
+                    ic.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => return,
             }
@@ -61,30 +57,32 @@ async fn push_distributes_across_inproc_and_tcp() {
     let tc = tcp_count.clone();
     let h2 = tokio::spawn(async move {
         loop {
-            match tokio::time::timeout(Duration::from_millis(300), pull_tcp.recv()).await {
+            match tokio::time::timeout(Duration::from_millis(500), pull_tcp.recv()).await {
                 Ok(Ok(_)) => {
-                    tc.fetch_add(1, Ordering::SeqCst);
+                    tc.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => return,
             }
         }
     });
+
+    // Send with yields between messages so recv tasks drain and PUSH
+    // round-robin sees both peers as writable.
+    for i in 0..N {
+        push.send(Message::single(format!("m{i}"))).await.unwrap();
+        if i % 10 == 9 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
     let _ = h1.await;
     let _ = h2.await;
 
-    let total = inproc_count.load(Ordering::SeqCst) + tcp_count.load(Ordering::SeqCst);
-    assert_eq!(
-        total, N,
-        "all {N} messages must arrive across both transports"
-    );
-    assert!(
-        inproc_count.load(Ordering::SeqCst) > 0,
-        "inproc peer received nothing"
-    );
-    assert!(
-        tcp_count.load(Ordering::SeqCst) > 0,
-        "tcp peer received nothing"
-    );
+    let ic = inproc_count.load(Ordering::Relaxed);
+    let tc = tcp_count.load(Ordering::Relaxed);
+    assert_eq!(ic + tc, N, "all {N} messages must arrive; got {ic}+{tc}");
+    assert!(ic > 0, "inproc peer received nothing (tcp got {tc})");
+    assert!(tc > 0, "tcp peer received nothing (inproc got {ic})");
 }
 
 #[tokio::test]

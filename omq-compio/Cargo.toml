@@ -25,7 +25,6 @@ curve = ["omq-proto/curve"]
 blake3zmq = ["omq-proto/blake3zmq"]
 plain = ["omq-proto/plain"]
 lz4 = ["omq-proto/lz4"]
-zstd = ["omq-proto/zstd"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfile", "dep:rustls-pki-types", "dep:compio-tls"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
@@ -61,9 +60,6 @@ atomic-waker = "1.1.0"
 futures-lite = "2"
 rand = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-# Used by benches/compression.rs to train a zstd dict from sample
-# JSON records before driving the with-dict throughput cells.
-zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"] }
 rcgen = "0.14"
 
 [[bench]]

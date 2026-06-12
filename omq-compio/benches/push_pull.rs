@@ -6,7 +6,7 @@
 //!   workloads where both ends share a thread).
 //! - **inproc-mt**: multi-runtime inproc — PULL on its own
 //!   thread/runtime, `PUSH`es on another (CPU-bound workloads).
-//! - **Wire** (TCP, IPC, lz4+tcp, zstd+tcp): multi-runtime, same
+//! - **Wire** (TCP, IPC, lz4+tcp): multi-runtime, same
 //!   shape as inproc-mt but over kernel sockets.
 
 #[path = "common/mod.rs"]
@@ -144,8 +144,6 @@ fn run_cell_threaded(
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(Barrier::new(2));
 
-    let seed_train = transport == "zstd+tcp";
-
     let pull_thread = {
         let ep = ep.clone();
         let pull_count = pull_count.clone();
@@ -193,20 +191,6 @@ fn run_cell_threaded(
                 }
                 let refs: Vec<&Socket> = pushes.iter().collect();
                 wait_connected_with_monitors(&refs, &mut monitors).await;
-
-                if seed_train {
-                    let sample = common::payload(512);
-                    for _ in 0..250 {
-                        pushes[0]
-                            .send(Message::single(sample.clone()))
-                            .await
-                            .unwrap();
-                    }
-                    while pull_count.load(Ordering::Relaxed) < 250 {
-                        compio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                    pull_count.store(0, Ordering::Relaxed);
-                }
 
                 let pushes = Arc::new(pushes);
 

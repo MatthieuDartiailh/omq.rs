@@ -79,9 +79,9 @@ impl SendSubmitter {
     pub(crate) fn try_send(
         &self,
         msg: Message,
-    ) -> core::result::Result<(), crate::socket::handle::TrySendError> {
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         match self {
-            Self::None => Err(crate::socket::handle::TrySendError::Error(Error::Protocol(
+            Self::None => Err(omq_proto::error::TrySendError::Error(Error::Protocol(
                 "socket type does not support send".into(),
             ))),
             Self::RoundRobin(s) => s.try_send(msg),

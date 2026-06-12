@@ -389,27 +389,6 @@ fn fuzz_lz4_decode() {
     }
 }
 
-#[cfg(feature = "zstd")]
-#[test]
-fn fuzz_zstd_decode() {
-    use omq_compio::proto::transform::zstd::ZstdDecoder;
-    let mut rng = rng();
-    for i in 0..iters() / 4 {
-        let mut tx = ZstdDecoder::new();
-        let n_parts = rng.random_range(1..=4);
-        let mut parts_vec: Vec<Bytes> = Vec::new();
-        for _ in 0..n_parts {
-            let part = random_bytes(&mut rng, 256);
-            parts_vec.push(Bytes::from(part));
-        }
-        let msg = Message::multipart(parts_vec);
-        let _ = tx.decode(msg);
-        if i % 10_000 == 0 {
-            eprintln!("zstd iter {i}");
-        }
-    }
-}
-
 // ================================================================
 // Tier 2: RFC compliance + adversarial structured inputs
 // ================================================================

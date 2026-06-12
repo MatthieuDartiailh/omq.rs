@@ -27,7 +27,6 @@ cargo test  -p omq-tokio  --features plain     --test plain
 cargo test  -p omq-tokio  --features curve     --test curve
 cargo test  -p omq-compio --features blake3zmq --test blake3zmq
 cargo test  -p omq-tokio  --features lz4       --test lz4_tcp
-cargo test  -p omq-tokio  --features zstd      --test zstd_tcp
 ```
 
 Full sweep (all features, both backends):
@@ -58,10 +57,10 @@ OMQ_FUZZ_ITERS=500000000 cargo test -p omq-tokio  --features fuzz --release -- -
 ## Soak tests
 
 Long-running leak and stability scenarios. Both backends have
-identical suites (12 scenarios each): peer churn, reconnect storm,
-PUB/SUB churn, large-message throughput, compression (zstd),
-compression (lz4), PLAIN auth, CURVE encryption, BLAKE3ZMQ
-encryption, multi-socket, inproc cross-thread.
+identical suites (11 scenarios each): peer churn, reconnect storm,
+PUB/SUB churn, large-message throughput, compression (lz4), PLAIN
+auth, CURVE encryption, BLAKE3ZMQ encryption, multi-socket, inproc
+cross-thread.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s).
 Enable all feature-gated scenarios with the full feature set.
@@ -71,7 +70,7 @@ sequentially. Launch scenarios in batches of 4 (8 processes) to
 keep peak RSS bounded while still running in parallel:
 
 ```sh
-FEATURES="soak lz4 zstd plain curve blake3zmq"
+FEATURES="soak lz4 plain curve blake3zmq"
 
 # build first (avoid parallel compilation conflicts)
 cargo test -p omq-compio --features "$FEATURES" --release --no-run
@@ -180,12 +179,17 @@ external framework. Results go to
 ## Updating charts
 
 After performance-relevant changes, regenerate the charts before
-releasing. All chart generators read `OMQ_HW_EXTRAS` for the subtitle
-when sysfs governor/turbo files are not accessible (e.g. in a VM):
+releasing. Chart subtitles show hardware info auto-detected from
+`/proc/cpuinfo` and sysfs. In VMs where sysfs governor/turbo files
+are absent, set these env vars:
 
 ```sh
-export OMQ_HW_EXTRAS="performance governor,turbo off"
+export OMQ_HW_PREFIX="Linux VM on a 2018 Mac Mini"
+export OMQ_HW_POSTFIX="performance governor, turbo off"
 ```
+
+`OMQ_HW_PREFIX` is prepended before the CPU model. `OMQ_HW_POSTFIX`
+replaces the auto-detected governor/turbo suffix.
 
 ### Cross-library comparison charts
 
@@ -215,8 +219,8 @@ python3 scripts/gen_mechanism_chart.py
 Produces `doc/charts/compression/{compio,tokio}_2048.svg`:
 
 ```sh
-cargo bench -p omq-compio --bench compression --features lz4,zstd  # → ~/.cache/omq/results_compression_compio.jsonl
-cargo bench -p omq-tokio  --bench compression --features lz4,zstd  # → ~/.cache/omq/results_compression_tokio.jsonl
+cargo bench -p omq-compio --bench compression --features lz4  # → ~/.cache/omq/results_compression_compio.jsonl
+cargo bench -p omq-tokio  --bench compression --features lz4  # → ~/.cache/omq/results_compression_tokio.jsonl
 python3 scripts/gen_compression_chart.py --backend compio           # JSONL → SVG
 python3 scripts/gen_compression_chart.py --backend tokio            # JSONL → SVG
 ```
