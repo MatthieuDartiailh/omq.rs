@@ -550,7 +550,7 @@ def detect_hardware() -> str | None:
                 label += ", " + ", ".join(extras)
             prefix = os.environ.get("OMQ_HW_PREFIX")
             if prefix:
-                label = f"{prefix} | {label}"
+                label = f"{prefix}, {label}"
             return label
     except OSError:
         pass
