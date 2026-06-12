@@ -124,12 +124,14 @@ impl SocketDriver {
         }
         if count == 1 && self.peers.len() == 1 {
             let s = sole_spsc.unwrap();
-            *self.send_ring.write().unwrap() = Some(s.clone());
-            self.send_ring_active
+            *self.spsc.send_ring.write().unwrap() = Some(s.clone());
+            self.spsc
+                .send_ring_active
                 .store(true, std::sync::atomic::Ordering::Release);
         } else {
-            *self.send_ring.write().unwrap() = None;
-            self.send_ring_active
+            *self.spsc.send_ring.write().unwrap() = None;
+            self.spsc
+                .send_ring_active
                 .store(false, std::sync::atomic::Ordering::Release);
         }
     }
@@ -511,12 +513,12 @@ impl SocketDriver {
 
         // Per-peer SPSC: always add to consumers Vec (recv side).
         if let Some(ref s) = spsc {
-            self.consumers.write().unwrap().push(s.clone());
+            self.spsc.consumers.write().unwrap().push(s.clone());
             if can_bypass_actor_recv(self.socket_type) {
                 s.recv_ready
                     .store(true, std::sync::atomic::Ordering::Release);
             }
-            self.spsc_activated.notify_one();
+            self.spsc.activated.notify_one();
         }
         self.update_send_ring();
 

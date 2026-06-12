@@ -42,6 +42,18 @@ pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
 /// any `recv()` that's blocked on the normal `async_channel` path.
 pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
 
+/// Grouped handles for per-peer SPSC inproc fast path. Shared between
+/// the socket handle (recv side) and the actor (send-ring management,
+/// consumer registration).
+#[derive(Debug, Clone)]
+pub(crate) struct SpscHandles {
+    pub consumers: SpscConsumers,
+    pub send_ring: SpscSendRing,
+    pub send_ring_active: SpscSendRingActive,
+    pub recv_notify: SpscRecvNotify,
+    pub activated: SpscActivated,
+}
+
 /// Recv channel that integrates per-peer SPSC awareness. Fair-queues
 /// across per-peer consumers, then falls back to the `async_channel`.
 #[derive(Debug)]
@@ -228,11 +240,13 @@ impl Socket {
         let monitor = MonitorPublisher::new();
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
         let send_submitter = send_strategy.submitter();
-        let consumers: Arc<RwLock<Vec<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(Vec::new()));
-        let recv_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
-        let spsc_activated: SpscActivated = Arc::new(tokio::sync::Notify::new());
-        let send_ring: Arc<RwLock<Option<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(None));
-        let send_ring_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let spsc = SpscHandles {
+            consumers: Arc::new(RwLock::new(Vec::new())),
+            send_ring: Arc::new(RwLock::new(None)),
+            send_ring_active: Arc::new(AtomicBool::new(false)),
+            recv_notify: Arc::new(tokio::sync::Notify::new()),
+            activated: Arc::new(tokio::sync::Notify::new()),
+        };
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let wire_slot: WireSlotHolder = Arc::new(Mutex::new(None));
@@ -244,11 +258,7 @@ impl Socket {
             cancel.clone(),
             monitor.clone(),
             send_strategy,
-            consumers.clone(),
-            send_ring.clone(),
-            send_ring_active.clone(),
-            recv_notify.clone(),
-            spsc_activated.clone(),
+            spsc.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
             wire_slot.clone(),
@@ -261,11 +271,11 @@ impl Socket {
                 cmd_tx,
                 recv_rx: SpscAwareRecv {
                     rx: recv_rx,
-                    consumers,
-                    recv_notify,
-                    activated: spsc_activated,
-                    send_ring,
-                    send_ring_active,
+                    consumers: spsc.consumers,
+                    recv_notify: spsc.recv_notify,
+                    activated: spsc.activated,
+                    send_ring: spsc.send_ring,
+                    send_ring_active: spsc.send_ring_active,
                     inproc_cache: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 },
                 monitor,
