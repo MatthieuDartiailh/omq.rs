@@ -192,129 +192,106 @@ pub(super) struct InprocRecvState {
     pub(super) fq_index: usize,
 }
 
+/// Outbound peer table, routing indices, and round-robin state.
+pub(super) struct PeerRouting {
+    pub(super) peers: RwLock<Slab<PeerSlot>>,
+    /// Bumped on every peer-set write. Lets send/recv skip lock
+    /// acquisitions when the peer set is stable.
+    pub(super) generation: AtomicU64,
+    /// Total outbound peer count (atomically readable without locking
+    /// `peers`).
+    pub(super) peer_count: Arc<AtomicUsize>,
+    /// Count of inproc outbound peers. When zero, multi-peer wire
+    /// sends skip `select_peer` entirely.
+    pub(super) inproc_count: AtomicUsize,
+    /// Cached route for the common single-peer case. Invalidated
+    /// when `generation` advances past the stored generation.
+    pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
+    /// Identity -> slot index for ROUTER outbound.
+    pub(super) identity_to_slot: RwLock<FxHashMap<Bytes, usize>>,
+    /// `connection_id` -> peer identity for the recv path.
+    pub(super) conn_id_to_identity: RwLock<FxHashMap<u64, Bytes>>,
+    /// Round-robin counter for peer selection.
+    pub(super) rr_index: AtomicUsize,
+    /// Dense list of live slab keys, rebuilt on peer add/remove.
+    pub(super) peer_keys: RwLock<Vec<usize>>,
+}
+
+/// Inproc transport state: per-peer SPSC pipes, tagged-frame channel,
+/// and the recv notification used by cross-thread inproc senders.
+pub(super) struct InprocIo {
+    /// Per-peer SPSC send pipes, indexed parallel to `routing.peers`.
+    pub(super) send_pipes: UnsafeCell<Vec<Option<InprocSendPipe>>>,
+    /// Per-peer SPSC recv consumers + fair-queue index.
+    pub(super) recv: UnsafeCell<InprocRecvState>,
+    /// Single shared recv notification. Remote senders notify this
+    /// when `parked` is true.
+    pub(super) recv_event: Arc<Event>,
+    /// True when recv is parked in select (waiting for data).
+    pub(super) parked: Arc<AtomicBool>,
+    pub(super) in_tx: blume::Sender<TaggedFrame>,
+    pub(super) in_rx: blume::Receiver<TaggedFrame>,
+}
+
+/// Cached `DirectIoState` handles for the wire send/recv fast paths.
+/// `UnsafeCell` is sound because compio is single-threaded.
+pub(super) struct DirectIoCache {
+    /// Direct codec access for `try_recv`. Set on first successful
+    /// direct recv; cleared on peer disconnect.
+    pub(super) recv: UnsafeCell<Option<Arc<DirectIoState>>>,
+    /// Cached `DirectIoState` + generation for the wire send fast path.
+    pub(super) send: UnsafeCell<Option<(Arc<DirectIoState>, u64)>>,
+}
+
+/// PUB/SUB matching caches and subscription tables.
+pub(super) struct PubSubState {
+    /// Set by subscribe/cancel handlers and peer add/remove.
+    pub(super) dirty: Arc<AtomicBool>,
+    /// True when every outbound peer has `subscribe_all`.
+    pub(super) all_match_all: Cell<bool>,
+    /// True when all outbound peers are Wire (not Inproc).
+    pub(super) all_wire: Cell<bool>,
+    /// Cached `PeerOut`s for the subscribe-all fast path.
+    pub(super) all_match_cache: UnsafeCell<SmallVec<[PeerOut; 8]>>,
+    /// Cached `DirectIoState` handles for direct-write PUB fan-out.
+    pub(super) direct_io_cache: UnsafeCell<SmallVec<[Arc<DirectIoState>; 8]>>,
+    pub(super) subscriptions: RwLock<SubscriptionSet>,
+    /// Active subscription prefixes (SUB / XSUB). Replayed to new peers.
+    pub(super) our_subs: RwLock<Vec<Bytes>>,
+}
+
+/// Active listeners and dialers.
+pub(super) struct EndpointRegistry {
+    pub(super) listeners: RwLock<Vec<ListenerEntry>>,
+    pub(super) dialers: RwLock<Vec<DialerEntry>>,
+    pub(super) udp_dialers: RwLock<Vec<UdpDialerEntry>>,
+}
+
 pub(super) struct SocketInner {
     pub(super) socket_type: SocketType,
     pub(super) simple_recv: bool,
     pub(super) options: Options,
-    /// Stable identity for inproc peer tagging. Equal to `options.identity`
-    /// when one is set; otherwise a 9-byte auto-generated value (leading 0x00
-    /// matches libzmq's auto-identity convention). ROUTER sockets use this to
-    /// identify peers that have no explicit identity.
+    /// Stable identity for inproc peer tagging.
     pub(super) inproc_identity: Bytes,
-    pub(super) out_peers: RwLock<Slab<PeerSlot>>,
-    /// Bumped on every `out_peers` write. Lets send/recv skip lock
-    /// acquisitions when the peer set is stable.
-    pub(super) peers_gen: AtomicU64,
-    /// Total outbound peer count. Used by the multi-peer wire fast
-    /// path to distinguish single-peer (direct encode) from multi-peer
-    /// (shared queue) without locking `out_peers`.
-    pub(super) out_peer_count: Arc<AtomicUsize>,
-    /// Count of inproc outbound peers. When zero, multi-peer wire
-    /// sends skip `select_peer` entirely: all peers drain from the
-    /// shared queue via their drivers.
-    pub(super) inproc_out_count: AtomicUsize,
-    /// Cached route for the common single-peer case. Invalidated
-    /// when `peers_gen` advances past the stored generation.
-    pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
-    pub(super) in_tx: blume::Sender<TaggedFrame>,
-    pub(super) in_rx: blume::Receiver<TaggedFrame>,
-    /// Per-peer SPSC send pipes, indexed parallel to `out_peers`.
-    /// None for wire / same-thread / non-eligible slots.
-    pub(super) inproc_send_pipes: UnsafeCell<Vec<Option<InprocSendPipe>>>,
-    /// Per-peer SPSC recv consumers + fair-queue index.
-    pub(super) inproc_recv: UnsafeCell<InprocRecvState>,
-    /// Single shared recv notification. Remote inproc senders
-    /// notify this when `inproc_parked` is true.
-    pub(super) inproc_recv_event: Arc<Event>,
-    /// True when recv is parked in select (waiting for data).
-    /// Producers check this to skip notification when consumer
-    /// is actively draining.
-    pub(super) inproc_parked: Arc<AtomicBool>,
-    /// Batch-drain cache for the direct-recv path. `try_direct_recv` drains
-    /// all codec events from one TCP delivery into here; `recv`/`try_recv`
-    /// pop raw messages and apply `post_recv_apply`. Uncontended on a
-    /// single-threaded compio runtime.
+    pub(super) routing: PeerRouting,
+    pub(super) inproc: InprocIo,
     pub(super) recv_cache: RecvCache,
-    /// Direct codec access for `try_recv`. Set once during the first
-    /// successful `try_direct_recv`; cleared on peer disconnect.
-    /// `UnsafeCell` because compio is single-threaded.
-    pub(super) direct_recv_io: UnsafeCell<Option<Arc<DirectIoState>>>,
-    /// Cached `DirectIoState` + generation for the wire send fast path.
-    /// Set on the first successful direct-encode; invalidated when
-    /// `peers_gen` advances past the stored generation. `UnsafeCell` is
-    /// sound because compio is single-threaded.
-    pub(super) direct_send_io: UnsafeCell<Option<(Arc<DirectIoState>, u64)>>,
+    pub(super) direct_io: DirectIoCache,
     pub(super) on_peer_ready: Event,
-    pub(super) subscriptions: RwLock<SubscriptionSet>,
-    /// Active subscription prefixes (SUB / XSUB only). Replayed to
-    /// each newly-handshaked publisher so late peers see our state.
-    pub(super) our_subs: RwLock<Vec<Bytes>>,
+    pub(super) pub_sub: PubSubState,
     /// REQ/REP envelope + alternation state.
     pub(super) type_state: Mutex<TypeState>,
-    /// Identity → slot index lookup for ROUTER outbound. Holds the
-    /// LATEST peer for an identity, so reconnect replaces the stale
-    /// slot without leaking state. Empty for non-router socket types.
-    pub(super) identity_to_slot: RwLock<FxHashMap<Bytes, usize>>,
-    /// `connection_id` → peer identity lookup for the recv path.
-    /// Populated in `insert_peer_slot`, removed in `release_slot`.
-    pub(super) conn_id_to_identity: RwLock<FxHashMap<u64, Bytes>>,
     pub(super) monitor: MonitorPublisher,
     pub(super) next_connection_id: AtomicU64,
     /// Set by `close()` / `Drop` so install paths bail.
     pub(super) closed: AtomicBool,
-    /// DISH local-filter group set (UDP RADIO/DISH only). The DISH
-    /// listener task locks this on every datagram receive.
+    /// DISH local-filter group set (UDP RADIO/DISH only).
     pub(super) joined_groups: RwLock<FxHashSet<Bytes>>,
-    /// UDP RADIO outbound dialers (one per `connect()` call).
-    pub(super) udp_dialers: RwLock<Vec<UdpDialerEntry>>,
-    /// Active listeners. Each `bind()` registers one entry whose
-    /// `_task` is the accept (or DISH recv) loop. Dropping the
-    /// `JoinHandle` cancels the task - that's what `unbind()` does.
-    pub(super) listeners: RwLock<Vec<ListenerEntry>>,
-    /// Active dialers. Each TCP/IPC `connect()` registers one entry
-    /// whose `_task` is the dial supervisor. Inproc and UDP don't
-    /// register here - inproc has no spawned task; UDP RADIO uses
-    /// `udp_dialers` directly.
-    pub(super) dialers: RwLock<Vec<DialerEntry>>,
-    /// Shared send queue for round-robin patterns
-    /// (PUSH/DEALER/REQ/PAIR/REP). Bounded at `Options::send_hwm` -
-    /// gives true *per-socket* HWM (not per-peer). Each round-robin
-    /// peer install spawns a pump task that drains this queue and
-    /// forwards to its driver's cmd channel; whichever pump's
-    /// driver has room first wins, giving work-stealing fairness.
-    /// `None` for non-round-robin socket types (PUB/XPUB/RADIO/
-    /// ROUTER use per-peer queues; XSUB uses fan-out; SUB/PULL/DISH
-    /// don't send).
-    /// Set by subscribe/cancel handlers (in the driver task) and by
-    /// `insert_peer_slot`/`release_slot`. Checked by the PUB send fast
-    /// path to know when to recompute `pub_all_match_all`.
-    pub(super) pub_sub_dirty: Arc<AtomicBool>,
-    /// True when every outbound peer has `subscribe_all`. When set, the
-    /// PUB send path uses `pub_all_match_cache` to skip the peer filter.
-    pub(super) pub_all_match_all: Cell<bool>,
-    /// True when all outbound peers are Wire (not Inproc). Pre-encoded
-    /// fan-out only works for wire peers.
-    pub(super) pub_all_wire: Cell<bool>,
-    /// Cached list of all outbound `PeerOut`s for the subscribe-all fast
-    /// path. Valid only when `pub_all_match_all` is true.
-    pub(super) pub_all_match_cache: UnsafeCell<SmallVec<[PeerOut; 8]>>,
-    /// Cached `DirectIoState` handles for the direct-write PUB fan-out.
-    /// Valid only when `pub_all_match_all && pub_all_wire` are both true.
-    /// Parallel to `pub_all_match_cache` (same peer order).
-    pub(super) pub_direct_io_cache: UnsafeCell<SmallVec<[Arc<DirectIoState>; 8]>>,
+    pub(super) endpoints: EndpointRegistry,
+    /// Shared send queue for round-robin socket types.
     pub(super) send_count: Cell<u32>,
     pub(super) shared_send_tx: RwLock<Option<super::shared_queue::SharedQueueSender>>,
     pub(super) shared_send_rx: Option<super::shared_queue::SharedQueueReceiver>,
-    /// Round-robin counter for `Socket::send` peer selection on
-    /// round-robin socket types. Modulo against the live peer
-    /// snapshot at send time. Inproc peers receive direct sends
-    /// keyed off this counter; wire peers funnel through the
-    /// shared queue (where drivers work-steal).
-    pub(super) rr_index: AtomicUsize,
-    /// Dense list of live `out_peers` slab keys. Rebuilt on peer
-    /// add/remove. Insertion order. The round-robin picker indexes
-    /// into this.
-    pub(super) peer_keys: RwLock<Vec<usize>>,
 }
 
 /// Returns `true` for socket types that round-robin their outbound
@@ -401,47 +378,57 @@ impl SocketInner {
             simple_recv: matches!(socket_type, SocketType::Pull | SocketType::Pair),
             inproc_identity,
             options,
-            out_peers: RwLock::new(Slab::new()),
-            peers_gen: AtomicU64::new(0),
-            out_peer_count: out_peer_count.clone(),
-            inproc_out_count: AtomicUsize::new(0),
-            cached_route: Mutex::new(None),
-            in_tx,
-            in_rx,
-            inproc_send_pipes: UnsafeCell::new(Vec::new()),
-            inproc_recv: UnsafeCell::new(InprocRecvState {
-                consumers: Vec::new(),
-                space_events: Vec::new(),
-                fq_index: 0,
-            }),
-            inproc_recv_event: Arc::new(Event::new()),
-            inproc_parked: Arc::new(AtomicBool::new(false)),
+            routing: PeerRouting {
+                peers: RwLock::new(Slab::new()),
+                generation: AtomicU64::new(0),
+                peer_count: out_peer_count.clone(),
+                inproc_count: AtomicUsize::new(0),
+                cached_route: Mutex::new(None),
+                identity_to_slot: RwLock::new(FxHashMap::default()),
+                conn_id_to_identity: RwLock::new(FxHashMap::default()),
+                rr_index: AtomicUsize::new(0),
+                peer_keys: RwLock::new(Vec::new()),
+            },
+            inproc: InprocIo {
+                send_pipes: UnsafeCell::new(Vec::new()),
+                recv: UnsafeCell::new(InprocRecvState {
+                    consumers: Vec::new(),
+                    space_events: Vec::new(),
+                    fq_index: 0,
+                }),
+                recv_event: Arc::new(Event::new()),
+                parked: Arc::new(AtomicBool::new(false)),
+                in_tx,
+                in_rx,
+            },
             recv_cache: RecvCache::new(),
-            direct_recv_io: UnsafeCell::new(None),
-            direct_send_io: UnsafeCell::new(None),
+            direct_io: DirectIoCache {
+                recv: UnsafeCell::new(None),
+                send: UnsafeCell::new(None),
+            },
             on_peer_ready: Event::new(),
-            subscriptions: RwLock::new(SubscriptionSet::new()),
-            our_subs: RwLock::new(Vec::new()),
+            pub_sub: PubSubState {
+                dirty: Arc::new(AtomicBool::new(true)),
+                all_match_all: Cell::new(false),
+                all_wire: Cell::new(false),
+                all_match_cache: UnsafeCell::new(SmallVec::new()),
+                direct_io_cache: UnsafeCell::new(SmallVec::new()),
+                subscriptions: RwLock::new(SubscriptionSet::new()),
+                our_subs: RwLock::new(Vec::new()),
+            },
             type_state: Mutex::new(TypeState::new()),
-            identity_to_slot: RwLock::new(FxHashMap::default()),
-            conn_id_to_identity: RwLock::new(FxHashMap::default()),
             monitor: MonitorPublisher::new(),
             next_connection_id: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             joined_groups: RwLock::new(FxHashSet::default()),
-            udp_dialers: RwLock::new(Vec::new()),
-            listeners: RwLock::new(Vec::new()),
-            dialers: RwLock::new(Vec::new()),
-            pub_sub_dirty: Arc::new(AtomicBool::new(true)),
-            pub_all_match_all: Cell::new(false),
-            pub_all_wire: Cell::new(false),
-            pub_all_match_cache: UnsafeCell::new(SmallVec::new()),
-            pub_direct_io_cache: UnsafeCell::new(SmallVec::new()),
+            endpoints: EndpointRegistry {
+                listeners: RwLock::new(Vec::new()),
+                dialers: RwLock::new(Vec::new()),
+                udp_dialers: RwLock::new(Vec::new()),
+            },
             send_count: Cell::new(0),
             shared_send_tx: RwLock::new(shared_send_tx),
             shared_send_rx,
-            rr_index: AtomicUsize::new(0),
-            peer_keys: RwLock::new(Vec::new()),
         })
     }
 
@@ -459,17 +446,17 @@ impl SocketInner {
         let is_inproc = matches!(&slot.out, PeerOut::Inproc { .. });
         let conn_id = slot.connection_id;
         let idx = {
-            let mut peers = self.out_peers.write().expect("peers lock");
+            let mut peers = self.routing.peers.write().expect("peers lock");
             let idx = peers.insert(slot);
-            self.peers_gen.fetch_add(1, Ordering::Release);
+            self.routing.generation.fetch_add(1, Ordering::Release);
             idx
         };
-        self.out_peer_count.fetch_add(1, Ordering::Release);
+        self.routing.peer_count.fetch_add(1, Ordering::Release);
         if is_inproc {
-            self.inproc_out_count.fetch_add(1, Ordering::Release);
+            self.routing.inproc_count.fetch_add(1, Ordering::Release);
         }
         {
-            let pipes = unsafe { &mut *self.inproc_send_pipes.get() };
+            let pipes = unsafe { &mut *self.inproc.send_pipes.get() };
             while pipes.len() <= idx {
                 pipes.push(None);
             }
@@ -477,6 +464,7 @@ impl SocketInner {
         if let Some(id) = identity {
             if !id.is_empty()
                 && let Some(old_idx) = self
+                    .routing
                     .identity_to_slot
                     .write()
                     .expect("identity table")
@@ -485,13 +473,14 @@ impl SocketInner {
             {
                 self.evict_peer_for_handover(old_idx);
             }
-            self.conn_id_to_identity
+            self.routing
+                .conn_id_to_identity
                 .write()
                 .expect("conn_id_to_identity lock")
                 .insert(conn_id, id.clone());
         }
         self.rebuild_peer_keys();
-        self.pub_sub_dirty.store(true, Ordering::Release);
+        self.pub_sub.dirty.store(true, Ordering::Release);
         self.on_peer_ready.notify(usize::MAX);
         idx
     }
@@ -500,14 +489,14 @@ impl SocketInner {
     /// must hold no lock on either; this acquires both reads/writes
     /// internally).
     pub(super) fn rebuild_peer_keys(&self) {
-        let peers = self.out_peers.read().expect("peers lock");
+        let peers = self.routing.peers.read().expect("peers lock");
         let keys: Vec<usize> = peers.iter().map(|(key, _)| key).collect();
         drop(peers);
-        *self.peer_keys.write().expect("peer_keys lock") = keys;
+        *self.routing.peer_keys.write().expect("peer_keys lock") = keys;
     }
 
     pub(super) fn evict_peer_for_handover(&self, slot_idx: usize) {
-        let peers = self.out_peers.read().expect("peers lock");
+        let peers = self.routing.peers.read().expect("peers lock");
         let Some(slot) = peers.get(slot_idx) else {
             return;
         };
@@ -531,29 +520,33 @@ impl SocketInner {
         }
         // Suppress the driver's Disconnected on exit.
         *slot.info.write().expect("info lock") = None;
-        self.peers_gen.fetch_add(1, Ordering::Release);
+        self.routing.generation.fetch_add(1, Ordering::Release);
     }
 
     pub(super) fn release_slot(&self, slot_idx: usize) {
         {
-            let mut peers = self.out_peers.write().expect("peers lock");
+            let mut peers = self.routing.peers.write().expect("peers lock");
             if !peers.contains(slot_idx) {
                 return;
             }
-            self.out_peer_count.fetch_sub(1, Ordering::Release);
+            self.routing.peer_count.fetch_sub(1, Ordering::Release);
             if matches!(&peers[slot_idx].out, PeerOut::Inproc { .. }) {
-                self.inproc_out_count.fetch_sub(1, Ordering::Release);
+                self.routing.inproc_count.fetch_sub(1, Ordering::Release);
             }
             peers.remove(slot_idx);
         }
         {
-            let pipes = unsafe { &mut *self.inproc_send_pipes.get() };
+            let pipes = unsafe { &mut *self.inproc.send_pipes.get() };
             if let Some(entry) = pipes.get_mut(slot_idx) {
                 *entry = None;
             }
         }
         {
-            let mut table = self.identity_to_slot.write().expect("identity table");
+            let mut table = self
+                .routing
+                .identity_to_slot
+                .write()
+                .expect("identity table");
             table.retain(|_, &mut v| v != slot_idx);
         }
         // conn_id_to_identity is NOT cleaned up here: frames
@@ -562,12 +555,12 @@ impl SocketInner {
         // Stale entries are harmless since connection_ids are
         // monotonic and never reused.
         self.rebuild_peer_keys();
-        self.pub_sub_dirty.store(true, Ordering::Release);
-        self.peers_gen.fetch_add(1, Ordering::Release);
+        self.pub_sub.dirty.store(true, Ordering::Release);
+        self.routing.generation.fetch_add(1, Ordering::Release);
     }
 
     pub(super) fn recompute_pub_all_match_all(&self) {
-        let peers = self.out_peers.read().expect("peers lock");
+        let peers = self.routing.peers.read().expect("peers lock");
         let all_match = !peers.is_empty()
             && peers.iter().all(|(_, slot)| {
                 slot.peer_sub
@@ -578,11 +571,11 @@ impl SocketInner {
             && peers
                 .iter()
                 .all(|(_, slot)| matches!(&slot.out, PeerOut::Wire(_)));
-        self.pub_all_match_all.set(all_match);
-        self.pub_all_wire.set(all_wire);
+        self.pub_sub.all_match_all.set(all_match);
+        self.pub_sub.all_wire.set(all_wire);
         if all_match {
             let cached: SmallVec<[PeerOut; 8]> = peers.iter().map(|(_, s)| s.out.clone()).collect();
-            unsafe { *self.pub_all_match_cache.get() = cached };
+            unsafe { *self.pub_sub.all_match_cache.get() = cached };
             if all_wire {
                 let dio: SmallVec<[Arc<DirectIoState>; 8]> = peers
                     .iter()
@@ -592,13 +585,13 @@ impl SocketInner {
                             .and_then(|h| h.read().expect("direct_io handle lock").clone())
                     })
                     .collect();
-                unsafe { *self.pub_direct_io_cache.get() = dio };
+                unsafe { *self.pub_sub.direct_io_cache.get() = dio };
             } else {
-                unsafe { (*self.pub_direct_io_cache.get()).clear() };
+                unsafe { (*self.pub_sub.direct_io_cache.get()).clear() };
             }
         } else {
-            unsafe { (*self.pub_direct_io_cache.get()).clear() };
+            unsafe { (*self.pub_sub.direct_io_cache.get()).clear() };
         }
-        self.pub_sub_dirty.store(false, Ordering::Release);
+        self.pub_sub.dirty.store(false, Ordering::Release);
     }
 }

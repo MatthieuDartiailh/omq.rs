@@ -55,9 +55,9 @@ impl Socket {
         let listener = inproc::bind(
             &name,
             snapshot,
-            self.inner().in_tx.clone(),
-            self.inner().inproc_recv_event.clone(),
-            self.inner().inproc_parked.clone(),
+            self.inner().inproc.in_tx.clone(),
+            self.inner().inproc.recv_event.clone(),
+            self.inner().inproc.parked.clone(),
         )?;
         let resolved = Endpoint::Inproc { name: name.clone() };
         self.inner().monitor.listening(resolved.clone());
@@ -80,6 +80,7 @@ impl Socket {
         });
         let ret = resolved.clone();
         self.inner()
+            .endpoints
             .listeners
             .write()
             .expect("listeners lock")
@@ -129,6 +130,7 @@ impl Socket {
         });
         let ret = resolved.clone();
         self.inner()
+            .endpoints
             .listeners
             .write()
             .expect("listeners lock")
@@ -177,6 +179,7 @@ impl Socket {
         });
         let ret = resolved.clone();
         self.inner()
+            .endpoints
             .listeners
             .write()
             .expect("listeners lock")
@@ -228,7 +231,7 @@ impl Socket {
                     Some(&identity),
                 );
                 let inner2 = inner.clone();
-                let in_tx = inner.in_tx.clone();
+                let in_tx = inner.inproc.in_tx.clone();
                 compio::runtime::spawn(async move {
                     stream_raw::run(stream, writer_fd.into(), conn_id, in_tx, cmd_rx).await;
                     inner2.release_slot(slot_idx);
@@ -238,6 +241,7 @@ impl Socket {
         });
         let ret = resolved.clone();
         self.inner()
+            .endpoints
             .listeners
             .write()
             .expect("listeners lock")
@@ -287,13 +291,14 @@ impl Socket {
                     connection_id: 0,
                     frame: omq_proto::inproc::InboundFrame::Message(msg),
                 };
-                if inner.in_tx.send_async(frame).await.is_err() {
+                if inner.inproc.in_tx.send_async(frame).await.is_err() {
                     break;
                 }
             }
         });
         let ret = resolved.clone();
         self.inner()
+            .endpoints
             .listeners
             .write()
             .expect("listeners lock")
@@ -385,6 +390,7 @@ impl Socket {
         });
         let ret = resolved.clone();
         self.inner()
+            .endpoints
             .listeners
             .write()
             .expect("listeners lock")

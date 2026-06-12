@@ -188,9 +188,9 @@ impl Socket {
         // needed. Bypasses Mutex, PeerOut clone, generation check.
         if matches!(st, SocketType::Push | SocketType::Pair)
             && !pre_send_needs_type_state(st)
-            && self.inner().out_peer_count.load(Ordering::Acquire) == 1
+            && self.inner().routing.peer_count.load(Ordering::Acquire) == 1
         {
-            let pipes = unsafe { &mut *self.inner().inproc_send_pipes.get() };
+            let pipes = unsafe { &mut *self.inner().inproc.send_pipes.get() };
             if let Some(pipe) = pipes.iter_mut().find_map(|p| p.as_mut()) {
                 let mut msg = msg;
                 loop {
@@ -221,9 +221,9 @@ impl Socket {
         ) && !pre_send_needs_type_state(st)
         {
             let inner = self.inner();
-            let dio = unsafe { &*inner.direct_send_io.get() };
+            let dio = unsafe { &*inner.direct_io.send.get() };
             if let Some((state, cached_gen)) = dio
-                && *cached_gen == inner.peers_gen.load(Ordering::Acquire)
+                && *cached_gen == inner.routing.generation.load(Ordering::Acquire)
                 && try_direct_encode(&msg, state)?
             {
                 return Ok(());
@@ -271,17 +271,17 @@ impl Socket {
     /// immediately; the pump drains it once a peer connects.
     fn select_peer(&self) -> Option<PeerSelection> {
         let inner = self.inner();
-        let peers = inner.out_peers.read().expect("peers lock");
+        let peers = inner.routing.peers.read().expect("peers lock");
         if peers.is_empty() {
             return None;
         }
-        let keys = inner.peer_keys.read().expect("peer_keys lock");
+        let keys = inner.routing.peer_keys.read().expect("peer_keys lock");
         let n = keys.len();
         let mut first_alive_idx = None;
         let mut first_alive_direct = None;
         let mut first_dead_idx = None;
         for _ in 0..n {
-            let idx = keys[inner.rr_index.fetch_add(1, Ordering::Relaxed) % n];
+            let idx = keys[inner.routing.rr_index.fetch_add(1, Ordering::Relaxed) % n];
             let p = &peers[idx];
             let alive = match &p.out {
                 PeerOut::Inproc { sender, .. } => !sender.is_disconnected(),
@@ -330,9 +330,9 @@ impl Socket {
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
         let inner = self.inner();
         // Fast path: reuse cached route when the peer set hasn't changed.
-        let cur_gen = inner.peers_gen.load(Ordering::Acquire);
+        let cur_gen = inner.routing.generation.load(Ordering::Acquire);
         let cached = {
-            let cache = inner.cached_route.lock().expect("cached_route");
+            let cache = inner.routing.cached_route.lock().expect("cached_route");
             if let Some(ref cr) = *cache
                 && cr.generation == cur_gen
             {
@@ -350,8 +350,8 @@ impl Socket {
         // don't, so we can only bypass when there are no inproc peers.
         // Gate on total > 1 so single-peer wire still bootstraps the
         // direct_send_io cache via select_peer -> slow_round_robin.
-        if inner.out_peer_count.load(Ordering::Acquire) > 1
-            && inner.inproc_out_count.load(Ordering::Relaxed) == 0
+        if inner.routing.peer_count.load(Ordering::Acquire) > 1
+            && inner.routing.inproc_count.load(Ordering::Relaxed) == 0
         {
             if inner.options.conflate {
                 return self.conflate_shared_queue_send(msg);
@@ -374,13 +374,14 @@ impl Socket {
             }) = self.select_peer()
             {
                 if peer_count == 1 {
-                    let cur_gen = inner.peers_gen.load(Ordering::Acquire);
-                    *inner.cached_route.lock().expect("cached_route") = Some(CachedPeerRoute {
-                        generation: cur_gen,
-                        out: chosen.clone(),
-                        direct: direct.clone(),
-                        slot_idx,
-                    });
+                    let cur_gen = inner.routing.generation.load(Ordering::Acquire);
+                    *inner.routing.cached_route.lock().expect("cached_route") =
+                        Some(CachedPeerRoute {
+                            generation: cur_gen,
+                            out: chosen.clone(),
+                            direct: direct.clone(),
+                            slot_idx,
+                        });
                 }
                 return self
                     .slow_round_robin(chosen, msg, peer_count, direct, slot_idx)
@@ -390,7 +391,7 @@ impl Socket {
                 return self.conflate_shared_queue_send(msg);
             }
             let listener = inner.on_peer_ready.listen();
-            if !inner.out_peers.read().expect("peers lock").is_empty() {
+            if !inner.routing.peers.read().expect("peers lock").is_empty() {
                 continue;
             }
             let stx = inner
@@ -444,7 +445,7 @@ impl Socket {
     ) -> Result<()> {
         match chosen {
             PeerOut::Inproc { .. } => {
-                let pipes = unsafe { &mut *self.inner().inproc_send_pipes.get() };
+                let pipes = unsafe { &mut *self.inner().inproc.send_pipes.get() };
                 let msg = if let Some(Some(pipe)) = pipes.get_mut(slot_idx) {
                     let mut msg = msg;
                     loop {
@@ -484,9 +485,9 @@ impl Socket {
                     && try_direct_encode(&msg, &state)?
                 {
                     // Cache for the UnsafeCell fast path in send().
-                    let cur_gen = self.inner().peers_gen.load(Ordering::Acquire);
+                    let cur_gen = self.inner().routing.generation.load(Ordering::Acquire);
                     unsafe {
-                        *self.inner().direct_send_io.get() = Some((state, cur_gen));
+                        *self.inner().direct_io.send.get() = Some((state, cur_gen));
                     }
                     return Ok(());
                 }
@@ -542,13 +543,14 @@ impl Socket {
         let target = {
             let table = self
                 .inner()
+                .routing
                 .identity_to_slot
                 .read()
                 .expect("identity table");
             let idx = table.get(&identity).copied();
             drop(table);
             idx.and_then(|idx| {
-                let peers = self.inner().out_peers.read().expect("peers lock");
+                let peers = self.inner().routing.peers.read().expect("peers lock");
                 peers.get(idx).map(|p| p.out.clone())
             })
         };
@@ -576,6 +578,7 @@ impl Socket {
         let body = msg.part_bytes(1).unwrap();
         let udp_socks: Vec<Arc<compio::net::UdpSocket>> = self
             .inner()
+            .endpoints
             .udp_dialers
             .read()
             .expect("udp_dialers lock")
@@ -590,7 +593,7 @@ impl Socket {
             }
         }
         let stream_targets: Vec<PeerOut> = {
-            let peers = self.inner().out_peers.read().expect("peers lock");
+            let peers = self.inner().routing.peers.read().expect("peers lock");
             peers
                 .iter()
                 .filter(|(_, p)| match &p.peer_groups {
@@ -618,20 +621,21 @@ impl Socket {
         inner.send_count.set(count);
 
         if inner
-            .pub_sub_dirty
+            .pub_sub
+            .dirty
             .load(std::sync::atomic::Ordering::Acquire)
         {
             inner.recompute_pub_all_match_all();
         }
-        if inner.pub_all_match_all.get() {
-            let targets = unsafe { &*inner.pub_all_match_cache.get() };
+        if inner.pub_sub.all_match_all.get() {
+            let targets = unsafe { &*inner.pub_sub.all_match_cache.get() };
             if targets.is_empty() {
                 crate::yield_now().await;
                 return Ok(());
             }
-            if targets.len() > 1 && inner.pub_all_wire.get() {
+            if targets.len() > 1 && inner.pub_sub.all_wire.get() {
                 let encoded = pre_encode_compio(&msg);
-                let dio_cache = unsafe { &*inner.pub_direct_io_cache.get() };
+                let dio_cache = unsafe { &*inner.pub_sub.direct_io_cache.get() };
                 if dio_cache.len() == targets.len() {
                     for (i, state) in dio_cache.iter().enumerate() {
                         if !direct_push_encoded(state, &encoded) {
@@ -658,7 +662,7 @@ impl Socket {
         }
         let topic = msg.part_bytes(0).unwrap_or_default();
         let targets: Vec<PeerOut> = {
-            let peers = inner.out_peers.read().expect("peers lock");
+            let peers = inner.routing.peers.read().expect("peers lock");
             peers
                 .iter()
                 .filter_map(|(_, slot)| {
@@ -728,15 +732,15 @@ impl Socket {
 
     fn try_send_round_robin(&self, msg: &Message) -> Result<()> {
         let inner = self.inner();
-        if inner.out_peer_count.load(Ordering::Acquire) > 1
-            && inner.inproc_out_count.load(Ordering::Relaxed) == 0
+        if inner.routing.peer_count.load(Ordering::Acquire) > 1
+            && inner.routing.inproc_count.load(Ordering::Relaxed) == 0
         {
             if inner.options.conflate {
                 return self.conflate_shared_queue_send(msg.clone());
             }
             return self.try_send_via_shared(msg.clone());
         }
-        let peers = inner.out_peers.read().expect("peers lock");
+        let peers = inner.routing.peers.read().expect("peers lock");
         if peers.is_empty() {
             if inner.options.conflate {
                 drop(peers);
@@ -744,9 +748,9 @@ impl Socket {
             }
             return Err(Error::WouldBlock);
         }
-        let keys = inner.peer_keys.read().expect("peer_keys lock");
+        let keys = inner.routing.peer_keys.read().expect("peer_keys lock");
         let n = keys.len();
-        let idx = keys[inner.rr_index.fetch_add(1, Ordering::Relaxed) % n];
+        let idx = keys[inner.routing.rr_index.fetch_add(1, Ordering::Relaxed) % n];
         let chosen = peers[idx].out.clone();
         let peer_count = n;
         drop(peers);
@@ -800,13 +804,14 @@ impl Socket {
         let target = {
             let table = self
                 .inner()
+                .routing
                 .identity_to_slot
                 .read()
                 .expect("identity table");
             let idx = table.get(&identity).copied();
             drop(table);
             idx.and_then(|idx| {
-                let peers = self.inner().out_peers.read().expect("peers lock");
+                let peers = self.inner().routing.peers.read().expect("peers lock");
                 peers.get(idx).map(|p| p.out.clone())
             })
         };
@@ -824,16 +829,17 @@ impl Socket {
     fn try_send_pub_filtered(&self, msg: &Message) {
         let inner = self.inner();
         if inner
-            .pub_sub_dirty
+            .pub_sub
+            .dirty
             .load(std::sync::atomic::Ordering::Acquire)
         {
             inner.recompute_pub_all_match_all();
         }
-        if inner.pub_all_match_all.get() {
-            let targets = unsafe { &*inner.pub_all_match_cache.get() };
-            if targets.len() > 1 && inner.pub_all_wire.get() {
+        if inner.pub_sub.all_match_all.get() {
+            let targets = unsafe { &*inner.pub_sub.all_match_cache.get() };
+            if targets.len() > 1 && inner.pub_sub.all_wire.get() {
                 let encoded = pre_encode_compio(msg);
-                let dio_cache = unsafe { &*inner.pub_direct_io_cache.get() };
+                let dio_cache = unsafe { &*inner.pub_sub.direct_io_cache.get() };
                 if dio_cache.len() == targets.len() {
                     for (i, state) in dio_cache.iter().enumerate() {
                         if !direct_push_encoded(state, &encoded) {
@@ -854,7 +860,7 @@ impl Socket {
         }
         let topic = msg.part_bytes(0).unwrap_or_default();
         let targets: Vec<PeerOut> = {
-            let peers = inner.out_peers.read().expect("peers lock");
+            let peers = inner.routing.peers.read().expect("peers lock");
             peers
                 .iter()
                 .filter_map(|(_, slot)| {
@@ -881,6 +887,7 @@ impl Socket {
         let body = msg.part_bytes(1).unwrap();
         let udp_socks: Vec<Arc<compio::net::UdpSocket>> = self
             .inner()
+            .endpoints
             .udp_dialers
             .read()
             .expect("udp_dialers lock")
@@ -902,7 +909,7 @@ impl Socket {
             }
         }
         let stream_targets: Vec<PeerOut> = {
-            let peers = self.inner().out_peers.read().expect("peers lock");
+            let peers = self.inner().routing.peers.read().expect("peers lock");
             peers
                 .iter()
                 .filter(|(_, p)| match &p.peer_groups {

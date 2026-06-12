@@ -95,16 +95,17 @@ async fn install_and_run(
     *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
     // SAFETY: single-threaded compio runtime.
     unsafe {
-        *inner.direct_recv_io.get() = None;
-        *inner.direct_send_io.get() = None;
+        *inner.direct_io.recv.get() = None;
+        *inner.direct_io.send.get() = None;
     }
     inner
-        .peers_gen
+        .routing
+        .generation
         .fetch_add(1, std::sync::atomic::Ordering::Release);
 
     let idx = if let Some(idx) = *slot_idx {
         {
-            let mut peers = inner.out_peers.write().expect("peers lock");
+            let mut peers = inner.routing.peers.write().expect("peers lock");
             if let Some(slot) = peers.get_mut(idx) {
                 slot.connection_id = conn_id;
             }
@@ -112,13 +113,14 @@ async fn install_and_run(
         // Evict stale identity entries for this slot from the previous connection.
         // Without this, each reconnect leaks one entry in identity_to_slot.
         inner
+            .routing
             .identity_to_slot
             .write()
             .expect("identity table")
             .retain(|_, &mut v| v != idx);
         idx
     } else {
-        let mut peers = inner.out_peers.write().expect("peers lock");
+        let mut peers = inner.routing.peers.write().expect("peers lock");
         let idx = peers.insert(PeerSlot {
             out: PeerOut::Wire(handle.clone()),
             direct_io: Some(direct_io_handle.clone()),
@@ -130,7 +132,7 @@ async fn install_and_run(
             peer_groups: peer_groups.cloned(),
         });
         {
-            let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+            let pipes = unsafe { &mut *inner.inproc.send_pipes.get() };
             while pipes.len() <= idx {
                 pipes.push(None);
             }
@@ -256,6 +258,7 @@ async fn dial_supervisor<F, Fut>(
         // Err(Closed) instead of silently dropping until reconnect.
         if let Some(idx) = slot_idx {
             inner
+                .routing
                 .identity_to_slot
                 .write()
                 .expect("identity table")
@@ -352,6 +355,7 @@ pub(super) fn connect_tcp_with_reconnect(
     ));
 
     inner
+        .endpoints
         .dialers
         .write()
         .expect("dialers lock")
@@ -422,6 +426,7 @@ pub(super) fn connect_ipc_with_reconnect(
     ));
 
     inner
+        .endpoints
         .dialers
         .write()
         .expect("dialers lock")

@@ -1,5 +1,5 @@
 //! Peer-installation glue: register a fully-formed peer in
-//! [`SocketInner.out_peers`] and bring the wire driver online.
+//! [`SocketInner.routing.peers`] and bring the wire driver online.
 //!
 //! Three install paths feed this module:
 //!   - inproc: synchronous via [`install_inproc_peer`] - peer
@@ -80,7 +80,7 @@ pub(super) fn install_inproc_peer(
         Some(&peer_identity),
     );
     {
-        let pipes = unsafe { &mut *inner.inproc_send_pipes.get() };
+        let pipes = unsafe { &mut *inner.inproc.send_pipes.get() };
         if let Some(producer) = conn.spsc_send {
             pipes[idx] = Some(super::inner::InprocSendPipe {
                 producer,
@@ -95,7 +95,7 @@ pub(super) fn install_inproc_peer(
             });
         }
         if let Some(consumer) = conn.spsc_recv {
-            let recv = unsafe { &mut *inner.inproc_recv.get() };
+            let recv = unsafe { &mut *inner.inproc.recv.get() };
             recv.consumers.push(consumer);
             recv.space_events.push(
                 conn.recv_space_event
@@ -103,7 +103,7 @@ pub(super) fn install_inproc_peer(
             );
         }
     }
-    inner.inproc_recv_event.notify(usize::MAX);
+    inner.inproc.recv_event.notify(usize::MAX);
     // Drain any messages that were queued in the shared send queue
     // before this inproc peer connected. Wire peers get this via
     // their driver's select loop; inproc has no driver, so we drain
@@ -111,7 +111,7 @@ pub(super) fn install_inproc_peer(
     if is_round_robin_send(inner.socket_type)
         && let Some(rx) = &inner.shared_send_rx
     {
-        let peers = inner.out_peers.read().expect("peers lock");
+        let peers = inner.routing.peers.read().expect("peers lock");
         if let Some(slot) = peers.get(idx) {
             while let Some(msg) = rx.try_recv() {
                 if slot.out.try_send_immediate(msg).is_err() {
@@ -177,7 +177,7 @@ impl crate::transport::dispatch::SnapshotSink for WireSnapshotSink {
     fn send(&self, snap: InprocPeerSnapshot) {
         let identity = snap.identity.clone();
         {
-            let peers = self.inner.out_peers.read().expect("peers lock");
+            let peers = self.inner.routing.peers.read().expect("peers lock");
             let slot = peers.get(self.slot_idx);
             let slot = slot.filter(|s| s.connection_id == self.connection_id);
             if let Some(s) = slot {
@@ -185,7 +185,12 @@ impl crate::transport::dispatch::SnapshotSink for WireSnapshotSink {
             }
         }
         if !identity.is_empty() {
-            let mut table = self.inner.identity_to_slot.write().expect("identity table");
+            let mut table = self
+                .inner
+                .routing
+                .identity_to_slot
+                .write()
+                .expect("identity table");
             if let Some(old_idx) = table.insert(identity.clone(), self.slot_idx)
                 && old_idx != self.slot_idx
             {
@@ -194,6 +199,7 @@ impl crate::transport::dispatch::SnapshotSink for WireSnapshotSink {
             }
         }
         self.inner
+            .routing
             .conn_id_to_identity
             .write()
             .expect("conn_id_to_identity lock")
@@ -213,13 +219,18 @@ fn spawn_snap_listener(
             return;
         };
         let out = {
-            let peers = inner.out_peers.read().expect("peers lock");
+            let peers = inner.routing.peers.read().expect("peers lock");
             let slot = peers.get(slot_idx);
             let slot = slot.filter(|s| s.connection_id == connection_id);
             slot.map(|s| s.out.clone())
         };
         if matches!(inner.socket_type, SocketType::Sub | SocketType::XSub) {
-            let prefixes: Vec<Bytes> = inner.our_subs.read().expect("our_subs lock").clone();
+            let prefixes: Vec<Bytes> = inner
+                .pub_sub
+                .our_subs
+                .read()
+                .expect("our_subs lock")
+                .clone();
             if let Some(out) = out.as_ref() {
                 for p in prefixes {
                     let _ = out
@@ -271,7 +282,7 @@ fn handle_driver_exit(
     }
     let should_reset = match socket_type {
         SocketType::Req | SocketType::Rep => {
-            let peers = inner.out_peers.read().expect("peers lock");
+            let peers = inner.routing.peers.read().expect("peers lock");
             !peers.iter().any(|(_, s)| {
                 s.connection_id != connection_id && s.info.read().expect("info lock").is_some()
             })
@@ -489,7 +500,7 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
 
     let socket_type = inner.socket_type;
     let options = inner.options.clone();
-    let peer_in_tx = inner.in_tx.clone();
+    let peer_in_tx = inner.inproc.in_tx.clone();
     let shared_msg_rx = if is_round_robin_send(socket_type) {
         inner.shared_send_rx.clone()
     } else {
@@ -503,7 +514,7 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
         peer_address,
         peer_sub,
         peer_groups,
-        pub_sub_dirty: Some(inner.pub_sub_dirty.clone()),
+        pub_sub_dirty: Some(inner.pub_sub.dirty.clone()),
     };
     let inner_for_exit = inner.clone();
     let endpoint_for_exit = endpoint;
@@ -534,7 +545,8 @@ pub(super) fn spawn_wire_driver(cfg: WireDriverConfig) -> compio::runtime::JoinH
             inner.release_slot(slot_idx);
         } else {
             inner
-                .peers_gen
+                .routing
+                .generation
                 .fetch_add(1, std::sync::atomic::Ordering::Release);
         }
     })

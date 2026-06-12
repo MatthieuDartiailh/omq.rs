@@ -99,9 +99,9 @@ impl Socket {
         match endpoint {
             Endpoint::Inproc { name } => {
                 let snapshot = self.inner().snapshot();
-                let in_tx = self.inner().in_tx.clone();
-                let recv_event = self.inner().inproc_recv_event.clone();
-                let parked = self.inner().inproc_parked.clone();
+                let in_tx = self.inner().inproc.in_tx.clone();
+                let recv_event = self.inner().inproc.recv_event.clone();
+                let parked = self.inner().inproc.parked.clone();
                 let conn_id = self
                     .inner()
                     .next_connection_id
@@ -174,7 +174,7 @@ impl Socket {
             },
             Some(&identity),
         );
-        let in_tx = inner.in_tx.clone();
+        let in_tx = inner.inproc.in_tx.clone();
         compio::runtime::spawn(async move {
             stream_raw::run(stream, writer_fd.into(), conn_id, in_tx, cmd_rx).await;
             inner.release_slot(slot_idx);
@@ -200,6 +200,7 @@ impl Socket {
             conn_id,
         );
         self.inner()
+            .endpoints
             .udp_dialers
             .write()
             .expect("udp_dialers lock")
