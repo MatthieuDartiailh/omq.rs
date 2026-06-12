@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-06-12
+
+### Removed
+
+- `zstd` feature: `zstd+tcp://` transport removed (follows `omq-tokio`).
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.14.1. Tighten `tokio` to 1.52.
+
+## [0.4.3] - 2026-06-10
+
+### Changed
+
+- Port from `omq-compio` to `omq-tokio` backend.
+- Eliminate recv-pump relay: `RecvSink::Yring` for single-peer TCP/IPC. Inproc byte ring eliminates per-message heap allocation. TCP throughput stabilized at 5.5M msg/s (was 0.1-5M).
+- Yield every 64 messages or 1 MiB sent to prevent starving the tokio worker.
+- `send_accum` `Mutex` replaced with `UnsafeCell`, `send_ring` `RwLock` replaced with `AtomicBool` guard.
+- Reduce `worker_threads` from 2 to 1.
+- *(deps)* Bump `omq-tokio` to 0.14.0.
+
+### Added
+
+- `ZMQ_XPUB_NODROP` option.
+
+### Fixed
+
+- Inproc bypass recv hang on multipart messages.
+- SPSC and recv-yring fast paths recover after peer churn.
+- Harden FFI layer against panics: `lock_overlay!` macro, `OmqContext::new` returns `Option`, `run_on` returns `Result`.
+- `zmq_poll`: reject negative `nitems`.
+- Use `ptr::read/write_unaligned` for FFI int access.
+- Stacked Borrows UB in inproc bypass: `Box<[UnsafeCell<u8>]>` for `RingBuf.buf`.
+
 ## [0.4.2] - 2026-05-30
 
 ### Changed

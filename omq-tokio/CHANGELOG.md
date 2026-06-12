@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-06-12
+
+### Removed
+
+- `zstd` feature: `zstd+tcp://` transport removed in favor of `lz4+tcp://`.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.17.0. Tighten `rustls-pki-types` to 1.14.
+
+## [0.14.0] - 2026-06-10
+
+### Added
+
+- `PeerWireSlot`: per-peer encode buffer (`std::sync::Mutex`, nanosecond hold time) replaces `DirectIo`'s `Mutex<Writer>`. Handle encodes, driver flushes via `data_ready` select arm.
+- `PeerSend` enum (`Wire`/`Inbox`): unified dispatch for fan-out, identity, and exclusive routing. Eliminates pump tasks for all strategies.
+- `Exclusive` routing strategy for PAIR/CHANNEL (single slot, no queue).
+- Encode-once PUB/SUB fan-out via `push_pre_encoded`.
+- Subscription elision: skip per-peer filtering when all peers have `subscribe_all`.
+- `RecvSink::Yring`: `ConnectionDriver` pushes decoded messages directly into a yring, bypassing the `async_channel` relay for single-peer TCP/IPC.
+- `CompressionPool`: `spawn_blocking` offload for large messages with warm `MessageEncoder` reuse.
+- `last_bound_endpoint()`.
+- `Options::xpub_nodrop` support: `FanOut` pre-checks wire slots and returns `Full(msg)` when capacity is reached.
+- 10 ms safety-net timers on notification-based await points.
+- Fair-share batch limiting for shared-queue send.
+
+### Fixed
+
+- `PeerSend::Wire` falls back to driver inbox for crypto/compression-ineligible messages (was silently dropping).
+- Dead `PeerWireSlot` no longer surfaces `Err(Closed)` to `send()`: falls through to `SendSubmitter` queue.
+- SPSC and recv-yring fast paths recover after peer churn (were one-shot).
+- Lost-wakeup race in `SpscAwareRecv::recv()`.
+- Silent message loss in `encode_msg` (was `unwrap_or_default()`).
+- WSS cert panic: return `Err` when no system certs found.
+- REQ: set `req_awaiting_reply` after successful send, not before. Loop to skip malformed messages in `try_recv`.
+- `Exclusive::send()` awaits peer instead of returning error before connect.
+- Flush encode slot on cancel (was losing pending data).
+- `SO_REUSEADDR` on TCP listener sockets.
+
+### Performance
+
+- PeerWireSlot: handle encodes under nanosecond Mutex, driver flushes. Replaces DirectIo async Mutex.
+- Fan-out: encode once, push pre-encoded bytes to all subscribers.
+- Batch yring consumer pops, defer Release store.
+
+### Changed
+
+- Remove `priority` feature.
+- Remove `DirectIo`, `SharedWriter`, `DirectIoSlot`.
+- *(deps)* Bump `omq-proto` to 0.16.0, `chacha20-blake3` to 0.10.0.
+
 ## [0.13.0] - 2026-05-30
 
 ### Added
