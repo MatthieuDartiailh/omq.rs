@@ -182,6 +182,7 @@ struct FanOutPeer {
 }
 
 impl FanOutInner {
+    #[allow(clippy::unused_self)]
     fn init_fan_out_encoder(&mut self) {
         #[cfg(feature = "lz4")]
         {
