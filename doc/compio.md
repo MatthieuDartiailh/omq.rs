@@ -573,6 +573,38 @@ publish(event):
     if full: lag += 1 [atomic]
 ```
 
+## Platform-Specific Implementation: Windows
+
+On Windows, compio provides a unified interface over IOCP (I/O Completion Ports).
+The architecture above is identical; platform differences are isolated to the I/O layer.
+
+**Key Windows differences:**
+
+- **IOCP instead of io_uring:** Windows uses IOCP for asynchronous I/O completion
+  notifications. Compio abstracts this, so the driver loop above remains unchanged.
+  IOCP posts completion status to a queue; the runtime polls this queue and
+  delivers completion events to waiting tasks. The net effect is equivalent to
+  io_uring's SQE/CQE model, though the mechanism differs.
+
+- **No IPC:** Windows lacks Unix domain sockets. IPC transport (`ipc://`) is
+  unavailable on Windows; use TCP for inter-process communication.
+
+- **No multi-shot recv pool (BUF_RING):** Linux io_uring offers a `BUF_RING`
+  pool for efficient multi-shot recv operations. Windows IOCP does not have a
+  direct equivalent. On Windows, inbound messages still use IOCP's completion
+  model but without the pool optimization. For most workloads this is transparent;
+  throughput remains competitive.
+
+- **No ZMQ_FD option:** Windows does not expose socket file descriptors to user code,
+  so the `ZMQ_FD` socket option is not available. Use `zmq_poll()` for portable
+  multiplexing across Windows and Unix.
+
+**Inproc transport:** On Windows, inproc uses a standard bounded queue rather than
+the lock-free SPSC ring buffer (yring) used on Linux. This provides correct-by-construction
+synchronization at the cost of one additional atomic operation per message on the hot
+path. For Windows inproc communication (typically same-process), this overhead is
+negligible compared to the TCP or UDP paths.
+
 `Socket::monitor()` returns a `MonitorStream` (one per `subscribe()`
 call):
 

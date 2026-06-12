@@ -240,6 +240,55 @@ Multiple subscribers per socket; each gets an independent stream with
 its own lag counter (returned as `Err(Lagged(n))` if the receiver fell
 behind).
 
+## Platform Support and Architecture Choices
+
+### Cross-Platform Design
+
+Both backends maintain architecture parity across Linux, macOS, and Windows:
+
+| Platform | omq-tokio | omq-compio |
+|----------|-----------|-----------|
+| Linux | epoll (mio) | io_uring (multi-shot recv, peak throughput) |
+| macOS | kqueue (mio) | Unsupported |
+| Windows | IOCP via mio | IOCP (direct, single-threaded path) |
+
+All backends expose the same `Socket` public API. Platform differences are internal.
+
+### Windows Specifics
+
+**Transports.** Windows supports TCP and inproc; IPC (`ipc://`) is Unix-only
+(Windows lacks Unix domain sockets). Use TCP for inter-process communication
+on Windows. See [omq-libzmq/WINDOWS.md](../omq-libzmq/WINDOWS.md) for detailed
+Windows API support.
+
+**Event Signaling.** omq uses a trait-based abstraction for socket readiness:
+
+- **Unix:** eventfd (Linux) or pipe pairs (macOS/BSD)
+- **Windows:** Manual-reset HANDLE events via Win32 CreateEventW / SetEvent
+
+This abstraction lives in `omq-libzmq/src/notify.rs` and enables platform-agnostic
+socket notification code. Polling is abstracted similarly:
+
+- **Unix:** poll() / epoll / kqueue on file descriptors
+- **Windows:** WaitForMultipleObjects() on HANDLEs (batched, max 64-handle limit)
+
+The two backends implement these differently:
+
+- **omq-tokio:** Delegates to mio and tokio's async runtime, which handle
+  platform differences transparently.
+- **omq-compio:** Uses compio's `AttachHandle` trait, abstracting over Windows
+  IOCP and Linux io_uring. IOCP pairs well with Rust's `async fn` model.
+
+**Inproc Transport.** On Unix, inproc uses lock-free SPSC ring buffers (yring)
+for optimal cross-thread throughput. On Windows, inproc falls back to a
+standard bounded queue for simplicity; throughput remains high due to lack of
+kernel context switching.
+
+**Socket Options.** Windows does not expose socket file descriptors to user code.
+The `ZMQ_FD` option (get the underlying file descriptor for multiplexing)
+returns `ENOPROTOOPT` on Windows. Use `zmq_poll()` instead for portable
+multiplexing.
+
 ## Source file map
 
 ### omq-proto

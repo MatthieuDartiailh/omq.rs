@@ -281,3 +281,32 @@ Within a tokio runtime, multiple `Socket` clones can call `send` /
 serialization point for any state that must be observed atomically
 (REQ alternation, ROUTER identity table, XPUB subscription trie),
 which is why those paths still go through `cmd_tx`.
+
+## Platform-Specific Implementation: Windows
+
+On Windows, tokio is backed by mio, which provides a unified abstraction
+over IOCP (I/O Completion Ports). The architecture above is identical;
+only the underlying I/O syscalls differ.
+
+**Key Windows differences:**
+
+- **No IPC:** Windows lacks Unix domain sockets. IPC transport is unavailable;
+  use TCP for inter-process communication.
+- **IOCP instead of epoll:** Tokio's mio integration handles this transparently.
+  Instead of registering file descriptors with epoll, Windows uses
+  CompletionPorts and async I/O operations.
+- **No ZMQ_FD option:** Windows does not expose socket file descriptors to user code.
+  The `ZMQ_FD` socket option returns `ENOPROTOOPT`.
+
+**Socket notification abstraction:** The `omq-libzmq` C API exposes
+a trait-based abstraction (`NotifyHandle` in `notify.rs`) that maps
+Unix eventfd/pipes to Windows manual-reset HANDLE events. This enables
+platform-agnostic socket multiplexing. The `omq-tokio` backend uses
+tokio's IOCP integration, so this abstraction is primarily used by
+omq-libzmq for its `zmq_poll()` implementation.
+
+**Inproc transport:** On Windows, inproc uses a standard bounded queue
+rather than the lock-free SPSC ring buffer (yring) used on Unix. This
+trades minimal throughput for code simplicity, since Windows inproc is
+typically used for testing or same-process communication where throughput
+is not critical.

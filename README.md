@@ -4,8 +4,8 @@
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
-- Two async backends: **tokio** (default, Linux/macOS) and **compio** (io_uring, Linux)
-- 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`)
+- Two async backends: **tokio** (default, Linux/macOS/Windows) and **compio** (io_uring/IOCP on Linux/Windows)
+- 20 socket types (11 standard + 9 draft), 7 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`)
 - 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
@@ -79,8 +79,12 @@ cargo add omq-tokio               # default: multi-thread tokio (Linux/macOS)
 
 Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `interop_compio` test suites:
 
-- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS)
-- [`omq-compio`](omq-compio/): single-thread io_uring/IOCP (Linux; not yet on crates.io)
+| Backend | Platforms | Runtime | I/O Model | Notes |
+|---------|-----------|---------|-----------|-------|
+| [`omq-tokio`](omq-tokio/) | Linux, macOS, Windows | Multi-threaded | epoll / kqueue / IOCP | **Recommended default** |
+| [`omq-compio`](omq-compio/) | Linux, Windows | Single-threaded | io_uring / IOCP | Lower-latency when you need it |
+
+**Windows specifics:** Both backends support `tcp://` and `inproc://`. IPC transport (`ipc://`) is Unix-only; use TCP for inter-process communication on Windows. See [`omq-libzmq/WINDOWS.md`](omq-libzmq/WINDOWS.md) for detailed Windows API support.
 
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
 
