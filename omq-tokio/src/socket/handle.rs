@@ -42,6 +42,18 @@ pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
 /// any `recv()` that's blocked on the normal `async_channel` path.
 pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
 
+/// Grouped handles for per-peer SPSC inproc fast path. Shared between
+/// the socket handle (recv side) and the actor (send-ring management,
+/// consumer registration).
+#[derive(Debug, Clone)]
+pub(crate) struct SpscHandles {
+    pub consumers: SpscConsumers,
+    pub send_ring: SpscSendRing,
+    pub send_ring_active: SpscSendRingActive,
+    pub recv_notify: SpscRecvNotify,
+    pub activated: SpscActivated,
+}
+
 /// Recv channel that integrates per-peer SPSC awareness. Fair-queues
 /// across per-peer consumers, then falls back to the `async_channel`.
 #[derive(Debug)]
@@ -228,11 +240,13 @@ impl Socket {
         let monitor = MonitorPublisher::new();
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
         let send_submitter = send_strategy.submitter();
-        let consumers: Arc<RwLock<Vec<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(Vec::new()));
-        let recv_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
-        let spsc_activated: SpscActivated = Arc::new(tokio::sync::Notify::new());
-        let send_ring: Arc<RwLock<Option<Arc<InprocSpsc>>>> = Arc::new(RwLock::new(None));
-        let send_ring_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let spsc = SpscHandles {
+            consumers: Arc::new(RwLock::new(Vec::new())),
+            send_ring: Arc::new(RwLock::new(None)),
+            send_ring_active: Arc::new(AtomicBool::new(false)),
+            recv_notify: Arc::new(tokio::sync::Notify::new()),
+            activated: Arc::new(tokio::sync::Notify::new()),
+        };
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let wire_slot: WireSlotHolder = Arc::new(Mutex::new(None));
@@ -244,11 +258,7 @@ impl Socket {
             cancel.clone(),
             monitor.clone(),
             send_strategy,
-            consumers.clone(),
-            send_ring.clone(),
-            send_ring_active.clone(),
-            recv_notify.clone(),
-            spsc_activated.clone(),
+            spsc.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
             wire_slot.clone(),
@@ -261,11 +271,11 @@ impl Socket {
                 cmd_tx,
                 recv_rx: SpscAwareRecv {
                     rx: recv_rx,
-                    consumers,
-                    recv_notify,
-                    activated: spsc_activated,
-                    send_ring,
-                    send_ring_active,
+                    consumers: spsc.consumers,
+                    recv_notify: spsc.recv_notify,
+                    activated: spsc.activated,
+                    send_ring: spsc.send_ring,
+                    send_ring_active: spsc.send_ring_active,
                     inproc_cache: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 },
                 monitor,
@@ -364,25 +374,10 @@ impl Socket {
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                // SPSC send fast path: push directly to ring.
-                // Gated on recv_ready (set by recv-side actor after
-                // installing the ring). Single-peer only.
-                if self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
-                    let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
-                    if let Some(ref pair) = spsc
-                        && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
-                        && pair
-                            .max_message_size
-                            .is_none_or(|max| msg.byte_len() <= max)
-                        && let Ok(mut producer) = pair.producer.try_lock()
-                        && !producer.is_full()
-                    {
-                        let _ = producer.push(msg);
-                        producer.flush();
-                        pair.recv_notify.notify_one();
-                        return Ok(());
-                    }
-                }
+                let msg = match self.try_push_spsc(msg) {
+                    Ok(()) => return Ok(()),
+                    Err(msg) => msg,
+                };
                 self.send_via_wire_slot(msg).await
             }
         }
@@ -425,22 +420,10 @@ impl Socket {
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
-                if self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
-                    let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
-                    if let Some(ref pair) = spsc
-                        && pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
-                        && pair
-                            .max_message_size
-                            .is_none_or(|max| msg.byte_len() <= max)
-                        && let Ok(mut producer) = pair.producer.try_lock()
-                        && !producer.is_full()
-                    {
-                        let _ = producer.push(msg);
-                        producer.flush();
-                        pair.recv_notify.notify_one();
-                        return Ok(());
-                    }
-                }
+                let msg = match self.try_push_spsc(msg) {
+                    Ok(()) => return Ok(()),
+                    Err(msg) => msg,
+                };
                 self.inner.send_submitter.try_send(msg)
             }
         }
@@ -694,6 +677,36 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
 }
 
 impl Socket {
+    /// SPSC send fast path: push directly into the peer's yring.
+    /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
+    /// unavailable or the ring is full.
+    fn try_push_spsc(&self, msg: Message) -> core::result::Result<(), Message> {
+        if !self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
+            return Err(msg);
+        }
+        let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
+        let Some(ref pair) = spsc else {
+            return Err(msg);
+        };
+        if !pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
+            || pair
+                .max_message_size
+                .is_some_and(|max| msg.byte_len() > max)
+        {
+            return Err(msg);
+        }
+        let Ok(mut producer) = pair.producer.try_lock() else {
+            return Err(msg);
+        };
+        if producer.is_full() {
+            return Err(msg);
+        }
+        let _ = producer.push(msg);
+        producer.flush();
+        pair.recv_notify.notify_one();
+        Ok(())
+    }
+
     async fn send_via_wire_slot(&self, msg: Message) -> Result<()> {
         let fast = {
             let guard = self.inner.wire_slot.lock().expect("wire_slot");

@@ -1,4 +1,9 @@
 //! Socket options overlay and `zmq_setsockopt` / `zmq_getsockopt`.
+//!
+//! The match arms in `zmq_setsockopt` and `zmq_getsockopt` are
+//! intentionally repetitive: each option is self-contained and easy
+//! to audit. Extracting duration-conversion helpers was considered
+//! and rejected as not worth the indirection.
 #![expect(clippy::cast_possible_wrap)]
 
 use std::ffi::c_int;
@@ -203,15 +208,69 @@ const ZMQ_AFFINITY: c_int = 4;
 const ZMQ_RATE: c_int = 8;
 const ZMQ_RECOVERY_IVL: c_int = 9;
 const ZMQ_MULTICAST_HOPS: c_int = 25;
+const ZMQ_IPV4ONLY: c_int = 31;
+const ZMQ_TCP_ACCEPT_FILTER: c_int = 38;
+const ZMQ_ROUTER_RAW: c_int = 41;
 const ZMQ_ZAP_DOMAIN: c_int = 55;
 const ZMQ_TOS: c_int = 57;
+const ZMQ_IPC_FILTER_PID: c_int = 58;
+const ZMQ_IPC_FILTER_UID: c_int = 59;
+const ZMQ_IPC_FILTER_GID: c_int = 60;
 const ZMQ_CONNECT_ROUTING_ID: c_int = 61;
+const ZMQ_GSSAPI_SERVER: c_int = 62;
+const ZMQ_GSSAPI_PRINCIPAL: c_int = 63;
+const ZMQ_GSSAPI_SERVICE_PRINCIPAL: c_int = 64;
+const ZMQ_GSSAPI_PLAINTEXT: c_int = 65;
 const ZMQ_SOCKS_PROXY: c_int = 68;
+const ZMQ_BLOCKY: c_int = 70;
+const ZMQ_XPUB_MANUAL: c_int = 71;
+const ZMQ_XPUB_WELCOME_MSG: c_int = 72;
+const ZMQ_STREAM_NOTIFY: c_int = 73;
 const ZMQ_INVERT_MATCHING: c_int = 74;
+const ZMQ_XPUB_VERBOSER: c_int = 78;
 const ZMQ_TCP_MAXRT: c_int = 80;
+const ZMQ_THREAD_SAFE: c_int = 81;
+const ZMQ_MULTICAST_MAXTPDU: c_int = 84;
+const ZMQ_VMCI_BUFFER_SIZE: c_int = 85;
+const ZMQ_VMCI_BUFFER_MIN_SIZE: c_int = 86;
+const ZMQ_VMCI_BUFFER_MAX_SIZE: c_int = 87;
+const ZMQ_VMCI_CONNECT_TIMEOUT: c_int = 88;
+const ZMQ_USE_FD: c_int = 89;
+const ZMQ_GSSAPI_PRINCIPAL_NAMETYPE: c_int = 90;
+const ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE: c_int = 91;
 const ZMQ_BINDTODEVICE: c_int = 92;
+const ZMQ_ZAP_ENFORCE_DOMAIN: c_int = 93;
+const ZMQ_LOOPBACK_FASTPATH: c_int = 94;
+const ZMQ_METADATA: c_int = 95;
 const ZMQ_MULTICAST_LOOP: c_int = 96;
 const ZMQ_ROUTER_NOTIFY: c_int = 97;
+const ZMQ_XPUB_MANUAL_LAST_VALUE: c_int = 98;
+const ZMQ_SOCKS_USERNAME: c_int = 99;
+const ZMQ_SOCKS_PASSWORD: c_int = 100;
+const ZMQ_IN_BATCH_SIZE: c_int = 101;
+const ZMQ_OUT_BATCH_SIZE: c_int = 102;
+const ZMQ_WSS_KEY_PEM: c_int = 103;
+const ZMQ_WSS_CERT_PEM: c_int = 104;
+const ZMQ_WSS_TRUST_PEM: c_int = 105;
+const ZMQ_WSS_HOSTNAME: c_int = 106;
+const ZMQ_WSS_TRUST_SYSTEM: c_int = 107;
+const ZMQ_ONLY_FIRST_SUBSCRIBE: c_int = 108;
+const ZMQ_RECONNECT_STOP: c_int = 109;
+const ZMQ_HELLO_MSG: c_int = 110;
+const ZMQ_DISCONNECT_MSG: c_int = 111;
+const ZMQ_PRIORITY: c_int = 112;
+const ZMQ_BUSY_POLL: c_int = 113;
+const ZMQ_HICCUP_MSG: c_int = 114;
+const ZMQ_XSUB_VERBOSE_UNSUBSCRIBE: c_int = 115;
+const ZMQ_TOPICS_COUNT: c_int = 116;
+const ZMQ_NORM_MODE: c_int = 117;
+const ZMQ_NORM_UNICAST_NACK: c_int = 118;
+const ZMQ_NORM_BUFFER_SIZE: c_int = 119;
+const ZMQ_NORM_SEGMENT_SIZE: c_int = 120;
+const ZMQ_NORM_BLOCK_SIZE: c_int = 121;
+const ZMQ_NORM_NUM_PARITY: c_int = 122;
+const ZMQ_NORM_NUM_AUTOPARITY: c_int = 123;
+const ZMQ_NORM_PUSH: c_int = 124;
 
 const ZMQ_POLLIN: c_int = crate::consts::ZMQ_POLLIN;
 const ZMQ_POLLOUT: c_int = crate::consts::ZMQ_POLLOUT;
@@ -467,6 +526,9 @@ pub extern "C" fn zmq_setsockopt(
         ZMQ_IPV6 => {
             lock_overlay!(sock_arc).ipv6 = read_i32(optval, optvallen) != 0;
         }
+        ZMQ_IPV4ONLY => {
+            lock_overlay!(sock_arc).ipv6 = read_i32(optval, optvallen) == 0;
+        }
         // Always-on in omq; accept silently.
         #[expect(clippy::match_same_arms)]
         ZMQ_ROUTER_HANDOVER => {}
@@ -496,16 +558,75 @@ pub extern "C" fn zmq_setsockopt(
         | ZMQ_RATE
         | ZMQ_RECOVERY_IVL
         | ZMQ_MULTICAST_HOPS
-        | ZMQ_TOS
-        | ZMQ_CONNECT_ROUTING_ID
+        | ZMQ_RCVMORE
+        | ZMQ_FD
+        | ZMQ_EVENTS
+        | ZMQ_TYPE
+        | ZMQ_LAST_ENDPOINT
+        | ZMQ_TCP_ACCEPT_FILTER
+        | ZMQ_ROUTER_RAW
+        | ZMQ_MECHANISM
         | ZMQ_ZAP_DOMAIN
+        | ZMQ_TOS
+        | ZMQ_IPC_FILTER_PID
+        | ZMQ_IPC_FILTER_UID
+        | ZMQ_IPC_FILTER_GID
+        | ZMQ_CONNECT_ROUTING_ID
+        | ZMQ_GSSAPI_SERVER
+        | ZMQ_GSSAPI_PRINCIPAL
+        | ZMQ_GSSAPI_SERVICE_PRINCIPAL
+        | ZMQ_GSSAPI_PLAINTEXT
         | ZMQ_SOCKS_PROXY
+        | ZMQ_BLOCKY
+        | ZMQ_XPUB_MANUAL
+        | ZMQ_XPUB_WELCOME_MSG
+        | ZMQ_STREAM_NOTIFY
         | ZMQ_INVERT_MATCHING
+        | ZMQ_XPUB_VERBOSER
         | ZMQ_TCP_MAXRT
-        | ZMQ_ROUTER_NOTIFY
+        | ZMQ_THREAD_SAFE
+        | ZMQ_MULTICAST_MAXTPDU
+        | ZMQ_VMCI_BUFFER_SIZE
+        | ZMQ_VMCI_BUFFER_MIN_SIZE
+        | ZMQ_VMCI_BUFFER_MAX_SIZE
+        | ZMQ_VMCI_CONNECT_TIMEOUT
+        | ZMQ_USE_FD
+        | ZMQ_GSSAPI_PRINCIPAL_NAMETYPE
+        | ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE
+        | ZMQ_BINDTODEVICE
+        | ZMQ_ZAP_ENFORCE_DOMAIN
+        | ZMQ_LOOPBACK_FASTPATH
+        | ZMQ_METADATA
         | ZMQ_MULTICAST_LOOP
-        | ZMQ_BINDTODEVICE => {}
-        _ => {}
+        | ZMQ_ROUTER_NOTIFY
+        | ZMQ_XPUB_MANUAL_LAST_VALUE
+        | ZMQ_SOCKS_USERNAME
+        | ZMQ_SOCKS_PASSWORD
+        | ZMQ_IN_BATCH_SIZE
+        | ZMQ_OUT_BATCH_SIZE
+        | ZMQ_WSS_KEY_PEM
+        | ZMQ_WSS_CERT_PEM
+        | ZMQ_WSS_TRUST_PEM
+        | ZMQ_WSS_HOSTNAME
+        | ZMQ_WSS_TRUST_SYSTEM
+        | ZMQ_ONLY_FIRST_SUBSCRIBE
+        | ZMQ_RECONNECT_STOP
+        | ZMQ_HELLO_MSG
+        | ZMQ_DISCONNECT_MSG
+        | ZMQ_PRIORITY
+        | ZMQ_BUSY_POLL
+        | ZMQ_HICCUP_MSG
+        | ZMQ_XSUB_VERBOSE_UNSUBSCRIBE
+        | ZMQ_TOPICS_COUNT
+        | ZMQ_NORM_MODE
+        | ZMQ_NORM_UNICAST_NACK
+        | ZMQ_NORM_BUFFER_SIZE
+        | ZMQ_NORM_SEGMENT_SIZE
+        | ZMQ_NORM_BLOCK_SIZE
+        | ZMQ_NORM_NUM_PARITY
+        | ZMQ_NORM_NUM_AUTOPARITY
+        | ZMQ_NORM_PUSH => {}
+        _ => return crate::error::fail(libc::EINVAL),
     }
     0
 }
@@ -818,7 +939,7 @@ pub extern "C" fn zmq_getsockopt(
             let v = lock_overlay!(sock_arc).ipv6;
             write_i32(optval, optvallen, i32::from(v))
         }
-        ZMQ_ROUTER_HANDOVER => write_i32(optval, optvallen, 1),
+        ZMQ_ROUTER_HANDOVER | ZMQ_BLOCKY | ZMQ_STREAM_NOTIFY => write_i32(optval, optvallen, 1),
         ZMQ_BACKLOG => write_i32(optval, optvallen, lock_overlay!(sock_arc).backlog),
         ZMQ_IMMEDIATE => write_i32(
             optval,
@@ -848,15 +969,71 @@ pub extern "C" fn zmq_getsockopt(
             optvallen,
             i32::from(lock_overlay!(sock_arc).xpub_nodrop),
         ),
-        ZMQ_AFFINITY => write_i64(optval, optvallen, 0),
-        ZMQ_RATE | ZMQ_RECOVERY_IVL | ZMQ_MULTICAST_HOPS | ZMQ_TOS | ZMQ_TCP_MAXRT
-        | ZMQ_ROUTER_NOTIFY | ZMQ_MULTICAST_LOOP | ZMQ_INVERT_MATCHING => {
-            write_i32(optval, optvallen, 0)
+        ZMQ_IPV4ONLY => write_i32(optval, optvallen, i32::from(!lock_overlay!(sock_arc).ipv6)),
+        ZMQ_MULTICAST_MAXTPDU => write_i32(optval, optvallen, 1500),
+        ZMQ_USE_FD => write_i32(optval, optvallen, -1),
+        ZMQ_AFFINITY
+        | ZMQ_VMCI_BUFFER_SIZE
+        | ZMQ_VMCI_BUFFER_MIN_SIZE
+        | ZMQ_VMCI_BUFFER_MAX_SIZE => write_i64(optval, optvallen, 0),
+        ZMQ_RATE
+        | ZMQ_RECOVERY_IVL
+        | ZMQ_MULTICAST_HOPS
+        | ZMQ_TOS
+        | ZMQ_IPC_FILTER_PID
+        | ZMQ_IPC_FILTER_UID
+        | ZMQ_IPC_FILTER_GID
+        | ZMQ_ROUTER_RAW
+        | ZMQ_GSSAPI_SERVER
+        | ZMQ_GSSAPI_PLAINTEXT
+        | ZMQ_XPUB_MANUAL
+        | ZMQ_INVERT_MATCHING
+        | ZMQ_XPUB_VERBOSER
+        | ZMQ_TCP_MAXRT
+        | ZMQ_THREAD_SAFE
+        | ZMQ_VMCI_CONNECT_TIMEOUT
+        | ZMQ_GSSAPI_PRINCIPAL_NAMETYPE
+        | ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE
+        | ZMQ_ZAP_ENFORCE_DOMAIN
+        | ZMQ_LOOPBACK_FASTPATH
+        | ZMQ_MULTICAST_LOOP
+        | ZMQ_ROUTER_NOTIFY
+        | ZMQ_XPUB_MANUAL_LAST_VALUE
+        | ZMQ_IN_BATCH_SIZE
+        | ZMQ_OUT_BATCH_SIZE
+        | ZMQ_WSS_TRUST_SYSTEM
+        | ZMQ_ONLY_FIRST_SUBSCRIBE
+        | ZMQ_RECONNECT_STOP
+        | ZMQ_PRIORITY
+        | ZMQ_BUSY_POLL
+        | ZMQ_XSUB_VERBOSE_UNSUBSCRIBE
+        | ZMQ_TOPICS_COUNT
+        | ZMQ_NORM_MODE
+        | ZMQ_NORM_UNICAST_NACK
+        | ZMQ_NORM_BUFFER_SIZE
+        | ZMQ_NORM_SEGMENT_SIZE
+        | ZMQ_NORM_BLOCK_SIZE
+        | ZMQ_NORM_NUM_PARITY
+        | ZMQ_NORM_NUM_AUTOPARITY
+        | ZMQ_NORM_PUSH => write_i32(optval, optvallen, 0),
+        ZMQ_TCP_ACCEPT_FILTER
+        | ZMQ_ZAP_DOMAIN
+        | ZMQ_SOCKS_PROXY
+        | ZMQ_CONNECT_ROUTING_ID
+        | ZMQ_GSSAPI_PRINCIPAL
+        | ZMQ_GSSAPI_SERVICE_PRINCIPAL
+        | ZMQ_BINDTODEVICE
+        | ZMQ_METADATA
+        | ZMQ_SOCKS_USERNAME
+        | ZMQ_SOCKS_PASSWORD
+        | ZMQ_WSS_KEY_PEM
+        | ZMQ_WSS_CERT_PEM
+        | ZMQ_WSS_TRUST_PEM
+        | ZMQ_WSS_HOSTNAME => write_string(optval, optvallen, b""),
+        ZMQ_XPUB_WELCOME_MSG | ZMQ_HELLO_MSG | ZMQ_DISCONNECT_MSG | ZMQ_HICCUP_MSG => {
+            write_bytes(optval, optvallen, b"")
         }
-        ZMQ_ZAP_DOMAIN | ZMQ_SOCKS_PROXY | ZMQ_CONNECT_ROUTING_ID | ZMQ_BINDTODEVICE => {
-            write_string(optval, optvallen, b"")
-        }
-        _ => 0,
+        _ => crate::error::fail(libc::EINVAL),
     }
 }
 

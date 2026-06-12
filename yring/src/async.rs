@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
 use atomic_waker::AtomicWaker;
@@ -100,11 +101,7 @@ impl<T> AsyncProducer<T> {
     /// (a no-op when no waker is registered) but is race-free.
     #[inline]
     pub fn flush(&mut self) {
-        self.ring
-            .ring
-            .flush
-            .0
-            .store(self.tail, std::sync::atomic::Ordering::Release);
+        self.ring.ring.flush.0.store(self.tail, Ordering::Release);
         self.ring.consumer_waker.0.wake();
     }
 
@@ -178,11 +175,16 @@ impl<T> Future for PushFuture<'_, T> {
         match this.producer.push(val) {
             Ok(()) => Poll::Ready(Ok(())),
             Err(returned) => {
-                if Arc::strong_count(&this.producer.ring) == 1 {
+                if this
+                    .producer
+                    .ring
+                    .ring
+                    .consumer_dropped
+                    .load(Ordering::Acquire)
+                {
                     return Poll::Ready(Err(returned));
                 }
                 this.producer.ring.producer_waker.0.register(cx.waker());
-                // Retry after registration to close the race window.
                 match this.producer.push(returned) {
                     Ok(()) => Poll::Ready(Ok(())),
                     Err(returned) => {
@@ -254,16 +256,26 @@ impl<T> Stream for AsyncConsumer<T> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        if let Some(val) = this.prefetch_and_pop() {
+        if this.head == this.cached_flush {
+            this.prefetch();
+        }
+        if let Some(val) = this.pop() {
             return Poll::Ready(Some(val));
         }
+
+        // Nothing available. Release consumed positions before parking
+        // so the producer can reuse slots while we wait.
+        this.release();
 
         this.ring.consumer_waker.0.register(cx.waker());
 
         // Re-check after registering to avoid lost wakes.
-        if let Some(val) = this.prefetch_and_pop() {
+        if this.head == this.cached_flush {
+            this.prefetch();
+        }
+        if let Some(val) = this.pop() {
             Poll::Ready(Some(val))
-        } else if Arc::strong_count(&this.ring) == 1 {
+        } else if this.ring.ring.producer_dropped.load(Ordering::Acquire) {
             Poll::Ready(None)
         } else {
             Poll::Pending
@@ -274,12 +286,21 @@ impl<T> Stream for AsyncConsumer<T> {
 impl<T> Drop for AsyncConsumer<T> {
     fn drop(&mut self) {
         self.release();
+        self.ring
+            .ring
+            .consumer_dropped
+            .store(true, Ordering::Release);
+        self.ring.producer_waker.0.wake();
     }
 }
 
 impl<T> Drop for AsyncProducer<T> {
     fn drop(&mut self) {
         self.flush();
+        self.ring
+            .ring
+            .producer_dropped
+            .store(true, Ordering::Release);
         self.ring.consumer_waker.0.wake();
     }
 }

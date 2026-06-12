@@ -55,28 +55,36 @@ impl Clone for Submitter {
 }
 
 impl Submitter {
+    fn validate_group(msg: Message) -> core::result::Result<(Message, Option<String>), Error> {
+        if msg.len() != 2 {
+            return Err(Error::Protocol(
+                "RADIO send requires [group, body] (2 parts)".into(),
+            ));
+        }
+        let group_bytes = msg.part_bytes(0).unwrap_or_default();
+        if group_bytes.len() > u8::MAX as usize {
+            return Err(Error::Protocol(
+                "RADIO group name too long (max 255 bytes)".into(),
+            ));
+        }
+        let group = String::from_utf8_lossy(&group_bytes).into_owned();
+        Ok((msg, Some(group)))
+    }
+
+    fn prepare(&self, msg: Message) -> core::result::Result<(Message, Option<String>), Error> {
+        match self.mode {
+            FanOutMode::SubscriptionPrefix => Ok((msg, None)),
+            FanOutMode::Group => Self::validate_group(msg),
+        }
+    }
+
     pub(crate) fn try_send(
         &self,
         msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
-        let (forwarded, group) = match self.mode {
-            FanOutMode::SubscriptionPrefix => (msg, None),
-            FanOutMode::Group => {
-                if msg.len() != 2 {
-                    return Err(omq_proto::error::TrySendError::Error(Error::Protocol(
-                        "RADIO send requires [group, body] (2 parts)".into(),
-                    )));
-                }
-                let group_bytes = msg.part_bytes(0).unwrap_or_default();
-                if group_bytes.len() > u8::MAX as usize {
-                    return Err(omq_proto::error::TrySendError::Error(Error::Protocol(
-                        "RADIO group name too long (max 255 bytes)".into(),
-                    )));
-                }
-                let group = String::from_utf8_lossy(&group_bytes).into_owned();
-                (msg, Some(group))
-            }
-        };
+        let (forwarded, group) = self
+            .prepare(msg)
+            .map_err(omq_proto::error::TrySendError::Error)?;
 
         let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop && !targets_have_space(&targets) {
@@ -87,24 +95,7 @@ impl Submitter {
     }
 
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
-        let (forwarded, group) = match self.mode {
-            FanOutMode::SubscriptionPrefix => (msg, None),
-            FanOutMode::Group => {
-                if msg.len() != 2 {
-                    return Err(Error::Protocol(
-                        "RADIO send requires [group, body] (2 parts)".into(),
-                    ));
-                }
-                let group_bytes = msg.part_bytes(0).unwrap_or_default();
-                if group_bytes.len() > u8::MAX as usize {
-                    return Err(Error::Protocol(
-                        "RADIO group name too long (max 255 bytes)".into(),
-                    ));
-                }
-                let group = String::from_utf8_lossy(&group_bytes).into_owned();
-                (msg, Some(group))
-            }
-        };
+        let (forwarded, group) = self.prepare(msg)?;
 
         let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop {

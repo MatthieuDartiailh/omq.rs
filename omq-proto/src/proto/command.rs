@@ -158,8 +158,7 @@ pub fn encode(cmd: &Command, out: &mut BytesMut) {
         }
         Command::Error { reason } => {
             write_name(out, NAME_ERROR);
-            let bytes = reason.as_bytes();
-            assert!(u8::try_from(bytes.len()).is_ok(), "error reason too long");
+            let bytes = &reason.as_bytes()[..reason.len().min(u8::MAX as usize)];
             out.put_u8(bytes.len() as u8);
             out.put_slice(bytes);
         }

@@ -309,7 +309,7 @@ impl Socket {
             if let Some(msg) = cache.pop_front() {
                 return Ok(msg);
             }
-            let dio = unsafe { &*inner.direct_recv_io.get() };
+            let dio = unsafe { &*inner.direct_io.recv.get() };
             if let Some(ref state) = *dio
                 && let Ok(mut io) = state.peer_io.try_lock()
             {
@@ -339,7 +339,7 @@ impl Socket {
             }
             if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
                 let cache = inner.recv_cache.get();
-                let dio = unsafe { &*inner.direct_recv_io.get() };
+                let dio = unsafe { &*inner.direct_io.recv.get() };
                 if let Some(ref state) = *dio
                     && let Ok(mut io) = state.peer_io.try_lock()
                     && let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache)
@@ -356,7 +356,7 @@ impl Socket {
                 return Ok(msg);
             }
 
-            let recv_state = unsafe { &mut *self.inner().inproc_recv.get() };
+            let recv_state = unsafe { &mut *self.inner().inproc.recv.get() };
             if !recv_state.consumers.is_empty() {
                 let cache = self.inner().recv_cache.get();
                 let max = self.inner().options.max_message_size;
@@ -381,12 +381,12 @@ impl Socket {
                     }
                 }
                 if let Some(msg) = cache.pop_front() {
-                    self.inner().inproc_parked.store(false, Ordering::Release);
+                    self.inner().inproc.parked.store(false, Ordering::Release);
                     return Ok(msg);
                 }
             }
 
-            match self.inner().in_rx.try_recv() {
+            match self.inner().inproc.in_rx.try_recv() {
                 Ok(frame) => {
                     if let Some(msg) = self.process_inbound_frame(frame)? {
                         return Ok(msg);
@@ -399,22 +399,22 @@ impl Socket {
                 _ => {}
             }
 
-            let inproc_listener = self.inner().inproc_recv_event.listen();
+            let inproc_listener = self.inner().inproc.recv_event.listen();
             let peer_listener = self.inner().on_peer_ready.listen();
-            self.inner().inproc_parked.store(true, Ordering::Release);
-            let recv_state = unsafe { &mut *self.inner().inproc_recv.get() };
+            self.inner().inproc.parked.store(true, Ordering::Release);
+            let recv_state = unsafe { &mut *self.inner().inproc.recv.get() };
             if recv_state.consumers.iter().any(|c| !c.is_empty()) {
-                self.inner().inproc_parked.store(false, Ordering::Release);
+                self.inner().inproc.parked.store(false, Ordering::Release);
                 continue;
             }
-            let in_rx_fut = self.inner().in_rx.recv_async();
+            let in_rx_fut = self.inner().inproc.in_rx.recv_async();
             futures::pin_mut!(inproc_listener);
             futures::pin_mut!(in_rx_fut);
             futures::pin_mut!(peer_listener);
             futures::select_biased! {
                 () = inproc_listener.fuse() => {}
                 frame = in_rx_fut.fuse() => {
-                    self.inner().inproc_parked.store(false, Ordering::Release);
+                    self.inner().inproc.parked.store(false, Ordering::Release);
                     let frame = frame.map_err(|_| Error::Closed)?;
                     if let Some(msg) = self.process_inbound_frame(frame)? {
                         return Ok(msg);
@@ -422,7 +422,7 @@ impl Socket {
                 }
                 () = peer_listener.fuse() => {}
             }
-            self.inner().inproc_parked.store(false, Ordering::Release);
+            self.inner().inproc.parked.store(false, Ordering::Release);
         }
     }
 
@@ -441,6 +441,7 @@ impl Socket {
                 let msg = if is_identity_recv(st) {
                     let id = self
                         .inner()
+                        .routing
                         .conn_id_to_identity
                         .read()
                         .expect("conn_id_to_identity lock")
@@ -497,7 +498,7 @@ impl Socket {
             if let Some(msg) = cache.pop_front() {
                 return Ok(msg);
             }
-            let dio = unsafe { &*inner.direct_recv_io.get() };
+            let dio = unsafe { &*inner.direct_io.recv.get() };
             if let Some(ref state) = *dio {
                 let mut io = state.lock_io();
                 while let Some(ev) = io.codec.poll_event() {
@@ -524,7 +525,7 @@ impl Socket {
                     return Ok(msg);
                 }
                 if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
-                    let dio = unsafe { &*inner.direct_recv_io.get() };
+                    let dio = unsafe { &*inner.direct_io.recv.get() };
                     if let Some(ref state) = *dio {
                         let cache = inner.recv_cache.get();
                         let mut io = state.lock_io();
@@ -535,7 +536,7 @@ impl Socket {
                 }
             }
         }
-        let recv_state = unsafe { &mut *inner.inproc_recv.get() };
+        let recv_state = unsafe { &mut *inner.inproc.recv.get() };
         if !recv_state.consumers.is_empty() {
             let cache = inner.recv_cache.get();
             let max = inner.options.max_message_size;
@@ -563,7 +564,7 @@ impl Socket {
             }
         }
         loop {
-            let frame = inner.in_rx.try_recv().map_err(|e| match e {
+            let frame = inner.inproc.in_rx.try_recv().map_err(|e| match e {
                 blume::TryRecvError::Empty => Error::WouldBlock,
                 blume::TryRecvError::Disconnected => Error::Closed,
             })?;
@@ -574,7 +575,7 @@ impl Socket {
     }
 
     fn snapshot_direct_io_single_peer(&self) -> Option<Arc<DirectIoState>> {
-        let peers = self.inner().out_peers.read().expect("peers lock");
+        let peers = self.inner().routing.peers.read().expect("peers lock");
         if peers.len() != 1 {
             return None;
         }
@@ -717,12 +718,17 @@ impl Socket {
         use futures::FutureExt;
         use futures::future::FusedFuture;
 
-        if !self.inner().in_rx.is_empty() {
+        if !self.inner().inproc.in_rx.is_empty() {
             return Ok(None);
         }
         let state = {
-            let cur_gen = self.inner().peers_gen.load(Ordering::Acquire);
-            let cr = self.inner().cached_route.lock().expect("cached_route");
+            let cur_gen = self.inner().routing.generation.load(Ordering::Acquire);
+            let cr = self
+                .inner()
+                .routing
+                .cached_route
+                .lock()
+                .expect("cached_route");
             if let Some(ref r) = *cr
                 && r.generation == cur_gen
             {
@@ -736,7 +742,7 @@ impl Socket {
             return Ok(None);
         };
         // SAFETY: single-threaded compio runtime.
-        unsafe { *self.inner().direct_recv_io.get() = Some(state.clone()) };
+        unsafe { *self.inner().direct_io.recv.get() = Some(state.clone()) };
         if state
             .recv_claim
             .compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
@@ -745,11 +751,11 @@ impl Socket {
             return Ok(None);
         }
         let guard = ClaimGuard { state: &state };
-        if !self.inner().in_rx.is_empty() {
+        if !self.inner().inproc.in_rx.is_empty() {
             return Ok(None);
         }
 
-        let mut inrx_fut = pin!(self.inner().in_rx.recv_async().fuse());
+        let mut inrx_fut = pin!(self.inner().inproc.in_rx.recv_async().fuse());
         let mut codec_ready_fut = pin!(state.recv_codec_ready.listen().fuse());
 
         loop {
@@ -781,7 +787,7 @@ impl Socket {
             };
 
             match outcome {
-                PullOutcome::Fed if !self.inner().in_rx.is_empty() => {
+                PullOutcome::Fed if !self.inner().inproc.in_rx.is_empty() => {
                     drop(guard);
                     return Ok(None);
                 }
@@ -830,6 +836,7 @@ impl Socket {
             SocketType::Sub | SocketType::XSub => {
                 let topic = msg.part_bytes(0).unwrap_or_default();
                 self.inner()
+                    .pub_sub
                     .subscriptions
                     .read()
                     .expect("subscriptions lock")

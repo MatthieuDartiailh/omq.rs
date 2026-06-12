@@ -48,10 +48,10 @@ impl std::fmt::Debug for Socket {
 impl Drop for Socket {
     fn drop(&mut self) {
         if Arc::strong_count(&self.user_life) == 1 {
-            if let Ok(mut d) = self.inner.dialers.write() {
+            if let Ok(mut d) = self.inner.endpoints.dialers.write() {
                 d.clear();
             }
-            if let Ok(mut l) = self.inner.listeners.write() {
+            if let Ok(mut l) = self.inner.endpoints.listeners.write() {
                 // Release inproc names before clearing. The accept
                 // task holds the InprocListener inside a detached
                 // compio task that won't be cancelled by dropping the
@@ -63,7 +63,7 @@ impl Drop for Socket {
                 }
                 l.clear();
             }
-            if let Ok(mut u) = self.inner.udp_dialers.write() {
+            if let Ok(mut u) = self.inner.endpoints.udp_dialers.write() {
                 u.clear();
             }
         }
@@ -111,6 +111,7 @@ impl Socket {
     /// Return the most recently bound endpoint, if any.
     pub fn last_bound_endpoint(&self) -> Option<Endpoint> {
         self.inner
+            .endpoints
             .listeners
             .read()
             .expect("listeners lock")
@@ -121,7 +122,12 @@ impl Socket {
     /// Remove a previously-established bind.
     #[expect(clippy::unused_async)]
     pub async fn unbind(&self, endpoint: Endpoint) -> Result<()> {
-        let mut listeners = self.inner.listeners.write().expect("listeners lock");
+        let mut listeners = self
+            .inner
+            .endpoints
+            .listeners
+            .write()
+            .expect("listeners lock");
         let before = listeners.len();
         listeners.retain(|l| l.endpoint != endpoint);
         if listeners.len() < before {
@@ -134,8 +140,13 @@ impl Socket {
     /// Remove a previously-started connect.
     #[expect(clippy::unused_async)]
     pub async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
-        let mut dialers = self.inner.dialers.write().expect("dialers lock");
-        let mut udp = self.inner.udp_dialers.write().expect("udp_dialers lock");
+        let mut dialers = self.inner.endpoints.dialers.write().expect("dialers lock");
+        let mut udp = self
+            .inner
+            .endpoints
+            .udp_dialers
+            .write()
+            .expect("udp_dialers lock");
         let before = dialers.len() + udp.len();
         dialers.retain(|d| d.endpoint != endpoint);
         udp.retain(|d| d.endpoint != endpoint);
@@ -152,7 +163,7 @@ impl Socket {
         &self,
         connection_id: u64,
     ) -> Result<Option<crate::monitor::ConnectionStatus>> {
-        let peers = self.inner.out_peers.read().expect("peers lock");
+        let peers = self.inner.routing.peers.read().expect("peers lock");
         for (_, p) in peers.iter() {
             if p.connection_id == connection_id {
                 let info = p.info.read().expect("info lock");
@@ -173,7 +184,7 @@ impl Socket {
     /// Snapshot every currently-connected peer.
     #[expect(clippy::unused_async)]
     pub async fn connections(&self) -> Result<Vec<crate::monitor::ConnectionStatus>> {
-        let peers = self.inner.out_peers.read().expect("peers lock");
+        let peers = self.inner.routing.peers.read().expect("peers lock");
         Ok(peers
             .iter()
             .map(|(_, p)| {
@@ -193,7 +204,7 @@ impl Socket {
 
     /// Total number of multishot recv rearms across all peers (diagnostic counter).
     pub fn multishot_rearms(&self) -> usize {
-        let peers = self.inner.out_peers.read().expect("peers lock");
+        let peers = self.inner.routing.peers.read().expect("peers lock");
         peers
             .iter()
             .filter_map(|(_, p)| {
@@ -217,12 +228,13 @@ impl Socket {
         }
         let prefix = prefix.into();
         self.inner
+            .pub_sub
             .subscriptions
             .write()
             .expect("subscriptions lock")
             .add(&prefix);
         {
-            let mut subs = self.inner.our_subs.write().expect("our_subs lock");
+            let mut subs = self.inner.pub_sub.our_subs.write().expect("our_subs lock");
             if !subs.iter().any(|p| p == &prefix) {
                 subs.push(prefix.clone());
             }
@@ -244,12 +256,13 @@ impl Socket {
         }
         let prefix = prefix.into();
         self.inner
+            .pub_sub
             .subscriptions
             .write()
             .expect("subscriptions lock")
             .remove(&prefix);
         {
-            let mut subs = self.inner.our_subs.write().expect("our_subs lock");
+            let mut subs = self.inner.pub_sub.our_subs.write().expect("our_subs lock");
             if let Some(pos) = subs.iter().position(|p| p == &prefix) {
                 subs.remove(pos);
             }
@@ -314,11 +327,13 @@ impl Socket {
             .linger
             .map(|d| std::time::Instant::now() + d);
         self.inner
+            .endpoints
             .listeners
             .write()
             .expect("listeners lock")
             .clear();
         self.inner
+            .endpoints
             .udp_dialers
             .write()
             .expect("udp_dialers lock")
@@ -337,7 +352,7 @@ impl Socket {
         }
         loop {
             {
-                let peers = self.inner.out_peers.read().expect("peers lock");
+                let peers = self.inner.routing.peers.read().expect("peers lock");
                 for (_, p) in peers.iter() {
                     if let Some(dio_handle) = &p.direct_io
                         && let Some(dio) = dio_handle.read().expect("dio lock").as_ref()
@@ -348,7 +363,7 @@ impl Socket {
                 }
             }
             let (inproc_pending, wire_alive) = {
-                let peers = self.inner.out_peers.read().expect("peers lock");
+                let peers = self.inner.routing.peers.read().expect("peers lock");
                 let inproc = peers.iter().any(|(_, p)| match &p.out {
                     PeerOut::Inproc { sender, .. } => {
                         !sender.is_empty() && !sender.is_disconnected()
@@ -374,23 +389,41 @@ impl Socket {
             }
             compio::time::sleep(Duration::from_millis(5)).await;
         }
-        self.inner.dialers.write().expect("dialers lock").clear();
-        self.inner.out_peers.write().expect("peers lock").clear();
-        self.inner.peers_gen.fetch_add(1, Ordering::Release);
+        self.inner
+            .endpoints
+            .dialers
+            .write()
+            .expect("dialers lock")
+            .clear();
+        self.inner
+            .routing
+            .peers
+            .write()
+            .expect("peers lock")
+            .clear();
+        self.inner
+            .routing
+            .generation
+            .fetch_add(1, Ordering::Release);
 
         // Drop cached DirectIoState refs so the Arc can reach zero
         // once the driver task exits and drops its own ref.
         unsafe {
-            *self.inner.direct_send_io.get() = None;
+            *self.inner.direct_io.send.get() = None;
         }
         unsafe {
-            *self.inner.direct_recv_io.get() = None;
+            *self.inner.direct_io.recv.get() = None;
         }
-        *self.inner.cached_route.lock().expect("cached_route") = None;
+        *self
+            .inner
+            .routing
+            .cached_route
+            .lock()
+            .expect("cached_route") = None;
 
         // Close the inbound channel so drivers blocked on
         // peer_in_tx.send_async() get unblocked with SendError.
-        self.inner.in_rx.close();
+        self.inner.inproc.in_rx.close();
 
         // Yield so the cooperative executor can run driver tasks to
         // completion, freeing DirectIoState and EncodedQueue buffers.
@@ -412,7 +445,14 @@ impl Socket {
                 .as_ref()
                 .is_some_and(|rx| !rx.is_empty())
         };
-        while has_pending() && !inner.dialers.read().expect("dialers lock").is_empty() {
+        while has_pending()
+            && !inner
+                .endpoints
+                .dialers
+                .read()
+                .expect("dialers lock")
+                .is_empty()
+        {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 break;
             }
@@ -421,7 +461,7 @@ impl Socket {
     }
 
     pub(super) fn snapshot_peers_now(&self) -> Vec<PeerOut> {
-        let peers = self.inner.out_peers.read().expect("peers lock");
+        let peers = self.inner.routing.peers.read().expect("peers lock");
         peers.iter().map(|(_, p)| p.out.clone()).collect()
     }
 }

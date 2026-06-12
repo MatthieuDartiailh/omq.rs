@@ -100,7 +100,11 @@ impl<T> Receiver<T> {
     /// Signal senders that the receiver is closed. Subsequent and
     /// in-flight `send_async` calls will return `SendError`.
     pub fn close(&self) {
-        let mut inner = self.shared.inner.lock().expect("blume: poisoned");
+        let mut inner = self
+            .shared
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.closed_recv = true;
         drop(inner);
         self.shared.send_event.notify(usize::MAX);
@@ -116,7 +120,11 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut inner = self.shared.inner.lock().expect("blume: poisoned");
+        let mut inner = self
+            .shared
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.closed_recv = true;
         drop(inner);
         self.shared.send_event.notify(usize::MAX);

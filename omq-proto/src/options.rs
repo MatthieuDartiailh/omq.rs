@@ -254,6 +254,14 @@ impl Options {
                 "heartbeat_ttl {ttl:?} exceeds ZMTP maximum of 6553.5s"
             )));
         }
+        if let Some(ref dict) = self.compression_dict
+            && (dict.is_empty() || dict.len() > COMPRESSION_DICT_MAX)
+        {
+            return Err(crate::error::Error::Config(format!(
+                "compression dict must be 1..={COMPRESSION_DICT_MAX} bytes, got {}",
+                dict.len()
+            )));
+        }
         #[cfg(feature = "plain")]
         if let MechanismSetup::PlainClient {
             ref username,
@@ -561,17 +569,11 @@ impl Options {
     }
 
     /// Set the outbound compression dictionary. Used by `lz4+tcp://`.
-    /// Panics if the dict is empty or larger than 8192 bytes (RFC §6.2).
+    /// Validated by [`Options::validate`]: must be 1..=8192 bytes (RFC §6.2).
     /// Disables auto-training when set.
     #[must_use]
     pub fn compression_dict(mut self, dict: impl Into<Bytes>) -> Self {
-        let dict = dict.into();
-        assert!(
-            !dict.is_empty() && dict.len() <= COMPRESSION_DICT_MAX,
-            "compression dict must be 1..={COMPRESSION_DICT_MAX} bytes, got {}",
-            dict.len()
-        );
-        self.compression_dict = Some(dict);
+        self.compression_dict = Some(dict.into());
         self
     }
 

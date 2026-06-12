@@ -16,6 +16,67 @@ use crate::consts::{ZMQ_DONTWAIT, ZMQ_SNDMORE};
 use crate::error::{ETERM, fail};
 use crate::socket::OmqSocket;
 
+/// Clear a bypass option if the peer has closed the pipe.
+///
+/// # Safety
+///
+/// Caller must guarantee single-threaded access to `bypass_cell`
+/// (zmq contract: one thread per socket).
+unsafe fn clear_stale_bypass<B: HasPipeClosed>(bypass_cell: &std::cell::UnsafeCell<Option<B>>) {
+    let opt = unsafe { &mut *bypass_cell.get() };
+    if opt
+        .as_ref()
+        .is_some_and(|b| b.pipe_closed().load(std::sync::atomic::Ordering::Acquire))
+    {
+        *opt = None;
+    }
+}
+
+trait HasPipeClosed {
+    fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool;
+}
+
+impl HasPipeClosed for crate::inproc_bypass::BypassSend {
+    fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool {
+        &self.pipe.closed
+    }
+}
+
+impl HasPipeClosed for crate::inproc_bypass::BypassRecv {
+    fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool {
+        &self.pipe.closed
+    }
+}
+
+/// Block on the recv eventfd until `try_pop` succeeds or the timeout
+/// expires. Returns `Err(EAGAIN)` on timeout.
+fn block_recv<T>(
+    sock: &OmqSocket,
+    rcvtimeo: i64,
+    mut try_pop: impl FnMut() -> Option<T>,
+) -> Result<T, c_int> {
+    if rcvtimeo > 0 {
+        let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(libc::EAGAIN);
+            }
+            let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
+            wait_recv_eventfd(sock, ms);
+            if let Some(val) = try_pop() {
+                return Ok(val);
+            }
+        }
+    }
+    loop {
+        wait_recv_eventfd(sock, -1);
+        if let Some(val) = try_pop() {
+            return Ok(val);
+        }
+    }
+}
+
 /// Core send dispatch. Takes a raw slice to avoid heap-allocating a `Bytes`
 /// on the hot path: single-part messages ≤55 bytes use `Message`'s inline
 /// storage (zero alloc). Only SNDMORE accumulation and XSUB subscription
@@ -66,13 +127,8 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         // SAFETY: zmq contract guarantees single-threaded access per socket.
         let accum = unsafe { &*sock.send_accum.get() };
         if accum.is_empty() {
-            let bypass_opt = unsafe { &mut *sock.bypass_send.get() };
-            if bypass_opt
-                .as_ref()
-                .is_some_and(|b| b.pipe.closed.load(std::sync::atomic::Ordering::Acquire))
-            {
-                *bypass_opt = None;
-            }
+            // SAFETY: zmq contract guarantees single-threaded access per socket.
+            unsafe { clear_stale_bypass(&sock.bypass_send) };
         }
         if accum.is_empty()
             && let Some(bypass) = unsafe { &mut *sock.bypass_send.get() }
@@ -224,15 +280,7 @@ pub extern "C" fn zmq_recv(
     // Inproc bypass fast path: copy from byte ring directly into user
     // buffer. Zero intermediate Bytes allocation.
     // SAFETY: zmq contract guarantees single-threaded access per socket.
-    {
-        let bypass_opt = unsafe { &mut *sock.bypass_recv.get() };
-        if bypass_opt
-            .as_ref()
-            .is_some_and(|b| b.pipe.closed.load(std::sync::atomic::Ordering::Acquire))
-        {
-            *bypass_opt = None;
-        }
-    }
+    unsafe { clear_stale_bypass(&sock.bypass_recv) };
     if let Some(bypass) = unsafe { &mut *sock.bypass_recv.get() } {
         match recv_bypass_direct(sock, bypass, buf, buf_len, flags) {
             Ok(n) => return n,
@@ -300,15 +348,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     // Used by zmq_msg_recv (which needs an owned Bytes).
     // zmq_recv uses recv_bypass_direct instead (zero alloc).
     // SAFETY: zmq contract guarantees single-threaded access per socket.
-    {
-        let bypass_opt = unsafe { &mut *sock.bypass_recv.get() };
-        if bypass_opt
-            .as_ref()
-            .is_some_and(|b| b.pipe.closed.load(Ordering::Acquire))
-        {
-            *bypass_opt = None;
-        }
-    }
+    unsafe { clear_stale_bypass(&sock.bypass_recv) };
     if let Some(bypass) = unsafe { &mut *sock.bypass_recv.get() } {
         // Drain yring first (messages from before bypass was installed,
         // or multipart messages that went through the regular tokio path
@@ -348,31 +388,12 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         return Err(libc::EAGAIN);
     }
 
-    // Blocking path: park on the eventfd until the pump signals data.
-    if rcvtimeo > 0 {
-        let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(libc::EAGAIN);
-            }
-            let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
-            wait_recv_eventfd(sock, ms);
-            if let Some(m) = try_pop_dual(cons, sock) {
-                signal_recv_space(sock);
-                return decompose_message(sock, &m);
-            }
-        }
-    }
-
-    // Infinite timeout.
-    loop {
-        wait_recv_eventfd(sock, -1);
-        if let Some(m) = try_pop_dual(cons, sock) {
-            signal_recv_space(sock);
-            return decompose_message(sock, &m);
-        }
-    }
+    let m = block_recv(sock, rcvtimeo, || {
+        let m = try_pop_dual(cons, sock)?;
+        signal_recv_space(sock);
+        Some(m)
+    })?;
+    decompose_message(sock, &m)
 }
 
 /// Zero-alloc recv for the inproc bypass: peek from byte ring,
@@ -428,29 +449,10 @@ fn recv_bypass_direct(
         return Err(libc::EAGAIN);
     }
 
-    // Blocking path.
-    if rcvtimeo > 0 {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(rcvtimeo as u64);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(libc::EAGAIN);
-            }
-            let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
-            wait_recv_eventfd(sock, ms);
-            if let Some(n) = try_recv_bypass_or_yring(sock, bypass, buf, buf_len) {
-                return Ok(n);
-            }
-        }
-    }
-
-    loop {
-        wait_recv_eventfd(sock, -1);
-        if let Some(n) = try_recv_bypass_or_yring(sock, bypass, buf, buf_len) {
-            return Ok(n);
-        }
-    }
+    let n = block_recv(sock, rcvtimeo, || {
+        try_recv_bypass_or_yring(sock, bypass, buf, buf_len)
+    })?;
+    Ok(n)
 }
 
 /// Try byte ring first, then pump yring. Returns payload length on success.

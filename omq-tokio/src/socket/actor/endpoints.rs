@@ -259,7 +259,7 @@ impl SocketDriver {
         let mut listener = bind_any(
             &endpoint,
             &snapshot,
-            &self.recv_notify,
+            &self.spsc.recv_notify,
             self.options.max_message_size,
             #[cfg(feature = "ws")]
             &self.options.wss_tls,
@@ -340,7 +340,7 @@ impl SocketDriver {
         let monitor_ep = endpoint.clone();
         let tx_for_delay = tx.clone();
         let snapshot = self.inproc_snapshot();
-        let recv_notify = self.recv_notify.clone();
+        let recv_notify = self.spsc.recv_notify.clone();
         #[cfg(feature = "ws")]
         let accept_invalid_certs = self.options.wss_tls.accept_invalid_certs;
         #[cfg(feature = "ws")]

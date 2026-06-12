@@ -32,35 +32,7 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
-    pub(crate) fn try_send(
-        &self,
-        mut msg: Message,
-    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
-        if msg.is_empty() {
-            return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
-        }
-        let identity = msg.pop_front().unwrap();
-
-        let target: Option<PeerSend> = {
-            let g = self.inner.lock().expect("identity inner poisoned");
-            g.identity_to_peer
-                .get(&identity)
-                .and_then(|peer_id| g.peers.get(peer_id))
-                .map(|p| p.target.clone())
-        };
-
-        let Some(t) = target else {
-            if self.router_mandatory {
-                return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
-            }
-            return Ok(());
-        };
-
-        let _ = t.try_encode(&msg);
-        Ok(())
-    }
-
-    pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
+    fn resolve_target(&self, msg: &mut Message) -> Result<Option<PeerSend>> {
         if msg.is_empty() {
             return Err(Error::Unroutable);
         }
@@ -74,13 +46,30 @@ impl Submitter {
                 .map(|p| p.target.clone())
         };
 
-        let Some(t) = target else {
-            if self.router_mandatory {
-                return Err(Error::Unroutable);
-            }
+        if target.is_none() && self.router_mandatory {
+            return Err(Error::Unroutable);
+        }
+        Ok(target)
+    }
+
+    pub(crate) fn try_send(
+        &self,
+        mut msg: Message,
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        let target = self
+            .resolve_target(&mut msg)
+            .map_err(omq_proto::error::TrySendError::Error)?;
+
+        if let Some(t) = target {
+            let _ = t.try_encode(&msg);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
+        let Some(t) = self.resolve_target(&mut msg)? else {
             return Ok(());
         };
-
         t.send(msg).await
     }
 }
