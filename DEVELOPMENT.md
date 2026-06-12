@@ -56,11 +56,12 @@ OMQ_FUZZ_ITERS=500000000 cargo test -p omq-tokio  --features fuzz --release -- -
 
 ## Soak tests
 
-Long-running leak and stability scenarios. Both backends have
-identical suites (11 scenarios each): peer churn, reconnect storm,
+Long-running leak and stability scenarios. omq-tokio has 14
+scenarios; omq-compio has 11 (the three newest are tokio-only for
+now). Scenarios: peer churn, reconnect storm, reconnect all types,
 PUB/SUB churn, large-message throughput, compression (lz4), PLAIN
 auth, CURVE encryption, BLAKE3ZMQ encryption, multi-socket, inproc
-cross-thread.
+cross-thread, cancel safety, CURVE reconnect, BLAKE3ZMQ reconnect.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s).
 Enable all feature-gated scenarios with the full feature set.
@@ -77,9 +78,10 @@ cargo test -p omq-compio --features "$FEATURES" --release --no-run
 cargo test -p omq-tokio  --features "$FEATURES" --release --no-run
 
 # run in batches of 4 scenarios (8 processes), 10 min each
-TESTS=(blake3zmq compression compression_lz4 curve
-       inproc_cross_thread large_throughput multi_socket peer_churn
-       plain pub_sub_churn reconnect_storm)
+TESTS=(blake3zmq cancel_safety compression compression_lz4 curve
+       inproc_cross_thread large_throughput mechanism_reconnect
+       multi_socket peer_churn plain pub_sub_churn
+       reconnect_all_types reconnect_storm)
 
 batch=()
 for test in "${TESTS[@]}"; do
