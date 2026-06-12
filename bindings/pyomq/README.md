@@ -102,10 +102,11 @@ pull.connect("lz4+tcp://127.0.0.1:5555")
 Both peers must use a matching compression endpoint. Payloads below ~512 B are
 sent as-is (the codec detects that compression would expand them).
 
-`lz4+tcp://` auto-trains a dictionary by default: it samples the first 100
-outbound messages, builds a 2 KiB dict, and ships it to the peer once. After
-that the compression threshold drops from 512 B to 128 B, so small structured
-messages start compressing too. Pure Rust (lz4rip), no C compiler required.
+`lz4+tcp://` supports dictionary auto-training (off by default). When enabled,
+it samples the first 100 outbound messages, builds a 2 KiB dict, and ships it
+to the peer once. After that the compression threshold drops from 512 B to
+128 B, so small structured messages start compressing too. Pure Rust (lz4rip),
+no C compiler required.
 
 See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for throughput charts and benchmark details.
 

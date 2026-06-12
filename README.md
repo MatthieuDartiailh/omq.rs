@@ -129,7 +129,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
 | **Zero-copy send and recv** | Send: large `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
 | **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |
-| **LZ4 dictionary auto-training** | Trains from first 100 messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |
+| **LZ4 dictionary auto-training** | Off by default. When enabled, trains from first 100 messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |
 | **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
 
 ## Workspace
