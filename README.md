@@ -82,9 +82,9 @@ Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `inte
 | Backend | Platforms | Runtime | I/O Model | Notes |
 |---------|-----------|---------|-----------|-------|
 | [`omq-tokio`](omq-tokio/) | Linux, macOS, Windows | Multi-threaded | epoll / kqueue / IOCP | **Recommended default** |
-| [`omq-compio`](omq-compio/) | Linux, Windows | Single-threaded | io_uring / IOCP | Lower-latency when you need it |
+| [`omq-compio`](omq-compio/) | Linux | Single-threaded | io_uring | Lower-latency when you need it |
 
-**Windows specifics:** Both backends support `tcp://` and `inproc://`. IPC transport (`ipc://`) is Unix-only; use TCP for inter-process communication on Windows. See [`omq-libzmq/WINDOWS.md`](omq-libzmq/WINDOWS.md) for detailed Windows API support.
+**Windows specifics:** Windows is fully supported via `omq-tokio` (the default backend). Both backends support `tcp://` and `inproc://`. IPC transport (`ipc://`) is Unix-only; use TCP for inter-process communication on Windows. See [`omq-libzmq/WINDOWS.md`](omq-libzmq/WINDOWS.md) for detailed Windows API support.
 
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
 

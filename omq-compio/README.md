@@ -1,9 +1,14 @@
 # omq-compio
 
-compio backend for [omq](https://crates.io/crates/omq). Single-threaded, io_uring-based (Linux / IOCP on Windows).
+compio backend for [omq](https://crates.io/crates/omq). Single-threaded, I/O-driven.
 
 Built on [omq-proto](https://crates.io/crates/omq-proto) and
-[compio](https://crates.io/crates/compio) (io_uring on Linux, IOCP on Windows).
+[compio](https://crates.io/crates/compio):
+- **Linux:** io_uring (high-performance kernel asynchronous I/O)
+
+**Platform support:** Linux only. macOS and Windows not supported.
+
+> **Note on Windows:** While compio itself supports Windows via IOCP, comprehensive Windows support for omq-compio remains under development. Use [`omq-tokio`](../omq-tokio/) for production Windows applications.
 
 ## Highlights
 
