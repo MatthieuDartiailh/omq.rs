@@ -18,10 +18,13 @@ pub mod options;
 pub mod proto;
 pub mod routing;
 pub mod socket_api;
+pub mod socket_ref;
 pub mod subscription;
 pub mod type_state;
 
-pub use endpoint::{Endpoint, EndpointRole, EndpointSpec, IpcPath};
+#[cfg(unix)]
+pub use endpoint::IpcPath;
+pub use endpoint::{Endpoint, EndpointRole, EndpointSpec};
 pub use error::{Error, Result, TrySendError};
 pub use message::{Frame, FrameFlags, Message, MessageIter, PartCountError, generated_identity};
 pub use monitor::{

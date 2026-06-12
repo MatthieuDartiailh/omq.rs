@@ -14,6 +14,7 @@ use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 use crate::proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey};
 #[cfg(feature = "curve")]
 use crate::proto::mechanism::{CurveKeypair, CurvePublicKey};
+use crate::socket_ref::SocketRef;
 /// Upper bound for `Options::compression_dict`. Both transports
 /// cap at 8 KiB. Inlined as a const so the `compression_dict`
 /// setter works regardless of which compression features are enabled.
@@ -686,8 +687,8 @@ pub enum KeepAlive {
 
 impl Options {
     /// Apply `SO_RCVBUF` and `SO_SNDBUF` to a connected socket.
-    pub fn apply_socket_buffers<S: std::os::fd::AsFd>(&self, sock: &S) -> std::io::Result<()> {
-        let sref = socket2::SockRef::from(sock);
+    pub fn apply_socket_buffers<S: SocketRef>(&self, sock: &S) -> std::io::Result<()> {
+        let sref = sock.as_socket_ref();
         if let Some(n) = self.recv_buffer_size {
             sref.set_recv_buffer_size(n)?;
         }
@@ -702,8 +703,8 @@ impl KeepAlive {
     /// Apply this keepalive policy to a connected TCP socket. Used by
     /// both `omq-tokio` and `omq-compio` after `connect`/`accept` so the
     /// option is in effect for the connection's lifetime.
-    pub fn apply<S: std::os::fd::AsFd>(&self, sock: &S) -> std::io::Result<()> {
-        let sref = socket2::SockRef::from(sock);
+    pub fn apply<S: SocketRef>(&self, sock: &S) -> std::io::Result<()> {
+        let sref = sock.as_socket_ref();
         match self {
             KeepAlive::Default => Ok(()),
             KeepAlive::Disabled => sref.set_keepalive(false),
