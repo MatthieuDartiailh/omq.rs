@@ -51,10 +51,10 @@ struct PeerSelection {
 /// parked in `select_biased!` (`driver_in_select == true`). When the driver is
 /// actively looping (steps 1-3), it will drain the queue naturally on its next
 /// step-3 pass — no spurious wakeup needed.
-fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
-    const DIRECT_CAP: usize = 512 * 1024;
-    const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
+const DIRECT_CAP: usize = 512 * 1024;
+const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
 
+fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
     // Crypto connections must go through the codec's send_message.
     if state.uses_crypto {
         return Ok(false);
@@ -135,9 +135,6 @@ fn direct_push_encoded(
     state: &DirectIoState,
     encoded: &smallvec::SmallVec<[bytes::Bytes; 4]>,
 ) -> bool {
-    const DIRECT_CAP: usize = 512 * 1024;
-    const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
-
     if state.uses_crypto || state.has_transform {
         return false;
     }

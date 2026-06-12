@@ -185,34 +185,7 @@ struct HttpRead {
     total: usize,
 }
 
-async fn read_until_header_end_tcp(stream: &mut TcpStream) -> Result<HttpRead> {
-    let mut buf = vec![0u8; 4096];
-    let mut total = 0;
-    loop {
-        let slice = buf[total..].to_vec();
-        let compio::buf::BufResult(n, returned) = stream.read(slice).await;
-        let n = n.map_err(Error::Io)?;
-        if n == 0 {
-            return Err(Error::HandshakeFailed(
-                "connection closed during HTTP upgrade".into(),
-            ));
-        }
-        buf[total..total + n].copy_from_slice(&returned[..n]);
-        total += n;
-        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
-            return Ok(HttpRead {
-                buf,
-                header_end: pos + 4,
-                total,
-            });
-        }
-        if total >= buf.len() {
-            return Err(Error::HandshakeFailed("HTTP headers too large".into()));
-        }
-    }
-}
-
-async fn read_until_header_end_tls(stream: &mut TlsStream) -> Result<HttpRead> {
+async fn read_until_header_end(stream: &mut (impl AsyncRead + Unpin)) -> Result<HttpRead> {
     let mut buf = vec![0u8; 4096];
     let mut total = 0;
     loop {
@@ -255,7 +228,7 @@ pub(crate) async fn accept(
 
     if let Some(acc) = tls_acceptor {
         let mut tls = acc.accept(stream).await.map_err(Error::Io)?;
-        let http = read_until_header_end_tls(&mut tls).await?;
+        let http = read_until_header_end(&mut tls).await?;
         let upgrade = ws_handshake::parse_client_upgrade(&http.buf[..http.header_end])?;
         let chosen = upgrade
             .subprotocols
@@ -277,7 +250,7 @@ pub(crate) async fn accept(
     }
 
     let mut stream = stream;
-    let http = read_until_header_end_tcp(&mut stream).await?;
+    let http = read_until_header_end(&mut stream).await?;
     let upgrade = ws_handshake::parse_client_upgrade(&http.buf[..http.header_end])?;
     let chosen = upgrade
         .subprotocols
@@ -337,7 +310,7 @@ pub(crate) async fn connect(
         compio::io::AsyncWrite::flush(&mut tls)
             .await
             .map_err(Error::Io)?;
-        let http = read_until_header_end_tls(&mut tls).await?;
+        let http = read_until_header_end(&mut tls).await?;
         ws_handshake::parse_server_upgrade(&http.buf[..http.header_end], &key)?;
         let leftover = extract_leftover(&http);
         return Ok(WsUpgraded {
@@ -351,7 +324,7 @@ pub(crate) async fn connect(
     let key = ws_handshake::generate_ws_key();
     let request = ws_handshake::format_client_upgrade(&host_header, path, &key, subprotocol);
     stream.write_all(request).await.0.map_err(Error::Io)?;
-    let http = read_until_header_end_tcp(&mut stream).await?;
+    let http = read_until_header_end(&mut stream).await?;
     ws_handshake::parse_server_upgrade(&http.buf[..http.header_end], &key)?;
     let leftover = extract_leftover(&http);
     Ok(WsUpgraded {
@@ -380,7 +353,7 @@ async fn connect_tls_ip(
     compio::io::AsyncWrite::flush(&mut tls)
         .await
         .map_err(Error::Io)?;
-    let http = read_until_header_end_tls(&mut tls).await?;
+    let http = read_until_header_end(&mut tls).await?;
     ws_handshake::parse_server_upgrade(&http.buf[..http.header_end], &key)?;
     let leftover = extract_leftover(&http);
     Ok(WsUpgraded {
