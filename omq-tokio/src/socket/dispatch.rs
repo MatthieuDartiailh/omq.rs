@@ -197,7 +197,7 @@ impl AnyListener {
 
 /// Bind dispatch: route an endpoint to its transport's listener and wrap it.
 ///
-/// `lz4+tcp://` and `zstd+tcp://` reuse the TCP listener; the per-connection
+/// `lz4+tcp://` reuses the TCP listener; the per-connection
 /// transform is installed by the actor based on the endpoint scheme.
 pub(super) async fn bind_any(
     endpoint: &Endpoint,

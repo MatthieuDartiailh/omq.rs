@@ -4,10 +4,8 @@
 //! Ruby OMQ implementation. Skips with a printed notice if the `omq` CLI
 //! or its `omq-lz4` plugin are not available.
 //!
-//! Mirrors `interop_ruby_zstd.rs`. Whereas the zstd interop test guards
-//! the dict-shipment wire format (a doubled-magic bug there used to drop
-//! the connection at the auto-train threshold), lz4 dicts are arbitrary
-//! bytes prefixed with a separate `LZ4D` sentinel — there is no
+//! LZ4 dicts are arbitrary bytes prefixed with a separate `LZ4D`
+//! sentinel. There is no
 //! equivalent doubled-magic risk. The test is still worth running:
 //! sustained traffic exercises the per-part `LZ4B` envelope and the
 //! plaintext-passthrough sentinel against a non-Rust encoder.

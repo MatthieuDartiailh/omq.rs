@@ -1,8 +1,8 @@
 #![cfg(all(feature = "soak", feature = "lz4"))]
 //! Soak: lz4 compression transport sustained.
 //!
-//! Same structure as `soak_compression` (zstd) but exercises the lz4
-//! encoder/decoder path. Mixed message sizes, continuous send/recv.
+//! PUSH/PULL over lz4+tcp://, mixed message sizes (64 B to 256 KiB).
+//! Continuous send/recv for the full soak duration.
 
 #[global_allocator]
 static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;

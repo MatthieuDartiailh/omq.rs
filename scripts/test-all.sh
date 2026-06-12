@@ -115,11 +115,8 @@ for feature in plain curve blake3zmq; do
 done
 par run cargo test -p omq-tokio  --features lz4 --test lz4_tcp --test lz4_pub_sub
 par run cargo test -p omq-compio --features lz4 --test lz4_tcp
-par run cargo test -p omq-tokio  --features zstd --test zstd_tcp
-par run cargo test -p omq-compio --features zstd --test zstd_tcp
 # Interop tests (external tooling; skipped automatically when absent).
 par run cargo test -p omq-tokio  --features lz4  --test interop_ruby_lz4
-par run cargo test -p omq-tokio  --features zstd --test interop_ruby_zstd
 par run cargo test -p omq-tokio  --features blake3zmq --test interop_ruby_blake3zmq
 par run cargo test -p omq-compio --features blake3zmq --test interop_ruby_blake3zmq
 par run cargo test -p omq-tokio  --features plain --test interop_pyzmq_plain
@@ -129,11 +126,10 @@ par_wait
 
 # ---------------------------------------------------------------- #
 # 3) All non-fuzz features at once, full backend test suite. Catches
-#    cross-feature interactions (e.g. CURVE + zstd layered on the
-#    same connection) and internal #[cfg(feature)] items inside
-#    otherwise-ungated test files (connect_before_bind lz4/zstd).
+#    cross-feature interactions and internal #[cfg(feature)] items
+#    inside otherwise-ungated test files (connect_before_bind lz4).
 # ---------------------------------------------------------------- #
-all_features='plain curve blake3zmq lz4 zstd'
+all_features='plain curve blake3zmq lz4'
 par run cargo test -p omq-proto  --features "$all_features"
 par run cargo test -p omq-tokio  --features "$all_features"
 par run cargo test -p omq-compio --features "$all_features"

@@ -2,7 +2,7 @@
 //!
 //! ZMTP codec, message + payload types, frame parsing, mechanism
 //! handshakes (NULL / CURVE / BLAKE3ZMQ), compression transforms
-//! (lz4 / zstd), endpoint parsing, options, and the prefix-
+//! (lz4), endpoint parsing, options, and the prefix-
 //! subscription matcher. None of this depends on a runtime -
 //! `omq-tokio` and `omq-compio` (and any future backend) embed it
 //! directly.

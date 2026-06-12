@@ -172,8 +172,6 @@ fn has_feature(name: &str) -> bool {
         "blake3zmq" => true,
         #[cfg(feature = "lz4")]
         "lz4" => true,
-        #[cfg(feature = "zstd")]
-        "zstd" => true,
         _ => false,
     }
 }

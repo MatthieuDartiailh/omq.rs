@@ -39,14 +39,6 @@ fn lz4_ep(port: u16) -> Endpoint {
     }
 }
 
-#[cfg(feature = "zstd")]
-fn zstd_ep(port: u16) -> Endpoint {
-    Endpoint::ZstdTcp {
-        host: omq_compio::endpoint::Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
-        port,
-    }
-}
-
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
@@ -514,20 +506,6 @@ async fn push_pull_connect_before_bind_lz4() {
 #[compio::test]
 async fn req_rep_connect_before_bind_lz4() {
     req_rep_connect_before_bind(lz4_ep(free_tcp_port())).await;
-}
-
-// -- zstd+tcp ----------------------------------------------------------------
-
-#[cfg(feature = "zstd")]
-#[compio::test]
-async fn push_pull_connect_before_bind_zstd() {
-    push_pull_connect_before_bind(zstd_ep(free_tcp_port())).await;
-}
-
-#[cfg(feature = "zstd")]
-#[compio::test]
-async fn req_rep_connect_before_bind_zstd() {
-    req_rep_connect_before_bind(zstd_ep(free_tcp_port())).await;
 }
 
 // -- ws ----------------------------------------------------------------------

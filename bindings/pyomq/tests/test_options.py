@@ -249,7 +249,7 @@ def test_has_feature():
     assert zmq.has("pgm") is False
     assert isinstance(zmq.has("curve"), bool)
     assert isinstance(zmq.has("lz4"), bool)
-    assert isinstance(zmq.has("zstd"), bool)
+    assert zmq.has("zstd") is False
     assert isinstance(zmq.has("plain"), bool)
     assert zmq.has("gssapi") is False
     assert zmq.has("INPROC") is True

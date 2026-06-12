@@ -83,32 +83,22 @@ pub struct Options {
     /// Active security mechanism. Defaults to `Null` (no encryption).
     pub mechanism: MechanismSetup,
 
-    /// Outbound compression dictionary. Used by `lz4+tcp://` (and, when it
-    /// lands, `zstd+tcp://`); ignored on plain transports. The dict is
-    /// shipped to the peer once per connection; subsequent parts are
-    /// compressed against it. Must be 1..=8192 bytes.
+    /// Outbound compression dictionary. Used by `lz4+tcp://`; ignored
+    /// on plain transports. The dict is shipped to the peer once per
+    /// connection; subsequent parts are compressed against it.
+    /// Must be 1..=8192 bytes.
     pub compression_dict: Option<Bytes>,
 
-    /// Zstd auto-trained dictionaries (RFC §6.5). Defaults to **on**.
-    /// When neither `compression_dict` nor any other dict source
-    /// is configured on a `zstd+tcp://` connection, the encoder
-    /// samples the first 1000 outbound messages or 100 KiB total
-    /// plaintext (whichever fires first), trains a dict (capacity
-    /// controlled by `compression_dict_capacity`, default 2 KiB),
-    /// and ships it. After that the per-frame compression threshold
-    /// drops from 512 B to 64 B and small messages start riding the
-    /// dict. Setting `compression_dict` overrides: auto-train is
-    /// silently disabled when a static dict is supplied.
-    /// Ignored by `lz4+tcp://` (LZ4 has no standard trainer).
+    /// Auto-trained dictionaries. Defaults to **on**.
+    /// When no `compression_dict` is configured on a compression
+    /// transport, the encoder samples outbound messages, trains a
+    /// dict (capacity controlled by `compression_dict_capacity`,
+    /// default 2 KiB), and ships it. Setting `compression_dict`
+    /// overrides: auto-train is silently disabled when a static
+    /// dict is supplied.
     /// Set to `false` to suppress training (e.g. tests that need a
     /// deterministic wire shape).
     pub compression_auto_train: bool,
-
-    /// Zstd compression level. Negative values select the "fast" strategy
-    /// (lower ratio, higher speed); 0 maps to zstd's default (level 3);
-    /// positive values trade speed for ratio. Ignored by `lz4+tcp://`.
-    /// Default: -3.
-    pub compression_level: i32,
 
     /// Minimum payload size (bytes) before compression is attempted.
     /// Messages smaller than this are sent uncompressed regardless of
@@ -117,9 +107,9 @@ pub struct Options {
     /// where compressing tiny messages wastes CPU.
     pub compression_threshold: Option<usize>,
 
-    /// Zstd auto-train dict capacity in bytes. Controls the maximum
-    /// size of the dictionary produced by auto-training. Default: 2048.
-    /// Ignored by `lz4+tcp://` and when `compression_dict` is set.
+    /// Auto-train dict capacity in bytes. Controls the maximum size of
+    /// the dictionary produced by auto-training. Default: 2048.
+    /// Ignored when `compression_dict` is set.
     pub compression_dict_capacity: Option<usize>,
 
     /// Maximum dictionary size (bytes) accepted from a peer. Dicts
@@ -221,7 +211,6 @@ impl Default for Options {
             mechanism: MechanismSetup::Null,
             compression_dict: None,
             compression_auto_train: true,
-            compression_level: -3,
             compression_threshold: None,
             compression_dict_capacity: None,
             max_recv_dict_size: None,
@@ -567,9 +556,9 @@ impl Options {
         self
     }
 
-    /// Set the outbound compression dictionary. Used by compression
-    /// transports (`lz4+tcp://`, future `zstd+tcp://`). Panics if the dict
-    /// is empty or larger than 8192 bytes (`omq-lz4` RFC §6.2).
+    /// Set the outbound compression dictionary. Used by `lz4+tcp://`.
+    /// Panics if the dict is empty or larger than 8192 bytes (RFC §6.2).
+    /// Disables auto-training when set.
     #[must_use]
     pub fn compression_dict(mut self, dict: impl Into<Bytes>) -> Self {
         let dict = dict.into();
@@ -582,21 +571,12 @@ impl Options {
         self
     }
 
-    /// Toggle Zstd auto-trained dictionaries (`zstd+tcp://` only).
+    /// Toggle auto-trained dictionaries (`lz4+tcp://`).
     /// On by default; pass `false` to suppress training. See
     /// [`Options::compression_auto_train`] for semantics.
     #[must_use]
     pub fn compression_auto_train(mut self, enabled: bool) -> Self {
         self.compression_auto_train = enabled;
-        self
-    }
-
-    /// Set the zstd compression level (default -3). Negative = fast
-    /// strategy, 0 = zstd default (3), positive = higher ratio.
-    /// Ignored by `lz4+tcp://`.
-    #[must_use]
-    pub fn compression_level(mut self, level: i32) -> Self {
-        self.compression_level = level;
         self
     }
 
@@ -610,9 +590,8 @@ impl Options {
         self
     }
 
-    /// Set the zstd auto-train dictionary capacity in bytes
-    /// (default 2048). Ignored by `lz4+tcp://` and when
-    /// `compression_dict` is set.
+    /// Set the auto-train dictionary capacity in bytes
+    /// (default 2048). Ignored when `compression_dict` is set.
     #[must_use]
     pub fn compression_dict_capacity(mut self, capacity: usize) -> Self {
         self.compression_dict_capacity = Some(capacity);

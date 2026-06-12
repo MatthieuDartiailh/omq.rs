@@ -2,7 +2,7 @@
 //!
 //! Wire-compatible with libzmq. All 11 standard socket types plus 7
 //! draft types, TCP / IPC / inproc / UDP transports, NULL / CURVE /
-//! blake3zmq mechanisms, lz4+tcp / zstd+tcp compression transports.
+//! blake3zmq mechanisms, lz4+tcp compression transport.
 //!
 //! The codec, message types, mechanism handshakes, and routing
 //! algorithms live in the runtime-agnostic `omq-proto` crate.

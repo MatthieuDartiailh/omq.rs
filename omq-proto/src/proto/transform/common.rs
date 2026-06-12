@@ -1,4 +1,4 @@
-//! Scaffolding shared between compression transforms (`lz4`, `zstd`).
+//! Scaffolding shared by compression transforms.
 //!
 //! The wire format details (sentinel bytes, dict caps, compression
 //! thresholds) live in the per-transport modules; the helpers below
@@ -10,7 +10,6 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-#[cfg(feature = "lz4")]
 use crate::message::Message;
 use crate::message::Payload;
 
@@ -54,8 +53,8 @@ pub(super) fn plaintext_payload(plain: &Bytes) -> Payload {
 }
 
 /// Validate a send-side or received dictionary against the transport's
-/// `max_bytes` cap. `label` ("LZ4" / "Zstd") goes into the error
-/// message so the caller's context is preserved.
+/// `max_bytes` cap. `label` goes into the error message so the
+/// caller's context is preserved.
 pub(super) fn validate_dict(dict: &Bytes, label: &str, max_bytes: usize) -> Result<()> {
     if dict.is_empty() {
         return Err(Error::Protocol(format!(
@@ -72,11 +71,7 @@ pub(super) fn validate_dict(dict: &Bytes, label: &str, max_bytes: usize) -> Resu
 }
 
 /// Build a single-part ZMTP message carrying a dict shipment:
-/// `sentinel | dict_bytes`. Used by transports whose dict body is
-/// arbitrary (lz4) and therefore needs an explicit sentinel prefix.
-/// Zstd does not use this — its dict bodies always begin with
-/// `ZDICT_MAGIC`, which doubles as the wire discriminator.
-#[cfg(feature = "lz4")]
+/// `sentinel | dict_bytes`.
 pub(super) fn build_dict_shipment(sentinel: [u8; 4], dict: &Bytes) -> Message {
     let mut frame = BytesMut::with_capacity(4 + dict.len());
     frame.extend_from_slice(&sentinel);
