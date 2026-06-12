@@ -6,6 +6,7 @@ mod test_support;
 use std::time::Duration;
 
 use bytes::Bytes;
+#[cfg(unix)]
 use omq_tokio::endpoint::IpcPath;
 use omq_tokio::{Endpoint, Message, Options, ReconnectPolicy, Socket, SocketType};
 
@@ -32,6 +33,7 @@ fn inproc_ep(tag: &str, round: usize) -> Endpoint {
     }
 }
 
+#[cfg(unix)]
 fn ipc_ep(tag: &str, round: usize) -> Endpoint {
     Endpoint::Ipc(IpcPath::Abstract(format!(
         "omq-stress-cbb-{tag}-{round}-{}-{}",
@@ -42,6 +44,7 @@ fn ipc_ep(tag: &str, round: usize) -> Endpoint {
 
 enum Transport {
     Tcp,
+    #[cfg(unix)]
     Ipc,
     Inproc,
 }
@@ -49,6 +52,7 @@ enum Transport {
 fn ep_for(transport: &Transport, tag: &str, round: usize) -> Endpoint {
     match transport {
         Transport::Tcp => tcp_ep(),
+        #[cfg(unix)]
         Transport::Ipc => ipc_ep(tag, round),
         Transport::Inproc => inproc_ep(tag, round),
     }
@@ -268,38 +272,47 @@ async fn dealer_router_tcp_dealer_binds() {
 // ── IPC ─────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[cfg(unix)]
 async fn push_pull_ipc_push_binds() {
     stress_push_pull(&Transport::Ipc, "push").await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn push_pull_ipc_pull_binds() {
     stress_push_pull(&Transport::Ipc, "pull").await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn req_rep_ipc_rep_binds() {
     stress_req_rep(&Transport::Ipc, "rep").await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn req_rep_ipc_req_binds() {
     stress_req_rep(&Transport::Ipc, "req").await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn pub_sub_ipc_pub_binds() {
     stress_pub_sub(&Transport::Ipc, "pub").await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn pub_sub_ipc_sub_binds() {
     stress_pub_sub(&Transport::Ipc, "sub").await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn pair_ipc() {
     stress_pair(&Transport::Ipc).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn dealer_router_ipc_router_binds() {
     stress_dealer_router(&Transport::Ipc, "router").await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn dealer_router_ipc_dealer_binds() {
     stress_dealer_router(&Transport::Ipc, "dealer").await;
 }

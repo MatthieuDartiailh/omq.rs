@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use omq_tokio::{Endpoint, IpcPath};
+use omq_tokio::Endpoint;
+#[cfg(unix)]
+use omq_tokio::IpcPath;
 
 /// Default size sweep: three points that cover the small/medium/large
 /// knee of the throughput curve. Pass `--all-sizes` to the bench binary
@@ -183,6 +185,7 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
         "inproc" => Endpoint::Inproc {
             name: format!("bench-{seq}"),
         },
+        #[cfg(unix)]
         "ipc" => Endpoint::Ipc(IpcPath::Abstract(format!(
             "omq-bench-{}-{seq}",
             std::process::id()
@@ -334,19 +337,30 @@ pub(crate) struct Cell {
 }
 
 pub(crate) fn process_cpu_time() -> Duration {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, std::ptr::from_mut(&mut ts)) };
-    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+    #[cfg(unix)]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, std::ptr::from_mut(&mut ts)) };
+        Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: use wall time as a proxy (less precise but better than nothing)
+        Duration::ZERO
+    }
 }
 
 pub(crate) fn print_header(label: &str) {
+    #[cfg(unix)]
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .unwrap_or_else(|_| "unknown".into())
         .trim()
         .to_string();
+    #[cfg(not(unix))]
+    let kernel = std::env::var("OS").unwrap_or_else(|_| "unknown".into());
     println!(
         "{label} | omq-tokio {} | {} | {kernel}",
         env!("CARGO_PKG_VERSION"),

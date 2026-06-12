@@ -9,17 +9,33 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use omq_tokio::endpoint::Host;
-use omq_tokio::{CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
+use omq_tokio::{CurveKeypair, Endpoint, Message, Options, Socket, SocketType};
 
-fn temp_ipc(name: &str) -> Endpoint {
+fn tcp_ep(port: u16) -> Endpoint {
+    use std::net::{IpAddr, Ipv4Addr};
+    Endpoint::Tcp {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port,
+    }
+}
+
+// Authentication tests must use a real transport (IPC on Unix, TCP on Windows)
+// because inproc bypasses authentication (no wire codec in fast path)
+#[cfg(unix)]
+fn auth_ep(name: &str) -> Endpoint {
+    use omq_tokio::IpcPath;
     Endpoint::Ipc(IpcPath::Abstract(format!(
         "omq-curve-{name}-{}",
         std::process::id()
     )))
 }
 
-fn tcp_ep(port: u16) -> Endpoint {
+#[cfg(not(unix))]
+fn auth_ep(_name: &str) -> Endpoint {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static PORT: AtomicU16 = AtomicU16::new(12000);
+    let port = PORT.fetch_add(1, Ordering::SeqCst);
     Endpoint::Tcp {
         host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         port,
@@ -32,7 +48,7 @@ async fn curve_push_pull_roundtrip_over_ipc() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let ep = temp_ipc("push-pull");
+    let ep = auth_ep("push-pull");
 
     let server = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     server.bind(ep.clone()).await.unwrap();
@@ -60,7 +76,7 @@ async fn curve_multipart_roundtrip() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let ep = temp_ipc("multipart");
+    let ep = auth_ep("multipart");
 
     let pair_a = Socket::new(SocketType::Pair, Options::default().curve_server(server_kp));
     pair_a.bind(ep.clone()).await.unwrap();
@@ -94,7 +110,7 @@ async fn curve_wrong_server_key_fails_handshake() {
     // server actually has -- handshake should fail.
     let wrong_pub = CurveKeypair::generate().public;
 
-    let ep = temp_ipc("wrong-key");
+    let ep = auth_ep("wrong-key");
 
     let server = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     server.bind(ep.clone()).await.unwrap();
@@ -125,7 +141,7 @@ async fn curve_emits_handshake_succeeded_with_curve_mechanism() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let ep = temp_ipc("monitor");
+    let ep = auth_ep("monitor");
     let server = Socket::new(SocketType::Pair, Options::default().curve_server(server_kp));
     let mut mon = server.monitor();
     server.bind(ep.clone()).await.unwrap();
@@ -158,7 +174,7 @@ async fn curve_authenticator_admits_known_client() {
     let server_pub = server_kp.public;
     let allowed = client_kp.public.0;
 
-    let ep = temp_ipc("auth-allow");
+    let ep = auth_ep("auth-allow");
 
     let saw_callback = Arc::new(AtomicBool::new(false));
     let saw_callback_cb = saw_callback.clone();
@@ -198,7 +214,7 @@ async fn curve_authenticator_rejects_unknown_client() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let ep = temp_ipc("auth-deny");
+    let ep = auth_ep("auth-deny");
 
     let server = Socket::new(
         SocketType::Pull,
@@ -238,7 +254,7 @@ async fn curve_req_rep() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = temp_ipc("req-rep");
+    let ep = auth_ep("req-rep");
 
     let rep = Socket::new(SocketType::Rep, Options::default().curve_server(server_kp));
     rep.bind(ep.clone()).await.unwrap();
@@ -267,7 +283,7 @@ async fn curve_dealer_router() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = temp_ipc("dealer-router");
+    let ep = auth_ep("dealer-router");
 
     let router = Socket::new(
         SocketType::Router,
@@ -297,7 +313,7 @@ async fn curve_pub_sub() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = temp_ipc("pub-sub");
+    let ep = auth_ep("pub-sub");
 
     let p = Socket::new(SocketType::Pub, Options::default().curve_server(server_kp));
     p.bind(ep.clone()).await.unwrap();

@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! IPC (Unix domain socket) end-to-end tests.
 
 mod test_support;
