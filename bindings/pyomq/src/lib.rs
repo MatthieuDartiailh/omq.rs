@@ -53,6 +53,11 @@ impl<'py> FromPyObject<'py> for AnySocket {
 
 #[pymodule]
 fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Check for OMQ_EXECUTOR_TYPE environment variable to auto-configure executor.
+    if let Ok(mode_str) = std::env::var("OMQ_EXECUTOR_TYPE") {
+        let _ = set_executor_type(&mode_str);
+    }
+
     socket::register_atfork();
     constants::register(m)?;
     error::register(py, m)?;
@@ -66,6 +71,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wait_any, m)?)?;
     m.add_function(wrap_pyfunction!(native_proxy, m)?)?;
     m.add_function(wrap_pyfunction!(has_feature, m)?)?;
+    m.add_function(wrap_pyfunction!(set_executor_type, m)?)?;
+    m.add_function(wrap_pyfunction!(get_executor_mode, m)?)?;
     #[cfg(feature = "curve")]
     {
         m.add_class::<auth::PeerInfo>()?;
@@ -184,4 +191,14 @@ fn backend_name() -> &'static str {
 #[pyfunction]
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+#[pyfunction]
+fn set_executor_type(mode: &str) -> PyResult<()> {
+    runtime::set_executor_type(mode)
+}
+
+#[pyfunction]
+fn get_executor_mode() -> String {
+    runtime::get_executor_mode()
 }

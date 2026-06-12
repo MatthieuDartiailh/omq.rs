@@ -18,12 +18,17 @@ workspace = true
 # Minimal default: NULL mechanism + TCP / IPC / inproc / UDP only.
 # All crypto and compression features are opt-in. See `omq-proto`'s
 # Cargo.toml for the catalog.
-default = []
+default = ["rt-multi-thread"]
 curve = ["omq-proto/curve"]
 blake3zmq = ["omq-proto/blake3zmq"]
 plain = ["omq-proto/plain"]
 lz4 = ["omq-proto/lz4"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfile", "dep:rustls-pki-types", "dep:tokio-rustls"]
+# Executor runtime: single-threaded current-thread or multi-threaded.
+# Can be enabled simultaneously for runtime selection.
+# If neither is enabled, defaults to multi-threaded.
+rt-single-thread = []
+rt-multi-thread = []
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
 # `cargo test`. Run with `cargo test --features fuzz`.

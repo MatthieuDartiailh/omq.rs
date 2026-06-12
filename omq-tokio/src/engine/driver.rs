@@ -874,8 +874,8 @@ type OffloadPipeline = FuturesOrdered<
 >;
 
 /// Submit one message to the offload pipeline. Large messages (above
-/// `threshold`) get `spawn_blocking` via a pool encoder; small messages
-/// and pool-exhausted fallbacks are encoded inline on the driver thread.
+/// `threshold`) get `spawn_blocking` via a pool encoder (unless in single-threaded
+/// mode); small messages and pool-exhausted fallbacks are encoded inline on the driver thread.
 #[allow(unused_variables)]
 fn submit_to_pipeline(
     msg: &Message,
@@ -885,24 +885,60 @@ fn submit_to_pipeline(
     pipeline: &mut OffloadPipeline,
 ) {
     #[cfg(feature = "lz4")]
-    if msg.byte_len() >= threshold
-        && let Some(mut pool_enc) = pool.try_take(encoder)
     {
-        let msg = msg.clone();
-        let handle = tokio::task::spawn_blocking(move || {
-            let result = pool_enc.encode(&msg);
-            (Some(pool_enc), result)
-        });
-        pipeline.push_back(Box::pin(async move {
-            match handle.await {
-                Ok(pair) => pair,
-                Err(_) => (
-                    None,
-                    Err(Error::Protocol("compression offload task panicked".into())),
-                ),
+        // Decide at compile time whether spawn_blocking can be used, or use runtime check
+        // when both features are available.
+        #[cfg(all(feature = "rt-multi-thread", not(feature = "rt-single-thread")))]
+        {
+            // Only multi-threaded available: always use spawn_blocking for large messages
+            if msg.byte_len() >= threshold
+                && let Some(mut pool_enc) = pool.try_take(encoder)
+            {
+                let msg = msg.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let result = pool_enc.encode(&msg);
+                    (Some(pool_enc), result)
+                });
+                pipeline.push_back(Box::pin(async move {
+                    match handle.await {
+                        Ok(pair) => pair,
+                        Err(_) => (
+                            None,
+                            Err(Error::Protocol("compression offload task panicked".into())),
+                        ),
+                    }
+                }));
+                return;
             }
-        }));
-        return;
+        }
+
+        #[cfg(feature = "rt-single-thread")]
+        {
+            // Single-threaded available: check at runtime if we can use spawn_blocking
+            let is_single_threaded = crate::runtime_config::executor_mode()
+                == crate::runtime_config::ExecutorMode::SingleThread;
+
+            if msg.byte_len() >= threshold
+                && !is_single_threaded
+                && let Some(mut pool_enc) = pool.try_take(encoder)
+            {
+                let msg = msg.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let result = pool_enc.encode(&msg);
+                    (Some(pool_enc), result)
+                });
+                pipeline.push_back(Box::pin(async move {
+                    match handle.await {
+                        Ok(pair) => pair,
+                        Err(_) => (
+                            None,
+                            Err(Error::Protocol("compression offload task panicked".into())),
+                        ),
+                    }
+                }));
+                return;
+            }
+        }
     }
     let result = encoder.encode(msg);
     pipeline.push_back(Box::pin(futures::future::ready((None, result))));

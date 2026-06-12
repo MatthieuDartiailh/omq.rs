@@ -11,6 +11,7 @@
 
 pub mod engine;
 pub(crate) mod routing;
+pub mod runtime_config;
 pub mod socket;
 pub mod transport;
 
@@ -41,4 +42,9 @@ pub use omq_proto::proto;
 pub use socket::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket,
+};
+
+// Runtime executor configuration.
+pub use runtime_config::{
+    ExecutorMode, compute_thread_count, executor_mode, set_executor_mode,
 };

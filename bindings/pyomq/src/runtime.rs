@@ -48,15 +48,39 @@ fn ensure_runtime() -> (Handle, flume::Sender<Job>, Arc<crate::socket::RecvNotif
     let (tx, rx) = flume::unbounded::<Job>();
     let recv_ready = Arc::new(crate::socket::RecvNotify::new());
     let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
-    let n = IO_THREADS.load(Ordering::Relaxed) as usize;
+    let executor_mode = omq_tokio::executor_mode();
     thread::Builder::new()
         .name("pyomq-tokio".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(n.max(1))
-                .enable_all()
-                .build()
-                .expect("pyomq: tokio runtime build");
+            // Build runtime based on executor mode. When only one runtime is available,
+            // the match arms collapse at compile time to a single path.
+            let rt = match executor_mode {
+                #[cfg(feature = "rt-single-thread")]
+                omq_tokio::ExecutorMode::SingleThread => {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("pyomq: tokio runtime build (single-threaded)")
+                }
+                #[cfg(feature = "rt-multi-thread")]
+                omq_tokio::ExecutorMode::MultiThread(None) => {
+                    let n = omq_tokio::compute_thread_count(executor_mode);
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(n)
+                        .enable_all()
+                        .build()
+                        .expect("pyomq: tokio runtime build (multi-threaded auto)")
+                }
+                #[cfg(feature = "rt-multi-thread")]
+                omq_tokio::ExecutorMode::MultiThread(Some(thread_count)) => {
+                    let n = thread_count.get();
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(n)
+                        .enable_all()
+                        .build()
+                        .expect("pyomq: tokio runtime build (multi-threaded)")
+                }
+            };
             let _ = handle_tx.send(rt.handle().clone());
             rt.block_on(async move {
                 while let Ok(job) = rx.recv_async().await {
@@ -513,6 +537,25 @@ pub fn wait_any(
 
 /// Return an already-resolved `asyncio.Future`. Avoids the tokio
 /// spawn + `call_soon_threadsafe` round trip for fast-path results.
+
+/// Set the executor mode. Accepts formats based on enabled features:
+/// - When `rt-single-thread` is available: "single"
+/// - When `rt-multi-thread` is available: "multi" or "multi:N"
+/// - When both are available: all formats
+/// Must be called before any socket is created.
+pub fn set_executor_type(mode_str: &str) -> pyo3::PyResult<()> {
+    let mode = omq_tokio::ExecutorMode::from_str(mode_str)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+    omq_tokio::set_executor_mode(mode).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// Get the current executor mode as a string based on enabled features:
+/// - If single-threaded: "single"
+/// - If multi-threaded auto: "multi"
+/// - If multi-threaded with explicit count: "multi:N"
+pub fn get_executor_mode() -> String {
+    omq_tokio::executor_mode().display()
+}
 /// Bridge a Rust future to a Python `asyncio.Future`.
 ///
 /// 1. Acquires the running asyncio loop on the calling Python thread.
