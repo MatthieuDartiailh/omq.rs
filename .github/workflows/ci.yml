@@ -35,25 +35,42 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.93"]
-        os: [ubuntu-latest, ubuntu-24.04-arm]
-        exclude:
-          - toolchain: "1.93"
+        include:
+          - toolchain: stable
+            os: ubuntu-latest
+          - toolchain: stable
             os: ubuntu-24.04-arm
+          - toolchain: "1.93"
+            os: ubuntu-latest
+          - toolchain: stable
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - toolchain: stable
+            os: windows-latest
+            target: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
-      - name: workspace tests (default features)
+      - name: Linux workspace tests (default features)
+        if: runner.os != 'Windows'
         run: cargo test --workspace --exclude omq-compio
+      - name: Windows workspace tests (default features)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --exclude omq-compio --exclude omq-libzmq
 
   encryption:
-    name: encryption (curve + blake3zmq)
+    name: encryption (curve + blake3zmq, ${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -62,10 +79,14 @@ jobs:
       - run: cargo test -p omq-tokio --features blake3zmq
 
   compression:
-    name: compression
+    name: compression (${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -77,20 +98,33 @@ jobs:
     name: fmt + clippy
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { components: rustfmt, clippy }
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --exclude omq-compio
+      - name: Linux workspace tests (default features)
+        if: runner.os != 'Windows'
+        run: cargo clippy --workspace --all-targets --exclude omq-compio
+      - name: Windows workspace tests (default features)
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-targets --exclude omq-compio --exclude omq-libzmq
 
   interop:
-    name: interop (ruby + pyomq)
+    name: interop (${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -103,7 +137,7 @@ jobs:
         run: cargo test -p omq-tokio --test interop_ruby
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
-      - name: create virtualenv and install python deps
+      - name: create virtualenv and install python deps (Linux)
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin pytest pytest-asyncio pyzmq
