@@ -10,6 +10,7 @@
 //! sustained traffic exercises the per-part `LZ4B` envelope and the
 //! plaintext-passthrough sentinel against a non-Rust encoder.
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -77,9 +78,15 @@ impl std::ops::Deref for ChildGuard {
 
 impl ChildGuard {
     // Kill the whole process group (sh + yes + omq push pipeline children).
+    // On Unix, kills the entire process group. On Windows, kills just the process.
     fn kill(&mut self) {
-        if let Some(c) = &self.0 {
-            unsafe { libc::kill(-c.id().cast_signed(), libc::SIGKILL) };
+        if let Some(c) = &mut self.0 {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(c.id().cast_signed()), libc::SIGKILL);
+            }
+            #[cfg(not(unix))]
+            let _ = c.kill();
         }
     }
 }
@@ -87,7 +94,12 @@ impl ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         if let Some(mut c) = self.0.take() {
-            unsafe { libc::kill(-c.id().cast_signed(), libc::SIGKILL) };
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(c.id().cast_signed()), libc::SIGKILL);
+            }
+            #[cfg(not(unix))]
+            let _ = c.kill();
             let _ = c.wait();
         }
     }
@@ -148,18 +160,53 @@ async fn ruby_push_lz4_tcp_sustained() {
 
     let expected = PAYLOAD_UNIT.repeat(5);
 
-    let mut guard = ChildGuard::new(
-        Command::new("sh")
-            .process_group(0)
-            .arg("-c")
-            .arg(format!(
-                "yes '{PAYLOAD_UNIT}' | omq push -c {cli_ep} -i0.005 -E 'it.first * 5'"
-            ))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn ruby omq push"),
-    );
+    // Spawn omq push directly without shell intermediary (cross-platform).
+    // We'll feed input via stdin from a spawned task.
+    #[cfg(unix)]
+    let mut cmd = {
+        use std::os::unix::process::CommandExt as _;
+        let mut cmd = Command::new("omq");
+        cmd.process_group(0);
+        cmd
+    };
+    #[cfg(not(unix))]
+    let mut cmd = Command::new("omq");
+
+    let mut child = cmd
+        .arg("push")
+        .arg("-c")
+        .arg(&cli_ep)
+        .arg("-i")
+        .arg("0.005")
+        .arg("-E")
+        .arg("it.first * 5")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn omq push");
+
+    let stdin = child.stdin.take().expect("failed to get stdin");
+    let mut guard = ChildGuard::new(child);
+
+    // Spawn a task to write payloads to stdin at regular intervals.
+    // Each write is one "line" (PAYLOAD_UNIT + newline), which omq push
+    // will read, transform via -E, and send.
+    let write_duration = WARMUP + RUN_FOR;
+    let payload_unit = PAYLOAD_UNIT.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        use std::time::Instant;
+        let writer_deadline = Instant::now() + write_duration;
+        let mut writer = std::io::BufWriter::new(stdin);
+        while Instant::now() < writer_deadline {
+            let _ = writeln!(writer, "{}", payload_unit);
+            let _ = writer.flush();
+            // Small sleep to avoid overwhelming the buffer; -i0.005 will throttle sends.
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // writer.close() will close stdin, signaling EOF to omq push
+    });
 
     // Wait for the Ruby CLI to connect and complete the ZMTP handshake
     // before starting the throughput timer.

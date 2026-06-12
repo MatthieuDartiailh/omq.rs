@@ -13,7 +13,9 @@ use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use omq_proto::endpoint::{Host, IpcPath};
+use omq_proto::endpoint::Host;
+#[cfg(unix)]
+use omq_proto::endpoint::IpcPath;
 #[cfg(feature = "curve")]
 use omq_proto::proto::mechanism::CurveKeypair;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
@@ -130,6 +132,7 @@ async fn bind_tcp_or_ipc(sock: &Socket, t: &Transport) -> String {
     }
 }
 
+#[cfg(unix)]
 fn ipc_transport(name: &str) -> Transport {
     let abstract_name = format!(
         "omq-interop-{name}-{}-{}",
@@ -210,6 +213,7 @@ async fn rust_push_to_ruby_pull_tcp() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn rust_push_to_ruby_pull_ipc() {
     if skip_if_no_omq() {
         return;
@@ -263,6 +267,7 @@ async fn ruby_push_to_rust_pull_tcp() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ruby_push_to_rust_pull_ipc() {
     if skip_if_no_omq() {
         return;
@@ -315,6 +320,7 @@ async fn rust_req_to_ruby_rep_tcp() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn rust_req_to_ruby_rep_ipc() {
     if skip_if_no_omq() {
         return;
@@ -375,6 +381,7 @@ async fn rust_pub_to_ruby_sub_tcp() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn rust_pub_to_ruby_sub_ipc() {
     if skip_if_no_omq() {
         return;
@@ -436,6 +443,7 @@ async fn rust_router_sees_ruby_dealer_identity_tcp() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn rust_router_sees_ruby_dealer_identity_ipc() {
     if skip_if_no_omq() {
         return;
@@ -499,6 +507,7 @@ async fn rust_radio_to_ruby_dish_tcp() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn rust_radio_to_ruby_dish_ipc() {
     if skip_if_no_omq() {
         return;

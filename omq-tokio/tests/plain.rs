@@ -7,13 +7,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
+use omq_tokio::endpoint::Host;
+use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
-fn temp_ipc(name: &str) -> Endpoint {
+// Authentication tests must use a real transport (IPC on Unix, TCP on Windows)
+// because inproc bypasses authentication (no wire codec in fast path)
+#[cfg(unix)]
+fn auth_ep(name: &str) -> Endpoint {
+    use omq_tokio::IpcPath;
     Endpoint::Ipc(IpcPath::Abstract(format!(
         "omq-plain-{name}-{}",
         std::process::id()
     )))
+}
+
+#[cfg(not(unix))]
+fn auth_ep(_name: &str) -> Endpoint {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static PORT: AtomicU16 = AtomicU16::new(13000);
+    let port = PORT.fetch_add(1, Ordering::SeqCst);
+    Endpoint::Tcp {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port,
+    }
 }
 
 fn accept_alice(peer: &omq_tokio::MechanismPeerInfo) -> bool {
@@ -22,7 +39,7 @@ fn accept_alice(peer: &omq_tokio::MechanismPeerInfo) -> bool {
 
 #[tokio::test]
 async fn plain_push_pull_roundtrip() {
-    let ep = temp_ipc("push-pull");
+    let ep = auth_ep("push-pull");
 
     let server = Socket::new(
         SocketType::Pull,
@@ -49,7 +66,7 @@ async fn plain_push_pull_roundtrip() {
 
 #[tokio::test]
 async fn plain_multipart_roundtrip() {
-    let ep = temp_ipc("multipart");
+    let ep = auth_ep("multipart");
 
     let pair_a = Socket::new(
         SocketType::Pair,
@@ -80,7 +97,7 @@ async fn plain_multipart_roundtrip() {
 
 #[tokio::test]
 async fn plain_wrong_credentials_rejected() {
-    let ep = temp_ipc("wrong-creds");
+    let ep = auth_ep("wrong-creds");
 
     let server = Socket::new(
         SocketType::Pull,
@@ -107,7 +124,7 @@ async fn plain_wrong_credentials_rejected() {
 
 #[tokio::test]
 async fn plain_authenticator_callback_runs() {
-    let ep = temp_ipc("auth-callback");
+    let ep = auth_ep("auth-callback");
 
     let saw = Arc::new(AtomicBool::new(false));
     let saw_cb = saw.clone();
@@ -138,7 +155,7 @@ async fn plain_authenticator_callback_runs() {
 
 #[tokio::test]
 async fn plain_req_rep() {
-    let ep = temp_ipc("req-rep");
+    let ep = auth_ep("req-rep");
 
     let rep = Socket::new(
         SocketType::Rep,
@@ -169,7 +186,7 @@ async fn plain_req_rep() {
 
 #[tokio::test]
 async fn plain_dealer_router() {
-    let ep = temp_ipc("dealer-router");
+    let ep = auth_ep("dealer-router");
 
     let router = Socket::new(
         SocketType::Router,
@@ -197,7 +214,7 @@ async fn plain_dealer_router() {
 
 #[tokio::test]
 async fn plain_pub_sub() {
-    let ep = temp_ipc("pub-sub");
+    let ep = auth_ep("pub-sub");
 
     let p = Socket::new(
         SocketType::Pub,
@@ -224,7 +241,7 @@ async fn plain_pub_sub() {
 
 #[tokio::test]
 async fn plain_empty_message() {
-    let ep = temp_ipc("empty-msg");
+    let ep = auth_ep("empty-msg");
 
     let server = Socket::new(
         SocketType::Pull,
@@ -251,7 +268,7 @@ async fn plain_empty_message() {
 
 #[tokio::test]
 async fn plain_large_message() {
-    let ep = temp_ipc("large-msg");
+    let ep = auth_ep("large-msg");
 
     let server = Socket::new(
         SocketType::Pull,
@@ -278,7 +295,7 @@ async fn plain_large_message() {
 async fn plain_reconnect_after_server_restart() {
     use omq_tokio::options::ReconnectPolicy;
 
-    let ep = temp_ipc("reconnect");
+    let ep = auth_ep("reconnect");
 
     let server1 = Socket::new(
         SocketType::Pull,

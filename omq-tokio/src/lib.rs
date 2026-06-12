@@ -17,6 +17,8 @@ pub mod transport;
 // Re-export the sans-I/O surface so downstream callers don't have
 // to depend on omq-proto explicitly. Identical surface to the
 // pre-split crate.
+#[cfg(unix)]
+pub use omq_proto::IpcPath;
 #[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
 pub use omq_proto::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "blake3zmq")]
@@ -24,9 +26,9 @@ pub use omq_proto::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 #[cfg(feature = "curve")]
 pub use omq_proto::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
 pub use omq_proto::{
-    Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, IpcPath, KeepAlive,
-    MechanismConfig, MechanismSetup, Message, MessageIter, OnMute, Options, PartCountError,
-    ReconnectPolicy, Result, SocketType, TrySendError, is_compatible,
+    Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, KeepAlive, MechanismConfig,
+    MechanismSetup, Message, MessageIter, OnMute, Options, PartCountError, ReconnectPolicy, Result,
+    SocketType, TrySendError, is_compatible,
 };
 
 // Sub-modules of omq_proto are re-exported under their original

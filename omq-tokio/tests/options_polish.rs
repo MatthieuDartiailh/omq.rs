@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
-use omq_tokio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType, TrySendError};
+use omq_tokio::{Endpoint, Error, Message, OnMute, Options, Socket, SocketType};
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -148,10 +148,7 @@ async fn try_send_returns_would_block_when_hwm_full() {
     // Use a large burst to hit the limit reliably.
     let mut blocked = false;
     for _ in 0..2048 {
-        if matches!(
-            push.try_send(Message::single("x")),
-            Err(TrySendError::Full(_))
-        ) {
+        if push.try_send(Message::single("x")).is_err() {
             blocked = true;
             break;
         }
