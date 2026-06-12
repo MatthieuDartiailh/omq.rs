@@ -101,7 +101,7 @@ fn run_mechanism_storm(
             "[{name}] done: {delivered}/{cycles} delivered ({pct:.1}%) in {:.1}s",
             start.elapsed().as_secs_f64(),
         );
-        assert!(pct >= 70.0, "[{name}] delivery rate too low: {pct:.1}%",);
+        assert!(pct >= 70.0, "[{name}] delivery rate too low: {pct:.1}%");
     });
 
     let report = monitor.stop();

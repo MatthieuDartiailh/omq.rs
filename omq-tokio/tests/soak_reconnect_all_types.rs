@@ -186,7 +186,7 @@ fn soak_reconnect_all_types() {
                     } else {
                         100.0
                     };
-                    eprintln!("  {}: {}/{} ({pct:.0}%)", p.name, p.delivered, p.cycles,);
+                    eprintln!("  {}: {}/{} ({pct:.0}%)", p.name, p.delivered, p.cycles);
                 }
                 last_log = Instant::now();
             }
