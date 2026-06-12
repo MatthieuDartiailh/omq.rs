@@ -17,6 +17,17 @@
 use bytes::Bytes;
 use smallvec::SmallVec;
 
+/// Error returned by [`Message::try_as_parts`] when the message does not have
+/// the requested number of parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("expected {expected} message part(s), found {actual}")]
+pub struct PartCountError {
+    /// Number of parts requested.
+    pub expected: usize,
+    /// Number of parts the message actually has.
+    pub actual: usize,
+}
+
 /// Maximum payload bytes stored inline (no `Bytes` / Arc).
 /// 62 is the largest value that keeps `Payload` at 64 bytes (one cache line).
 pub const MAX_INLINE_PAYLOAD: usize = 62;
@@ -390,6 +401,28 @@ impl Message {
         }
     }
 
+    /// Borrow exactly `N` parts as an array of `Bytes`.
+    ///
+    /// Returns [`PartCountError`] if the message has a different number of
+    /// parts. `Bytes` is refcounted, so the returned parts clone cheaply
+    /// without copying payload bytes.
+    ///
+    /// ```ignore
+    /// let [route, body] = msg.try_as_parts::<2>()?;
+    /// ```
+    pub fn try_as_parts<const N: usize>(&self) -> Result<[Bytes; N], PartCountError> {
+        let actual = self.len();
+        if actual != N {
+            return Err(PartCountError {
+                expected: N,
+                actual,
+            });
+        }
+        Ok(std::array::from_fn(|i| {
+            self.part_bytes(i).expect("index < len checked above")
+        }))
+    }
+
     /// Iterate parts, yielding `Bytes` per part.
     pub fn iter(&self) -> MessageIter<'_> {
         MessageIter { msg: self, pos: 0 }
@@ -700,6 +733,48 @@ pub fn generated_identity(id: u64) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_as_parts_exact_match() {
+        let msg = Message::multipart([&b"route"[..], &b"body"[..]]);
+        let [a, b] = msg.try_as_parts::<2>().unwrap();
+        assert_eq!(a, &b"route"[..]);
+        assert_eq!(b, &b"body"[..]);
+    }
+
+    #[test]
+    fn try_as_parts_single() {
+        let msg = Message::single(Bytes::from_static(b"solo"));
+        let [a] = msg.try_as_parts::<1>().unwrap();
+        assert_eq!(a, &b"solo"[..]);
+    }
+
+    #[test]
+    fn try_as_parts_count_mismatch() {
+        let msg = Message::multipart([&b"a"[..], &b"b"[..], &b"c"[..]]);
+        let err = msg.try_as_parts::<2>().unwrap_err();
+        assert_eq!(
+            err,
+            PartCountError {
+                expected: 2,
+                actual: 3
+            }
+        );
+        // borrows, so the message is still usable afterwards
+        assert_eq!(msg.len(), 3);
+    }
+
+    #[test]
+    fn try_as_parts_empty() {
+        let msg = Message::new();
+        assert_eq!(
+            msg.try_as_parts::<1>().unwrap_err(),
+            PartCountError {
+                expected: 1,
+                actual: 0
+            }
+        );
+    }
 
     #[test]
     fn payload_empty() {
