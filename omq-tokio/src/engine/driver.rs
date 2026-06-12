@@ -165,65 +165,70 @@ impl RecvSink {
     }
 }
 
-/// Batch-encode messages, then flush. Two modes:
+/// Batch-encode messages into `EncodedQueue`. Two modes:
 ///
 /// **Direct** (no encoder or offloading disabled): encode each message
-/// into `EncodedQueue` inline, flush once via `write_vectored`.
+/// into `EncodedQueue` inline.
 ///
 /// **Pipelined** (encoder present, offloading enabled): each message
 /// enters `FuturesOrdered` as either `spawn_blocking` (large) or
 /// `ready()` (small). After the batch loop, drain completed futures
-/// front-to-back into EQ and flush.
-macro_rules! batch_encode_flush {
-    ($first:expr, $try_recv:expr, $max_msgs:expr, $encoder:expr, $codec:expr,
-     $eq:expr, $drain_buf:expr, $writer:expr, $passthrough:expr,
-     $pool:expr, $threshold:expr, $pipeline:expr) => {{
-        let use_pipeline = $threshold > 0
-            && ($encoder).as_ref().is_some_and(|e| e.can_offload())
-            && ($pool).is_some();
-        if use_pipeline {
-            submit_to_pipeline(
-                &$first,
-                ($encoder).as_mut().unwrap(),
-                ($pool).as_ref().unwrap(),
-                $threshold,
-                $pipeline,
-            );
-        } else {
-            encode_msg(&$first, $encoder, $codec, $eq, $passthrough)?;
-        }
-        let mut count = 1usize;
-        let mut bytes = $first.byte_len();
-        let max_batch = $max_msgs;
-        while count < max_batch && bytes < max_batch_bytes() {
-            match $try_recv {
-                Some(next) => {
-                    bytes += next.byte_len();
-                    if use_pipeline {
-                        submit_to_pipeline(
-                            &next,
-                            ($encoder).as_mut().unwrap(),
-                            ($pool).as_ref().unwrap(),
-                            $threshold,
-                            $pipeline,
-                        );
-                    } else {
-                        encode_msg(&next, $encoder, $codec, $eq, $passthrough)?;
-                    }
-                    count += 1;
+/// front-to-back into EQ.
+///
+/// Does NOT flush to the writer. Call [`flush_all`] afterwards.
+#[expect(clippy::too_many_arguments)]
+async fn batch_encode(
+    first: &Message,
+    mut try_recv: impl FnMut() -> Option<Message>,
+    max_msgs: usize,
+    encoder: &mut Option<MessageEncoder>,
+    codec: &mut Connection,
+    eq: &mut EncodedQueue,
+    passthrough: Option<&(Bytes, usize)>,
+    pool: Option<&Arc<CompressionPool>>,
+    threshold: usize,
+    pipeline: &mut OffloadPipeline,
+) -> Result<usize> {
+    let use_pipeline = threshold > 0
+        && encoder.as_ref().is_some_and(MessageEncoder::can_offload)
+        && pool.is_some();
+    if use_pipeline {
+        submit_to_pipeline(
+            first,
+            encoder.as_mut().unwrap(),
+            pool.unwrap(),
+            threshold,
+            pipeline,
+        );
+    } else {
+        encode_msg(first, encoder, codec, eq, passthrough)?;
+    }
+    let mut count = 1usize;
+    let mut bytes = first.byte_len();
+    while count < max_msgs && bytes < max_batch_bytes() {
+        match try_recv() {
+            Some(next) => {
+                bytes += next.byte_len();
+                if use_pipeline {
+                    submit_to_pipeline(
+                        &next,
+                        encoder.as_mut().unwrap(),
+                        pool.unwrap(),
+                        threshold,
+                        pipeline,
+                    );
+                } else {
+                    encode_msg(&next, encoder, codec, eq, passthrough)?;
                 }
-                None => break,
+                count += 1;
             }
+            None => break,
         }
-        if use_pipeline {
-            drain_pipeline($pipeline, ($pool).as_ref(), $eq).await?;
-        }
-        flush_encoded_queue($writer, $eq, $drain_buf).await?;
-        while $codec.has_pending_transmit() {
-            flush_once($writer, $codec).await?;
-        }
-        count
-    }};
+    }
+    if use_pipeline {
+        drain_pipeline(pipeline, pool, eq).await?;
+    }
+    Ok(count)
 }
 
 const READ_BUF_SIZE: usize = 128 * 1024;
@@ -620,10 +625,7 @@ where
                     offload_pipeline.next().await
                 }, if !offload_pipeline.is_empty() => {
                     drain_offload_result(pool_enc, frames, compression_pool.as_ref(), &mut eq)?;
-                    flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
-                    while codec.has_pending_transmit() {
-                        flush_once(&mut writer, &mut codec).await?;
-                    }
+                    flush_all(&mut writer, &mut eq, &mut drain_buf, &mut codec).await?;
                 }
 
                 res = async {
@@ -636,35 +638,35 @@ where
                 cmd = inbox.recv() => match cmd {
                     Some(DriverCommand::SendMessage(first)) => {
                         let mut closing = false;
-                        let _ = batch_encode_flush!(
-                            first,
-                            match inbox.try_recv() {
+                        let mut deferred: SmallVec<[DriverCommand; 4]> =
+                            SmallVec::new();
+                        let _ = batch_encode(
+                            &first,
+                            || match inbox.try_recv() {
                                 Ok(DriverCommand::SendMessage(m)) => Some(m),
-                                Ok(DriverCommand::SendEncoded(chunks)) => {
-                                    eq.push_shared_chunks(&chunks);
-                                    None
-                                }
-                                Ok(DriverCommand::SendCommand(c)) => {
-                                    let _ = codec.send_command(&c);
-                                    None
-                                }
-                                Ok(DriverCommand::Close) => {
-                                    closing = true;
-                                    None
-                                }
+                                Ok(cmd) => { deferred.push(cmd); None }
                                 Err(_) => None,
                             },
                             SHARED_MAX_BATCH_MSGS,
-                            &mut encoder,
-                            &mut codec,
-                            &mut eq,
-                            &mut drain_buf,
-                            &mut writer,
-                            passthrough.as_ref(),
-                            &compression_pool,
-                            offload_threshold,
-                            &mut offload_pipeline
-                        );
+                            &mut encoder, &mut codec, &mut eq,
+                            passthrough.as_ref(), compression_pool.as_ref(),
+                            offload_threshold, &mut offload_pipeline,
+                        ).await?;
+                        for cmd in deferred {
+                            match cmd {
+                                DriverCommand::SendEncoded(chunks) => {
+                                    eq.push_shared_chunks(&chunks);
+                                }
+                                DriverCommand::SendCommand(c) => {
+                                    codec.send_command(&c)?;
+                                }
+                                DriverCommand::Close => closing = true,
+                                DriverCommand::SendMessage(_) => unreachable!(),
+                            }
+                        }
+                        flush_all(
+                            &mut writer, &mut eq, &mut drain_buf, &mut codec,
+                        ).await?;
                         if closing {
                             drain_writes(&mut writer, &mut codec).await.ok();
                             return Ok(());
@@ -676,7 +678,6 @@ where
                     }
                     Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
                     Some(DriverCommand::Close) | None => {
-                        // Drain any outbound bytes already queued before returning.
                         drain_writes(&mut writer, &mut codec).await.ok();
                         return Ok(());
                     }
@@ -690,22 +691,9 @@ where
                 }, if wire_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
-                    let slot = wire_slot.as_ref().unwrap();
-                    let mut batch_bytes = 0usize;
-                    loop {
-                        drain_buf.clear();
-                        slot.drain_into_vec(&mut drain_buf, 1024);
-                        if drain_buf.is_empty() {
-                            break;
-                        }
-                        batch_bytes +=
-                            drain_buf.iter().map(Bytes::len).sum::<usize>();
-                        write_chunks(&mut writer, &mut drain_buf).await?;
-                        slot.space_available.notify_one();
-                        if batch_bytes >= max_batch_bytes() {
-                            break;
-                        }
-                    }
+                    drain_wire_slot(
+                        wire_slot.as_ref().unwrap(), &mut drain_buf, &mut writer,
+                    ).await?;
                 },
 
                 // Shared-queue arm: batch-encodes up to
@@ -727,20 +715,19 @@ where
                             let batch_limit = shared_msg_rx
                                 .as_ref()
                                 .map_or(SHARED_MAX_BATCH_MSGS, QueueReceiver::batch_limit);
-                            let count = batch_encode_flush!(
-                                first,
-                                shared_msg_rx.as_ref().and_then(QueueReceiver::try_pop),
+                            let count = batch_encode(
+                                &first,
+                                || shared_msg_rx.as_ref().and_then(
+                                    QueueReceiver::try_pop,
+                                ),
                                 batch_limit,
-                                &mut encoder,
-                                &mut codec,
-                                &mut eq,
-                                &mut drain_buf,
-                                &mut writer,
-                                passthrough.as_ref(),
-                                &compression_pool,
-                                offload_threshold,
-                                &mut offload_pipeline
-                            );
+                                &mut encoder, &mut codec, &mut eq,
+                                passthrough.as_ref(), compression_pool.as_ref(),
+                                offload_threshold, &mut offload_pipeline,
+                            ).await?;
+                            flush_all(
+                                &mut writer, &mut eq, &mut drain_buf, &mut codec,
+                            ).await?;
                             if let Some(ref rx) = shared_msg_rx {
                                 rx.release_permits(count);
                             }
@@ -828,6 +815,44 @@ async fn drain_on_cancel<W: AsyncWrite + Unpin>(
     }
     let _ = flush_encoded_queue(writer, eq, drain_buf).await;
     drain_writes(writer, codec).await.ok();
+}
+
+/// Flush `EncodedQueue` to the writer, then drain any pending codec
+/// transmits (command frames queued during encoding).
+async fn flush_all<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    eq: &mut EncodedQueue,
+    drain_buf: &mut Vec<Bytes>,
+    codec: &mut Connection,
+) -> io::Result<()> {
+    flush_encoded_queue(writer, eq, drain_buf).await?;
+    while codec.has_pending_transmit() {
+        flush_once(writer, codec).await?;
+    }
+    Ok(())
+}
+
+/// Drain the per-peer [`PeerWireSlot`] and write directly to the wire.
+async fn drain_wire_slot<W: AsyncWrite + Unpin>(
+    slot: &PeerWireSlot,
+    drain_buf: &mut Vec<Bytes>,
+    writer: &mut W,
+) -> io::Result<()> {
+    let mut batch_bytes = 0usize;
+    loop {
+        drain_buf.clear();
+        slot.drain_into_vec(drain_buf, 1024);
+        if drain_buf.is_empty() {
+            break;
+        }
+        batch_bytes += drain_buf.iter().map(Bytes::len).sum::<usize>();
+        write_chunks(writer, drain_buf).await?;
+        slot.space_available.notify_one();
+        if batch_bytes >= max_batch_bytes() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// After reading bytes from the wire, check for large frames whose
