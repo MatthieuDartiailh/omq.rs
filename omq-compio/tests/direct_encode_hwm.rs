@@ -15,11 +15,11 @@ fn tcp_ep(port: u16) -> Endpoint {
     }
 }
 
-/// Fill the PUSH→PULL pipeline (receiver never reads), then verify
+/// Fill the PUSH->PULL pipeline (receiver never reads), then verify
 /// that `send()` blocks within a bounded number of messages.
 ///
-/// Uses 8 KiB payloads so kernel TCP buffers fill within hundreds of
-/// messages rather than tens of thousands.
+/// Uses 128 KiB payloads so kernel TCP buffers (which autoscale up to
+/// tcp_wmem max, often 4 MiB on Linux) fill within tens of messages.
 #[compio::test]
 async fn direct_encode_respects_send_hwm() {
     let hwm: u32 = 16;
@@ -30,7 +30,7 @@ async fn direct_encode_respects_send_hwm() {
     push.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
-    let payload = vec![0u8; 8 * 1024];
+    let payload = vec![0u8; 128 * 1024];
     let mut accepted = 0usize;
     for _ in 0..5000 {
         match compio::time::timeout(
@@ -44,14 +44,13 @@ async fn direct_encode_respects_send_hwm() {
         }
     }
 
-    // Total buffering: DIRECT_CAP / 8 KiB = 64 msgs (byte-capped)
-    // + send_hwm (cmd channel) + kernel TCP buffers (system-dependent,
-    // typically 128-512 KiB on Linux). At 8 KiB per message that gives
-    // roughly 64 + 16 + ~32 = ~112 messages before backpressure.
+    // Total buffering: DIRECT_CAP (512 KiB) / 128 KiB = 4 msgs +
+    // send_hwm 16 (cmd channel) + kernel TCP buffers (tcp_wmem max is
+    // typically 4 MiB on Linux = ~32 msgs at 128 KiB). Total ~52 msgs.
     assert!(
         accepted < 500,
-        "accepted {accepted} messages — expected backpressure well before 500 \
-         (8 KiB payloads × send_hwm {hwm})",
+        "accepted {accepted} messages -- expected backpressure well before 500 \
+         (128 KiB payloads x send_hwm {hwm})",
     );
 
     let _ = pull;
