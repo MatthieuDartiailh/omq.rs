@@ -39,17 +39,23 @@ fn soak_ipc_fanout_no_message_loss() {
         )));
 
     let recv_count = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
+    let sent_count = Arc::new(AtomicUsize::new(0));
+    let counting = Arc::new(AtomicBool::new(false));
+    let sending_done = Arc::new(AtomicBool::new(false));
     let subs_ready: Arc<Vec<AtomicBool>> =
         Arc::new((0..PEERS).map(|_| AtomicBool::new(false)).collect());
     let bind_barrier = Arc::new(Barrier::new(PEERS + 1));
+    let (drain_tx, drain_rx) = flume::bounded::<()>(PEERS);
 
     let sub_threads: Vec<_> = (0..PEERS)
         .map(|i| {
             let ep = ep.clone();
             let recv_count = recv_count.clone();
+            let sent_count = sent_count.clone();
+            let counting = counting.clone();
+            let sending_done = sending_done.clone();
+            let drain_tx = drain_tx.clone();
             let subs_ready = subs_ready.clone();
-            let stop = stop.clone();
             let bind_barrier = bind_barrier.clone();
             std::thread::spawn(move || {
                 let rt = build_default_runtime().expect("sub runtime");
@@ -58,23 +64,52 @@ fn soak_ipc_fanout_no_message_loss() {
                     let s = Socket::new(SocketType::Sub, Options::default());
                     s.connect(ep).await.expect("connect SUB");
                     s.subscribe(Bytes::new()).await.expect("subscribe");
-                    while !stop.load(Ordering::Relaxed) {
-                        if let Ok(Ok(_)) =
-                            compio::time::timeout(Duration::from_millis(20), s.recv()).await
-                        {
-                            subs_ready[i].store(true, Ordering::Relaxed);
-                            recv_count.fetch_add(1, Ordering::Relaxed);
+
+                    loop {
+                        match compio::time::timeout(Duration::from_millis(20), s.recv()).await {
+                            Ok(Ok(_)) => {
+                                subs_ready[i].store(true, Ordering::Relaxed);
+                                if counting.load(Ordering::Acquire) {
+                                    recv_count.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            _ => {
+                                if sending_done.load(Ordering::Acquire) {
+                                    break;
+                                }
+                            }
                         }
                     }
+
+                    // Drain messages still in the pipeline.
+                    let expected = sent_count.load(Ordering::Acquire) * PEERS;
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while std::time::Instant::now() < deadline {
+                        match compio::time::timeout(Duration::from_secs(1), s.recv()).await {
+                            Ok(Ok(_)) => {
+                                recv_count.fetch_add(1, Ordering::Relaxed);
+                            }
+                            _ => {
+                                if recv_count.load(Ordering::Relaxed) >= expected {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    let _ = drain_tx.send(());
                 });
             })
         })
         .collect();
+    drop(drain_tx);
 
     let pub_thread = {
         let recv_count = recv_count.clone();
+        let sent_count = sent_count.clone();
+        let counting = counting.clone();
+        let sending_done = sending_done.clone();
         let subs_ready = subs_ready.clone();
-        let stop = stop.clone();
         std::thread::spawn(move || {
             let rt = build_default_runtime().expect("pub runtime");
             block_on_and_drain(&rt, async move {
@@ -84,6 +119,8 @@ fn soak_ipc_fanout_no_message_loss() {
 
                 let payload = Bytes::from(vec![0xABu8; MSG_SIZE]);
 
+                // Warmup: send until all SUBs have received at least one
+                // message, confirming subscriptions are registered.
                 loop {
                     let _ = pub_.send(Message::single(payload.clone())).await;
                     if subs_ready.iter().all(|r| r.load(Ordering::Relaxed)) {
@@ -92,8 +129,12 @@ fn soak_ipc_fanout_no_message_loss() {
                     compio::time::sleep(Duration::from_micros(50)).await;
                 }
 
+                // Let warmup messages drain before counting begins.
+                compio::time::sleep(Duration::from_millis(100)).await;
+                counting.store(true, Ordering::Release);
+
                 let start = std::time::Instant::now();
-                let mut sent: u64 = 0;
+                let mut sent: usize = 0;
                 let mut last_log = start;
                 while start.elapsed() < duration {
                     pub_.send(Message::single(payload.clone())).await.unwrap();
@@ -107,15 +148,17 @@ fn soak_ipc_fanout_no_message_loss() {
                         last_log = std::time::Instant::now();
                     }
                 }
-                stop.store(true, Ordering::Relaxed);
 
-                let r = recv_count.load(Ordering::Relaxed);
-                let expected = sent as usize * PEERS;
-                eprintln!(
-                    "[ipc_fanout] done: sent {sent}, recvd {r}, expected {expected} in {:.1}s",
-                    start.elapsed().as_secs_f64(),
-                );
-                assert_eq!(r, expected, "message loss detected");
+                sent_count.store(sent, Ordering::Release);
+                sending_done.store(true, Ordering::Release);
+
+                // Wait for all SUBs to finish draining. This is async
+                // so the PUB's connection drivers keep flushing.
+                for _ in 0..PEERS {
+                    let _ = drain_rx.recv_async().await;
+                }
+
+                pub_.close().await.unwrap();
             });
         })
     };
@@ -124,4 +167,10 @@ fn soak_ipc_fanout_no_message_loss() {
     for t in sub_threads {
         t.join().expect("sub thread panicked");
     }
+
+    let s = sent_count.load(Ordering::Relaxed);
+    let r = recv_count.load(Ordering::Relaxed);
+    let expected = s * PEERS;
+    eprintln!("[ipc_fanout] done: sent {s}, recvd {r}, expected {expected}");
+    assert_eq!(r, expected, "message loss detected");
 }

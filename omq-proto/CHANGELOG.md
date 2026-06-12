@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `Options::compression_auto_train` now defaults to `false`. Auto-training adds per-connection overhead that only pays off for small structured records on bandwidth-constrained links. Enable explicitly with `.compression_auto_train(true)` when needed.
+
 ## [0.17.0] - 2026-06-12
 
 ### Added

@@ -314,11 +314,11 @@ def test_compression_dict_rejects_oversize():
 def test_compression_auto_train_round_trip():
     ctx, s = _push()
     try:
-        assert s.getsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN) == 1
-        s.setsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN, 0)
         assert s.getsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN) == 0
         s.setsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN, 1)
         assert s.getsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN) == 1
+        s.setsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN, 0)
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN) == 0
     finally:
         s.close()
         ctx.term()

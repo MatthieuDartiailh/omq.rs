@@ -99,8 +99,9 @@ pub struct Options {
     /// 512 B to 64 B and small messages ride the dict.
     /// Setting `compression_dict` overrides: auto-train is silently
     /// disabled when a static dict is supplied.
-    /// Set to `false` to suppress training (e.g. tests that need a
-    /// deterministic wire shape).
+    /// Default: `false`. Enable for workloads with small structured
+    /// records (JSON, protobuf) where dictionary compression can
+    /// achieve 8-24x compression ratios on sub-1 KiB messages.
     pub compression_auto_train: bool,
 
     /// Minimum payload size (bytes) before compression is attempted.
@@ -213,7 +214,7 @@ impl Default for Options {
             send_buffer_size: None,
             mechanism: MechanismSetup::Null,
             compression_dict: None,
-            compression_auto_train: true,
+            compression_auto_train: false,
             compression_threshold: None,
             compression_dict_capacity: None,
             max_recv_dict_size: None,
@@ -574,9 +575,9 @@ impl Options {
         self
     }
 
-    /// Toggle auto-trained dictionaries (`lz4+tcp://`).
-    /// On by default; pass `false` to suppress training. See
-    /// [`Options::compression_auto_train`] for semantics.
+    /// Enable auto-trained dictionaries (`lz4+tcp://`).
+    /// Off by default. See [`Options::compression_auto_train`] for
+    /// semantics.
     #[must_use]
     pub fn compression_auto_train(mut self, enabled: bool) -> Self {
         self.compression_auto_train = enabled;

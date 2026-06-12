@@ -14,12 +14,12 @@ use smallvec::SmallVec;
 
 use bytes::Bytes;
 
-use crate::engine::wire_slot::TryEncodeResult;
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
+use omq_proto::proto::transform::MessageEncoder;
 
 use super::peer_send::PeerSend;
 use super::subscription::SubscriptionSet;
@@ -78,11 +78,11 @@ impl Submitter {
             }
         };
 
-        let targets = self.collect_targets(&forwarded, group.as_deref());
+        let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop && !targets_have_space(&targets) {
             return Err(omq_proto::error::TrySendError::Full(forwarded));
         }
-        dispatch_to_targets(&targets, &forwarded);
+        dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
         Ok(())
     }
 
@@ -106,22 +106,27 @@ impl Submitter {
             }
         };
 
-        let targets = self.collect_targets(&forwarded, group.as_deref());
+        let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop {
             while !targets_have_space(&targets) {
                 tokio::task::yield_now().await;
             }
         }
-        dispatch_to_targets(&targets, &forwarded);
+        dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
         if self.send_count.fetch_add(1, Ordering::Relaxed) % YIELD_INTERVAL == YIELD_INTERVAL - 1 {
             tokio::task::yield_now().await;
         }
         Ok(())
     }
 
-    fn collect_targets(&self, msg: &Message, group: Option<&str>) -> SmallVec<[PeerSend; 8]> {
+    fn collect_targets(
+        &self,
+        msg: &Message,
+        group: Option<&str>,
+    ) -> (SmallVec<[PeerSend; 8]>, Option<Arc<Mutex<MessageEncoder>>>) {
         let g = self.inner.lock().expect("fanout inner poisoned");
-        if g.all_subscribe_all && matches!(self.mode, FanOutMode::SubscriptionPrefix) {
+        let targets = if g.all_subscribe_all && matches!(self.mode, FanOutMode::SubscriptionPrefix)
+        {
             g.all_targets.clone()
         } else {
             g.peers
@@ -135,7 +140,9 @@ impl Submitter {
                 })
                 .map(|p| p.target.clone())
                 .collect()
-        }
+        };
+        let encoder = g.fan_out_encoder.clone();
+        (targets, encoder)
     }
 }
 
@@ -147,11 +154,23 @@ pub(crate) struct FanOutSend {
     xpub_nodrop: bool,
 }
 
-#[derive(Debug)]
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
     all_subscribe_all: bool,
     all_targets: SmallVec<[PeerSend; 8]>,
+    fan_out_encoder: Option<Arc<Mutex<MessageEncoder>>>,
+    #[allow(dead_code)]
+    options: Options,
+}
+
+impl std::fmt::Debug for FanOutInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FanOutInner")
+            .field("peers", &self.peers.len())
+            .field("all_subscribe_all", &self.all_subscribe_all)
+            .field("has_fan_out_encoder", &self.fan_out_encoder.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -163,6 +182,26 @@ struct FanOutPeer {
 }
 
 impl FanOutInner {
+    #[allow(clippy::unused_self)]
+    fn init_fan_out_encoder(&mut self) {
+        #[cfg(feature = "lz4")]
+        {
+            use omq_proto::endpoint::{Endpoint, Host};
+            let dummy = Endpoint::Lz4Tcp {
+                host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
+                port: 0,
+            };
+            // Strip the dict: per-connection dict shipping requires the
+            // driver's per-peer encoder, which the fan-out path bypasses.
+            // Dictless compression still applies the lz4 block transform.
+            let mut opts = self.options.clone();
+            opts.compression_dict = None;
+            if let Some((enc, _dec)) = MessageEncoder::for_endpoint(&dummy, &opts) {
+                self.fan_out_encoder = Some(Arc::new(Mutex::new(enc.new_offload())));
+            }
+        }
+    }
+
     fn recompute_subscribe_all(&mut self) {
         self.all_subscribe_all = !self.peers.is_empty()
             && self
@@ -184,6 +223,8 @@ impl FanOutSend {
                 peers: FxHashMap::default(),
                 all_subscribe_all: false,
                 all_targets: SmallVec::new(),
+                fan_out_encoder: None,
+                options: options.clone(),
             })),
             mode,
             xpub_nodrop: options.xpub_nodrop,
@@ -209,6 +250,7 @@ impl FanOutSend {
 
     #[expect(clippy::needless_pass_by_value)]
     fn add_peer(&mut self, peer_id: u64, handle: DriverHandle, any_groups: bool) {
+        let has_transform = handle.wire_slot.as_ref().is_some_and(|s| s.has_transform);
         let target = PeerSend::from_handle(&handle);
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.insert(
@@ -220,6 +262,9 @@ impl FanOutSend {
                 target,
             },
         );
+        if has_transform && g.fan_out_encoder.is_none() {
+            g.init_fan_out_encoder();
+        }
         g.recompute_subscribe_all();
     }
 
@@ -281,7 +326,11 @@ fn targets_have_space(targets: &[PeerSend]) -> bool {
     })
 }
 
-fn dispatch_to_targets(targets: &[PeerSend], msg: &Message) {
+fn dispatch_to_targets(
+    targets: &[PeerSend],
+    msg: &Message,
+    encoder: Option<&Mutex<MessageEncoder>>,
+) {
     match targets.len() {
         0 => {}
         1 => {
@@ -293,24 +342,43 @@ fn dispatch_to_targets(targets: &[PeerSend], msg: &Message) {
                 static SCRATCH: RefCell<EncodedQueue> = RefCell::new(
                     EncodedQueue::one_shot(),
                 );
+                static CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
             }
             SCRATCH.with(|cell| {
                 let eq = &mut *cell.borrow_mut();
-                eq.encode_auto(msg);
-                let encoded = eq.arena_bytes();
-                for t in targets {
-                    match t {
-                        PeerSend::Wire { slot, inbox } => {
-                            if slot.try_push_pre_encoded(encoded) == TryEncodeResult::Ineligible {
-                                let _ = inbox.try_send(DriverCommand::SendMessage(msg.clone()));
+                if let Some(enc_mtx) = encoder {
+                    let transformed = {
+                        let mut enc = enc_mtx.lock().expect("fan_out_encoder poisoned");
+                        match enc.encode(msg) {
+                            Ok(t) => t,
+                            Err(_) => return,
+                        }
+                    };
+                    for wire_msg in &transformed {
+                        eq.encode_auto(wire_msg);
+                    }
+                } else {
+                    eq.encode_auto(msg);
+                }
+                // Freeze the arena into shared Bytes, then distribute by
+                // reference.  Each subscriber gets an Arc clone (nanoseconds)
+                // instead of a full memcpy of the encoded bytes.
+                CHUNKS.with(|drain| {
+                    let chunks = &mut *drain.borrow_mut();
+                    chunks.clear();
+                    eq.drain_into_vec(chunks, 1024);
+                    for t in targets {
+                        match t {
+                            PeerSend::Wire { slot, .. } => {
+                                let _ = slot.try_push_encoded(chunks);
+                            }
+                            PeerSend::Inbox(tx) => {
+                                let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
                             }
                         }
-                        PeerSend::Inbox(tx) => {
-                            let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
-                        }
                     }
-                }
-                eq.clear_arena();
+                    chunks.clear();
+                });
             });
         }
     }

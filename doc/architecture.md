@@ -17,7 +17,7 @@ runtime backends differ. Detail lives in [`compio.md`](compio.md),
         |  Socket::send / Socket::recv / connect / bind / monitor
         v
 +------------------------------------------------------------------+
-|  runtime backend  (omq-compio or omq-tokio)                      |
+|  runtime backend  (omq-tokio or omq-compio)                      |
 |  ----------------------------------------                        |
 |  Socket actor / direct-IO state                                  |
 |  per-connection driver tasks                                     |
@@ -144,15 +144,15 @@ backends. Users see only `Message`. Public API: `Deref<[u8]>`
 
 ## Backends compared
 
-| | omq-compio | omq-tokio |
+| | omq-tokio | omq-compio |
 |---|---|---|
-| Runtime | Single-thread, cooperative | Multi-thread, work-stealing |
-| Linux I/O | io_uring | epoll (mio) |
-| Other platforms | macOS kqueue, Windows IOCP | macOS/BSD kqueue, Windows IOCP |
-| Hot-path send | Per-peer `EncodedQueue` under sync `try_lock` | Per-peer `PeerWireSlot` (`EncodedQueue` under `std::sync::Mutex`); driver flushes via `data_ready` select arm |
-| Hot-path recv | `RecvMulti` (multi-shot recv from io_uring `BUF_RING`) fed to codec inline | Connection driver pushes straight into user `recv_tx` |
-| Fan-in scaling | One runtime per worker thread (manual) | Free across cores via runtime |
-| Strengths | Small-message wire throughput, low syscall cost, low jitter | Multi-peer fan-in, no per-thread setup, ecosystem fit |
+| Runtime | Multi-thread, work-stealing | Single-thread, cooperative |
+| Linux I/O | epoll (mio) | io_uring |
+| Other platforms | macOS/BSD kqueue, Windows IOCP | macOS kqueue, Windows IOCP |
+| Hot-path send | Per-peer `PeerWireSlot` (`EncodedQueue` under `std::sync::Mutex`); driver flushes via `data_ready` select arm | Per-peer `EncodedQueue` under sync `try_lock` |
+| Hot-path recv | Connection driver pushes straight into user `recv_tx` | `RecvMulti` (multi-shot recv from io_uring `BUF_RING`) fed to codec inline |
+| Fan-in scaling | Free across cores via runtime | One runtime per worker thread (manual) |
+| Strengths | Multi-peer fan-in, no per-thread setup, ecosystem fit | Small-message wire throughput, low syscall cost, low jitter |
 
 Both expose an identical public `Socket` API. Anything on one that is
 not on the other is a bug. Verified by

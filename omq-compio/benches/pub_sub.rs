@@ -13,10 +13,20 @@ use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_compio::{Message, OnMute, Options, Socket, SocketType, build_default_runtime};
+use omq_compio::{Message, OnMute, Options, ProactorBuilderExt, Socket, SocketType};
 
 const PATTERN: &str = "pub_sub";
 const PEER_COUNTS: &[usize] = &[3];
+
+fn build_runtime(peers: usize) -> std::io::Result<compio::runtime::Runtime> {
+    let count = u16::try_from(64_usize.max(peers * 4)).unwrap_or(u16::MAX);
+    let len = common::bench_buffer_len();
+    let mut p = compio::driver::ProactorBuilder::new();
+    p.with_omq_buffer_pool_sized(std::num::NonZero::new(count).expect("nonzero"), len);
+    compio::runtime::RuntimeBuilder::new()
+        .with_proactor(p)
+        .build()
+}
 
 fn main() {
     common::print_header("PUB/SUB");
@@ -47,7 +57,7 @@ fn main() {
 
 #[allow(clippy::arc_with_non_send_sync)] // compio is single-threaded; Arc for spawn sharing
 fn run_cell_single(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
-    let rt = build_default_runtime().expect("single runtime");
+    let rt = build_runtime(peers).expect("single runtime");
     common::block_on_and_drain(rt, async {
         let ep = common::endpoint(transport, seq);
         let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
@@ -148,7 +158,7 @@ fn run_cell_threaded(
             let stop = stop.clone();
             let bind_barrier = bind_barrier.clone();
             std::thread::spawn(move || {
-                let rt = build_default_runtime().expect("sub runtime");
+                let rt = build_runtime(1).expect("sub runtime");
                 common::block_on_and_drain(rt, async move {
                     bind_barrier.wait();
                     let s = Socket::new(SocketType::Sub, Options::default());
@@ -172,7 +182,7 @@ fn run_cell_threaded(
         let subs_ready = subs_ready.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
-            let rt = build_default_runtime().expect("pub runtime");
+            let rt = build_runtime(1).expect("pub runtime");
             common::block_on_and_drain(rt, async move {
                 let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
                 pub_.bind(ep).await.expect("bind PUB");
