@@ -1,4 +1,9 @@
 //! Socket options overlay and `zmq_setsockopt` / `zmq_getsockopt`.
+//!
+//! The match arms in `zmq_setsockopt` and `zmq_getsockopt` are
+//! intentionally repetitive: each option is self-contained and easy
+//! to audit. Extracting duration-conversion helpers was considered
+//! and rejected as not worth the indirection.
 #![expect(clippy::cast_possible_wrap)]
 
 use std::ffi::c_int;
@@ -505,7 +510,7 @@ pub extern "C" fn zmq_setsockopt(
         | ZMQ_ROUTER_NOTIFY
         | ZMQ_MULTICAST_LOOP
         | ZMQ_BINDTODEVICE => {}
-        _ => {}
+        _ => return crate::error::fail(libc::EINVAL),
     }
     0
 }
@@ -856,7 +861,7 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_ZAP_DOMAIN | ZMQ_SOCKS_PROXY | ZMQ_CONNECT_ROUTING_ID | ZMQ_BINDTODEVICE => {
             write_string(optval, optvallen, b"")
         }
-        _ => 0,
+        _ => crate::error::fail(libc::EINVAL),
     }
 }
 
