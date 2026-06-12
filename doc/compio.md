@@ -612,8 +612,8 @@ after each handshake via `our_subs` and `joined_groups`.
 ### `InboundFrame::SinglePart`
 
 The single-part variant carries `Option<Bytes>` (identity) and `Bytes`
-(body) inline (~72 B). The `Message` struct is 48 B (custom enum with
-inline storage for single-frame messages up to 39 B); wrapping it in
+(body) inline (~72 B). The `Message` struct is 64 B (custom enum with
+inline storage for single-frame messages up to 55 B); wrapping it in
 a box for the multipart variant keeps the blume channel slot small on
 the hot path.
 

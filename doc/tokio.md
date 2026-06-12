@@ -175,13 +175,19 @@ The gather functions (`encode_message_gather`,
 arena and track payloads as external entries. The per-frame
 `scratch: BytesMut` is eliminated.
 
-The arena path is disabled when a frame transform (CURVE, BLAKE3ZMQ)
-is active, since those require the codec's encrypt-in-place flow via
-`send_message`. `Connection` exposes `take_transform()` /
-`restore_transform()` / `emit_encrypted_frames()` and `FrameTransform`
-exposes `encrypt_message()` as infrastructure for future per-peer
-encryption offloading, but the routing strategies do not wire this up
-yet.
+The arena path is disabled when CURVE or BLAKE3ZMQ is active.
+These mechanisms hold per-connection symmetric keys and a nonce
+counter inside the codec's `FrameTransform`. The nonce must advance
+in strict wire order per frame, so encryption is coupled to the
+codec's `send_message`/`poll_transmit` sequencing. The arena bypass
+skips `Connection::send_message` entirely, so there is no point at
+which the transform can encrypt. LZ4 does not have this constraint:
+its `MessageEncoder` lives outside the codec, holds no per-frame
+sequence state, and produces wire-ready bytes independently.
+`Connection` exposes `take_transform()` / `restore_transform()` /
+`emit_encrypted_frames()` and `FrameTransform` exposes
+`encrypt_message()` as infrastructure for future per-peer encryption
+offloading, but the routing strategies do not wire this up yet.
 
 ## 128 KiB read buffer
 
