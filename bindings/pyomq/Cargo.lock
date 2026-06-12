@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "async-channel",
  "bytes",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "pyomq"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "bytes",
  "flume",

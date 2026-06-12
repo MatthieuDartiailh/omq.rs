@@ -19,7 +19,7 @@ fn tcp_ep(port: u16) -> Endpoint {
 /// that `send()` blocks within a bounded number of messages.
 ///
 /// Uses 128 KiB payloads so kernel TCP buffers (which autoscale up to
-/// tcp_wmem max, often 4 MiB on Linux) fill within tens of messages.
+/// `tcp_wmem` max, often 4 MiB on Linux) fill within tens of messages.
 #[compio::test]
 async fn direct_encode_respects_send_hwm() {
     let hwm: u32 = 16;

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-06-12
+
+### Fixed
+
+- lz4+tcp fan-out: PUB/XPUB/RADIO with lz4 compression now encodes once and distributes the compressed bytes to all subscribers via `push_pre_encoded`. Previously the fan-out path framed messages without applying the lz4 transform, causing subscribers to reject frames with "unknown lz4 sentinel" and reset connections (~150x throughput loss at 2+ subscribers).
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.17.1.
+
 ## [0.14.1] - 2026-06-12
 
 ### Removed

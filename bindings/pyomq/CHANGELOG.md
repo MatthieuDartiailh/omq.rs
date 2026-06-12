@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-06-12
+
+### Changed
+
+- `compression_auto_train` option now defaults to `false`, matching `omq-proto` 0.17.1.
+- *(deps)* Bump `omq-tokio` to 0.14.2, `omq-proto` to 0.17.1.
+
 ## [0.12.1] - 2026-06-12
 
 ### Removed
