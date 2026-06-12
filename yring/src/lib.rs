@@ -33,6 +33,11 @@ pub(crate) struct Ring<T> {
     /// Set by `Producer::drop`. Lets the consumer detect that no more
     /// data will ever arrive.
     pub(crate) producer_dropped: AtomicBool,
+    /// Set by `AsyncConsumer::drop`. Lets the producer detect that
+    /// the consumer is gone. Not used by the sync side (sync `Consumer`
+    /// has no analogous signal; the producer detects it via `is_full`).
+    #[cfg(feature = "async")]
+    pub(crate) consumer_dropped: AtomicBool,
 }
 
 // SAFETY: Ring<T> is Send because all shared mutable state is accessed through
@@ -56,6 +61,8 @@ impl<T> Ring<T> {
             head: Padded(AtomicUsize::new(0)),
             flush: Padded(AtomicUsize::new(0)),
             producer_dropped: AtomicBool::new(false),
+            #[cfg(feature = "async")]
+            consumer_dropped: AtomicBool::new(false),
         }
     }
 
