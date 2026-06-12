@@ -5,6 +5,12 @@
 //! running BLAKE3 transcript hash that binds every message
 //! (including the two ZMTP greetings) into the keys they derive.
 //!
+//! NOTE: The CURVE handshake in `mechanism/curve.rs` has a parallel
+//! structure (same four-message flow, similar state enums). This is
+//! intentional: each mechanism's handshake is kept self-contained so
+//! the crypto protocol flow is auditable without chasing through
+//! abstractions. Do not deduplicate.
+//!
 //! The state machines here are **wire-bytes-in / wire-bytes-out**:
 //! they own their transcript and reconstruct the wire bytes of each
 //! message they emit / receive (the codec gives us frame bodies, so
