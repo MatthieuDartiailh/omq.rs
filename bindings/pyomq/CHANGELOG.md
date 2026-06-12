@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-12
+
+### Removed
+
+- `zstd` feature and `OMQ_COMPRESSION_LEVEL` constant. `lz4+tcp://` covers the compression use case.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.14.1, `omq-proto` to 0.17.0.
+
+## [0.12.0] - 2026-06-10
+
+### Changed
+
+- Port from `omq-compio` to `omq-tokio` backend. Jupyter notebook compatibility (tokio runtime coexists with running event loops).
+- Set `arena_threshold` to 64 KiB (eliminates the 32 KiB message throughput cliff from gather-write refcount overhead on Python objects).
+- *(deps)* Bump `omq-tokio` to 0.14.0, `omq-proto` to 0.16.0. Drop `omq-compio`, `blume`, `compio` dependencies.
+
 ## [0.11.0] - 2026-05-30
 
 ### Added

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-12
+
+### Added
+
+- LZ4 auto-training: `Lz4Encoder` feeds outbound messages to `lz4rip::DictTrainer`, trains a dict after 100 messages, lowering the compression threshold from 512 B to 64 B. Controlled by `Options::compression_auto_train` (default: true).
+- `TrySendError` enum in `omq_proto::error` for unified `try_send` error handling across backends.
+
+### Removed
+
+- **Breaking:** `zstd` feature and all associated types: `ZstdEncoder`, `ZstdDecoder`, `Endpoint::ZstdTcp`, `Options::compression_level`. `lz4+tcp://` with `lz4rip` (pure Rust, no C compiler) covers the compression use case with better small-message performance.
+
+### Changed
+
+- *(deps)* Upgrade `lz4rip` to 0.4.0. Tighten `subtle` to 2.6.
+
+## [0.16.0] - 2026-06-10
+
+### Added
+
+- `EncodedQueue`: arena-based ZMTP frame encoder moved from backends to `omq-proto`. Entry-based arena (256 KiB capacity, 96 KiB `ARENA_THRESHOLD`), `encode_auto`/`encode_prefixed_auto` dispatch, `push_pre_encoded`/`push_shared_chunks` for encode-once fan-out, configurable `with_arena_threshold`.
+- `InboundFrame`/`InprocPeerSnapshot` in `omq_proto::inproc` (unified across backends).
+- `generated_identity()` in `omq_proto::message`, `supports_conflate()` in `omq_proto::routing`.
+- `SendCategory::Exclusive` for PAIR/CHANNEL.
+- `SubscriptionSet::is_subscribe_all()`.
+- `Options::xpub_nodrop`, `Options::arena_threshold`, `Options::wire_slot_cap`, `Options::compression_offload_threshold`.
+- Compression offload API: `MessageEncoder::can_offload`/`new_offload`/`sync_dict`.
+- Monitor events: `SubscribeReceived`, `UnsubscribeReceived`, `JoinReceived`, `LeaveReceived`.
+- `Connection::take_transform`/`restore_transform`/`emit_encrypted_frames` for per-peer encryption offload infrastructure.
+
+### Fixed
+
+- Frame size overflow DoS: saturating/checked arithmetic in `max_message_size` and `try_decode_frame`.
+- BLAKE3ZMQ: wrap all DH intermediates in `Zeroizing<>`.
+- CURVE: eliminate wasted entropy on state transitions (use `.take()` instead of `mem::replace` with throwaway `SecretKey`).
+- Remove incorrect `unsafe impl Sync for Lz4Encoder`.
+- `write_outbound_commands` propagates encrypt failures instead of silently dropping commands.
+- WS: graceful close on mechanism start failure instead of panic.
+
+### Performance
+
+- `Message` inline threshold widened from 39 B to 55 B, `Payload` from 38 B to 62 B (both 64 B, one cache line). Eliminates 29% throughput cliff at 40 B.
+- Arena capacity 128 KiB to 256 KiB.
+- BLAKE3ZMQ: port to `chacha20-blake3` `Session20` API (stateful, no per-message KDF). Eliminate 5 `Vec` heap allocations per handshake.
+- Eliminate per-message identity clone from inproc path.
+
+### Changed
+
+- Unify `MechanismConfig`/`MechanismSetup` into single `MechanismSetup` enum.
+- LZ4: replace `lz4-sys` (C FFI) with `lz4rip` (pure Rust).
+- Remove `priority` feature and `connect_opts` module.
+- *(deps)* `lz4rip` 0.2.0, `chacha20-blake3` 0.10.0.
+
 ## [0.15.0] - 2026-05-30
 
 ### Added

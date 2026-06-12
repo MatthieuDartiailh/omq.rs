@@ -421,12 +421,18 @@ def detect_hardware() -> str | None:
                 except OSError:
                     continue
             # Override via env for machines where sysfs isn't available.
-            if not extras:
+            postfix = os.environ.get("OMQ_HW_POSTFIX")
+            if postfix:
+                extras = [e.strip() for e in postfix.split(",")]
+            elif not extras:
                 hw_extras = os.environ.get("OMQ_HW_EXTRAS")
                 if hw_extras:
                     extras.extend(hw_extras.split(","))
             if extras:
                 label += ", " + ", ".join(extras)
+            prefix = os.environ.get("OMQ_HW_PREFIX")
+            if prefix:
+                label = f"{prefix}, {label}"
             return label
     except OSError:
         pass
