@@ -93,7 +93,6 @@ from ._native import (  # type: ignore[attr-defined]
     BLAKE3ZMQ_SERVERKEY,
     # omq-specific options
     OMQ_ON_MUTE,
-    OMQ_COMPRESSION_LEVEL,
     OMQ_COMPRESSION_DICT,
     OMQ_COMPRESSION_AUTO_TRAIN,
     OMQ_ON_MUTE_BLOCK,
@@ -280,7 +279,6 @@ _SOCKOPT_NAMES = {
     "blake3zmq_secretkey": BLAKE3ZMQ_SECRETKEY,
     "blake3zmq_serverkey": BLAKE3ZMQ_SERVERKEY,
     "on_mute": OMQ_ON_MUTE,
-    "compression_level": OMQ_COMPRESSION_LEVEL,
     "compression_dict": OMQ_COMPRESSION_DICT,
     "compression_auto_train": OMQ_COMPRESSION_AUTO_TRAIN,
     "sndbuf": SNDBUF,
@@ -1045,7 +1043,7 @@ __all__ = [
     "SNDMORE", "NOBLOCK", "DONTWAIT",
     "CURVE_SERVER", "CURVE_PUBLICKEY", "CURVE_SECRETKEY", "CURVE_SERVERKEY",
     "BLAKE3ZMQ_SERVER", "BLAKE3ZMQ_PUBLICKEY", "BLAKE3ZMQ_SECRETKEY", "BLAKE3ZMQ_SERVERKEY",
-    "OMQ_ON_MUTE", "OMQ_COMPRESSION_LEVEL", "OMQ_COMPRESSION_DICT",
+    "OMQ_ON_MUTE", "OMQ_COMPRESSION_DICT",
     "OMQ_COMPRESSION_AUTO_TRAIN",
     "OMQ_ON_MUTE_BLOCK", "OMQ_ON_MUTE_DROP_NEWEST", "OMQ_ON_MUTE_DROP_OLDEST",
     # poll / compat constants
