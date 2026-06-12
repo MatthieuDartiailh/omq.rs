@@ -28,8 +28,8 @@ CHART_SCRIPT = REPO / "scripts" / "gen_compression_chart.py"
 
 CHART_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096,
                8192, 16384, 32768, 65536, 131072, 262144]
-DEFAULT_TRANSPORTS = ["tcp", "lz4+tcp", "zstd+tcp"]
-DICT_TRANSPORTS = ["lz4+tcp", "zstd+tcp"]
+DEFAULT_TRANSPORTS = ["tcp", "lz4+tcp"]
+DICT_TRANSPORTS = ["lz4+tcp"]
 DEFAULT_DICT_SIZES = [2048]
 
 
@@ -39,7 +39,7 @@ def build_peer():
     print("Building bench_peer_tokio...", file=sys.stderr)
     subprocess.run(
         ["cargo", "build", "--release", "-p", "omq-tokio",
-         "--bin", "bench_peer_tokio", "--features", "lz4,zstd"],
+         "--bin", "bench_peer_tokio", "--features", "lz4"],
         cwd=REPO, check=True, capture_output=True,
     )
 
@@ -74,6 +74,17 @@ def train_dict(path, capacity=2048):
     peer_output("train-dict", str(path), str(capacity))
 
 
+def read_proc_cpu(pid):
+    """Read user+sys CPU time in seconds from /proc/[pid]/stat."""
+    try:
+        fields = open(f"/proc/{pid}/stat").read().split()
+        utime = int(fields[13])
+        stime = int(fields[14])
+        return (utime + stime) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError):
+        return 0.0
+
+
 def run_cell(transport, size, port, duration, dict_file=None):
     ep = f"{transport}://127.0.0.1:{port}"
     env = {"OMQ_BENCH_PAYLOAD": "json"}
@@ -91,18 +102,22 @@ def run_cell(transport, size, port, duration, dict_file=None):
         push.kill()
         push.wait()
         return None
-    finally:
-        push.send_signal(signal.SIGTERM)
-        push.wait()
+
+    push_cpu = read_proc_cpu(push.pid)
+    push.send_signal(signal.SIGTERM)
+    push.wait()
 
     if not output or pull.returncode != 0:
         return None
 
     parts = output.split()
     count, elapsed = int(parts[0]), float(parts[1])
+    pull_cpu = float(parts[3]) if len(parts) >= 4 else 0.0
+    cpu_time = push_cpu + pull_cpu
     msgs_s = count / elapsed
     mbps = count * size / elapsed / 1_000_000
-    return {"count": count, "elapsed": elapsed, "msgs_s": msgs_s, "mbps": mbps}
+    return {"count": count, "elapsed": elapsed, "msgs_s": msgs_s, "mbps": mbps,
+            "cpu_time": cpu_time}
 
 
 def run_sweep(transports, sizes, duration, run_id, dict_file=None,
@@ -143,7 +158,7 @@ def run_sweep(transports, sizes, duration, run_id, dict_file=None,
                 "wire_bytes": wire_bytes,
                 "msg_count": cell["count"],
                 "elapsed": cell["elapsed"],
-                "cpu_time": 0,
+                "cpu_time": cell["cpu_time"],
                 "mbps": cell["mbps"],
                 "msgs_s": cell["msgs_s"],
             }

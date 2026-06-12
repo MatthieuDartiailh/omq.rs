@@ -136,7 +136,7 @@ async fn main() {
             let size: usize = args[3].parse().expect("msg_size");
             println!("{}", wire_size(&ep, size));
         }
-        #[cfg(feature = "zstd")]
+        #[cfg(feature = "lz4")]
         Some("train-dict") => {
             let path = &args[2];
             let capacity: usize = args.get(3).map_or(2048, |s| s.parse().expect("capacity"));
@@ -433,6 +433,7 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
@@ -447,7 +448,8 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("{count} {elapsed:.6} {size}");
+    let cpu = cpu_time_secs() - cpu_before;
+    println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);
 }
 
@@ -587,6 +589,18 @@ fn percentile(sorted: &[u64], p: f64) -> f64 {
     sorted[idx] as f64 / 1_000.0
 }
 
+#[expect(clippy::cast_precision_loss)]
+fn cpu_time_secs() -> f64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    unsafe {
+        libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
+        let usage = usage.assume_init();
+        let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1e6;
+        let sys = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1e6;
+        user + sys
+    }
+}
+
 fn bench_payload(size: usize) -> Bytes {
     if std::env::var("OMQ_BENCH_PAYLOAD").as_deref() == Ok("json") {
         json_payload(size)
@@ -652,17 +666,21 @@ fn json_payload(target_bytes: usize) -> Bytes {
     Bytes::from(out)
 }
 
-#[cfg(feature = "zstd")]
+#[cfg(feature = "lz4")]
 fn train_json_dict(capacity: usize) -> Vec<u8> {
-    let mut samples: Vec<Vec<u8>> = Vec::with_capacity(200);
-    for i in 0..200 {
-        let s = json_payload(64 + (i * 10) % (2048 - 64));
-        samples.push(s.to_vec());
+    use omq_proto::proto::transform::lz4::DictTrainer;
+
+    let mut trainer = DictTrainer::new(capacity);
+    // Bias toward common message sizes (512B, 1 KiB) with a few at other sizes.
+    let sample_sizes: &[(usize, usize)] =
+        &[(64, 2), (128, 2), (256, 4), (512, 8), (1024, 8), (2048, 4)];
+    for &(size, count) in sample_sizes {
+        let payload = json_payload(size);
+        for _ in 0..count {
+            trainer.add_sample(&payload);
+        }
     }
-    let refs: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
-    omq_proto::proto::transform::train_zdict(&refs, capacity)
-        .expect("dict training failed")
-        .to_vec()
+    trainer.train()
 }
 
 fn wire_size(ep: &Endpoint, size: usize) -> usize {

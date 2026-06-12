@@ -9,7 +9,7 @@
 #   ruby scripts/bench_run.rb --backend compio        # compio only
 #   ruby scripts/bench_run.rb --backend tokio         # tokio only
 #   ruby scripts/bench_run.rb --bench push_pull       # one bench target only
-#   ruby scripts/bench_run.rb --features 'lz4 zstd'  # extra cargo features
+#   ruby scripts/bench_run.rb --features 'lz4'       # extra cargo features
 #   ruby scripts/bench_run.rb --all-sizes             # full 7-size sweep
 #   ruby scripts/bench_run.rb --id my-baseline        # named run ID
 #
@@ -30,8 +30,8 @@ OptionParser.new do |o|
   o.on('--backend BACKEND',  'Run only "compio" or "tokio"')         { |v| options[:backends]  = [v] }
   o.on('--bench TARGET',     'Run only this bench target (by name)') { |v| options[:bench]     = v }
   o.on('--features FEATS',   'Extra cargo --features value')               { |v| options[:features]       = v }
-  o.on('--all-features',     'Enable lz4,zstd,curve,blake3zmq,ws') {
-    options[:features] = 'lz4 zstd curve blake3zmq ws'
+  o.on('--all-features',     'Enable lz4,curve,blake3zmq,ws') {
+    options[:features] = 'lz4 curve blake3zmq ws'
   }
   o.on('--all-sizes',        'Full 32 B–128 KiB size sweep (×4 steps, default: 128 B/2 KiB/8 KiB)') {
     options[:all_sizes] = true

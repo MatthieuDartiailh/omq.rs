@@ -7,8 +7,8 @@
 # at the requested link speed:
 #   effective_msgs_s = min(cpu_msgs_s, link_bytes_s / wire_bytes)
 #
-#   cargo bench -p omq-compio --features lz4,zstd --bench compression
-#   cargo bench -p omq-tokio  --features lz4,zstd --bench compression
+#   cargo bench -p omq-compio --features lz4 --bench compression
+#   cargo bench -p omq-tokio  --features lz4 --bench compression
 #   ruby scripts/compression_report.rb --link 100m
 #   ruby scripts/compression_report.rb --link 100m --backend tokio
 
@@ -69,7 +69,7 @@ selected.each do |r|
 end
 
 def build_table(data, pattern)
-  transports = %w[tcp lz4+tcp zstd+tcp]
+  transports = %w[tcp lz4+tcp]
   transports = %w[lz4+tcp] if pattern == :compression_json_dict
   sizes = data.keys
     .select { |p, _t, _s| p == pattern }

@@ -5,7 +5,7 @@
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
 - Two async backends: **tokio** (default, Linux/macOS) and **compio** (io_uring, Linux)
-- 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `zstd+tcp://`)
+- 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`)
 - 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
@@ -35,12 +35,9 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 </details>
 
 <details>
-<summary>Compression throughput: lz4 / zstd</summary>
+<summary>Compression throughput: lz4+tcp://</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/compio_2048.svg" alt="Compression throughput: omq-compio" width="850">
 </p>
 </details>
 
@@ -110,7 +107,6 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
 | `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
 | `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4rip` |
-| `zstd`            | `zstd+tcp://` compression transport ([RFC](https://github.com/paddor/omq-zstd/blob/main/RFC.md)) | `zstd-safe` (vends `libzstd`; needs `cc`) |
 | `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
 
 > [!WARNING]
@@ -130,7 +126,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
 | **Zero-copy send and recv** | Send: large `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
 | **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |
-| **zstd dictionary auto-training** | Trains from first 1k messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |
+| **LZ4 dictionary auto-training** | Trains from first 100 messages, ships to peer once; drops effective compression threshold from 512 B to 64 B. |
 | **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
 
 ## Workspace
@@ -173,7 +169,7 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 
 - [BENCHMARKS.md](BENCHMARKS.md): throughput / latency tables across
   message patterns, transports, message sizes, and backends.
-- [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp / zstd+tcp
+- [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp
   throughput on bandwidth-limited links with structured JSON payloads.
 - [doc/architecture.md](doc/architecture.md): three-layer split, two-queue
   socket model, backend comparison.

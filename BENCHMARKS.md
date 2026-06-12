@@ -106,8 +106,8 @@ python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism/{compio
 
 # Compression charts require a bench run first (writes JSONL):
 #   1. Run bench:
-#      cargo bench -p omq-tokio  --features lz4,zstd --bench compression
-#      cargo bench -p omq-compio --features lz4,zstd --bench compression
+#      cargo bench -p omq-tokio  --features lz4 --bench compression
+#      cargo bench -p omq-compio --features lz4 --bench compression
 #   2. Generate chart:
 python3 scripts/gen_compression_chart.py --backend tokio     # doc/charts/compression/tokio_2048.svg
 python3 scripts/gen_compression_chart.py --backend compio    # doc/charts/compression/compio_2048.svg

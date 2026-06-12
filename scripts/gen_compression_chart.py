@@ -2,7 +2,8 @@
 """Generate doc/charts/compression.svg -- four-panel combined chart.
 
 Panels (top to bottom): 10 Gbps, 1 Gbps, 100 Mbps, 10 Mbps.
-Each panel: dashed = CPU % (left axis), solid = virtual throughput (right axis).
+Each panel: dashed = CPU % (left axis), solid = virtual throughput (inner
+right axis), dotted = msg/s (outer right axis).
 
 The bench runs at full loopback speed.  Each panel projects what throughput
 would be at its link speed: effective_msgs_s = min(cpu_msgs_s, link_bytes_s / wire_bytes).
@@ -28,15 +29,13 @@ COLORS = {
     "tcp":            "#eab308",
     "lz4+tcp":        "#60a5fa",
     "lz4+tcp+dict":   "#1d4ed8",
-    "zstd+tcp":       "#f97316",
 }
 LABELS = {
-    "tcp":            "tcp",
-    "lz4+tcp":        "lz4",
-    "lz4+tcp+dict":   "lz4+dict",
-    "zstd+tcp":       "zstd",
+    "tcp":            "tcp (no compression)",
+    "lz4+tcp":        "lz4+tcp (no dict)",
+    "lz4+tcp+dict":   "lz4+tcp (auto dict)",
 }
-SERIES_ORDER = ["tcp", "lz4+tcp", "lz4+tcp+dict", "zstd+tcp"]
+SERIES_ORDER = ["tcp", "lz4+tcp", "lz4+tcp+dict"]
 
 
 def fmt_size(b: int) -> str:
@@ -60,16 +59,14 @@ def _fmt_tput(mb):
     return f"{mb:.1f} MB/s"
 
 
-def _tput_ticks(max_mb):
-    if max_mb <= 0:
-        return [1]
-    candidates = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
-    for step in candidates:
-        n_ticks = max_mb / step
-        if 3 <= n_ticks <= 8:
-            return [step * i for i in range(1, int(max_mb / step) + 1)]
-    step = candidates[-1]
-    return [step * i for i in range(1, int(max_mb / step) + 1)]
+def _fmt_msgs(msgs_s):
+    if msgs_s >= 1_000_000:
+        v = msgs_s / 1_000_000
+        return f"{v:.1f}M" if v < 10 else f"{v:.0f}M"
+    if msgs_s >= 1_000:
+        v = msgs_s / 1_000
+        return f"{v:.0f}K"
+    return f"{msgs_s:.0f}"
 
 
 def _log_ticks(data_min, data_max):
@@ -132,10 +129,13 @@ def _cpu_ticks(data_max):
     return ceil, ticks
 
 
-def load_raw_data(jsonl_path: Path, dict_size: int | None = None) -> dict:
-    """Load the latest run and return per-series raw data (cpu_msgs_s, wire_bytes, msg_size).
+def load_raw_data(jsonl_path: Path, dict_size: int | None = None) -> tuple[dict, int]:
+    """Load the newest row per (series, msg_size) across all runs.
 
-    dict_size: if set, only include dict rows whose dict_size field matches.
+    dict_size: filter dict rows to this value. When None, auto-detect
+    from the newest dict row in the file.
+
+    Returns (data_dict, effective_dict_size).
     """
     all_rows = []
     for line in jsonl_path.read_text().splitlines():
@@ -150,31 +150,42 @@ def load_raw_data(jsonl_path: Path, dict_size: int | None = None) -> dict:
         print("ERROR: no compression rows found", file=sys.stderr)
         sys.exit(1)
 
-    all_rows.sort(key=lambda r: r["run_id"])
-    latest_id = all_rows[-1]["run_id"]
-    selected = [r for r in all_rows if r["run_id"] == latest_id]
-    print(f"Using {len(selected)} rows from run {latest_id}", file=sys.stderr)
+    if dict_size is None:
+        dict_rows = [r for r in all_rows if r["pattern"] == "compression_json_dict"]
+        if dict_rows:
+            newest_dict = max(dict_rows, key=lambda r: r["run_id"])
+            dict_size = newest_dict.get("dict_size", 2048)
+        else:
+            dict_size = 2048
 
-    if dict_size is not None:
-        selected = [
-            r for r in selected
-            if r["pattern"] != "compression_json_dict"
-            or r.get("dict_size", dict_size) == dict_size
-        ]
-        print(f"  filtered to {len(selected)} rows with dict_size={dict_size}",
-              file=sys.stderr)
+    all_rows = [
+        r for r in all_rows
+        if r["pattern"] != "compression_json_dict"
+        or r.get("dict_size", dict_size) == dict_size
+    ]
+
+    def series_key(r):
+        transport = r["transport"]
+        is_dict = r["pattern"] == "compression_json_dict"
+        if is_dict:
+            return f"{transport}+dict"
+        return transport
+
+    newest = {}
+    for r in all_rows:
+        k = (series_key(r), r["msg_size"])
+        if k not in newest or r["run_id"] > newest[k]["run_id"]:
+            newest[k] = r
+
+    selected = list(newest.values())
+    run_ids = sorted(set(r["run_id"] for r in selected))
+    print(f"Using {len(selected)} rows from {len(run_ids)} run(s): "
+          + ", ".join(run_ids), file=sys.stderr)
 
     sizes_set = set()
     series = {}
     for r in selected:
-        transport = r["transport"]
-        is_dict = r["pattern"] == "compression_json_dict"
-        if is_dict and transport == "zstd+tcp":
-            key = "zstd+tcp"
-        elif is_dict:
-            key = f"{transport}+dict"
-        else:
-            key = transport
+        key = series_key(r)
         sizes_set.add(r["msg_size"])
         elapsed = r.get("elapsed", 0)
         cpu_time = r.get("cpu_time", 0)
@@ -186,7 +197,7 @@ def load_raw_data(jsonl_path: Path, dict_size: int | None = None) -> dict:
             "wire_bytes": r.get("wire_bytes", r["msg_size"]),
         }
 
-    return {"sizes": sorted(sizes_set), "series": series}
+    return {"sizes": sorted(sizes_set), "series": series}, dict_size
 
 
 def project(raw: dict, link_bytes_s: float) -> dict:
@@ -222,19 +233,21 @@ def generate_svg(
         sys.exit(1)
 
     n_panels = len(links)
-    x_left, x_right = 90, 760
+    x_left = 90
+    x_right = 700
+    x_right2 = 780
     plot_w = x_right - x_left
     panel_h = 220
     panel_gap = 70
     top_margin = 44 if hw_label else 30
     x_label_space = 20
-    legend_h = 50
+    legend_h = 60
 
     bottom_pad = 40
     right_pad = 15
     svg_h = (top_margin + n_panels * (panel_h + x_label_space)
              + (n_panels - 1) * panel_gap + legend_h + bottom_pad)
-    svg_w = 850 + right_pad
+    svg_w = x_right2 + 80 + right_pad
     mid_x = (x_left + x_right) / 2
 
     all_sizes = set()
@@ -286,11 +299,24 @@ def generate_svg(
             tp_max = math.log10(tput_ranges[link][1])
             tp_ticks = [t for t in tp_ticks if t <= tput_ranges[link][1]]
 
+        all_msgs = [d["msgs_s"] for s in series.values()
+                    for d in s.values() if d["msgs_s"] > 0]
+        msgs_min = min(all_msgs) if all_msgs else 1
+        msgs_max = max(all_msgs) if all_msgs else 1000
+        ms_min, ms_max, ms_ticks = _log_ticks(max(msgs_min, 1), max(msgs_max, 10))
+
         def y_cpu(v, _bot=y_bot, _h=plot_h, _ceil=cpu_ceil):
             frac = max(0, min(1, v / _ceil))
             return _bot - frac * _h
 
         def y_tput(v, _bot=y_bot, _h=plot_h, _lmin=tp_min, _lmax=tp_max):
+            if v <= 0:
+                return _bot
+            lv = math.log10(v)
+            frac = max(0, min(1, (lv - _lmin) / (_lmax - _lmin)))
+            return _bot - frac * _h
+
+        def y_msgs(v, _bot=y_bot, _h=plot_h, _lmin=ms_min, _lmax=ms_max):
             if v <= 0:
                 return _bot
             lv = math.log10(v)
@@ -317,7 +343,7 @@ def generate_svg(
                 f'{_fmt_cpu(val)}</text>'
             )
 
-        # Right-axis gridlines (virtual throughput, log scale)
+        # Inner right-axis tick labels (virtual throughput, log scale)
         for mb in tp_ticks:
             yy = y_tput(mb)
             L.append(
@@ -328,6 +354,15 @@ def generate_svg(
                 f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
                 f' dominant-baseline="middle" fill="#6b7280" font-size="9">'
                 f'{_fmt_tput(mb)}</text>'
+            )
+
+        # Outer right-axis tick labels (msg/s, log scale)
+        for ms in ms_ticks:
+            yy = y_msgs(ms)
+            L.append(
+                f'  <text x="{x_right2 + 8}" y="{yy:.1f}" text-anchor="start"'
+                f' dominant-baseline="middle" fill="#9ca3af" font-size="9">'
+                f'{_fmt_msgs(ms)}/s</text>'
             )
 
         # Vertical gridlines
@@ -346,6 +381,11 @@ def generate_svg(
             L.append(
                 f'  <line x1="{axis_line}" stroke="#9ca3af" stroke-width="1.5"/>'
             )
+        # Outer right axis line
+        L.append(
+            f'  <line x1="{x_right2}" y1="{y_top}" x2="{x_right2}" y2="{y_bot}"'
+            f' stroke="#d1d5db" stroke-width="1"/>'
+        )
 
         # X-axis labels
         last_x_label_y = y_bot + 14
@@ -366,7 +406,7 @@ def generate_svg(
         # Plot lines
         present = [k for k in SERIES_ORDER if k in series]
 
-        # Dashed: CPU %
+        # Dotted: CPU %
         for name in present:
             d = series[name]
             active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
@@ -377,7 +417,7 @@ def generate_svg(
             )
             L.append(
                 f'  <polyline points="{pts}" fill="none" stroke="{COLORS[name]}"'
-                f' stroke-width="1.5" stroke-dasharray="5,3"/>'
+                f' stroke-width="2" stroke-dasharray="2,3" opacity="0.7"/>'
             )
 
         # Solid: virtual throughput with dots
@@ -400,9 +440,24 @@ def generate_svg(
                     f' fill="{COLORS[name]}" stroke="white" stroke-width="1"/>'
                 )
 
+        # Dashed: msg/s
+        for name in present:
+            d = series[name]
+            active = [(i, sizes[i]) for i in range(n) if sizes[i] in d]
+            if not active:
+                continue
+            pts = " ".join(
+                f"{xs[i]:.1f},{y_msgs(d[s]['msgs_s']):.1f}" for i, s in active
+            )
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{COLORS[name]}"'
+                f' stroke-width="1.5" stroke-dasharray="5,3"/>'
+            )
+
     # Legend below last panel's x-axis labels
     leg_y1 = last_x_label_y + 18
     leg_y2 = leg_y1 + 12
+    leg_y3 = leg_y2 + 12
     all_present = []
     for link in links:
         for k in SERIES_ORDER:
@@ -416,22 +471,27 @@ def generate_svg(
         c = COLORS[name]
         L.append(
             f'  <line x1="{lx:.0f}" y1="{leg_y1}" x2="{lx + 14:.0f}" y2="{leg_y1}"'
-            f' stroke="{c}" stroke-width="1.5" stroke-dasharray="4,3"/>'
+            f' stroke="{c}" stroke-width="1.5" stroke-dasharray="2,3" opacity="0.7"/>'
         )
         L.append(
             f'  <line x1="{lx:.0f}" y1="{leg_y2}" x2="{lx + 14:.0f}" y2="{leg_y2}"'
             f' stroke="{c}" stroke-width="2.5"/>'
         )
         L.append(
+            f'  <line x1="{lx:.0f}" y1="{leg_y3}" x2="{lx + 14:.0f}" y2="{leg_y3}"'
+            f' stroke="{c}" stroke-width="1.5" stroke-dasharray="5,3"/>'
+        )
+        L.append(
             f'  <text x="{lx + 18:.0f}" y="{leg_y1 + 4}" fill="#374151" font-size="10"'
             f' font-weight="500">{LABELS[name]}</text>'
         )
 
-    footer_y = leg_y2 + 18
+    footer_y = leg_y3 + 18
     L.append(
         f'  <text x="{mid_x:.1f}" y="{footer_y}" text-anchor="middle"'
         f' fill="#9ca3af" font-size="9">'
-        f'dashed = CPU % (left) · solid = virtual throughput log (right)</text>'
+        f'dotted = CPU % linear (left) · solid = virtual throughput log (inner right)'
+        f' · dashed = msg/s log (outer right)</text>'
     )
     L.append("</svg>")
 
@@ -445,7 +505,13 @@ THREAD_MODELS = {
 
 
 def detect_hardware() -> str | None:
-    """Read CPU model, core count, governor, and turbo state."""
+    """Read CPU model, core count, governor, and turbo state.
+
+    Env vars for overrides (useful in VMs where sysfs is absent):
+      OMQ_HW_PREFIX  -- prepended, e.g. "Linux VM on a 2018 Mac Mini"
+      OMQ_HW_POSTFIX -- appended, e.g. "performance governor, turbo off"
+      OMQ_HW_EXTRAS  -- legacy fallback for postfix (comma-separated)
+    """
     try:
         cpu = None
         for line in open("/proc/cpuinfo"):
@@ -473,12 +539,18 @@ def detect_hardware() -> str | None:
                     break
                 except OSError:
                     continue
-            if not extras:
+            postfix = os.environ.get("OMQ_HW_POSTFIX")
+            if postfix:
+                extras = [e.strip() for e in postfix.split(",")]
+            elif not extras:
                 hw_extras = os.environ.get("OMQ_HW_EXTRAS")
                 if hw_extras:
                     extras.extend(hw_extras.split(","))
             if extras:
                 label += ", " + ", ".join(extras)
+            prefix = os.environ.get("OMQ_HW_PREFIX")
+            if prefix:
+                label = f"{prefix} | {label}"
             return label
     except OSError:
         pass
@@ -511,7 +583,7 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    raw = load_raw_data(jsonl, dict_size=args.dict_size or 2048)
+    raw, ds = load_raw_data(jsonl, dict_size=args.dict_size)
 
     panels = {}
     for label, link_bytes_s in LINK_SPEEDS:
@@ -531,8 +603,6 @@ def main():
         "100m": parse_range(args.tput_100m, default_tput["100m"]),
         "10m": parse_range(args.tput_10m, default_tput["10m"]),
     }
-
-    ds = args.dict_size or 2048
     if ds >= 1024:
         dict_size_label = f"{ds // 1024} KiB"
     else:

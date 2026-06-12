@@ -13,8 +13,8 @@ when building a custom backend or embedding the ZMTP codec into a non-standard t
 | `Message` | Zero-copy multi-frame messages, inline up to 55 B |
 | Greeting / handshake | ZMTP 3.0/3.1 negotiation and mechanism dispatch |
 | Mechanisms | NULL, PLAIN, CURVE, BLAKE3ZMQ |
-| Transforms | LZ4, Zstandard frame-level compression |
-| `Endpoint` | Parser for `tcp://`, `ipc://`, `inproc://`, `udp://`, `lz4+tcp://`, `zstd+tcp://`, `ws://`, `wss://` |
+| Transforms | LZ4 frame-level compression |
+| `Endpoint` | Parser for `tcp://`, `ipc://`, `inproc://`, `udp://`, `lz4+tcp://`, `ws://`, `wss://` |
 | `SocketType` | 19 types (11 stable + 8 draft) with compatibility matrix |
 | `SubscriptionSet` | Prefix-trie for PUB/SUB topic filtering |
 | Monitor types | `MonitorEvent`, `DisconnectReason`, `PeerInfo` |
@@ -29,7 +29,6 @@ All opt-in. Default build needs no C compiler and no crypto deps.
 | `curve` | CURVE mechanism (RFC 26) | `crypto_box`, `crypto_secretbox` |
 | `blake3zmq` | BLAKE3 + ChaCha20 mechanism | `blake3`, `chacha20-blake3`, `x25519-dalek` |
 | `lz4` | LZ4 compression | `lz4rip` |
-| `zstd` | Zstandard compression | `zstd-safe` (needs `cc`) |
 | `ws` | WebSocket transport | - (backends add `rustls`) |
 
 ## License
