@@ -22,6 +22,7 @@ use crate::socket::OmqSocket;
 ///
 /// Caller must guarantee single-threaded access to `bypass_cell`
 /// (zmq contract: one thread per socket).
+#[cfg(unix)]
 unsafe fn clear_stale_bypass<B: HasPipeClosed>(bypass_cell: &std::cell::UnsafeCell<Option<B>>) {
     let opt = unsafe { &mut *bypass_cell.get() };
     if opt
@@ -32,16 +33,19 @@ unsafe fn clear_stale_bypass<B: HasPipeClosed>(bypass_cell: &std::cell::UnsafeCe
     }
 }
 
+#[cfg(unix)]
 trait HasPipeClosed {
     fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool;
 }
 
+#[cfg(unix)]
 impl HasPipeClosed for crate::inproc_bypass::BypassSend {
     fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool {
         &self.pipe.closed
     }
 }
 
+#[cfg(unix)]
 impl HasPipeClosed for crate::inproc_bypass::BypassRecv {
     fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool {
         &self.pipe.closed
@@ -50,6 +54,9 @@ impl HasPipeClosed for crate::inproc_bypass::BypassRecv {
 
 /// Block on the recv eventfd until `try_pop` succeeds or the timeout
 /// expires. Returns `Err(EAGAIN)` on timeout.
+///
+/// This function is only available on Unix platforms where eventfd is available.
+#[cfg(unix)]
 fn block_recv<T>(
     sock: &OmqSocket,
     rcvtimeo: i64,
@@ -123,6 +130,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     // Inproc bypass: write raw bytes into the byte ring.
     // Checked BEFORE Message construction to avoid heap allocation.
     // SAFETY: zmq contract guarantees single-threaded access per socket.
+    #[cfg(unix)]
     if flags & ZMQ_SNDMORE == 0 {
         // SAFETY: zmq contract guarantees single-threaded access per socket.
         let accum = unsafe { &*sock.send_accum.get() };
@@ -171,48 +179,50 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
 
-    match inner.try_send(msg) {
-        Ok(()) => {
-            // SAFETY: zmq contract guarantees single-threaded access per socket.
-            let (count, bytes) = unsafe { &mut *sock.send_yield.get() };
-            *count += 1;
-            *bytes += len;
-            if *count >= 64 || *bytes >= 1_024 * 1_024 {
-                *count = 0;
-                *bytes = 0;
-                std::thread::yield_now();
+    // Send with backpressure handling (no dontwait).
+    let handle = sock.ctx.handle(sock.thread_idx);
+    let s = inner.clone();
+
+    if dontwait {
+        // Non-blocking: try_send or fail immediately.
+        match inner.try_send(msg) {
+            Ok(()) => {
+                // SAFETY: zmq contract guarantees single-threaded access per socket.
+                let (count, bytes) = unsafe { &mut *sock.send_yield.get() };
+                *count += 1;
+                *bytes += len;
+                if *count >= 64 || *bytes >= 1_024 * 1_024 {
+                    *count = 0;
+                    *bytes = 0;
+                    std::thread::yield_now();
+                }
+                len as c_int
             }
-            len as c_int
+            Err(_) => fail(libc::EAGAIN),
         }
-        Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => fail(ETERM),
-        Err(omq_tokio::TrySendError::Full(_)) if dontwait => fail(libc::EAGAIN),
-        Err(omq_tokio::TrySendError::Full(mut msg)) => {
-            // Queue full: spin-yield to let the tokio driver drain,
-            // then fall back to block_on if still full.
-            for _ in 0..64 {
-                std::thread::yield_now();
-                match inner.try_send(msg) {
-                    Ok(()) => return len as c_int,
-                    Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => {
-                        return fail(ETERM);
-                    }
-                    Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
-                }
+    } else {
+        // Blocking: always use block_on for reliability.
+        // SAFETY: zmq contract guarantees single-threaded access per socket.
+        let (count, bytes) = unsafe { &mut *sock.send_yield.get() };
+        *count += 1;
+        *bytes += len;
+        if *count >= 64 || *bytes >= 1_024 * 1_024 {
+            *count = 0;
+            *bytes = 0;
+            std::thread::yield_now();
+        }
+
+        if sndtimeo > 0 {
+            let timeout = Duration::from_millis(sndtimeo as u64);
+            match handle.block_on(async { tokio::time::timeout(timeout, s.send(msg)).await }) {
+                Ok(Ok(())) => len as c_int,
+                Ok(Err(_)) => fail(ETERM),
+                Err(_elapsed) => fail(libc::EAGAIN),
             }
-            let handle = sock.ctx.handle(sock.thread_idx);
-            let s = inner.clone();
-            if sndtimeo > 0 {
-                let timeout = Duration::from_millis(sndtimeo as u64);
-                match handle.block_on(async { tokio::time::timeout(timeout, s.send(msg)).await }) {
-                    Ok(Ok(())) => len as c_int,
-                    Ok(Err(_)) => fail(ETERM),
-                    Err(_elapsed) => fail(libc::EAGAIN),
-                }
-            } else {
-                match handle.block_on(s.send(msg)) {
-                    Ok(()) => len as c_int,
-                    Err(_) => fail(ETERM),
-                }
+        } else {
+            match handle.block_on(s.send(msg)) {
+                Ok(()) => len as c_int,
+                Err(_) => fail(ETERM),
             }
         }
     }
@@ -277,6 +287,16 @@ pub extern "C" fn zmq_recv(
     {
         return fail(ETERM);
     }
+
+    #[cfg(unix)]
+    return zmq_recv_unix(sock, buf, buf_len, flags);
+
+    #[cfg(windows)]
+    zmq_recv_windows(sock, buf, buf_len, flags)
+}
+
+#[cfg(unix)]
+fn zmq_recv_unix(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags: c_int) -> c_int {
     // Inproc bypass fast path: copy from byte ring directly into user
     // buffer. Zero intermediate Bytes allocation.
     // SAFETY: zmq contract guarantees single-threaded access per socket.
@@ -297,7 +317,58 @@ pub extern "C" fn zmq_recv(
     }
 }
 
+#[cfg(windows)]
+fn zmq_recv_windows(
+    sock: &OmqSocket,
+    buf: *mut libc::c_void,
+    buf_len: usize,
+    flags: c_int,
+) -> c_int {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let dontwait = (flags & ZMQ_DONTWAIT) != 0;
+    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
+    let timeout = if dontwait || rcvtimeo == 0 {
+        Some(Duration::from_secs(0))
+    } else if rcvtimeo > 0 {
+        Some(Duration::from_millis(rcvtimeo as u64))
+    } else {
+        None
+    };
+
+    let Some(inner) = sock.inner.get() else {
+        return fail(ETERM);
+    };
+
+    let handle = sock.ctx.handle(sock.thread_idx);
+    let s = inner.clone();
+
+    let result = if let Some(dur) = timeout {
+        handle.block_on(async { tokio::time::timeout(dur, s.recv()).await })
+    } else {
+        Ok(handle.block_on(s.recv()))
+    };
+
+    match result {
+        Ok(Ok(msg)) => {
+            // Extract first frame for zmq_recv (not multipart-aware like zmq_recvmsg)
+            if let Some(frame) = msg.part_bytes(0) {
+                let frame_len = frame.len();
+                copy_to_buf(buf, buf_len, &frame[..]);
+                // TODO: Store remaining parts in drain if multipart (Phase 2.5)
+                frame_len as c_int
+            } else {
+                0
+            }
+        }
+        Ok(Err(_)) => fail(ETERM),
+        Err(_timeout) => fail(libc::EAGAIN),
+    }
+}
+
 /// Signal the recv pump that space is available in the recv ring.
+#[cfg(unix)]
 #[inline]
 fn signal_recv_space(sock: &OmqSocket) {
     if let Some(n) = sock.recv_space.get() {
@@ -307,11 +378,9 @@ fn signal_recv_space(sock: &OmqSocket) {
 
 /// Block on the recv eventfd until readable or timeout.
 /// Returns 0 on readable, -1 on timeout/error.
+#[cfg(unix)]
 fn wait_recv_eventfd(sock: &OmqSocket, timeout_ms: c_int) -> c_int {
-    #[cfg(target_os = "linux")]
-    let fd = sock.notify.recv_fd;
-    #[cfg(not(target_os = "linux"))]
-    let fd = sock.notify.recv_read;
+    let fd = sock.notify.recv_fd();
 
     let mut pfd = libc::pollfd {
         fd,
@@ -323,6 +392,7 @@ fn wait_recv_eventfd(sock: &OmqSocket, timeout_ms: c_int) -> c_int {
 }
 
 /// Pop one frame from the socket, honoring flags/timeout.
+#[cfg(unix)]
 pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
@@ -398,6 +468,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
 
 /// Zero-alloc recv for the inproc bypass: peek from byte ring,
 /// copy directly into the user's buffer, advance.
+#[cfg(unix)]
 fn recv_bypass_direct(
     sock: &OmqSocket,
     bypass: &mut crate::inproc_bypass::BypassRecv,
@@ -457,6 +528,7 @@ fn recv_bypass_direct(
 
 /// Try byte ring first, then pump yring. Returns payload length on success.
 #[inline]
+#[cfg(unix)]
 fn try_recv_bypass_or_yring(
     sock: &OmqSocket,
     bypass: &mut crate::inproc_bypass::BypassRecv,
@@ -493,6 +565,7 @@ fn try_recv_bypass_or_yring(
     None
 }
 
+#[cfg(unix)]
 #[inline]
 fn try_pop_dual(
     cons: &mut crate::socket::RecvConsumers,
@@ -510,6 +583,7 @@ fn try_pop_dual(
         .or_else(|| cons.pump.prefetch_and_pop())
 }
 
+#[cfg(unix)]
 fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 

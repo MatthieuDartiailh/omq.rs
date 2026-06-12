@@ -1,4 +1,8 @@
 //! Socket handle and `zmq_socket`/close/bind/connect/unbind/disconnect.
+//!
+//! Cross-platform socket operations:
+//! - **Unix:** All transports (TCP, IPC, inproc, UDP, etc.)
+//! - **Windows:** TCP, inproc, UDP (IPC not supported; returns ENOTSUP)
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_int, c_void};
@@ -16,7 +20,17 @@ use std::os::raw::c_char;
 
 use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, fail, map_omq_err, set_errno};
+use crate::notify::NotifyHandle;
 use crate::opts::SocketOverlay;
+
+// Conditional types for Unix vs Windows
+#[cfg(unix)]
+use crate::inproc_bypass::{BypassRecv, BypassSend};
+
+#[cfg(windows)]
+type BypassSend = ();
+#[cfg(windows)]
+type BypassRecv = ();
 
 /// Rewrite `Host::Wildcard` to IPv6 unspecified (::) for dual-stack bind.
 fn ipv6_rewrite_wildcard(ep: Endpoint) -> Endpoint {
@@ -35,135 +49,18 @@ fn ipv6_rewrite_wildcard(ep: Endpoint) -> Endpoint {
 // Default channel capacity (matches default HWM).
 pub(crate) const DEFAULT_HWM: usize = 1000;
 
-/// Eventfd-based notification pair on Linux; pipe pair on other platforms.
-#[cfg(target_os = "linux")]
-pub(crate) struct NotifyFd {
-    /// eventfd signaled (+1) for each message delivered to the recv ring.
-    pub recv_fd: std::os::unix::io::RawFd,
-    /// eventfd signaled (+1) for each send slot freed.
-    pub send_fd: std::os::unix::io::RawFd,
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) struct NotifyFd {
-    pub recv_read: std::os::unix::io::RawFd,
-    pub recv_write: std::os::unix::io::RawFd,
-    pub send_read: std::os::unix::io::RawFd,
-    pub send_write: std::os::unix::io::RawFd,
-}
-
-impl std::fmt::Debug for NotifyFd {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("NotifyFd { .. }")
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl NotifyFd {
-    fn new() -> Option<Self> {
-        // Non-semaphore: a single read returns the accumulated count
-        // and resets to 0. This allows O(1) drain instead of O(N).
-        // SAFETY: eventfd returns a valid fd on success, -1 on failure.
-        let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
-        if recv_fd < 0 {
-            return None;
-        }
-        // SAFETY: same as above.
-        let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
-        if send_fd < 0 {
-            // SAFETY: recv_fd is a valid open fd from the successful eventfd call above.
-            unsafe { libc::close(recv_fd) };
-            return None;
-        }
-        Some(Self { recv_fd, send_fd })
-    }
-
-    fn close(&self) {
-        // SAFETY: recv_fd and send_fd are valid fds opened by new().
-        unsafe {
-            libc::close(self.recv_fd);
-            libc::close(self.send_fd);
-        }
-    }
-
-    pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
-        let val: u64 = 1;
-        // SAFETY: fd is a valid eventfd; writing 8 bytes atomically increments the counter.
-        unsafe {
-            libc::write(fd, (&raw const val).cast::<libc::c_void>(), 8);
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-impl NotifyFd {
-    fn new() -> Option<Self> {
-        let mut fds = [-1i32; 2];
-        // SAFETY: fds is a valid 2-element array; pipe() writes two fds into it on success.
-        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        if rc != 0 {
-            return None;
-        }
-        // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
-        unsafe {
-            libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
-            libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
-        }
-        let (recv_read, recv_write) = (fds[0], fds[1]);
-        // SAFETY: same as above.
-        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        if rc != 0 {
-            // SAFETY: recv_read and recv_write are valid open fds.
-            unsafe {
-                libc::close(recv_read);
-                libc::close(recv_write);
-            }
-            return None;
-        }
-        // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
-        unsafe {
-            libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
-            libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
-        }
-        let (send_read, send_write) = (fds[0], fds[1]);
-        Some(Self {
-            recv_read,
-            recv_write,
-            send_read,
-            send_write,
-        })
-    }
-
-    fn close(&self) {
-        // SAFETY: all fds are valid, opened by new().
-        unsafe {
-            libc::close(self.recv_read);
-            libc::close(self.recv_write);
-            libc::close(self.send_read);
-            libc::close(self.send_write);
-        }
-    }
-
-    pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
-        let b: u8 = 1;
-        // SAFETY: fd is a valid pipe write end; writing 1 byte signals readiness.
-        unsafe {
-            libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
-        }
-    }
-}
-
 /// Dual yring consumers for the recv path.
 #[derive(Debug)]
 pub(crate) struct RecvConsumers {
     /// Filled directly by the first peer's `ConnectionDriver`.
+    #[allow(dead_code)]
     pub fast: yring::Consumer<omq_tokio::Message>,
     /// Filled by the recv pump task (fallback for second+ peers).
+    #[allow(dead_code)]
     pub pump: yring::Consumer<omq_tokio::Message>,
 }
 
 #[expect(dead_code)]
-#[derive(Debug)]
 pub(crate) struct OmqSocket {
     pub id: u64,
     pub thread_idx: usize,
@@ -178,9 +75,9 @@ pub(crate) struct OmqSocket {
     /// Lock-free inproc bypass (sender half). Set once during connect;
     /// accessed only from the `zmq_send` caller thread (ZMQ's single-thread
     /// contract per socket).
-    pub bypass_send: std::cell::UnsafeCell<Option<crate::inproc_bypass::BypassSend>>,
+    pub bypass_send: std::cell::UnsafeCell<Option<BypassSend>>,
     /// Lock-free inproc bypass (receiver half).
-    pub bypass_recv: std::cell::UnsafeCell<Option<crate::inproc_bypass::BypassRecv>>,
+    pub bypass_recv: std::cell::UnsafeCell<Option<BypassRecv>>,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub recv_drain: Mutex<VecDeque<Bytes>>,
     /// True when `recv_drain` is non-empty. Checked without the lock so the
@@ -198,7 +95,7 @@ pub(crate) struct OmqSocket {
     /// Shared config for recycling the recv fast yring on peer churn.
     pub recv_sink_config: std::sync::OnceLock<Arc<omq_tokio::engine::RecvSinkConfig>>,
     pub last_endpoint: Mutex<Option<String>>,
-    pub notify: NotifyFd,
+    pub notify: Arc<dyn NotifyHandle>,
     pub bound_or_connected: AtomicBool,
     pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
     /// Send yield state: (message count, bytes queued). Accessed only
@@ -263,6 +160,7 @@ fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {
     )
 }
 
+#[cfg(unix)]
 fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     let capacity = {
         let Ok(s_ov) = sender.overlay.lock() else {
@@ -276,10 +174,7 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
         shwm.min(rhwm).max(16)
     };
 
-    #[cfg(target_os = "linux")]
-    let recv_fd = receiver.notify.recv_fd;
-    #[cfg(not(target_os = "linux"))]
-    let recv_fd = receiver.notify.recv_write;
+    let recv_fd = receiver.notify.recv_fd();
 
     // Byte ring capacity: enough for `capacity` messages at a generous
     // average size. Rounded up to a power of two internally.
@@ -310,12 +205,16 @@ fn register_inproc_bind(sock: &Arc<OmqSocket>, name: &str) {
         if let Some(connector) = w.upgrade()
             && is_bypass_eligible(connector.socket_type, sock.socket_type)
         {
-            let (sender, receiver) = if connector.socket_type == SocketType::Push {
+            let (_sender, _receiver) = if connector.socket_type == SocketType::Push {
                 (&connector, sock)
             } else {
                 (sock, &connector)
             };
-            try_install_bypass(sender, receiver);
+            #[cfg(unix)]
+            {
+                let (sender, receiver) = (_sender, _receiver);
+                try_install_bypass(sender, receiver);
+            }
         }
     }
 }
@@ -331,12 +230,16 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
 
     if let Some(binder) = binder {
         if is_bypass_eligible(sock.socket_type, binder.socket_type) {
-            let (sender, receiver) = if sock.socket_type == SocketType::Push {
+            let (_sender, _receiver) = if sock.socket_type == SocketType::Push {
                 (sock, &binder)
             } else {
                 (&binder, sock)
             };
-            try_install_bypass(sender, receiver);
+            #[cfg(unix)]
+            {
+                let (sender, receiver) = (_sender, _receiver);
+                try_install_bypass(sender, receiver);
+            }
         }
     } else if let Ok(mut waiting) = ctx.inproc_waiting.lock() {
         waiting
@@ -368,7 +271,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         return std::ptr::null_mut();
     }
 
-    let Some(notify) = NotifyFd::new() else {
+    let Some(notify) = crate::notify::create_notify() else {
         set_errno(libc::EMFILE);
         return std::ptr::null_mut();
     };
@@ -427,116 +330,138 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
         return;
     };
     let opts = overlay.to_options();
-    let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
+    let _recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
     drop(overlay);
 
     let socket_type = sock.socket_type;
 
-    #[cfg(target_os = "linux")]
-    let recv_signal_fd = sock.notify.recv_fd;
-    #[cfg(not(target_os = "linux"))]
-    let recv_signal_fd = sock.notify.recv_write;
+    #[cfg(unix)]
+    {
+        let recv_hwm = _recv_hwm;
+        let recv_signal_fd = sock.notify.recv_fd();
+        let (fast_prod, fast_cons) = yring::spsc(cap);
+        let (mut pump_prod, pump_cons) = yring::spsc(cap);
+        // SAFETY: called once during materialization before any recv.
+        unsafe {
+            *sock.recv_cons.get() = Some(RecvConsumers {
+                fast: fast_cons,
+                pump: pump_cons,
+            });
+        };
 
-    let cap = recv_hwm.max(16);
-    let (fast_prod, fast_cons) = yring::spsc(cap);
-    let (mut pump_prod, pump_cons) = yring::spsc(cap);
-    // SAFETY: called once during materialization before any recv.
-    unsafe {
-        *sock.recv_cons.get() = Some(RecvConsumers {
-            fast: fast_cons,
-            pump: pump_cons,
+        let recv_space = Arc::new(tokio::sync::Notify::new());
+        let _ = sock.recv_space.set(recv_space.clone());
+
+        // Build the RecvSink::Yring for the driver's direct fast path.
+        let signal_fd = recv_signal_fd;
+        let signal_cb: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || crate::notify::signal_raw_recv_fd(signal_fd));
+        let recv_sink = omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
+            producer: fast_prod,
+            signal: Box::new({
+                let f = signal_cb.clone();
+                move || f()
+            }),
+            space: recv_space.clone(),
         });
-    };
+        let recv_sink_cfg = Arc::new(omq_tokio::engine::RecvSinkConfig::new(
+            recv_sink,
+            signal_cb,
+            recv_space.clone(),
+            cap,
+        ));
+        let _ = sock.recv_sink_config.set(recv_sink_cfg.clone());
 
-    let recv_space = Arc::new(tokio::sync::Notify::new());
-    let _ = sock.recv_space.set(recv_space.clone());
+        // Build the inner socket ON the tokio io thread.
+        // Socket::new() calls tokio::spawn internally (spawn_driver), so it
+        // must run within a tokio runtime context.
+        let (otx, orx) = flume::bounded(1);
+        sock.ctx.submit(
+            sock.thread_idx,
+            Box::new(move || {
+                let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_config(
+                    socket_type,
+                    opts,
+                    recv_sink_cfg,
+                ));
 
-    // Build the RecvSink::Yring for the driver's direct fast path.
-    let signal_fd = recv_signal_fd;
-    let signal_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || NotifyFd::signal_recv(signal_fd));
-    let recv_sink = omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
-        producer: fast_prod,
-        signal: Box::new({
-            let f = signal_cb.clone();
-            move || f()
-        }),
-        space: recv_space.clone(),
-    });
-    let recv_sink_cfg = Arc::new(omq_tokio::engine::RecvSinkConfig::new(
-        recv_sink,
-        signal_cb,
-        recv_space.clone(),
-        cap,
-    ));
-    let _ = sock.recv_sink_config.set(recv_sink_cfg.clone());
-
-    // Build the inner socket ON the tokio io thread.
-    // Socket::new() calls tokio::spawn internally (spawn_driver), so it
-    // must run within a tokio runtime context.
-    let (otx, orx) = flume::bounded(1);
-    sock.ctx.submit(
-        sock.thread_idx,
-        Box::new(move || {
-            let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_config(
-                socket_type,
-                opts,
-                recv_sink_cfg,
-            ));
-
-            // Recv pump: relay from async_channel into the pump yring.
-            // Handles second+ peers whose drivers push to async_channel.
-            // For the single-peer case, the async_channel stays empty
-            // and this task idles.
-            let s_recv = inner.clone();
-            let recv_pump = tokio::spawn(async move {
-                while let Ok(msg) = s_recv.recv().await {
-                    let mut m = msg;
-                    loop {
-                        match pump_prod.push(m) {
-                            Ok(()) => {
-                                if let yring::FlushResult::Flushed {
-                                    was_empty: true, ..
-                                } = pump_prod.flush_and_check()
-                                {
-                                    NotifyFd::signal_recv(recv_signal_fd);
-                                }
-                                break;
-                            }
-                            Err(returned) => {
-                                m = returned;
-                                let notified = recv_space.notified();
-                                tokio::pin!(notified);
-                                notified.as_mut().enable();
-                                match pump_prod.push(m) {
-                                    Ok(()) => {
-                                        if let yring::FlushResult::Flushed {
-                                            was_empty: true, ..
-                                        } = pump_prod.flush_and_check()
-                                        {
-                                            NotifyFd::signal_recv(recv_signal_fd);
-                                        }
-                                        break;
+                // Recv pump: relay from async_channel into the pump yring.
+                // Handles second+ peers whose drivers push to async_channel.
+                // For the single-peer case, the async_channel stays empty
+                // and this task idles.
+                let s_recv = inner.clone();
+                let recv_pump = tokio::spawn(async move {
+                    while let Ok(msg) = s_recv.recv().await {
+                        let mut m = msg;
+                        loop {
+                            match pump_prod.push(m) {
+                                Ok(()) => {
+                                    if let yring::FlushResult::Flushed {
+                                        was_empty: true, ..
+                                    } = pump_prod.flush_and_check()
+                                    {
+                                        crate::notify::signal_raw_recv_fd(recv_signal_fd);
                                     }
-                                    Err(returned2) => {
-                                        m = returned2;
-                                        notified.await;
+                                    break;
+                                }
+                                Err(returned) => {
+                                    m = returned;
+                                    let notified = recv_space.notified();
+                                    tokio::pin!(notified);
+                                    notified.as_mut().enable();
+                                    match pump_prod.push(m) {
+                                        Ok(()) => {
+                                            if let yring::FlushResult::Flushed {
+                                                was_empty: true,
+                                                ..
+                                            } = pump_prod.flush_and_check()
+                                            {
+                                                crate::notify::signal_raw_recv_fd(recv_signal_fd);
+                                            }
+                                            break;
+                                        }
+                                        Err(returned2) => {
+                                            m = returned2;
+                                            notified.await;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-            });
+                });
 
-            let _ = otx.send((inner, recv_pump));
-        }),
-    );
+                let _ = otx.send((inner, recv_pump));
+            }),
+        );
 
-    let Ok((inner, recv_pump)) = orx.recv() else {
-        return;
-    };
-    let _ = sock.inner.set(inner);
-    let _ = sock.recv_pump.set(recv_pump);
+        let Ok((inner, recv_pump)) = orx.recv() else {
+            return;
+        };
+        let _ = sock.inner.set(inner);
+        let _ = sock.recv_pump.set(recv_pump);
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows: yring recv infrastructure deferred to Phase 2.5.
+        // For now, use basic omq-tokio socket without optimization.
+        let (otx, orx) = flume::bounded(1);
+        sock.ctx.submit(
+            sock.thread_idx,
+            Box::new(move || {
+                let inner = Arc::new(omq_tokio::Socket::new(socket_type, opts));
+                let recv_pump = tokio::spawn(async { /* noop pump */ });
+                let _ = otx.send((inner, recv_pump));
+            }),
+        );
+
+        let Ok((inner, recv_pump)) = orx.recv() else {
+            return;
+        };
+        let _ = sock.inner.set(inner);
+        let _ = sock.recv_pump.set(recv_pump);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -566,6 +491,8 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
 /// `Endpoint`. Returns the socket reference, owned address string, and
 /// parsed endpoint on success. Also checks the context terminated flag.
 ///
+/// On Windows, returns ENOTSUP for IPC endpoints (ipc://).
+///
 /// # Safety
 ///
 /// `sock_ptr` must be a valid `*mut Arc<OmqSocket>` or null (returns EFAULT).
@@ -587,6 +514,13 @@ unsafe fn parse_endpoint_args(
         return Err(libc::EINVAL);
     };
     let addr_str = addr_str.to_owned();
+
+    // Windows: reject IPC transport (not supported).
+    #[cfg(windows)]
+    if addr_str.starts_with("ipc://") {
+        return Err(libc::ENOTSUP);
+    }
+
     let Ok(endpoint) = omq_tokio::Endpoint::from_str(&addr_str) else {
         return Err(libc::EINVAL);
     };

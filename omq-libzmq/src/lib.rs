@@ -5,8 +5,10 @@ mod consts;
 mod context;
 pub mod curve;
 mod error;
+#[cfg(unix)]
 mod inproc_bypass;
 mod msg;
+mod notify;
 mod opts;
 pub mod poll;
 pub mod proxy;

@@ -755,25 +755,29 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, v)
         }
         ZMQ_FD => {
-            #[cfg(target_os = "linux")]
-            let fd = sock_arc.notify.recv_fd;
-            #[cfg(not(target_os = "linux"))]
-            let fd = sock_arc.notify.recv_read;
-            write_i32(optval, optvallen, fd)
+            #[cfg(unix)]
+            {
+                let fd = sock_arc.notify.recv_fd();
+                return write_i32(optval, optvallen, fd);
+            }
+            #[cfg(windows)]
+            return crate::error::fail(libc::ENOPROTOOPT);
         }
         ZMQ_EVENTS => {
             let mut events = ZMQ_POLLOUT; // optimistic: always writable
             let has_data = sock_arc
                 .drain_nonempty
-                .load(std::sync::atomic::Ordering::Relaxed)
+                .load(std::sync::atomic::Ordering::Relaxed);
+            #[cfg(unix)]
+            let has_data = has_data
                 // SAFETY: zmq contract guarantees single-threaded access per socket.
                 || unsafe { &*sock_arc.recv_cons.get() }
                     .as_ref()
                     .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty())
-                // SAFETY: zmq contract guarantees single-threaded access per socket.
-                || unsafe { &*sock_arc.bypass_recv.get() }
-                    .as_ref()
-                    .is_some_and(|br| !br.is_empty());
+                    // SAFETY: zmq contract guarantees single-threaded access per socket.
+                    || unsafe { &*sock_arc.bypass_recv.get() }
+                        .as_ref()
+                        .is_some_and(|br| !br.is_empty());
             if has_data {
                 events |= ZMQ_POLLIN;
             }

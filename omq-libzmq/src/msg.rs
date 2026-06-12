@@ -444,6 +444,18 @@ pub extern "C" fn zmq_recvmsg(
     zmq_msg_recv(msg, sock, flags)
 }
 
+/// Extract a Bytes copy out of a msg without consuming ownership.
+fn extract_bytes(msg: *const OmqMsgRepr) -> Bytes {
+    // SAFETY: caller guarantees msg is non-null and initialized.
+    let r = unsafe { &*msg };
+    if r.ptr.is_null() || r.size == 0 {
+        return Bytes::new();
+    }
+    // SAFETY: r.ptr is non-null with r.size readable bytes (message invariant).
+    Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(r.ptr, r.size as usize) })
+}
+
+/// Extract the group name (routing prefix) from a msg.
 fn msg_group_bytes(msg: *mut OmqMsgRepr) -> bytes::Bytes {
     // SAFETY: caller guarantees msg is non-null.
     let r = unsafe { &*msg };
@@ -481,39 +493,90 @@ pub extern "C" fn zmq_msg_recv(
         return crate::error::fail(crate::error::ETERM);
     }
 
-    match crate::send_recv::pop_recv_frame(sock, flags) {
-        Ok((frame, more)) => {
-            zmq_msg_close(msg);
-            let sz = frame.len();
-            let boxed = Box::new(frame);
-            let data_ptr = boxed.as_ptr().cast_mut();
-            // SAFETY: msg was just closed above and is ready for reinitialization.
-            let r = unsafe { repr(msg) };
-            r.kind = KIND_BYTES;
-            r.more = u8::from(more);
-            r.pad = [0; 6];
-            r.size = sz as u64;
-            r.ptr = data_ptr;
-            r.free_fn = std::ptr::null_mut();
-            r.hint = std::ptr::null_mut();
-            r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
-            r.reserved = [0; 16];
-            #[expect(clippy::cast_possible_wrap)]
-            {
-                sz as c_int
+    #[cfg(unix)]
+    {
+        match crate::send_recv::pop_recv_frame(sock, flags) {
+            Ok((frame, more)) => {
+                zmq_msg_close(msg);
+                let sz = frame.len();
+                let boxed = Box::new(frame);
+                let data_ptr = boxed.as_ptr().cast_mut();
+                // SAFETY: msg was just closed above and is ready for reinitialization.
+                let r = unsafe { repr(msg) };
+                r.kind = KIND_BYTES;
+                r.more = u8::from(more);
+                r.pad = [0; 6];
+                r.size = sz as u64;
+                r.ptr = data_ptr;
+                r.free_fn = std::ptr::null_mut();
+                r.hint = std::ptr::null_mut();
+                r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
+                r.reserved = [0; 16];
+                #[expect(clippy::cast_possible_wrap)]
+                {
+                    sz as c_int
+                }
             }
+            Err(e) => crate::error::fail(e),
         }
-        Err(e) => crate::error::fail(e),
     }
-}
 
-/// Extract a Bytes copy out of a msg without consuming ownership.
-fn extract_bytes(msg: *const OmqMsgRepr) -> Bytes {
-    // SAFETY: caller guarantees msg is non-null and initialized.
-    let r = unsafe { &*msg };
-    if r.ptr.is_null() || r.size == 0 {
-        return Bytes::new();
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let dontwait = (flags & crate::consts::ZMQ_DONTWAIT) != 0;
+        let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
+        let timeout = if dontwait || rcvtimeo == 0 {
+            Some(Duration::from_secs(0))
+        } else if rcvtimeo > 0 {
+            Some(Duration::from_millis(rcvtimeo as u64))
+        } else {
+            None
+        };
+
+        let Some(inner) = sock.inner.get() else {
+            return crate::error::fail(crate::error::ETERM);
+        };
+
+        let handle = sock.ctx.handle(sock.thread_idx);
+        let s = inner.clone();
+
+        let result = if let Some(dur) = timeout {
+            handle.block_on(async { tokio::time::timeout(dur, s.recv()).await })
+        } else {
+            Ok(handle.block_on(s.recv()))
+        };
+
+        match result {
+            Ok(Ok(msg_data)) => {
+                zmq_msg_close(msg);
+                // For now, just extract first frame. TODO: multipart handling in Phase 2.5
+                if let Some(frame) = msg_data.part_bytes(0) {
+                    let sz = frame.len();
+                    let boxed = Box::new(frame.clone());
+                    let data_ptr = boxed.as_ptr().cast_mut();
+                    let r = unsafe { repr(msg) };
+                    r.kind = KIND_BYTES;
+                    r.more = 0; // TODO: check if multipart in Phase 2.5
+                    r.pad = [0; 6];
+                    r.size = sz as u64;
+                    r.ptr = data_ptr;
+                    r.free_fn = std::ptr::null_mut();
+                    r.hint = std::ptr::null_mut();
+                    r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
+                    r.reserved = [0; 16];
+                    #[expect(clippy::cast_possible_wrap)]
+                    {
+                        sz as c_int
+                    }
+                } else {
+                    0
+                }
+            }
+            Ok(Err(_)) => crate::error::fail(crate::error::ETERM),
+            Err(_timeout) => crate::error::fail(libc::EAGAIN),
+        }
     }
-    // SAFETY: r.ptr is non-null with r.size readable bytes (message invariant).
-    Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(r.ptr, r.size as usize) })
 }

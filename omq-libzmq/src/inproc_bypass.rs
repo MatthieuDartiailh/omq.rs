@@ -1,3 +1,6 @@
+#![cfg(unix)]
+#![expect(dead_code)] // Unix-only inproc optimization; Windows path uses basic socket
+
 //! Lock-free inproc bypass: connects `zmq_send` and `zmq_recv` directly
 //! via a SPSC byte ring, completely bypassing the io thread for eligible
 //! socket types (PUSH/PULL).
@@ -11,8 +14,6 @@
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-use crate::socket::NotifyFd;
 
 /// Shared state between the sender and receiver halves of an inproc bypass.
 pub(crate) struct InprocPipe {
@@ -341,7 +342,7 @@ impl BypassSend {
             return false;
         }
         if self.producer.flush() {
-            NotifyFd::signal_recv(self.pipe.recv_signal_fd);
+            crate::notify::signal_raw_recv_fd(self.pipe.recv_signal_fd);
         }
         true
     }
@@ -364,7 +365,7 @@ impl BypassSend {
             }
             self.pipe.sender_waiting.store(false, Ordering::Relaxed);
             if self.producer.flush() {
-                NotifyFd::signal_recv(self.pipe.recv_signal_fd);
+                crate::notify::signal_raw_recv_fd(self.pipe.recv_signal_fd);
             }
             return;
         }
