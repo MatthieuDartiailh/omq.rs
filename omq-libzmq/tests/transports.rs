@@ -38,6 +38,7 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
 // --- IPC (abstract namespace) ---
 
 #[test]
+#[cfg(unix)]
 fn ipc_push_pull() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);

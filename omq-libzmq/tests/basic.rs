@@ -121,6 +121,7 @@ fn push_pull_tcp() {
 }
 
 #[test]
+#[cfg(unix)]
 fn dontwait_returns_eagain_when_empty() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
@@ -223,6 +224,7 @@ fn pair_inproc_roundtrip() {
 }
 
 #[test]
+#[cfg(unix)]
 fn pub_sub_inproc() {
     let ctx = zmq_ctx_new();
     let pub_sock = zmq_socket(ctx, ZMQ_PUB);

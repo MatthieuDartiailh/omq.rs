@@ -6,6 +6,8 @@
 //!   - copy:      `zmq_msg_recv` → `zmq_send(ptr)`  (1 copy in fwd-send via `zmq_send`)
 //!
 //! Run: `cargo run --example bench_zero_copy --release -p omq-libzmq`
+//!
+//! Note: On Windows, IPC transport is not supported; only inproc and TCP are used.
 
 use std::ffi::CString;
 use std::time::Instant;

@@ -1,6 +1,8 @@
 //! Push/pull throughput and req/rep latency bench for omq-libzmq.
 //!
 //! Run: `cargo run --example bench_recv --release -p omq-libzmq`
+//!
+//! Note: On Windows, IPC transport is not supported; only inproc and TCP are used.
 
 use std::ffi::CString;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -205,8 +207,6 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(10_000);
-
-    let ipc_addr = format!("ipc://@omq-bench-{}", std::process::id());
     let sizes = [8, 64, 256, 1024, 16384];
 
     println!("=== omq-libzmq push/pull throughput ({batch} msgs/round) ===");
@@ -214,9 +214,13 @@ fn main() {
     for &sz in &sizes {
         bench_push_pull("inproc://x", sz, batch);
     }
-    println!("--- ipc ---");
-    for &sz in &sizes {
-        bench_push_pull(&ipc_addr, sz, batch);
+    #[cfg(unix)]
+    {
+        let ipc_addr = format!("ipc://@omq-bench-{}", std::process::id());
+        println!("--- ipc ---");
+        for &sz in &sizes {
+            bench_push_pull(&ipc_addr, sz, batch);
+        }
     }
     println!("--- tcp ---");
     for &sz in &sizes {
@@ -228,9 +232,13 @@ fn main() {
     for &sz in &sizes {
         bench_req_rep("inproc://x", sz, rt_iters);
     }
-    println!("--- ipc ---");
-    for &sz in &sizes {
-        bench_req_rep(&ipc_addr, sz, rt_iters);
+    #[cfg(unix)]
+    {
+        let ipc_addr = format!("ipc://@omq-bench-{}", std::process::id());
+        println!("--- ipc ---");
+        for &sz in &sizes {
+            bench_req_rep(&ipc_addr, sz, rt_iters);
+        }
     }
     println!("--- tcp ---");
     for &sz in &sizes {
