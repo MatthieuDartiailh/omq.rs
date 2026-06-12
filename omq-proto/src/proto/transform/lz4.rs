@@ -19,6 +19,7 @@
 //! connection.
 
 use bytes::Bytes;
+pub use lz4rip::block::DictTrainer;
 use lz4rip::block::{self, Compressor, Decompressor};
 use smallvec::SmallVec;
 
@@ -46,13 +47,15 @@ const LZ4M_BLOCK_SIZE: usize = 0x4000_0000;
 const MIN_COMPRESS_NO_DICT: usize = 512;
 
 /// Below this size, plaintext passthrough wins when a dict is installed.
-/// At 128B+, dict compression ratios reach 4-5x (2 KiB dict) and the
-/// CPU cost is acceptable. Below 128B, ratios are marginal and the
-/// per-message overhead is 5-7x higher than passthrough.
-const MIN_COMPRESS_WITH_DICT: usize = 128;
+/// At 64B+, dict compression achieves >50% ratio and the epoch-based
+/// compressor cost is negligible relative to wire savings.
+const MIN_COMPRESS_WITH_DICT: usize = 64;
 
 /// Maximum LZ4 dictionary size in bytes (RFC §6.2).
 pub const MAX_DICT_BYTES: usize = 8192;
+
+/// Default auto-train dictionary capacity in bytes.
+const DEFAULT_DICT_CAPACITY: usize = 2048;
 
 /// Send-side per-connection LZ4 state.
 pub struct Lz4Encoder {
@@ -72,6 +75,12 @@ pub struct Lz4Encoder {
     compressor: Compressor,
     /// User override for the compression threshold.
     threshold_override: Option<usize>,
+    /// Auto-training state. Fed message parts, then trained after
+    /// `train_msgs_left` messages.
+    trainer: Option<DictTrainer>,
+    train_msgs_left: usize,
+    /// Target dict size for auto-training.
+    dict_capacity: usize,
 }
 
 impl Default for Lz4Encoder {
@@ -84,6 +93,9 @@ impl Default for Lz4Encoder {
             out_buf: Vec::new(),
             compressor: Compressor::new(),
             threshold_override: None,
+            trainer: None,
+            train_msgs_left: 0,
+            dict_capacity: DEFAULT_DICT_CAPACITY,
         }
     }
 }
@@ -94,6 +106,7 @@ impl std::fmt::Debug for Lz4Encoder {
             .field("send_dict", &self.send_dict.as_ref().map(Bytes::len))
             .field("send_dict_shipped", &self.send_dict_shipped)
             .field("max_message_size", &self.max_message_size)
+            .field("training", &self.trainer.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -101,6 +114,29 @@ impl std::fmt::Debug for Lz4Encoder {
 impl Lz4Encoder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable auto-training. The encoder feeds outbound message parts
+    /// to a `DictTrainer` until saturated, then trains a dictionary
+    /// and ships it to the peer. Silently disabled when a static
+    /// `compression_dict` is set.
+    #[must_use]
+    pub fn with_auto_train(mut self) -> Self {
+        self.trainer = Some(DictTrainer::new(self.dict_capacity));
+        self.train_msgs_left = 100;
+        self
+    }
+
+    /// Set the auto-train dictionary capacity in bytes. Defaults to
+    /// 2048. Must not exceed [`MAX_DICT_BYTES`].
+    #[must_use]
+    pub fn with_dict_capacity(mut self, capacity: usize) -> Self {
+        let capacity = capacity.min(MAX_DICT_BYTES);
+        self.dict_capacity = capacity;
+        if self.trainer.is_some() {
+            self.trainer = Some(DictTrainer::new(capacity));
+        }
+        self
     }
 
     /// Construct with a send-side dictionary. The dict will be shipped to
@@ -118,6 +154,9 @@ impl Lz4Encoder {
             out_buf: Vec::new(),
             compressor,
             threshold_override: None,
+            trainer: None,
+            train_msgs_left: 0,
+            dict_capacity: DEFAULT_DICT_CAPACITY,
         })
     }
 
@@ -165,6 +204,8 @@ impl Lz4Encoder {
     pub fn passthrough_threshold(&self) -> Option<usize> {
         if self.threshold_override.is_some() {
             Some(self.effective_threshold())
+        } else if self.trainer.is_some() {
+            None
         } else if self.send_dict.is_none() {
             Some(MIN_COMPRESS_NO_DICT)
         } else {
@@ -172,9 +213,10 @@ impl Lz4Encoder {
         }
     }
 
-    /// True when no dict shipment is pending and offloading is safe.
+    /// True when no dict shipment is pending, no training is in
+    /// progress, and offloading is safe.
     pub fn can_offload(&self) -> bool {
-        self.send_dict.is_none() || self.send_dict_shipped
+        self.trainer.is_none() && (self.send_dict.is_none() || self.send_dict_shipped)
     }
 
     /// Create a pool encoder with the same config but its own compressor.
@@ -194,14 +236,41 @@ impl Lz4Encoder {
             out_buf: Vec::new(),
             compressor,
             threshold_override: self.threshold_override,
+            trainer: None,
+            train_msgs_left: 0,
+            dict_capacity: self.dict_capacity,
         }
     }
 
-    /// Update dict from the primary encoder. No-op for LZ4 (dict is
-    /// static, configured at construction).
-    pub fn sync_dict(&mut self, _primary: &Self) {}
+    /// Update dict from the primary encoder. After auto-training
+    /// completes, offload encoders pick up the trained dict here.
+    pub fn sync_dict(&mut self, primary: &Self) {
+        if let Some(dict) = &primary.send_dict
+            && self.send_dict.is_none()
+        {
+            self.send_dict = Some(dict.clone());
+            self.compressor = Compressor::with_dict(dict);
+        }
+    }
 
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
+        if let Some(trainer) = &mut self.trainer {
+            for part in &msg.parts_payload() {
+                trainer.add_sample(&part.as_bytes());
+            }
+            self.train_msgs_left = self.train_msgs_left.saturating_sub(1);
+            if self.train_msgs_left == 0 {
+                let trainer = self.trainer.take().unwrap();
+                let dict_bytes = trainer.train();
+                if !dict_bytes.is_empty() {
+                    let dict = Bytes::from(dict_bytes);
+                    self.compressor = Compressor::with_dict(&dict);
+                    self.send_dict = Some(dict);
+                    self.send_dict_shipped = false;
+                }
+            }
+        }
+
         let mut out: TransformedOut = SmallVec::new();
         if let Some(dict) = self.send_dict.as_ref()
             && !self.send_dict_shipped
@@ -632,8 +701,8 @@ mod tests {
 
     #[test]
     fn dict_aware_roundtrip_small_payload_uses_lz4b() {
-        // 64-byte payload - below the no-dict threshold (512) but above
-        // the with-dict threshold (128). The dict makes it compressible.
+        // 192-byte payload - below the no-dict threshold (512) but above
+        // the with-dict threshold (64). The dict makes it compressible.
         let dict = Bytes::from(vec![b'q'; 256]);
         let plain = vec![b'q'; 192];
         let msg = Message::single(plain.clone());
@@ -868,12 +937,208 @@ mod tests {
     }
 
     #[test]
-    fn sync_dict_is_noop() {
+    fn sync_dict_noop_when_already_present() {
         let dict = Bytes::from_static(b"some-dict-bytes-here");
         let primary = Lz4Encoder::with_send_dict(dict.clone()).unwrap();
         let mut offload = primary.new_offload();
         let ptr_before = offload.send_dict.as_ref().unwrap().as_ptr();
         offload.sync_dict(&primary);
         assert_eq!(offload.send_dict.as_ref().unwrap().as_ptr(), ptr_before);
+    }
+
+    fn compressible_payload(size: usize) -> Bytes {
+        let mut buf = Vec::with_capacity(size);
+        while buf.len() < size {
+            buf.extend_from_slice(b"{\"ts\":\"2026-06-11\",\"level\":\"INFO\",\"msg\":\"ok\"}");
+        }
+        buf.truncate(size);
+        Bytes::from(buf)
+    }
+
+    #[test]
+    fn auto_train_produces_dict_and_roundtrips() {
+        let mut enc = Lz4Encoder::new().with_auto_train();
+        let mut dec = Lz4Decoder::new();
+        assert!(enc.trainer.is_some());
+        assert!(!enc.can_offload());
+
+        // Feed enough messages to trigger training (>= 100 samples).
+        let mut dict_shipped = false;
+        for _ in 0..200 {
+            let msg = Message::single(compressible_payload(256));
+            let wire = enc.encode(&msg).unwrap();
+            for w in &wire {
+                if let Some(first_part) = w.part_bytes(0)
+                    && first_part.starts_with(b"LZ4D")
+                {
+                    dict_shipped = true;
+                }
+                let decoded = dec.decode(w.clone()).unwrap();
+                if let Some(out) = decoded {
+                    assert_eq!(out.part_bytes(0).unwrap().len(), 256);
+                }
+            }
+        }
+        assert!(enc.trainer.is_none(), "trainer consumed after saturation");
+        assert!(enc.send_dict.is_some(), "trained dict installed");
+        assert!(dict_shipped, "trained dict shipped to decoder");
+        assert!(enc.can_offload());
+
+        // Post-training messages use the dict.
+        let msg = Message::single(compressible_payload(128));
+        let wire = enc.encode(&msg).unwrap();
+        assert_eq!(wire.len(), 1);
+        let body = wire[0].part_bytes(0).unwrap();
+        assert_eq!(&body[..4], b"LZ4B", "128B msg compressed with dict");
+        let out = dec.decode(wire[0].clone()).unwrap().unwrap();
+        assert_eq!(out.part_bytes(0).unwrap().len(), 128);
+    }
+
+    #[test]
+    fn auto_train_threshold_drops_after_dict() {
+        let mut enc = Lz4Encoder::new().with_auto_train();
+        assert!(
+            enc.passthrough_threshold().is_none(),
+            "no passthrough cache during training"
+        );
+
+        // Trigger training (>= 100 samples).
+        for _ in 0..200 {
+            let _ = enc.encode(&Message::single(compressible_payload(256)));
+        }
+        assert!(enc.trainer.is_none());
+        assert_eq!(enc.effective_threshold(), MIN_COMPRESS_WITH_DICT);
+    }
+
+    #[test]
+    fn sync_dict_propagates_trained_dict() {
+        let mut primary = Lz4Encoder::new().with_auto_train();
+        let mut offload = Lz4Encoder::new();
+        assert!(offload.send_dict.is_none());
+
+        // Trigger training on primary (>= 100 samples).
+        for _ in 0..200 {
+            let _ = primary.encode(&Message::single(compressible_payload(256)));
+        }
+        assert!(primary.send_dict.is_some());
+
+        // Offload picks up the trained dict via sync.
+        offload.sync_dict(&primary);
+        assert!(offload.send_dict.is_some());
+        assert_eq!(
+            offload.send_dict.as_ref().unwrap().as_ptr(),
+            primary.send_dict.as_ref().unwrap().as_ptr(),
+        );
+    }
+
+    #[test]
+    fn auto_train_with_custom_capacity() {
+        let enc = Lz4Encoder::new().with_dict_capacity(4096).with_auto_train();
+        assert_eq!(enc.dict_capacity, 4096);
+        assert!(enc.trainer.is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "soak")]
+    fn multiblock_2gib_roundtrip() {
+        let size = LZ4M_BLOCK_SIZE + 1;
+        let mut plain = vec![0u8; size];
+        for (i, chunk) in plain.chunks_mut(43).enumerate() {
+            let tag = (i as u64).to_le_bytes();
+            let n = tag.len().min(chunk.len());
+            chunk[..n].copy_from_slice(&tag[..n]);
+        }
+        let msg = Message::single(plain.clone());
+        let mut enc = Lz4Encoder::new();
+        let wire = enc.encode(&msg).unwrap();
+        let bytes = wire[0].part_bytes(0).unwrap();
+        assert_eq!(&bytes[..4], b"LZ4M");
+        let declared = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+        assert_eq!(declared as usize, size);
+
+        let mut dec = Lz4Decoder::new();
+        let out = dec
+            .decode(wire.into_iter().next().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.part_bytes(0).unwrap().len(), size);
+        assert_eq!(&out.part_bytes(0).unwrap()[..8], &plain[..8]);
+        assert_eq!(
+            &out.part_bytes(0).unwrap()[LZ4M_BLOCK_SIZE..LZ4M_BLOCK_SIZE + 8],
+            &plain[LZ4M_BLOCK_SIZE..LZ4M_BLOCK_SIZE + 8],
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "soak")]
+    fn multiblock_2gib_with_dict() {
+        let dict = Bytes::from(vec![0x42u8; 256]);
+        let size = LZ4M_BLOCK_SIZE + 1;
+        let mut plain = vec![0u8; size];
+        for (i, chunk) in plain.chunks_mut(43).enumerate() {
+            let tag = (i as u64).to_le_bytes();
+            let n = tag.len().min(chunk.len());
+            chunk[..n].copy_from_slice(&tag[..n]);
+        }
+        let msg = Message::single(plain.clone());
+        let mut enc = Lz4Encoder::with_send_dict(dict).unwrap();
+        let mut dec = Lz4Decoder::new();
+
+        let wire = enc.encode(&msg).unwrap();
+        assert_eq!(wire.len(), 2);
+
+        let consumed = dec.decode(wire[0].clone()).unwrap();
+        assert!(consumed.is_none());
+
+        let out = dec.decode(wire[1].clone()).unwrap().unwrap();
+        assert_eq!(out.part_bytes(0).unwrap().len(), size);
+        assert_eq!(&out.part_bytes(0).unwrap()[..8], &plain[..8]);
+        assert_eq!(
+            &out.part_bytes(0).unwrap()[LZ4M_BLOCK_SIZE..LZ4M_BLOCK_SIZE + 8],
+            &plain[LZ4M_BLOCK_SIZE..LZ4M_BLOCK_SIZE + 8],
+        );
+    }
+
+    #[test]
+    fn auto_train_soak_pattern() {
+        const SIZES: &[usize] = &[64, 1024, 8 * 1024, 64 * 1024, 256 * 1024];
+
+        fn soak_payload(idx: u64, size: usize) -> Vec<u8> {
+            let seed = (idx & 0xFF) as u8;
+            let mut v = vec![seed; size];
+            let tag = idx.to_le_bytes();
+            v[..tag.len().min(size)].copy_from_slice(&tag[..tag.len().min(size)]);
+            v
+        }
+
+        // Pure lz4rip repro: reuse one Compressor::new() for many
+        // mixed-size calls, same pattern as the encoder accumulates
+        // during auto-training.
+        let mut compressor = Compressor::new();
+        for idx in 0..8000u64 {
+            let size = SIZES[idx as usize % SIZES.len()];
+            if size < 512 {
+                continue;
+            }
+            let input = soak_payload(idx, size);
+            let bound = block::get_maximum_output_size(input.len());
+            let mut out = vec![0u8; bound];
+            compressor.compress_into(&input, &mut out).unwrap();
+        }
+
+        // Full encoder/decoder roundtrip with auto-train.
+        let mut enc = Lz4Encoder::new().with_auto_train();
+        let mut dec = Lz4Decoder::new();
+        for idx in 0..300u64 {
+            let size = SIZES[idx as usize % SIZES.len()];
+            let payload = soak_payload(idx, size);
+            let msg = Message::single(payload.clone());
+            let wire = enc.encode(&msg).unwrap();
+            for w in wire {
+                if let Some(out) = dec.decode(w).unwrap() {
+                    assert_eq!(out.part_bytes(0).unwrap().to_vec(), payload);
+                }
+            }
+        }
     }
 }

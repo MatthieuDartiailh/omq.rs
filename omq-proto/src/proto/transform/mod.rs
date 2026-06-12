@@ -43,7 +43,7 @@ pub type TransformedOut = SmallVec<[Message; 2]>;
 #[derive(Debug)]
 pub enum MessageEncoder {
     #[cfg(feature = "lz4")]
-    Lz4(Lz4Encoder),
+    Lz4(Box<Lz4Encoder>),
 }
 
 /// Receive-side message transform. Symmetric to [`MessageEncoder`].
@@ -76,18 +76,26 @@ impl MessageEncoder {
 
     /// Build the per-connection encoder+decoder pair implied by an endpoint
     /// scheme. Returns `None` for plain `tcp://` / `ipc://` / `inproc://` /
-    /// `udp://`. Picks up `Options::compression_dict` and
-    /// `Options::max_message_size`.
+    /// `udp://`. Picks up `Options::compression_dict`,
+    /// `Options::compression_auto_train`, and `Options::max_message_size`.
     #[allow(unused_variables)]
     pub fn for_endpoint(endpoint: &Endpoint, options: &Options) -> Option<(Self, MessageDecoder)> {
         match endpoint {
             #[cfg(feature = "lz4")]
             Endpoint::Lz4Tcp { .. } => {
                 use lz4::{Lz4Decoder, Lz4Encoder};
-                let mut enc = match options.compression_dict.clone() {
-                    Some(d) => Lz4Encoder::with_send_dict(d)
-                        .expect("compression_dict validated at Options::compression_dict"),
-                    None => Lz4Encoder::new(),
+                let mut enc = if let Some(d) = options.compression_dict.clone() {
+                    Lz4Encoder::with_send_dict(d)
+                        .expect("compression_dict validated at Options::compression_dict")
+                } else {
+                    let mut e = Lz4Encoder::new();
+                    if options.compression_auto_train {
+                        e = e.with_auto_train();
+                    }
+                    if let Some(c) = options.compression_dict_capacity {
+                        e = e.with_dict_capacity(c);
+                    }
+                    e
                 }
                 .with_max_message_size(options.max_message_size);
                 if let Some(t) = options.compression_threshold {
@@ -97,7 +105,7 @@ impl MessageEncoder {
                 if let Some(m) = options.max_recv_dict_size {
                     dec = dec.with_max_recv_dict_size(m);
                 }
-                Some((MessageEncoder::Lz4(enc), MessageDecoder::Lz4(dec)))
+                Some((MessageEncoder::Lz4(Box::new(enc)), MessageDecoder::Lz4(dec)))
             }
             _ => None,
         }
@@ -131,7 +139,7 @@ impl MessageEncoder {
     pub fn new_offload(&self) -> Self {
         match self {
             #[cfg(feature = "lz4")]
-            Self::Lz4(t) => Self::Lz4(t.new_offload()),
+            Self::Lz4(t) => Self::Lz4(Box::new(t.new_offload())),
             #[cfg(not(feature = "lz4"))]
             _ => unreachable!(),
         }

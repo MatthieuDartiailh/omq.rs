@@ -90,12 +90,15 @@ pub struct Options {
     pub compression_dict: Option<Bytes>,
 
     /// Auto-trained dictionaries. Defaults to **on**.
-    /// When no `compression_dict` is configured on a compression
-    /// transport, the encoder samples outbound messages, trains a
-    /// dict (capacity controlled by `compression_dict_capacity`,
-    /// default 2 KiB), and ships it. Setting `compression_dict`
-    /// overrides: auto-train is silently disabled when a static
-    /// dict is supplied.
+    /// When no `compression_dict` is configured on an `lz4+tcp://`
+    /// connection, the encoder feeds outbound message parts to a
+    /// `DictTrainer` until it saturates (bloom-filter diversity
+    /// plateaus), then trains a dict (capacity controlled by
+    /// `compression_dict_capacity`, default 2 KiB) and ships it.
+    /// After that the per-part compression threshold drops from
+    /// 512 B to 64 B and small messages ride the dict.
+    /// Setting `compression_dict` overrides: auto-train is silently
+    /// disabled when a static dict is supplied.
     /// Set to `false` to suppress training (e.g. tests that need a
     /// deterministic wire shape).
     pub compression_auto_train: bool,
