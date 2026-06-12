@@ -7,8 +7,10 @@
 
 use std::fmt;
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::str::FromStr;
+
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use crate::error::{Error, Result};
 
@@ -22,6 +24,8 @@ pub enum Endpoint {
     /// `tcp://host:port` (IPv4, IPv6, or DNS name).
     Tcp { host: Host, port: u16 },
     /// `ipc://path` filesystem socket, or `ipc://@name` Linux abstract namespace.
+    /// Only available on Unix platforms.
+    #[cfg(unix)]
     Ipc(IpcPath),
     /// `inproc://name` in-process transport.
     Inproc { name: String },
@@ -58,6 +62,8 @@ pub enum Host {
 }
 
 /// IPC path, possibly in the Linux abstract namespace (leading `@`).
+/// Only available on Unix platforms.
+#[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IpcPath {
@@ -98,6 +104,7 @@ impl FromStr for Endpoint {
 
         match scheme {
             "tcp" => parse_host_port(rest).map(|(host, port)| Endpoint::Tcp { host, port }),
+            #[cfg(unix)]
             "ipc" => Ok(Endpoint::Ipc(parse_ipc(rest)?)),
             "inproc" => {
                 if rest.is_empty() {
@@ -123,6 +130,7 @@ impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Tcp { host, port } => write!(f, "tcp://{host}:{port}"),
+            #[cfg(unix)]
             Self::Ipc(path) => write!(f, "ipc://{path}"),
             Self::Inproc { name } => write!(f, "inproc://{name}"),
             Self::Udp { group, host, port } => match group {
@@ -152,7 +160,9 @@ impl Endpoint {
                 host: host.clone(),
                 port: *port,
             },
-            other => other.clone(),
+            #[cfg(unix)]
+            Endpoint::Ipc(_) => self.clone(),
+            _ => self.clone(),
         }
     }
 
@@ -191,6 +201,7 @@ impl Endpoint {
     pub fn scheme(&self) -> &'static str {
         match self {
             Endpoint::Tcp { .. } => "tcp",
+            #[cfg(unix)]
             Endpoint::Ipc(_) => "ipc",
             Endpoint::Inproc { .. } => "inproc",
             Endpoint::Udp { .. } => "udp",
@@ -235,6 +246,7 @@ impl fmt::Display for Host {
     }
 }
 
+#[cfg(unix)]
 impl fmt::Display for IpcPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -324,6 +336,7 @@ fn parse_host(s: &str) -> Result<Host> {
     Ok(Host::Name(s.to_string()))
 }
 
+#[cfg(unix)]
 fn parse_ipc(rest: &str) -> Result<IpcPath> {
     if rest.is_empty() {
         return Err(Error::InvalidEndpoint("empty ipc path".to_string()));

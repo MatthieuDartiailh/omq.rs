@@ -2,9 +2,12 @@
 //! `omq-proto/src/endpoint.rs`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(unix)]
 use std::path::PathBuf;
 
-use omq_proto::endpoint::{Endpoint, EndpointRole, EndpointSpec, Host, IpcPath};
+#[cfg(unix)]
+use omq_proto::endpoint::IpcPath;
+use omq_proto::endpoint::{Endpoint, EndpointRole, EndpointSpec, Host};
 use omq_proto::error::Error;
 
 fn parse(s: &str) -> Endpoint {
@@ -55,6 +58,7 @@ fn tcp_wildcard() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn ipc_filesystem() {
     assert_eq!(
@@ -63,6 +67,7 @@ fn ipc_filesystem() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn ipc_abstract() {
     assert_eq!(
@@ -162,7 +167,9 @@ fn display_roundtrip() {
         "tcp://127.0.0.1:5555",
         "tcp://example.com:5555",
         "tcp://*:5555",
+        #[cfg(unix)]
         "ipc:///tmp/sock",
+        #[cfg(unix)]
         "ipc://@mysock",
         "inproc://ch",
         "udp://weather@239.1.1.1:9000",
