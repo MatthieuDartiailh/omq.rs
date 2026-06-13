@@ -116,13 +116,15 @@ impl SpscAwareRecv {
             }
 
             if self.consumers.read().unwrap().is_empty() {
+                let activated = self.activated.notified();
+                tokio::pin!(activated);
+                activated.as_mut().enable();
                 tokio::select! {
                     biased;
                     res = self.rx.recv() => {
                         return res.map_err(|_| Error::Closed);
                     }
-                    () = self.activated.notified() => continue,
-                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => continue,
+                    () = activated => continue,
                 }
             } else {
                 let notified = self.recv_notify.notified();
