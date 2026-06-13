@@ -1046,6 +1046,7 @@ where
         if drain_buf.is_empty() {
             return Ok(());
         }
+        let total: usize = drain_buf.iter().map(Bytes::len).sum();
         let iovecs: SmallVec<[io::IoSlice<'_>; 64]> =
             drain_buf.iter().map(|b| io::IoSlice::new(b)).collect();
         let n = writer.write_vectored(&iovecs).await?;
@@ -1053,7 +1054,6 @@ where
         if n == 0 {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
         }
-        let total: usize = drain_buf.iter().map(Bytes::len).sum();
         if n < total {
             let drained = std::mem::take(drain_buf);
             eq.put_back_unwritten(drained, n);
@@ -1065,7 +1065,8 @@ async fn write_chunks<W>(writer: &mut W, chunks: &mut Vec<Bytes>) -> io::Result<
 where
     W: AsyncWrite + Unpin,
 {
-    while !chunks.is_empty() {
+    let mut remaining: usize = chunks.iter().map(Bytes::len).sum();
+    while remaining > 0 {
         let iovecs: SmallVec<[io::IoSlice<'_>; 64]> =
             chunks.iter().map(|b| io::IoSlice::new(b)).collect();
         let n = writer.write_vectored(&iovecs).await?;
@@ -1073,8 +1074,8 @@ where
         if n == 0 {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
         }
-        let total: usize = chunks.iter().map(Bytes::len).sum();
-        if n >= total {
+        remaining -= n;
+        if remaining == 0 {
             chunks.clear();
         } else {
             let mut skip = n;
