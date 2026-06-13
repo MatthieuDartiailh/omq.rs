@@ -514,6 +514,9 @@ impl SocketDriver {
         // Per-peer SPSC: always add to consumers Vec (recv side).
         if let Some(ref s) = spsc {
             self.spsc.consumers.write().unwrap().push(s.clone());
+            self.spsc
+                .consumer_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
             if can_bypass_actor_recv(self.socket_type) {
                 s.recv_ready
                     .store(true, std::sync::atomic::Ordering::Release);

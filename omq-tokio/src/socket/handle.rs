@@ -1,6 +1,6 @@
 //! Public `Socket` handle.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
@@ -45,9 +45,14 @@ pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
 /// Grouped handles for per-peer SPSC inproc fast path. Shared between
 /// the socket handle (recv side) and the actor (send-ring management,
 /// consumer registration).
+/// Bumped by the actor whenever the consumers Vec changes. Lets
+/// `SpscAwareRecv` skip re-cloning the Vec when nothing changed.
+pub(crate) type SpscConsumerGeneration = Arc<AtomicU64>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct SpscHandles {
     pub consumers: SpscConsumers,
+    pub consumer_generation: SpscConsumerGeneration,
     pub send_ring: SpscSendRing,
     pub send_ring_active: SpscSendRingActive,
     pub recv_notify: SpscRecvNotify,
@@ -61,6 +66,8 @@ struct SpscAwareRecv {
     rx: async_channel::Receiver<Message>,
     /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
     consumers: Arc<std::sync::RwLock<Vec<Arc<InprocSpsc>>>>,
+    /// Generation counter. Bumped by the actor on consumer add/remove.
+    consumer_generation: SpscConsumerGeneration,
     /// Shared recv notification. All drivers/senders notify this.
     recv_notify: Arc<tokio::sync::Notify>,
     /// Notified when consumers Vec changes (new peer added).
@@ -71,6 +78,8 @@ struct SpscAwareRecv {
     send_ring_active: Arc<AtomicBool>,
     /// Batched inproc messages drained from consumers.
     inproc_cache: std::sync::Mutex<std::collections::VecDeque<Message>>,
+    /// Cached clone of the consumers Vec, refreshed when generation changes.
+    cached_consumers: Mutex<(u64, Vec<Arc<InprocSpsc>>)>,
 }
 
 impl SpscAwareRecv {
@@ -81,7 +90,14 @@ impl SpscAwareRecv {
                 return Some(msg);
             }
         }
-        let consumers = self.consumers.read().unwrap().clone();
+        let current_gen = self.consumer_generation.load(Ordering::Acquire);
+        let mut cached = self.cached_consumers.lock().unwrap();
+        if cached.0 != current_gen {
+            cached.1.clone_from(&self.consumers.read().unwrap());
+            cached.0 = current_gen;
+        }
+        let consumers = cached.1.clone();
+        drop(cached);
         let mut cache = self.inproc_cache.lock().unwrap();
         let mut has_disconnected = false;
         for p in &consumers {
@@ -104,6 +120,8 @@ impl SpscAwareRecv {
                 .write()
                 .unwrap()
                 .retain(|p| p.consumer.try_lock().map_or(true, |c| !c.is_disconnected()));
+            self.consumer_generation.fetch_add(1, Ordering::Release);
+            self.cached_consumers.lock().unwrap().0 = u64::MAX;
         }
         result
     }
@@ -244,6 +262,7 @@ impl Socket {
         let send_submitter = send_strategy.submitter();
         let spsc = SpscHandles {
             consumers: Arc::new(RwLock::new(Vec::new())),
+            consumer_generation: Arc::new(AtomicU64::new(0)),
             send_ring: Arc::new(RwLock::new(None)),
             send_ring_active: Arc::new(AtomicBool::new(false)),
             recv_notify: Arc::new(tokio::sync::Notify::new()),
@@ -274,11 +293,13 @@ impl Socket {
                 recv_rx: SpscAwareRecv {
                     rx: recv_rx,
                     consumers: spsc.consumers,
+                    consumer_generation: spsc.consumer_generation,
                     recv_notify: spsc.recv_notify,
                     activated: spsc.activated,
                     send_ring: spsc.send_ring,
                     send_ring_active: spsc.send_ring_active,
                     inproc_cache: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                    cached_consumers: Mutex::new((u64::MAX, Vec::new())),
                 },
                 monitor,
                 root_cancel: cancel,
