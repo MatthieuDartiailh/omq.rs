@@ -56,11 +56,15 @@ OMQ_FUZZ_ITERS=500000000 cargo test -p omq-tokio  --features fuzz --release -- -
 
 ## Soak tests
 
-Long-running leak and stability scenarios. Both backends have
-identical suites (11 scenarios each): peer churn, reconnect storm,
-PUB/SUB churn, large-message throughput, compression (lz4), PLAIN
-auth, CURVE encryption, BLAKE3ZMQ encryption, multi-socket, inproc
-cross-thread.
+Long-running leak and stability scenarios. omq-tokio has 21
+scenarios; omq-compio has 11 (the ten newest are tokio-only for
+now). Scenarios: peer churn, reconnect storm, reconnect all types,
+PUB/SUB churn, PUB/SUB churn TCP, XPUB/XSUB churn,
+ROUTER/DEALER churn, HWM reconnect (drop + block), WebSocket
+throughput, WebSocket reconnect storm, large-message throughput,
+compression (lz4), PLAIN auth, CURVE encryption, BLAKE3ZMQ
+encryption, multi-socket, inproc cross-thread, cancel safety,
+CURVE reconnect, BLAKE3ZMQ reconnect.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s).
 Enable all feature-gated scenarios with the full feature set.
@@ -70,16 +74,19 @@ sequentially. Launch scenarios in batches of 4 (8 processes) to
 keep peak RSS bounded while still running in parallel:
 
 ```sh
-FEATURES="soak lz4 plain curve blake3zmq"
+FEATURES="soak lz4 plain curve blake3zmq ws"
 
 # build first (avoid parallel compilation conflicts)
 cargo test -p omq-compio --features "$FEATURES" --release --no-run
 cargo test -p omq-tokio  --features "$FEATURES" --release --no-run
 
 # run in batches of 4 scenarios (8 processes), 10 min each
-TESTS=(blake3zmq compression compression_lz4 curve
-       inproc_cross_thread large_throughput multi_socket peer_churn
-       plain pub_sub_churn reconnect_storm)
+TESTS=(blake3zmq cancel_safety compression compression_lz4 curve
+       hwm_reconnect inproc_cross_thread large_throughput
+       mechanism_reconnect multi_socket peer_churn plain
+       pub_sub_churn pub_sub_churn_tcp reconnect_all_types
+       reconnect_storm router_dealer_churn ws
+       xpub_xsub_churn)
 
 batch=()
 for test in "${TESTS[@]}"; do
