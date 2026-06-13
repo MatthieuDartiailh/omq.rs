@@ -743,15 +743,6 @@ impl Socket {
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {
-        let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
-        if let Some(ref slot) = slot {
-            let mut stripped = msg.clone();
-            stripped.pop_front();
-            match slot.try_encode(&stripped) {
-                TryEncodeResult::Ok => return Ok(()),
-                TryEncodeResult::Dead | TryEncodeResult::Full | TryEncodeResult::Ineligible => {}
-            }
-        }
         self.inner.send_submitter.send(msg).await
     }
 
