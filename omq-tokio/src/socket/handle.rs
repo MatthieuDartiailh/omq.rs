@@ -708,29 +708,23 @@ impl Socket {
     }
 
     async fn send_via_wire_slot(&self, msg: Message) -> Result<()> {
-        let fast = {
-            let guard = self.inner.wire_slot.lock().expect("wire_slot");
-            match guard.as_ref() {
-                Some(slot) => slot.try_encode(&msg),
-                None => TryEncodeResult::Ineligible,
-            }
+        let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
+        let Some(ref slot) = slot else {
+            return self.inner.send_submitter.send(msg).await;
         };
-        match fast {
+        match slot.try_encode(&msg) {
             TryEncodeResult::Ok => Ok(()),
             TryEncodeResult::Full => {
-                let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
-                if let Some(ref slot) = slot {
-                    loop {
-                        match slot.try_encode(&msg) {
-                            TryEncodeResult::Ok => return Ok(()),
-                            TryEncodeResult::Dead | TryEncodeResult::Ineligible => break,
-                            TryEncodeResult::Full => {
-                                let notified = slot.space_available.notified();
-                                if slot.try_encode(&msg) == TryEncodeResult::Ok {
-                                    return Ok(());
-                                }
-                                notified.await;
+                loop {
+                    match slot.try_encode(&msg) {
+                        TryEncodeResult::Ok => return Ok(()),
+                        TryEncodeResult::Dead | TryEncodeResult::Ineligible => break,
+                        TryEncodeResult::Full => {
+                            let notified = slot.space_available.notified();
+                            if slot.try_encode(&msg) == TryEncodeResult::Ok {
+                                return Ok(());
                             }
+                            notified.await;
                         }
                     }
                 }
