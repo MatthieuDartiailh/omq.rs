@@ -26,7 +26,7 @@ pub(crate) struct PeerWireSlot {
     pub(crate) space_available: Notify,
     pub(crate) driver_in_select: AtomicBool,
     pub(crate) handshake_done: AtomicBool,
-    pending: AtomicBool,
+    pub(crate) pending: AtomicBool,
     #[allow(dead_code)]
     pub(crate) has_transform: bool,
     #[allow(dead_code)]
@@ -136,7 +136,9 @@ impl PeerWireSlot {
     }
 
     fn signal_encoded(&self) {
-        if !self.pending.swap(true, Ordering::Release) {
+        if !self.pending.swap(true, Ordering::Release)
+            && self.driver_in_select.load(Ordering::Acquire)
+        {
             self.data_ready.notify_one();
         }
     }

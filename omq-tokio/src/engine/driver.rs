@@ -557,6 +557,19 @@ where
                 slot.handshake_done.store(true, Ordering::Release);
             }
 
+            if let Some(ref slot) = wire_slot
+                && slot.handshake_done.load(Ordering::Acquire)
+                && slot.pending.load(Ordering::Acquire)
+            {
+                drain_buf.clear();
+                slot.drain_into_vec(&mut drain_buf, 1024);
+                if !drain_buf.is_empty() {
+                    eq.push_shared_chunks(&drain_buf);
+                    drain_buf.clear();
+                    slot.space_available.notify_one();
+                }
+            }
+
             let want_write = codec.has_pending_transmit() || !eq.is_empty();
             let hb_enabled = hb_interval.is_some() && codec.is_ready();
 
