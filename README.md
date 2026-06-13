@@ -155,7 +155,7 @@ covered by integration tests on both backends. The full suite:
   socket-type x transport x mechanism cell).
 - **Protocol fuzzing** (~10M iterations per suite): hand-rolled fuzz of
   the wire parser and the socket-action state machine.
-- **12 soak test scenarios** per backend: peer churn, reconnect storms,
+- **18 soak test scenarios** per backend: peer churn, reconnect storms,
   PUB/SUB churn, compression, PLAIN / CURVE / BLAKE3ZMQ auth
   large-message throughput, multi-socket. Each scenario samples
   RSS and file-descriptor counts to detect leaks.
