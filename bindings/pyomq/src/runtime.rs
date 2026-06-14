@@ -52,11 +52,18 @@ fn ensure_runtime() -> (Handle, flume::Sender<Job>, Arc<crate::socket::RecvNotif
     thread::Builder::new()
         .name("pyomq-tokio".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(n.max(1))
-                .enable_all()
-                .build()
-                .expect("pyomq: tokio runtime build");
+            let rt = if n <= 1 {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("pyomq: tokio runtime build")
+            } else {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(n)
+                    .enable_all()
+                    .build()
+                    .expect("pyomq: tokio runtime build")
+            };
             let _ = handle_tx.send(rt.handle().clone());
             rt.block_on(async move {
                 while let Ok(job) = rx.recv_async().await {
