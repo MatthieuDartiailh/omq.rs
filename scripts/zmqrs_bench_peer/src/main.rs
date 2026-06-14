@@ -35,12 +35,24 @@ fn resolve_addr(s: &str) -> String {
     }
 }
 
+fn resolve_bind_addr(s: &str) -> String {
+    if s == "0" {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        println!("PORT {port}");
+        format!("tcp://127.0.0.1:{port}")
+    } else {
+        resolve_addr(s)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("push") => {
-            let addr = resolve_addr(&args[2]);
+            let addr = resolve_bind_addr(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             run_push(&addr, size).await;
         }
@@ -51,7 +63,7 @@ async fn main() {
             run_pull(&addr, size, Duration::from_secs_f64(duration)).await;
         }
         Some("rep") => {
-            let addr = resolve_addr(&args[2]);
+            let addr = resolve_bind_addr(&args[2]);
             run_rep(&addr).await;
         }
         Some("req") => {
@@ -67,13 +79,13 @@ async fn main() {
             run_push_connect(&addr, size).await;
         }
         Some("pull-bind") => {
-            let addr = resolve_addr(&args[2]);
+            let addr = resolve_bind_addr(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
             run_pull_bind(&addr, size, Duration::from_secs_f64(duration)).await;
         }
         Some("pub") => {
-            let addr = resolve_addr(&args[2]);
+            let addr = resolve_bind_addr(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             run_pub(&addr, size).await;
         }

@@ -107,12 +107,14 @@ def libzmq_version() -> str:
 
 # ── process management ────────────────────────────────────────────
 
-def spawn_process(binary: str, *args: str) -> subprocess.Popen:
+def spawn_process(binary: str, *args: str, env: dict | None = None) -> subprocess.Popen:
+    merged = {**os.environ, **(env or {})} if env else None
     return subprocess.Popen(
         [binary, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        env=merged,
     )
 
 
@@ -131,12 +133,15 @@ def read_bound_port(proc: subprocess.Popen, timeout: float = 5.0) -> int | None:
     return None
 
 
-def capture_process(binary: str, *args: str, timeout: int = 15) -> str:
+def capture_process(binary: str, *args: str, timeout: int = 15,
+                    env: dict | None = None) -> str:
+    merged = {**os.environ, **(env or {})} if env else None
     proc = subprocess.Popen(
         [binary, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        env=merged,
     )
     try:
         stdout, _ = proc.communicate(timeout=timeout)
@@ -171,6 +176,17 @@ def kill_process(proc: subprocess.Popen):
 
 # ── measurement parsing ──────────────────────────────────────────
 
+def read_proc_cpu(pid: int) -> float:
+    """Read user+sys CPU time in seconds from /proc/[pid]/stat."""
+    try:
+        fields = open(f"/proc/{pid}/stat").read().split()
+        utime = int(fields[13])
+        stime = int(fields[14])
+        return (utime + stime) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError):
+        return 0.0
+
+
 def parse_throughput(output: str, size: int) -> dict | None:
     parts = output.strip().split()
     if len(parts) < 2:
@@ -181,20 +197,37 @@ def parse_throughput(output: str, size: int) -> dict | None:
         return None
     msgs_s = count / elapsed
     mbps = (count * size) / elapsed / 1e6
-    return {"msgs_s": msgs_s, "mbps": mbps}
+    result = {"msgs_s": msgs_s, "mbps": mbps, "elapsed": elapsed}
+    if len(parts) >= 4:
+        try:
+            result["pull_cpu"] = float(parts[3])
+        except ValueError:
+            pass
+    return result
 
 
 def parse_latency(output: str) -> dict | None:
     parts = output.strip().split()
     if len(parts) < 5:
         return None
-    return {
+    result = {
         "p50_us": float(parts[0]),
         "p99_us": float(parts[1]),
         "p999_us": float(parts[2]),
         "max_us": float(parts[3]),
         "iterations": int(parts[4]),
     }
+    if len(parts) >= 6:
+        try:
+            result["req_cpu"] = float(parts[5])
+        except ValueError:
+            pass
+    if len(parts) >= 7:
+        try:
+            result["elapsed"] = float(parts[6])
+        except ValueError:
+            pass
+    return result
 
 
 # ── benchmark cells ──────────────────────────────────────────────
@@ -204,6 +237,7 @@ def run_throughput_cell(
     inproc_subcmd: str = "inproc",
     duration: float = DEFAULT_DURATION,
     rounds: int = DEFAULT_ROUNDS,
+    env: dict | None = None,
 ) -> dict | None:
     best = None
     # Extra retries for inproc: compio cross-thread waker bug causes
@@ -211,7 +245,7 @@ def run_throughput_cell(
     effective_rounds = max(rounds, 5) if transport == "inproc" else rounds
     for _ in range(effective_rounds):
         result = _run_throughput_once(binary, transport, addr, size,
-                                      inproc_subcmd, duration)
+                                      inproc_subcmd, duration, env=env)
         if result and (best is None or result["msgs_s"] > best["msgs_s"]):
             best = result
     return best
@@ -226,19 +260,19 @@ def _fresh_addr(addr: str) -> str:
 
 def _run_throughput_once(
     binary: str, transport: str, addr: str, size: int,
-    inproc_subcmd: str, duration: float,
+    inproc_subcmd: str, duration: float, env: dict | None = None,
 ) -> dict | None:
     dur = str(duration)
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
         timeout_s = max(int(duration) + 5, 8)
         output = capture_process(binary, inproc_subcmd, fresh_name, str(size),
-                                 dur, timeout=timeout_s)
+                                 dur, timeout=timeout_s, env=env)
         return parse_throughput(output, size)
 
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
-    push = spawn_process(binary, "push", addr, str(size))
+    push = spawn_process(binary, "push", addr, str(size), env=env)
     if transport in ("ipc", "ws"):
         time.sleep(0.2)
         connect_addr = addr
@@ -249,11 +283,17 @@ def _run_throughput_once(
             return None
         connect_addr = str(port)
     try:
-        output = capture_process(binary, "pull", connect_addr, str(size), dur)
+        output = capture_process(binary, "pull", connect_addr, str(size), dur,
+                                 env=env)
+        push_cpu = read_proc_cpu(push.pid)
     finally:
         kill_process(push)
         cleanup_ipc_socket(addr)
-    return parse_throughput(output, size)
+    result = parse_throughput(output, size)
+    if result and push_cpu > 0:
+        pull_cpu = result.get("pull_cpu", 0.0)
+        result["cpu_time"] = push_cpu + pull_cpu
+    return result
 
 
 def run_pubsub_cell(
@@ -413,19 +453,20 @@ def run_latency_cell(
     iterations: int = LATENCY_ITERATIONS,
     warmup: int = LATENCY_WARMUP,
     timeout: int = LATENCY_TIMEOUT,
+    env: dict | None = None,
 ) -> dict | None:
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
         output = capture_process(
             binary, inproc_subcmd, fresh_name, str(size),
             str(iterations), str(warmup),
-            timeout=timeout,
+            timeout=timeout, env=env,
         )
         return parse_latency(output)
 
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
-    rep = spawn_process(binary, "rep", addr, str(size))
+    rep = spawn_process(binary, "rep", addr, str(size), env=env)
     if transport in ("ipc", "ws"):
         time.sleep(0.2)
         connect_addr = addr
@@ -439,12 +480,17 @@ def run_latency_cell(
         output = capture_process(
             binary, "req", connect_addr, str(size),
             str(iterations), str(warmup),
-            timeout=timeout,
+            timeout=timeout, env=env,
         )
+        rep_cpu = read_proc_cpu(rep.pid)
     finally:
         kill_process(rep)
         cleanup_ipc_socket(addr)
-    return parse_latency(output)
+    result = parse_latency(output)
+    if result and rep_cpu > 0:
+        req_cpu = result.get("req_cpu", 0.0)
+        result["cpu_time"] = rep_cpu + req_cpu
+    return result
 
 
 # ── address generation ────────────────────────────────────────────
@@ -511,6 +557,16 @@ IMPLS = {
         "inproc_pubsub_subcmd": "inproc-pubsub",
         "supports_pubsub": True,
     },
+    "omq-tokio-mt": {
+        "binary_from": "omq-tokio",
+        "prefix": "u",
+        "transports": ["tcp", "inproc", "ipc", "ws"],
+        "inproc_tput_subcmd": "inproc",
+        "inproc_lat_subcmd": "inproc-latency",
+        "inproc_pubsub_subcmd": "inproc-pubsub",
+        "supports_pubsub": True,
+        "env": {"OMQ_BENCH_RUNTIME": "multi_thread"},
+    },
     "libzmq": {
         "prefix": "z",
         "transports": ["tcp", "inproc", "ipc", "ws"],
@@ -561,10 +617,16 @@ def build_peers(impl_names: set[str], ws_needed: bool):
         if "omq-compio-st" in impl_names:
             binaries["omq-compio-st"] = compio_bin
 
-    if "omq-tokio" in impl_names:
+    if impl_names & {"omq-tokio", "omq-tokio-mt"}:
         print("==> building omq-tokio bench_peer...", file=sys.stderr)
-        cargo_build("omq-tokio", "bench_peer_tokio", features=features or None)
-        binaries["omq-tokio"] = str(ROOT / "target" / "release" / "bench_peer_tokio")
+        tokio_features = list(features) if features else []
+        tokio_features.append("rt-multi-thread")
+        cargo_build("omq-tokio", "bench_peer_tokio", features=tokio_features)
+        tokio_bin = str(ROOT / "target" / "release" / "bench_peer_tokio")
+        if "omq-tokio" in impl_names:
+            binaries["omq-tokio"] = tokio_bin
+        if "omq-tokio-mt" in impl_names:
+            binaries["omq-tokio-mt"] = tokio_bin
 
     if "libzmq" in impl_names:
         print("==> building libzmq bench_peer...", file=sys.stderr)
@@ -654,12 +716,14 @@ def run_benchmarks(
                 addr = addr_for(transport, prefix, idx, base_port,
                                impl_name=name)
                 subcmd = impl_def.get("inproc_tput_subcmd", "inproc")
+                impl_env = impl_def.get("env")
                 result = run_throughput_cell(binary, transport, addr, size,
                                             inproc_subcmd=subcmd,
-                                            duration=duration, rounds=rounds)
+                                            duration=duration, rounds=rounds,
+                                            env=impl_env)
                 cells[name] = result
                 if result:
-                    append_jsonl({
+                    row = {
                         "run_id": run_id,
                         "impl": name,
                         "kind": "throughput",
@@ -667,7 +731,12 @@ def run_benchmarks(
                         "msg_size": size,
                         "msgs_s": round(result["msgs_s"], 1),
                         "mbps": round(result["mbps"], 1),
-                    })
+                    }
+                    if "elapsed" in result:
+                        row["elapsed"] = round(result["elapsed"], 6)
+                    if "cpu_time" in result:
+                        row["cpu_time"] = round(result["cpu_time"], 6)
+                    append_jsonl(row)
 
             line = f"{size_label(size):>10s}"
             for name in active:
@@ -692,14 +761,16 @@ def run_benchmarks(
                     addr = addr_for(transport, prefix, idx + len(sizes), base_port,
                                    impl_name=name)
                     subcmd = impl_def.get("inproc_lat_subcmd", "inproc-latency")
+                    impl_env = impl_def.get("env")
                     result = run_latency_cell(binary, transport, addr, size,
                                              inproc_subcmd=subcmd,
                                              iterations=latency_iterations,
                                              warmup=latency_warmup,
-                                             timeout=latency_timeout)
+                                             timeout=latency_timeout,
+                                             env=impl_env)
                     cells[name] = result
                     if result:
-                        append_jsonl({
+                        row = {
                             "run_id": run_id,
                             "impl": name,
                             "kind": "latency",
@@ -710,7 +781,12 @@ def run_benchmarks(
                             "p999_us": round(result["p999_us"], 3),
                             "max_us": round(result["max_us"], 3),
                             "iterations": result["iterations"],
-                        })
+                        }
+                        if "cpu_time" in result:
+                            row["cpu_time"] = round(result["cpu_time"], 6)
+                        if "elapsed" in result:
+                            row["elapsed"] = round(result["elapsed"], 6)
+                        append_jsonl(row)
 
                 line = f"{size_label(size):>10s}"
                 for name in active:
