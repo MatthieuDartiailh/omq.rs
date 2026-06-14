@@ -25,6 +25,8 @@ mod conversions;
 mod dispatch;
 mod error;
 mod options;
+#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+mod peer_info;
 mod runtime;
 mod socket;
 mod socket_async;
@@ -66,9 +68,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wait_any, m)?)?;
     m.add_function(wrap_pyfunction!(native_proxy, m)?)?;
     m.add_function(wrap_pyfunction!(has_feature, m)?)?;
+    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    m.add_class::<peer_info::PeerInfo>()?;
     #[cfg(feature = "curve")]
     {
-        m.add_class::<auth::PeerInfo>()?;
         m.add_function(wrap_pyfunction!(curve_keypair, m)?)?;
         m.add_function(wrap_pyfunction!(curve_public, m)?)?;
     }
@@ -123,7 +126,8 @@ fn native_proxy(
         }
         None => None,
     };
-    py.allow_threads(|| runtime::proxy(fe, be, cap, ctrl));
+    let ctx = fe.ctx.clone();
+    py.allow_threads(|| runtime::proxy(&ctx, fe, be, cap, ctrl));
     Ok(())
 }
 

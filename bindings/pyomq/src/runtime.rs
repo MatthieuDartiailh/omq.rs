@@ -1,4 +1,7 @@
-//! Runtime: a single-threaded tokio runtime on a dedicated background thread.
+//! Per-context tokio runtime on a dedicated background thread.
+//!
+//! Each `ContextInner` owns one tokio runtime + background thread.
+//! `term()` shuts down that runtime (aborts all pumps, drops the handle).
 //!
 //! omq-tokio::Socket is Send + Sync, so Python-side wrappers hold an
 //! Arc<Socket> directly in SocketInner. However, the socket's internal
@@ -13,7 +16,7 @@
 //! actual socket.send()/recv().await calls.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -29,80 +32,26 @@ struct RuntimeState {
     pid: u32,
     handle: Handle,
     submit: flume::Sender<Job>,
-    recv_ready: Arc<crate::socket::RecvNotify>,
 }
 
-static RUNTIME: Mutex<Option<RuntimeState>> = Mutex::new(None);
-static IO_THREADS: AtomicU64 = AtomicU64::new(1);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-fn ensure_runtime() -> (Handle, flume::Sender<Job>, Arc<crate::socket::RecvNotify>) {
-    let mut guard = RUNTIME.lock().unwrap();
+static GLOBAL_RECV_READY: Mutex<Option<(u32, Arc<crate::socket::RecvNotify>)>> = Mutex::new(None);
+
+/// Process-global recv notification for `wait_any`. Recv pumps from all
+/// contexts signal this after pushing a message; `wait_any` parks on it.
+/// Recreated after fork (PID guard).
+pub(crate) fn global_recv_ready() -> Arc<crate::socket::RecvNotify> {
+    let mut guard = GLOBAL_RECV_READY.lock().unwrap();
     let pid = std::process::id();
-    if let Some(rt) = guard.as_ref()
-        && rt.pid == pid
+    if let Some((p, rr)) = guard.as_ref()
+        && *p == pid
     {
-        return (rt.handle.clone(), rt.submit.clone(), rt.recv_ready.clone());
+        return rr.clone();
     }
-    // First call, or child process after fork: (re)initialize.
-    let (tx, rx) = flume::unbounded::<Job>();
-    let recv_ready = Arc::new(crate::socket::RecvNotify::new());
-    let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
-    let n = IO_THREADS.load(Ordering::Relaxed) as usize;
-    thread::Builder::new()
-        .name("pyomq-tokio".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(n.max(1))
-                .enable_all()
-                .build()
-                .expect("pyomq: tokio runtime build");
-            let _ = handle_tx.send(rt.handle().clone());
-            rt.block_on(async move {
-                while let Ok(job) = rx.recv_async().await {
-                    job();
-                }
-            });
-        })
-        .expect("pyomq: spawn tokio thread");
-    let handle = handle_rx.recv().expect("pyomq: runtime handle");
-    let state = RuntimeState {
-        pid,
-        handle: handle.clone(),
-        submit: tx.clone(),
-        recv_ready: recv_ready.clone(),
-    };
-    *guard = Some(state);
-    (handle, tx, recv_ready)
-}
-
-/// Set the number of tokio worker threads. Only takes effect before the
-/// runtime starts (i.e. before the first socket is materialized). Later
-/// calls are silently ignored.
-pub(crate) fn set_io_threads(n: u64) {
-    let guard = RUNTIME.lock().unwrap();
-    if guard
-        .as_ref()
-        .is_some_and(|rt| rt.pid == std::process::id())
-    {
-        return;
-    }
-    drop(guard);
-    IO_THREADS.store(n.max(1), Ordering::Relaxed);
-}
-
-pub(crate) fn runtime_handle() -> Handle {
-    ensure_runtime().0
-}
-
-fn submit_tx() -> flume::Sender<Job> {
-    ensure_runtime().1
-}
-
-/// Global recv notification for the current process. Recv pumps signal
-/// this after pushing a message; `wait_any` parks on it.
-pub(crate) fn recv_ready() -> Arc<crate::socket::RecvNotify> {
-    ensure_runtime().2
+    let rr = Arc::new(crate::socket::RecvNotify::new());
+    *guard = Some((pid, rr.clone()));
+    rr
 }
 
 /// Allocate the next socket id. Strictly monotonic; never recycled.
@@ -110,146 +59,270 @@ fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Spawn a Send future on the tokio runtime and block until it completes.
-pub fn spawn_blocking<F, T>(fut: F) -> T
-where
-    F: Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let handle = runtime_handle();
-    let (otx, orx) = flume::bounded::<T>(1);
-    handle.spawn(async move {
-        let out = fut.await;
-        let _ = otx.send(out);
-    });
-    pyo3::Python::with_gil(|py| {
-        py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result"))
-    })
+pub(crate) struct ContextInner {
+    io_threads: usize,
+    state: Mutex<Option<RuntimeState>>,
+    terminated: AtomicBool,
 }
 
-/// Build a socket on the tokio thread, spawn per-socket send/recv pumps,
-/// and return the socket Arc and its id.
-///
-/// The pumps relay between the yring rings and the socket's async
-/// send/recv. They must run on the tokio thread because socket
-/// operations need the runtime's scheduler and I/O driver.
-pub fn materialize(
-    socket_type: omq_tokio::SocketType,
-    options: omq_tokio::Options,
-    send_cons: yring::AsyncConsumer<omq_tokio::Message>,
-    mut recv_prod: yring::Producer<omq_tokio::Message>,
-    recv_notify: Arc<crate::socket::RecvNotify>,
-    send_notify: Arc<crate::socket::RecvNotify>,
-    recv_space: Arc<tokio::sync::Notify>,
-) -> (u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>) {
-    let (otx, orx) = flume::bounded(1);
-    let job: Job = Box::new(move || {
-        let id = next_id();
-        let sock = Arc::new(InnerSocket::new(socket_type, options));
+impl ContextInner {
+    pub fn new(io_threads: usize) -> Arc<Self> {
+        Arc::new(Self {
+            io_threads: io_threads.max(1),
+            state: Mutex::new(None),
+            terminated: AtomicBool::new(false),
+        })
+    }
 
-        // Send pump: drain Python-side yring into the omq Socket.
-        // Yield every N messages so the connection drivers get
-        // scheduled on this single-threaded tokio runtime.
-        // Signal send_notify after each drain so the Python thread
-        // can wake up from backpressure parking.
-        const SEND_YIELD_INTERVAL: u32 = 256;
-        let s = sock.clone();
-        let send_pump = tokio::spawn(async move {
-            futures::pin_mut!(send_cons);
-            let mut batch = 0u32;
-            while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
-                let _ = s.send(msg).await;
-                send_notify.notify();
-                batch += 1;
-                if batch >= SEND_YIELD_INTERVAL {
-                    batch = 0;
-                    tokio::task::yield_now().await;
-                }
-            }
-            send_notify.notify();
+    fn ensure_runtime(&self) -> pyo3::PyResult<(Handle, flume::Sender<Job>)> {
+        if self.terminated.load(Ordering::Acquire) {
+            return Err(crate::error::map_err(omq_proto::error::Error::Closed));
+        }
+        let mut guard = self.state.lock().unwrap();
+        let pid = std::process::id();
+        if let Some(rt) = guard.as_ref()
+            && rt.pid == pid
+        {
+            return Ok((rt.handle.clone(), rt.submit.clone()));
+        }
+        let (tx, rx) = flume::unbounded::<Job>();
+        let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
+        let n = self.io_threads;
+        thread::Builder::new()
+            .name("pyomq-tokio".into())
+            .spawn(move || {
+                let rt = if n <= 1 {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("pyomq: tokio runtime build")
+                } else {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(n)
+                        .enable_all()
+                        .build()
+                        .expect("pyomq: tokio runtime build")
+                };
+                let _ = handle_tx.send(rt.handle().clone());
+                rt.block_on(async move {
+                    while let Ok(job) = rx.recv_async().await {
+                        job();
+                    }
+                });
+            })
+            .expect("pyomq: spawn tokio thread");
+        let handle = handle_rx.recv().expect("pyomq: runtime handle");
+        *guard = Some(RuntimeState {
+            pid,
+            handle: handle.clone(),
+            submit: tx.clone(),
         });
+        Ok((handle, tx))
+    }
 
-        // Recv pump: drain the omq Socket into Python-side yring.
-        // When the ring is full, wait on recv_space (signaled by the
-        // Python consumer after draining) instead of spin-looping.
-        let s = sock.clone();
-        let global_recv_ready = recv_ready();
-        let recv_pump = tokio::spawn(async move {
-            while let Ok(msg) = s.recv().await {
-                let mut m = msg;
-                loop {
-                    match recv_prod.push(m) {
-                        Ok(()) => {
-                            recv_prod.flush();
-                            recv_notify.notify();
+    pub fn runtime_handle(&self) -> pyo3::PyResult<Handle> {
+        Ok(self.ensure_runtime()?.0)
+    }
 
-                            global_recv_ready.notify();
-                            break;
-                        }
-                        Err(returned) => {
-                            m = returned;
-                            let notified = recv_space.notified();
-                            tokio::pin!(notified);
-                            notified.as_mut().enable();
-                            match recv_prod.push(m) {
-                                Ok(()) => {
-                                    recv_prod.flush();
-                                    recv_notify.notify();
+    fn submit_tx(&self) -> pyo3::PyResult<flume::Sender<Job>> {
+        Ok(self.ensure_runtime()?.1)
+    }
 
-                                    global_recv_ready.notify();
-                                    break;
-                                }
-                                Err(returned2) => {
-                                    m = returned2;
-                                    notified.await;
+    /// Spawn a Send future on the tokio runtime and block until it completes.
+    pub fn spawn_blocking<F, T>(&self, fut: F) -> T
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let handle = self.runtime_handle().expect("pyomq: context terminated");
+        let (otx, orx) = flume::bounded::<T>(1);
+        handle.spawn(async move {
+            let out = fut.await;
+            let _ = otx.send(out);
+        });
+        pyo3::Python::with_gil(|py| {
+            py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result"))
+        })
+    }
+
+    /// Build a socket on the tokio thread, spawn per-socket send/recv pumps,
+    /// and return the socket Arc and its id.
+    #[expect(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn materialize(
+        &self,
+        socket_type: omq_tokio::SocketType,
+        options: omq_tokio::Options,
+        send_cons: yring::AsyncConsumer<omq_tokio::Message>,
+        mut recv_prod: yring::Producer<omq_tokio::Message>,
+        recv_notify: Arc<crate::socket::RecvNotify>,
+        send_notify: Arc<crate::socket::RecvNotify>,
+        recv_space: Arc<tokio::sync::Notify>,
+    ) -> pyo3::PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
+        let (otx, orx) = flume::bounded(1);
+        let grr = global_recv_ready();
+        let job: Job = Box::new(move || {
+            let id = next_id();
+            let sock = Arc::new(InnerSocket::new(socket_type, options));
+
+            const SEND_YIELD_INTERVAL: u32 = 256;
+            let s = sock.clone();
+            let send_pump = tokio::spawn(async move {
+                futures::pin_mut!(send_cons);
+                let mut batch = 0u32;
+                while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
+                    let _ = s.send(msg).await;
+                    send_notify.notify();
+                    batch += 1;
+                    if batch >= SEND_YIELD_INTERVAL {
+                        batch = 0;
+                        tokio::task::yield_now().await;
+                    }
+                }
+                send_notify.notify();
+            });
+
+            let s = sock.clone();
+            let recv_pump = tokio::spawn(async move {
+                while let Ok(msg) = s.recv().await {
+                    let mut m = msg;
+                    loop {
+                        match recv_prod.push(m) {
+                            Ok(()) => {
+                                recv_prod.flush();
+                                recv_notify.notify();
+                                grr.notify();
+                                break;
+                            }
+                            Err(returned) => {
+                                m = returned;
+                                let notified = recv_space.notified();
+                                tokio::pin!(notified);
+                                notified.as_mut().enable();
+                                match recv_prod.push(m) {
+                                    Ok(()) => {
+                                        recv_prod.flush();
+                                        recv_notify.notify();
+                                        grr.notify();
+                                        break;
+                                    }
+                                    Err(returned2) => {
+                                        m = returned2;
+                                        notified.await;
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
+            });
+
+            let _ = otx.send((id, sock, send_pump, recv_pump));
+        });
+        self.submit_tx()?
+            .send(job)
+            .expect("pyomq: tokio runtime gone");
+        pyo3::Python::with_gil(|py| {
+            Ok(py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result")))
+        })
+    }
+
+    /// Close a socket: drain the send yring, then close with linger.
+    ///
+    /// If the context is already terminated, the runtime is gone and
+    /// spawned tasks were aborted. Just drop the socket.
+    pub fn destroy_socket(
+        &self,
+        sock: Arc<InnerSocket>,
+        send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
+        send_pump: JoinHandle<()>,
+        recv_pump: JoinHandle<()>,
+    ) {
+        recv_pump.abort();
+        drop(send_prod);
+        let handle = match self.runtime_handle() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let (otx, orx) = flume::bounded(1);
+        handle.spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(1), send_pump).await;
+            let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone());
+            let _ = tokio::time::timeout(Duration::from_secs(1), s.close()).await;
+            let _ = otx.send(());
+        });
+        let _ = orx.recv_timeout(Duration::from_secs(3));
+    }
+
+    /// Run an async op against a socket and return the result.
+    pub fn with_socket<F, Fut, T>(&self, sock: &Arc<InnerSocket>, op: F) -> T
+    where
+        F: FnOnce(Arc<InnerSocket>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let s = sock.clone();
+        self.spawn_blocking(op(s))
+    }
+
+    /// Shut down this context's runtime. Drops the job channel, which
+    /// causes the background thread to exit (runtime drops, tasks abort).
+    /// The thread is detached, not joined, to avoid blocking.
+    pub fn term(&self) {
+        self.terminated.store(true, Ordering::Release);
+        let state = self.state.lock().unwrap().take();
+        if let Some(s) = state {
+            drop(s.submit);
+            drop(s.handle);
+        }
+    }
+
+    /// Bridge a Rust future to a Python `asyncio.Future`.
+    pub fn tokio_future_into_py<'py, F>(
+        &self,
+        py: pyo3::Python<'py>,
+        fut: F,
+    ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>>
+    where
+        F: Future<Output = pyo3::PyResult<pyo3::PyObject>> + Send + 'static,
+    {
+        use pyo3::prelude::*;
+
+        let asyncio = py.import_bound("asyncio")?;
+        let event_loop = asyncio.call_method0("get_running_loop")?;
+        let py_future = event_loop.call_method0("create_future")?;
+        let loop_handle: PyObject = event_loop.clone().unbind().into_any();
+        let future_handle: PyObject = py_future.clone().unbind().into_any();
+
+        self.runtime_handle()?.spawn(async move {
+            let result = fut.await;
+            Python::with_gil(|gil| {
+                let loop_obj = loop_handle.bind(gil);
+                let fut_obj = future_handle.bind(gil);
+                let _ = match result {
+                    Ok(value) => {
+                        let setter = fut_obj.getattr("set_result")?;
+                        loop_obj.call_method1("call_soon_threadsafe", (setter, value))
+                    }
+                    Err(e) => {
+                        let setter = fut_obj.getattr("set_exception")?;
+                        loop_obj.call_method1("call_soon_threadsafe", (setter, e.into_value(gil)))
+                    }
+                };
+                PyResult::<()>::Ok(())
+            })
+            .ok();
         });
 
-        let _ = otx.send((id, sock, send_pump, recv_pump));
-    });
-    submit_tx().send(job).expect("pyomq: tokio runtime gone");
-    pyo3::Python::with_gil(|py| {
-        py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result"))
-    })
+        Ok(py_future)
+    }
 }
 
-/// Close a socket: drain the send yring, then close with linger.
-///
-/// Drops `send_prod` so the send pump's consumer stream ends after
-/// draining remaining messages. Awaits the pump (up to 1s) before
-/// closing the socket. The recv pump is aborted immediately.
-pub fn destroy_socket(
-    sock: Arc<InnerSocket>,
-    send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
-    send_pump: JoinHandle<()>,
-    recv_pump: JoinHandle<()>,
-) {
-    recv_pump.abort();
-    // Drop the producer so the pump's consumer stream ends once drained.
-    drop(send_prod);
-    spawn_blocking(async move {
-        // Give the send pump time to drain remaining messages.
-        let _ = tokio::time::timeout(Duration::from_secs(1), send_pump).await;
-        let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone());
-        let _ = s.close().await;
-    });
-}
-
-/// Run an async op against a socket and return the result. The future
-/// is spawned on the tokio runtime. Blocks the calling thread.
-pub fn with_socket<F, Fut, T>(sock: &Arc<InnerSocket>, op: F) -> T
-where
-    F: FnOnce(Arc<InnerSocket>) -> Fut + Send + 'static,
-    Fut: Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let s = sock.clone();
-    spawn_blocking(op(s))
+impl Drop for ContextInner {
+    fn drop(&mut self) {
+        if let Some(s) = self.state.get_mut().unwrap().take() {
+            drop(s.submit);
+        }
+    }
 }
 
 fn drain_recv_ring(inner: &Arc<crate::socket::SocketInner>) -> Vec<omq_tokio::Message> {
@@ -276,16 +349,13 @@ fn push_to_capture(cap: &Arc<crate::socket::SocketInner>, msg: &omq_tokio::Messa
 }
 
 /// Run a forwarding proxy between two sockets on the tokio thread.
-///
-/// Stops the send/recv pumps on fe/be (and control, if any), then
-/// runs direct async forwarding loops. Capture stays ring-based.
 pub fn proxy(
+    ctx: &Arc<ContextInner>,
     fe_inner: Arc<crate::socket::SocketInner>,
     be_inner: Arc<crate::socket::SocketInner>,
     cap_inner: Option<Arc<crate::socket::SocketInner>>,
     ctrl_inner: Option<Arc<crate::socket::SocketInner>>,
 ) {
-    // Abort pumps so proxy gets exclusive socket access.
     let fe_mat = fe_inner.materialized.read().unwrap();
     let fe_m = fe_mat.as_ref().unwrap();
     fe_m.send_pump.abort();
@@ -311,7 +381,7 @@ pub fn proxy(
     let fe_drained = drain_recv_ring(&fe_inner);
     let be_drained = drain_recv_ring(&be_inner);
 
-    spawn_blocking(async move {
+    ctx.spawn_blocking(async move {
         for msg in fe_drained {
             if let Some(ref cap) = cap_inner {
                 push_to_capture(cap, &msg);
@@ -440,8 +510,7 @@ async fn proxy_loop(
 }
 
 /// Block the calling thread until at least one of the given sockets has
-/// an inbound message ready (or until `timeout_ms` elapses). Returns
-/// the list of socket IDs that are ready.
+/// an inbound message ready (or until `timeout_ms` elapses).
 pub fn wait_any(
     sockets: Vec<(u64, Arc<crate::socket::SocketInner>)>,
     timeout_ms: Option<u64>,
@@ -474,7 +543,7 @@ pub fn wait_any(
         return ready;
     }
 
-    let rr = recv_ready();
+    let rr = global_recv_ready();
     let deadline = timeout_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
 
     rr.park_begin();
@@ -509,52 +578,4 @@ pub fn wait_any(
             return vec![];
         }
     }
-}
-
-/// Return an already-resolved `asyncio.Future`. Avoids the tokio
-/// spawn + `call_soon_threadsafe` round trip for fast-path results.
-/// Bridge a Rust future to a Python `asyncio.Future`.
-///
-/// 1. Acquires the running asyncio loop on the calling Python thread.
-/// 2. Creates a fresh `asyncio.Future` via `loop.create_future()`.
-/// 3. Spawns the future on the tokio runtime.
-/// 4. When it resolves, the tokio thread acquires the GIL and calls
-///    `loop.call_soon_threadsafe(future.set_result | set_exception, ...)`
-/// 5. Returns the Python `asyncio.Future` to the caller.
-pub fn tokio_future_into_py<F>(
-    py: pyo3::Python<'_>,
-    fut: F,
-) -> pyo3::PyResult<pyo3::Bound<'_, pyo3::PyAny>>
-where
-    F: Future<Output = pyo3::PyResult<pyo3::PyObject>> + Send + 'static,
-{
-    use pyo3::prelude::*;
-
-    let asyncio = py.import_bound("asyncio")?;
-    let event_loop = asyncio.call_method0("get_running_loop")?;
-    let py_future = event_loop.call_method0("create_future")?;
-    let loop_handle: PyObject = event_loop.clone().unbind().into_any();
-    let future_handle: PyObject = py_future.clone().unbind().into_any();
-
-    runtime_handle().spawn(async move {
-        let result = fut.await;
-        Python::with_gil(|gil| {
-            let loop_obj = loop_handle.bind(gil);
-            let fut_obj = future_handle.bind(gil);
-            let _ = match result {
-                Ok(value) => {
-                    let setter = fut_obj.getattr("set_result")?;
-                    loop_obj.call_method1("call_soon_threadsafe", (setter, value))
-                }
-                Err(e) => {
-                    let setter = fut_obj.getattr("set_exception")?;
-                    loop_obj.call_method1("call_soon_threadsafe", (setter, e.into_value(gil)))
-                }
-            };
-            PyResult::<()>::Ok(())
-        })
-        .ok();
-    });
-
-    Ok(py_future)
 }

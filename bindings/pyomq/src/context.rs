@@ -1,12 +1,14 @@
-//! Context: lightweight Socket factory. Most of the libzmq Context
-//! semantics (term, IO threads) don't apply to our model; we keep the
-//! type to satisfy `ctx = zmq.Context(); sock = ctx.socket(zmq.PUSH)`.
+//! Context: per-runtime Socket factory. Each Context owns a dedicated
+//! tokio runtime on a background thread. `term()` shuts it down.
+
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 
 use crate::constants;
 use crate::error::map_err;
+use crate::runtime::ContextInner;
 use crate::socket::Socket;
 use crate::socket_async::AsyncSocket;
 
@@ -41,27 +43,34 @@ fn map_socket_type(st: i32) -> PyResult<omq_tokio::SocketType> {
 }
 
 #[pyclass(module = "pyomq._native")]
-pub struct Context;
+pub struct Context {
+    pub(crate) ctx: Arc<ContextInner>,
+}
 
 #[pymethods]
 impl Context {
     #[new]
     #[pyo3(signature = (io_threads = 1))]
     fn new(io_threads: i32) -> Self {
-        crate::runtime::set_io_threads(io_threads.max(1) as u64);
-        Context
+        Context {
+            ctx: ContextInner::new(io_threads.max(1) as usize),
+        }
     }
 
     /// Construct a new socket of the given libzmq type code.
     #[pyo3(signature = (socket_type, /))]
     fn socket(&self, py: Python<'_>, socket_type: i32) -> PyResult<Socket> {
         let _ = py;
-        Ok(Socket::new(map_socket_type(socket_type)?))
+        Ok(Socket::new(self.ctx.clone(), map_socket_type(socket_type)?))
     }
 
     /// pyzmq calls this `term`; older code calls `destroy`.
-    fn term(&self) {}
-    fn destroy(&self) {}
+    fn term(&self) {
+        self.ctx.term();
+    }
+    fn destroy(&self) {
+        self.ctx.term();
+    }
 
     fn __enter__<'py>(slf: Bound<'py, Self>) -> Bound<'py, Self> {
         slf
@@ -74,33 +83,42 @@ impl Context {
         _exc_val: Option<Bound<'_, PyAny>>,
         _exc_tb: Option<Bound<'_, PyAny>>,
     ) -> bool {
+        self.ctx.term();
         false
     }
 }
 
-/// `pyomq.asyncio.Context`. Hands out `AsyncSocket` instances. The
-/// instance itself has no state - it's a factory the way `Context`
-/// is in pyzmq's `zmq.asyncio`.
+/// `pyomq.asyncio.Context`. Hands out `AsyncSocket` instances.
 #[pyclass(module = "pyomq._native")]
-pub struct AsyncContext;
+pub struct AsyncContext {
+    pub(crate) ctx: Arc<ContextInner>,
+}
 
 #[pymethods]
 impl AsyncContext {
     #[new]
     #[pyo3(signature = (io_threads = 1))]
     fn new(io_threads: i32) -> Self {
-        crate::runtime::set_io_threads(io_threads.max(1) as u64);
-        AsyncContext
+        AsyncContext {
+            ctx: ContextInner::new(io_threads.max(1) as usize),
+        }
     }
 
     #[pyo3(signature = (socket_type, /))]
     fn socket(&self, py: Python<'_>, socket_type: i32) -> PyResult<AsyncSocket> {
         let _ = py;
-        Ok(AsyncSocket::new(map_socket_type(socket_type)?))
+        Ok(AsyncSocket::new(
+            self.ctx.clone(),
+            map_socket_type(socket_type)?,
+        ))
     }
 
-    fn term(&self) {}
-    fn destroy(&self) {}
+    fn term(&self) {
+        self.ctx.term();
+    }
+    fn destroy(&self) {
+        self.ctx.term();
+    }
 
     fn __enter__<'py>(slf: Bound<'py, Self>) -> Bound<'py, Self> {
         slf
@@ -113,6 +131,7 @@ impl AsyncContext {
         _exc_val: Option<Bound<'_, PyAny>>,
         _exc_tb: Option<Bound<'_, PyAny>>,
     ) -> bool {
+        self.ctx.term();
         false
     }
 }

@@ -5,7 +5,7 @@
 //! (via `pre_encode`), then the pre-encoded chunks are pushed into
 //! each matching peer's `EncodedQueue`. The driver flushes to the wire.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -38,18 +38,28 @@ const YIELD_INTERVAL: u32 = 256;
 #[derive(Debug)]
 pub(crate) struct Submitter {
     inner: Arc<Mutex<FanOutInner>>,
+    generation: Arc<AtomicU64>,
     mode: FanOutMode,
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
+    cached: Mutex<CachedFanOut>,
+}
+
+#[derive(Debug, Default)]
+struct CachedFanOut {
+    generation: u64,
+    sole_wire: Option<PeerSend>,
 }
 
 impl Clone for Submitter {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            generation: self.generation.clone(),
             mode: self.mode,
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
+            cached: Mutex::new(CachedFanOut::default()),
         }
     }
 }
@@ -78,6 +88,23 @@ impl Submitter {
         }
     }
 
+    fn try_sole_wire(&self, msg: &Message) -> Option<crate::engine::wire_slot::TryEncodeResult> {
+        let current = self.generation.load(Ordering::Acquire);
+        let mut cached = self.cached.lock().unwrap();
+        if cached.generation != current {
+            let g = self.inner.lock().expect("fanout inner poisoned");
+            cached.sole_wire =
+                if g.all_subscribe_all && g.all_targets.len() == 1 && g.fan_out_encoder.is_none() {
+                    Some(g.all_targets[0].clone())
+                } else {
+                    None
+                };
+            cached.generation = current;
+        }
+        let target = cached.sole_wire.as_ref()?;
+        Some(target.try_encode(msg))
+    }
+
     pub(crate) fn try_send(
         &self,
         msg: Message,
@@ -85,6 +112,19 @@ impl Submitter {
         let (forwarded, group) = self
             .prepare(msg)
             .map_err(omq_proto::error::TrySendError::Error)?;
+
+        if group.is_none()
+            && let Some(r) = self.try_sole_wire(&forwarded)
+        {
+            return match r {
+                crate::engine::wire_slot::TryEncodeResult::Ok
+                | crate::engine::wire_slot::TryEncodeResult::Dead
+                | crate::engine::wire_slot::TryEncodeResult::Ineligible => Ok(()),
+                crate::engine::wire_slot::TryEncodeResult::Full => {
+                    Err(omq_proto::error::TrySendError::Full(forwarded))
+                }
+            };
+        }
 
         let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop && !targets_have_space(&targets) {
@@ -96,6 +136,14 @@ impl Submitter {
 
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = self.prepare(msg)?;
+
+        if group.is_none()
+            && self
+                .try_sole_wire(&forwarded)
+                .is_some_and(|r| r == crate::engine::wire_slot::TryEncodeResult::Ok)
+        {
+            return Ok(());
+        }
 
         let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop {
@@ -141,6 +189,7 @@ impl Submitter {
 #[derive(Debug)]
 pub(crate) struct FanOutSend {
     inner: Arc<Mutex<FanOutInner>>,
+    generation: Arc<AtomicU64>,
     mode: FanOutMode,
     xpub_nodrop: bool,
 }
@@ -217,17 +266,24 @@ impl FanOutSend {
                 fan_out_encoder: None,
                 options: options.clone(),
             })),
+            generation: Arc::new(AtomicU64::new(0)),
             mode,
             xpub_nodrop: options.xpub_nodrop,
         }
     }
 
+    fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
             inner: self.inner.clone(),
+            generation: self.generation.clone(),
             mode: self.mode,
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
+            cached: Mutex::new(CachedFanOut::default()),
         }
     }
 
@@ -257,12 +313,15 @@ impl FanOutSend {
             g.init_fan_out_encoder();
         }
         g.recompute_subscribe_all();
+        self.bump_generation();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if g.peers.remove(&peer_id).is_some() {
             g.recompute_subscribe_all();
+            drop(g);
+            self.bump_generation();
         }
     }
 
@@ -272,6 +331,8 @@ impl FanOutSend {
         if let Some(p) = g.peers.get_mut(&peer_id) {
             p.subscriptions.add(&prefix);
             g.recompute_subscribe_all();
+            drop(g);
+            self.bump_generation();
         }
     }
 
@@ -280,6 +341,8 @@ impl FanOutSend {
         if let Some(p) = g.peers.get_mut(&peer_id) {
             p.subscriptions.remove(prefix);
             g.recompute_subscribe_all();
+            drop(g);
+            self.bump_generation();
         }
     }
 
@@ -289,6 +352,8 @@ impl FanOutSend {
             && let Ok(s) = std::str::from_utf8(group)
         {
             p.groups.insert(s.to_string());
+            drop(g);
+            self.bump_generation();
         }
     }
 
@@ -298,6 +363,8 @@ impl FanOutSend {
             && let Ok(s) = std::str::from_utf8(group)
         {
             p.groups.remove(s);
+            drop(g);
+            self.bump_generation();
         }
     }
 

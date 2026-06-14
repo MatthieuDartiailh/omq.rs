@@ -58,9 +58,27 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
     unsafe { libc::_exit(0) };
 }
 
-#[tokio::main]
+fn main() {
+    let rt = if std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "current_thread") {
+        eprintln!("runtime: current_thread");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    } else {
+        let workers = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+        eprintln!("runtime: multi_thread ({workers} workers)");
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    };
+    rt.block_on(async_main());
+}
+
 #[expect(clippy::too_many_lines)]
-async fn main() {
+async fn async_main() {
     unsafe {
         libc::signal(
             libc::SIGTERM,

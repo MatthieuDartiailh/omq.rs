@@ -430,16 +430,25 @@ fn rustc_version_runtime() -> String {
         .to_string()
 }
 
-/// Tokio multi-thread runtime sized to keep the bench process honest:
-/// one worker for the receiver(s), one per sender, plus a bit of
-/// headroom. Defaults to the count of available CPUs.
+/// Build the benchmark runtime. Defaults to multi-thread with one
+/// worker per available CPU. Set `OMQ_BENCH_RUNTIME=current_thread`
+/// to use the single-threaded current-thread runtime instead.
 pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
-    let workers = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(workers)
-        .enable_all()
-        .build()
-        .expect("bench: tokio runtime")
+    if std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "current_thread") {
+        println!("runtime: current_thread\n");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("bench: tokio runtime")
+    } else {
+        let workers = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+        println!("runtime: multi_thread ({workers} workers)\n");
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_all()
+            .build()
+            .expect("bench: tokio runtime")
+    }
 }
 
 /// Thin wrapper around `tokio::time::timeout` to enforce the per-cell

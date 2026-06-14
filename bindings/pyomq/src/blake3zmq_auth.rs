@@ -44,7 +44,7 @@ pub(crate) fn build_authenticator(
                 Python::with_gil(|py| {
                     let info = Py::new(
                         py,
-                        crate::auth::PeerInfo::from_raw_bytes(py, &peer.public_key),
+                        crate::peer_info::PeerInfo::from_raw_bytes(py, &peer.public_key),
                     );
                     let info = match info {
                         Ok(i) => i,

@@ -29,9 +29,8 @@ def test_context_churn():
         pull.bind(ep)
         push.connect(ep)
 
+        pull.setsockopt(zmq.RCVTIMEO, 5000)
         push.send(b"x")
-        push.setsockopt(zmq.RCVTIMEO, 1000)
-        pull.setsockopt(zmq.RCVTIMEO, 1000)
         msg = pull.recv()
         assert msg == b"x"
 

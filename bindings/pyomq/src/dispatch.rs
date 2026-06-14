@@ -10,7 +10,6 @@ use omq_tokio::Socket;
 use pyo3::prelude::*;
 
 use crate::error::map_err;
-use crate::runtime;
 use crate::socket::SocketInner;
 
 /// Sync version: spawn a `Result<()>`-returning op on the tokio
@@ -21,7 +20,8 @@ where
     Fut: Future<Output = Result<(), PError>> + Send + 'static,
 {
     let sock = inner.ensure_socket()?;
-    py.allow_threads(|| runtime::with_socket(&sock, op))
+    let ctx = inner.ctx.clone();
+    py.allow_threads(|| ctx.with_socket(&sock, op))
         .map_err(map_err)
 }
 
@@ -36,7 +36,8 @@ where
     Fut: Future<Output = Result<String, PError>> + Send + 'static,
 {
     let sock = inner.ensure_socket()?;
-    py.allow_threads(|| runtime::with_socket(&sock, op))
+    let ctx = inner.ctx.clone();
+    py.allow_threads(|| ctx.with_socket(&sock, op))
         .map_err(map_err)
 }
 
@@ -52,7 +53,8 @@ where
     Fut: Future<Output = Result<(), PError>> + Send + 'static,
 {
     let sock = inner.ensure_socket()?;
-    runtime::tokio_future_into_py(py, async move {
+    let ctx = inner.ctx.clone();
+    ctx.tokio_future_into_py(py, async move {
         op(sock).await.map_err(map_err)?;
         Python::with_gil(|py| Ok(py.None()))
     })
@@ -70,7 +72,8 @@ where
     Fut: Future<Output = Result<String, PError>> + Send + 'static,
 {
     let sock = inner.ensure_socket()?;
-    runtime::tokio_future_into_py(py, async move {
+    let ctx = inner.ctx.clone();
+    ctx.tokio_future_into_py(py, async move {
         let s = op(sock).await.map_err(map_err)?;
         Python::with_gil(|py| Ok(s.to_object(py)))
     })
