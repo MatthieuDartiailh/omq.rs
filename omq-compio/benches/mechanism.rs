@@ -110,7 +110,7 @@ fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usize) -> 
         let ready = ready.clone();
         std::thread::spawn(move || {
             let rt = build_runtime().expect("pull runtime");
-            common::block_on_and_leak(rt, async move {
+            common::block_on_and_drain(rt, async move {
                 let pull = Socket::new(SocketType::Pull, pull_opts);
                 pull.bind(ep).await.expect("bind PULL");
                 ready.wait();
@@ -138,7 +138,7 @@ fn run_cell(pull_opts: Options, push_opts: Options, size: usize, seq: usize) -> 
         let ready = ready.clone();
         std::thread::spawn(move || {
             let rt = build_runtime().expect("push runtime");
-            common::block_on_and_leak(rt, async move {
+            common::block_on_and_drain(rt, async move {
                 ready.wait();
                 let push = Socket::new(SocketType::Push, push_opts);
                 let mut mon = push.monitor();

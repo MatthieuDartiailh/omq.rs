@@ -234,20 +234,12 @@ where
     F: std::future::Future,
 {
     let out = runtime.block_on(fut);
-    while runtime.run() {}
+    // Runtime::run() is a low-level API that does not call enter(),
+    // so CURRENT_RUNTIME is unset. Without enter(), any task dropped
+    // during tick() that touches the timer wheel (TimerFuture::drop)
+    // panics with "not in a compio runtime".
+    runtime.enter(|| while runtime.run() {});
     drop(runtime);
-    out
-}
-
-/// Like [`block_on_and_drain`] but leaks the runtime instead of
-/// draining. Use when connection-driver safety-net timers cause a
-/// double-panic during drain (compio timer TLS issue).
-pub(crate) fn block_on_and_leak<F>(runtime: compio::runtime::Runtime, fut: F) -> F::Output
-where
-    F: std::future::Future,
-{
-    let out = runtime.block_on(fut);
-    std::mem::forget(runtime);
     out
 }
 
