@@ -347,20 +347,22 @@ pub fn setsockopt(
         constants::SUBSCRIBE => {
             let v: &[u8] = value.extract()?;
             let bytes = Bytes::copy_from_slice(v);
+            let ctx = sock.ctx.clone();
             drop(ov);
             let s = sock.ensure_socket()?;
             let r = py.allow_threads(|| {
-                crate::runtime::with_socket(&s, move |s| async move { s.subscribe(bytes).await })
+                ctx.with_socket(&s, move |s| async move { s.subscribe(bytes).await })
             });
             return r.map_err(map_err);
         }
         constants::UNSUBSCRIBE => {
             let v: &[u8] = value.extract()?;
             let bytes = Bytes::copy_from_slice(v);
+            let ctx = sock.ctx.clone();
             drop(ov);
             let s = sock.ensure_socket()?;
             let r = py.allow_threads(|| {
-                crate::runtime::with_socket(&s, move |s| async move { s.unsubscribe(bytes).await })
+                ctx.with_socket(&s, move |s| async move { s.unsubscribe(bytes).await })
             });
             return r.map_err(map_err);
         }

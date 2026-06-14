@@ -24,7 +24,7 @@ use crate::conversions;
 use crate::dispatch;
 use crate::error::{map_err, timeout_err};
 use crate::options;
-use crate::runtime;
+use crate::runtime::ContextInner;
 
 /// Per-socket scratchpad for SNDMORE-style multipart construction.
 #[derive(Default)]
@@ -164,6 +164,7 @@ pub(crate) struct Materialized {
 /// Both pyclasses hold an `Arc<SocketInner>` and route I/O through the
 /// helpers below.
 pub(crate) struct SocketInner {
+    pub ctx: Arc<ContextInner>,
     pub socket_type: omq_tokio::SocketType,
     pub overlay: Mutex<options::Overlay>,
     pub sndbuf: Mutex<SendBuffer>,
@@ -173,10 +174,11 @@ pub(crate) struct SocketInner {
 }
 
 impl SocketInner {
-    pub fn new(socket_type: omq_tokio::SocketType) -> Arc<Self> {
+    pub fn new(ctx: Arc<ContextInner>, socket_type: omq_tokio::SocketType) -> Arc<Self> {
         let opts = omq_tokio::Options::default();
         let overlay = options::Overlay::from_options(&opts);
         Arc::new(Self {
+            ctx,
             socket_type,
             overlay: Mutex::new(overlay),
             sndbuf: Mutex::new(SendBuffer::default()),
@@ -219,7 +221,7 @@ impl SocketInner {
         let send_notify = Arc::new(RecvNotify::new());
         let recv_space = Arc::new(tokio::sync::Notify::new());
         let st = self.socket_type;
-        let (id, socket, send_pump, recv_pump) = runtime::materialize(
+        let (id, socket, send_pump, recv_pump) = self.ctx.materialize(
             st,
             opts,
             send_cons,
@@ -227,7 +229,7 @@ impl SocketInner {
             recv_notify.clone(),
             send_notify.clone(),
             recv_space.clone(),
-        );
+        )?;
         *slot = Some(Materialized {
             id,
             fork_gen: fgen,
@@ -318,25 +320,30 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    pub(crate) fn from_stream(mut stream: omq_tokio::MonitorStream) -> Self {
+    pub(crate) fn from_stream(
+        ctx: &Arc<ContextInner>,
+        mut stream: omq_tokio::MonitorStream,
+    ) -> Self {
         let (tx, rx) = flume::unbounded();
         let lagged = Arc::new(AtomicU64::new(0));
         let lagged2 = lagged.clone();
-        runtime::runtime_handle().spawn(async move {
-            loop {
-                match stream.recv().await {
-                    Ok(ev) => {
-                        if tx.send(ev).is_err() {
-                            break;
+        ctx.runtime_handle()
+            .expect("pyomq: context terminated")
+            .spawn(async move {
+                loop {
+                    match stream.recv().await {
+                        Ok(ev) => {
+                            if tx.send(ev).is_err() {
+                                break;
+                            }
                         }
+                        Err(omq_tokio::MonitorRecvError::Lagged(n)) => {
+                            lagged2.fetch_add(n, Ordering::Relaxed);
+                        }
+                        Err(_) => break,
                     }
-                    Err(omq_tokio::MonitorRecvError::Lagged(n)) => {
-                        lagged2.fetch_add(n, Ordering::Relaxed);
-                    }
-                    Err(_) => break,
                 }
-            }
-        });
+            });
         Self { rx, lagged }
     }
 }
@@ -473,9 +480,9 @@ pub struct Socket {
 }
 
 impl Socket {
-    pub fn new(socket_type: omq_tokio::SocketType) -> Self {
+    pub(crate) fn new(ctx: Arc<ContextInner>, socket_type: omq_tokio::SocketType) -> Self {
         Self {
-            inner: SocketInner::new(socket_type),
+            inner: SocketInner::new(ctx, socket_type),
         }
     }
 
@@ -595,8 +602,9 @@ impl Socket {
     /// Return a list of dicts describing every live peer connection.
     fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let sock = self.inner.ensure_socket()?;
+        let ctx = self.inner.ctx.clone();
         let statuses: Vec<omq_tokio::ConnectionStatus> = py.allow_threads(|| {
-            runtime::with_socket(&sock, |s| async move {
+            ctx.with_socket(&sock, |s| async move {
                 s.connections().await.unwrap_or_default()
             })
         });
@@ -611,8 +619,9 @@ impl Socket {
     /// `None` if no such peer is currently connected.
     fn connection_info<'py>(&self, py: Python<'py>, connection_id: u64) -> PyResult<PyObject> {
         let sock = self.inner.ensure_socket()?;
+        let ctx = self.inner.ctx.clone();
         let status: Option<omq_tokio::ConnectionStatus> = py.allow_threads(|| {
-            runtime::with_socket(&sock, move |s| async move {
+            ctx.with_socket(&sock, move |s| async move {
                 s.connection_info(connection_id).await.ok().flatten()
             })
         });
@@ -626,9 +635,9 @@ impl Socket {
     /// this socket. Multiple monitors can be active simultaneously.
     fn monitor(&self, py: Python<'_>) -> PyResult<Monitor> {
         let sock = self.inner.ensure_socket()?;
-        let stream =
-            py.allow_threads(|| runtime::with_socket(&sock, |s| async move { s.monitor() }));
-        Ok(Monitor::from_stream(stream))
+        let ctx = self.inner.ctx.clone();
+        let stream = py.allow_threads(|| ctx.with_socket(&sock, |s| async move { s.monitor() }));
+        Ok(Monitor::from_stream(&self.inner.ctx, stream))
     }
 
     fn setsockopt(&self, py: Python<'_>, option: i32, value: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -655,8 +664,9 @@ impl Socket {
         let Some(m) = m else {
             return Ok(());
         };
+        let ctx = self.inner.ctx.clone();
         py.allow_threads(|| {
-            runtime::destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump)
+            ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump);
         });
         Ok(())
     }

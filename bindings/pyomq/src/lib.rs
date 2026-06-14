@@ -123,7 +123,8 @@ fn native_proxy(
         }
         None => None,
     };
-    py.allow_threads(|| runtime::proxy(fe, be, cap, ctrl));
+    let ctx = fe.ctx.clone();
+    py.allow_threads(|| runtime::proxy(&ctx, fe, be, cap, ctrl));
     Ok(())
 }
 

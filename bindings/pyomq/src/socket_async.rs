@@ -25,7 +25,7 @@ use pyo3::types::{PyBytes, PyList, PyType};
 use crate::conversions;
 use crate::dispatch;
 use crate::error::map_err;
-use crate::runtime;
+use crate::runtime::ContextInner;
 use crate::socket::SocketInner;
 
 #[pyclass(module = "pyomq._native")]
@@ -34,9 +34,9 @@ pub struct AsyncSocket {
 }
 
 impl AsyncSocket {
-    pub fn new(socket_type: omq_tokio::SocketType) -> Self {
+    pub(crate) fn new(ctx: Arc<ContextInner>, socket_type: omq_tokio::SocketType) -> Self {
         Self {
-            inner: SocketInner::new(socket_type),
+            inner: SocketInner::new(ctx, socket_type),
         }
     }
 
@@ -209,8 +209,9 @@ impl AsyncSocket {
 
     fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let sock = self.inner.ensure_socket()?;
+        let ctx = self.inner.ctx.clone();
         let statuses: Vec<omq_tokio::ConnectionStatus> = py.allow_threads(|| {
-            runtime::with_socket(&sock, |s| async move {
+            ctx.with_socket(&sock, |s| async move {
                 s.connections().await.unwrap_or_default()
             })
         });
@@ -223,8 +224,9 @@ impl AsyncSocket {
 
     fn connection_info<'py>(&self, py: Python<'py>, connection_id: u64) -> PyResult<PyObject> {
         let sock = self.inner.ensure_socket()?;
+        let ctx = self.inner.ctx.clone();
         let status: Option<omq_tokio::ConnectionStatus> = py.allow_threads(|| {
-            runtime::with_socket(&sock, move |s| async move {
+            ctx.with_socket(&sock, move |s| async move {
                 s.connection_info(connection_id).await.ok().flatten()
             })
         });
@@ -236,9 +238,9 @@ impl AsyncSocket {
 
     fn monitor(&self, py: Python<'_>) -> PyResult<crate::socket::Monitor> {
         let sock = self.inner.ensure_socket()?;
-        let stream =
-            py.allow_threads(|| runtime::with_socket(&sock, |s| async move { s.monitor() }));
-        Ok(crate::socket::Monitor::from_stream(stream))
+        let ctx = self.inner.ctx.clone();
+        let stream = py.allow_threads(|| ctx.with_socket(&sock, |s| async move { s.monitor() }));
+        Ok(crate::socket::Monitor::from_stream(&self.inner.ctx, stream))
     }
 
     // ── Options ─────────────────────────────────────────────────────
@@ -269,8 +271,9 @@ impl AsyncSocket {
         let Some(m) = m else {
             return Ok(());
         };
+        let ctx = self.inner.ctx.clone();
         py.allow_threads(|| {
-            runtime::destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump)
+            ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump);
         });
         Ok(())
     }
