@@ -2,7 +2,7 @@
 //! the sync and async wrappers.
 //!
 //! Hot path is queue-relayed: every `send` / `recv` goes through a
-//! per-socket yring SPSC ring buffer. Two pump tasks on the compio
+//! per-socket yring SPSC ring buffer. Two pump tasks on the tokio
 //! thread bridge the rings to the actual `omq_tokio::Socket`'s async
 //! send/recv. The fast path (ring not full / not empty) does NOT call
 //! `Python::allow_threads`. The slow path (Full / Empty) releases the
@@ -712,7 +712,10 @@ impl Socket {
                     loop {
                         let push_result = {
                             let mat_guard = self.inner.materialized.read().unwrap();
-                            let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+                            let mat = mat_guard.as_ref().ok_or_else(|| {
+                                send_notify.park_end();
+                                map_err(PError::Closed)
+                            })?;
                             let mut prod = mat.send_prod.lock().unwrap();
                             prod.push_and_flush(msg)
                         };
