@@ -322,12 +322,6 @@ fn bench_b3_client_keypair() -> omq_compio::Blake3ZmqKeypair {
     omq_compio::Blake3ZmqKeypair::from_secret(omq_compio::Blake3ZmqSecretKey([0x04; 32]))
 }
 
-// FIXME: uses channel signaling instead of a Barrier because compio's
-// single-threaded runtime intermittently loses cross-thread wakeups
-// (flume send → Waker::wake → eventfd write not picked up by
-// io_uring_enter). Reproduces ~25% of the time with the old Barrier
-// approach. Root cause is upstream in compio's driver; not yet isolated
-// into a minimal repro outside omq.
 async fn run_inproc(name: String, size: usize, duration: Duration) {
     use std::sync::{
         Arc,
@@ -393,6 +387,7 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
 
     compio::time::sleep(Duration::from_millis(500)).await;
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
@@ -407,7 +402,8 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("{count} {elapsed:.6} {size}");
+    let cpu = cpu_time_secs() - cpu_before;
+    println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);
 }
 
@@ -482,6 +478,8 @@ async fn run_req(ep: Endpoint, size: usize, iterations: usize, warmup: usize) {
         req.recv().await.unwrap();
     }
 
+    let t_wall = Instant::now();
+    let cpu_before = cpu_time_secs();
     let mut rtts = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let t0 = Instant::now();
@@ -489,13 +487,15 @@ async fn run_req(ep: Endpoint, size: usize, iterations: usize, warmup: usize) {
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+    let cpu = cpu_time_secs() - cpu_before;
+    let elapsed = t_wall.elapsed().as_secs_f64();
 
     rtts.sort_unstable();
     let p50 = percentile(&rtts, 50.0);
     let p99 = percentile(&rtts, 99.0);
     let p999 = percentile(&rtts, 99.9);
     let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu:.6} {elapsed:.6}");
 }
 
 fn percentile(sorted: &[u64], p: f64) -> f64 {
@@ -750,6 +750,18 @@ async fn run_inproc_pubsub(name: String, size: usize, duration: Duration, peers:
     let elapsed = t0.elapsed().as_secs_f64();
     println!("{count} {elapsed:.6} {size}");
     std::process::exit(0);
+}
+
+#[expect(clippy::cast_precision_loss)]
+fn cpu_time_secs() -> f64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    unsafe {
+        libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
+        let usage = usage.assume_init();
+        let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1e6;
+        let sys = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1e6;
+        user + sys
+    }
 }
 
 async fn run_inproc_same_thread(name: String, size: usize, duration: Duration) {

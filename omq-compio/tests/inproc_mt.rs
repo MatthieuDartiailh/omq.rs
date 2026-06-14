@@ -153,6 +153,67 @@ fn spsc_preserves_ordering() {
     pull_thread.join().unwrap();
 }
 
+/// Regression: try_recv() must notify space_events after releasing
+/// yring slots, otherwise the producer blocks on a full ring forever.
+///
+/// The yring has capacity 1024. We let the push fill it, then the
+/// pull uses recv()+try_recv() to drain. try_recv() must notify the
+/// producer's space_event, otherwise the producer stays blocked on
+/// the full ring and the next recv() deadlocks.
+#[test]
+fn try_recv_notifies_space_event() {
+    const N: usize = 50_000;
+    let ep = inproc_ep("try-recv-space");
+    let count = Arc::new(AtomicUsize::new(0));
+    let (bound_tx, bound_rx) = flume::bounded::<()>(1);
+    let (connected_tx, connected_rx) = flume::bounded::<()>(1);
+
+    let pull_count = count.clone();
+    let pull_ep = ep.clone();
+    let pull_thread = std::thread::spawn(move || {
+        let rt = compio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let pull = Socket::new(SocketType::Pull, Options::default());
+            pull.bind(pull_ep).await.unwrap();
+            let _ = bound_tx.send(());
+            let _ = connected_rx.recv_async().await;
+            compio::time::sleep(Duration::from_millis(100)).await;
+
+            let mut got = 0;
+            while got < N {
+                let r = compio::time::timeout(Duration::from_secs(5), pull.recv()).await;
+                r.expect("recv timed out (deadlock: producer stuck on full ring)")
+                    .unwrap();
+                got += 1;
+                while got < N {
+                    match pull.try_recv() {
+                        Ok(_) => got += 1,
+                        Err(_) => break,
+                    }
+                }
+            }
+            pull_count.store(got, Ordering::Relaxed);
+        });
+    });
+
+    let push_thread = std::thread::spawn(move || {
+        let rt = compio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let _ = bound_rx.recv_async().await;
+            let push = Socket::new(SocketType::Push, Options::default());
+            push.connect(ep).await.unwrap();
+            let _ = connected_tx.send(());
+            for _ in 0..N {
+                push.send(Message::single(b"x" as &[u8])).await.unwrap();
+            }
+        });
+    });
+
+    push_thread.join().unwrap();
+    pull_thread.join().unwrap();
+    assert_eq!(count.load(Ordering::Relaxed), N);
+}
+
 /// Multi-PUSH cross-thread to one PULL.
 #[test]
 fn multi_push_cross_thread() {
