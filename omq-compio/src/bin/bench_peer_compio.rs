@@ -47,8 +47,11 @@ fn parse_ep(s: &str) -> Endpoint {
 }
 
 fn print_bound_port(ep: &Endpoint) {
-    if let Endpoint::Tcp { port, .. } = ep {
-        println!("PORT {port}");
+    match ep {
+        Endpoint::Tcp { port, .. } => println!("PORT {port}"),
+        #[cfg(feature = "lz4")]
+        Endpoint::Lz4Tcp { port, .. } => println!("PORT {port}"),
+        _ => {}
     }
 }
 
@@ -252,6 +255,22 @@ fn bench_options(msg_size: usize) -> Options {
     if msg_size >= 2 * 1024 * 1024 {
         let buf = msg_size * 2;
         o = o.recv_buffer_size(buf).send_buffer_size(buf);
+    }
+    #[cfg(feature = "lz4")]
+    if let Ok(path) = std::env::var("OMQ_BENCH_COMPRESSION_DICT") {
+        let dict = std::fs::read(&path).expect("read compression dict file");
+        o = o.compression_dict(Bytes::from(dict));
+    }
+    #[cfg(feature = "lz4")]
+    if let Ok(s) = std::env::var("OMQ_BENCH_COMPRESSION_THRESHOLD")
+        && let Ok(t) = s.parse::<usize>()
+    {
+        o = o.compression_threshold(t);
+    }
+    if let Ok(s) = std::env::var("OMQ_BENCH_SEND_HWM")
+        && let Ok(hwm) = s.parse::<u32>()
+    {
+        o = o.send_hwm(hwm);
     }
     o
 }
