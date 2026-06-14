@@ -849,10 +849,9 @@ def _detect_hardware():
                     break
                 except OSError:
                     continue
-            if not extras:
-                hw_extras = os.environ.get("OMQ_HW_EXTRAS")
-                if hw_extras:
-                    extras.extend(hw_extras.split(","))
+            hw_extras = os.environ.get("OMQ_HW_EXTRAS")
+            if hw_extras:
+                extras.extend(hw_extras.split(","))
             if extras:
                 label += ", " + ", ".join(extras)
             return label

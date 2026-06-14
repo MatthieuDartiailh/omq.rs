@@ -33,6 +33,14 @@ workspace root lock file.
 
 ## Benchmarks
 
+**Always set `OMQ_HW_EXTRAS` before running.** It appends to the chart
+subtitle alongside any auto-detected governor/turbo info. On the bench
+machine (i7-8700B, performance governor, turbo off):
+
+```sh
+export OMQ_HW_EXTRAS="performance governor,turbo off"
+```
+
 ```sh
 maturin develop --release
 python scripts/update_perf.py                # full (pyomq + pyzmq)
@@ -43,12 +51,12 @@ python scripts/update_perf.py --chart-only   # regenerate SVG from JSONL
 Results in `~/.cache/omq/bindings.jsonl` (latest `run_id` per impl wins).
 Regenerates `doc/charts/bindings.svg` and the proxy table in `README.md`.
 
-The proxy PUSH/PULL benchmark uses a native omq-compio client
+The proxy PUSH/PULL benchmark uses a native omq-tokio client
 (`bench_proxy_client`) to saturate the proxy without Python
 sender/receiver overhead. Build it before running benchmarks:
 
 ```sh
-cargo build --release -p omq-compio --bin bench_proxy_client
+cargo build --release -p omq-tokio --bin bench_proxy_client
 ```
 
 If the binary is missing, the proxy PUSH/PULL bench falls back to
