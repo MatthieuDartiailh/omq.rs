@@ -89,6 +89,7 @@ async fn server_survives_mid_session_abrupt_drop() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn reconnect_after_ipc_peer_restarts() {
     // Dialer must reconnect when the IPC listener goes away and a new
     // one appears at the same path.

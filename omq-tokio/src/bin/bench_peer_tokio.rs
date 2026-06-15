@@ -617,6 +617,7 @@ fn percentile(sorted: &[u64], p: f64) -> f64 {
 }
 
 #[expect(clippy::cast_precision_loss)]
+#[cfg(unix)]
 fn cpu_time_secs() -> f64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     unsafe {
@@ -626,6 +627,12 @@ fn cpu_time_secs() -> f64 {
         let sys = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1e6;
         user + sys
     }
+}
+
+#[cfg(windows)]
+fn cpu_time_secs() -> f64 {
+    // Windows doesn't have rusage; return 0.0 as a placeholder.
+    0.0
 }
 
 fn bench_payload(size: usize) -> Bytes {

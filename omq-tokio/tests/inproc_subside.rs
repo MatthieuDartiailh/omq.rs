@@ -15,12 +15,15 @@
 
 use std::time::{Duration, Instant};
 
-use omq_tokio::{Endpoint, IpcPath, OnMute, Options, Socket, SocketType};
+#[cfg(unix)]
+use omq_tokio::IpcPath;
+use omq_tokio::{Endpoint, OnMute, Options, Socket, SocketType};
 
 fn inproc(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
+#[cfg(unix)]
 fn ipc_ep(name: &str) -> Endpoint {
     Endpoint::Ipc(IpcPath::Abstract(format!(
         "omq-subside-{name}-{}",
@@ -69,6 +72,7 @@ async fn inproc_sub_subscribe_after_connect() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[cfg(unix)]
 async fn ipc_sub_subscribe_after_connect() {
     check_subside_handshake(ipc_ep("subside-ipc")).await;
 }

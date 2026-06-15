@@ -8,6 +8,7 @@ use std::time::Duration;
 mod test_support;
 
 use bytes::Bytes;
+#[cfg(unix)]
 use omq_proto::endpoint::IpcPath;
 use omq_tokio::endpoint::Host;
 use omq_tokio::options::ReconnectPolicy;
@@ -46,6 +47,7 @@ fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
+#[cfg(unix)]
 fn ipc_ep(name: &str) -> Endpoint {
     Endpoint::Ipc(IpcPath::Abstract(format!(
         "omq-cbb-{name}-{}-{}",
@@ -83,6 +85,7 @@ async fn push_pull_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn push_pull_connect_before_bind_ipc() {
     push_pull_connect_before_bind(ipc_ep("cbb-pp")).await;
 }
@@ -123,6 +126,7 @@ async fn req_rep_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn req_rep_connect_before_bind_ipc() {
     req_rep_connect_before_bind(ipc_ep("cbb-rr")).await;
 }
@@ -163,6 +167,7 @@ async fn pair_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn pair_connect_before_bind_ipc() {
     pair_connect_before_bind(ipc_ep("cbb-pair")).await;
 }
@@ -211,6 +216,7 @@ async fn pub_sub_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn pub_sub_connect_before_bind_ipc() {
     pub_sub_connect_before_bind(ipc_ep("cbb-ps")).await;
 }
@@ -261,6 +267,7 @@ async fn dealer_router_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn dealer_router_connect_before_bind_ipc() {
     dealer_router_connect_before_bind(ipc_ep("cbb-dr")).await;
 }
@@ -311,6 +318,7 @@ async fn client_server_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn client_server_connect_before_bind_ipc() {
     client_server_connect_before_bind(ipc_ep("cbb-cs")).await;
 }
@@ -344,6 +352,7 @@ async fn scatter_gather_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn scatter_gather_connect_before_bind_ipc() {
     scatter_gather_connect_before_bind(ipc_ep("cbb-sg")).await;
 }
@@ -400,6 +409,7 @@ async fn radio_dish_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn radio_dish_connect_before_bind_ipc() {
     radio_dish_connect_before_bind(ipc_ep("cbb-rd")).await;
 }
@@ -451,6 +461,7 @@ async fn peer_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn peer_connect_before_bind_ipc() {
     peer_connect_before_bind(ipc_ep("cbb-peer")).await;
 }
@@ -491,6 +502,7 @@ async fn channel_connect_before_bind_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn channel_connect_before_bind_ipc() {
     channel_connect_before_bind(ipc_ep("cbb-ch")).await;
 }

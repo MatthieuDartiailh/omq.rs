@@ -11,14 +11,18 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
 
+#[cfg(unix)]
+use crate::transport::IpcTransport;
 use crate::transport::{
-    InprocConn, InprocPeerSnapshot, IpcTransport, Listener as _, PeerIdent, TcpTransport,
-    Transport as _, inproc as inproc_transport,
+    InprocConn, InprocPeerSnapshot, Listener as _, PeerIdent, TcpTransport, Transport as _,
+    inproc as inproc_transport,
 };
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP, IPC, WS).
@@ -27,6 +31,7 @@ use crate::transport::{
 #[derive(Debug)]
 pub(crate) enum AnyStream {
     Tcp(TcpStream),
+    #[cfg(unix)]
     Ipc(UnixStream),
     #[cfg(feature = "ws")]
     Ws(Box<crate::transport::ws::WsTransport>),
@@ -44,6 +49,7 @@ impl AnyStream {
                 options.apply_socket_buffers(s)?;
                 Ok(())
             }
+            #[cfg(unix)]
             Self::Ipc(s) => options.apply_socket_buffers(s),
             #[cfg(feature = "ws")]
             Self::Ws(_) => Ok(()),
@@ -59,6 +65,7 @@ impl AsyncRead for AnyStream {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(unix)]
             Self::Ipc(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
@@ -74,6 +81,7 @@ impl AsyncWrite for AnyStream {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(unix)]
             Self::Ipc(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
@@ -83,6 +91,7 @@ impl AsyncWrite for AnyStream {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(unix)]
             Self::Ipc(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_flush(cx),
@@ -92,6 +101,7 @@ impl AsyncWrite for AnyStream {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(unix)]
             Self::Ipc(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
@@ -141,6 +151,7 @@ impl AnyConn {
 pub(super) enum AnyListener {
     Tcp(crate::transport::tcp::TcpListener),
     Inproc(crate::transport::InprocListener),
+    #[cfg(unix)]
     Ipc(crate::transport::ipc::IpcListener),
     #[cfg(feature = "ws")]
     Ws(crate::transport::ws::WsListener),
@@ -151,6 +162,7 @@ impl AnyListener {
         match self {
             Self::Tcp(l) => l.local_endpoint(),
             Self::Inproc(l) => l.local_endpoint(),
+            #[cfg(unix)]
             Self::Ipc(l) => l.local_endpoint(),
             #[cfg(feature = "ws")]
             Self::Ws(_) => {
@@ -175,6 +187,7 @@ impl AnyListener {
                 let conn = l.accept().await?;
                 Ok(AnyConn::Inproc { conn, peer_ident })
             }
+            #[cfg(unix)]
             Self::Ipc(l) => l.accept().await.map(|(s, peer_ident)| AnyConn::ByteStream {
                 stream: AnyStream::Ipc(s),
                 peer_ident,
@@ -238,6 +251,7 @@ pub(super) async fn bind_any(
             recv_notify.clone(),
             max_message_size,
         )?)),
+        #[cfg(unix)]
         Endpoint::Ipc(_) => Ok(AnyListener::Ipc(IpcTransport::bind(endpoint).await?)),
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
     }
@@ -296,6 +310,7 @@ pub(super) async fn connect_any(
                 peer_ident: PeerIdent::Inproc(name.clone()),
             })
         }
+        #[cfg(unix)]
         Endpoint::Ipc(_) => {
             let s = IpcTransport::connect(endpoint).await?;
             let peer_ident = peer_ident_for_endpoint(endpoint);

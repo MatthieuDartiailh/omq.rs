@@ -7,9 +7,11 @@ mod test_support;
 use std::time::Duration;
 
 use bytes::Bytes;
+#[cfg(unix)]
 use omq_proto::endpoint::IpcPath;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
+#[cfg(unix)]
 fn ipc_ep(name: &str) -> Endpoint {
     Endpoint::Ipc(IpcPath::Abstract(format!(
         "omq-tokio-cov-{name}-{}-{}",
@@ -250,6 +252,7 @@ async fn peer_inproc() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn push_pull_ipc() {
     let ep = ipc_ep("pp");
     let pull = Socket::new(SocketType::Pull, Options::default());
@@ -257,6 +260,7 @@ async fn push_pull_ipc() {
     push_pull_roundtrip(&pull, ep).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn req_rep_ipc() {
     let ep = ipc_ep("rr");
     let rep = Socket::new(SocketType::Rep, Options::default());
@@ -264,6 +268,7 @@ async fn req_rep_ipc() {
     req_rep_roundtrip(&rep, ep).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn dealer_router_ipc() {
     let ep = ipc_ep("dr");
     let router = Socket::new(SocketType::Router, Options::default());
@@ -271,6 +276,7 @@ async fn dealer_router_ipc() {
     dealer_router_roundtrip(&router, ep).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn pair_ipc() {
     let ep = ipc_ep("pair");
     let a = Socket::new(SocketType::Pair, Options::default());
@@ -278,6 +284,7 @@ async fn pair_ipc() {
     pair_roundtrip(&a, ep).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn pub_sub_ipc() {
     let ep = ipc_ep("ps");
     let p = Socket::new(SocketType::Pub, Options::default());
@@ -285,6 +292,7 @@ async fn pub_sub_ipc() {
     pub_sub_roundtrip(&p, ep).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn client_server_ipc() {
     let ep = ipc_ep("cs");
     let server = Socket::new(SocketType::Server, Options::default());
@@ -292,6 +300,7 @@ async fn client_server_ipc() {
     client_server_roundtrip(&server, ep).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn scatter_gather_ipc() {
     let ep = ipc_ep("sg");
     let gather = Socket::new(SocketType::Gather, Options::default());
@@ -299,6 +308,7 @@ async fn scatter_gather_ipc() {
     scatter_gather_roundtrip(&gather, ep).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn channel_ipc() {
     let ep = ipc_ep("ch");
     let a = Socket::new(SocketType::Channel, Options::default());
@@ -306,6 +316,7 @@ async fn channel_ipc() {
     channel_roundtrip(&a, ep).await;
 }
 #[tokio::test]
+#[cfg(unix)]
 async fn peer_ipc() {
     let ep = ipc_ep("pp");
     let a = Socket::new(

@@ -8,17 +8,22 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use omq_tokio::{Blake3ZmqKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
+use omq_tokio::{Blake3ZmqKeypair, Endpoint, Message, Options, Socket, SocketType};
 
-// Encrypted mechanisms aren't valid on inproc (no wire to protect;
-// the inproc fast path skips the codec entirely). Use IPC instead
-// - same in-process testing convenience, real byte-stream
-// transport, codec runs.
-fn inproc_ep(name: &str) -> Endpoint {
+// Auth tests need a real transport (inproc bypasses the wire codec).
+// IPC on Unix, TCP :0 on Windows.
+#[cfg(unix)]
+fn auth_ep(name: &str) -> Endpoint {
+    use omq_tokio::IpcPath;
     Endpoint::Ipc(IpcPath::Abstract(format!(
         "omq-blake3-{name}-{}",
         std::process::id()
     )))
+}
+
+#[cfg(not(unix))]
+fn auth_ep(_name: &str) -> Endpoint {
+    "tcp://127.0.0.1:0".parse().unwrap()
 }
 
 #[tokio::test]
@@ -26,13 +31,11 @@ async fn blake3zmq_push_pull_roundtrip() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-pp");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().blake3zmq_server(server_kp),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("blake3-pp")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -56,13 +59,11 @@ async fn blake3zmq_multiple_messages_keep_counter_synced() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-many");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().blake3zmq_server(server_kp),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("blake3-many")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -90,13 +91,11 @@ async fn blake3zmq_long_payload_uses_long_frame_aad() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-long");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().blake3zmq_server(server_kp),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("blake3-long")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -146,13 +145,14 @@ async fn blake3zmq_multipart_message_delivered_atomically() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-multipart-atomic");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().blake3zmq_server(server_kp),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server
+        .bind(auth_ep("blake3-multipart-atomic"))
+        .await
+        .unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -195,13 +195,11 @@ async fn blake3zmq_encrypts_subscribe_command() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-pub-sub");
-
     let pub_socket = Socket::new(
         SocketType::Pub,
         Options::default().blake3zmq_server(server_kp),
     );
-    pub_socket.bind(ep.clone()).await.unwrap();
+    let ep = pub_socket.bind(auth_ep("blake3-pub-sub")).await.unwrap();
 
     let sub_socket = Socket::new(
         SocketType::Sub,
@@ -255,13 +253,11 @@ async fn blake3zmq_rejects_wrong_server_key() {
     let real_server = Blake3ZmqKeypair::generate();
     let unrelated = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
-    let ep = inproc_ep("blake3-bad-key");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().blake3zmq_server(real_server),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("blake3-bad-key")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -287,8 +283,6 @@ async fn blake3zmq_authenticator_admits_known_client() {
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
     let allowed = client_kp.public.0;
-    let ep = inproc_ep("blake3-auth-allow");
-
     let saw_callback = Arc::new(AtomicBool::new(false));
     let saw_callback_cb = saw_callback.clone();
 
@@ -301,7 +295,7 @@ async fn blake3zmq_authenticator_admits_known_client() {
                 peer.public_key == allowed
             }),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("blake3-auth-allow")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -326,15 +320,13 @@ async fn blake3zmq_authenticator_rejects_unknown_client() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-auth-deny");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default()
             .blake3zmq_server(server_kp)
             .authenticator(|_peer| false),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("blake3-auth-deny")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -363,13 +355,11 @@ async fn blake3zmq_req_rep() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-req-rep");
-
     let rep = Socket::new(
         SocketType::Rep,
         Options::default().blake3zmq_server(server_kp),
     );
-    rep.bind(ep.clone()).await.unwrap();
+    let ep = rep.bind(auth_ep("blake3-req-rep")).await.unwrap();
     let req = Socket::new(
         SocketType::Req,
         Options::default().blake3zmq_client(client_kp, server_pub),
@@ -395,13 +385,11 @@ async fn blake3zmq_dealer_router() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-dr");
-
     let router = Socket::new(
         SocketType::Router,
         Options::default().blake3zmq_server(server_kp),
     );
-    router.bind(ep.clone()).await.unwrap();
+    let ep = router.bind(auth_ep("blake3-dr")).await.unwrap();
     let dealer = Socket::new(
         SocketType::Dealer,
         Options::default()
@@ -425,13 +413,11 @@ async fn blake3zmq_pub_sub() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-ps");
-
     let p = Socket::new(
         SocketType::Pub,
         Options::default().blake3zmq_server(server_kp),
     );
-    p.bind(ep.clone()).await.unwrap();
+    let ep = p.bind(auth_ep("blake3-ps")).await.unwrap();
     let s = Socket::new(
         SocketType::Sub,
         Options::default().blake3zmq_client(client_kp, server_pub),
@@ -454,13 +440,11 @@ async fn blake3zmq_empty_message() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-empty");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().blake3zmq_server(server_kp),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("blake3-empty")).await.unwrap();
     let client = Socket::new(
         SocketType::Push,
         Options::default().blake3zmq_client(client_kp, server_pub),
@@ -483,13 +467,11 @@ async fn blake3zmq_large_message() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-large");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().blake3zmq_server(server_kp),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("blake3-large")).await.unwrap();
     let client = Socket::new(
         SocketType::Push,
         Options::default().blake3zmq_client(client_kp, server_pub),
@@ -512,13 +494,11 @@ async fn blake3zmq_reconnect_after_server_restart() {
     let server_kp = Blake3ZmqKeypair::generate();
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = inproc_ep("blake3-reconnect");
-
     let server1 = Socket::new(
         SocketType::Pull,
         Options::default().blake3zmq_server(server_kp.clone()),
     );
-    server1.bind(ep.clone()).await.unwrap();
+    let ep = server1.bind(auth_ep("blake3-reconnect")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,

@@ -115,10 +115,6 @@ for feature in plain curve blake3zmq; do
 done
 par run cargo test -p omq-tokio  --features lz4 --test lz4_tcp --test lz4_pub_sub
 par run cargo test -p omq-compio --features lz4 --test lz4_tcp
-# Interop tests (external tooling; skipped automatically when absent).
-par run cargo test -p omq-tokio  --features lz4  --test interop_ruby_lz4
-par run cargo test -p omq-tokio  --features blake3zmq --test interop_ruby_blake3zmq
-par run cargo test -p omq-compio --features blake3zmq --test interop_ruby_blake3zmq
 par run cargo test -p omq-tokio  --features plain --test interop_pyzmq_plain
 par run cargo test -p omq-tokio  --features curve --test interop_pyzmq_curve
 par run cargo test -p omq-compio --features curve --test interop_pyzmq_curve

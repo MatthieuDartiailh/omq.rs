@@ -18,7 +18,9 @@ use bytes::Bytes;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
 
-use omq_tokio::{Endpoint, IpcPath, Message, OnMute, Options, Socket, SocketType};
+#[cfg(unix)]
+use omq_tokio::IpcPath;
+use omq_tokio::{Endpoint, Message, OnMute, Options, Socket, SocketType};
 
 fn rng() -> StdRng {
     let seed: u64 = std::env::var("OMQ_FUZZ_SEED")
