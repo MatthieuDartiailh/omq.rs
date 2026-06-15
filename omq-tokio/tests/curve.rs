@@ -19,8 +19,8 @@ fn tcp_ep(port: u16) -> Endpoint {
     }
 }
 
-// Authentication tests must use a real transport (IPC on Unix, TCP on Windows)
-// because inproc bypasses authentication (no wire codec in fast path)
+// Auth tests need a real transport (inproc bypasses the wire codec).
+// IPC on Unix, TCP :0 on Windows.
 #[cfg(unix)]
 fn auth_ep(name: &str) -> Endpoint {
     use omq_tokio::IpcPath;
@@ -32,14 +32,7 @@ fn auth_ep(name: &str) -> Endpoint {
 
 #[cfg(not(unix))]
 fn auth_ep(_name: &str) -> Endpoint {
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static PORT: AtomicU16 = AtomicU16::new(12000);
-    let port = PORT.fetch_add(1, Ordering::SeqCst);
-    Endpoint::Tcp {
-        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        port,
-    }
+    "tcp://127.0.0.1:0".parse().unwrap()
 }
 
 #[tokio::test]

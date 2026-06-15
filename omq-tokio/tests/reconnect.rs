@@ -211,6 +211,7 @@ async fn exponential_backoff_retry_in_grows() {
 
     // Collect the first 4 ConnectDelayed events.
     let mut delays: Vec<Duration> = Vec::new();
+    // 10 s: Windows CI runners are slower than Linux.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while delays.len() < 4 {
         let evt = tokio::time::timeout_at(deadline, mon.recv())

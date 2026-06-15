@@ -160,8 +160,6 @@ impl Endpoint {
                 host: host.clone(),
                 port: *port,
             },
-            #[cfg(unix)]
-            Endpoint::Ipc(_) => self.clone(),
             _ => self.clone(),
         }
     }

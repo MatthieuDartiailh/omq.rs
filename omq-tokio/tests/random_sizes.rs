@@ -1,4 +1,5 @@
 //! Randomized message sizes — verify framing works for non-power-of-2 payloads.
+//! Uses TCP to exercise the full wire codec (inproc bypasses framing).
 
 use std::time::Duration;
 
@@ -6,27 +7,17 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use xxhash_rust::xxh3::xxh3_128;
 
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
-
-fn inproc_ep(tag: &str) -> Endpoint {
-    Endpoint::Inproc {
-        name: format!(
-            "omq-rng-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ),
-    }
-}
+use omq_tokio::{Message, Options, Socket, SocketType};
 
 #[tokio::test]
 async fn random_message_sizes() {
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF);
 
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let ep = pull.bind(inproc_ep("sizes")).await.unwrap();
+    let ep = pull
+        .bind("tcp://127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -67,7 +58,10 @@ async fn random_multipart_sizes() {
     let mut rng = StdRng::seed_from_u64(0xCAFE_BABE);
 
     let rep = Socket::new(SocketType::Rep, Options::default());
-    let ep = rep.bind(inproc_ep("multi")).await.unwrap();
+    let ep = rep
+        .bind("tcp://127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;

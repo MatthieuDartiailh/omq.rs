@@ -8,16 +8,13 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(unix)]
-use omq_tokio::IpcPath;
 use omq_tokio::{Blake3ZmqKeypair, Endpoint, Message, Options, Socket, SocketType};
 
-// Encrypted mechanisms aren't valid on inproc (no wire to protect;
-// the inproc fast path skips the codec entirely). Use IPC instead
-// - same in-process testing convenience, real byte-stream
-// transport, codec runs.
+// Auth tests need a real transport (inproc bypasses the wire codec).
+// IPC on Unix, TCP :0 on Windows.
 #[cfg(unix)]
 fn auth_ep(name: &str) -> Endpoint {
+    use omq_tokio::IpcPath;
     Endpoint::Ipc(IpcPath::Abstract(format!(
         "omq-blake3-{name}-{}",
         std::process::id()
@@ -26,15 +23,7 @@ fn auth_ep(name: &str) -> Endpoint {
 
 #[cfg(not(unix))]
 fn auth_ep(_name: &str) -> Endpoint {
-    use omq_tokio::endpoint::Host;
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static PORT: AtomicU16 = AtomicU16::new(14000);
-    let port = PORT.fetch_add(1, Ordering::SeqCst);
-    Endpoint::Tcp {
-        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        port,
-    }
+    "tcp://127.0.0.1:0".parse().unwrap()
 }
 
 #[tokio::test]

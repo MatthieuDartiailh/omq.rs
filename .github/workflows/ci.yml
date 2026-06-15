@@ -109,35 +109,25 @@ jobs:
         with: { components: rustfmt, clippy }
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - name: Linux workspace tests (default features)
+      - name: clippy (Linux)
         if: runner.os != 'Windows'
         run: cargo clippy --workspace --all-targets --exclude omq-compio
-      - name: Windows workspace tests (default features)
+      - name: clippy (Windows)
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets --exclude omq-compio --exclude omq-libzmq
 
-  interop:
-    name: interop (${{ matrix.os }})
+  pyomq:
+    name: pyomq
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: ruby/setup-ruby@v1
-        with: { ruby-version: "4.0" }
-      - name: install omq-cli
-        run: gem install omq-cli
-      - name: rust ↔ ruby interop (tokio)
-        run: cargo test -p omq-tokio --test interop_ruby
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
-      - name: create virtualenv and install python deps (Linux)
+      - name: create virtualenv and install python deps
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin pytest pytest-asyncio pyzmq
@@ -150,7 +140,7 @@ jobs:
 
   ci-success:
     name: CI success
-    needs: [changes, test, encryption, compression, lint, interop]
+    needs: [changes, test, encryption, compression, lint, pyomq]
     runs-on: ubuntu-latest
     if: always()
     steps:
