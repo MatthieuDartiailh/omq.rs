@@ -162,11 +162,19 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
                     || e.raw_os_error() == Some(libc::ECANCELED) =>
             {
                 let mut sguard = state.recv_stream.0.lock().await;
-                *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                let io = state.lock_io();
+                let new_stream = io.reader.build_recv_stream();
+                drop(io);
+                *sguard = Some(crate::socket::RecvStreamState::MultiShot(new_stream));
+                state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
             }
             None => {
                 let mut sguard = state.recv_stream.0.lock().await;
-                *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                let io = state.lock_io();
+                let new_stream = io.reader.build_recv_stream();
+                drop(io);
+                *sguard = Some(crate::socket::RecvStreamState::MultiShot(new_stream));
+                state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
             }
             _ => {
                 state.signal_eof();
@@ -194,13 +202,21 @@ async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
             .await;
             match buf {
                 None => {
-                    *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                    let io = state.lock_io();
+                    let new_stream = io.reader.build_recv_stream();
+                    drop(io);
+                    *sguard = Some(crate::socket::RecvStreamState::MultiShot(new_stream));
+                    state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
                     PullOutcome::Fed
                 }
                 Some(Err(e)) => {
                     let os = e.raw_os_error();
                     if os == Some(libc::ENOBUFS) || os == Some(libc::ECANCELED) {
-                        *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                        let io = state.lock_io();
+                        let new_stream = io.reader.build_recv_stream();
+                        drop(io);
+                        *sguard = Some(crate::socket::RecvStreamState::MultiShot(new_stream));
+                        state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
                         PullOutcome::Fed
                     } else {
                         PullOutcome::Err(e)

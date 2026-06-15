@@ -59,17 +59,22 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
 }
 
 fn main() {
-    let rt = if std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "current_thread") {
+    let rt = if std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "multi_thread") {
+        #[cfg(feature = "rt-multi-thread")]
+        {
+            let workers = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+            eprintln!("runtime: multi_thread ({workers} workers)");
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(workers)
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+        }
+        #[cfg(not(feature = "rt-multi-thread"))]
+        panic!("multi_thread runtime requires --features rt-multi-thread")
+    } else {
         eprintln!("runtime: current_thread");
         tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime")
-    } else {
-        let workers = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
-        eprintln!("runtime: multi_thread ({workers} workers)");
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(workers)
             .enable_all()
             .build()
             .expect("tokio runtime")
@@ -583,6 +588,8 @@ async fn run_req(ep: Endpoint, size: usize, iterations: usize, warmup: usize) {
         req.recv().await.unwrap();
     }
 
+    let t_wall = Instant::now();
+    let cpu_before = cpu_time_secs();
     let mut rtts = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let t0 = Instant::now();
@@ -590,13 +597,15 @@ async fn run_req(ep: Endpoint, size: usize, iterations: usize, warmup: usize) {
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+    let cpu = cpu_time_secs() - cpu_before;
+    let elapsed = t_wall.elapsed().as_secs_f64();
 
     rtts.sort_unstable();
     let p50 = percentile(&rtts, 50.0);
     let p99 = percentile(&rtts, 99.0);
     let p999 = percentile(&rtts, 99.9);
     let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu:.6} {elapsed:.6}");
 }
 
 fn percentile(sorted: &[u64], p: f64) -> f64 {

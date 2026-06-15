@@ -29,11 +29,19 @@
 #include <time.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <sys/resource.h>
 
 static double now_secs(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+static double cpu_time_secs(void) {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return (ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6)
+         + (ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6);
 }
 
 static void die(const char *msg) {
@@ -134,6 +142,7 @@ int main(int argc, char **argv) {
         }
 
         long long count = 0;
+        double cpu_before = cpu_time_secs();
         double t0 = now_secs();
         double deadline = t0 + duration;
 
@@ -158,7 +167,8 @@ int main(int argc, char **argv) {
         }
 done:;
         double elapsed = now_secs() - t0;
-        printf("%lld %.6f %d\n", count, elapsed, size);
+        double cpu = cpu_time_secs() - cpu_before;
+        printf("%lld %.6f %d %.6f\n", count, elapsed, size, cpu);
 
         zmq_msg_close(&msg);
         zmq_close(sock);
@@ -492,6 +502,8 @@ done_inproc_pubsub:;
         uint64_t *rtts = malloc(sizeof(uint64_t) * iterations);
         if (!rtts) { perror("malloc"); exit(1); }
 
+        double wall_t0 = now_secs();
+        double cpu_before = cpu_time_secs();
         for (int i = 0; i < iterations; i++) {
             struct timespec t0, t1;
             clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -501,6 +513,8 @@ done_inproc_pubsub:;
             rtts[i] = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ULL
                      + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
         }
+        double cpu = cpu_time_secs() - cpu_before;
+        double wall_elapsed = now_secs() - wall_t0;
 
         int cmp_u64(const void *a, const void *b) {
             uint64_t va = *(const uint64_t *)a;
@@ -519,7 +533,7 @@ done_inproc_pubsub:;
         double p99  = percentile(rtts, iterations, 99);
         double p999 = percentile(rtts, iterations, 99.9);
         double max  = rtts[iterations - 1] / 1000.0;
-        printf("%.3f %.3f %.3f %.3f %d\n", p50, p99, p999, max, iterations);
+        printf("%.3f %.3f %.3f %.3f %d %.6f %.6f\n", p50, p99, p999, max, iterations, cpu, wall_elapsed);
 
         free(rtts);
         free(buf);
