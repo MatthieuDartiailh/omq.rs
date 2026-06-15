@@ -41,10 +41,8 @@ async fn curve_push_pull_roundtrip_over_ipc() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let ep = auth_ep("push-pull");
-
     let server = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("push-pull")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -69,10 +67,8 @@ async fn curve_multipart_roundtrip() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let ep = auth_ep("multipart");
-
     let pair_a = Socket::new(SocketType::Pair, Options::default().curve_server(server_kp));
-    pair_a.bind(ep.clone()).await.unwrap();
+    let ep = pair_a.bind(auth_ep("multipart")).await.unwrap();
 
     let pair_b = Socket::new(
         SocketType::Pair,
@@ -103,10 +99,8 @@ async fn curve_wrong_server_key_fails_handshake() {
     // server actually has -- handshake should fail.
     let wrong_pub = CurveKeypair::generate().public;
 
-    let ep = auth_ep("wrong-key");
-
     let server = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("wrong-key")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -134,10 +128,9 @@ async fn curve_emits_handshake_succeeded_with_curve_mechanism() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let ep = auth_ep("monitor");
     let server = Socket::new(SocketType::Pair, Options::default().curve_server(server_kp));
     let mut mon = server.monitor();
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("monitor")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Pair,
@@ -167,8 +160,6 @@ async fn curve_authenticator_admits_known_client() {
     let server_pub = server_kp.public;
     let allowed = client_kp.public.0;
 
-    let ep = auth_ep("auth-allow");
-
     let saw_callback = Arc::new(AtomicBool::new(false));
     let saw_callback_cb = saw_callback.clone();
 
@@ -181,7 +172,7 @@ async fn curve_authenticator_admits_known_client() {
                 peer.public_key == allowed
             }),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("auth-allow")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -207,15 +198,13 @@ async fn curve_authenticator_rejects_unknown_client() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let ep = auth_ep("auth-deny");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default()
             .curve_server(server_kp)
             .authenticator(|_peer| false),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("auth-deny")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -247,10 +236,8 @@ async fn curve_req_rep() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = auth_ep("req-rep");
-
     let rep = Socket::new(SocketType::Rep, Options::default().curve_server(server_kp));
-    rep.bind(ep.clone()).await.unwrap();
+    let ep = rep.bind(auth_ep("req-rep")).await.unwrap();
     let req = Socket::new(
         SocketType::Req,
         Options::default().curve_client(client_kp, server_pub),
@@ -276,13 +263,11 @@ async fn curve_dealer_router() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = auth_ep("dealer-router");
-
     let router = Socket::new(
         SocketType::Router,
         Options::default().curve_server(server_kp),
     );
-    router.bind(ep.clone()).await.unwrap();
+    let ep = router.bind(auth_ep("dealer-router")).await.unwrap();
     let dealer = Socket::new(
         SocketType::Dealer,
         Options::default()
@@ -306,10 +291,8 @@ async fn curve_pub_sub() {
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
-    let ep = auth_ep("pub-sub");
-
     let p = Socket::new(SocketType::Pub, Options::default().curve_server(server_kp));
-    p.bind(ep.clone()).await.unwrap();
+    let ep = p.bind(auth_ep("pub-sub")).await.unwrap();
     let s = Socket::new(
         SocketType::Sub,
         Options::default().curve_client(client_kp, server_pub),

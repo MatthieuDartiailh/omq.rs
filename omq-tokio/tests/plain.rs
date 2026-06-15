@@ -31,13 +31,11 @@ fn accept_alice(peer: &omq_tokio::MechanismPeerInfo) -> bool {
 
 #[tokio::test]
 async fn plain_push_pull_roundtrip() {
-    let ep = auth_ep("push-pull");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(accept_alice),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("push-pull")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -58,13 +56,11 @@ async fn plain_push_pull_roundtrip() {
 
 #[tokio::test]
 async fn plain_multipart_roundtrip() {
-    let ep = auth_ep("multipart");
-
     let pair_a = Socket::new(
         SocketType::Pair,
         Options::default().plain_server(accept_alice),
     );
-    pair_a.bind(ep.clone()).await.unwrap();
+    let ep = pair_a.bind(auth_ep("multipart")).await.unwrap();
 
     let pair_b = Socket::new(
         SocketType::Pair,
@@ -89,13 +85,11 @@ async fn plain_multipart_roundtrip() {
 
 #[tokio::test]
 async fn plain_wrong_credentials_rejected() {
-    let ep = auth_ep("wrong-creds");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(accept_alice),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("wrong-creds")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -116,8 +110,6 @@ async fn plain_wrong_credentials_rejected() {
 
 #[tokio::test]
 async fn plain_authenticator_callback_runs() {
-    let ep = auth_ep("auth-callback");
-
     let saw = Arc::new(AtomicBool::new(false));
     let saw_cb = saw.clone();
 
@@ -128,7 +120,7 @@ async fn plain_authenticator_callback_runs() {
             accept_alice(peer)
         }),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("auth-callback")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -147,13 +139,11 @@ async fn plain_authenticator_callback_runs() {
 
 #[tokio::test]
 async fn plain_req_rep() {
-    let ep = auth_ep("req-rep");
-
     let rep = Socket::new(
         SocketType::Rep,
         Options::default().plain_server(accept_alice),
     );
-    rep.bind(ep.clone()).await.unwrap();
+    let ep = rep.bind(auth_ep("req-rep")).await.unwrap();
 
     let req = Socket::new(
         SocketType::Req,
@@ -178,13 +168,11 @@ async fn plain_req_rep() {
 
 #[tokio::test]
 async fn plain_dealer_router() {
-    let ep = auth_ep("dealer-router");
-
     let router = Socket::new(
         SocketType::Router,
         Options::default().plain_server(accept_alice),
     );
-    router.bind(ep.clone()).await.unwrap();
+    let ep = router.bind(auth_ep("dealer-router")).await.unwrap();
 
     let dealer = Socket::new(
         SocketType::Dealer,
@@ -206,13 +194,11 @@ async fn plain_dealer_router() {
 
 #[tokio::test]
 async fn plain_pub_sub() {
-    let ep = auth_ep("pub-sub");
-
     let p = Socket::new(
         SocketType::Pub,
         Options::default().plain_server(accept_alice),
     );
-    p.bind(ep.clone()).await.unwrap();
+    let ep = p.bind(auth_ep("pub-sub")).await.unwrap();
 
     let s = Socket::new(
         SocketType::Sub,
@@ -233,13 +219,11 @@ async fn plain_pub_sub() {
 
 #[tokio::test]
 async fn plain_empty_message() {
-    let ep = auth_ep("empty-msg");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(accept_alice),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("empty-msg")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -260,13 +244,11 @@ async fn plain_empty_message() {
 
 #[tokio::test]
 async fn plain_large_message() {
-    let ep = auth_ep("large-msg");
-
     let server = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(accept_alice),
     );
-    server.bind(ep.clone()).await.unwrap();
+    let ep = server.bind(auth_ep("large-msg")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
@@ -287,13 +269,11 @@ async fn plain_large_message() {
 async fn plain_reconnect_after_server_restart() {
     use omq_tokio::options::ReconnectPolicy;
 
-    let ep = auth_ep("reconnect");
-
     let server1 = Socket::new(
         SocketType::Pull,
         Options::default().plain_server(accept_alice),
     );
-    server1.bind(ep.clone()).await.unwrap();
+    let ep = server1.bind(auth_ep("reconnect")).await.unwrap();
 
     let client = Socket::new(
         SocketType::Push,
