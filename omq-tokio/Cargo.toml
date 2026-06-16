@@ -64,6 +64,10 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 name = "interop_compio"
 required-features = ["compio-interop"]
 
+[[test]]
+name = "interop_compio_ws"
+required-features = ["compio-interop", "ws"]
+
 [[bin]]
 name = "bench_peer_tokio"
 path = "src/bin/bench_peer_tokio.rs"
