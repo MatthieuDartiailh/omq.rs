@@ -24,7 +24,7 @@ fn soak_plain_sustained() {
     rt.block_on(async {
         let pull = Socket::new(
             SocketType::Pull,
-            Options::default().plain_server(|peer| {
+            soak_common::soak_options().plain_server(|peer| {
                 peer.username.as_deref() == Some("alice")
                     && peer.password.as_deref() == Some("secret")
             }),
@@ -33,7 +33,7 @@ fn soak_plain_sustained() {
 
         let push = Socket::new(
             SocketType::Push,
-            Options::default()
+            soak_common::soak_options()
                 .plain_client("alice", "secret")
                 .linger(Duration::from_secs(5)),
         );

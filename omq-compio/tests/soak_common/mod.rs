@@ -53,6 +53,10 @@ pub mod alloc {
 // Duration
 // ---------------------------------------------------------------------------
 
+pub fn soak_options() -> omq_compio::Options {
+    omq_compio::Options::default().heartbeat_interval(Duration::from_secs(10))
+}
+
 pub fn soak_duration() -> Duration {
     let secs: u64 = std::env::var("OMQ_SOAK_DURATION_SECS")
         .ok()

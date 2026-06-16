@@ -26,13 +26,13 @@ fn soak_reconnect_storm() {
         rt.block_on(async {
             // Grab a free port by binding a temporary socket, then close it.
             // The PUSH dialer reconnects to this fixed endpoint across PULL restarts.
-            let tmp = Socket::new(SocketType::Pull, Options::default());
+            let tmp = Socket::new(SocketType::Pull, soak_common::soak_options());
             let ep = tmp.bind(soak_common::tcp_ep(0)).await.unwrap();
             tmp.close().await.unwrap();
 
             let push = Socket::new(
                 SocketType::Push,
-                Options::default()
+                soak_common::soak_options()
                     .send_hwm(16)
                     .reconnect(ReconnectPolicy::Fixed(Duration::from_millis(10))),
             );
@@ -44,7 +44,7 @@ fn soak_reconnect_storm() {
             let mut last_log = start;
 
             while start.elapsed() < duration {
-                let pull = Socket::new(SocketType::Pull, Options::default());
+                let pull = Socket::new(SocketType::Pull, soak_common::soak_options());
 
                 let mut bound = false;
                 for _ in 0..40 {

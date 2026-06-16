@@ -37,7 +37,7 @@ struct Stats {
 fn dealer_opts(identity: &[u8]) -> Options {
     Options {
         reconnect: ReconnectPolicy::Disabled,
-        ..Default::default()
+        ..soak_common::soak_options()
     }
     .identity(Bytes::copy_from_slice(identity))
 }
@@ -132,7 +132,7 @@ fn soak_router_dealer_churn() {
     rt.block_on(async {
         let router = Socket::new(
             SocketType::Router,
-            Options::default().router_mandatory(true),
+            soak_common::soak_options().router_mandatory(true),
         );
         let ep = router.bind(soak_common::tcp_ep(0)).await.unwrap();
 

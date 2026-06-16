@@ -62,7 +62,7 @@ fn soak_ipc_fanout_no_message_loss() {
                 let rt = build_default_runtime().expect("sub runtime");
                 block_on_and_drain(&rt, async move {
                     bind_barrier.wait();
-                    let s = Socket::new(SocketType::Sub, Options::default());
+                    let s = Socket::new(SocketType::Sub, soak_common::soak_options());
                     s.connect(ep).await.expect("connect SUB");
                     s.subscribe(Bytes::new()).await.expect("subscribe");
 
@@ -114,7 +114,10 @@ fn soak_ipc_fanout_no_message_loss() {
         std::thread::spawn(move || {
             let rt = build_default_runtime().expect("pub runtime");
             block_on_and_drain(&rt, async move {
-                let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
+                let pub_ = Socket::new(
+                    SocketType::Pub,
+                    soak_common::soak_options().on_mute(OnMute::Block),
+                );
                 pub_.bind(ep).await.expect("bind PUB");
                 bind_barrier.wait();
 

@@ -19,13 +19,13 @@ fn soak_reconnect_storm() {
     rt.block_on(async {
         // Bind port 0 to discover a free port, then use that endpoint for
         // repeated bind/close cycles so the dialer reconnects to the same address.
-        let probe = Socket::new(SocketType::Pull, Options::default());
+        let probe = Socket::new(SocketType::Pull, soak_common::soak_options());
         let ep = probe.bind(soak_common::tcp_ep(0)).await.unwrap();
         probe.close().await.unwrap();
 
         let push = Socket::new(
             SocketType::Push,
-            Options::default()
+            soak_common::soak_options()
                 .send_hwm(16)
                 .reconnect(ReconnectPolicy::Fixed(Duration::from_millis(10))),
         );
@@ -37,7 +37,7 @@ fn soak_reconnect_storm() {
         let mut last_log = start;
 
         while start.elapsed() < duration {
-            let pull = Socket::new(SocketType::Pull, Options::default());
+            let pull = Socket::new(SocketType::Pull, soak_common::soak_options());
 
             let mut bound = false;
             for _ in 0..40 {

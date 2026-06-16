@@ -19,7 +19,7 @@ use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 const SIZES: &[usize] = &[64, 1024, 8 * 1024, 64 * 1024, 256 * 1024];
 
 async fn pull_on_loopback() -> (Socket, Endpoint) {
-    let pull = Socket::new(SocketType::Pull, Options::default());
+    let pull = Socket::new(SocketType::Pull, soak_common::soak_options());
     let mut mon = pull.monitor();
     pull.bind(Endpoint::Lz4Tcp {
         host: Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
@@ -69,7 +69,7 @@ fn soak_compression_lz4_sustained() {
         let (pull, ep) = pull_on_loopback().await;
         let push = Socket::new(
             SocketType::Push,
-            Options::default().linger(Duration::from_secs(5)),
+            soak_common::soak_options().linger(Duration::from_secs(5)),
         );
         push.connect(ep).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;

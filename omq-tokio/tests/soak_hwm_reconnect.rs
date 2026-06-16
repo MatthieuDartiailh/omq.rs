@@ -25,13 +25,13 @@ use omq_tokio::{Message, Options, Socket, SocketType};
 fn fast_reconnect() -> Options {
     Options {
         reconnect: ReconnectPolicy::Fixed(Duration::from_millis(10)),
-        ..Default::default()
+        ..soak_common::soak_options()
     }
 }
 
 async fn rebind(ep: &omq_tokio::Endpoint) -> Option<Socket> {
     for _ in 0..40 {
-        let s = Socket::new(SocketType::Pull, Options::default());
+        let s = Socket::new(SocketType::Pull, soak_common::soak_options());
         if s.bind(ep.clone()).await.is_ok() {
             return Some(s);
         }
@@ -47,7 +47,7 @@ fn run_hwm_storm(name: &str, mute: OnMute) {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
         // Probe for a port, then close so we can rebind.
-        let probe = Socket::new(SocketType::Pull, Options::default());
+        let probe = Socket::new(SocketType::Pull, soak_common::soak_options());
         let ep = probe.bind(soak_common::tcp_ep(0)).await.unwrap();
         probe.close().await.unwrap();
 

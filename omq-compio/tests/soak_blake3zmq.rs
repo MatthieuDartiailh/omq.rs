@@ -36,7 +36,7 @@ fn soak_blake3zmq() {
         rt.block_on(async {
             let pull = Socket::new(
                 SocketType::Pull,
-                Options::default().blake3zmq_server(server_kp),
+                soak_common::soak_options().blake3zmq_server(server_kp),
             );
             let mut mon = pull.monitor();
             pull.bind(soak_common::tcp_ep(0)).await.unwrap();
@@ -53,7 +53,7 @@ fn soak_blake3zmq() {
 
             let push = Socket::new(
                 SocketType::Push,
-                Options::default()
+                soak_common::soak_options()
                     .blake3zmq_client(client_kp, server_pub)
                     .linger(Duration::from_secs(5)),
             );

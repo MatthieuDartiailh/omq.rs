@@ -32,13 +32,13 @@ fn get_port(ep: &Endpoint) -> u16 {
 fn fast_reconnect() -> Options {
     Options {
         reconnect: ReconnectPolicy::Fixed(Duration::from_millis(10)),
-        ..Default::default()
+        ..soak_common::soak_options()
     }
 }
 
 async fn rebind_ws(port: u16) -> Option<Socket> {
     for _ in 0..40 {
-        let s = Socket::new(SocketType::Pull, Options::default());
+        let s = Socket::new(SocketType::Pull, soak_common::soak_options());
         if s.bind(ws_ep(port)).await.is_ok() {
             return Some(s);
         }
@@ -54,11 +54,11 @@ fn soak_ws_throughput() {
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let pull = Socket::new(SocketType::Pull, Options::default());
+        let pull = Socket::new(SocketType::Pull, soak_common::soak_options());
         let ep = pull.bind(ws_ep(0)).await.unwrap();
         let port = get_port(&ep);
 
-        let push = Socket::new(SocketType::Push, Options::default().send_hwm(1024));
+        let push = Socket::new(SocketType::Push, soak_common::soak_options().send_hwm(1024));
         push.connect(ws_ep(port)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -115,7 +115,7 @@ fn soak_ws_reconnect_storm() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
         // Probe for a port.
-        let probe = Socket::new(SocketType::Pull, Options::default());
+        let probe = Socket::new(SocketType::Pull, soak_common::soak_options());
         let ep = probe.bind(ws_ep(0)).await.unwrap();
         let port = get_port(&ep);
         probe.close().await.unwrap();

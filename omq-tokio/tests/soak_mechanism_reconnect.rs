@@ -22,7 +22,7 @@ use omq_tokio::{Message, Options, Socket, SocketType};
 fn fast_reconnect() -> Options {
     Options {
         reconnect: ReconnectPolicy::Fixed(Duration::from_millis(10)),
-        ..Default::default()
+        ..soak_common::soak_options()
     }
 }
 
@@ -122,7 +122,7 @@ fn soak_curve_reconnect() {
         move || {
             Socket::new(
                 SocketType::Pull,
-                Options::default().curve_server(server_kp.clone()),
+                soak_common::soak_options().curve_server(server_kp.clone()),
             )
         },
         move |_ep| {
@@ -151,7 +151,7 @@ fn soak_blake3zmq_reconnect() {
         move || {
             Socket::new(
                 SocketType::Pull,
-                Options::default().blake3zmq_server(server_kp.clone()),
+                soak_common::soak_options().blake3zmq_server(server_kp.clone()),
             )
         },
         move |_ep| {

@@ -24,7 +24,7 @@ use rand::rngs::StdRng;
 fn fast_reconnect() -> Options {
     Options {
         reconnect: ReconnectPolicy::Fixed(Duration::from_millis(10)),
-        ..Default::default()
+        ..soak_common::soak_options()
     }
 }
 
@@ -48,7 +48,7 @@ struct PairState {
 }
 
 async fn make_pair(name: &'static str, bind_type: SocketType, connector: Socket) -> PairState {
-    let probe = Socket::new(bind_type, Options::default());
+    let probe = Socket::new(bind_type, soak_common::soak_options());
     let ep = probe.bind(soak_common::tcp_ep(0)).await.unwrap();
     probe.close().await.unwrap();
     connector.connect(ep.clone()).await.unwrap();
@@ -227,7 +227,7 @@ async fn try_send(connector: &Socket, msg: Message) -> bool {
 
 async fn cycle_push_pull(pair: &mut PairState) -> bool {
     let Some(pull) = rebind(&pair.ep, || {
-        Socket::new(SocketType::Pull, Options::default())
+        Socket::new(SocketType::Pull, soak_common::soak_options())
     })
     .await
     else {
@@ -253,7 +253,7 @@ async fn cycle_push_pull(pair: &mut PairState) -> bool {
 
 async fn cycle_req_rep(pair: &mut PairState) -> bool {
     let Some(rep) = rebind(&pair.ep, || {
-        Socket::new(SocketType::Rep, Options::default())
+        Socket::new(SocketType::Rep, soak_common::soak_options())
     })
     .await
     else {
@@ -287,7 +287,7 @@ async fn cycle_req_rep(pair: &mut PairState) -> bool {
 
 async fn cycle_pub_sub(pair: &mut PairState) -> bool {
     let Some(pub_) = rebind(&pair.ep, || {
-        Socket::new(SocketType::Pub, Options::default())
+        Socket::new(SocketType::Pub, soak_common::soak_options())
     })
     .await
     else {
@@ -320,7 +320,7 @@ async fn cycle_pub_sub(pair: &mut PairState) -> bool {
 
 async fn cycle_dealer_router(pair: &mut PairState) -> bool {
     let Some(router) = rebind(&pair.ep, || {
-        Socket::new(SocketType::Router, Options::default())
+        Socket::new(SocketType::Router, soak_common::soak_options())
     })
     .await
     else {
@@ -350,7 +350,10 @@ async fn cycle_bidirectional(pair: &mut PairState) -> bool {
     } else {
         SocketType::Channel
     };
-    let Some(bind_side) = rebind(&pair.ep, || Socket::new(bind_type, Options::default())).await
+    let Some(bind_side) = rebind(&pair.ep, || {
+        Socket::new(bind_type, soak_common::soak_options())
+    })
+    .await
     else {
         return false;
     };
@@ -374,7 +377,7 @@ async fn cycle_bidirectional(pair: &mut PairState) -> bool {
 
 async fn cycle_client_server(pair: &mut PairState) -> bool {
     let Some(server) = rebind(&pair.ep, || {
-        Socket::new(SocketType::Server, Options::default())
+        Socket::new(SocketType::Server, soak_common::soak_options())
     })
     .await
     else {
@@ -400,7 +403,7 @@ async fn cycle_client_server(pair: &mut PairState) -> bool {
 
 async fn cycle_scatter_gather(pair: &mut PairState) -> bool {
     let Some(gather) = rebind(&pair.ep, || {
-        Socket::new(SocketType::Gather, Options::default())
+        Socket::new(SocketType::Gather, soak_common::soak_options())
     })
     .await
     else {

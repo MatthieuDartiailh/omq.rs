@@ -18,10 +18,10 @@ fn soak_peer_churn() {
     let monitor = soak_common::ResourceMonitor::start();
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let push = Socket::new(SocketType::Push, Options::default().send_hwm(1024));
+        let push = Socket::new(SocketType::Push, soak_common::soak_options().send_hwm(1024));
         let ep = push.bind(soak_common::tcp_ep(0)).await.unwrap();
 
-        let initial_pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(64));
+        let initial_pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(64));
         initial_pull.connect(ep.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -34,7 +34,7 @@ fn soak_peer_churn() {
         while start.elapsed() < duration {
             let action = rng.random_range(0u8..10);
             if action < 3 && peers.len() < 20 {
-                let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(64));
+                let pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(64));
                 pull.connect(ep.clone()).await.unwrap();
                 peers.push(pull);
             } else if action < 5 && peers.len() > 1 {

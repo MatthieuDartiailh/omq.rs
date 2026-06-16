@@ -65,10 +65,10 @@ fn soak_large_message_throughput() {
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(4));
+        let pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(4));
         let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
 
-        let push = Socket::new(SocketType::Push, Options::default().send_hwm(4));
+        let push = Socket::new(SocketType::Push, soak_common::soak_options().send_hwm(4));
         push.connect(ep).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 

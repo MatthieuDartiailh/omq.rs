@@ -25,7 +25,7 @@ const TOPICS: &[&str] = &["fast.", "slow.", "all.", "rare."];
 fn no_reconnect() -> Options {
     Options {
         reconnect: ReconnectPolicy::Disabled,
-        ..Default::default()
+        ..soak_common::soak_options()
     }
 }
 
@@ -36,7 +36,7 @@ fn soak_pub_sub_churn_tcp() {
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let publisher = Socket::new(SocketType::Pub, Options::default());
+        let publisher = Socket::new(SocketType::Pub, soak_common::soak_options());
         let ep = publisher.bind(soak_common::tcp_ep(0)).await.unwrap();
 
         let mut rng = rand::make_rng::<StdRng>();

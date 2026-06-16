@@ -36,7 +36,7 @@ fn random_pair(rng: &mut StdRng) -> (SocketType, SocketType) {
 fn no_reconnect() -> Options {
     Options {
         reconnect: ReconnectPolicy::Disabled,
-        ..Default::default()
+        ..soak_common::soak_options()
     }
 }
 

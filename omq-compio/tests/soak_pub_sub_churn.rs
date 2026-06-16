@@ -30,7 +30,7 @@ fn soak_pub_sub_churn() {
         let rt = compio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let ep = soak_common::inproc_ep("soak-pub-sub-churn");
-            let publisher = Socket::new(SocketType::Pub, Options::default());
+            let publisher = Socket::new(SocketType::Pub, soak_common::soak_options());
             publisher.bind(ep.clone()).await.unwrap();
 
             let mut rng = rand::make_rng::<StdRng>();
@@ -74,7 +74,8 @@ fn soak_pub_sub_churn() {
 
                     // Add a new subscriber (up to 10).
                     if subs.len() < 10 {
-                        let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(32));
+                        let sub =
+                            Socket::new(SocketType::Sub, soak_common::soak_options().recv_hwm(32));
                         sub.connect(ep.clone()).await.unwrap();
                         let prefix = TOPICS[rng.random_range(0..TOPICS.len())];
                         sub.subscribe(Bytes::from(prefix.to_string()))

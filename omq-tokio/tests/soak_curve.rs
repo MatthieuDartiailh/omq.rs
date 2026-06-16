@@ -26,12 +26,15 @@ fn soak_curve_sustained() {
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
+        let pull = Socket::new(
+            SocketType::Pull,
+            soak_common::soak_options().curve_server(server_kp),
+        );
         let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
 
         let push = Socket::new(
             SocketType::Push,
-            Options::default()
+            soak_common::soak_options()
                 .curve_client(client_kp, server_pub)
                 .linger(Duration::from_secs(5)),
         );

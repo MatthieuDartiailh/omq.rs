@@ -19,9 +19,9 @@ async fn create_pairs() -> Vec<SocketPair> {
     let mut pairs = Vec::new();
 
     for i in 0..20 {
-        let pull = Socket::new(SocketType::Pull, Options::default().recv_hwm(16));
+        let pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(16));
         let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
-        let push = Socket::new(SocketType::Push, Options::default().send_hwm(16));
+        let push = Socket::new(SocketType::Push, soak_common::soak_options().send_hwm(16));
         push.connect(ep).await.unwrap();
         pairs.push(SocketPair {
             sender: push,
@@ -48,9 +48,9 @@ async fn create_pairs() -> Vec<SocketPair> {
     }
 
     for _ in 0..10 {
-        let rep = Socket::new(SocketType::Rep, Options::default());
+        let rep = Socket::new(SocketType::Rep, soak_common::soak_options());
         let ep = rep.bind(soak_common::tcp_ep(0)).await.unwrap();
-        let req = Socket::new(SocketType::Req, Options::default());
+        let req = Socket::new(SocketType::Req, soak_common::soak_options());
         req.connect(ep).await.unwrap();
         pairs.push(SocketPair {
             sender: req,

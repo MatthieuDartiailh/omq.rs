@@ -25,7 +25,7 @@ const TOPICS: &[&str] = &["alpha.", "beta.", "gamma.", "delta."];
 fn no_reconnect() -> Options {
     Options {
         reconnect: ReconnectPolicy::Disabled,
-        ..Default::default()
+        ..soak_common::soak_options()
     }
 }
 
@@ -36,7 +36,7 @@ fn soak_xpub_xsub_churn() {
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
-        let xpub = Socket::new(SocketType::XPub, Options::default());
+        let xpub = Socket::new(SocketType::XPub, soak_common::soak_options());
         let ep = xpub.bind(soak_common::tcp_ep(0)).await.unwrap();
 
         let mut rng = rand::make_rng::<StdRng>();

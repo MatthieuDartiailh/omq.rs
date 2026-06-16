@@ -36,7 +36,7 @@ fn soak_plain() {
         rt.block_on(async {
             let pull = Socket::new(
                 SocketType::Pull,
-                Options::default().plain_server(accept_alice),
+                soak_common::soak_options().plain_server(accept_alice),
             );
             let mut mon = pull.monitor();
             pull.bind(soak_common::tcp_ep(0)).await.unwrap();
@@ -53,7 +53,7 @@ fn soak_plain() {
 
             let push = Socket::new(
                 SocketType::Push,
-                Options::default()
+                soak_common::soak_options()
                     .plain_client("alice", "secret")
                     .linger(Duration::from_secs(5)),
             );
