@@ -715,22 +715,33 @@ where
                             let batch_limit = shared_msg_rx
                                 .as_ref()
                                 .map_or(SHARED_MAX_BATCH_MSGS, QueueReceiver::batch_limit);
-                            let count = batch_encode(
+                            let mut popped = 1usize;
+                            let encode_result = batch_encode(
                                 &first,
-                                || shared_msg_rx.as_ref().and_then(
-                                    QueueReceiver::try_pop,
-                                ),
+                                || {
+                                    let msg = shared_msg_rx.as_ref()
+                                        .and_then(QueueReceiver::try_pop);
+                                    if msg.is_some() {
+                                        popped += 1;
+                                    }
+                                    msg
+                                },
                                 batch_limit,
                                 &mut encoder, &mut codec, &mut eq,
                                 passthrough.as_ref(), compression_pool.as_ref(),
                                 offload_threshold, &mut offload_pipeline,
-                            ).await?;
-                            flush_all(
-                                &mut writer, &mut eq, &mut drain_buf, &mut codec,
-                            ).await?;
+                            ).await;
+                            let result: Result<()> = match encode_result {
+                                Ok(_) => flush_all(
+                                    &mut writer, &mut eq, &mut drain_buf,
+                                    &mut codec,
+                                ).await.map_err(Into::into),
+                                Err(e) => Err(e),
+                            };
                             if let Some(ref rx) = shared_msg_rx {
-                                rx.release_permits(count);
+                                rx.release_permits(popped);
                             }
+                            result?;
                         }
                     }
                 },
