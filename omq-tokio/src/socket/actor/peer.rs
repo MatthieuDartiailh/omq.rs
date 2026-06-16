@@ -76,6 +76,11 @@ impl SocketDriver {
                 .store(false, std::sync::atomic::Ordering::Release);
         }
         self.update_send_ring();
+        if let Some(ref peer) = peer
+            && let Some(ref slot) = peer.handle.wire_slot
+        {
+            slot.mark_dead();
+        }
         {
             let mut guard = self.wire_slot.lock().expect("wire_slot");
             if guard.as_ref().is_some_and(|s| s.peer_id == peer_id) {
