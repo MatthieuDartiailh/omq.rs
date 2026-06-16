@@ -495,6 +495,17 @@ impl SocketDriver {
             spsc,
         } = conn;
 
+        // Extract recv_sink for poll() message detection, similar to wire path.
+        // Only inproc peers with yring-backed recv bypass can use this.
+        let can_use_yring = !matches!(self.socket_type, SocketType::Req);
+        let recv_sink = if can_bypass_actor_recv(self.socket_type) && can_use_yring {
+            self.recv_sink_config
+                .as_ref()
+                .and_then(|cfg| cfg.slot.lock().unwrap().take())
+        } else {
+            None
+        };
+
         // Insert the peer BEFORE spawning the driver - same race
         // protection as in the byte-stream path. `info` stays None
         // until the synthesised HandshakeSucceeded lands; that
@@ -550,6 +561,7 @@ impl SocketDriver {
                 max_message_size: self.options.max_message_size,
                 recv_direct,
                 spsc,
+                recv_sink,
             },
         ));
     }
@@ -784,6 +796,7 @@ struct InprocDriverCtx {
     max_message_size: Option<usize>,
     recv_direct: Option<async_channel::Sender<omq_proto::message::Message>>,
     spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
+    recv_sink: Option<crate::engine::RecvSink>,
 }
 
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
@@ -806,6 +819,7 @@ async fn inproc_peer_driver(
         max_message_size,
         recv_direct,
         spsc,
+        mut recv_sink,
     } = ctx;
 
     #[expect(clippy::items_after_statements)]
@@ -863,16 +877,54 @@ async fn inproc_peer_driver(
                             return;
                         }
                         let m = try_push_spsc(spsc.as_ref(), m);
-                        if let Some(m) = m
-                            && !route_inproc_message(
-                                m,
-                                recv_direct.as_ref(),
-                                &peer_out,
-                                peer_id,
-                            )
-                            .await
-                        {
-                            return;
+                        if let Some(m) = m {
+                            // Also try to push to recv_sink (Ring #1) for poll() detection.
+                            // This bridges the two independent rings so poll() can see inproc messages.
+                            let m = if let Some(ref mut sink) = recv_sink {
+                                match sink {
+                                    crate::engine::RecvSink::Channel(tx) => {
+                                        if tx.send(m).await.is_ok() {
+                                            None
+                                        } else {
+                                            None  // Message moved; can't recover it
+                                        }
+                                    }
+                                    crate::engine::RecvSink::Yring(yring_sink) => {
+                                        let mut msg = m;
+                                        loop {
+                                            match yring_sink.producer.push(msg.clone()) {
+                                                Ok(()) => {
+                                                    if let yring::FlushResult::Flushed {
+                                                        was_empty: true, ..
+                                                    } = yring_sink.producer.flush_and_check()
+                                                    {
+                                                        (yring_sink.signal)();
+                                                    }
+                                                    break None;
+                                                }
+                                                Err(returned) => {
+                                                    msg = returned;
+                                                    // Don't block on inproc send failure; let route_inproc_message handle it
+                                                    break Some(msg);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                Some(m)
+                            };
+                            if let Some(m) = m
+                                && !route_inproc_message(
+                                    m,
+                                    recv_direct.as_ref(),
+                                    &peer_out,
+                                    peer_id,
+                                )
+                                .await
+                            {
+                                return;
+                            }
                         }
                     }
                     Some(InboundFrame::Command(c)) => {

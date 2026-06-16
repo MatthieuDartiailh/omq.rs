@@ -6,6 +6,8 @@
 //!   C → `run_on`/`with_socket` → `Socket::send` directly on io thread
 //!
 //! Run: `cargo run --example bench_latency --release -p omq-libzmq`
+//!
+//! Note: On Windows, IPC transport is not supported; only inproc is used.
 
 use std::ffi::CString;
 use std::time::Instant;

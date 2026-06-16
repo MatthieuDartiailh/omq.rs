@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! `ZMQ_FD` level-triggered behavior tests.
 //!
 //! omq-libzmq provides an accurate, level-triggered fd (eventfd on Linux,

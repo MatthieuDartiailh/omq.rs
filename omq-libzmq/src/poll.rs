@@ -1,4 +1,59 @@
-//! `zmq_poll` -- multiplexed I/O readiness via poll on eventfds.
+//! `zmq_poll` -- multiplexed I/O readiness.
+//!
+//! # Architecture
+//!
+//! ## Cross-Platform Polling
+//!
+//! Provides libzmq-compatible `zmq_poll()` for event-driven socket multiplexing:
+//! - **Unix:** Uses `poll()` on eventfds (Linux) or pipe pairs (other Unix)
+//! - **Windows:** Uses `WaitForMultipleObjects()` with manual-reset events (tiered batching for >64 handles)
+//!
+//! ## Inproc Message Detection (Key Feature)
+//!
+//! Inproc (in-process) messages are delivered via lock-free ring buffers (yring consumers),
+//! not through the OS notification mechanism. This means `zmq_poll()` must actively check
+//! for buffered messages BEFORE and AFTER waiting on OS events:
+//!
+//! ### Fast Path (`check_immediate`)
+//!
+//! Before blocking on OS events, scan all sockets for buffered messages:
+//! - **`recv_cons`:** Per-socket yring consumers containing inproc messages
+//!   - `fast`: Direct SPSC from first inproc peer (zero-copy, no atomics)
+//!   - `pump`: Fallback for additional peers (fair queuing)
+//!   - Check: `!fast.is_empty() || !pump.is_empty()` (one Acquire load each)
+//! - **`bypass_recv`:** Cross-platform optimization for PUSH→PULL inproc byte-ring
+//!   - Available on both Unix and Windows
+//!   - Check: via `crate::notify::has_bypass_data()` abstraction
+//!
+//! If messages found, return immediately (zero syscalls).
+//! If timeout=0 is specified, also return immediately (poll semantics).
+//!
+//! ### Slow Path (wait on OS)
+//!
+//! If no immediate messages and timeout > 0:
+//! 1. Create platform-specific `PollWaiter` (Unix: pfds array; Windows: event handles)
+//! 2. Call `waiter.prepare_for_wait()` to prepare (platform-specific semantics hidden)
+//! 3. Call `PollWaiter::wait()` with user timeout
+//!    - **Unix:** Single `poll()` syscall on all fds
+//!    - **Windows:** Tiered `WaitForMultipleObjects()` with batching
+//!      - Batch 0: Full timeout
+//!      - Batches 1+: Non-blocking (timeout=0)
+//! 4. Perform FINAL `check_immediate()` to catch buffered messages
+//!
+//! This ensures:
+//! - Buffered inproc messages never missed
+//! - OS events always detected
+//! - Timeout honored correctly (Windows: first batch only)
+//!
+//! ## Platform Abstractions
+//!
+//! Both Unix and Windows use identical poll.rs code with zero platform gates (no `#[cfg(unix)]`/`#[cfg(windows)]`).
+//! All platform-specific logic is encapsulated in `notify.rs`:
+//! - `has_bypass_data()` — Cross-platform bypass check
+//! - `PollWaiter::prepare_for_wait()` — Platform-specific preparation (Unix: drain; Windows: no-op)
+//! - `PollWaiter::wait()` — Platform-specific blocking (`poll()` vs `WaitForMultipleObjects()`)
+//!
+//! See `notify.rs` for platform implementations.
 
 use std::ffi::c_int;
 use std::sync::Arc;
@@ -6,9 +61,10 @@ use std::sync::Arc;
 use crate::consts;
 use crate::socket::OmqSocket;
 
-const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
-const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
-const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_short;
+pub(crate) const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
+pub(crate) const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
+#[allow(dead_code)]
+pub(crate) const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_short;
 
 /// `zmq_pollitem_t` layout compatible with libzmq.
 #[repr(C)]
@@ -20,64 +76,42 @@ pub struct ZmqPollItem {
     pub revents: libc::c_short,
 }
 
-fn build_pollfds(items: &[ZmqPollItem]) -> (Vec<libc::pollfd>, Vec<(usize, libc::c_short)>) {
-    let mut pfds = Vec::new();
-    let mut map = Vec::new();
-
-    for (i, item) in items.iter().enumerate() {
-        if !item.socket.is_null() {
-            // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
-            let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
-
-            if (item.events & ZMQ_POLLIN) != 0 {
-                #[cfg(target_os = "linux")]
-                let fd = sock.notify.recv_fd;
-                #[cfg(not(target_os = "linux"))]
-                let fd = sock.notify.recv_read;
-
-                pfds.push(libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                });
-                map.push((i, ZMQ_POLLIN));
-            }
-            if (item.events & ZMQ_POLLOUT) != 0 {
-                #[cfg(target_os = "linux")]
-                let fd = sock.notify.send_fd;
-                #[cfg(not(target_os = "linux"))]
-                let fd = sock.notify.send_read;
-
-                pfds.push(libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                });
-                map.push((i, ZMQ_POLLOUT));
-            }
-        } else if item.fd >= 0 {
-            let mut events: libc::c_short = 0;
-            if (item.events & ZMQ_POLLIN) != 0 {
-                events |= libc::POLLIN;
-            }
-            if (item.events & ZMQ_POLLOUT) != 0 {
-                events |= libc::POLLOUT;
-            }
-            if (item.events & ZMQ_POLLERR) != 0 {
-                events |= libc::POLLERR;
-            }
-            pfds.push(libc::pollfd {
-                fd: item.fd,
-                events,
-                revents: 0,
-            });
-            map.push((i, 0));
-        }
-    }
-
-    (pfds, map)
-}
-
+/// Check for immediately-available events without blocking.
+///
+/// This function scans all poll items for:
+/// 1. **Buffered inproc messages** in yring consumers (`recv_cons`, `bypass_recv`)
+/// 2. **Leftover multipart frames** from a previous recv (`drain_nonempty` flag)
+///
+/// # Algorithm
+///
+/// For each POLLIN item:
+/// - Check `recv_cons.fast.is_empty()` — first peer's direct SPSC messages
+/// - Check `recv_cons.pump.is_empty()` — additional peers' messages (fair queuing)
+/// - Check `has_bypass_data(sock)` — cross-platform IPC optimization (Unix and Windows)
+/// - Check `drain_nonempty` — leftover multipart frames needing draining
+///
+/// For each POLLOUT item:
+/// - Mark writable if socket is not blocking
+///
+/// # Key Insight
+///
+/// Buffered inproc messages are NOT delivered through OS events (eventfd, HANDLE).
+/// Instead, they sit in lock-free yring ring buffers, discovered only by explicit
+/// checking. This is why `check_immediate()` must run BEFORE blocking on OS wait,
+/// and again AFTER wait returns (to detect messages arrived while poll was blocking).
+///
+/// # Performance
+///
+/// Each `is_empty()` check is O(1) with one Acquire load from the ring buffer's atomic
+/// tail pointer. Total cost for n sockets: O(n) with minimal atomics.
+///
+/// # Cross-Platform Implementation
+///
+/// All checks work identically on Unix and Windows:
+/// - `recv_cons` populated and checked on both platforms
+/// - `bypass_recv` available and checked on both platforms
+/// - `drain_nonempty` checked on both platforms
+/// - Platform differences encapsulated in `notify.rs` abstractions (`has_bypass_data()`, etc.)
 fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
     let mut ready = 0i32;
     for item in items.iter_mut() {
@@ -116,8 +150,12 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
     ready
 }
 
-fn drain_eventfds(items: &[ZmqPollItem]) {
-    for item in items {
+/// Accumulate buffered inproc messages to existing revents (without clearing).
+/// Called after `waiter.wait()` to detect buffered messages that arrived while blocking.
+/// Preserves any revents already set by OS events.
+fn accumulate_buffered(items: &mut [ZmqPollItem]) -> i32 {
+    let mut ready = 0i32;
+    for item in items.iter_mut() {
         if item.socket.is_null() {
             continue;
         }
@@ -125,31 +163,43 @@ fn drain_eventfds(items: &[ZmqPollItem]) {
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
-            #[cfg(target_os = "linux")]
-            {
-                let fd = sock.notify.recv_fd;
-                let mut val = 0u64;
-                // SAFETY: fd is a valid eventfd; 8-byte read drains the counter.
-                unsafe { libc::read(fd, (&raw mut val).cast(), 8) };
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let fd = sock.notify.recv_read;
-                let mut buf = [0u8; 64];
-                loop {
-                    // SAFETY: fd is a valid pipe read end; draining buffered signal bytes.
-                    let n = unsafe {
-                        libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
-                    };
-                    if n <= 0 {
-                        break;
-                    }
+            let drain_nonempty = sock
+                .drain_nonempty
+                .load(std::sync::atomic::Ordering::Relaxed);
+
+            let cons_ptr = &*sock.recv_cons.get();
+            let recv_cons_has_data = cons_ptr
+                .as_ref()
+                .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty());
+
+            let bypass_recv_has_data = crate::notify::has_bypass_data(sock);
+
+            let has_buffered = drain_nonempty || recv_cons_has_data || bypass_recv_has_data;
+
+            if has_buffered {
+                if item.revents == 0 {
+                    ready += 1;
                 }
+                item.revents |= ZMQ_POLLIN;
             }
         }
     }
+    ready
 }
 
+/// Cross-platform C API for `zmq_poll`.
+///
+/// Multiplexed I/O readiness on one or more sockets or file descriptors.
+/// Uses unified code path on all platforms with platform differences encapsulated in abstractions.
+///
+/// **Implementation:**
+/// - Fast path: Check immediately available messages (zero syscalls)
+/// - Slow path: Block on OS events via `PollWaiter` abstraction
+///   - Unix: `poll()` on event file descriptors (eventfd on Linux, pipes on other Unix)
+///   - Windows: `WaitForMultipleObjects()` with tiered batching (supports >64 sockets)
+/// - Final check: Detect messages that arrived while blocking
+///
+/// **Note:** item.fd polling on Unix works; Windows sockets must use item.socket
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poll(
     items: *mut ZmqPollItem,
@@ -166,73 +216,47 @@ pub extern "C" fn zmq_poll(
     // SAFETY: items is non-null (checked above) with nitems elements.
     let items_slice = unsafe { std::slice::from_raw_parts_mut(items, n) };
 
+    // Fast path: check for immediately available messages
     let ready = check_immediate(items_slice);
     if ready > 0 || timeout_ms == 0 {
         return ready;
     }
 
-    let (mut pfds, map) = build_pollfds(items_slice);
-    if pfds.is_empty() {
+    // Create platform-specific poller for this set of items
+    let mut waiter = crate::notify::PollWaiter::new(items_slice);
+
+    // If no handles/fds to wait on, just sleep and return
+    if waiter.has_no_handles() {
         if timeout_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
         }
         return 0;
     }
 
-    drain_eventfds(items_slice);
+    // Prepare poller (platform-specific semantics encapsulated in prepare_for_wait):
+    // - Unix: drain accumulated eventfd signals
+    // - Windows: no-op (manual-reset events don't accumulate)
+    waiter.prepare_for_wait();
+
+    // Check again after preparing poller (may have found buffered data)
     let ready = check_immediate(items_slice);
     if ready > 0 {
         return ready;
     }
 
-    let poll_timeout = if timeout_ms < 0 {
-        -1
-    } else {
-        timeout_ms as c_int
-    };
-    // SAFETY: pfds is a valid pollfd array; poll blocks until events or timeout.
-    let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, poll_timeout) };
-    if rc < 0 {
-        return crate::error::fail(
-            std::io::Error::last_os_error()
-                .raw_os_error()
-                .unwrap_or(libc::EINTR) as libc::c_int,
-        );
-    }
-    if rc == 0 {
-        return 0;
-    }
+    // Wait for events
+    let _rc = waiter.wait(timeout_ms, items_slice);
 
-    for item in items_slice.iter_mut() {
-        item.revents = 0;
-    }
+    // Accumulate buffered inproc messages to OS events (don't clear existing revents)
+    // This ensures we report both OS-detected events and buffered inproc data
+    let _buffered = accumulate_buffered(items_slice);
 
-    for (pfd_idx, pfd) in pfds.iter().enumerate() {
-        if pfd.revents == 0 {
-            continue;
-        }
-        let (item_idx, zmq_event) = map[pfd_idx];
-
-        if zmq_event == 0 {
-            if (pfd.revents & libc::POLLIN) != 0 {
-                items_slice[item_idx].revents |= ZMQ_POLLIN;
-            }
-            if (pfd.revents & libc::POLLOUT) != 0 {
-                items_slice[item_idx].revents |= ZMQ_POLLOUT;
-            }
-            if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
-                items_slice[item_idx].revents |= ZMQ_POLLERR;
-            }
-        } else {
-            items_slice[item_idx].revents |= zmq_event;
-        }
-    }
-
-    let mut ready_count = 0i32;
-    for item in items_slice.iter() {
+    // Count total items with any revents set (combines OS events + buffered data)
+    let mut ready = 0i32;
+    for item in items_slice {
         if item.revents != 0 {
-            ready_count += 1;
+            ready += 1;
         }
     }
-    ready_count
+    ready
 }
