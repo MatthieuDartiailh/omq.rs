@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-06-17
+
+### Fixed
+
+- `flush_codec_to_wire` / `flush_codec_output` race condition.
+- Heartbeat priority inversion: heartbeat timer was polled before `transmit_ready` in the driver select loop, causing heartbeat frames to starve pending data and trigger spurious connection timeouts under sustained traffic.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.17.2, `blume` to 0.4.1, `yring` to 0.3.1.
+
 ## [0.12.0] - 2026-05-30
 
 ### Fixed

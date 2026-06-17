@@ -6,6 +6,40 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## 2026-06-17
+
+### omq-proto 0.17.2
+
+- Windows support: `Endpoint::Ipc`/`IpcPath` gated behind `#[cfg(unix)]`, new `SocketRef` trait abstracts `AsFd`/`AsSocket`.
+- Fix `Command::Error` panic on overlong reasons, frame parser rejects `isize::MAX` overflow, CURVE surfaces `ERROR` commands.
+- `compression_dict` setter deferred to `Options::validate()` (no longer panics).
+- Upgrade lz4rip 0.4 to 0.5.2.
+
+### omq-tokio 0.14.3
+
+- PUB/SUB fan-out: shared `FanOutArena` + `fan_out_pump` task eliminates per-peer encode. Cached multi-peer dispatch avoids lock on stable peer sets.
+- Dynamic yield interval scales with peer count. Disabled 10ms safety timeout polling (~6400 spurious wakeups/sec at 64 peers).
+- Tolerate small message reordering during connection churn.
+
+### omq-compio 0.12.2
+
+- Fix `flush_codec_to_wire` / `flush_codec_output` race.
+- Fix heartbeat priority inversion causing spurious connection timeouts under sustained traffic.
+
+### omq-libzmq 0.4.6
+
+- Complete `zmq_setsockopt`/`zmq_getsockopt` coverage (all 124 options). Unknown options return `EINVAL`.
+- `ZMQ_IPV4ONLY` support, `ZMQ_BLOCKY`/`ZMQ_STREAM_NOTIFY` stubs.
+
+### blume 0.4.1, yring 0.3.1
+
+- blume: recover from poisoned mutex in `Receiver::close()`/`drop()`.
+- yring: explicit `consumer_dropped`/`producer_dropped` flags replace `Arc::strong_count`. Release consumed positions before parking.
+
+### pyomq 0.12.3
+
+- Dep bumps: omq-tokio 0.14.3, lz4rip 0.5.2.
+
 ## 2026-06-10
 
 ### Removed

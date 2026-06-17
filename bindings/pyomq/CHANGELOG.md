@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-06-17
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.14.3, `lz4rip` to 0.5.2.
+
 ## [0.12.2] - 2026-06-12
 
 ### Changed
