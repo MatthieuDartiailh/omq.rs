@@ -17,7 +17,7 @@ use bytes::Bytes;
 use rand::RngExt;
 use rand::rngs::StdRng;
 
-use omq_compio::{Message, Options, Socket, SocketType};
+use omq_compio::{Message, Socket, SocketType};
 
 const TOPICS: &[&str] = &["fast.", "slow.", "all.", "rare."];
 

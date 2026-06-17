@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use futures::join;
 
 use omq_compio::endpoint::Host;
-use omq_compio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Message, MonitorEvent, Socket, SocketType};
 
 const SIZES: &[usize] = &[64, 1024, 8 * 1024, 64 * 1024, 256 * 1024];
 

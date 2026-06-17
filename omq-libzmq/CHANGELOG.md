@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-06-17
+
+### Added
+
+- Complete `zmq_setsockopt`/`zmq_getsockopt` coverage: all 124 libzmq option constants defined. Unknown options now return `EINVAL` instead of silently succeeding.
+- `ZMQ_IPV4ONLY` get/set support (inverse of `ZMQ_IPV6`).
+- `ZMQ_BLOCKY`, `ZMQ_STREAM_NOTIFY` getsockopt stubs.
+
+### Changed
+
+- Deduplicate blocking recv logic (`block_recv` helper) and stale bypass cleanup (`clear_stale_bypass`).
+- *(deps)* Bump `omq-tokio` to 0.14.3, `yring` to 0.3.1.
+
 ## [0.4.5] - 2026-06-12
 
 ### Changed

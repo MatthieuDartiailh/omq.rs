@@ -8,7 +8,7 @@ mod soak_common;
 use std::time::{Duration, Instant};
 
 use omq_tokio::options::ReconnectPolicy;
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Message, Socket, SocketType};
 
 #[test]
 fn soak_reconnect_storm() {

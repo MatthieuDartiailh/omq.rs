@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-17
+
+### Fixed
+
+- `Receiver::close()` and `Receiver::drop()`: recover from poisoned mutex instead of panicking.
+
+## [0.4.0] - 2026-06-10
+
+### Changed
+
+- `Receiver`: replace internal `Mutex<VecDeque<T>>` cache with `RefCell<VecDeque<T>>` (single-consumer, no contention).
+- `recv_batch`: return count of newly drained items, not total `out.len()`.
+- `Sender::drop`: recover from poisoned mutex instead of panicking.
+
 ## [0.3.0] - 2026-05-30
 
 ### Added

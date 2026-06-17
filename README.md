@@ -4,7 +4,7 @@
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
-- Two async backends: **tokio** (default, Linux/macOS) and **compio** (io_uring, Linux)
+- Two async backends: **tokio** (default, Linux/macOS/Windows) and **compio** (io_uring, Linux)
 - 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`)
 - 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
@@ -12,49 +12,52 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 
 ### vs libzmq and other implementations
 
-[How to beat libzmq](doc/performance.md)
+[How to beat libzmq](doc/performance.md) | [Full comparison charts](COMPARISONS.md)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_tcp.svg" alt="PUSH/PULL throughput: TCP, all implementations" width="950">
 </p>
 
 <details>
-<summary>More PUSH/PULL: fan-out, fan-in, IPC, inproc</summary>
+<summary>omq backends: compio, tokio, tokio-mt</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/omq_tcp.svg" alt="REQ/REP latency: TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
+</p>
+</details>
+
+<details>
+<summary>Fan-out and fan-in</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout_tcp.svg" alt="PUSH fan-out: TCP" width="850">
 </p>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin_tcp.svg" alt="PUSH fan-in: TCP" width="850">
 </p>
+</details>
+
+<details>
+<summary>PUB/SUB throughput</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/omq_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/omq_ipc.svg" alt="PUB/SUB throughput: IPC" width="850">
 </p>
 </details>
 
 <details>
-<summary>Compression throughput: lz4+tcp://</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
-</p>
+<summary>Compression: lz4+tcp://</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/lz4_tcp.svg" alt="PUB/SUB lz4+tcp fan-out: projected throughput at link speed" width="850">
-</p>
-</details>
-
-<details>
-<summary>REQ/REP latency: TCP</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/comparison_tcp.svg" alt="REQ/REP latency: TCP" width="850">
-</p>
-</details>
-
-<details>
-<summary>PUB/SUB throughput: TCP</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/comparison_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
 </p>
 </details>
 
@@ -79,7 +82,7 @@ cargo add omq-tokio               # default: multi-thread tokio (Linux/macOS)
 
 Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `interop_compio` test suites:
 
-- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS)
+- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS/Windows)
 - [`omq-compio`](omq-compio/): single-thread io_uring/IOCP (Linux; not yet on crates.io)
 
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
@@ -139,7 +142,7 @@ Seven crates, one repo.
 | Crate | What it does |
 |-------|-------------|
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions |
-| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS) |
+| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows) |
 | [`omq-compio`](omq-compio/) | Single-thread io_uring / IOCP backend (Linux) |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
 | [`blume`](blume/) | Batching MPSC channel with swap-drain consumer |
@@ -160,8 +163,7 @@ covered by integration tests on both backends. The full suite:
   large-message throughput, multi-socket. Each scenario samples
   RSS and file-descriptor counts to detect leaks.
 - **Cross-runtime interop**: omq-compio <-> omq-tokio over TCP.
-- **Wire interop** with libzmq (C), pyzmq, and
-  [Pure Ruby OMQ](https://github.com/zeromq/omq.rb).
+- **Wire interop** with libzmq (C) and pyzmq.
 
 ```sh
 ./scripts/test-all.sh          # full sweep, both backends
@@ -170,6 +172,8 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 
 ## Further reading
 
+- [COMPARISONS.md](COMPARISONS.md): cross-implementation comparison
+  charts (libzmq, zmq.rs, rzmq) across all transports.
 - [BENCHMARKS.md](BENCHMARKS.md): throughput / latency tables across
   message patterns, transports, message sizes, and backends.
 - [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp
@@ -182,9 +186,23 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 
 ## Platform and requirements
 
-Linux and macOS (and likely other mio targets). `omq-tokio` uses mio /
-epoll / kqueue. `omq-compio` uses io_uring (Linux 6.0+) and is not
-available on macOS.
+**Linux is the primary platform.** All development, testing, and
+benchmarking happens on Linux. CI is Linux-only for required checks.
+
+**macOS** should work (`omq-tokio` via mio / kqueue) but is
+experimental. The test suite has not been run on macOS recently.
+
+**Windows** support is incomplete and experimental. `omq-tokio`
+compiles and partially works (mio / IOCP). CI runs Windows jobs as
+informational (failures do not block PRs). Known limitations:
+
+- IPC transport is not available.
+- `omq-libzmq` is excluded (Unix-only C API surface).
+- Some tests are flaky (timer-sensitive assertions).
+
+`omq-compio` uses io_uring and is Linux-only (6.0+).
+
+Requirements:
 
 - Rust 1.93 or newer (edition 2024).
 - `omq-compio`: Linux 6.0 or newer (io_uring multi-shot recv with

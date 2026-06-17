@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use futures::join;
 
-use omq_compio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_compio::{Endpoint, Message, MonitorEvent, Socket, SocketType};
 
 fn accept_alice(peer: &omq_compio::MechanismPeerInfo) -> bool {
     peer.username.as_deref() == Some("alice") && peer.password.as_deref() == Some("secret")

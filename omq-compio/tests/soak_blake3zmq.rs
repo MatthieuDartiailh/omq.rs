@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use futures::join;
 
-use omq_compio::{Blake3ZmqKeypair, Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_compio::{Blake3ZmqKeypair, Endpoint, Message, MonitorEvent, Socket, SocketType};
 
 #[test]
 fn soak_blake3zmq() {

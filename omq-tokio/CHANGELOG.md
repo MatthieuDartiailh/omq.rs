@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-06-17
+
+### Fixed
+
+- Connection churn: tolerate small message reordering between wire slot bypass and driver inbox paths during reconnection.
+
+### Performance
+
+- PUB/SUB fan-out: shared `FanOutArena` + `fan_out_pump` task. Encode once into a shared arena, pump distributes pre-encoded bytes to all subscribers. Eliminates per-peer encode on the send path.
+- Cached multi-peer dispatch: `Submitter` caches target list and encoder across generations, avoiding lock acquisition on every send when the peer set is stable.
+- Dynamic yield interval: scale with peer count instead of fixed 256-message interval.
+- Disable 10ms safety timeout polling in connection driver, eliminating ~6400 spurious wakeups/sec at 64 peers.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.17.2, `yring` to 0.3.1.
+
 ## [0.14.2] - 2026-06-12
 
 ### Fixed

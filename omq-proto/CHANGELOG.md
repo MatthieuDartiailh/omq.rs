@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-06-17
+
+### Added
+
+- `socket_ref` module: cross-platform `SocketRef` trait abstracting `AsFd` (Unix) and `AsSocket` (Windows) for socket option application.
+
+### Fixed
+
+- `Command::Error` encoding: truncate reason to 255 bytes instead of panicking on overlong reasons.
+- Frame parser: reject frames exceeding `isize::MAX` allocation limit.
+- CURVE handshake: detect and surface `ERROR` commands from the peer.
+
+### Changed
+
+- `Endpoint::Ipc` and `IpcPath` gated behind `#[cfg(unix)]` for Windows support.
+- `Options::apply_socket_buffers` and `KeepAlive::apply` now take `impl SocketRef` instead of `impl AsFd`.
+- `Options::compression_dict` setter no longer panics; validation deferred to `Options::validate()`.
+- *(deps)* Upgrade `lz4rip` 0.4 to 0.5.2.
+
 ## [0.17.1] - 2026-06-12
 
 ### Added

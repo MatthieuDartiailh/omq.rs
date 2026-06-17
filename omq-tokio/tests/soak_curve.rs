@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use omq_tokio::{CurveKeypair, Message, Options, Socket, SocketType};
+use omq_tokio::{CurveKeypair, Message, Socket, SocketType};
 
 #[test]
 fn soak_curve_sustained() {

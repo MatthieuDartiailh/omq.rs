@@ -17,6 +17,7 @@ mod soak_common;
 use std::time::{Duration, Instant};
 
 use omq_tokio::options::ReconnectPolicy;
+#[allow(unused_imports)]
 use omq_tokio::{Message, Options, Socket, SocketType};
 
 fn fast_reconnect() -> Options {

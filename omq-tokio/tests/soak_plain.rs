@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Message, Socket, SocketType};
 
 #[test]
 fn soak_plain_sustained() {

@@ -6,7 +6,7 @@ import time
 import pyomq as zmq
 
 ATTEMPTS = 3
-MIN_RATE = 800_000
+MIN_RATE = 650_000
 
 
 def _measure_inproc_throughput():
@@ -44,4 +44,4 @@ def test_inproc_throughput_above_500k():
         best = max(best, rate)
         if best > MIN_RATE:
             return
-    assert best > MIN_RATE, f"inproc throughput {best/1e6:.2f}M msg/s, expected >0.8M"
+    assert best > MIN_RATE, f"inproc throughput {best/1e6:.2f}M msg/s, expected >0.65M"

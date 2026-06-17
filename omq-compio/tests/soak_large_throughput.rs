@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use futures::join;
 
-use omq_compio::{Message, Options, Socket, SocketType, build_default_runtime};
+use omq_compio::{Message, Socket, SocketType, build_default_runtime};
 
 const MSG_SIZE: usize = 1024 * 1024;
 

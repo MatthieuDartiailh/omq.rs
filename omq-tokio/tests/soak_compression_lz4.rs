@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use omq_tokio::endpoint::Host;
-use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, MonitorEvent, Socket, SocketType};
 
 const SIZES: &[usize] = &[64, 1024, 8 * 1024, 64 * 1024, 256 * 1024];
 

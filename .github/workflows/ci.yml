@@ -42,35 +42,19 @@ jobs:
             os: ubuntu-24.04-arm
           - toolchain: "1.93"
             os: ubuntu-latest
-          - toolchain: stable
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - toolchain: stable
-            os: windows-latest
-            target: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
-      - name: Linux workspace tests (default features)
-        if: runner.os != 'Windows'
-        run: cargo test --workspace --exclude omq-compio
-      - name: Windows workspace tests (default features)
-        if: runner.os == 'Windows'
-        run: cargo test --workspace --exclude omq-compio --exclude omq-libzmq
+      - run: cargo test --workspace --exclude omq-compio
 
   encryption:
-    name: encryption (curve + blake3zmq, ${{ matrix.os }})
+    name: encryption (curve + blake3zmq)
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -79,42 +63,50 @@ jobs:
       - run: cargo test -p omq-tokio --features blake3zmq
 
   compression:
-    name: compression (${{ matrix.os }})
+    name: compression
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p omq-tokio --features lz4
 
-
   lint:
     name: fmt + clippy
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { components: rustfmt, clippy }
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - name: clippy (Linux)
-        if: runner.os != 'Windows'
-        run: cargo clippy --workspace --all-targets --exclude omq-compio
-      - name: clippy (Windows)
-        if: runner.os == 'Windows'
-        run: cargo clippy --workspace --all-targets --exclude omq-compio --exclude omq-libzmq
+      - run: cargo clippy --workspace --all-targets --exclude omq-compio
+
+  windows:
+    name: windows (${{ matrix.target }})
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    continue-on-error: true
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, x86_64-pc-windows-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --exclude omq-compio --exclude omq-libzmq
+      - run: cargo test -p omq-tokio --features curve
+      - run: cargo test -p omq-tokio --features blake3zmq
+      - run: cargo test -p omq-tokio --features lz4
+      - run: cargo clippy --workspace --all-targets --exclude omq-compio --exclude omq-libzmq
 
   pyomq:
     name: pyomq

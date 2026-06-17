@@ -561,11 +561,6 @@ pub(crate) async fn run_connection(
             () = timeout_fut.fuse() => {
                 return Err(Error::HandshakeFailed("handshake timeout".into()));
             }
-            () = hb_fut.fuse() => {
-                ls.handle_heartbeat(
-                    &state, hb_interval, hb_ttl_deciseconds, hb_timeout,
-                )?;
-            }
             outcome = stream_arm.fuse() => {
                 if ls.handle_stream_outcome(
                     outcome, accumulating, &state, &peer_io,
@@ -601,6 +596,11 @@ pub(crate) async fn run_connection(
             }
             () = transmit_ready_fut.as_mut() => {
                 ls.codec_maybe_dirty = true;
+            }
+            () = hb_fut.fuse() => {
+                ls.handle_heartbeat(
+                    &state, hb_interval, hb_ttl_deciseconds, hb_timeout,
+                )?;
             }
             () = safety_timeout.as_mut() => {
                 safety_timeout.set(
@@ -761,13 +761,12 @@ impl DriverLoopState {
 
     async fn flush_codec_to_wire(&mut self, state: &DirectIoState) -> Result<bool> {
         let mut writer = state.writer.lock().await;
-        let chunks = {
-            let io = state.lock_io();
+        let mut chunks = {
+            let mut io = state.lock_io();
             if io.codec.has_pending_transmit() {
-                let mut c = io.codec.clone_transmit_chunks();
-                if c.len() > 1024 {
-                    c.truncate(1024);
-                }
+                let c = io.codec.clone_transmit_chunks();
+                let total: usize = c.iter().map(Bytes::len).sum();
+                io.codec.advance_transmit(total);
                 c
             } else {
                 self.codec_maybe_dirty = false;
@@ -777,10 +776,22 @@ impl DriverLoopState {
         if chunks.is_empty() {
             return Ok(false);
         }
-        let (res, _returned) = writer.write_vectored(chunks).await;
+        let overflow = if chunks.len() > 1024 {
+            Some(chunks.split_off(1024))
+        } else {
+            None
+        };
+        let (res, returned) = writer.write_vectored(chunks).await;
         let written = res.map_err(Error::Io)?;
-        if written > 0 {
-            state.lock_io().codec.advance_transmit(written);
+        if let Some(extra) = overflow {
+            state.encoded_queue.borrow_mut().push_raw(extra);
+        }
+        let total: usize = returned.iter().map(Bytes::len).sum();
+        if written < total {
+            state
+                .encoded_queue
+                .borrow_mut()
+                .put_back_unwritten(returned, written);
         }
         Ok(written > 0)
     }
