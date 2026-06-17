@@ -1,3 +1,10 @@
+// During connection churn (heartbeat timeout, peer restart, network
+// blip) a small number of messages may be reordered. The wire slot
+// bypass and the driver inbox are two independent paths into the same
+// TCP stream. When a new connection's handshake completes, one
+// in-flight message may still be in the inbox while the next message
+// takes the wire slot fast path and reaches the wire first.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
