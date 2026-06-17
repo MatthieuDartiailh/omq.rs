@@ -14,9 +14,9 @@ Sources: `omq-compio/benches/` and `omq-tokio/benches/`.
 ## PUSH/PULL throughput, single peer
 
 <p align="center">
-  <img src="doc/charts/pushpull/comparison_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
-  <img src="doc/charts/pushpull/comparison_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
-  <img src="doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
+  <img src="doc/charts/pushpull/omq_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
+  <img src="doc/charts/pushpull/omq_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
+  <img src="doc/charts/pushpull/omq_tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
 </p>
 
 Inproc "GB/s" at large payloads reflects zero-copy Arc-clone: no kernel
@@ -40,9 +40,9 @@ Serial ping-pong: 1 000 warmup + 10 000 measured iterations. All values are
 wall time.
 
 <p align="center">
-  <img src="doc/charts/reqrep/comparison_inproc.svg" alt="REQ/REP latency: inproc" width="850">
-  <img src="doc/charts/reqrep/comparison_ipc.svg" alt="REQ/REP latency: IPC" width="850">
-  <img src="doc/charts/reqrep/comparison_tcp.svg" alt="REQ/REP latency: TCP" width="850">
+  <img src="doc/charts/reqrep/omq_inproc.svg" alt="REQ/REP latency: inproc" width="850">
+  <img src="doc/charts/reqrep/omq_ipc.svg" alt="REQ/REP latency: IPC" width="850">
+  <img src="doc/charts/reqrep/omq_tcp.svg" alt="REQ/REP latency: TCP" width="850">
 </p>
 
 ## PUB/SUB throughput (3 peers)
@@ -50,8 +50,8 @@ wall time.
 1 PUB -> 3 SUB.
 
 <p align="center">
-  <img src="doc/charts/pubsub/comparison_ipc.svg" alt="PUB/SUB throughput: IPC" width="850">
-  <img src="doc/charts/pubsub/comparison_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
+  <img src="doc/charts/pubsub/omq_ipc.svg" alt="PUB/SUB throughput: IPC" width="850">
+  <img src="doc/charts/pubsub/omq_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
 </p>
 
 ## Mechanism overhead (PUSH/PULL over TCP)
