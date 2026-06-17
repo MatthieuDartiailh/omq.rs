@@ -561,11 +561,6 @@ pub(crate) async fn run_connection(
             () = timeout_fut.fuse() => {
                 return Err(Error::HandshakeFailed("handshake timeout".into()));
             }
-            () = hb_fut.fuse() => {
-                ls.handle_heartbeat(
-                    &state, hb_interval, hb_ttl_deciseconds, hb_timeout,
-                )?;
-            }
             outcome = stream_arm.fuse() => {
                 if ls.handle_stream_outcome(
                     outcome, accumulating, &state, &peer_io,
@@ -601,6 +596,11 @@ pub(crate) async fn run_connection(
             }
             () = transmit_ready_fut.as_mut() => {
                 ls.codec_maybe_dirty = true;
+            }
+            () = hb_fut.fuse() => {
+                ls.handle_heartbeat(
+                    &state, hb_interval, hb_ttl_deciseconds, hb_timeout,
+                )?;
             }
             () = safety_timeout.as_mut() => {
                 safety_timeout.set(
