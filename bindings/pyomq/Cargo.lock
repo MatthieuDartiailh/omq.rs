@@ -504,9 +504,38 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "lz4rip"
-version = "0.4.0"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2cf5c85e387b97d1bf8cc9bde4bf4b56730e379d00c05bf2eccc12268c493e6"
+checksum = "638882e70c06a6dcebca6bc5274184eaa36c586b819b04ff6363802ea55a5503"
+dependencies = [
+ "lz4rip-core",
+ "lz4rip-decode",
+ "lz4rip-encode",
+]
+
+[[package]]
+name = "lz4rip-core"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0fc56919983a2e2f9a54030d1f841f26ea6e786da2ab0a5c2507671c9fac2a4"
+
+[[package]]
+name = "lz4rip-decode"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd73f80ff50429cf2c899db1d99a0bd8efd2e25371c73dca6403014877e38309"
+dependencies = [
+ "lz4rip-core",
+]
+
+[[package]]
+name = "lz4rip-encode"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0eef87dfb26dcbdc907127a7957b88877c5b6cf176ca2e08d18d4b661cd7d9bc"
+dependencies = [
+ "lz4rip-core",
+]
 
 [[package]]
 name = "memchr"
@@ -536,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "blake3",
  "bytes",
@@ -556,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "async-channel",
  "bytes",
@@ -1186,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "atomic-waker",
  "futures-core",
