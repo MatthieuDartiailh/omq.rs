@@ -186,14 +186,27 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 
 ## Platform and requirements
 
-Linux, macOS, and Windows. `omq-tokio` uses mio / epoll / kqueue /
-IOCP. `omq-compio` uses io_uring (Linux 6.0+) and is not available on
-macOS or Windows.
+**Linux is the primary platform.** All development, testing, and
+benchmarking happens on Linux. CI is Linux-only for required checks.
+
+**macOS** should work (`omq-tokio` via mio / kqueue) but is
+experimental. The test suite has not been run on macOS recently.
+
+**Windows** support is incomplete and experimental. `omq-tokio`
+compiles and partially works (mio / IOCP). CI runs Windows jobs as
+informational (failures do not block PRs). Known limitations:
+
+- IPC transport is not available.
+- `omq-libzmq` is excluded (Unix-only C API surface).
+- Some tests are flaky (timer-sensitive assertions).
+
+`omq-compio` uses io_uring and is Linux-only (6.0+).
+
+Requirements:
 
 - Rust 1.93 or newer (edition 2024).
 - `omq-compio`: Linux 6.0 or newer (io_uring multi-shot recv with
   provided buffers).
-- IPC transport is not available on Windows.
 
 ## Contributing
 
