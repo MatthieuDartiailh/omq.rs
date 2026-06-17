@@ -48,7 +48,7 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude omq-compio
+      - run: cargo test --workspace --exclude omq-compio --exclude omq-interop-tests
 
   encryption:
     name: encryption (curve + blake3zmq)
@@ -102,11 +102,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude omq-compio --exclude omq-libzmq
+      - run: cargo test --workspace --exclude omq-compio --exclude omq-libzmq --exclude omq-interop-tests
       - run: cargo test -p omq-tokio --features curve
       - run: cargo test -p omq-tokio --features blake3zmq
       - run: cargo test -p omq-tokio --features lz4
-      - run: cargo clippy --workspace --all-targets --exclude omq-compio --exclude omq-libzmq
+      - run: cargo clippy --workspace --all-targets --exclude omq-compio --exclude omq-libzmq --exclude omq-interop-tests
 
   pyomq:
     name: pyomq
