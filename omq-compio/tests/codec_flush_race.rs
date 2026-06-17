@@ -41,12 +41,9 @@ async fn sustained_send_recv_with_heartbeats() {
 
     while std::time::Instant::now() < deadline {
         for _ in 0..100 {
-            if compio::time::timeout(
-                Duration::from_millis(5),
-                push.send(Message::single("x")),
-            )
-            .await
-            .is_ok()
+            if compio::time::timeout(Duration::from_millis(5), push.send(Message::single("x")))
+                .await
+                .is_ok()
             {
                 sent += 1;
             }
@@ -90,16 +87,10 @@ async fn concurrent_codec_output_and_data() {
     let mut total = 0u64;
 
     while std::time::Instant::now() < deadline {
-        let _ = compio::time::timeout(
-            Duration::from_millis(2),
-            push.send(Message::single("a")),
-        )
-        .await;
-        let _ = compio::time::timeout(
-            Duration::from_millis(2),
-            push2.send(Message::single("b")),
-        )
-        .await;
+        let _ =
+            compio::time::timeout(Duration::from_millis(2), push.send(Message::single("a"))).await;
+        let _ =
+            compio::time::timeout(Duration::from_millis(2), push2.send(Message::single("b"))).await;
 
         for _ in 0..10 {
             match compio::time::timeout(Duration::from_millis(1), pull.recv()).await {
