@@ -1,0 +1,31 @@
+[package]
+name = "omq-interop-tests"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+omq-proto = { path = "../../omq-proto" }
+omq-tokio = { path = "../../omq-tokio" }
+omq-compio = { path = "../../omq-compio", default-features = false }
+bytes = "1.11.0"
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+compio = { version = "0.19.1", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync"] }
+
+[features]
+default = []
+ws = ["omq-tokio/ws", "omq-compio/ws"]
+
+[[test]]
+name = "tcp"
+path = "tests/tcp.rs"
+
+[[test]]
+name = "ws"
+path = "tests/ws.rs"
+required-features = ["ws"]

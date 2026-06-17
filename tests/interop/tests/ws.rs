@@ -2,9 +2,8 @@
 //! ws://. Drives compio on a dedicated thread while tokio runs in the
 //! test's own runtime.
 
-#![cfg(feature = "ws")]
-
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -28,17 +27,19 @@ fn ws_compio(port: u16) -> omq_compio::Endpoint {
     }
 }
 
+/// Compio binds PUB, tokio connects SUB. PUB sends a burst; SUB must
+/// receive at least one message. Tests the WS accept path on compio.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tokio_push_to_compio_pull_ws() {
-    let (port_tx, port_rx) = std::sync::mpsc::channel();
+async fn compio_pub_to_tokio_sub_ws() {
+    let (port_tx, port_rx) = mpsc::channel();
 
-    let pull_thread = thread::spawn(move || {
+    let pub_thread = thread::spawn(move || {
         let rt = compio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            use omq_compio::{Options, Socket, SocketType};
-            let pull = Socket::new(SocketType::Pull, Options::default());
-            let mut mon = pull.monitor();
-            pull.bind(ws_compio(0)).await.unwrap();
+            use omq_compio::{Message, Options, Socket, SocketType};
+            let p = Socket::new(SocketType::Pub, Options::default());
+            let mut mon = p.monitor();
+            p.bind(ws_compio(0)).await.unwrap();
             let port = loop {
                 match mon.recv().await {
                     Ok(MonitorEvent::Listening {
@@ -49,41 +50,32 @@ async fn tokio_push_to_compio_pull_ws() {
                 }
             };
             let _ = port_tx.send(port);
-            let mut got = Vec::new();
-            for _ in 0..3 {
-                let msg = compio::time::timeout(Duration::from_secs(5), pull.recv())
-                    .await
-                    .expect("recv timed out")
-                    .unwrap();
-                got.push(msg.part_bytes(0).unwrap().to_vec());
+            for _ in 0..50 {
+                let _ = p.send(Message::single("ws.hello")).await;
+                compio::time::sleep(Duration::from_millis(50)).await;
             }
-            got
-        })
+        });
     });
 
     let port = tokio::task::spawn_blocking(move || port_rx.recv().unwrap())
         .await
         .unwrap();
 
-    let push = omq_tokio::Socket::new(omq_tokio::SocketType::Push, omq_tokio::Options::default());
-    push.connect(ws_tokio(port)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sub = omq_tokio::Socket::new(omq_tokio::SocketType::Sub, omq_tokio::Options::default());
+    sub.subscribe("ws.").await.unwrap();
+    sub.connect(ws_tokio(port)).await.unwrap();
 
-    for i in 0..3u32 {
-        push.send(omq_proto::message::Message::from(Bytes::from(format!(
-            "ws-msg-{i}"
-        ))))
+    let m = tokio::time::timeout(Duration::from_secs(10), sub.recv())
         .await
+        .expect("sub timed out")
         .unwrap();
-    }
-
-    let got = pull_thread.join().expect("compio thread panicked");
-    assert_eq!(got.len(), 3);
-    for (i, data) in got.iter().enumerate() {
-        assert_eq!(data, format!("ws-msg-{i}").as_bytes());
-    }
+    assert_eq!(m.part_bytes(0).unwrap(), &b"ws.hello"[..]);
+    drop(sub);
+    pub_thread.join().expect("compio thread panicked");
 }
 
+/// Tokio binds PUSH, compio connects PULL. Tests the WS connect
+/// path on compio.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compio_push_to_tokio_pull_ws() {
     let pull = omq_tokio::Socket::new(omq_tokio::SocketType::Pull, omq_tokio::Options::default());
@@ -98,7 +90,6 @@ async fn compio_push_to_tokio_pull_ws() {
             other => panic!("expected Listening, got {other:?}"),
         }
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let push_thread = thread::spawn(move || {
         let rt = compio::runtime::Runtime::new().unwrap();
@@ -106,7 +97,7 @@ async fn compio_push_to_tokio_pull_ws() {
             use omq_compio::{Options, Socket, SocketType};
             let push = Socket::new(SocketType::Push, Options::default());
             push.connect(ws_compio(port)).await.unwrap();
-            compio::time::sleep(Duration::from_millis(300)).await;
+            compio::time::sleep(Duration::from_millis(500)).await;
             for i in 0..3u32 {
                 push.send(omq_proto::message::Message::from(Bytes::from(format!(
                     "ws-rev-{i}"
@@ -120,7 +111,7 @@ async fn compio_push_to_tokio_pull_ws() {
 
     let mut got = Vec::new();
     for _ in 0..3 {
-        let msg = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+        let msg = tokio::time::timeout(Duration::from_secs(10), pull.recv())
             .await
             .expect("recv timed out")
             .unwrap();

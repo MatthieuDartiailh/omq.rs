@@ -84,6 +84,7 @@ impl PayloadStats {
 }
 
 #[test]
+#[expect(clippy::too_many_lines)]
 fn soak_large_message_throughput() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
