@@ -42,19 +42,31 @@ jobs:
             os: ubuntu-24.04-arm
           - toolchain: "1.93"
             os: ubuntu-latest
+          - toolchain: stable
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - toolchain: stable
+            os: windows-latest
+            target: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude omq-compio --exclude omq-interop-tests
+      - name: Workspace tests (default features)
+        run: cargo test --workspace --exclude omq-compio --no-fail-fast
 
   encryption:
-    name: encryption (curve + blake3zmq)
+    name: encryption (curve + blake3zmq, ${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -63,21 +75,30 @@ jobs:
       - run: cargo test -p omq-tokio --features blake3zmq
 
   compression:
-    name: compression
+    name: compression (${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p omq-tokio --features lz4
 
+
   lint:
     name: fmt + clippy
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
