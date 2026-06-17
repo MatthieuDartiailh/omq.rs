@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the 3-panel main chart: doc/charts/main_tcp.svg.
 
-Panel 1: PUSH/PULL throughput (MB/s), small messages (8 B .. 256 B)
+Panel 1: PUSH/PULL throughput (MB/s + msg/s dashed), small messages (8 B .. 128 B)
 Panel 2: PUSH/PULL throughput (MB/s), medium/large messages (512 B .. 32 KiB)
 Panel 3: REQ/REP latency (p50 µs), 8 B .. 8 KiB
 
@@ -77,17 +77,19 @@ def load_jsonl() -> list[dict]:
     return rows
 
 
-def load_data() -> tuple[dict, dict]:
-    """Return (tput, lat) dicts keyed by size -> impl -> value.
+def load_data() -> tuple[dict, dict, dict]:
+    """Return (tput, lat, msgs) dicts keyed by size -> impl -> value.
 
     tput[size][impl] = mbps (float)
     lat[size][impl] = p50_us (float)
+    msgs[size][impl] = msgs_s (float)
     """
     rows = load_jsonl()
     tcp = [r for r in rows if r.get("transport") == "tcp"]
 
     tput: dict[int, dict[str, float]] = {}
     lat: dict[int, dict[str, float]] = {}
+    msgs: dict[int, dict[str, float]] = {}
     seen_tput: dict[tuple, str] = {}
     seen_lat: dict[tuple, str] = {}
 
@@ -104,6 +106,7 @@ def load_data() -> tuple[dict, dict]:
             if key not in seen_tput or run_id >= seen_tput[key]:
                 seen_tput[key] = run_id
                 tput.setdefault(size, {})[impl_name] = r.get("mbps", 0)
+                msgs.setdefault(size, {})[impl_name] = r.get("msgs_s", 0)
 
         elif kind == "latency":
             key = (impl_name, size)
@@ -111,7 +114,7 @@ def load_data() -> tuple[dict, dict]:
                 seen_lat[key] = run_id
                 lat.setdefault(size, {})[impl_name] = r.get("p50_us", 0)
 
-    return tput, lat
+    return tput, lat, msgs
 
 
 # ── SVG helpers ───────────────────────────────────────────────────
@@ -159,10 +162,20 @@ def svg_dots(points: list[tuple[float, float]], color: str) -> list[str]:
 
 # ── panel drawing ────────────────────────────────────────────────
 
+def fmt_msgs(v: float) -> str:
+    if v >= 1e6:
+        n = v / 1e6
+        return f"{n:.1f} M" if n % 1 else f"{int(n)} M"
+    if v >= 1e3:
+        n = v / 1e3
+        return f"{n:.0f} K"
+    return f"{v:.0f}"
+
+
 def draw_throughput_panel(
     L: list[str], sizes: list[int], xs: list[float], tput: dict,
     x_left: float, x_right: float, y_top: float, y_bot: float,
-    title: str,
+    title: str, msgs: dict | None = None,
 ):
     h = y_bot - y_top
 
@@ -178,19 +191,41 @@ def draw_throughput_panel(
     L.append(svg_text((x_left + x_right) / 2, y_top - 12, title,
                        size=12, weight="700", fill="#111827"))
 
-    step = nice_step(mbps_max, 6)
-    v = step
-    while v <= mbps_max:
-        yy = y_mbps(v)
-        L.append(svg_line(x_left, yy, x_right, yy))
-        if v >= 1000:
-            label = f"{v / 1000:.1f}" if v % 1000 else f"{int(v / 1000)}"
-            label += " GB/s"
-        else:
-            label = f"{v:.0f} MB/s"
-        L.append(svg_text(x_left - 8, yy, label, anchor="end", baseline="middle",
-                          size=8.5))
-        v += step
+    if msgs is not None:
+        all_msgs = [
+            msgs[s][name]
+            for s in sizes for name in IMPLS if name in msgs.get(s, {})
+        ]
+        msgs_max = max(all_msgs) * 1.15 if all_msgs else 1e6
+
+        def y_msgs(v):
+            return y_bot - (v / msgs_max) * h
+
+        step_m = nice_step(msgs_max, 6)
+        v = step_m
+        while v <= msgs_max:
+            yy = y_msgs(v)
+            L.append(svg_line(x_left, yy, x_right, yy, dash="4,3"))
+            L.append(svg_text(x_left - 8, yy, f"{fmt_msgs(v)} msg/s", anchor="end",
+                              baseline="middle", size=8.5))
+            v += step_m
+    else:
+        step = nice_step(mbps_max, 6)
+        v = step
+        while v <= mbps_max:
+            yy = y_mbps(v)
+            L.append(svg_line(x_left, yy, x_right, yy))
+            if v >= 1000:
+                label = f"{v / 1000:.1f}" if v % 1000 else f"{int(v / 1000)}"
+                label += " GB/s"
+            else:
+                label = f"{v:.0f} MB/s"
+            L.append(svg_text(x_right + 8, yy, label, anchor="start",
+                              baseline="middle", size=8.5))
+            v += step
+
+    L.append(svg_line(x_right, y_top, x_right, y_bot, stroke="#9ca3af",
+                      width=1.5))
 
     for x in xs:
         L.append(svg_line(x, y_top, x, y_bot))
@@ -198,14 +233,23 @@ def draw_throughput_panel(
     L.append(svg_line(x_left, y_top, x_left, y_bot, stroke="#9ca3af", width=1.5))
     L.append(svg_line(x_left, y_bot, x_right, y_bot, stroke="#9ca3af", width=1.5))
 
-    for name in DRAW_ORDER:
-        pts = [
-            (xs[i], y_mbps(tput[sizes[i]][name]))
-            for i in range(len(sizes)) if name in tput.get(sizes[i], {})
-        ]
-        if pts:
-            L.append(svg_polyline(pts, COLORS[name]))
-            L.extend(svg_dots(pts, COLORS[name]))
+    if msgs is not None:
+        for name in DRAW_ORDER:
+            pts = [
+                (xs[i], y_msgs(msgs[sizes[i]][name]))
+                for i in range(len(sizes)) if name in msgs.get(sizes[i], {})
+            ]
+            if pts:
+                L.append(svg_polyline(pts, COLORS[name], width=2.5, dash="6,3"))
+    else:
+        for name in DRAW_ORDER:
+            pts = [
+                (xs[i], y_mbps(tput[sizes[i]][name]))
+                for i in range(len(sizes)) if name in tput.get(sizes[i], {})
+            ]
+            if pts:
+                L.append(svg_polyline(pts, COLORS[name]))
+                L.extend(svg_dots(pts, COLORS[name]))
 
     for i, s in enumerate(sizes):
         L.append(svg_text(xs[i], y_bot + 13, fmt_size(s), size=8))
@@ -269,21 +313,22 @@ def draw_latency_panel(
 
 # ── main chart generation ────────────────────────────────────────
 
-def generate_main_chart(tput: dict, lat: dict, hw_label: str | None) -> str:
-    small_sizes = [8, 16, 32, 64, 128]
-    large_sizes = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+def generate_main_chart(tput: dict, lat: dict, msgs: dict,
+                        hw_label: str | None) -> str:
+    small_sizes = [8, 16, 32, 64, 128, 256]
+    large_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 
     hw_offset = 14 if hw_label else 0
     panel_h = 260
     x_pad_left = 70
-    panel_gap_x = 50
-    x_pad_right = 25
+    panel_gap_x = 40
+    x_pad_right = 70
     legend_h = 60
 
     svg_w = 950
     total_w = svg_w - x_pad_left - x_pad_right - panel_gap_x
-    p1_w = total_w / 3
-    p2_w = total_w * 2 / 3
+    p1_w = total_w * 0.4
+    p2_w = total_w * 0.6
 
     header_y = 16
     row_top = hw_offset + header_y + 30
@@ -313,7 +358,7 @@ def generate_main_chart(tput: dict, lat: dict, hw_label: str | None) -> str:
     p1_xr = p1_xl + p1_w
     draw_throughput_panel(L, small_sizes, make_xs(small_sizes, p1_xl, p1_xr),
                           tput, p1_xl, p1_xr, row_top, row_bot,
-                          "small messages (higher is better)")
+                          "small messages (higher is better)", msgs=msgs)
 
     p2_xl = p1_xr + panel_gap_x
     p2_xr = p2_xl + p2_w
@@ -351,8 +396,8 @@ def generate_main_chart(tput: dict, lat: dict, hw_label: str | None) -> str:
 
 def main():
     hw = detect_hardware()
-    tput, lat = load_data()
-    svg = generate_main_chart(tput, lat, hw)
+    tput, lat, msgs = load_data()
+    svg = generate_main_chart(tput, lat, msgs, hw)
     out = REPO / "doc" / "charts" / "main_tcp.svg"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(svg)
