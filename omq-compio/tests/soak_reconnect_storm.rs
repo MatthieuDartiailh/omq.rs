@@ -14,7 +14,7 @@ mod soak_common;
 use std::time::{Duration, Instant};
 
 use omq_compio::options::ReconnectPolicy;
-use omq_compio::{Message, Options, Socket, SocketType};
+use omq_compio::{Message, Socket, SocketType};
 
 #[test]
 fn soak_reconnect_storm() {

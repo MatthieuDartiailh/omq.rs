@@ -16,7 +16,7 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_compio::{Message, OnMute, Options, Socket, SocketType, build_default_runtime};
+use omq_compio::{Message, OnMute, Socket, SocketType, build_default_runtime};
 
 fn block_on_and_drain<F: std::future::Future>(rt: &compio::runtime::Runtime, fut: F) -> F::Output {
     let out = rt.block_on(fut);

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use rand::RngExt;
 use rand::rngs::StdRng;
 
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Message, Socket, SocketType};
 
 #[test]
 fn soak_peer_churn() {

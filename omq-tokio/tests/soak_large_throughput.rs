@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Message, Socket, SocketType};
 
 const MSG_SIZE: usize = 1024 * 1024;
 const CANARY_MAGIC: u64 = 0xDEAD_BEEF_CAFE_F00D;
