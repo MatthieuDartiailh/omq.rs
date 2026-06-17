@@ -30,7 +30,6 @@ ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfi
 rt-multi-thread = ["tokio/rt-multi-thread"]
 fuzz = []
 soak = []
-compio-interop = ["dep:omq-compio", "dep:compio"]
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.17.2", default-features = false }
@@ -52,21 +51,11 @@ rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = { version = "2.2", optional = true }
 rustls-pki-types = { version = "1.14", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
-omq-compio = { version = "0.12.2", path = "../omq-compio", optional = true, default-features = false, features = ["ws"] }
-compio = { version = "0.19.1", optional = true, features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync"] }
 
 [dev-dependencies]
 tokio = { version = "1.52.0", features = ["test-util", "rt-multi-thread"] }
 rcgen = "0.14"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-
-[[test]]
-name = "interop_compio"
-required-features = ["compio-interop"]
-
-[[test]]
-name = "interop_compio_ws"
-required-features = ["compio-interop", "ws"]
 
 [[bin]]
 name = "bench_peer_tokio"

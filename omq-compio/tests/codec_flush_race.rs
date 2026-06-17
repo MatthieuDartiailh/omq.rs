@@ -1,9 +1,9 @@
-//! Regression test for the flush_codec_to_wire / flush_codec_output race.
+//! Regression test for the `flush_codec_to_wire` / `flush_codec_output` race.
 //!
 //! Before the fix, sustained TCP send/recv with heartbeats could panic
-//! with "advance_transmit beyond pending bytes" because the driver's
-//! flush_codec_to_wire cloned chunks without advancing, yielded during
-//! the async write, and the recv path's flush_codec_output drained the
+//! with "`advance_transmit` beyond pending bytes" because the driver's
+//! `flush_codec_to_wire` cloned chunks without advancing, yielded during
+//! the async write, and the recv path's `flush_codec_output` drained the
 //! same chunks before the driver resumed.
 
 use std::net::Ipv4Addr;
@@ -49,11 +49,8 @@ async fn sustained_send_recv_with_heartbeats() {
             }
         }
 
-        loop {
-            match compio::time::timeout(Duration::from_millis(1), pull.recv()).await {
-                Ok(Ok(_)) => recvd += 1,
-                _ => break,
-            }
+        while let Ok(Ok(_)) = compio::time::timeout(Duration::from_millis(1), pull.recv()).await {
+            recvd += 1;
         }
     }
 

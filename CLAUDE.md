@@ -24,7 +24,7 @@ out-of-tree (maturin etc.).
 
 Both backends re-export `omq-proto`'s public API and share an identical
 public `Socket` API. Verified by `tests/coverage_matrix.rs` (both) and
-`omq-tokio/tests/interop_compio.rs`.
+`tests/interop/` (cross-runtime TCP and WS tests).
 
 ## Build / test / bench
 
@@ -62,9 +62,9 @@ Lints: `missing_debug_implementations` = **deny**,
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for comparison benchmark infra,
 chart generation, and release process.
 
-**interop_compio dep constraint:** `omq-tokio/Cargo.toml`'s compio
-dev-dep must use the same git rev as `omq-compio`'s dep. Different
-revs link two `compio-runtime` instances -> TLS mismatch panic.
+**interop dep constraint:** `tests/interop/Cargo.toml`'s compio
+dep must use the same version as `omq-compio`'s dep. Different
+versions link two `compio-runtime` instances -> TLS mismatch panic.
 
 ## Cargo features
 

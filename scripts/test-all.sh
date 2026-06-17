@@ -118,6 +118,8 @@ par run cargo test -p omq-compio --features lz4 --test lz4_tcp
 par run cargo test -p omq-tokio  --features plain --test interop_pyzmq_plain
 par run cargo test -p omq-tokio  --features curve --test interop_pyzmq_curve
 par run cargo test -p omq-compio --features curve --test interop_pyzmq_curve
+par run cargo test -p omq-interop-tests --test tcp
+par run cargo test -p omq-interop-tests --test ws --features ws
 par_wait
 
 # ---------------------------------------------------------------- #

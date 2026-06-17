@@ -5,6 +5,7 @@ members = [
     "omq-proto",
     "omq-tokio",
     "omq-libzmq",
+    "tests/interop",
     "yring",
 ]
 default-members = ["omq-proto", "omq-tokio"]

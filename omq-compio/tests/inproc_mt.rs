@@ -153,13 +153,13 @@ fn spsc_preserves_ordering() {
     pull_thread.join().unwrap();
 }
 
-/// Regression: try_recv() must notify space_events after releasing
+/// Regression: `try_recv()` must notify `space_events` after releasing
 /// yring slots, otherwise the producer blocks on a full ring forever.
 ///
 /// The yring has capacity 1024. We let the push fill it, then the
-/// pull uses recv()+try_recv() to drain. try_recv() must notify the
-/// producer's space_event, otherwise the producer stays blocked on
-/// the full ring and the next recv() deadlocks.
+/// pull uses `recv()`+`try_recv()` to drain. `try_recv()` must notify the
+/// producer's `space_event`, otherwise the producer stays blocked on
+/// the full ring and the next `recv()` deadlocks.
 #[test]
 fn try_recv_notifies_space_event() {
     const N: usize = 50_000;

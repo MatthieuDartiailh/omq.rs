@@ -307,8 +307,8 @@ crate must be configured as a trusted publisher on crates.io.
 identical public `Socket` API. Adding or changing a method on one
 backend requires the same change on the other. Parity is enforced by
 `tests/coverage_matrix.rs` (both backends) and
-`omq-tokio/tests/interop_compio.rs`.
+`tests/interop/` (cross-runtime TCP and WS tests).
 
-**interop_compio dep constraint:** `omq-tokio/Cargo.toml`'s compio
-dev-dep must use the same git rev as `omq-compio`'s dep. Different
-revs link two `compio-runtime` instances -> TLS mismatch panic.
+**interop dep constraint:** `tests/interop/Cargo.toml`'s compio
+dep must use the same version as `omq-compio`'s dep. Different
+versions link two `compio-runtime` instances -> TLS mismatch panic.
