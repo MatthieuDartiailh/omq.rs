@@ -145,8 +145,9 @@ Full size sweep: `-- --all-sizes`.
 Results append to `$XDG_CACHE_HOME/omq/` (default `~/.cache/omq/`)
 unless `OMQ_BENCH_NO_WRITE=1`.
 
-Compression benchmarks run separately with bandwidth limiting.
-See [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md) for commands and results.
+PUB/SUB compression benchmarks (`scripts/bench_pubsub_lz4.py`) run
+at full CPU speed and project to realistic link speeds. See the
+"PUB/SUB LZ4 compression chart" section below.
 
 ### Cross-implementation comparison benchmarks
 
@@ -222,15 +223,13 @@ cargo bench -p omq-compio --bench mechanism --features plain,curve,blake3zmq
 python3 scripts/gen_mechanism_chart.py
 ```
 
-### Compression charts
+### PUB/SUB LZ4 compression chart
 
 Produces `doc/charts/pubsub/lz4_tcp.svg`:
 
 ```sh
-cargo bench -p omq-compio --bench compression --features lz4  # → ~/.cache/omq/results_compression_compio.jsonl
-cargo bench -p omq-tokio  --bench compression --features lz4  # → ~/.cache/omq/results_compression_tokio.jsonl
-python3 scripts/gen_compression_chart.py --backend compio          # JSONL → SVG
-python3 scripts/gen_compression_chart.py --backend tokio           # JSONL → SVG
+python3 scripts/bench_pubsub_lz4.py --chart   # full sweep + chart
+python3 scripts/gen_pubsub_lz4_chart.py        # chart only (reuse existing JSONL)
 ```
 
 ### pyomq bindings charts

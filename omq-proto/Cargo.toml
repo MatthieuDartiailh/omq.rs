@@ -41,7 +41,7 @@ crypto_box = { version = "0.9", features = ["std"], optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
 subtle = { version = "2.6", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"], optional = true }
-lz4rip = { version = "0.5.2", default-features = false, features = ["std"], optional = true }
+lz4rip = { version = "0.8", default-features = false, features = ["std"], optional = true }
 rand = "0.10"
 patricia_tree = "0.10"
 smallvec = { version = "1", features = ["const_generics", "union"] }
