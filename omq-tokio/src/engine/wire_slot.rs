@@ -31,7 +31,6 @@ pub(crate) struct PeerWireSlot {
     cap: usize,
     pub(crate) data_ready: Notify,
     pub(crate) space_available: Notify,
-    pub(crate) driver_in_select: AtomicBool,
     pub(crate) handshake_done: AtomicBool,
     pending: AtomicBool,
     #[allow(dead_code)]
@@ -69,7 +68,6 @@ impl PeerWireSlot {
             cap,
             data_ready: Notify::new(),
             space_available: Notify::new(),
-            driver_in_select: AtomicBool::new(false),
             handshake_done: AtomicBool::new(false),
             pending: AtomicBool::new(false),
             has_transform,
@@ -151,7 +149,9 @@ impl PeerWireSlot {
     pub(crate) fn drain_into_vec(&self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
         eq.drain_into_vec(buf, max_chunks);
-        self.pending.store(false, Ordering::Relaxed);
+        if eq.is_empty() {
+            self.pending.store(false, Ordering::Relaxed);
+        }
     }
 
     pub(crate) fn has_space(&self) -> bool {
