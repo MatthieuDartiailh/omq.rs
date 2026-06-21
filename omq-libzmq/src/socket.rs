@@ -69,7 +69,7 @@ impl NotifyFd {
             return None;
         }
         // SAFETY: same as above.
-        let send_fd = unsafe { libc::eventfd(DEFAULT_HWM as u32, libc::EFD_NONBLOCK) };
+        let send_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
         if send_fd < 0 {
             // SAFETY: recv_fd is a valid open fd from the successful eventfd call above.
             unsafe { libc::close(recv_fd) };
