@@ -15,7 +15,7 @@
 //!
 //! **Windows Implementation:**
 //! - Manual-reset events (HANDLE returned by `CreateEventW`)
-//! - Operations: `SetEvent()` to signal, `ResetEvent()` to drain, `WaitForSingleObject()` to wait
+//! - Operations: `SetEvent()` to signal, explicit `ResetEvent()` drain before each `WaitForMultipleObjects`
 //!
 //! ### Inproc Message Delivery (Cross-Platform)
 //!
@@ -620,6 +620,7 @@ pub(crate) mod windows {
     impl WindowsNotifyHandle {
         pub(crate) fn new() -> Self {
             // Create two manual-reset events (initially non-signaled)
+            // Manual-reset: explicitly reset by prepare_for_wait() before each wait
             let recv_event = unsafe {
                 CreateEventW(
                     None,  // default security attributes
@@ -832,12 +833,19 @@ pub(crate) mod windows {
             self.handle_map.len()
         }
 
-        /// Prepare poller for wait: no-op on Windows.
-        /// Windows manual-reset events don't accumulate signals like Unix eventfds,
-        /// so no draining is necessary before waiting.
-        #[allow(clippy::unused_self)]
+        /// Prepare poller for wait: drain all manual-reset events before waiting.
+        /// Mirrors Unix path which drains accumulated signals from eventfds.
+        /// By resetting all events before WFMO, we ensure we only wake on NEW signal events,
+        /// not stale signaling state from the previous poll.
         pub(crate) fn prepare_for_wait(&mut self) {
-            // Manual-reset events don't accumulate signals, so nothing to do
+            use windows::Win32::System::Threading::ResetEvent;
+            for batch in &self.batches {
+                for handle in batch {
+                    unsafe {
+                        let _ = ResetEvent(*handle);
+                    }
+                }
+            }
         }
 
         /// Wait for events with tiered batching.
@@ -855,7 +863,9 @@ pub(crate) mod windows {
                 return 0;
             }
 
-            let mut ready_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            // Track (item_idx, event_bits) to preserve which event type was signaled
+            let mut ready_events: std::collections::HashMap<usize, libc::c_short> =
+                std::collections::HashMap::new();
 
             // Process each batch, first with full timeout, rest non-blocking
             for (batch_idx, batch) in self.batches.iter().enumerate() {
@@ -883,14 +893,18 @@ pub(crate) mod windows {
                 let wait_result_u32 = wait_result.0;
                 if wait_result_u32 < WAIT_OBJECT_0.0 + batch.len() as u32 {
                     let signaled_idx = (wait_result_u32 - WAIT_OBJECT_0.0) as usize;
-                    if let Some((item_idx, _event_type, _is_send)) = self.handle_map.get(
+                    if let Some((item_idx, event_type, _is_send)) = self.handle_map.get(
                         self.batches[..batch_idx]
                             .iter()
                             .map(std::vec::Vec::len)
                             .sum::<usize>()
                             + signaled_idx,
                     ) {
-                        ready_set.insert(*item_idx);
+                        // Track which event was signaled (POLLIN or POLLOUT)
+                        ready_events
+                            .entry(*item_idx)
+                            .and_modify(|bits| *bits |= event_type)
+                            .or_insert(*event_type);
                     }
                 }
             }
@@ -899,8 +913,8 @@ pub(crate) mod windows {
             let mut ready_count = 0i32;
             for (idx, item) in items.iter_mut().enumerate() {
                 item.revents = 0;
-                if ready_set.contains(&idx) {
-                    item.revents |= crate::poll::ZMQ_POLLIN;
+                if let Some(event_bits) = ready_events.get(&idx) {
+                    item.revents = *event_bits;
                     ready_count += 1;
                 }
             }
