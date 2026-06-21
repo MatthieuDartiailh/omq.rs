@@ -317,7 +317,7 @@ impl EncodedQueueCell {
 
     #[inline]
     pub(crate) fn borrow_mut(&self) -> EncodedQueueGuard<'_> {
-        debug_assert!(!self.borrowed.get(), "EncodedQueueCell: already borrowed");
+        assert!(!self.borrowed.get(), "EncodedQueueCell: already borrowed");
         self.borrowed.set(true);
         EncodedQueueGuard { cell: self }
     }
