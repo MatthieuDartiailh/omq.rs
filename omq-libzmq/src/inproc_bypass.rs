@@ -45,6 +45,15 @@ impl std::fmt::Debug for InprocPipe {
 
 const HEADER_SIZE: usize = 4;
 const WRAP_SENTINEL: u32 = u32::MAX;
+const ALIGN_MASK: usize = HEADER_SIZE - 1;
+
+/// Entry occupies `HEADER_SIZE + payload_len` bytes, rounded up to
+/// `HEADER_SIZE` alignment. Keeps `tail` 4-aligned so `cap - tail_offset`
+/// is always >= `HEADER_SIZE` (cap is a power of two).
+#[inline]
+const fn aligned_entry_size(payload_len: usize) -> usize {
+    (HEADER_SIZE + payload_len + ALIGN_MASK) & !ALIGN_MASK
+}
 
 struct RingBuf {
     buf: Box<[UnsafeCell<u8>]>,
@@ -135,7 +144,7 @@ impl RingProducer {
     /// Returns false if not enough space.
     #[inline]
     fn try_push(&mut self, data: &[u8]) -> bool {
-        let entry_size = HEADER_SIZE + data.len();
+        let entry_size = aligned_entry_size(data.len());
         let cap = self.ring.capacity;
         let mask = cap - 1;
         let tail = self.tail;
@@ -162,8 +171,9 @@ impl RingProducer {
                     return false;
                 }
             }
-            // SAFETY: tail_offset..tail_offset+4 is within buf (contiguous >= HEADER_SIZE
-            // because capacity is a power of two and entry_size >= HEADER_SIZE).
+            // SAFETY: tail_offset..tail_offset+4 is within buf. `contiguous >= HEADER_SIZE`
+            // because capacity is a power of two and tail is always HEADER_SIZE-aligned
+            // (aligned_entry_size rounds up all advances).
             unsafe {
                 let dst = self.ring.buf[tail_offset].get();
                 std::ptr::copy_nonoverlapping(
@@ -192,7 +202,7 @@ impl RingProducer {
             std::ptr::copy_nonoverlapping(len.to_ne_bytes().as_ptr(), base, HEADER_SIZE);
             std::ptr::copy_nonoverlapping(data.as_ptr(), base.add(HEADER_SIZE), data.len());
         }
-        self.tail += HEADER_SIZE + data.len();
+        self.tail += aligned_entry_size(data.len());
     }
 
     /// Publish all written entries to the consumer. Returns true if
@@ -267,7 +277,7 @@ impl RingConsumer {
     /// Advance past the last peeked entry and publish the new head.
     #[inline]
     fn advance_and_release(&mut self, len: usize) {
-        self.head += HEADER_SIZE + len;
+        self.head += aligned_entry_size(len);
         self.ring.head.store(self.head, Ordering::Release);
     }
 

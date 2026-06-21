@@ -13,6 +13,7 @@ use bytes::Bytes;
 use omq_tokio::MechanismSetup;
 use omq_tokio::options::{KeepAlive, ReconnectPolicy};
 
+use crate::error::fail;
 use crate::socket::DEFAULT_HWM;
 
 macro_rules! lock_overlay {
@@ -375,7 +376,7 @@ pub extern "C" fn zmq_setsockopt(
             lock_overlay!(sock_arc).handshake_ivl = if v <= 0 {
                 None
             } else {
-                Some(Duration::from_millis(v as u64 * 1000))
+                Some(Duration::from_secs(v as u64))
             };
         }
         ZMQ_MAXMSGSIZE => {
@@ -1141,15 +1142,15 @@ fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
-    let copy_len = data.len().min(avail);
-    // SAFETY: optval is non-null with at least copy_len bytes; null-terminator
-    // only written when buffer has room.
+    let needed = data.len() + 1;
+    if avail < needed {
+        return fail(libc::EINVAL);
+    }
+    // SAFETY: optval is non-null with at least `needed` bytes available.
     unsafe {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), copy_len);
-        if copy_len < avail {
-            *optval.cast::<u8>().add(copy_len) = 0;
-        }
-        *optvallen = data.len() + 1;
+        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), data.len());
+        *optval.cast::<u8>().add(data.len()) = 0;
+        *optvallen = needed;
     }
     0
 }

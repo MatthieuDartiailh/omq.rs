@@ -361,24 +361,32 @@ impl Socket {
     pub async fn send(&self, msg: Message) -> Result<()> {
         match self.inner.socket_type {
             SocketType::Req => {
-                if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
-                    tokio::task::yield_now().await;
-                    if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
-                        if self.is_wire_slot_dead() {
-                            self.inner
-                                .req_awaiting_reply
-                                .store(false, Ordering::Relaxed);
-                        } else {
-                            return Err(Error::Protocol(
-                                "REQ socket must receive a reply before sending again".into(),
-                            ));
-                        }
+                loop {
+                    if self
+                        .inner
+                        .req_awaiting_reply
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        break;
                     }
+                    tokio::task::yield_now().await;
+                    if self.is_wire_slot_dead() {
+                        self.inner
+                            .req_awaiting_reply
+                            .store(false, Ordering::Release);
+                        continue;
+                    }
+                    return Err(Error::Protocol(
+                        "REQ socket must receive a reply before sending again".into(),
+                    ));
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 let result = self.send_via_wire_slot(msg).await;
-                if result.is_ok() {
-                    self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
+                if result.is_err() {
+                    self.inner
+                        .req_awaiting_reply
+                        .store(false, Ordering::Release);
                 }
                 result
             }
@@ -413,15 +421,22 @@ impl Socket {
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         match self.inner.socket_type {
             SocketType::Req => {
-                if self.inner.req_awaiting_reply.load(Ordering::Relaxed) {
+                if self
+                    .inner
+                    .req_awaiting_reply
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
                     return Err(TrySendError::Error(Error::Protocol(
                         "REQ socket must receive a reply before sending again".into(),
                     )));
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 let result = self.inner.send_submitter.try_send(msg);
-                if result.is_ok() {
-                    self.inner.req_awaiting_reply.store(true, Ordering::Relaxed);
+                if result.is_err() {
+                    self.inner
+                        .req_awaiting_reply
+                        .store(false, Ordering::Release);
                 }
                 result
             }
@@ -464,7 +479,7 @@ impl Socket {
                 }
                 self.inner
                     .req_awaiting_reply
-                    .store(false, Ordering::Relaxed);
+                    .store(false, Ordering::Release);
                 return Ok(msg);
             },
             _ => self.inner.recv_rx.recv().await,
@@ -483,7 +498,7 @@ impl Socket {
                 {
                     self.inner
                         .req_awaiting_reply
-                        .store(false, Ordering::Relaxed);
+                        .store(false, Ordering::Release);
                     return Ok(msg);
                 }
             }

@@ -35,10 +35,11 @@ pub struct OmqMsgRepr {
     reserved: [u8; 16],
 }
 
-// SAFETY: The pointer fields are either null or owned by exactly one
-// OmqMsgRepr instance; no concurrent access.
+// SAFETY: pointer fields are owned by exactly one OmqMsgRepr instance.
+// Send is needed for ownership transfer across threads.
+// Sync is intentionally omitted: concurrent &-access from multiple
+// threads (e.g. via Arc) would be unsound.
 unsafe impl Send for OmqMsgRepr {}
-unsafe impl Sync for OmqMsgRepr {}
 
 impl std::fmt::Debug for OmqMsgRepr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

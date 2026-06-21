@@ -30,7 +30,7 @@ fn inline_message_from_buf(
     payload_len: usize,
 ) -> Message {
     let mut data: [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE] =
-        unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+        unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
     buf.read_into_uninit(payload_len, &mut data);
     Message {
         inner: crate::message::MessageInner::Inline {
@@ -648,7 +648,7 @@ impl Connection {
         // SAFETY: same pattern as try_advance_ready — MaybeUninit<u8> array
         // has no validity invariant.
         let mut data: [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE] =
-            unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+            unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
 
         // Read ZWS flag + payload together, then split.
         // We use a small stack buffer for the ZWS flag byte.

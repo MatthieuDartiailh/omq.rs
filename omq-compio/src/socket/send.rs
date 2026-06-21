@@ -898,14 +898,18 @@ impl Socket {
             let dgram = crate::transport::udp::encode_datagram(&group, &body)?;
             for sock in &udp_socks {
                 use std::os::fd::AsRawFd;
-                unsafe {
+                // SAFETY: sock is a valid connected UDP socket fd.
+                // dgram lives for the duration of the call.
+                // Best-effort: UDP send failures are silently ignored
+                // (matches ZMQ RADIO semantics for unreliable transport).
+                let _ = unsafe {
                     libc::send(
                         sock.as_raw_fd(),
                         dgram.as_ptr().cast::<libc::c_void>(),
                         dgram.len(),
                         libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
-                    );
-                }
+                    )
+                };
             }
         }
         let stream_targets: Vec<PeerOut> = {

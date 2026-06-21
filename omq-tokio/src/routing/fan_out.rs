@@ -267,12 +267,8 @@ impl Submitter {
                 encoder,
                 all_wire,
             } => {
-                if all_wire {
+                if all_wire && !self.xpub_nodrop {
                     self.arena.encode_and_signal(&forwarded, encoder.as_deref());
-                    let interval = yield_interval(targets.len());
-                    if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
-                        tokio::task::yield_now().await;
-                    }
                 } else {
                     if self.xpub_nodrop {
                         while !targets_have_space(&targets) {
@@ -280,10 +276,10 @@ impl Submitter {
                         }
                     }
                     dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
-                    let interval = yield_interval(targets.len());
-                    if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
-                        tokio::task::yield_now().await;
-                    }
+                }
+                let interval = yield_interval(targets.len());
+                if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
+                    tokio::task::yield_now().await;
                 }
                 return Ok(());
             }
