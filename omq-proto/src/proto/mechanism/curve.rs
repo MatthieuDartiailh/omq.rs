@@ -303,12 +303,12 @@ impl CurveClient {
         }
     }
 
-    fn next_out_counter(&mut self) -> u64 {
+    fn next_out_counter(&mut self) -> Result<u64> {
         self.out_counter = self
             .out_counter
             .checked_add(1)
-            .expect("CURVE handshake nonce counter exhausted");
-        self.out_counter
+            .ok_or_else(|| Error::Protocol("CURVE handshake nonce counter exhausted".into()))?;
+        Ok(self.out_counter)
     }
 
     fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) -> Result<()> {
@@ -386,7 +386,7 @@ impl CurveClient {
     }
 
     fn build_hello(&mut self) -> Result<Bytes> {
-        let counter = self.next_out_counter();
+        let counter = self.next_out_counter()?;
         let nonce = nonce_short(NONCE_HELLO, counter);
         let signature_box = SalsaBox::new(&self.peer_lt_public, self.eph_secret())
             .encrypt(&nonce.into(), &[0u8; 64][..])
@@ -443,7 +443,7 @@ impl CurveClient {
     }
 
     fn build_initiate(&mut self) -> Result<Bytes> {
-        let counter = self.next_out_counter();
+        let counter = self.next_out_counter()?;
 
         let Some(CurveClientState::AwaitingReady {
             ref our_eph_secret,
@@ -597,12 +597,12 @@ impl CurveServer {
         }
     }
 
-    fn next_out_counter(&mut self) -> u64 {
+    fn next_out_counter(&mut self) -> Result<u64> {
         self.out_counter = self
             .out_counter
             .checked_add(1)
-            .expect("CURVE handshake nonce counter exhausted");
-        self.out_counter
+            .ok_or_else(|| Error::Protocol("CURVE handshake nonce counter exhausted".into()))?;
+        Ok(self.out_counter)
     }
 
     fn start(&mut self, our_props: PeerProperties) {
@@ -709,7 +709,7 @@ impl CurveServer {
             .encrypt(&welcome_nonce.into(), welcome_pt.as_slice())
             .map_err(|_| Error::Protocol("CURVE WELCOME encrypt failed".into()))?;
 
-        let counter = self.next_out_counter();
+        let counter = self.next_out_counter()?;
         let _ = counter; // WELCOME doesn't carry a short nonce counter
 
         let mut body = BytesMut::with_capacity(160);
@@ -805,7 +805,7 @@ impl CurveServer {
     }
 
     fn build_ready(&mut self) -> Result<Bytes> {
-        let counter = self.next_out_counter();
+        let counter = self.next_out_counter()?;
         let CurveServerState::Done {
             ref our_eph_secret,
             ref peer_eph_public,
