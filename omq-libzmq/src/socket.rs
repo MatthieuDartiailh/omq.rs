@@ -570,10 +570,10 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
 ///
 /// `sock_ptr` must be a valid `*mut Arc<OmqSocket>` or null (returns EFAULT).
 /// `addr` must be a valid C string pointer or null (returns EFAULT).
-unsafe fn parse_endpoint_args(
+unsafe fn parse_endpoint_args<'a>(
     sock_ptr: *mut c_void,
     addr: *const c_char,
-) -> Result<(&'static Arc<OmqSocket>, String, Endpoint), c_int> {
+) -> Result<(&'a Arc<OmqSocket>, String, Endpoint), c_int> {
     if sock_ptr.is_null() || addr.is_null() {
         return Err(libc::EFAULT);
     }
@@ -601,10 +601,10 @@ unsafe fn parse_endpoint_args(
 ///
 /// `sock_ptr` must be a valid `*mut Arc<OmqSocket>` or null.
 /// `cstr` must be a valid C string pointer or null.
-unsafe fn parse_group_args(
+unsafe fn parse_group_args<'a>(
     sock_ptr: *mut c_void,
     cstr: *const c_char,
-) -> Result<(&'static Arc<OmqSocket>, Bytes), c_int> {
+) -> Result<(&'a Arc<OmqSocket>, Bytes), c_int> {
     if sock_ptr.is_null() || cstr.is_null() {
         return Err(libc::EFAULT);
     }
