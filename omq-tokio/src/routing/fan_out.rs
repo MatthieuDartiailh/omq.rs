@@ -36,9 +36,13 @@ pub(crate) enum FanOutMode {
     Group,
 }
 
+const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
+
+const FAN_OUT_COPY_BUDGET: usize = 128 * 1024;
+
 fn yield_interval(peer_count: usize) -> u32 {
     let n = (peer_count as u32).max(1);
-    (256 / n).max(4)
+    (512 / n.isqrt()).max(16)
 }
 
 enum CachedResult {
@@ -95,13 +99,20 @@ impl FanOutArena {
             self.pending.store(false, Ordering::Relaxed);
             return;
         }
-        if eq.has_arena_only() {
+        if eq.has_arena_only()
+            && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET
+        {
             let frozen = eq.take_arena_bytes();
             self.pending.store(false, Ordering::Relaxed);
             drop(eq);
             for t in targets {
                 if let PeerSend::Wire { slot, .. } = t {
-                    let _ = slot.try_push_pre_encoded(&frozen);
+                    let _ = slot.try_push_pre_encoded_no_signal(&frozen);
+                }
+            }
+            for t in targets {
+                if let PeerSend::Wire { slot, .. } = t {
+                    slot.signal_encoded();
                 }
             }
         } else {
@@ -278,8 +289,11 @@ impl Submitter {
                 encoder,
                 all_wire,
             } => {
+                let interval;
                 if all_wire && !self.xpub_nodrop {
                     self.arena.encode_and_signal(&forwarded, encoder.as_deref());
+                    let wire_size = forwarded.byte_len() + 10;
+                    interval = (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32;
                 } else {
                     if self.xpub_nodrop {
                         while !targets_have_space(&targets) {
@@ -287,8 +301,8 @@ impl Submitter {
                         }
                     }
                     dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
+                    interval = yield_interval(targets.len());
                 }
-                let interval = yield_interval(targets.len());
                 if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
                     tokio::task::yield_now().await;
                 }
@@ -593,16 +607,23 @@ fn dispatch_to_targets(
                 } else {
                     eq.encode_auto(msg);
                 }
-                if eq.has_arena_only() {
+                if eq.has_arena_only()
+                    && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET
+                {
                     let raw = eq.uncommitted_arena();
                     for t in targets {
                         match t {
                             PeerSend::Wire { slot, .. } => {
-                                let _ = slot.try_push_pre_encoded(raw);
+                                let _ = slot.try_push_pre_encoded_no_signal(raw);
                             }
                             PeerSend::Inbox(tx) => {
                                 let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
                             }
+                        }
+                    }
+                    for t in targets {
+                        if let PeerSend::Wire { slot, .. } = t {
+                            slot.signal_encoded();
                         }
                     }
                     eq.clear_arena();
