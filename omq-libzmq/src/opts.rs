@@ -376,7 +376,7 @@ pub extern "C" fn zmq_setsockopt(
             lock_overlay!(sock_arc).handshake_ivl = if v <= 0 {
                 None
             } else {
-                Some(Duration::from_millis(v as u64 * 1000))
+                Some(Duration::from_secs(v as u64))
             };
         }
         ZMQ_MAXMSGSIZE => {
