@@ -90,6 +90,7 @@ impl EncodedQueue {
     /// `Entry::Arena`, if non-empty. Called before pushing `External`
     /// entries to preserve wire ordering.
     fn commit_arena_range(&mut self) {
+        debug_assert!(u32::try_from(self.arena.len()).is_ok());
         let end = self.arena.len() as u32;
         if end > self.arena_mark {
             self.entries.push_back(Entry::Arena {
