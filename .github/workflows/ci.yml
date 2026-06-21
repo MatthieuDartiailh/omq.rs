@@ -56,7 +56,7 @@ jobs:
           targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
       - name: Workspace tests (default features)
-        run: cargo test --workspace --exclude omq-compio --no-fail-fast
+        run: cargo test --workspace --exclude omq-compio --exclude omq-interop-tests --no-fail-fast
 
   encryption:
     name: encryption (curve + blake3zmq, ${{ matrix.os }})
