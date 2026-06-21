@@ -55,6 +55,26 @@ impl tokio::io::AsyncWrite for WsTransport {
         }
     }
 
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => std::pin::Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Tls(s) => std::pin::Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::TlsServer(s) => std::pin::Pin::new(s).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(s) => s.is_write_vectored(),
+            Self::Tls(s) => s.is_write_vectored(),
+            Self::TlsServer(s) => s.is_write_vectored(),
+        }
+    }
+
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

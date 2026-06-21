@@ -90,18 +90,29 @@ impl FanOutArena {
     }
 
     fn drain_to(&self, targets: &[PeerSend], chunks: &mut Vec<Bytes>) {
-        chunks.clear();
-        {
-            let mut eq = self.eq.lock().unwrap();
-            eq.drain_into_vec(chunks, 1024);
+        let mut eq = self.eq.lock().unwrap();
+        if eq.is_empty() {
             self.pending.store(false, Ordering::Relaxed);
-        }
-        if chunks.is_empty() {
             return;
         }
-        for t in targets {
-            if let PeerSend::Wire { slot, .. } = t {
-                let _ = slot.try_push_encoded(chunks);
+        if eq.has_arena_only() {
+            let frozen = eq.take_arena_bytes();
+            self.pending.store(false, Ordering::Relaxed);
+            drop(eq);
+            for t in targets {
+                if let PeerSend::Wire { slot, .. } = t {
+                    let _ = slot.try_push_pre_encoded(&frozen);
+                }
+            }
+        } else {
+            chunks.clear();
+            eq.drain_into_vec(chunks, 1024);
+            self.pending.store(false, Ordering::Relaxed);
+            drop(eq);
+            for t in targets {
+                if let PeerSend::Wire { slot, .. } = t {
+                    let _ = slot.try_push_encoded(chunks);
+                }
             }
         }
     }
@@ -582,22 +593,37 @@ fn dispatch_to_targets(
                 } else {
                     eq.encode_auto(msg);
                 }
-                CHUNKS.with(|drain| {
-                    let chunks = &mut *drain.borrow_mut();
-                    chunks.clear();
-                    eq.drain_into_vec(chunks, 1024);
+                if eq.has_arena_only() {
+                    let raw = eq.uncommitted_arena();
                     for t in targets {
                         match t {
                             PeerSend::Wire { slot, .. } => {
-                                let _ = slot.try_push_encoded(chunks);
+                                let _ = slot.try_push_pre_encoded(raw);
                             }
                             PeerSend::Inbox(tx) => {
                                 let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
                             }
                         }
                     }
-                    chunks.clear();
-                });
+                    eq.clear_arena();
+                } else {
+                    CHUNKS.with(|drain| {
+                        let chunks = &mut *drain.borrow_mut();
+                        chunks.clear();
+                        eq.drain_into_vec(chunks, 1024);
+                        for t in targets {
+                            match t {
+                                PeerSend::Wire { slot, .. } => {
+                                    let _ = slot.try_push_encoded(chunks);
+                                }
+                                PeerSend::Inbox(tx) => {
+                                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
+                                }
+                            }
+                        }
+                        chunks.clear();
+                    });
+                }
             });
         }
     }
