@@ -291,9 +291,12 @@ crate must be configured as a trusted publisher on crates.io.
 4. **Merge the release PR.** release-plz tags and publishes to
    crates.io automatically.
 
-5. **pyomq** (if changed): bump version in
-   `bindings/pyomq/Cargo.toml` and `bindings/pyomq/pyproject.toml`,
-   push a `pyomq-v*` tag to trigger the wheel build/publish workflow.
+5. **pyomq** (if changed): bump version in **both**
+   `bindings/pyomq/Cargo.toml` and `bindings/pyomq/pyproject.toml`
+   (maturin reads `pyproject.toml` for the wheel version), run
+   `cargo update -p pyomq` to update `Cargo.lock`, add a changelog
+   entry in `bindings/pyomq/CHANGELOG.md`, then push a `pyomq-v*`
+   tag to trigger the wheel build/publish workflow.
 
 ### Crates to check
 
