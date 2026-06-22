@@ -81,6 +81,21 @@ impl EncodedQueue {
         self.total_bytes = 0;
     }
 
+    pub fn has_arena_only(&self) -> bool {
+        self.entries.is_empty() && !self.arena.is_empty()
+    }
+
+    pub fn uncommitted_arena(&self) -> &[u8] {
+        &self.arena[self.arena_mark as usize..]
+    }
+
+    pub fn take_arena_bytes(&mut self) -> Bytes {
+        let frozen = self.arena.split().freeze();
+        self.arena_mark = 0;
+        self.total_bytes = 0;
+        frozen
+    }
+
     pub fn push_pre_encoded(&mut self, data: &[u8]) {
         self.arena.extend_from_slice(data);
         self.total_bytes += data.len();
@@ -350,5 +365,66 @@ mod tests {
         let mut buf = Vec::new();
         eq.drain_into_vec(&mut buf, 1024);
         assert!(eq.is_empty());
+    }
+
+    #[test]
+    fn has_arena_only_small_message() {
+        let mut eq = EncodedQueue::one_shot();
+        assert!(!eq.has_arena_only());
+
+        let msg = Message::from(Bytes::from_static(&[0xAA; 64]));
+        eq.encode_auto(&msg);
+        assert!(eq.has_arena_only());
+
+        let raw = eq.uncommitted_arena();
+        assert_eq!(raw.len(), eq.total_bytes());
+        assert!(!raw.is_empty());
+    }
+
+    #[test]
+    fn has_arena_only_false_for_gather() {
+        let mut eq = EncodedQueue::one_shot();
+        let large = Message::from(Bytes::from(vec![0xBB; 128 * 1024]));
+        eq.encode_auto(&large);
+        assert!(!eq.has_arena_only());
+    }
+
+    #[test]
+    fn take_arena_bytes_round_trip() {
+        let mut eq = EncodedQueue::one_shot();
+        let msg = Message::from(Bytes::from_static(&[0xCC; 32]));
+        eq.encode_auto(&msg);
+        assert!(eq.has_arena_only());
+
+        let frozen = eq.take_arena_bytes();
+        assert!(!frozen.is_empty());
+        assert!(eq.is_empty());
+        assert_eq!(eq.total_bytes(), 0);
+
+        let mut eq2 = EncodedQueue::new();
+        eq2.push_pre_encoded(&frozen);
+        let mut buf = Vec::new();
+        eq2.drain_into_vec(&mut buf, 1024);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf[0], frozen);
+    }
+
+    #[test]
+    fn arena_only_matches_drain_output() {
+        let mut eq1 = EncodedQueue::one_shot();
+        let mut eq2 = EncodedQueue::one_shot();
+        let msg = Message::from(Bytes::from_static(&[0xDD; 100]));
+
+        eq1.encode_auto(&msg);
+        eq2.encode_auto(&msg);
+
+        let raw = eq1.uncommitted_arena().to_vec();
+        eq1.clear_arena();
+
+        let mut chunks = Vec::new();
+        eq2.drain_into_vec(&mut chunks, 1024);
+
+        let drained: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
+        assert_eq!(raw, drained);
     }
 }

@@ -42,13 +42,17 @@ impl Transport for IpcTransport {
     }
 
     async fn connect(endpoint: &Endpoint) -> Result<Self::Stream> {
-        match endpoint {
-            Endpoint::Ipc(IpcPath::Filesystem(p)) => Ok(UnixStream::connect(p).await?),
-            Endpoint::Ipc(IpcPath::Abstract(name)) => connect_abstract(name),
-            other => Err(Error::InvalidEndpoint(format!(
-                "ipc transport got non-ipc endpoint: {other}"
-            ))),
-        }
+        let stream = match endpoint {
+            Endpoint::Ipc(IpcPath::Filesystem(p)) => UnixStream::connect(p).await?,
+            Endpoint::Ipc(IpcPath::Abstract(name)) => connect_abstract(name)?,
+            other => {
+                return Err(Error::InvalidEndpoint(format!(
+                    "ipc transport got non-ipc endpoint: {other}"
+                )));
+            }
+        };
+        tune_unix_buffers(&stream);
+        Ok(stream)
     }
 }
 
@@ -111,6 +115,32 @@ fn connect_abstract(_name: &str) -> Result<UnixStream> {
     ))
 }
 
+const IPC_BUF_SIZE: u32 = 1024 * 1024;
+
+fn tune_unix_buffers(stream: &UnixStream) {
+    use std::os::fd::AsRawFd;
+    let fd = stream.as_raw_fd();
+    // SAFETY: fd is valid, SOL_SOCKET + SO_SNDBUF/SO_RCVBUF are
+    // standard. The kernel clamps to wmem_max / rmem_max silently.
+    let val = IPC_BUF_SIZE;
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&raw const val).cast::<libc::c_void>(),
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&raw const val).cast::<libc::c_void>(),
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        );
+    }
+}
+
 /// Bound IPC listener. For filesystem-path binds, removes the socket
 /// file on drop; abstract-namespace binds carry no filesystem entry
 /// and need no cleanup.
@@ -133,8 +163,7 @@ impl Listener for IpcListener {
 
     async fn accept(&mut self) -> Result<(Self::Stream, PeerIdent)> {
         let (stream, _addr) = self.inner.accept().await?;
-        // Accepted peer addresses on Unix are usually anonymous; surface
-        // the bound address for monitor events instead.
+        tune_unix_buffers(&stream);
         Ok((stream, self.ident.clone()))
     }
 }

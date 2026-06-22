@@ -7,6 +7,7 @@
 //! entry points the socket actor calls from its bind / dial paths.
 
 use std::io;
+use std::io::IoSlice;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -85,6 +86,30 @@ impl AsyncWrite for AnyStream {
             Self::Ipc(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(unix)]
+            Self::Ipc(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "ws")]
+            Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Tcp(s) => s.is_write_vectored(),
+            #[cfg(unix)]
+            Self::Ipc(s) => s.is_write_vectored(),
+            #[cfg(feature = "ws")]
+            Self::Ws(s) => s.is_write_vectored(),
         }
     }
 
@@ -340,3 +365,46 @@ pub(super) fn peer_ident_socket_addr(ident: &PeerIdent) -> Option<std::net::Sock
 }
 
 pub(super) use omq_proto::message::generated_identity;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWrite;
+
+    #[test]
+    fn any_stream_tcp_reports_write_vectored() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            assert!(tcp.is_write_vectored());
+            let any = AnyStream::Tcp(tcp);
+            assert!(any.is_write_vectored());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn any_stream_ipc_reports_write_vectored() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = std::env::temp_dir();
+            let path = dir.join(format!("omq-test-writev-{}.sock", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let client = UnixStream::connect(&path).await.unwrap();
+            let _ = listener.accept().await.unwrap();
+            assert!(client.is_write_vectored());
+            let any = AnyStream::Ipc(client);
+            assert!(any.is_write_vectored());
+            let _ = std::fs::remove_file(&path);
+        });
+    }
+}

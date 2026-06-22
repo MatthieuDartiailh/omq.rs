@@ -523,6 +523,7 @@ where
             .unwrap_or(0);
         let hb_sleep = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX));
         tokio::pin!(hb_sleep);
+        let mut hb_ping_sent = false;
         loop {
             if handshake_deadline.is_some() && codec.is_ready() {
                 handshake_deadline = None;
@@ -679,22 +680,13 @@ where
                     }
                 },
 
-                // Wire-slot arm: the socket handle encoded ZMTP frames
-                // into the per-peer PeerWireSlot. Drain and write
-                // directly, bypassing the local EncodedQueue.
-                () = async {
-                    wire_slot.as_ref().unwrap().data_ready.notified().await;
-                }, if wire_slot.as_ref().is_some_and(|s| {
-                    s.handshake_done.load(Ordering::Acquire)
-                }) => {
-                    drain_wire_slot(
-                        wire_slot.as_ref().unwrap(), &mut drain_buf, &mut writer,
-                    ).await?;
-                },
-
                 // Shared-queue arm: batch-encodes up to
                 // SHARED_MAX_BATCH_MSGS messages per wakeup then flushes
                 // them all in one or a few write_vectored calls.
+                //
+                // Higher priority than wire_slot: messages queued before
+                // the wire-slot fast path was enabled (pre-handshake or
+                // post-reconnect) must drain first to preserve ordering.
                 msg = async {
                     if let Some(ref rx) = shared_msg_rx {
                         rx.recv().await
@@ -742,11 +734,29 @@ where
                     }
                 },
 
+                // Wire-slot arm: the socket handle encoded ZMTP frames
+                // into the per-peer PeerWireSlot. Drain and write
+                // directly, bypassing the local EncodedQueue.
+                () = async {
+                    wire_slot.as_ref().unwrap().data_ready.notified().await;
+                }, if wire_slot.as_ref().is_some_and(|s| {
+                    s.handshake_done.load(Ordering::Acquire)
+                }) => {
+                    drain_wire_slot(
+                        wire_slot.as_ref().unwrap(), &mut drain_buf, &mut writer,
+                    ).await?;
+                },
+
                 // Heartbeat tick: enabled only post-handshake when
                 // `heartbeat_interval` is set. Uses a persistent pinned
                 // sleep so the safety-net timeout doesn't reset it.
+                //
+                // Only check the timeout after at least one PING has
+                // been sent: on unidirectional sockets (PUSH, PUB) the
+                // peer has no data to send, so last_input stays at
+                // handshake time until the first PONG arrives.
                 () = &mut hb_sleep, if hb_enabled => {
-                    if last_input.elapsed() > hb_timeout {
+                    if hb_ping_sent && last_input.elapsed() > hb_timeout {
                         return Err(Error::Timeout);
                     }
                     let ping = Command::Ping {
@@ -754,6 +764,7 @@ where
                         context: Bytes::new(),
                     };
                     let _ = codec.send_command(&ping);
+                    hb_ping_sent = true;
                     hb_sleep.as_mut().reset(
                         tokio::time::Instant::now() + hb_interval.unwrap(),
                     );
