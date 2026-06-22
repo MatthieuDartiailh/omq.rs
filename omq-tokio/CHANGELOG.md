@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-06-22
+
+### Fixed
+
+- Wire-slot drain stall under sustained throughput.
+- `FanOut` arena path bypassing `xpub_nodrop` backpressure.
+- REQ send/recv alternation TOCTOU under concurrent senders.
+- Driver select priority: heartbeat first-tick timeout fired immediately instead of after the configured interval.
+
+### Performance
+
+- Fan-out: adaptive yield interval scales with peer count and copy budget.
+- Fan-out: batched `data_ready` signals reduce per-peer wakeup overhead.
+- Fan-out: writev delegation to `EncodedQueue::write_vectored`, arena-only dispatch.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.17.3.
+
 ## [0.14.3] - 2026-06-17
 
 ### Fixed

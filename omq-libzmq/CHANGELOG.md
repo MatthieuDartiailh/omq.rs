@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-06-22
+
+### Fixed
+
+- Heap buffer overflow in inproc bypass `WRAP_SENTINEL` write.
+- `write_string` now returns `EINVAL` when the caller buffer is too small instead of silently truncating.
+- `send_fd` eventfd initialized with 0 instead of `DEFAULT_HWM`.
+
+### Changed
+
+- Remove unsound `unsafe impl Sync for OmqMsgRepr`.
+- Narrow `parse_endpoint_args`/`parse_group_args` lifetime from `'static` to `'a`.
+- Use `Duration::from_secs` for `ZMQ_HANDSHAKE_IVL`.
+- *(deps)* Bump `omq-tokio` to 0.14.4.
+
 ## [0.4.6] - 2026-06-17
 
 ### Added
