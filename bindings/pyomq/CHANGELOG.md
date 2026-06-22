@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-06-22
+
+### Fixed
+
+- `pyproject.toml` version was not bumped in 0.12.4, causing wheels to publish as 0.12.3.
+
 ## [0.12.4] - 2026-06-22
 
 ### Changed
