@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-06-22
+
+### Fixed
+
+- CURVE handshake nonce counter overflow now returns `Result` instead of panicking.
+
+### Changed
+
+- `EncodedQueue`: arena-only dispatch path for fan-out, writev delegation to `EncodedQueue::write_vectored`, IPC send/recv buffer sizing.
+- Use `MaybeUninit::zeroed()` for inline message buffers.
+- *(deps)* Upgrade `lz4rip` from 0.5.2 to 0.8.
+
 ## [0.17.2] - 2026-06-17
 
 ### Added
