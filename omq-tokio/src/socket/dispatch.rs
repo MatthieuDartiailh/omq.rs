@@ -251,11 +251,12 @@ pub(super) async fn bind_any(
     }
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
-        let (host, port) = match endpoint {
+        let plain = endpoint.underlying_ws();
+        let (host, port) = match &plain {
             Endpoint::Ws { host, port, .. } | Endpoint::Wss { host, port, .. } => (host, *port),
             _ => unreachable!(),
         };
-        let tls_acc = if matches!(endpoint, Endpoint::Wss { .. }) {
+        let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
             let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
                 Error::Protocol("wss:// bind requires server_cert_pem in WssTls options".into())
             })?;
@@ -301,7 +302,8 @@ pub(super) async fn connect_any(
     }
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
-        let (host, port, path) = match endpoint {
+        let plain = endpoint.underlying_ws();
+        let (host, port, path) = match &plain {
             Endpoint::Ws {
                 host, port, path, ..
             }
@@ -314,7 +316,7 @@ pub(super) async fn connect_any(
             host,
             port,
             path,
-            matches!(endpoint, Endpoint::Wss { .. }),
+            matches!(plain, Endpoint::Wss { .. }),
             accept_invalid_certs,
             mechanism,
         )

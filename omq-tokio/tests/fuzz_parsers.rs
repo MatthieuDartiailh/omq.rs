@@ -389,6 +389,173 @@ fn fuzz_lz4_decode() {
     }
 }
 
+/// Random strings fed to `Endpoint::from_str()` — must never panic.
+#[test]
+fn fuzz_endpoint_parse() {
+    use omq_tokio::Endpoint;
+    use std::str::FromStr;
+    let mut rng = rng();
+    let schemes = [
+        "tcp", "ipc", "inproc", "udp", "ws", "wss", "lz4+tcp", "lz4+ws", "lz4+wss", "bogus", "",
+    ];
+    for i in 0..iters() / 2 {
+        let input = if rng.random_range(0..4) == 0 {
+            let scheme = schemes[rng.random_range(0..schemes.len())];
+            let tail_len = rng.random_range(0..128);
+            let tail: String = (0..tail_len)
+                .map(|_| rng.random_range(0x20..0x7f_u8) as char)
+                .collect();
+            format!("{scheme}://{tail}")
+        } else {
+            let len = rng.random_range(0..256);
+            (0..len)
+                .map(|_| rng.random_range(0x20..0x7f_u8) as char)
+                .collect()
+        };
+        let _ = Endpoint::from_str(&input);
+        if i % 100_000 == 0 {
+            eprintln!("endpoint_parse iter {i}");
+        }
+    }
+}
+
+/// Valid endpoints must survive display → parse roundtrip.
+#[test]
+fn fuzz_endpoint_roundtrip() {
+    use omq_tokio::Endpoint;
+    use omq_tokio::endpoint::Host;
+    use std::str::FromStr;
+    let mut rng = rng();
+    for i in 0..iters() / 4 {
+        let host = match rng.random_range(0..3) {
+            0 => Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                rng.random(),
+                rng.random(),
+                rng.random(),
+                rng.random(),
+            ))),
+            1 => Host::Ip(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+                rng.random(),
+                rng.random(),
+                rng.random(),
+                rng.random(),
+                rng.random(),
+                rng.random(),
+                rng.random(),
+                rng.random(),
+            ))),
+            _ => Host::Name("example.com".to_string()),
+        };
+        let port: u16 = rng.random_range(1..=65535);
+        let path = format!("/{}", rng.random_range(0..100));
+        let ep = match rng.random_range(0..10) {
+            0 => Endpoint::Tcp {
+                host: host.clone(),
+                port,
+            },
+            #[cfg(feature = "lz4")]
+            1 => Endpoint::Lz4Tcp {
+                host: host.clone(),
+                port,
+            },
+            #[cfg(feature = "ws")]
+            3 => Endpoint::Ws {
+                host: host.clone(),
+                port,
+                path: path.clone(),
+            },
+            #[cfg(feature = "ws")]
+            4 => Endpoint::Wss {
+                host: host.clone(),
+                port,
+                path: path.clone(),
+            },
+            #[cfg(all(feature = "lz4", feature = "ws"))]
+            5 => Endpoint::Lz4Ws {
+                host: host.clone(),
+                port,
+                path: path.clone(),
+            },
+            #[cfg(all(feature = "lz4", feature = "ws"))]
+            6 => Endpoint::Lz4Wss {
+                host: host.clone(),
+                port,
+                path: path.clone(),
+            },
+            _ => Endpoint::Tcp {
+                host: host.clone(),
+                port,
+            },
+        };
+        let s = ep.to_string();
+        let parsed = Endpoint::from_str(&s).unwrap_or_else(|e| {
+            panic!("failed to parse roundtrip of {ep:?} → {s:?}: {e}");
+        });
+        assert_eq!(ep, parsed, "roundtrip mismatch for {s:?}");
+        if i % 50_000 == 0 {
+            eprintln!("endpoint_roundtrip iter {i}");
+        }
+    }
+}
+
+/// Compression transform encode→decode roundtrip with random messages.
+#[cfg(all(feature = "lz4", feature = "ws"))]
+#[test]
+fn fuzz_compress_ws_roundtrip() {
+    use omq_tokio::Endpoint;
+    use omq_tokio::endpoint::Host;
+    use omq_tokio::options::Options;
+    use omq_tokio::proto::transform::MessageEncoder;
+    let mut rng = rng();
+    let localhost = Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let endpoints: Vec<Endpoint> = vec![
+        Endpoint::Lz4Ws {
+            host: localhost.clone(),
+            port: 1,
+            path: "/".into(),
+        },
+        Endpoint::Lz4Wss {
+            host: localhost.clone(),
+            port: 1,
+            path: "/".into(),
+        },
+    ];
+    let opts = Options::default();
+    for i in 0..iters() / 4 {
+        let ep = &endpoints[rng.random_range(0..endpoints.len())];
+        let (mut enc, mut dec) =
+            MessageEncoder::for_endpoint(ep, &opts).expect("transform for compressed-ws");
+        let n_parts = rng.random_range(1..=4);
+        let mut parts: Vec<Bytes> = Vec::new();
+        for _ in 0..n_parts {
+            let len = rng.random_range(0..2048);
+            let part: Vec<u8> = (0..len).map(|_| rng.random()).collect();
+            parts.push(Bytes::from(part));
+        }
+        let msg = Message::multipart(parts.clone());
+        let wires = enc.encode(&msg).expect("encode failed");
+        let mut decoded_parts: Vec<Bytes> = Vec::new();
+        for wire in wires {
+            if let Some(decoded) = dec.decode(wire).expect("decode failed") {
+                for j in 0..decoded.len() {
+                    decoded_parts.push(decoded.part_bytes(j).unwrap().clone());
+                }
+            }
+        }
+        assert_eq!(
+            parts.len(),
+            decoded_parts.len(),
+            "part count mismatch at iter {i}"
+        );
+        for (j, (orig, got)) in parts.iter().zip(&decoded_parts).enumerate() {
+            assert_eq!(orig, got, "part {j} mismatch at iter {i}");
+        }
+        if i % 50_000 == 0 {
+            eprintln!("compress_ws_roundtrip iter {i}");
+        }
+    }
+}
+
 // ================================================================
 // Tier 2: RFC compliance + adversarial structured inputs
 // ================================================================

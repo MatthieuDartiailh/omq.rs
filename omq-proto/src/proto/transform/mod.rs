@@ -82,33 +82,38 @@ impl MessageEncoder {
     pub fn for_endpoint(endpoint: &Endpoint, options: &Options) -> Option<(Self, MessageDecoder)> {
         match endpoint {
             #[cfg(feature = "lz4")]
-            Endpoint::Lz4Tcp { .. } => {
-                use lz4::{Lz4Decoder, Lz4Encoder};
-                let mut enc = if let Some(d) = options.compression_dict.clone() {
-                    Lz4Encoder::with_send_dict(d)
-                        .expect("compression_dict validated at Options::compression_dict")
-                } else {
-                    let mut e = Lz4Encoder::new();
-                    if options.compression_auto_train {
-                        e = e.with_auto_train();
-                    }
-                    if let Some(c) = options.compression_dict_capacity {
-                        e = e.with_dict_capacity(c);
-                    }
-                    e
-                }
-                .with_max_message_size(options.max_message_size);
-                if let Some(t) = options.compression_threshold {
-                    enc = enc.with_threshold(t);
-                }
-                let mut dec = Lz4Decoder::new().with_max_message_size(options.max_message_size);
-                if let Some(m) = options.max_recv_dict_size {
-                    dec = dec.with_max_recv_dict_size(m);
-                }
-                Some((MessageEncoder::Lz4(Box::new(enc)), MessageDecoder::Lz4(dec)))
-            }
+            Endpoint::Lz4Tcp { .. } => Some(Self::build_lz4(options)),
+            #[cfg(all(feature = "lz4", feature = "ws"))]
+            Endpoint::Lz4Ws { .. } | Endpoint::Lz4Wss { .. } => Some(Self::build_lz4(options)),
             _ => None,
         }
+    }
+
+    #[cfg(feature = "lz4")]
+    fn build_lz4(options: &Options) -> (Self, MessageDecoder) {
+        use lz4::{Lz4Decoder, Lz4Encoder};
+        let mut enc = if let Some(d) = options.compression_dict.clone() {
+            Lz4Encoder::with_send_dict(d)
+                .expect("compression_dict validated at Options::compression_dict")
+        } else {
+            let mut e = Lz4Encoder::new();
+            if options.compression_auto_train {
+                e = e.with_auto_train();
+            }
+            if let Some(c) = options.compression_dict_capacity {
+                e = e.with_dict_capacity(c);
+            }
+            e
+        }
+        .with_max_message_size(options.max_message_size);
+        if let Some(t) = options.compression_threshold {
+            enc = enc.with_threshold(t);
+        }
+        let mut dec = Lz4Decoder::new().with_max_message_size(options.max_message_size);
+        if let Some(m) = options.max_recv_dict_size {
+            dec = dec.with_max_recv_dict_size(m);
+        }
+        (MessageEncoder::Lz4(Box::new(enc)), MessageDecoder::Lz4(dec))
     }
 
     /// Transform an outbound user message into 1+ wire messages.

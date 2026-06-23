@@ -271,7 +271,8 @@ impl SocketDriver {
                 AnyListener::Ws(l) => l.local_addr,
                 _ => unreachable!(),
             };
-            match &endpoint {
+            let plain = endpoint.underlying_ws();
+            let resolved_plain = match &plain {
                 Endpoint::Ws { path, .. } => Endpoint::Ws {
                     host: omq_proto::endpoint::Host::Ip(local.ip()),
                     port: local.port(),
@@ -283,7 +284,8 @@ impl SocketDriver {
                     path: path.clone(),
                 },
                 _ => unreachable!(),
-            }
+            };
+            endpoint.rewrap_ws(resolved_plain)
         } else {
             endpoint.rewrap_tcp(listener.local_endpoint().clone())
         };

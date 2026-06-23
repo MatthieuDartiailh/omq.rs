@@ -313,7 +313,8 @@ impl Socket {
     async fn bind_ws(&self, endpoint: Endpoint) -> Result<Endpoint> {
         use crate::transport::ws as ws_transport;
 
-        let tls_acc = if matches!(endpoint, Endpoint::Wss { .. }) {
+        let plain = endpoint.underlying_ws();
+        let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
             let cert = self
                 .inner()
                 .options
@@ -340,9 +341,9 @@ impl Socket {
         } else {
             None
         };
-        let ws_listener = ws_transport::bind(&endpoint, tls_acc).await?;
+        let ws_listener = ws_transport::bind(&plain, tls_acc).await?;
         let local = ws_listener.local_addr;
-        let resolved = match &endpoint {
+        let resolved_plain = match &plain {
             Endpoint::Ws { path, .. } => Endpoint::Ws {
                 host: omq_proto::endpoint::Host::Ip(local.ip()),
                 port: local.port(),
@@ -355,6 +356,7 @@ impl Socket {
             },
             _ => unreachable!("checked above"),
         };
+        let resolved = endpoint.rewrap_ws(resolved_plain);
         self.inner().monitor.listening(resolved.clone());
         let inner = self.inner().clone();
         let ep_for_task = resolved.clone();

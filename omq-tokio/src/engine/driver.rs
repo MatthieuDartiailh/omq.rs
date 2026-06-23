@@ -1005,7 +1005,13 @@ fn encode_msg(
             codec.ws_role(),
             Some(omq_proto::proto::connection::WsRole::Client)
         );
-        eq.encode_ws(msg, masked);
+        if let Some(enc) = encoder.as_mut() {
+            for wire in enc.encode(msg)? {
+                eq.encode_ws(&wire, masked);
+            }
+        } else {
+            eq.encode_ws(msg, masked);
+        }
         return Ok(());
     }
     if codec.has_frame_transform() {
