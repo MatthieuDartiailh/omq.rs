@@ -25,12 +25,6 @@ pub(crate) struct InprocPipe {
     sender_thread: std::sync::Mutex<Option<std::thread::Thread>>,
 }
 
-// SAFETY: InprocPipe contains only atomics, RecvNotify (which wraps either
-// a RawFd or HANDLE, both valid to Send/Sync), and Mutex<Thread>, all of which
-// are safe to send and sync across threads.
-unsafe impl Send for InprocPipe {}
-unsafe impl Sync for InprocPipe {}
-
 impl std::fmt::Debug for InprocPipe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InprocPipe")

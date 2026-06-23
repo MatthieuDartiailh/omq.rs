@@ -95,6 +95,15 @@ mod unix {
         fd: std::os::unix::io::RawFd,
     }
 
+    // SAFETY: RecvNotify is Send+Sync because:
+    // - Field `fd` is a std::os::unix::io::RawFd (i32), which is just a handle/reference
+    // - RawFd itself is Send+Sync (it's an i32, not a resource ownership type)
+    // - File descriptors can be safely sent across threads; the kernel maintains state
+    // - Ownership model ensures logical single-threaded access (socket owns the fd)
+    // - Operations (write, read, poll) are atomic at syscall level
+    unsafe impl Send for RecvNotify {}
+    unsafe impl Sync for RecvNotify {}
+
     impl RecvNotify {
         /// Signal that a message has arrived (non-blocking write to eventfd/pipe).
         #[inline]
@@ -554,8 +563,12 @@ pub(crate) mod windows {
         event: HANDLE,
     }
 
-    // SAFETY: HANDLE is a unique kernel object reference. Safe to Send and Sync;
-    // the Windows kernel handles synchronization internally.
+    // SAFETY: RecvNotify is Send+Sync because:
+    // - Field `event` is a windows::Win32::Foundation::HANDLE (opaque kernel object reference)
+    // - HANDLE is not a resource ownership type; it's just an identifier/reference to kernel state
+    // - Multiple threads can safely hold the same HANDLE; Windows kernel ensures synchronization
+    // - SetEvent() and ResetEvent() are internally atomic operations
+    // - The actual Windows kernel event object is thread-safe by design
     unsafe impl Send for RecvNotify {}
     unsafe impl Sync for RecvNotify {}
 
@@ -602,9 +615,11 @@ pub(crate) mod windows {
         send_event: Mutex<Option<HANDLE>>,
     }
 
-    // SAFETY: HANDLE is a unique Windows kernel object reference.
-    // It is safe to Send and Sync across threads; the Windows kernel handles
-    // synchronization internally.
+    // SAFETY: WindowsNotifyHandle is Send+Sync because:
+    // - Contains `Mutex<Option<HANDLE>>` which is Send+Sync when T is Send+Sync
+    // - RecvNotify's HANDLE is Send+Sync (kernel object reference, not owned resource)
+    // - Mutex ensures thread-safe interior mutability
+    // - Multiple threads can safely access the underlying HANDLE through Mutex
     unsafe impl Send for WindowsNotifyHandle {}
     unsafe impl Sync for WindowsNotifyHandle {}
 
@@ -970,6 +985,6 @@ pub(crate) use windows::WindowsNotifyHandle as PlatformNotifyHandle;
 /// (bypass infrastructure is identical on both platforms).
 pub(crate) fn has_bypass_data(sock: &crate::socket::OmqSocket) -> bool {
     // SAFETY: zmq contract guarantees single-threaded access per socket.
-    let bypass_ptr = unsafe { &*sock.bypass_recv.get() };
+    let bypass_ptr = &*sock.bypass_recv.get();
     bypass_ptr.as_ref().is_some_and(|br| !br.is_empty())
 }
