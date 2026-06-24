@@ -34,13 +34,12 @@ pub use connection::{Connection, ConnectionConfig, Event, Role};
 pub use frame::{MAX_FRAME_HEADER_LEN, MAX_SHORT_FRAME_SIZE};
 pub use greeting::{Greeting, MechanismName, VERSION_SNIFF_LEN, ZMTP_MAJOR, ZMTP_MINOR};
 
-/// All 19 ZMTP socket types (11 standard + 8 draft).
+/// All 19 ZMTP socket types.
 ///
 /// The value carries the wire-level ASCII name returned by [`Self::as_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SocketType {
-    // Standard
     Req,
     Rep,
     Pub,
@@ -52,7 +51,6 @@ pub enum SocketType {
     Dealer,
     Router,
     Pair,
-    // Draft
     Client,
     Server,
     Radio,
@@ -89,22 +87,6 @@ impl SocketType {
             Self::Peer => "PEER",
             Self::Stream => "STREAM",
         }
-    }
-
-    /// Whether the type is a draft RFC (CLIENT/SERVER, RADIO/DISH, etc.).
-    pub const fn is_draft(self) -> bool {
-        matches!(
-            self,
-            Self::Client
-                | Self::Server
-                | Self::Radio
-                | Self::Dish
-                | Self::Scatter
-                | Self::Gather
-                | Self::Channel
-                | Self::Peer
-                | Self::Stream
-        )
     }
 
     /// Parse a wire-level socket-type name. Case-sensitive.
@@ -233,15 +215,6 @@ mod tests {
         assert!(is_compatible(Scatter, Gather));
         assert!(is_compatible(Channel, Channel));
         assert!(is_compatible(Peer, Peer));
-    }
-
-    #[test]
-    fn draft_flag() {
-        assert!(!SocketType::Req.is_draft());
-        assert!(!SocketType::Pair.is_draft());
-        assert!(SocketType::Radio.is_draft());
-        assert!(SocketType::Peer.is_draft());
-        assert!(SocketType::Stream.is_draft());
     }
 
     #[test]
