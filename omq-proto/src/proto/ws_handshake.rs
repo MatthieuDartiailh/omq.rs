@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn validate_accept_works() {
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
-        assert!(validate_ws_accept(key, "SMKhevRK+OBO0OqLVjVnnQFNHvc="));
+        assert!(validate_ws_accept(key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
         assert!(!validate_ws_accept(key, "wrong"));
     }
 

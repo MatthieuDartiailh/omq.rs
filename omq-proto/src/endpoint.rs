@@ -441,7 +441,7 @@ fn parse_ws(rest: &str, tls: bool) -> Result<Endpoint> {
     }
 }
 
-#[cfg(feature = "ws")]
+#[cfg(all(feature = "lz4", feature = "ws"))]
 fn parse_compressed_ws(
     rest: &str,
     tls: bool,

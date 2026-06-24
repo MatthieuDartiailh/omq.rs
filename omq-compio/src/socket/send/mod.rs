@@ -118,6 +118,11 @@ pub(super) fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Re
         return Ok(false);
     }
     for wire in &wires {
+        #[cfg(feature = "ws")]
+        if state.is_ws {
+            eq.encode_ws(wire, state.ws_masked);
+            continue;
+        }
         eq.encode_auto(wire);
     }
     drop(eq);

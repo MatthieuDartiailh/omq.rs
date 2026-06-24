@@ -226,7 +226,7 @@ async fn batch_encode(
         }
     }
     if use_pipeline {
-        drain_pipeline(pipeline, pool, eq).await?;
+        drain_pipeline(pipeline, pool, codec, eq).await?;
     }
     Ok(count)
 }
@@ -621,7 +621,7 @@ where
                     use futures::StreamExt;
                     offload_pipeline.next().await
                 }, if !offload_pipeline.is_empty() => {
-                    drain_offload_result(pool_enc, frames, compression_pool.as_ref(), &mut eq)?;
+                    drain_offload_result(pool_enc, frames, compression_pool.as_ref(), &codec, &mut eq)?;
                     flush_all(&mut writer, &mut eq, &mut drain_buf, &mut codec).await?;
                 }
 
@@ -958,25 +958,40 @@ fn submit_to_pipeline(
 async fn drain_pipeline(
     pipeline: &mut OffloadPipeline,
     pool: Option<&Arc<CompressionPool>>,
+    codec: &Connection,
     eq: &mut EncodedQueue,
 ) -> Result<()> {
     use futures::StreamExt;
     while let Some((pool_enc, frames)) = pipeline.next().await {
-        drain_offload_result(pool_enc, frames, pool, eq)?;
+        drain_offload_result(pool_enc, frames, pool, codec, eq)?;
     }
     Ok(())
 }
 
+#[allow(unused_variables)]
 fn drain_offload_result(
     pool_enc: Option<MessageEncoder>,
     frames: Result<TransformedOut>,
     pool: Option<&Arc<CompressionPool>>,
+    codec: &Connection,
     eq: &mut EncodedQueue,
 ) -> Result<()> {
     if let (Some(enc), Some(pool)) = (pool_enc, pool) {
         pool.put(enc);
     }
+    #[cfg(feature = "ws")]
+    let ws = codec.is_ws().then(|| {
+        matches!(
+            codec.ws_role(),
+            Some(omq_proto::proto::connection::WsRole::Client)
+        )
+    });
     for wire in frames? {
+        #[cfg(feature = "ws")]
+        if let Some(masked) = ws {
+            eq.encode_ws(&wire, masked);
+            continue;
+        }
         eq.encode_auto(&wire);
     }
     Ok(())
