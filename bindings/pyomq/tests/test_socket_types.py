@@ -1,4 +1,4 @@
-"""Coverage for all 19 ZMTP socket types (11 standard + 8 draft).
+"""Coverage for all 19 ZMTP socket types.
 
 Each test constructs a real omq socket pair and exchanges at least one
 message. The point is not perf or edge cases - those live in the
@@ -13,7 +13,7 @@ import pytest
 
 import pyomq
 
-STANDARD = [
+ALL_TYPES = [
     pyomq.PAIR,
     pyomq.PUB,
     pyomq.SUB,
@@ -25,9 +25,7 @@ STANDARD = [
     pyomq.PUSH,
     pyomq.XPUB,
     pyomq.XSUB,
-]
-
-DRAFT = [
+    pyomq.STREAM,
     pyomq.SERVER,
     pyomq.CLIENT,
     pyomq.RADIO,
@@ -51,7 +49,7 @@ def _inproc(name: str) -> str:
     return f"inproc://socket-types-{name}-{time.monotonic_ns()}"
 
 
-@pytest.mark.parametrize("kind", STANDARD + DRAFT)
+@pytest.mark.parametrize("kind", ALL_TYPES)
 def test_construct_each_type(kind):
     """Every constant maps through Context.socket without erroring."""
     ctx = pyomq.Context()
@@ -260,3 +258,36 @@ def test_radio_dish_udp_with_groups():
 
     dish.leave(b"weather")
     radio.close(); dish.close(); ctx.term()
+
+
+def test_stream_raw_tcp():
+    """STREAM socket accepts raw TCP and echoes data back."""
+    ep = _free_tcp()
+    ctx = pyomq.Context()
+    stream = ctx.socket(pyomq.STREAM)
+    stream.bind(ep)
+    stream.setsockopt(pyomq.RCVTIMEO, 1000)
+
+    raw = stdsocket.socket(stdsocket.AF_INET, stdsocket.SOCK_STREAM)
+    host, port = ep.replace("tcp://", "").split(":")
+    raw.connect((host, int(port)))
+    raw.sendall(b"hello")
+
+    # Connect notification: [identity, b""]
+    parts = stream.recv_multipart()
+    assert len(parts) == 2
+    identity = parts[0]
+    assert len(identity) > 0
+    assert parts[1] == b""
+
+    # Data: [identity, payload]
+    parts = stream.recv_multipart()
+    assert parts == [identity, b"hello"]
+
+    # Echo back via [identity, payload]
+    stream.send_multipart([identity, b"world"])
+    echoed = raw.recv(1024)
+    assert echoed == b"world"
+
+    raw.close()
+    stream.close(); ctx.term()
