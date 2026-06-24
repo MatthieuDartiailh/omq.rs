@@ -214,6 +214,10 @@ impl Submitter {
                 cached.sole_wire = None;
                 let targets: Vec<PeerSend> = g.all_targets.to_vec();
                 cached.all_wire = targets.iter().all(|t| matches!(t, PeerSend::Wire { .. }));
+                #[cfg(feature = "ws")]
+                if cached.all_wire && targets.iter().any(PeerSend::is_ws) {
+                    cached.all_wire = false;
+                }
                 cached.all_targets = Some(Arc::new(targets));
                 cached.encoder.clone_from(&g.fan_out_encoder);
             } else {
@@ -578,13 +582,22 @@ fn dispatch_to_targets(
     msg: &Message,
     encoder: Option<&Mutex<MessageEncoder>>,
 ) {
+    use std::cell::RefCell;
+
     match targets.len() {
         0 => {}
         1 => {
             let _ = targets[0].try_encode(msg);
         }
         _ => {
-            use std::cell::RefCell;
+            #[cfg(feature = "ws")]
+            if targets.iter().any(PeerSend::is_ws) {
+                for t in targets {
+                    let _ = t.try_encode(msg);
+                }
+                return;
+            }
+
             thread_local! {
                 static ARENA: RefCell<EncodedQueue> = RefCell::new(
                     EncodedQueue::one_shot(),

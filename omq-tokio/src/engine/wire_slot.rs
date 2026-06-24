@@ -87,6 +87,11 @@ impl PeerWireSlot {
         })
     }
 
+    #[cfg(feature = "ws")]
+    pub(crate) fn is_ws(&self) -> bool {
+        self.is_ws
+    }
+
     pub(crate) fn try_encode(&self, msg: &Message) -> TryEncodeResult {
         if self.dead.load(Ordering::Acquire) {
             return TryEncodeResult::Dead;
