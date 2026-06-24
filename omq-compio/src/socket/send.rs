@@ -53,6 +53,8 @@ struct PeerSelection {
 /// step-3 pass — no spurious wakeup needed.
 const DIRECT_CAP: usize = 512 * 1024;
 const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
+const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
+const FAN_OUT_ARENA_COPY_MAX: usize = 256;
 
 fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
     // Crypto connections must go through the codec's send_message.
@@ -131,10 +133,7 @@ fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> 
 /// Falls back (returns `false`) when the peer uses crypto, transforms,
 /// WebSocket framing, hasn't finished the handshake, or when the
 /// queue is already borrowed or above the capacity cap.
-fn direct_push_encoded(
-    state: &DirectIoState,
-    encoded: &smallvec::SmallVec<[bytes::Bytes; 4]>,
-) -> bool {
+fn direct_push_encoded(state: &DirectIoState, encoded: &[bytes::Bytes]) -> bool {
     if state.uses_crypto || state.has_transform {
         return false;
     }
@@ -152,6 +151,35 @@ fn direct_push_encoded(
         return false;
     }
     eq.push_shared_chunks(encoded);
+    drop(eq);
+    state.signal_encoded();
+    true
+}
+
+/// Push pre-encoded ZMTP bytes (arena memcpy) directly into a peer's
+/// `EncodedQueue`. Returns `true` on success.
+///
+/// Falls back (returns `false`) when the peer uses crypto, transforms,
+/// WebSocket framing, hasn't finished the handshake, or when the
+/// queue is already borrowed or above the capacity cap.
+fn direct_push_pre_encoded(state: &DirectIoState, data: &[u8]) -> bool {
+    if state.uses_crypto || state.has_transform {
+        return false;
+    }
+    #[cfg(feature = "ws")]
+    if state.is_ws {
+        return false;
+    }
+    if !state.handshake_done.get() {
+        return false;
+    }
+    let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
+        return false;
+    };
+    if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
+        return false;
+    }
+    eq.push_pre_encoded(data);
     drop(eq);
     state.signal_encoded();
     true
@@ -614,8 +642,6 @@ impl Socket {
     }
 
     async fn send_pub_filtered(&self, msg: Message) -> Result<()> {
-        const YIELD_INTERVAL: u32 = 256;
-
         let inner = self.inner();
         let count = inner.send_count.get().wrapping_add(1);
         inner.send_count.set(count);
@@ -634,20 +660,17 @@ impl Socket {
                 return Ok(());
             }
             if targets.len() > 1 && inner.pub_sub.all_wire.get() {
-                let encoded = pre_encode_compio(&msg);
                 let dio_cache = unsafe { &*inner.pub_sub.direct_io_cache.get() };
                 if dio_cache.len() == targets.len() {
-                    for (i, state) in dio_cache.iter().enumerate() {
-                        if !direct_push_encoded(state, &encoded) {
-                            let _ = targets[i].send(msg.clone()).await;
-                        }
-                    }
+                    fan_out_encode_dispatch(dio_cache, targets, &msg);
                 } else {
                     for peer in targets {
                         let _ = peer.send(msg.clone()).await;
                     }
                 }
-                if count.is_multiple_of(YIELD_INTERVAL) {
+                let wire_size = msg.byte_len() + 10;
+                let interval = (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32;
+                if count.is_multiple_of(interval) {
                     crate::yield_now().await;
                 }
                 return Ok(());
@@ -655,7 +678,9 @@ impl Socket {
             for peer in targets {
                 let _ = peer.send(msg.clone()).await;
             }
-            if count.is_multiple_of(YIELD_INTERVAL) {
+            let wire_size = msg.byte_len() + 10;
+            let interval = (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32;
+            if count.is_multiple_of(interval) {
                 crate::yield_now().await;
             }
             return Ok(());
@@ -681,7 +706,9 @@ impl Socket {
         for peer in targets {
             let _ = peer.send(msg.clone()).await;
         }
-        if count.is_multiple_of(YIELD_INTERVAL) {
+        let wire_size = msg.byte_len() + 10;
+        let interval = (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32;
+        if count.is_multiple_of(interval) {
             crate::yield_now().await;
         }
         Ok(())
@@ -838,14 +865,9 @@ impl Socket {
         if inner.pub_sub.all_match_all.get() {
             let targets = unsafe { &*inner.pub_sub.all_match_cache.get() };
             if targets.len() > 1 && inner.pub_sub.all_wire.get() {
-                let encoded = pre_encode_compio(msg);
                 let dio_cache = unsafe { &*inner.pub_sub.direct_io_cache.get() };
                 if dio_cache.len() == targets.len() {
-                    for (i, state) in dio_cache.iter().enumerate() {
-                        if !direct_push_encoded(state, &encoded) {
-                            let _ = targets[i].try_send_immediate(msg.clone());
-                        }
-                    }
+                    try_fan_out_encode_dispatch(dio_cache, targets, msg);
                 } else {
                     for peer in targets {
                         let _ = peer.try_send_immediate(msg.clone());
@@ -930,10 +952,72 @@ impl Socket {
     }
 }
 
-fn pre_encode_compio(msg: &Message) -> std::sync::Arc<smallvec::SmallVec<[bytes::Bytes; 4]>> {
-    let mut eq = omq_proto::encoded_queue::EncodedQueue::new();
-    eq.encode_auto(msg);
-    let mut buf = Vec::new();
-    eq.drain_into_vec(&mut buf, 1024);
-    std::sync::Arc::new(smallvec::SmallVec::from_vec(buf))
+use std::cell::RefCell;
+
+use bytes::Bytes;
+use omq_proto::encoded_queue::EncodedQueue;
+
+thread_local! {
+    static FAN_OUT_EQ: RefCell<EncodedQueue> = RefCell::new(EncodedQueue::one_shot());
+    static FAN_OUT_CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
+}
+
+fn fan_out_encode_dispatch(dio_cache: &[Arc<DirectIoState>], targets: &[PeerOut], msg: &Message) {
+    FAN_OUT_EQ.with(|cell| {
+        let eq = &mut *cell.borrow_mut();
+        eq.encode_auto(msg);
+        if eq.has_arena_only() && eq.uncommitted_arena().len() <= FAN_OUT_ARENA_COPY_MAX {
+            let raw = eq.uncommitted_arena();
+            for (i, state) in dio_cache.iter().enumerate() {
+                if !direct_push_pre_encoded(state, raw) {
+                    let _ = targets[i].try_send_immediate(msg.clone());
+                }
+            }
+            eq.clear_arena();
+        } else {
+            FAN_OUT_CHUNKS.with(|drain| {
+                let chunks = &mut *drain.borrow_mut();
+                chunks.clear();
+                eq.drain_into_vec(chunks, 1024);
+                for (i, state) in dio_cache.iter().enumerate() {
+                    if !direct_push_encoded(state, chunks) {
+                        let _ = targets[i].try_send_immediate(msg.clone());
+                    }
+                }
+                chunks.clear();
+            });
+        }
+    });
+}
+
+fn try_fan_out_encode_dispatch(
+    dio_cache: &[Arc<DirectIoState>],
+    targets: &[PeerOut],
+    msg: &Message,
+) {
+    FAN_OUT_EQ.with(|cell| {
+        let eq = &mut *cell.borrow_mut();
+        eq.encode_auto(msg);
+        if eq.has_arena_only() && eq.uncommitted_arena().len() <= FAN_OUT_ARENA_COPY_MAX {
+            let raw = eq.uncommitted_arena();
+            for (i, state) in dio_cache.iter().enumerate() {
+                if !direct_push_pre_encoded(state, raw) {
+                    let _ = targets[i].try_send_immediate(msg.clone());
+                }
+            }
+            eq.clear_arena();
+        } else {
+            FAN_OUT_CHUNKS.with(|drain| {
+                let chunks = &mut *drain.borrow_mut();
+                chunks.clear();
+                eq.drain_into_vec(chunks, 1024);
+                for (i, state) in dio_cache.iter().enumerate() {
+                    if !direct_push_encoded(state, chunks) {
+                        let _ = targets[i].try_send_immediate(msg.clone());
+                    }
+                }
+                chunks.clear();
+            });
+        }
+    });
 }
