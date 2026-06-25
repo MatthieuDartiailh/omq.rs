@@ -14,6 +14,8 @@ use omq_tokio::endpoint::{Endpoint, Host};
 
 use std::os::raw::c_char;
 
+use tokio::sync::Notify;
+
 use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, fail, map_omq_err, set_errno};
 use crate::opts::SocketOverlay;
@@ -405,7 +407,6 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
 /// options, then start the recv pump. Called once on first bind/connect
 /// so that options set between `zmq_socket` and first bind/connect take
 /// effect.
-#[expect(clippy::too_many_lines)]
 pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     // CAS guarantees exactly one thread wins the materialization race.
     if sock
@@ -483,41 +484,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
             let s_recv = inner.clone();
             let recv_pump = tokio::spawn(async move {
                 while let Ok(msg) = s_recv.recv().await {
-                    let mut m = msg;
-                    loop {
-                        match pump_prod.push(m) {
-                            Ok(()) => {
-                                if let yring::FlushResult::Flushed {
-                                    was_empty: true, ..
-                                } = pump_prod.flush_and_check()
-                                {
-                                    NotifyFd::signal_recv(recv_signal_fd);
-                                }
-                                break;
-                            }
-                            Err(returned) => {
-                                m = returned;
-                                let notified = recv_space.notified();
-                                tokio::pin!(notified);
-                                notified.as_mut().enable();
-                                match pump_prod.push(m) {
-                                    Ok(()) => {
-                                        if let yring::FlushResult::Flushed {
-                                            was_empty: true, ..
-                                        } = pump_prod.flush_and_check()
-                                        {
-                                            NotifyFd::signal_recv(recv_signal_fd);
-                                        }
-                                        break;
-                                    }
-                                    Err(returned2) => {
-                                        m = returned2;
-                                        notified.await;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    push_to_pump(&mut pump_prod, msg, recv_signal_fd, &recv_space).await;
                 }
             });
 
@@ -810,42 +777,14 @@ pub extern "C" fn zmq_socket_monitor(
         pair.bind(ep).await?;
 
         tokio::spawn(async move {
-            use omq_tokio::MonitorEvent;
-            use omq_tokio::message::Message;
-
             while let Ok(ev) = stream.recv().await {
-                let (event_id, value, endpoint): (u16, i32, String) = match &ev {
-                    MonitorEvent::Listening { endpoint } => (0x0008, 0, endpoint.to_string()),
-                    MonitorEvent::Accepted { endpoint, .. } => (0x0020, 0, endpoint.to_string()),
-                    MonitorEvent::Connected { endpoint, .. } => (0x0001, 0, endpoint.to_string()),
-                    MonitorEvent::ConnectDelayed { endpoint, .. } => {
-                        (0x0002, 0, endpoint.to_string())
-                    }
-                    MonitorEvent::HandshakeSucceeded { endpoint, .. } => {
-                        (0x1000, 0, endpoint.to_string())
-                    }
-                    MonitorEvent::HandshakeFailed { endpoint, .. } => {
-                        (0x2000, 0, endpoint.to_string())
-                    }
-                    MonitorEvent::Disconnected { endpoint, .. } => {
-                        (0x0200, 0, endpoint.to_string())
-                    }
-                    MonitorEvent::Closed => (0x0400, 0, String::new()),
-                    _ => continue,
+                let Some((event_id, endpoint)) = monitor_event_to_zmq(&ev) else {
+                    continue;
                 };
-
                 if events_mask != 0xFFFF && (events_mask & event_id) == 0 {
                     continue;
                 }
-
-                let mut header = [0u8; 6];
-                header[0..2].copy_from_slice(&event_id.to_le_bytes());
-                header[2..6].copy_from_slice(&value.to_le_bytes());
-
-                let msg = Message::multipart([
-                    bytes::Bytes::copy_from_slice(&header),
-                    bytes::Bytes::copy_from_slice(endpoint.as_bytes()),
-                ]);
+                let msg = monitor_frame(event_id, 0, &endpoint);
                 if pair.send(msg).await.is_err() {
                     break;
                 }
@@ -860,4 +799,70 @@ pub extern "C" fn zmq_socket_monitor(
         Ok(Err(ref e)) => fail(map_omq_err(e)),
         Err(()) => fail(ETERM),
     }
+}
+
+async fn push_to_pump(
+    prod: &mut yring::Producer<omq_tokio::Message>,
+    msg: omq_tokio::Message,
+    signal_fd: std::os::unix::io::RawFd,
+    space: &Notify,
+) {
+    let flush_signal = |prod: &mut yring::Producer<omq_tokio::Message>| {
+        if let yring::FlushResult::Flushed {
+            was_empty: true, ..
+        } = prod.flush_and_check()
+        {
+            NotifyFd::signal_recv(signal_fd);
+        }
+    };
+    let mut m = msg;
+    loop {
+        match prod.push(m) {
+            Ok(()) => {
+                flush_signal(prod);
+                return;
+            }
+            Err(returned) => {
+                m = returned;
+                let notified = space.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                match prod.push(m) {
+                    Ok(()) => {
+                        flush_signal(prod);
+                        return;
+                    }
+                    Err(returned2) => {
+                        m = returned2;
+                        notified.await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn monitor_event_to_zmq(ev: &omq_tokio::MonitorEvent) -> Option<(u16, String)> {
+    use omq_tokio::MonitorEvent;
+    match ev {
+        MonitorEvent::Listening { endpoint } => Some((0x0008, endpoint.to_string())),
+        MonitorEvent::Accepted { endpoint, .. } => Some((0x0020, endpoint.to_string())),
+        MonitorEvent::Connected { endpoint, .. } => Some((0x0001, endpoint.to_string())),
+        MonitorEvent::ConnectDelayed { endpoint, .. } => Some((0x0002, endpoint.to_string())),
+        MonitorEvent::HandshakeSucceeded { endpoint, .. } => Some((0x1000, endpoint.to_string())),
+        MonitorEvent::HandshakeFailed { endpoint, .. } => Some((0x2000, endpoint.to_string())),
+        MonitorEvent::Disconnected { endpoint, .. } => Some((0x0200, endpoint.to_string())),
+        MonitorEvent::Closed => Some((0x0400, String::new())),
+        _ => None,
+    }
+}
+
+fn monitor_frame(event_id: u16, value: i32, endpoint: &str) -> omq_tokio::Message {
+    let mut header = [0u8; 6];
+    header[0..2].copy_from_slice(&event_id.to_le_bytes());
+    header[2..6].copy_from_slice(&value.to_le_bytes());
+    omq_tokio::Message::multipart([
+        bytes::Bytes::copy_from_slice(&header),
+        bytes::Bytes::copy_from_slice(endpoint.as_bytes()),
+    ])
 }

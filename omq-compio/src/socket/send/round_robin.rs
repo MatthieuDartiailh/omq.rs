@@ -47,19 +47,15 @@ impl Socket {
             let alive = match &p.out {
                 PeerOut::Inproc { sender, .. } => !sender.is_disconnected(),
                 PeerOut::Wire(_) => {
-                    if let Some(h) = p.direct_io.as_ref() {
-                        let guard = h.read().expect("direct_io handle lock");
-                        if guard.is_some() {
-                            if first_alive_idx.is_none() {
-                                first_alive_direct.clone_from(&guard);
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
+                    let guard = p
+                        .direct_io
+                        .as_ref()
+                        .map(|h| h.read().expect("direct_io handle lock"));
+                    let has_dio = guard.as_ref().is_some_and(|g| g.is_some());
+                    if has_dio && first_alive_idx.is_none() {
+                        first_alive_direct.clone_from(guard.as_ref().unwrap());
                     }
+                    has_dio
                 }
             };
             if alive {

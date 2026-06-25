@@ -30,7 +30,72 @@ impl From<crate::socket::OneShotLargeRecvOutcome> for StreamArmOutcome {
     }
 }
 
-#[expect(clippy::too_many_lines)]
+async fn pull_stream_accumulating(
+    state: &Arc<DirectIoState>,
+    peer_io: &SharedPeerIo,
+) -> StreamArmOutcome {
+    let mut sguard = state.recv_stream.0.lock().await;
+    if state.recv_claim.load(Ordering::Acquire) == 1 {
+        drop(sguard);
+        state.recv_state_changed.listen().await;
+        return StreamArmOutcome::ClaimFlipped;
+    }
+    match sguard.as_mut() {
+        Some(crate::socket::RecvStreamState::OneShot) => {
+            drop(sguard);
+            let payload_len = state.large_recv_pending.load(Ordering::Acquire);
+            let fd = {
+                let io = peer_io.lock().expect("peer_io");
+                io.reader.fd_clone()
+            };
+            let mut restore = crate::socket::AccRestore {
+                state,
+                buf: state.pending_acc.lock().expect("pending_acc").take(),
+            };
+            let acc = restore.buf.as_mut().expect("pending_acc");
+            if let Err(e) = fd.read_until(acc, payload_len).await {
+                return StreamArmOutcome::Err(e);
+            }
+            state.last_input_nanos.store(
+                state.hb_epoch.elapsed().as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+            let payload = restore.buf.take().unwrap().freeze();
+            state.large_recv_pending.store(0, Ordering::Release);
+            let mut io = peer_io.lock().expect("peer_io");
+            match io.codec.supply_payload(payload) {
+                Ok(()) => StreamArmOutcome::Fed,
+                Err(e) => StreamArmOutcome::ProtoErr(e),
+            }
+        }
+        Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
+            let buf = compio::runtime::FutureExt::with_cancel(
+                futures::StreamExt::next(&mut cs.stream),
+                cs.cancel.clone(),
+            )
+            .await;
+            match buf {
+                None => {
+                    *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                    StreamArmOutcome::Fed
+                }
+                Some(Err(e)) => StreamArmOutcome::Err(e),
+                Some(Ok(buf)) if buf.is_empty() => StreamArmOutcome::Eof,
+                Some(Ok(buf)) => {
+                    state.last_input_nanos.store(
+                        state.hb_epoch.elapsed().as_nanos() as u64,
+                        Ordering::Relaxed,
+                    );
+                    let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
+                    drop(buf);
+                    StreamArmOutcome::AccData(bytes)
+                }
+            }
+        }
+        None => StreamArmOutcome::Eof,
+    }
+}
+
 pub(super) async fn pull_stream(
     state: &Arc<DirectIoState>,
     peer_io: &SharedPeerIo,
@@ -42,69 +107,7 @@ pub(super) async fn pull_stream(
         return StreamArmOutcome::ClaimFlipped;
     }
     if accumulating {
-        let mut sguard = state.recv_stream.0.lock().await;
-        if state.recv_claim.load(Ordering::Acquire) == 1 {
-            drop(sguard);
-            state.recv_state_changed.listen().await;
-            return StreamArmOutcome::ClaimFlipped;
-        }
-        return match sguard.as_mut() {
-            Some(crate::socket::RecvStreamState::OneShot) => {
-                drop(sguard);
-                let payload_len = state.large_recv_pending.load(Ordering::Acquire);
-                let fd = {
-                    let io = peer_io.lock().expect("peer_io");
-                    io.reader.fd_clone()
-                };
-                let mut restore = crate::socket::AccRestore {
-                    state,
-                    buf: state.pending_acc.lock().expect("pending_acc").take(),
-                };
-                let acc = restore.buf.as_mut().expect("pending_acc");
-                if let Err(e) = fd.read_until(acc, payload_len).await {
-                    return StreamArmOutcome::Err(e);
-                }
-                state.last_input_nanos.store(
-                    state.hb_epoch.elapsed().as_nanos() as u64,
-                    Ordering::Relaxed,
-                );
-                let payload = restore.buf.take().unwrap().freeze();
-                state.large_recv_pending.store(0, Ordering::Release);
-                let mut io = peer_io.lock().expect("peer_io");
-                match io.codec.supply_payload(payload) {
-                    Ok(()) => StreamArmOutcome::Fed,
-                    Err(e) => StreamArmOutcome::ProtoErr(e),
-                }
-            }
-            Some(crate::socket::RecvStreamState::MultiShot(cs)) => {
-                let buf = compio::runtime::FutureExt::with_cancel(
-                    futures::StreamExt::next(&mut cs.stream),
-                    cs.cancel.clone(),
-                )
-                .await;
-                match buf {
-                    // Mid-accumulation: the connection is alive (we're partway
-                    // through a large message). Fall back to one-shot reads to
-                    // finish the payload.
-                    None => {
-                        *sguard = Some(crate::socket::RecvStreamState::OneShot);
-                        StreamArmOutcome::Fed
-                    }
-                    Some(Err(e)) => StreamArmOutcome::Err(e),
-                    Some(Ok(buf)) if buf.is_empty() => StreamArmOutcome::Eof,
-                    Some(Ok(buf)) => {
-                        state.last_input_nanos.store(
-                            state.hb_epoch.elapsed().as_nanos() as u64,
-                            Ordering::Relaxed,
-                        );
-                        let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
-                        drop(buf);
-                        StreamArmOutcome::AccData(bytes)
-                    }
-                }
-            }
-            None => StreamArmOutcome::Eof,
-        };
+        return pull_stream_accumulating(state, peer_io).await;
     }
     let mut sguard = state.recv_stream.0.lock().await;
     if state.recv_claim.load(Ordering::Acquire) == 1 {

@@ -577,6 +577,47 @@ fn targets_have_space(targets: &[PeerSend]) -> bool {
     })
 }
 
+fn dispatch_encoded(
+    eq: &mut EncodedQueue,
+    targets: &[PeerSend],
+    msg: &Message,
+    chunks: &mut Vec<Bytes>,
+) {
+    if eq.has_arena_only() && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET {
+        let raw = eq.uncommitted_arena();
+        for t in targets {
+            match t {
+                PeerSend::Wire { slot, .. } => {
+                    let _ = slot.try_push_pre_encoded_no_signal(raw);
+                }
+                PeerSend::Inbox(tx) => {
+                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
+                }
+            }
+        }
+        for t in targets {
+            if let PeerSend::Wire { slot, .. } = t {
+                slot.signal_encoded();
+            }
+        }
+        eq.clear_arena();
+    } else {
+        chunks.clear();
+        eq.drain_into_vec(chunks, 1024);
+        for t in targets {
+            match t {
+                PeerSend::Wire { slot, .. } => {
+                    let _ = slot.try_push_encoded(chunks);
+                }
+                PeerSend::Inbox(tx) => {
+                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
+                }
+            }
+        }
+        chunks.clear();
+    }
+}
+
 fn dispatch_to_targets(
     targets: &[PeerSend],
     msg: &Message,
@@ -620,44 +661,9 @@ fn dispatch_to_targets(
                 } else {
                     eq.encode_auto(msg);
                 }
-                if eq.has_arena_only()
-                    && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET
-                {
-                    let raw = eq.uncommitted_arena();
-                    for t in targets {
-                        match t {
-                            PeerSend::Wire { slot, .. } => {
-                                let _ = slot.try_push_pre_encoded_no_signal(raw);
-                            }
-                            PeerSend::Inbox(tx) => {
-                                let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
-                            }
-                        }
-                    }
-                    for t in targets {
-                        if let PeerSend::Wire { slot, .. } = t {
-                            slot.signal_encoded();
-                        }
-                    }
-                    eq.clear_arena();
-                } else {
-                    CHUNKS.with(|drain| {
-                        let chunks = &mut *drain.borrow_mut();
-                        chunks.clear();
-                        eq.drain_into_vec(chunks, 1024);
-                        for t in targets {
-                            match t {
-                                PeerSend::Wire { slot, .. } => {
-                                    let _ = slot.try_push_encoded(chunks);
-                                }
-                                PeerSend::Inbox(tx) => {
-                                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
-                                }
-                            }
-                        }
-                        chunks.clear();
-                    });
-                }
+                CHUNKS.with(|drain| {
+                    dispatch_encoded(eq, targets, msg, &mut drain.borrow_mut());
+                });
             });
         }
     }
