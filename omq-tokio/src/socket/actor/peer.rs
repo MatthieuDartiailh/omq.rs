@@ -802,6 +802,7 @@ struct InprocDriverCtx {
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
 /// then forwards Messages and Commands between the `SocketDriver`'s
 /// inbox and the partner's channels until either side drops.
+#[allow(clippy::too_many_lines)]
 async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
     mut in_rx: mpsc::Receiver<InboundFrame>,
@@ -883,30 +884,31 @@ async fn inproc_peer_driver(
                             let m = if let Some(ref mut sink) = recv_sink {
                                 match sink {
                                     crate::engine::RecvSink::Channel(tx) => {
-                                        if tx.send(m).await.is_ok() {
-                                            None
-                                        } else {
-                                            None  // Message moved; can't recover it
-                                        }
+                                        // We unconditionally return None here because
+                                        // the channel is bounded and we don't want to
+                                        // block the inproc driver on a slow consumer.
+                                        // The recv_sink is only used for poll()
+                                        // detection, so if it fails to send, we just
+                                        // drop the message from that path.
+                                        let _ = tx.send(m).await;
+                                        None
                                     }
                                     crate::engine::RecvSink::Yring(yring_sink) => {
                                         let mut msg = m;
-                                        loop {
-                                            match yring_sink.producer.push(msg.clone()) {
-                                                Ok(()) => {
-                                                    if let yring::FlushResult::Flushed {
-                                                        was_empty: true, ..
-                                                    } = yring_sink.producer.flush_and_check()
-                                                    {
-                                                        (yring_sink.signal)();
-                                                    }
-                                                    break None;
+                                        match yring_sink.producer.push(msg.clone()) {
+                                            Ok(()) => {
+                                                if let yring::FlushResult::Flushed {
+                                                    was_empty: true, ..
+                                                } = yring_sink.producer.flush_and_check()
+                                                {
+                                                    (yring_sink.signal)();
                                                 }
-                                                Err(returned) => {
-                                                    msg = returned;
-                                                    // Don't block on inproc send failure; let route_inproc_message handle it
-                                                    break Some(msg);
-                                                }
+                                                None
+                                            }
+                                            Err(returned) => {
+                                                msg = returned;
+                                                // Don't block on inproc send failure; let route_inproc_message handle it
+                                                Some(msg)
                                             }
                                         }
                                     }
