@@ -221,6 +221,110 @@ fn pub_tcp_tight_send_must_not_starve_listener() {
     assert_eq!(msg.part_bytes(0).unwrap().len(), 64);
 }
 
+/// Fan-out content integrity across message sizes. Exercises both the
+/// arena memcpy path (small messages <= 256B encoded) and the
+/// `Bytes::clone` path (larger messages), interleaved, with 4 subscribers
+/// verifying exact byte content on every received message.
+#[test]
+fn pub_fan_out_content_integrity_mixed_sizes() {
+    const SUBS: usize = 4;
+    let sizes: &[usize] = &[8, 64, 200, 512, 2048, 8192];
+
+    let port = Arc::new(AtomicU16::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let port_pub = port.clone();
+    let stop_pub = stop.clone();
+    let pub_thread = std::thread::spawn(move || {
+        let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
+        rt.block_on(async {
+            let pub_ = Socket::new(SocketType::Pub, Options::default());
+            let bound = pub_.bind(test_support::tcp_loopback(0)).await.unwrap();
+            let Endpoint::Tcp { port: p, .. } = bound else {
+                panic!("expected TCP endpoint");
+            };
+            port_pub.store(p, Ordering::Release);
+
+            let mut seq = 0u32;
+            while !stop_pub.load(Ordering::Relaxed) {
+                let size = sizes[seq as usize % sizes.len()];
+                let mut payload = vec![0u8; size];
+                let tag = seq.to_le_bytes();
+                payload[..4.min(size)].copy_from_slice(&tag[..4.min(size)]);
+                for (i, byte) in payload.iter_mut().enumerate().skip(4) {
+                    *byte = (i as u8).wrapping_add(seq as u8);
+                }
+                let _ = pub_.send(Message::single(payload)).await;
+                seq += 1;
+            }
+        });
+    });
+
+    let handles: Vec<_> = (0..SUBS)
+        .map(|_| {
+            let port = port.clone();
+            std::thread::spawn(move || {
+                let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
+                rt.block_on(async {
+                    while port.load(Ordering::Acquire) == 0 {
+                        compio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    let p = port.load(Ordering::Acquire);
+                    let sub = Socket::new(SocketType::Sub, Options::default());
+                    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+                    sub.connect(test_support::tcp_loopback(p)).await.unwrap();
+
+                    let mut received = 0usize;
+                    let mut seen_sizes = std::collections::HashSet::new();
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    while std::time::Instant::now() < deadline && received < 200 {
+                        let Ok(Ok(m)) =
+                            compio::time::timeout(Duration::from_secs(5), sub.recv()).await
+                        else {
+                            break;
+                        };
+                        let body = m.part_bytes(0).unwrap();
+                        let size = body.len();
+                        assert!(sizes.contains(&size), "unexpected message size {size}");
+                        seen_sizes.insert(size);
+                        if size >= 4 {
+                            let seq = u32::from_le_bytes(body[..4].try_into().unwrap());
+                            for i in 4..size {
+                                assert_eq!(
+                                    body[i],
+                                    (i as u8).wrapping_add(seq as u8),
+                                    "byte {i} wrong for size={size} seq={seq}"
+                                );
+                            }
+                        }
+                        received += 1;
+                    }
+                    assert!(
+                        received >= 30,
+                        "expected at least 30 messages, got {received}"
+                    );
+                    assert!(
+                        seen_sizes.len() >= 3,
+                        "expected at least 3 different sizes, got {seen_sizes:?}"
+                    );
+                    received
+                })
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|h| h.join().expect("sub thread panicked"))
+        .collect();
+    stop.store(true, Ordering::Relaxed);
+    pub_thread.join().expect("pub thread panicked");
+    assert!(
+        results.iter().all(|&c| c >= 30),
+        "all subs must receive messages: {results:?}"
+    );
+}
+
 /// PUB with multiple TCP subscribe-all subscribers exercises the
 /// direct-write fan-out path (bypasses flume, encodes once, pushes
 /// chunks into each peer's `EncodedQueue` directly).

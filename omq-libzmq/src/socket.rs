@@ -173,14 +173,13 @@ pub(crate) struct OmqSocket {
     pub sndtimeo_ms: AtomicI64,
     pub rcvtimeo_ms: AtomicI64,
     /// Accumulator for SNDMORE multipart assembly.
-    /// `UnsafeCell` because zmq guarantees single-threaded socket access.
-    pub send_accum: std::cell::UnsafeCell<Vec<Bytes>>,
+    pub send_accum: crate::local_cell::LocalCell<Vec<Bytes>>,
     /// Lock-free inproc bypass (sender half). Set once during connect;
     /// accessed only from the `zmq_send` caller thread (ZMQ's single-thread
     /// contract per socket).
-    pub bypass_send: std::cell::UnsafeCell<Option<crate::inproc_bypass::BypassSend>>,
+    pub bypass_send: crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassSend>>,
     /// Lock-free inproc bypass (receiver half).
-    pub bypass_recv: std::cell::UnsafeCell<Option<crate::inproc_bypass::BypassRecv>>,
+    pub bypass_recv: crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassRecv>>,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub recv_drain: Mutex<VecDeque<Bytes>>,
     /// True when `recv_drain` is non-empty. Checked without the lock so the
@@ -190,7 +189,7 @@ pub(crate) struct OmqSocket {
     /// peer's `ConnectionDriver` (bypasses `async_channel` + recv pump).
     /// `pump` is filled by the recv pump task for second+ peers.
     /// Accessed only from the `zmq_recv` caller thread.
-    pub recv_cons: std::cell::UnsafeCell<Option<RecvConsumers>>,
+    pub recv_cons: crate::local_cell::LocalCell<Option<RecvConsumers>>,
     /// The inner omq-tokio socket. Send+Sync, stored directly.
     pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
     /// Backpressure: recv pump waits on this when the recv ring is full.
@@ -203,7 +202,7 @@ pub(crate) struct OmqSocket {
     pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
     /// Send yield state: (message count, bytes queued). Accessed only
     /// from the `zmq_send` caller thread (ZMQ single-thread contract).
-    pub send_yield: std::cell::UnsafeCell<(u32, usize)>,
+    pub send_yield: crate::local_cell::LocalCell<(u32, usize)>,
 }
 
 /// Map ZMQ socket-type integer to `SocketType`.
@@ -285,10 +284,8 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     // average size. Rounded up to a power of two internally.
     let byte_ring_cap = capacity * 1024;
     let (bsend, brecv) = crate::inproc_bypass::create_bypass(byte_ring_cap, recv_fd);
-    // SAFETY: called from zmq_bind/zmq_connect before any send/recv,
-    // so no concurrent access to the UnsafeCells.
-    unsafe { *sender.bypass_send.get() = Some(bsend) };
-    unsafe { *receiver.bypass_recv.get() = Some(brecv) };
+    *sender.bypass_send.get() = Some(bsend);
+    *receiver.bypass_recv.get() = Some(brecv);
 }
 
 /// Register an inproc bind. If there are pending connectors, install
@@ -347,7 +344,6 @@ fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
 }
 
 #[unsafe(no_mangle)]
-#[expect(clippy::arc_with_non_send_sync)]
 pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
     if ctx_ptr.is_null() {
         set_errno(libc::EFAULT);
@@ -386,12 +382,12 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         overlay: Mutex::new(SocketOverlay::default()),
         sndtimeo_ms: AtomicI64::new(-1),
         rcvtimeo_ms: AtomicI64::new(-1),
-        send_accum: std::cell::UnsafeCell::new(Vec::new()),
-        bypass_send: std::cell::UnsafeCell::new(None),
-        bypass_recv: std::cell::UnsafeCell::new(None),
+        send_accum: crate::local_cell::LocalCell::new(Vec::new()),
+        bypass_send: crate::local_cell::LocalCell::new(None),
+        bypass_recv: crate::local_cell::LocalCell::new(None),
         recv_drain: Mutex::new(VecDeque::new()),
         drain_nonempty: AtomicBool::new(false),
-        recv_cons: std::cell::UnsafeCell::new(None),
+        recv_cons: crate::local_cell::LocalCell::new(None),
         inner: std::sync::OnceLock::new(),
         recv_space: std::sync::OnceLock::new(),
         recv_sink_config: std::sync::OnceLock::new(),
@@ -399,7 +395,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         notify,
         bound_or_connected: AtomicBool::new(false),
         recv_pump: std::sync::OnceLock::new(),
-        send_yield: std::cell::UnsafeCell::new((0, 0)),
+        send_yield: crate::local_cell::LocalCell::new((0, 0)),
     });
 
     Box::into_raw(Box::new(sock)).cast()
@@ -440,13 +436,10 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     let cap = recv_hwm.max(16);
     let (fast_prod, fast_cons) = yring::spsc(cap);
     let (mut pump_prod, pump_cons) = yring::spsc(cap);
-    // SAFETY: called once during materialization before any recv.
-    unsafe {
-        *sock.recv_cons.get() = Some(RecvConsumers {
-            fast: fast_cons,
-            pump: pump_cons,
-        });
-    };
+    *sock.recv_cons.get() = Some(RecvConsumers {
+        fast: fast_cons,
+        pump: pump_cons,
+    });
 
     let recv_space = Arc::new(tokio::sync::Notify::new());
     let _ = sock.recv_space.set(recv_space.clone());

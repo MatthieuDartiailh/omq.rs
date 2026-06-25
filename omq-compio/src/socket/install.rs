@@ -80,7 +80,7 @@ pub(super) fn install_inproc_peer(
         Some(&peer_identity),
     );
     {
-        let pipes = unsafe { &mut *inner.inproc.send_pipes.get() };
+        let pipes = inner.inproc.send_pipes.get();
         if let Some(producer) = conn.spsc_send {
             pipes[idx] = Some(super::inner::InprocSendPipe {
                 producer,
@@ -95,7 +95,7 @@ pub(super) fn install_inproc_peer(
             });
         }
         if let Some(consumer) = conn.spsc_recv {
-            let recv = unsafe { &mut *inner.inproc.recv.get() };
+            let recv = inner.inproc.recv.get();
             recv.consumers.push(consumer);
             recv.space_events.push(
                 conn.recv_space_event

@@ -8,7 +8,7 @@
 //!
 //! [`Socket`]: super::Socket
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::Cell;
 use std::collections::VecDeque;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -20,30 +20,7 @@ use std::sync::{
 
 use slab::Slab;
 
-/// A `VecDeque` wrapper that provides `&mut` access without a `Mutex`.
-///
-/// Sound only when all access is confined to a single thread -- true for
-/// compio's cooperative single-threaded runtime. The `Sync` impl is the
-/// unsafe contract: callers must never access from multiple threads.
-pub(super) struct RecvCache(UnsafeCell<VecDeque<Message>>);
-
-// SAFETY: compio is single-threaded. All recv_cache access happens on
-// the runtime thread that created the socket. No concurrent access.
-unsafe impl Sync for RecvCache {}
-
-impl RecvCache {
-    fn new() -> Self {
-        Self(UnsafeCell::new(VecDeque::new()))
-    }
-
-    /// Borrow the inner deque mutably. Caller must be on the owning
-    /// runtime thread (always true in compio's cooperative model).
-    #[inline]
-    #[expect(clippy::mut_from_ref)]
-    pub(super) fn get(&self) -> &mut VecDeque<Message> {
-        unsafe { &mut *self.0.get() }
-    }
-}
+use crate::local_cell::LocalCell;
 use bytes::{Bytes, BytesMut};
 use event_listener::Event;
 
@@ -221,9 +198,9 @@ pub(super) struct PeerRouting {
 /// and the recv notification used by cross-thread inproc senders.
 pub(super) struct InprocIo {
     /// Per-peer SPSC send pipes, indexed parallel to `routing.peers`.
-    pub(super) send_pipes: UnsafeCell<Vec<Option<InprocSendPipe>>>,
+    pub(super) send_pipes: LocalCell<Vec<Option<InprocSendPipe>>>,
     /// Per-peer SPSC recv consumers + fair-queue index.
-    pub(super) recv: UnsafeCell<InprocRecvState>,
+    pub(super) recv: LocalCell<InprocRecvState>,
     /// Single shared recv notification. Remote senders notify this
     /// when `parked` is true.
     pub(super) recv_event: Arc<Event>,
@@ -234,13 +211,12 @@ pub(super) struct InprocIo {
 }
 
 /// Cached `DirectIoState` handles for the wire send/recv fast paths.
-/// `UnsafeCell` is sound because compio is single-threaded.
 pub(super) struct DirectIoCache {
     /// Direct codec access for `try_recv`. Set on first successful
     /// direct recv; cleared on peer disconnect.
-    pub(super) recv: UnsafeCell<Option<Arc<DirectIoState>>>,
+    pub(super) recv: LocalCell<Option<Arc<DirectIoState>>>,
     /// Cached `DirectIoState` + generation for the wire send fast path.
-    pub(super) send: UnsafeCell<Option<(Arc<DirectIoState>, u64)>>,
+    pub(super) send: LocalCell<Option<(Arc<DirectIoState>, u64)>>,
 }
 
 /// PUB/SUB matching caches and subscription tables.
@@ -252,9 +228,9 @@ pub(super) struct PubSubState {
     /// True when all outbound peers are Wire (not Inproc).
     pub(super) all_wire: Cell<bool>,
     /// Cached `PeerOut`s for the subscribe-all fast path.
-    pub(super) all_match_cache: UnsafeCell<SmallVec<[PeerOut; 8]>>,
+    pub(super) all_match_cache: LocalCell<SmallVec<[PeerOut; 8]>>,
     /// Cached `DirectIoState` handles for direct-write PUB fan-out.
-    pub(super) direct_io_cache: UnsafeCell<SmallVec<[Arc<DirectIoState>; 8]>>,
+    pub(super) direct_io_cache: LocalCell<SmallVec<[Arc<DirectIoState>; 8]>>,
     pub(super) subscriptions: RwLock<SubscriptionSet>,
     /// Active subscription prefixes (SUB / XSUB). Replayed to new peers.
     pub(super) our_subs: RwLock<Vec<Bytes>>,
@@ -275,7 +251,7 @@ pub(super) struct SocketInner {
     pub(super) inproc_identity: Bytes,
     pub(super) routing: PeerRouting,
     pub(super) inproc: InprocIo,
-    pub(super) recv_cache: RecvCache,
+    pub(super) recv_cache: LocalCell<VecDeque<Message>>,
     pub(super) direct_io: DirectIoCache,
     pub(super) on_peer_ready: Event,
     pub(super) pub_sub: PubSubState,
@@ -390,8 +366,8 @@ impl SocketInner {
                 peer_keys: RwLock::new(Vec::new()),
             },
             inproc: InprocIo {
-                send_pipes: UnsafeCell::new(Vec::new()),
-                recv: UnsafeCell::new(InprocRecvState {
+                send_pipes: LocalCell::new(Vec::new()),
+                recv: LocalCell::new(InprocRecvState {
                     consumers: Vec::new(),
                     space_events: Vec::new(),
                     fq_index: 0,
@@ -401,18 +377,18 @@ impl SocketInner {
                 in_tx,
                 in_rx,
             },
-            recv_cache: RecvCache::new(),
+            recv_cache: LocalCell::new(VecDeque::new()),
             direct_io: DirectIoCache {
-                recv: UnsafeCell::new(None),
-                send: UnsafeCell::new(None),
+                recv: LocalCell::new(None),
+                send: LocalCell::new(None),
             },
             on_peer_ready: Event::new(),
             pub_sub: PubSubState {
                 dirty: Arc::new(AtomicBool::new(true)),
                 all_match_all: Cell::new(false),
                 all_wire: Cell::new(false),
-                all_match_cache: UnsafeCell::new(SmallVec::new()),
-                direct_io_cache: UnsafeCell::new(SmallVec::new()),
+                all_match_cache: LocalCell::new(SmallVec::new()),
+                direct_io_cache: LocalCell::new(SmallVec::new()),
                 subscriptions: RwLock::new(SubscriptionSet::new()),
                 our_subs: RwLock::new(Vec::new()),
             },
@@ -456,7 +432,7 @@ impl SocketInner {
             self.routing.inproc_count.fetch_add(1, Ordering::Release);
         }
         {
-            let pipes = unsafe { &mut *self.inproc.send_pipes.get() };
+            let pipes = self.inproc.send_pipes.get();
             while pipes.len() <= idx {
                 pipes.push(None);
             }
@@ -536,7 +512,7 @@ impl SocketInner {
             peers.remove(slot_idx);
         }
         {
-            let pipes = unsafe { &mut *self.inproc.send_pipes.get() };
+            let pipes = self.inproc.send_pipes.get();
             if let Some(entry) = pipes.get_mut(slot_idx) {
                 *entry = None;
             }
@@ -575,7 +551,7 @@ impl SocketInner {
         self.pub_sub.all_wire.set(all_wire);
         if all_match {
             let cached: SmallVec<[PeerOut; 8]> = peers.iter().map(|(_, s)| s.out.clone()).collect();
-            unsafe { *self.pub_sub.all_match_cache.get() = cached };
+            *self.pub_sub.all_match_cache.get() = cached;
             if all_wire {
                 let dio: SmallVec<[Arc<DirectIoState>; 8]> = peers
                     .iter()
@@ -585,12 +561,12 @@ impl SocketInner {
                             .and_then(|h| h.read().expect("direct_io handle lock").clone())
                     })
                     .collect();
-                unsafe { *self.pub_sub.direct_io_cache.get() = dio };
+                *self.pub_sub.direct_io_cache.get() = dio;
             } else {
-                unsafe { (*self.pub_sub.direct_io_cache.get()).clear() };
+                self.pub_sub.direct_io_cache.get().clear();
             }
         } else {
-            unsafe { (*self.pub_sub.direct_io_cache.get()).clear() };
+            self.pub_sub.direct_io_cache.get().clear();
         }
         self.pub_sub.dirty.store(false, Ordering::Release);
     }

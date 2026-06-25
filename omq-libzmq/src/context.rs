@@ -41,7 +41,6 @@ pub(crate) fn next_socket_id() -> u64 {
 }
 
 impl OmqContext {
-    #[expect(clippy::arc_with_non_send_sync)]
     fn new(n_io_threads: usize) -> Option<Arc<Self>> {
         let n = n_io_threads.max(1);
         let terminated = Arc::new(AtomicBool::new(false));

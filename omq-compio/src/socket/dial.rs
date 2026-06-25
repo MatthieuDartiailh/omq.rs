@@ -93,11 +93,8 @@ async fn install_and_run(
     peer_groups: Option<&Arc<RwLock<rustc_hash::FxHashSet<Bytes>>>>,
 ) {
     *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
-    // SAFETY: single-threaded compio runtime.
-    unsafe {
-        *inner.direct_io.recv.get() = None;
-        *inner.direct_io.send.get() = None;
-    }
+    *inner.direct_io.recv.get() = None;
+    *inner.direct_io.send.get() = None;
     inner
         .routing
         .generation
@@ -132,7 +129,7 @@ async fn install_and_run(
             peer_groups: peer_groups.cloned(),
         });
         {
-            let pipes = unsafe { &mut *inner.inproc.send_pipes.get() };
+            let pipes = inner.inproc.send_pipes.get();
             while pipes.len() <= idx {
                 pipes.push(None);
             }

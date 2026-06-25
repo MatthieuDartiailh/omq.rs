@@ -30,6 +30,7 @@ pub use omq_proto::message;
 pub use omq_proto::options;
 pub use omq_proto::proto;
 
+pub(crate) mod local_cell;
 pub mod monitor;
 pub mod runtime;
 pub mod socket;

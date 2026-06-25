@@ -152,11 +152,9 @@ impl ChunkedInputBuf {
         }
     }
 
-    /// Copy `n` bytes into uninitialized `dest[..n]` and advance. Writes into a
-    /// `MaybeUninit<u8>` slice, allowing the caller to skip zeroing the
-    /// destination. After this call, `dest[..n]` is initialized.
+    /// Copy `n` bytes into `dest[..n]` and advance.
     #[inline]
-    pub(crate) fn read_into_uninit(&mut self, n: usize, dest: &mut [std::mem::MaybeUninit<u8>]) {
+    pub(crate) fn read_into(&mut self, n: usize, dest: &mut [u8]) {
         debug_assert!(n <= self.total_len);
         debug_assert!(n <= dest.len());
         if n == 0 {
@@ -165,13 +163,7 @@ impl ChunkedInputBuf {
         self.total_len -= n;
         let avail = self.front.len() - self.front_offset;
         if n <= avail {
-            let src = &self.front[self.front_offset..self.front_offset + n];
-            // SAFETY: `&[u8]` and `&[MaybeUninit<u8>]` have identical
-            // layout (guaranteed by MaybeUninit's repr(transparent)).
-            let src_mu: &[std::mem::MaybeUninit<u8>] = unsafe {
-                &*(std::ptr::from_ref::<[u8]>(src) as *const [std::mem::MaybeUninit<u8>])
-            };
-            dest[..n].copy_from_slice(src_mu);
+            dest[..n].copy_from_slice(&self.front[self.front_offset..self.front_offset + n]);
             self.front_offset += n;
             if self.front_offset >= self.front.len() {
                 self.advance_front();
@@ -184,11 +176,7 @@ impl ChunkedInputBuf {
             let start = self.front_offset;
             let avail = self.front.len() - start;
             let take = remaining.min(avail);
-            let src = &self.front[start..start + take];
-            let src_mu: &[std::mem::MaybeUninit<u8>] = unsafe {
-                &*(std::ptr::from_ref::<[u8]>(src) as *const [std::mem::MaybeUninit<u8>])
-            };
-            dest[pos..pos + take].copy_from_slice(src_mu);
+            dest[pos..pos + take].copy_from_slice(&self.front[start..start + take]);
             pos += take;
             remaining -= take;
             if take >= avail {
@@ -415,21 +403,21 @@ mod tests {
     }
 
     #[test]
-    fn read_into_uninit_zero_on_empty() {
+    fn read_into_zero_on_empty() {
         let mut buf = ChunkedInputBuf::new();
-        let mut dest = [std::mem::MaybeUninit::uninit(); 4];
-        buf.read_into_uninit(0, &mut dest);
+        let mut dest = [0u8; 4];
+        buf.read_into(0, &mut dest);
         assert!(buf.is_empty());
     }
 
     #[test]
-    fn read_into_uninit_zero_after_drain() {
+    fn read_into_zero_after_drain() {
         let mut buf = ChunkedInputBuf::new();
         push_bytes(&mut buf, b"\x00\x00");
         buf.advance(2);
         assert!(buf.is_empty());
-        let mut dest = [std::mem::MaybeUninit::uninit(); 4];
-        buf.read_into_uninit(0, &mut dest);
+        let mut dest = [0u8; 4];
+        buf.read_into(0, &mut dest);
         assert!(buf.is_empty());
     }
 }
