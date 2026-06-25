@@ -1,8 +1,4 @@
 //! Socket handle and `zmq_socket`/close/bind/connect/unbind/disconnect.
-//!
-//! Cross-platform socket operations:
-//! - **Unix:** All transports (TCP, IPC, inproc, UDP, etc.)
-//! - **Windows:** TCP, inproc, UDP (IPC not supported; returns ENOTSUP)
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_int, c_void};
@@ -404,8 +400,6 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
 /// Validate `sock_ptr` and `addr`, parse `addr` as a `CStr` and then as an
 /// `Endpoint`. Returns the socket reference, owned address string, and
 /// parsed endpoint on success. Also checks the context terminated flag.
-///
-/// On Windows, returns ENOTSUP for IPC endpoints (ipc://).
 ///
 /// # Safety
 ///

@@ -28,7 +28,6 @@ This document describes the Windows-specific implementation, limitations, and us
   - CURVE key exchange (`curve` feature)
   - BLAKE3 with ChaCha20 (`blake3zmq` feature)
   - LZ4 compression (`lz4` feature)
-  - Zstd compression (`zstd` feature)
 
 - **Messaging:**
   - `zmq_send()` / `zmq_recv()` — Blocking and non-blocking send/receive
@@ -205,7 +204,7 @@ Windows-specific error codes returned by `zmq_errno()`:
 
 **Polling Latency:**
 
-- **Unix:** `epoll` + kernel syscall (~1-5µs per 10 sockets)
+- **Unix:** `poll()` syscall (~1-5µs per 10 sockets)
 - **Windows:** `WaitForMultipleObjects` + kernel wait (~2-8µs per 10 sockets)
 - **Practical impact:** Sub-microsecond differences for typical socket counts
 

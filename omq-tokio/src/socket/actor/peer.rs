@@ -879,23 +879,14 @@ async fn inproc_peer_driver(
                         }
                         let m = try_push_spsc(spsc.as_ref(), m);
                         if let Some(m) = m {
-                            // Also try to push to recv_sink (Ring #1) for poll() detection.
-                            // This bridges the two independent rings so poll() can see inproc messages.
                             let m = if let Some(ref mut sink) = recv_sink {
                                 match sink {
                                     crate::engine::RecvSink::Channel(tx) => {
-                                        // We unconditionally return None here because
-                                        // the channel is bounded and we don't want to
-                                        // block the inproc driver on a slow consumer.
-                                        // The recv_sink is only used for poll()
-                                        // detection, so if it fails to send, we just
-                                        // drop the message from that path.
                                         let _ = tx.send(m).await;
                                         None
                                     }
                                     crate::engine::RecvSink::Yring(yring_sink) => {
-                                        let mut msg = m;
-                                        match yring_sink.producer.push(msg.clone()) {
+                                        match yring_sink.producer.push(m) {
                                             Ok(()) => {
                                                 if let yring::FlushResult::Flushed {
                                                     was_empty: true, ..
@@ -905,11 +896,7 @@ async fn inproc_peer_driver(
                                                 }
                                                 None
                                             }
-                                            Err(returned) => {
-                                                msg = returned;
-                                                // Don't block on inproc send failure; let route_inproc_message handle it
-                                                Some(msg)
-                                            }
+                                            Err(returned) => Some(returned),
                                         }
                                     }
                                 }

@@ -1,14 +1,7 @@
 //! `zmq_send` / `zmq_recv` entry points.
 //!
 //! Send: direct `Handle::block_on(socket.send())`, no relay.
-//! Recv: Cross-platform strategy (Unix + Windows):
-//! 1. Try inproc bypass (byte ring, zero-alloc for single-part)
-//! 2. Fall back to yring consumers (messages from async drivers)
-//! 3. Block on `RecvNotify` if needed (platform-agnostic abstraction)
-//! 4. Decompose multipart messages to draining queue (RCVMORE)
-//!
-//! The recv pump on the tokio thread fills the yring; the C thread drains it lock-free.
-//! Blocking operations use `RecvNotify` abstraction (eventfd/poll on Unix, `WaitForSingleObject` on Windows).
+//! Recv: bypass ring -> yring consumers -> block on `RecvNotify`.
 #![expect(clippy::cast_possible_wrap)]
 
 use std::ffi::c_int;
@@ -50,11 +43,6 @@ impl HasPipeClosed for crate::inproc_bypass::BypassRecv {
     }
 }
 
-/// Block on the recv notification until `try_pop` succeeds or the timeout
-/// expires. Returns `Err(EAGAIN)` on timeout.
-///
-/// Uses `RecvNotify` abstraction for cross-platform blocking (eventfd/poll on Unix,
-/// `WaitForSingleObject` on Windows).
 fn block_recv<T>(
     sock: &OmqSocket,
     rcvtimeo: i64,
@@ -287,12 +275,6 @@ pub extern "C" fn zmq_recv(
     zmq_recv_impl(sock, buf, buf_len, flags)
 }
 
-/// Cross-platform recv implementation.
-/// Strategy:
-/// 1. Try inproc bypass (zero-alloc byte ring for single-part)
-/// 2. Fall back to yring consumers (messages from async drivers)
-/// 3. Block on `RecvNotify` if needed
-/// 4. Decompose multipart messages
 fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags: c_int) -> c_int {
     // Inproc bypass fast path: copy from byte ring directly into user
     // buffer. Zero intermediate Bytes allocation.
