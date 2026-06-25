@@ -151,7 +151,7 @@ pub fn encode_message_flat_ws_masked(msg: &Message, buf: &mut BytesMut) {
     msg.iter_slices(|slice| {
         let more = i + 1 < n;
         let ws_payload_len = 1 + slice.len();
-        let mask = super::ws_codec::generate_mask_key_pub();
+        let mask = super::ws_codec::generate_mask_key();
         buf.put_u8(0x82); // FIN | BINARY
         if ws_payload_len <= 125 {
             buf.put_u8(0x80 | ws_payload_len as u8); // MASK bit set

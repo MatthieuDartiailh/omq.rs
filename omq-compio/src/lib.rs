@@ -9,8 +9,8 @@
 //! algorithms come from the runtime-agnostic `omq-proto` crate.
 //! This crate provides only the runtime glue.
 //!
-//! Status: beachhead. PUSH/PULL on inproc + TCP, send-batching,
-//! gather writes via compio's `Vec<Bytes>` `IoVectoredBuf` path.
+//! Supports all ZMTP socket types, TCP/IPC/inproc/UDP/WebSocket
+//! transports, CURVE/BLAKE3ZMQ/PLAIN mechanisms, and lz4 compression.
 
 #[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
 pub use omq_proto::{Authenticator, MechanismPeerInfo};

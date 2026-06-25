@@ -2,7 +2,7 @@
 //!
 //! PUB and XPUB filter by SUBSCRIBE-driven prefix set; RADIO filters
 //! by joined groups. On every `send`, the message is encoded once
-//! (via `pre_encode`), then the pre-encoded chunks are pushed into
+//! into the fan-out arena, then the pre-encoded bytes are pushed into
 //! each matching peer's `EncodedQueue`. The driver flushes to the wire.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -36,10 +36,16 @@ pub(crate) enum FanOutMode {
     Group,
 }
 
+/// Yield to the runtime after encoding this many arena bytes, so a large
+/// fan-out does not starve other tasks on the same thread.
 const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
 
+/// Per-peer copy budget for pre-encoded bytes before yielding.
 const FAN_OUT_COPY_BUDGET: usize = 128 * 1024;
 
+/// Yield every N peers to keep latency bounded. Scales down with peer
+/// count: fewer peers per yield when fan-out is wide (more total work).
+/// isqrt gives sub-linear scaling; floor of 16 prevents over-yielding.
 fn yield_interval(peer_count: usize) -> u32 {
     let n = (peer_count as u32).max(1);
     (512 / n.isqrt()).max(16)
@@ -577,6 +583,47 @@ fn targets_have_space(targets: &[PeerSend]) -> bool {
     })
 }
 
+fn dispatch_encoded(
+    eq: &mut EncodedQueue,
+    targets: &[PeerSend],
+    msg: &Message,
+    chunks: &mut Vec<Bytes>,
+) {
+    if eq.has_arena_only() && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET {
+        let raw = eq.uncommitted_arena();
+        for t in targets {
+            match t {
+                PeerSend::Wire { slot, .. } => {
+                    let _ = slot.try_push_pre_encoded_no_signal(raw);
+                }
+                PeerSend::Inbox(tx) => {
+                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
+                }
+            }
+        }
+        for t in targets {
+            if let PeerSend::Wire { slot, .. } = t {
+                slot.signal_encoded();
+            }
+        }
+        eq.clear_arena();
+    } else {
+        chunks.clear();
+        eq.drain_into_vec(chunks, 1024);
+        for t in targets {
+            match t {
+                PeerSend::Wire { slot, .. } => {
+                    let _ = slot.try_push_encoded(chunks);
+                }
+                PeerSend::Inbox(tx) => {
+                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
+                }
+            }
+        }
+        chunks.clear();
+    }
+}
+
 fn dispatch_to_targets(
     targets: &[PeerSend],
     msg: &Message,
@@ -620,44 +667,9 @@ fn dispatch_to_targets(
                 } else {
                     eq.encode_auto(msg);
                 }
-                if eq.has_arena_only()
-                    && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET
-                {
-                    let raw = eq.uncommitted_arena();
-                    for t in targets {
-                        match t {
-                            PeerSend::Wire { slot, .. } => {
-                                let _ = slot.try_push_pre_encoded_no_signal(raw);
-                            }
-                            PeerSend::Inbox(tx) => {
-                                let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
-                            }
-                        }
-                    }
-                    for t in targets {
-                        if let PeerSend::Wire { slot, .. } = t {
-                            slot.signal_encoded();
-                        }
-                    }
-                    eq.clear_arena();
-                } else {
-                    CHUNKS.with(|drain| {
-                        let chunks = &mut *drain.borrow_mut();
-                        chunks.clear();
-                        eq.drain_into_vec(chunks, 1024);
-                        for t in targets {
-                            match t {
-                                PeerSend::Wire { slot, .. } => {
-                                    let _ = slot.try_push_encoded(chunks);
-                                }
-                                PeerSend::Inbox(tx) => {
-                                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
-                                }
-                            }
-                        }
-                        chunks.clear();
-                    });
-                }
+                CHUNKS.with(|drain| {
+                    dispatch_encoded(eq, targets, msg, &mut drain.borrow_mut());
+                });
             });
         }
     }

@@ -126,6 +126,15 @@ impl CurveTransform {
         Ok(body.freeze())
     }
 
+    /// Wrap an encrypted body in the `\x07MESSAGE` ZMTP command frame.
+    pub(crate) fn message_command_frame(body: &[u8]) -> Bytes {
+        let mut wire = BytesMut::with_capacity(8 + body.len());
+        wire.put_u8(b"MESSAGE".len() as u8);
+        wire.put_slice(b"MESSAGE");
+        wire.put_slice(body);
+        wire.freeze()
+    }
+
     /// Decrypt a MESSAGE command body (post-`\x07MESSAGE` prefix). Returns
     /// `(more, command, plaintext)`. Body layout: `nonce(8) || box(flags(1) || data)`.
     /// The inner flags byte carries libzmq's msg flags — MORE (0x01) and COMMAND
@@ -708,9 +717,6 @@ impl CurveServer {
         let welcome_box = SalsaBox::new(peer_eph_public, &self.our_lt_secret)
             .encrypt(&welcome_nonce.into(), welcome_pt.as_slice())
             .map_err(|_| Error::Protocol("CURVE WELCOME encrypt failed".into()))?;
-
-        let counter = self.next_out_counter()?;
-        let _ = counter; // WELCOME doesn't carry a short nonce counter
 
         let mut body = BytesMut::with_capacity(160);
         body.put_slice(&welcome_suffix);

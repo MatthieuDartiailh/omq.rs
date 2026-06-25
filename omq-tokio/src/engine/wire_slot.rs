@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use smallvec::SmallVec;
 use tokio::sync::Notify;
 
 use omq_proto::encoded_queue::EncodedQueue;
@@ -32,10 +31,11 @@ pub(crate) struct PeerWireSlot {
     pub(crate) data_ready: Notify,
     pub(crate) space_available: Notify,
     pub(crate) handshake_done: AtomicBool,
+    /// Coalesces `data_ready` notifications: only the first encode since
+    /// the last drain actually calls `notify_one()`, avoiding thundering
+    /// herd on the `Notify` when many messages arrive between drains.
     pending: AtomicBool,
-    #[allow(dead_code)]
     pub(crate) has_transform: bool,
-    #[allow(dead_code)]
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
     #[cfg(feature = "ws")]
     is_ws: bool,
@@ -58,7 +58,6 @@ impl std::fmt::Debug for PeerWireSlot {
     }
 }
 
-#[allow(dead_code)]
 impl PeerWireSlot {
     pub(crate) fn new(
         peer_id: u64,
@@ -156,20 +155,6 @@ impl PeerWireSlot {
         TryEncodeResult::Ok
     }
 
-    pub(crate) fn try_push_pre_encoded(&self, data: &[u8]) -> TryEncodeResult {
-        if self.dead.load(Ordering::Acquire) {
-            return TryEncodeResult::Dead;
-        }
-        let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-        if eq.total_bytes() >= self.cap {
-            return TryEncodeResult::Full;
-        }
-        eq.push_pre_encoded(data);
-        drop(eq);
-        self.signal_encoded();
-        TryEncodeResult::Ok
-    }
-
     pub(crate) fn try_push_pre_encoded_no_signal(&self, data: &[u8]) -> TryEncodeResult {
         if self.dead.load(Ordering::Acquire) {
             return TryEncodeResult::Dead;
@@ -213,22 +198,4 @@ impl PeerWireSlot {
         self.dead.store(true, Ordering::Release);
         self.space_available.notify_waiters();
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn pre_encode(msg: &Message) -> SmallVec<[Bytes; 4]> {
-    let mut eq = EncodedQueue::one_shot();
-    eq.encode_auto(msg);
-    let mut chunks = Vec::new();
-    eq.drain_into_vec(&mut chunks, 1024);
-    SmallVec::from_vec(chunks)
-}
-
-#[allow(dead_code)]
-pub(crate) fn pre_encode_prefixed(sentinel: &Bytes, msg: &Message) -> SmallVec<[Bytes; 4]> {
-    let mut eq = EncodedQueue::one_shot();
-    eq.encode_prefixed_auto(sentinel, msg);
-    let mut chunks = Vec::new();
-    eq.drain_into_vec(&mut chunks, 1024);
-    SmallVec::from_vec(chunks)
 }

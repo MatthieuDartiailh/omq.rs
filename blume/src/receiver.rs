@@ -120,14 +120,7 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut inner = self
-            .shared
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        inner.closed_recv = true;
-        drop(inner);
-        self.shared.send_event.notify(usize::MAX);
+        self.close();
     }
 }
 

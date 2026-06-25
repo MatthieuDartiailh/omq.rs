@@ -77,8 +77,11 @@ impl Drop for ClaimGuard<'_> {
 
 #[expect(clippy::too_many_lines)]
 async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction> {
-    while state.large_recv_pending.load(Ordering::Acquire) != 0 {
+    loop {
         let payload_len = state.large_recv_pending.load(Ordering::Acquire);
+        if payload_len == 0 {
+            break;
+        }
 
         let is_one_shot = {
             let sg = state.recv_stream.0.lock().await;
@@ -316,7 +319,6 @@ impl Socket {
     }
 
     /// Receive the next message, blocking until one is available or the socket is closed.
-    #[expect(clippy::too_many_lines)]
     pub async fn recv(&self) -> Result<Message> {
         use futures::FutureExt;
         let inner = self.inner();
@@ -373,34 +375,9 @@ impl Socket {
                 return Ok(msg);
             }
 
-            let recv_state = self.inner().inproc.recv.get();
-            if !recv_state.consumers.is_empty() {
-                let cache = self.inner().recv_cache.get();
-                let max = self.inner().options.max_message_size;
-                let n = recv_state.consumers.len();
-                let start = recv_state.fq_index;
-                for i in 0..n {
-                    let idx = (start + i) % n;
-                    let c = &mut recv_state.consumers[idx];
-                    let got = c.prefetch();
-                    if got > 0 {
-                        while let Some(msg) = c.pop() {
-                            if max.is_some_and(|m| msg.byte_len() > m) {
-                                continue;
-                            }
-                            cache.push_back(msg);
-                        }
-                        c.release();
-                        recv_state.space_events[idx].notify(usize::MAX);
-                    }
-                    if !cache.is_empty() {
-                        recv_state.fq_index = idx + 1;
-                    }
-                }
-                if let Some(msg) = cache.pop_front() {
-                    self.inner().inproc.parked.store(false, Ordering::Release);
-                    return Ok(msg);
-                }
+            if let Some(msg) = self.drain_inproc_consumers() {
+                self.inner().inproc.parked.store(false, Ordering::Release);
+                return Ok(msg);
             }
 
             match self.inner().inproc.in_rx.try_recv() {
@@ -410,7 +387,9 @@ impl Socket {
                     }
                     continue;
                 }
-                Err(blume::TryRecvError::Disconnected) if recv_state.consumers.is_empty() => {
+                Err(blume::TryRecvError::Disconnected)
+                    if self.inner().inproc.recv.get().consumers.is_empty() =>
+                {
                     return Err(Error::Closed);
                 }
                 _ => {}
@@ -553,33 +532,8 @@ impl Socket {
                 }
             }
         }
-        let recv_state = inner.inproc.recv.get();
-        if !recv_state.consumers.is_empty() {
-            let cache = inner.recv_cache.get();
-            let max = inner.options.max_message_size;
-            let n = recv_state.consumers.len();
-            let start = recv_state.fq_index;
-            for i in 0..n {
-                let idx = (start + i) % n;
-                let c = &mut recv_state.consumers[idx];
-                let got = c.prefetch();
-                if got > 0 {
-                    while let Some(msg) = c.pop() {
-                        if max.is_some_and(|m| msg.byte_len() > m) {
-                            continue;
-                        }
-                        cache.push_back(msg);
-                    }
-                    c.release();
-                    recv_state.space_events[idx].notify(usize::MAX);
-                }
-                if !cache.is_empty() {
-                    recv_state.fq_index = idx + 1;
-                }
-            }
-            if let Some(msg) = cache.pop_front() {
-                return Ok(msg);
-            }
+        if let Some(msg) = self.drain_inproc_consumers() {
+            return Ok(msg);
         }
         loop {
             let frame = inner.inproc.in_rx.try_recv().map_err(|e| match e {
@@ -833,6 +787,37 @@ impl Socket {
                 state.transmit_ready.notify(1);
             }
         }
+    }
+
+    fn drain_inproc_consumers(&self) -> Option<Message> {
+        let inner = self.inner();
+        let recv_state = inner.inproc.recv.get();
+        if recv_state.consumers.is_empty() {
+            return None;
+        }
+        let cache = inner.recv_cache.get();
+        let max = inner.options.max_message_size;
+        let n = recv_state.consumers.len();
+        let start = recv_state.fq_index;
+        for i in 0..n {
+            let idx = (start + i) % n;
+            let c = &mut recv_state.consumers[idx];
+            let got = c.prefetch();
+            if got > 0 {
+                while let Some(msg) = c.pop() {
+                    if max.is_some_and(|m| msg.byte_len() > m) {
+                        continue;
+                    }
+                    cache.push_back(msg);
+                }
+                c.release();
+                recv_state.space_events[idx].notify(usize::MAX);
+            }
+            if !cache.is_empty() {
+                recv_state.fq_index = idx + 1;
+            }
+        }
+        cache.pop_front()
     }
 
     #[inline]

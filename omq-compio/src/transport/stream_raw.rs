@@ -1,10 +1,11 @@
 //! Raw TCP driver for STREAM sockets (compio backend).
 //!
 //! No ZMTP greeting, no frame encoding: reads raw bytes from the TCP
-//! connection and delivers `[identity, data]` messages to the socket's
-//! inbound queue. Outbound `[identity, data]` messages are routed by
-//! identity; the data payload is written as raw bytes. An empty data
-//! frame closes the connection.
+//! connection and delivers single-frame data messages to the socket's
+//! inbound queue. The recv path prepends the peer identity frame.
+//! Outbound `[identity, data]` messages are routed by identity; the
+//! data payload is written as raw bytes. An empty data frame closes
+//! the connection.
 //!
 //! Split into a read task and a write task to avoid compio's
 //! buffer-ownership issues inside `select!`.

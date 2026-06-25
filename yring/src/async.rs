@@ -263,8 +263,10 @@ impl<T> Stream for AsyncConsumer<T> {
             return Poll::Ready(Some(val));
         }
 
-        // Nothing available. Release consumed positions before parking
-        // so the producer can reuse slots while we wait.
+        // Release BEFORE registering the waker. Reversing this order
+        // deadlocks: the producer could fill the freed slots and call
+        // wake() between register and release, and we'd park with data
+        // available and no pending wake.
         this.release();
 
         this.ring.consumer_waker.0.register(cx.waker());

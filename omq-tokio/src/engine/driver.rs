@@ -116,6 +116,17 @@ impl std::fmt::Debug for YringSink {
     }
 }
 
+impl YringSink {
+    fn flush_and_signal(&mut self) {
+        if let yring::FlushResult::Flushed {
+            was_empty: true, ..
+        } = self.producer.flush_and_check()
+        {
+            (self.signal)();
+        }
+    }
+}
+
 impl RecvSink {
     async fn send(&mut self, m: Message) -> bool {
         match self {
@@ -125,12 +136,7 @@ impl RecvSink {
                 loop {
                     match sink.producer.push(msg) {
                         Ok(()) => {
-                            if let yring::FlushResult::Flushed {
-                                was_empty: true, ..
-                            } = sink.producer.flush_and_check()
-                            {
-                                (sink.signal)();
-                            }
+                            sink.flush_and_signal();
                             return true;
                         }
                         Err(returned) => {
@@ -140,6 +146,8 @@ impl RecvSink {
                             notified.as_mut().enable();
                             match sink.producer.push(msg) {
                                 Ok(()) => {
+                                    // Can't call flush_and_signal(): `notified`
+                                    // borrows `sink.space` until end of scope.
                                     if let yring::FlushResult::Flushed {
                                         was_empty: true, ..
                                     } = sink.producer.flush_and_check()
@@ -593,6 +601,9 @@ where
                         return Ok(());
                     }
                     let chunk = if decoder.is_some() {
+                        // Decoders (lz4 etc.) consume the full input each call,
+                        // so split().freeze() would leave a 0-cap BytesMut that
+                        // needs reallocation. Copy + clear reuses the buffer.
                         let b = Bytes::copy_from_slice(&read_buf);
                         read_buf.clear();
                         b
@@ -770,11 +781,6 @@ where
                     );
                 }
 
-                // TODO: remove after extended soak testing confirms no stalls.
-                // All wakeup paths (data_ready Notify, inbox mpsc, heartbeat
-                // timer) are believed correct. Disabled to eliminate 6400
-                // spurious polls/sec at 64 peers.
-                // () = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
         }
     }

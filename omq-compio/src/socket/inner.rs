@@ -51,23 +51,6 @@ use crate::transport::peer_io::{CancellableRecvStream, SharedPeerIo};
 pub(super) use super::direct_io::DirectIoState;
 pub(super) use super::peer::{DirectIoHandle, PeerOut, PeerSlot, WirePeerHandle};
 
-/// `Send + Sync`-asserting wrapper around a multi-shot recv stream.
-///
-/// compio's multi-shot recv stream contains [`compio::driver::SharedFd`]
-/// which is `Rc`-based for single-thread efficiency, hence `!Send`. We
-/// store such a stream behind an [`async_lock::Mutex`] inside the
-/// `Arc<DirectIoState>` so the driver task and the user's
-/// `try_direct_recv` task can share it.
-///
-/// # Safety
-///
-/// `compio::runtime::Runtime` is thread-pinned: every `compio::runtime::spawn`
-/// places the future on the local runtime's thread, and `Socket` is documented
-/// as pinned to its creating runtime. Cross-runtime sends in omq-compio go
-/// through `flume` mpsc, never moving the `Arc<DirectIoState>` itself.
-/// Therefore the inner `Rc` refcount is only ever touched on a single thread,
-/// and asserting `Send + Sync` on this wrapper does not introduce a data race
-/// in any usage pattern omq-compio supports.
 /// Two-state recv mode for a wire peer.
 ///
 /// After a large-frame one-shot, stay in `OneShot` so consecutive large
@@ -96,14 +79,28 @@ impl Drop for AccRestore<'_> {
     }
 }
 
+/// `Send + Sync`-asserting wrapper around a multi-shot recv stream.
+///
+/// compio's multi-shot recv stream contains [`compio::driver::SharedFd`]
+/// which is `Rc`-based for single-thread efficiency, hence `!Send`. We
+/// store such a stream behind an [`async_lock::Mutex`] inside the
+/// `Arc<DirectIoState>` so the driver task and the user's
+/// `try_direct_recv` task can share it.
+///
+/// # Safety
+///
+/// `compio::runtime::Runtime` is thread-pinned: every `compio::runtime::spawn`
+/// places the future on the local runtime's thread, and `Socket` is documented
+/// as pinned to its creating runtime. Cross-runtime sends in omq-compio go
+/// through `flume` mpsc, never moving the `Arc<DirectIoState>` itself.
+/// Therefore the inner `Rc` refcount is only ever touched on a single thread,
+/// and asserting `Send + Sync` on this wrapper does not introduce a data race
+/// in any usage pattern omq-compio supports.
 pub(crate) struct LocalStream(pub(crate) async_lock::Mutex<Option<RecvStreamState>>);
 
-// SAFETY: see `LocalStream` doc comment. `CancelToken` is `Rc`-based
-// (single-threaded) for the same reason as `SharedFd`, and is only
-// touched from the runtime thread. The unsafe `Send + Sync` cover
-// both fields of the inner `CancellableRecvStream`.
+// SAFETY: see `LocalStream` doc comment above.
 unsafe impl Send for LocalStream {}
-// SAFETY: see `LocalStream` doc comment.
+// SAFETY: see `LocalStream` doc comment above.
 unsafe impl Sync for LocalStream {}
 
 impl LocalStream {

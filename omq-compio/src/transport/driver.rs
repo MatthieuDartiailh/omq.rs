@@ -1,21 +1,23 @@
 //! Shared connection driver for stream transports (compio).
 //!
-//! One driver task per connection. Co-owns the codec, transform,
-//! writer and reader through [`PeerIo`] behind an async [`Mutex`].
+//! One driver task per connection. Co-owns the codec and reader
+//! through [`PeerIo`] behind an [`async_lock::Mutex`]. The send path
+//! uses a separate [`EncodedQueueCell`] (Cell-based, no atomics) so
+//! the socket handle can encode without contending with the driver.
 //! The driver `select_biased!`s between `PollFd::read_ready` (kernel
 //! readability), the per-peer inbox, the shared work-stealing queue
 //! (round-robin types), the pre-handshake deadline, the heartbeat
 //! tick, and the recv-direct claim/release signals.
 //!
-//! Lock discipline: the [`PeerIo`] mutex is per-op only — never held
-//! across an await — so the direct send/recv fast paths can grab it
-//! between driver iterations.
+//! Lock discipline: the [`PeerIo`] mutex is per-op only, never held
+//! across an await, so the direct recv fast path can grab it between
+//! driver iterations.
 //!
 //! Generic over any `Splittable` stream whose halves implement
 //! `AsyncRead` + `AsyncWrite`. TCP and IPC each provide bind/connect
 //! glue and call `run_connection`.
 //!
-//! [`Mutex`]: async_lock::Mutex
+//! [`EncodedQueueCell`]: crate::socket::direct_io::EncodedQueueCell
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -26,6 +28,7 @@ use bytes::Bytes;
 use flume::Receiver;
 use smallvec::SmallVec;
 
+use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::{Message, generated_identity};
 use omq_proto::options::Options;
@@ -181,6 +184,18 @@ pub(crate) fn build_peer_io(
     (peer_io, recv_stream)
 }
 
+/// Encode `msg` into `eq`, dispatching to WS framing when applicable.
+#[inline]
+fn encode_into_eq(eq: &mut EncodedQueue, msg: &Message, state: &DirectIoState) {
+    #[cfg(feature = "ws")]
+    if state.is_ws {
+        eq.encode_ws(msg, state.ws_masked);
+        return;
+    }
+    let _ = state;
+    eq.encode_auto(msg);
+}
+
 /// Encode a user message through the appropriate path (transform /
 /// crypto / plain) and return whether the batch cap was reached.
 impl DriverLoopState {
@@ -200,12 +215,7 @@ impl DriverLoopState {
             let mut eq = state.encoded_queue.borrow_mut();
             let cr = eq.total_bytes() >= cap;
             for wire in &wires {
-                #[cfg(feature = "ws")]
-                if state.is_ws {
-                    eq.encode_ws(wire, state.ws_masked);
-                    continue;
-                }
-                eq.encode_auto(wire);
+                encode_into_eq(&mut eq, wire, state);
             }
             Ok(cr)
         } else if state.uses_crypto {
@@ -218,12 +228,7 @@ impl DriverLoopState {
         } else {
             let mut eq = state.encoded_queue.borrow_mut();
             let cr = eq.total_bytes() >= cap;
-            #[cfg(feature = "ws")]
-            if state.is_ws {
-                eq.encode_ws(m, state.ws_masked);
-                return Ok(cr);
-            }
-            eq.encode_auto(m);
+            encode_into_eq(&mut eq, m, state);
             Ok(cr)
         }
     }
@@ -244,23 +249,13 @@ impl DriverLoopState {
                         drop(enc);
                         let mut eq = state.encoded_queue.borrow_mut();
                         for wire in &wires {
-                            #[cfg(feature = "ws")]
-                            if state.is_ws {
-                                eq.encode_ws(wire, state.ws_masked);
-                                continue;
-                            }
-                            eq.encode_auto(wire);
+                            encode_into_eq(&mut eq, wire, state);
                         }
                     } else if state.uses_crypto {
                         io.codec.send_message(&m)?;
                     } else {
                         let mut eq = state.encoded_queue.borrow_mut();
-                        #[cfg(feature = "ws")]
-                        if state.is_ws {
-                            eq.encode_ws(&m, state.ws_masked);
-                            continue;
-                        }
-                        eq.encode_auto(&m);
+                        encode_into_eq(&mut eq, &m, state);
                     }
                 }
                 DriverCommand::SendEncoded(chunks) => {

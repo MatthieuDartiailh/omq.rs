@@ -1,6 +1,6 @@
 use std::io::IoSlice;
 
-#[cfg(any(feature = "curve", feature = "ws"))]
+#[cfg(feature = "ws")]
 use bytes::BufMut;
 use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
@@ -10,6 +10,8 @@ use crate::message::{Message, Payload};
 
 use super::super::command::{self, Command};
 use super::super::frame;
+#[cfg(feature = "curve")]
+use super::super::mechanism::curve::CurveTransform;
 #[cfg(feature = "ws")]
 use super::super::ws_codec;
 #[cfg(feature = "ws")]
@@ -56,11 +58,8 @@ impl Connection {
                 let enc = tx
                     .encrypt_message(false, true, &plaintext)
                     .map_err(|_| Error::Protocol("command encryption failed".into()))?;
-                let mut wire = BytesMut::with_capacity(8 + enc.len());
-                wire.put_u8(b"MESSAGE".len() as u8);
-                wire.put_slice(b"MESSAGE");
-                wire.put_slice(&enc);
-                self.emit_command_frame(wire.freeze());
+                let wire = CurveTransform::message_command_frame(&enc);
+                self.emit_command_frame(wire);
                 continue;
             }
 
@@ -239,16 +238,13 @@ impl Connection {
         };
         let plaintext = part.as_bytes();
         let body = tx.encrypt_message(more, false, &plaintext)?;
-        let mut wire = BytesMut::with_capacity(8 + body.len());
-        wire.put_u8(b"MESSAGE".len() as u8);
-        wire.put_slice(b"MESSAGE");
-        wire.put_slice(&body);
+        let wire = CurveTransform::message_command_frame(&body);
         let flags = if more {
             crate::message::FrameFlags::MORE
         } else {
             crate::message::FrameFlags::LAST
         };
-        self.emit_frame(flags, Payload::from_bytes(wire.freeze()));
+        self.emit_frame(flags, Payload::from_bytes(wire));
         Ok(())
     }
 

@@ -53,6 +53,9 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Lock+drop synchronizes with try_drain: guarantees that any
+            // in-flight send() has completed and its items are visible
+            // before we notify the receiver of channel closure.
             drop(
                 self.shared
                     .inner

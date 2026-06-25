@@ -1,9 +1,26 @@
+use bytes::Bytes;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
 use crate::socket::handle::Socket;
+use crate::socket::inner::PeerOut;
 
 impl Socket {
+    fn resolve_identity(&self, identity: &Bytes) -> Option<PeerOut> {
+        let table = self
+            .inner()
+            .routing
+            .identity_to_slot
+            .read()
+            .expect("identity table");
+        let idx = table.get(identity).copied();
+        drop(table);
+        idx.and_then(|idx| {
+            let peers = self.inner().routing.peers.read().expect("peers lock");
+            peers.get(idx).map(|p| p.out.clone())
+        })
+    }
+
     /// Identity-routed send: ROUTER, SERVER, PEER. Message must be
     /// `[routing_id, body...]`; the first frame names the target peer
     /// in `identity_to_slot`. Unknown identity is dropped silently
@@ -13,21 +30,7 @@ impl Socket {
             return Err(Error::Unroutable);
         }
         let identity = msg.part_bytes(0).unwrap_or_default();
-        let target = {
-            let table = self
-                .inner()
-                .routing
-                .identity_to_slot
-                .read()
-                .expect("identity table");
-            let idx = table.get(&identity).copied();
-            drop(table);
-            idx.and_then(|idx| {
-                let peers = self.inner().routing.peers.read().expect("peers lock");
-                peers.get(idx).map(|p| p.out.clone())
-            })
-        };
-        let Some(out) = target else {
+        let Some(out) = self.resolve_identity(&identity) else {
             if self.inner().options.router_mandatory {
                 return Err(Error::Unroutable);
             }
@@ -42,21 +45,7 @@ impl Socket {
             return Err(Error::Unroutable);
         }
         let identity = msg.part_bytes(0).unwrap_or_default();
-        let target = {
-            let table = self
-                .inner()
-                .routing
-                .identity_to_slot
-                .read()
-                .expect("identity table");
-            let idx = table.get(&identity).copied();
-            drop(table);
-            idx.and_then(|idx| {
-                let peers = self.inner().routing.peers.read().expect("peers lock");
-                peers.get(idx).map(|p| p.out.clone())
-            })
-        };
-        let Some(out) = target else {
+        let Some(out) = self.resolve_identity(&identity) else {
             if self.inner().options.router_mandatory {
                 return Err(Error::Unroutable);
             }
