@@ -9,7 +9,7 @@ use omq_proto::message::Message;
 use crate::socket::handle::Socket;
 use crate::socket::inner::{DirectIoState, PeerOut};
 
-use super::{direct_push_encoded, direct_push_pre_encoded};
+use super::{direct_push_encoded, direct_push_pre_encoded, try_direct_encode};
 
 const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
 const FAN_OUT_ARENA_COPY_MAX: usize = 256;
@@ -98,21 +98,21 @@ impl Socket {
                 crate::yield_now().await;
                 return Ok(());
             }
-            if targets.len() > 1 && inner.pub_sub.all_wire.get() {
+            if inner.pub_sub.all_wire.get() {
                 let dio_cache = unsafe { &*inner.pub_sub.direct_io_cache.get() };
                 if dio_cache.len() == targets.len() {
-                    fan_out_encode_dispatch(dio_cache, targets, &msg);
-                } else {
-                    for peer in targets {
-                        let _ = peer.send(msg.clone()).await;
+                    if targets.len() > 1 {
+                        fan_out_encode_dispatch(dio_cache, targets, &msg);
+                    } else if !try_direct_encode(&msg, &dio_cache[0])? {
+                        let _ = targets[0].send(msg.clone()).await;
                     }
+                    let wire_size = msg.byte_len() + 10;
+                    let interval = (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32;
+                    if count.is_multiple_of(interval) {
+                        crate::yield_now().await;
+                    }
+                    return Ok(());
                 }
-                let wire_size = msg.byte_len() + 10;
-                let interval = (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32;
-                if count.is_multiple_of(interval) {
-                    crate::yield_now().await;
-                }
-                return Ok(());
             }
             for peer in targets {
                 let _ = peer.send(msg.clone()).await;
@@ -164,16 +164,16 @@ impl Socket {
         }
         if inner.pub_sub.all_match_all.get() {
             let targets = unsafe { &*inner.pub_sub.all_match_cache.get() };
-            if targets.len() > 1 && inner.pub_sub.all_wire.get() {
+            if inner.pub_sub.all_wire.get() {
                 let dio_cache = unsafe { &*inner.pub_sub.direct_io_cache.get() };
                 if dio_cache.len() == targets.len() {
-                    try_fan_out_encode_dispatch(dio_cache, targets, msg);
-                } else {
-                    for peer in targets {
-                        let _ = peer.try_send_immediate(msg.clone());
+                    if targets.len() > 1 {
+                        try_fan_out_encode_dispatch(dio_cache, targets, msg);
+                    } else if !try_direct_encode(msg, &dio_cache[0]).unwrap_or(false) {
+                        let _ = targets[0].try_send_immediate(msg.clone());
                     }
+                    return;
                 }
-                return;
             }
             for peer in targets {
                 let _ = peer.try_send_immediate(msg.clone());
