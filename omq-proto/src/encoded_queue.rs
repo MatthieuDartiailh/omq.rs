@@ -76,6 +76,10 @@ impl EncodedQueue {
     }
 
     pub fn clear_arena(&mut self) {
+        debug_assert!(
+            self.entries.is_empty(),
+            "clear_arena called with external entries still present"
+        );
         self.arena.clear();
         self.arena_mark = 0;
         self.total_bytes = 0;

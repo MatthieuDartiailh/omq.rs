@@ -289,10 +289,10 @@ impl Endpoint {
     }
 }
 
-/// Inproc + an encrypting mechanism makes no sense - both ends are
-/// in the same process, the fast path skips the codec, and there's
-/// no wire to attack. Reject explicitly so the user notices their
-/// config doesn't do what they think it does.
+/// Inproc + any non-NULL mechanism makes no sense: both ends are in
+/// the same process, the fast path skips the codec entirely. Reject
+/// explicitly so the user notices their config doesn't do what they
+/// think it does.
 pub fn reject_encrypted_inproc(
     endpoint: &Endpoint,
     mechanism: &crate::proto::mechanism::MechanismSetup,
@@ -301,8 +301,8 @@ pub fn reject_encrypted_inproc(
         && !matches!(mechanism, crate::proto::mechanism::MechanismSetup::Null)
     {
         return Err(crate::error::Error::InvalidEndpoint(
-            "encrypting mechanisms (CURVE / BLAKE3ZMQ) are not supported on \
-             inproc - use ipc:// or tcp:// for encrypted in-host channels"
+            "non-NULL mechanisms (PLAIN / CURVE / BLAKE3ZMQ) are not supported on \
+             inproc - use ipc:// or tcp:// for authenticated or encrypted channels"
                 .into(),
         ));
     }

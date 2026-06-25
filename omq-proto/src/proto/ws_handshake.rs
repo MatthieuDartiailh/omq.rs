@@ -155,7 +155,11 @@ pub fn parse_server_upgrade(response: &[u8], expected_key: &str) -> Result<Strin
         .next()
         .ok_or_else(|| Error::HandshakeFailed("empty HTTP response".into()))?;
 
-    if !status_line.contains("101") {
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok());
+    if status_code != Some(101) {
         return Err(Error::HandshakeFailed(format!(
             "expected HTTP 101, got: {status_line}"
         )));

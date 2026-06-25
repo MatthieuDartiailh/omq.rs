@@ -77,8 +77,11 @@ impl Drop for ClaimGuard<'_> {
 
 #[expect(clippy::too_many_lines)]
 async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction> {
-    while state.large_recv_pending.load(Ordering::Acquire) != 0 {
+    loop {
         let payload_len = state.large_recv_pending.load(Ordering::Acquire);
+        if payload_len == 0 {
+            break;
+        }
 
         let is_one_shot = {
             let sg = state.recv_stream.0.lock().await;

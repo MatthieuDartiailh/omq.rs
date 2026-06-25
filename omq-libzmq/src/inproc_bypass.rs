@@ -386,22 +386,22 @@ impl BypassRecv {
     /// into the ring buffer. Caller must call `advance` after consuming.
     #[inline]
     pub(crate) fn peek(&mut self) -> Option<(*const u8, usize)> {
-        let result = self.consumer.try_peek();
-        if result.is_some()
-            && self.pipe.sender_waiting.load(Ordering::Acquire)
+        self.consumer.try_peek()
+    }
+
+    /// Advance past the last peeked entry. Unparks a blocked sender if
+    /// one is waiting, since ring space is now available. Drains the
+    /// eventfd when the ring becomes empty so `libc::poll` sees the fd
+    /// as not-readable.
+    #[inline]
+    pub(crate) fn advance(&mut self, len: usize) {
+        self.consumer.advance_and_release(len);
+        if self.pipe.sender_waiting.load(Ordering::Acquire)
             && let Ok(guard) = self.pipe.sender_thread.lock()
             && let Some(t) = guard.as_ref()
         {
             t.unpark();
         }
-        result
-    }
-
-    /// Advance past the last peeked entry. Drains the eventfd when the
-    /// ring becomes empty so `libc::poll` sees the fd as not-readable.
-    #[inline]
-    pub(crate) fn advance(&mut self, len: usize) {
-        self.consumer.advance_and_release(len);
         if self.consumer.is_empty() {
             drain_recv_fd(self.pipe.recv_signal_fd);
         }

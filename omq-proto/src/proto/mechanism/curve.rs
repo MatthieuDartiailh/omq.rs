@@ -709,9 +709,6 @@ impl CurveServer {
             .encrypt(&welcome_nonce.into(), welcome_pt.as_slice())
             .map_err(|_| Error::Protocol("CURVE WELCOME encrypt failed".into()))?;
 
-        let counter = self.next_out_counter()?;
-        let _ = counter; // WELCOME doesn't carry a short nonce counter
-
         let mut body = BytesMut::with_capacity(160);
         body.put_slice(&welcome_suffix);
         body.put_slice(&welcome_box);
