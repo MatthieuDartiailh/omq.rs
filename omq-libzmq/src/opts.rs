@@ -767,12 +767,14 @@ pub extern "C" fn zmq_getsockopt(
             let has_data = sock_arc
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed)
-                // SAFETY: zmq contract guarantees single-threaded access per socket.
-                || unsafe { &*sock_arc.recv_cons.get() }
+                || sock_arc
+                    .recv_cons
+                    .get()
                     .as_ref()
                     .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty())
-                // SAFETY: zmq contract guarantees single-threaded access per socket.
-                || unsafe { &*sock_arc.bypass_recv.get() }
+                || sock_arc
+                    .bypass_recv
+                    .get()
                     .as_ref()
                     .is_some_and(|br| !br.is_empty());
             if has_data {

@@ -22,25 +22,17 @@ use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 ///
 /// SAFETY: `[MaybeUninit<u8>; N]` has no validity invariant. The transmute
 /// to `[u8; N]` is sound because `MessageInner::Inline` only reads
-/// `data[..len]`, which was initialized by `read_into_uninit`. Copying
-/// uninit tail bytes is defined behavior for `u8`.
 #[inline]
 fn inline_message_from_buf(
     buf: &mut super::super::chunked_buf::ChunkedInputBuf,
     payload_len: usize,
 ) -> Message {
-    let mut data: [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE] =
-        unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-    buf.read_into_uninit(payload_len, &mut data);
+    let mut data = [0u8; crate::message::MAX_INLINE_MESSAGE];
+    buf.read_into(payload_len, &mut data);
     Message {
         inner: crate::message::MessageInner::Inline {
             len: payload_len as u8,
-            data: unsafe {
-                std::mem::transmute::<
-                    [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE],
-                    [u8; crate::message::MAX_INLINE_MESSAGE],
-                >(data)
-            },
+            data,
         },
     }
 }
@@ -645,17 +637,11 @@ impl Connection {
 
         let zmtp_payload_len = ws_payload_len - 1;
 
-        // SAFETY: same pattern as try_advance_ready — MaybeUninit<u8> array
-        // has no validity invariant.
-        let mut data: [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE] =
-            unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
+        let mut data = [0u8; crate::message::MAX_INLINE_MESSAGE];
 
-        // Read ZWS flag + payload together, then split.
-        // We use a small stack buffer for the ZWS flag byte.
-        let mut zws_flag_buf: [std::mem::MaybeUninit<u8>; 1] = [std::mem::MaybeUninit::uninit()];
-        self.in_buf.read_into_uninit(1, &mut zws_flag_buf);
-        // SAFETY: read_into_uninit initialized zws_flag_buf[0].
-        let mut zws_flag = unsafe { zws_flag_buf[0].assume_init() };
+        let mut zws_flag = 0u8;
+        self.in_buf
+            .read_into(1, std::slice::from_mut(&mut zws_flag));
 
         if masked {
             zws_flag ^= mask_key[0];
@@ -685,26 +671,17 @@ impl Connection {
         }
 
         if zmtp_payload_len > 0 {
-            self.in_buf.read_into_uninit(zmtp_payload_len, &mut data);
+            self.in_buf.read_into(zmtp_payload_len, &mut data);
         }
 
         if masked && zmtp_payload_len > 0 {
-            // SAFETY: data[..zmtp_payload_len] was initialized by read_into_uninit.
-            let slice = unsafe {
-                std::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u8>(), zmtp_payload_len)
-            };
-            ws_codec::apply_mask_offset(slice, mask_key, 1);
+            ws_codec::apply_mask_offset(&mut data[..zmtp_payload_len], mask_key, 1);
         }
 
         let msg = Message {
             inner: crate::message::MessageInner::Inline {
                 len: zmtp_payload_len as u8,
-                data: unsafe {
-                    std::mem::transmute::<
-                        [std::mem::MaybeUninit<u8>; crate::message::MAX_INLINE_MESSAGE],
-                        [u8; crate::message::MAX_INLINE_MESSAGE],
-                    >(data)
-                },
+                data,
             },
         };
         self.messages.push_back(msg);

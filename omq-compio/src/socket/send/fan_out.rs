@@ -93,13 +93,13 @@ impl Socket {
             inner.recompute_pub_all_match_all();
         }
         if inner.pub_sub.all_match_all.get() {
-            let targets = unsafe { &*inner.pub_sub.all_match_cache.get() };
+            let targets = inner.pub_sub.all_match_cache.get();
             if targets.is_empty() {
                 crate::yield_now().await;
                 return Ok(());
             }
             if inner.pub_sub.all_wire.get() {
-                let dio_cache = unsafe { &*inner.pub_sub.direct_io_cache.get() };
+                let dio_cache = inner.pub_sub.direct_io_cache.get();
                 if dio_cache.len() == targets.len() {
                     if targets.len() > 1 {
                         fan_out_encode_dispatch(dio_cache, targets, &msg);
@@ -163,9 +163,9 @@ impl Socket {
             inner.recompute_pub_all_match_all();
         }
         if inner.pub_sub.all_match_all.get() {
-            let targets = unsafe { &*inner.pub_sub.all_match_cache.get() };
+            let targets = inner.pub_sub.all_match_cache.get();
             if inner.pub_sub.all_wire.get() {
-                let dio_cache = unsafe { &*inner.pub_sub.direct_io_cache.get() };
+                let dio_cache = inner.pub_sub.direct_io_cache.get();
                 if dio_cache.len() == targets.len() {
                     if targets.len() > 1 {
                         try_fan_out_encode_dispatch(dio_cache, targets, msg);

@@ -407,14 +407,8 @@ impl Socket {
             .generation
             .fetch_add(1, Ordering::Release);
 
-        // Drop cached DirectIoState refs so the Arc can reach zero
-        // once the driver task exits and drops its own ref.
-        unsafe {
-            *self.inner.direct_io.send.get() = None;
-        }
-        unsafe {
-            *self.inner.direct_io.recv.get() = None;
-        }
+        *self.inner.direct_io.send.get() = None;
+        *self.inner.direct_io.recv.get() = None;
         *self
             .inner
             .routing

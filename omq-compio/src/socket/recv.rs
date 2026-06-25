@@ -326,7 +326,7 @@ impl Socket {
             if let Some(msg) = cache.pop_front() {
                 return Ok(msg);
             }
-            let dio = unsafe { &*inner.direct_io.recv.get() };
+            let dio = inner.direct_io.recv.get();
             if let Some(ref state) = *dio
                 && let Ok(mut io) = state.peer_io.try_lock()
             {
@@ -356,7 +356,7 @@ impl Socket {
             }
             if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
                 let cache = inner.recv_cache.get();
-                let dio = unsafe { &*inner.direct_io.recv.get() };
+                let dio = inner.direct_io.recv.get();
                 if let Some(ref state) = *dio
                     && let Ok(mut io) = state.peer_io.try_lock()
                     && let Ok(Some(msg)) = self.drain_and_swap(&mut io, cache)
@@ -373,7 +373,7 @@ impl Socket {
                 return Ok(msg);
             }
 
-            let recv_state = unsafe { &mut *self.inner().inproc.recv.get() };
+            let recv_state = self.inner().inproc.recv.get();
             if !recv_state.consumers.is_empty() {
                 let cache = self.inner().recv_cache.get();
                 let max = self.inner().options.max_message_size;
@@ -419,7 +419,7 @@ impl Socket {
             let inproc_listener = self.inner().inproc.recv_event.listen();
             let peer_listener = self.inner().on_peer_ready.listen();
             self.inner().inproc.parked.store(true, Ordering::Release);
-            let recv_state = unsafe { &mut *self.inner().inproc.recv.get() };
+            let recv_state = self.inner().inproc.recv.get();
             if recv_state.consumers.iter().any(|c| !c.is_empty()) {
                 self.inner().inproc.parked.store(false, Ordering::Release);
                 continue;
@@ -515,7 +515,7 @@ impl Socket {
             if let Some(msg) = cache.pop_front() {
                 return Ok(msg);
             }
-            let dio = unsafe { &*inner.direct_io.recv.get() };
+            let dio = inner.direct_io.recv.get();
             if let Some(ref state) = *dio {
                 let mut io = state.lock_io();
                 while let Some(ev) = io.codec.poll_event() {
@@ -542,7 +542,7 @@ impl Socket {
                     return Ok(msg);
                 }
                 if !post_recv_needs_type_state(st) && !self.needs_subscription_filter() {
-                    let dio = unsafe { &*inner.direct_io.recv.get() };
+                    let dio = inner.direct_io.recv.get();
                     if let Some(ref state) = *dio {
                         let cache = inner.recv_cache.get();
                         let mut io = state.lock_io();
@@ -553,7 +553,7 @@ impl Socket {
                 }
             }
         }
-        let recv_state = unsafe { &mut *inner.inproc.recv.get() };
+        let recv_state = inner.inproc.recv.get();
         if !recv_state.consumers.is_empty() {
             let cache = inner.recv_cache.get();
             let max = inner.options.max_message_size;
@@ -760,7 +760,7 @@ impl Socket {
             return Ok(None);
         };
         // SAFETY: single-threaded compio runtime.
-        unsafe { *self.inner().direct_io.recv.get() = Some(state.clone()) };
+        *self.inner().direct_io.recv.get() = Some(state.clone());
         if state
             .recv_claim
             .compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)

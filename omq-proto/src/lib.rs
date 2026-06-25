@@ -6,6 +6,7 @@
 //! subscription matcher. None of this depends on a runtime -
 //! `omq-tokio` and `omq-compio` (and any future backend) embed it
 //! directly.
+#![forbid(unsafe_code)]
 
 pub mod backoff;
 pub mod encoded_queue;

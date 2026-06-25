@@ -211,7 +211,7 @@ impl Socket {
             && !pre_send_needs_type_state(st)
             && self.inner().routing.peer_count.load(Ordering::Acquire) == 1
         {
-            let pipes = unsafe { &mut *self.inner().inproc.send_pipes.get() };
+            let pipes = self.inner().inproc.send_pipes.get();
             if let Some(pipe) = pipes.iter_mut().find_map(|p| p.as_mut()) {
                 let mut msg = msg;
                 loop {
@@ -242,7 +242,7 @@ impl Socket {
         ) && !pre_send_needs_type_state(st)
         {
             let inner = self.inner();
-            let dio = unsafe { &*inner.direct_io.send.get() };
+            let dio = inner.direct_io.send.get();
             if let Some((state, cached_gen)) = dio
                 && *cached_gen == inner.routing.generation.load(Ordering::Acquire)
                 && try_direct_encode(&msg, state)?

@@ -331,6 +331,9 @@ impl std::ops::Deref for EncodedQueueGuard<'_> {
     type Target = EncodedQueue;
     #[inline]
     fn deref(&self) -> &EncodedQueue {
+        // SAFETY: the borrow flag prevents concurrent access. The
+        // guard's lifetime is bounded by the cell's, so the pointer
+        // remains valid.
         unsafe { &*self.cell.inner.get() }
     }
 }
@@ -338,6 +341,8 @@ impl std::ops::Deref for EncodedQueueGuard<'_> {
 impl std::ops::DerefMut for EncodedQueueGuard<'_> {
     #[inline]
     fn deref_mut(&mut self) -> &mut EncodedQueue {
+        // SAFETY: &mut self guarantees exclusive guard access. The
+        // borrow flag prevents a second guard from being created.
         unsafe { &mut *self.cell.inner.get() }
     }
 }

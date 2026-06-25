@@ -8,6 +8,7 @@
 //! algorithms live in the runtime-agnostic `omq-proto` crate.
 //! This crate provides the tokio glue: per-connection drivers,
 //! transport implementations, and the public `Socket` actor.
+#![forbid(unsafe_code)]
 
 pub mod engine;
 pub(crate) mod routing;

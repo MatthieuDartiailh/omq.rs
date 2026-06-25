@@ -206,7 +206,7 @@ impl Socket {
     ) -> Result<()> {
         match chosen {
             PeerOut::Inproc { .. } => {
-                let pipes = unsafe { &mut *self.inner().inproc.send_pipes.get() };
+                let pipes = self.inner().inproc.send_pipes.get();
                 let msg = if let Some(Some(pipe)) = pipes.get_mut(slot_idx) {
                     let mut msg = msg;
                     loop {
@@ -245,11 +245,8 @@ impl Socket {
                 if let Some(state) = direct
                     && try_direct_encode(&msg, &state)?
                 {
-                    // Cache for the UnsafeCell fast path in send().
                     let cur_gen = self.inner().routing.generation.load(Ordering::Acquire);
-                    unsafe {
-                        *self.inner().direct_io.send.get() = Some((state, cur_gen));
-                    }
+                    *self.inner().direct_io.send.get() = Some((state, cur_gen));
                     return Ok(());
                 }
                 // Fall back to per-peer cmd channel. If the driver died

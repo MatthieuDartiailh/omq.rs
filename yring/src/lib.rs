@@ -78,6 +78,8 @@ impl<T> Ring<T> {
                 return Err(val);
             }
         }
+        // SAFETY: capacity check above guarantees this slot is not
+        // visible to the consumer (tail < head + capacity).
         unsafe {
             (*self.buf[*tail & self.mask].get()).write(val);
         }
@@ -123,6 +125,8 @@ impl<T> Ring<T> {
         if *head == cached_flush {
             return None;
         }
+        // SAFETY: head < cached_flush, so this slot was written by the
+        // producer and made visible via flush (Release store).
         let val = unsafe { (*self.buf[*head & self.mask].get()).assume_init_read() };
         *head += 1;
         Some(val)
@@ -158,6 +162,8 @@ impl<T> Ring<T> {
         let head = *self.head.0.get_mut();
         let flush = *self.flush.0.get_mut();
         for i in head..flush {
+            // SAFETY: &mut self guarantees exclusive access. Slots
+            // [head..flush] were written by the producer and flushed.
             unsafe {
                 self.buf[i & self.mask].get_mut().assume_init_drop();
             }

@@ -229,37 +229,13 @@ pub(crate) fn apply_mask_offset(data: &mut [u8], mask: [u8; 4], offset: usize) {
     }
     let mask_u32 = u32::from_ne_bytes(rotated);
 
-    let mut i = 0;
-
-    // Byte-by-byte until aligned to 4 bytes.
-    let align_end = data.len().min((4 - (data.as_ptr() as usize % 4)) % 4);
-    while i < align_end {
-        data[i] ^= rotated[i % 4];
-        i += 1;
+    let (chunks, remainder) = data.as_chunks_mut::<4>();
+    for chunk in chunks {
+        let word = u32::from_ne_bytes(*chunk) ^ mask_u32;
+        *chunk = word.to_ne_bytes();
     }
-
-    // Word-at-a-time after alignment point.
-    let mask_adjusted = if align_end.is_multiple_of(4) {
-        mask_u32
-    } else {
-        let shift = align_end % 4;
-        let mut adj = [0u8; 4];
-        for j in 0..4 {
-            adj[j] = rotated[(j + shift) % 4];
-        }
-        u32::from_ne_bytes(adj)
-    };
-
-    let chunks = &mut data[i..];
-    let (prefix, middle, suffix) = unsafe { chunks.align_to_mut::<u32>() };
-    debug_assert!(prefix.is_empty());
-    for word in middle.iter_mut() {
-        *word ^= mask_adjusted;
-    }
-
-    let suffix_offset = (i + middle.len() * 4) % 4;
-    for (j, b) in suffix.iter_mut().enumerate() {
-        *b ^= rotated[(suffix_offset + j) % 4];
+    for (j, b) in remainder.iter_mut().enumerate() {
+        *b ^= rotated[j % 4];
     }
 }
 

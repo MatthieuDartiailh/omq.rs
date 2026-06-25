@@ -411,8 +411,7 @@ pub extern "C" fn zmq_msg_send(
     };
 
     if !group.is_empty() {
-        // SAFETY: zmq contract guarantees single-threaded access per socket.
-        let accum = unsafe { &mut *sock_arc.send_accum.get() };
+        let accum = sock_arc.send_accum.get();
         accum.push(group);
     }
 

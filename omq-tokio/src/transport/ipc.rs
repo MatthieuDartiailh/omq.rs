@@ -118,27 +118,9 @@ fn connect_abstract(_name: &str) -> Result<UnixStream> {
 const IPC_BUF_SIZE: u32 = 1024 * 1024;
 
 fn tune_unix_buffers(stream: &UnixStream) {
-    use std::os::fd::AsRawFd;
-    let fd = stream.as_raw_fd();
-    // SAFETY: fd is valid, SOL_SOCKET + SO_SNDBUF/SO_RCVBUF are
-    // standard. The kernel clamps to wmem_max / rmem_max silently.
-    let val = IPC_BUF_SIZE;
-    unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_SNDBUF,
-            (&raw const val).cast::<libc::c_void>(),
-            std::mem::size_of::<u32>() as libc::socklen_t,
-        );
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            (&raw const val).cast::<libc::c_void>(),
-            std::mem::size_of::<u32>() as libc::socklen_t,
-        );
-    }
+    let sock = socket2::SockRef::from(stream);
+    let _ = sock.set_send_buffer_size(IPC_BUF_SIZE as usize);
+    let _ = sock.set_recv_buffer_size(IPC_BUF_SIZE as usize);
 }
 
 /// Bound IPC listener. For filesystem-path binds, removes the socket
