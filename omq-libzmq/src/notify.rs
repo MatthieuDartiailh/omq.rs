@@ -179,10 +179,10 @@ mod unix {
     }
 
     /// Unix implementation: eventfd on Linux, pipe pairs on other Unix.
-    pub(crate) struct UnixNotifyHandle {
-        linux: Option<LinuxEventFd>,
-        unix: Option<UnixPipeFd>,
-    }
+    #[cfg(target_os = "linux")]
+    pub(crate) struct UnixNotifyHandle(Option<LinuxEventFd>);
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) struct UnixNotifyHandle(Option<UnixPipeFd>);
 
     #[allow(dead_code)]
     struct LinuxEventFd {
@@ -226,10 +226,7 @@ mod unix {
                 unsafe { libc::close(recv_fd) };
                 return None;
             }
-            Some(Self {
-                linux: Some(LinuxEventFd { recv_fd, send_fd }),
-                unix: None,
-            })
+            Some(Self(Some(LinuxEventFd { recv_fd, send_fd })))
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -262,22 +259,19 @@ mod unix {
                 libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
             }
             let (send_read, send_write) = (fds[0], fds[1]);
-            Some(Self {
-                linux: None,
-                unix: Some(UnixPipeFd {
-                    recv_read,
-                    recv_write,
-                    send_read,
-                    send_write,
-                }),
-            })
+            Some(Self(Some(UnixPipeFd {
+                recv_read,
+                recv_write,
+                send_read,
+                send_write,
+            })))
         }
     }
 
     impl NotifyHandle for UnixNotifyHandle {
         fn signal_recv(&self) {
             #[cfg(target_os = "linux")]
-            if let Some(linux) = &self.linux {
+            if let Some(linux) = &self.0 {
                 let val: u64 = 1;
                 // SAFETY: fd is a valid eventfd; writing 8 bytes atomically increments the counter.
                 unsafe {
@@ -285,7 +279,7 @@ mod unix {
                 }
             }
             #[cfg(not(target_os = "linux"))]
-            if let Some(unix) = &self.unix {
+            if let Some(unix) = &self.0 {
                 let b: u8 = 1;
                 // SAFETY: fd is a valid pipe write end; writing 1 byte signals readiness.
                 unsafe {
@@ -296,7 +290,7 @@ mod unix {
 
         fn signal_send(&self) {
             #[cfg(target_os = "linux")]
-            if let Some(linux) = &self.linux {
+            if let Some(linux) = &self.0 {
                 let val: u64 = 1;
                 // SAFETY: fd is a valid eventfd; writing 8 bytes atomically decrements the counter.
                 unsafe {
@@ -304,7 +298,7 @@ mod unix {
                 }
             }
             #[cfg(not(target_os = "linux"))]
-            if let Some(unix) = &self.unix {
+            if let Some(unix) = &self.0 {
                 let b: u8 = 1;
                 // SAFETY: fd is a valid pipe write end; writing 1 byte signals readiness.
                 unsafe {
@@ -315,7 +309,7 @@ mod unix {
 
         fn close(&self) {
             #[cfg(target_os = "linux")]
-            if let Some(linux) = &self.linux {
+            if let Some(linux) = &self.0 {
                 // SAFETY: recv_fd and send_fd are valid fds opened by new().
                 unsafe {
                     libc::close(linux.recv_fd);
@@ -323,7 +317,7 @@ mod unix {
                 }
             }
             #[cfg(not(target_os = "linux"))]
-            if let Some(unix) = &self.unix {
+            if let Some(unix) = &self.0 {
                 // SAFETY: all fds are valid, opened by new().
                 unsafe {
                     libc::close(unix.recv_read);
@@ -337,22 +331,22 @@ mod unix {
         fn recv_fd(&self) -> std::os::raw::c_int {
             #[cfg(target_os = "linux")]
             {
-                self.linux.as_ref().map(|l| l.recv_fd).unwrap_or(-1)
+                self.0.as_ref().map_or(-1, |l| l.recv_fd)
             }
             #[cfg(not(target_os = "linux"))]
             {
-                self.unix.as_ref().map(|u| u.recv_read).unwrap_or(-1)
+                self.0.as_ref().map_or(-1, |u| u.recv_read)
             }
         }
 
         fn send_fd(&self) -> std::os::raw::c_int {
             #[cfg(target_os = "linux")]
             {
-                self.linux.as_ref().map_or(-1, |l| l.send_fd)
+                self.0.as_ref().map_or(-1, |l| l.send_fd)
             }
             #[cfg(not(target_os = "linux"))]
             {
-                self.unix.as_ref().map_or(-1, |u| u.send_read)
+                self.0.as_ref().map_or(-1, |u| u.send_read)
             }
         }
 
@@ -444,7 +438,7 @@ mod unix {
         /// before blocking poll.
         /// Called before waiting to clear any accumulated signals.
         pub(crate) fn prepare_for_wait(&mut self) {
-            for pfd in self.pfds.iter_mut() {
+            for pfd in &mut self.pfds {
                 if pfd.fd < 0 {
                     continue;
                 }
@@ -547,8 +541,6 @@ mod unix {
             ready_count
         }
     }
-
-    pub(super) use UnixNotifyHandle as PlatformNotifyHandle;
 }
 
 #[cfg(windows)]
@@ -938,9 +930,6 @@ pub(crate) mod windows {
             ready_count
         }
     }
-
-    #[allow(unused_imports)]
-    pub(super) use WindowsNotifyHandle as PlatformNotifyHandle;
 }
 
 /// Create a platform-specific notification handle.
