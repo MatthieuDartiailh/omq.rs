@@ -361,6 +361,11 @@ impl Socket {
     pub async fn send(&self, msg: Message) -> Result<()> {
         match self.inner.socket_type {
             SocketType::Req => {
+                // CAS loop with yield guards against a TOCTOU race: between
+                // the CAS failing and the yield returning, the peer holding
+                // the reply slot may disconnect (dead slot), which resets the
+                // flag. Yielding lets the driver task process the disconnect
+                // and clear req_awaiting_reply before we re-check.
                 loop {
                     if self
                         .inner

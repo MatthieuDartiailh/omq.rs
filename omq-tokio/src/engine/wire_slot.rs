@@ -31,6 +31,9 @@ pub(crate) struct PeerWireSlot {
     pub(crate) data_ready: Notify,
     pub(crate) space_available: Notify,
     pub(crate) handshake_done: AtomicBool,
+    /// Coalesces `data_ready` notifications: only the first encode since
+    /// the last drain actually calls `notify_one()`, avoiding thundering
+    /// herd on the `Notify` when many messages arrive between drains.
     pending: AtomicBool,
     pub(crate) has_transform: bool,
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,

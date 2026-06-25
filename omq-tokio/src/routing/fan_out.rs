@@ -36,10 +36,16 @@ pub(crate) enum FanOutMode {
     Group,
 }
 
+/// Yield to the runtime after encoding this many arena bytes, so a large
+/// fan-out does not starve other tasks on the same thread.
 const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
 
+/// Per-peer copy budget for pre-encoded bytes before yielding.
 const FAN_OUT_COPY_BUDGET: usize = 128 * 1024;
 
+/// Yield every N peers to keep latency bounded. Scales down with peer
+/// count: fewer peers per yield when fan-out is wide (more total work).
+/// isqrt gives sub-linear scaling; floor of 16 prevents over-yielding.
 fn yield_interval(peer_count: usize) -> u32 {
     let n = (peer_count as u32).max(1);
     (512 / n.isqrt()).max(16)

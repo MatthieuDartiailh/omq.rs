@@ -601,6 +601,9 @@ where
                         return Ok(());
                     }
                     let chunk = if decoder.is_some() {
+                        // Decoders (lz4 etc.) consume the full input each call,
+                        // so split().freeze() would leave a 0-cap BytesMut that
+                        // needs reallocation. Copy + clear reuses the buffer.
                         let b = Bytes::copy_from_slice(&read_buf);
                         read_buf.clear();
                         b
