@@ -1,8 +1,9 @@
 //! Cross-platform notification handle abstraction for socket signaling.
 //!
-//! This module provides a unified `NotifyHandle` trait and platform-specific implementations for
-//! signaling inproc message arrival and send buffer availability. It bridges the gap between
-//! Unix file descriptor semantics and Windows handle-based I/O.
+//! This module provides a unified `NotifyHandle` trait and platform-specific
+//! implementations for signaling inproc message arrival and send buffer availability.
+//! It bridges the gap between Unix file descriptor semantics and Windows
+//! handle-based I/O.
 //!
 //! ## Architecture
 //!
@@ -15,14 +16,17 @@
 //!
 //! **Windows Implementation:**
 //! - Manual-reset events (HANDLE returned by `CreateEventW`)
-//! - Operations: `SetEvent()` to signal, explicit `ResetEvent()` drain before each `WaitForMultipleObjects`
+//! - Operations: `SetEvent()` to signal, explicit `ResetEvent()` drain before
+//!   each `WaitForMultipleObjects`
 //!
 //! ### Inproc Message Delivery (Cross-Platform)
 //!
 //! Both Unix and Windows use identical infrastructure for inproc message delivery:
-//! - Inproc bypass byte rings for PUSH/PULL optimization (cross-platform, `RecvNotify` signaling)
+//! - Inproc bypass byte rings for PUSH/PULL optimization (cross-platform,
+//!   `RecvNotify` signaling)
 //! - Lock-free yring consumers for message buffering (cross-platform)
-//! - `RecvNotify` (platform-specific, Copy, monomorphic) for signal/drain/wait operations
+//! - `RecvNotify` (platform-specific, Copy, monomorphic) for signal/drain/wait
+//!   operations
 //!
 //! **Message flow (all platforms):**
 //! 1. **Send side:** PUSH writes frame to yring, calls `RecvNotify::signal()`
@@ -30,8 +34,9 @@
 //! 3. **Recv side:** PULL reads frames from yring
 //! 4. **Block side:** Calls `RecvNotify::wait_for_readable()` if no buffered messages
 //!
-//! The signaling mechanism is platform-specific (eventfd write vs `SetEvent` call), but the
-//! message buffering and blocking strategy are identical, ensuring consistent behavior across platforms.
+//! The signaling mechanism is platform-specific (eventfd write vs `SetEvent` call),
+//! but the message buffering and blocking strategy are identical, ensuring consistent
+//! behavior across platforms.
 //!
 //! ### Polling Mechanisms
 //!
@@ -55,12 +60,8 @@
 //! - `RecvNotify::signal()` / `drain()` / `wait_for_readable()` for all blocking/signaling needs
 //! - `PollWaiter::new()` (compile-time selection) for multi-socket polling
 
-// Default channel capacity (matches default HWM in socket.rs).
-#[allow(dead_code)]
-const DEFAULT_HWM: usize = 1000;
-
 /// Platform-agnostic notification handle for signaling recv/send events.
-#[allow(dead_code)]
+#[allow(dead_code)] // Allow dead code to manage platform difference.
 pub(crate) trait NotifyHandle: Send + Sync {
     /// Signal that a message has arrived (recv event).
     fn signal_recv(&self);
@@ -85,7 +86,8 @@ pub(crate) trait NotifyHandle: Send + Sync {
 
 #[cfg(unix)]
 mod unix {
-    use super::{DEFAULT_HWM, NotifyHandle};
+    use super::NotifyHandle;
+    use crate::socket::DEFAULT_HWM;
 
     /// Platform-specific notification handle for signal/drain operations.
     /// Monomorphic (no vtable), compile-time platform selection via #[cfg(...)].
@@ -177,12 +179,12 @@ mod unix {
     }
 
     /// Unix implementation: eventfd on Linux, pipe pairs on other Unix.
-    #[expect(dead_code)]
     pub(crate) struct UnixNotifyHandle {
         linux: Option<LinuxEventFd>,
         unix: Option<UnixPipeFd>,
     }
 
+    #[allow(dead_code)]
     struct LinuxEventFd {
         recv_fd: std::os::raw::c_int,
         send_fd: std::os::raw::c_int,
@@ -346,11 +348,11 @@ mod unix {
         fn send_fd(&self) -> std::os::raw::c_int {
             #[cfg(target_os = "linux")]
             {
-                self.linux.as_ref().map(|l| l.send_fd).unwrap_or(-1)
+                self.linux.as_ref().map_or(-1, |l| l.send_fd)
             }
             #[cfg(not(target_os = "linux"))]
             {
-                self.unix.as_ref().map(|u| u.send_read).unwrap_or(-1)
+                self.unix.as_ref().map_or(-1, |u| u.send_read)
             }
         }
 
@@ -366,7 +368,7 @@ mod unix {
     }
 
     /// Platform-specific poller for collecting socket fds and waiting for readiness.
-    /// Unix: Wraps libc::poll() directly on eventfds/pipes.
+    /// Unix: Wraps `libc::poll()` directly on eventfds/pipes.
     pub(crate) struct PollWaiter {
         pfds: Vec<libc::pollfd>,
         map: Vec<(usize, libc::c_short)>, // (item_idx, zmq_event_type)
@@ -380,7 +382,8 @@ mod unix {
 
             for (i, item) in items.iter().enumerate() {
                 if !item.socket.is_null() {
-                    // SAFETY: socket is non-null (checked above); caller guarantees valid socket.
+                    // SAFETY: socket is non-null (checked above);
+                    // caller guarantees valid socket.
                     let sock = unsafe {
                         &*(item
                             .socket
@@ -437,10 +440,11 @@ mod unix {
             self.pfds.is_empty()
         }
 
-        /// Prepare poller for wait: drain all recv notification fds/eventfds before blocking poll.
+        /// Prepare poller for wait: drain all recv notification fds/eventfds
+        /// before blocking poll.
         /// Called before waiting to clear any accumulated signals.
         pub(crate) fn prepare_for_wait(&mut self) {
-            for (_pfd_idx, pfd) in self.pfds.iter_mut().enumerate() {
+            for pfd in self.pfds.iter_mut() {
                 if pfd.fd < 0 {
                     continue;
                 }
@@ -544,7 +548,6 @@ mod unix {
         }
     }
 
-    #[allow(unused_imports)]
     pub(super) use UnixNotifyHandle as PlatformNotifyHandle;
 }
 
@@ -725,12 +728,10 @@ pub(crate) mod windows {
         }
     }
 
-    /// Public accessor to get the recv event `HANDLE` (used by `poll.rs` `WaitForMultipleObjects`).
     pub(crate) fn get_recv_event(handle: &WindowsNotifyHandle) -> Option<HANDLE> {
         handle.recv_event.lock().ok().and_then(|g| *g)
     }
 
-    /// Public accessor to get the send event `HANDLE` (used by `poll.rs` `WaitForMultipleObjects`).
     pub(crate) fn get_send_event(handle: &WindowsNotifyHandle) -> Option<HANDLE> {
         handle.send_event.lock().ok().and_then(|g| *g)
     }
@@ -947,7 +948,7 @@ pub(crate) mod windows {
 pub(crate) fn create_notify() -> Option<std::sync::Arc<PlatformNotifyHandle>> {
     #[cfg(unix)]
     {
-        unix::UnixNotifyHandle::new().map(|h| std::sync::Arc::new(h))
+        unix::UnixNotifyHandle::new().map(std::sync::Arc::new)
     }
     #[cfg(windows)]
     {
