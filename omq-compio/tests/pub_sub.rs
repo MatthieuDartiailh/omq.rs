@@ -223,7 +223,7 @@ fn pub_tcp_tight_send_must_not_starve_listener() {
 
 /// Fan-out content integrity across message sizes. Exercises both the
 /// arena memcpy path (small messages <= 256B encoded) and the
-/// Bytes::clone path (larger messages), interleaved, with 4 subscribers
+/// `Bytes::clone` path (larger messages), interleaved, with 4 subscribers
 /// verifying exact byte content on every received message.
 #[test]
 fn pub_fan_out_content_integrity_mixed_sizes() {
@@ -251,8 +251,8 @@ fn pub_fan_out_content_integrity_mixed_sizes() {
                 let mut payload = vec![0u8; size];
                 let tag = seq.to_le_bytes();
                 payload[..4.min(size)].copy_from_slice(&tag[..4.min(size)]);
-                for i in 4..size {
-                    payload[i] = (i as u8).wrapping_add(seq as u8);
+                for (i, byte) in payload.iter_mut().enumerate().skip(4) {
+                    *byte = (i as u8).wrapping_add(seq as u8);
                 }
                 let _ = pub_.send(Message::single(payload)).await;
                 seq += 1;
@@ -278,11 +278,11 @@ fn pub_fan_out_content_integrity_mixed_sizes() {
                     let mut seen_sizes = std::collections::HashSet::new();
                     let deadline = std::time::Instant::now() + Duration::from_secs(3);
                     while std::time::Instant::now() < deadline && received < 200 {
-                        let m =
-                            match compio::time::timeout(Duration::from_secs(5), sub.recv()).await {
-                                Ok(Ok(m)) => m,
-                                _ => break,
-                            };
+                        let Ok(Ok(m)) =
+                            compio::time::timeout(Duration::from_secs(5), sub.recv()).await
+                        else {
+                            break;
+                        };
                         let body = m.part_bytes(0).unwrap();
                         let size = body.len();
                         assert!(sizes.contains(&size), "unexpected message size {size}");
