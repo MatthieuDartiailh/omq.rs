@@ -363,7 +363,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
             let s_recv = inner.clone();
             let recv_pump = tokio::spawn(async move {
                 while let Ok(msg) = s_recv.recv().await {
-                    push_to_pump(&mut pump_prod, msg, recv_signal_fd, &recv_space).await;
+                    push_to_pump(&mut pump_prod, msg, recv_notify, &recv_space).await;
                 }
             });
 
