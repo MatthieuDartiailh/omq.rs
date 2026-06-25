@@ -15,19 +15,15 @@ use omq_zmq::{
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
-#[allow(dead_code)]
 const ZMQ_PUB: i32 = 1;
-#[allow(dead_code)]
 const ZMQ_SUB: i32 = 2;
 const ZMQ_REQ: i32 = 3;
 const ZMQ_REP: i32 = 4;
 const ZMQ_PAIR: i32 = 0;
-#[allow(dead_code)]
 const ZMQ_DONTWAIT: i32 = 1;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
-#[allow(dead_code)]
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_RCVMORE: i32 = 13;
 
@@ -125,7 +121,6 @@ fn push_pull_tcp() {
 }
 
 #[test]
-#[cfg(unix)]
 fn dontwait_returns_eagain_when_empty() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
@@ -228,7 +223,6 @@ fn pair_inproc_roundtrip() {
 }
 
 #[test]
-#[cfg(unix)]
 fn pub_sub_inproc() {
     let ctx = zmq_ctx_new();
     let pub_sock = zmq_socket(ctx, ZMQ_PUB);
