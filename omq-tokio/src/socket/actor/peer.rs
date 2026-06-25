@@ -774,12 +774,8 @@ fn can_bypass_actor_recv(t: SocketType) -> bool {
     )
 }
 
-/// Extract a `SocketAddr` from a `PeerIdent` where applicable. None for inproc
-/// and filesystem paths.
-///
-/// Inproc fast path connection driver. Replaces the
-/// `engine::ConnectionDriver` / ZMTP codec stack for in-process
-/// peers. Synthesises `HandshakeSucceeded` immediately (no greeting
+/// Inproc fast path connection driver context. Replaces the
+/// `engine::ConnectionDriver` / ZMTP codec stack for in-process peers.
 struct InprocDriverCtx {
     peer_out: mpsc::Sender<(u64, crate::engine::PeerOut)>,
     peer_id: u64,
@@ -790,9 +786,9 @@ struct InprocDriverCtx {
     spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
 }
 
-/// exchange), then forwards Messages and Commands between the
-/// `SocketDriver`'s inbox and the partner's channels until either
-/// side drops.
+/// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
+/// then forwards Messages and Commands between the `SocketDriver`'s
+/// inbox and the partner's channels until either side drops.
 async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
     mut in_rx: mpsc::Receiver<InboundFrame>,

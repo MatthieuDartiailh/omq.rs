@@ -770,11 +770,6 @@ where
                     );
                 }
 
-                // TODO: remove after extended soak testing confirms no stalls.
-                // All wakeup paths (data_ready Notify, inbox mpsc, heartbeat
-                // timer) are believed correct. Disabled to eliminate 6400
-                // spurious polls/sec at 64 peers.
-                // () = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
         }
     }

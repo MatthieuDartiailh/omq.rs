@@ -2,7 +2,7 @@
 //!
 //! PUB and XPUB filter by SUBSCRIBE-driven prefix set; RADIO filters
 //! by joined groups. On every `send`, the message is encoded once
-//! (via `pre_encode`), then the pre-encoded chunks are pushed into
+//! into the fan-out arena, then the pre-encoded bytes are pushed into
 //! each matching peer's `EncodedQueue`. The driver flushes to the wire.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

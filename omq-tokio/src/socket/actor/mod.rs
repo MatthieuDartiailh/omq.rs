@@ -431,11 +431,6 @@ impl SocketDriver {
     }
 }
 
-/// Whether this socket type can receive messages directly from the connection
-/// driver into the user-facing recv channel, bypassing the actor's event loop.
-/// Safe when the recv path is a plain fair-queue delivery with no
-/// per-socket-type post-processing (no `type_state.post_recv` transform,
-/// no identity-prefix prepending).
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,12 +16,8 @@ use super::FrameTransform;
 use super::blake3zmq_aad;
 use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 
-/// Build a `Message::Inline` from a `ChunkedInputBuf` without zeroing the
-/// full 39-byte array. The caller must ensure `payload_len` bytes are
-/// available in `buf`.
-///
-/// SAFETY: `[MaybeUninit<u8>; N]` has no validity invariant. The transmute
-/// to `[u8; N]` is sound because `MessageInner::Inline` only reads
+/// Build a `Message::Inline` from a `ChunkedInputBuf`. The caller must
+/// ensure `payload_len` bytes are available in `buf`.
 #[inline]
 fn inline_message_from_buf(
     buf: &mut super::super::chunked_buf::ChunkedInputBuf,
