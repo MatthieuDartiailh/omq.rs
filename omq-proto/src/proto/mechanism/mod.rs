@@ -465,16 +465,13 @@ impl FrameTransform {
             Self::Curve(tx) => {
                 let plaintext = part.as_bytes();
                 let body = tx.encrypt_message(more, false, &plaintext)?;
-                let mut wire = bytes::BytesMut::with_capacity(8 + body.len());
-                bytes::BufMut::put_u8(&mut wire, b"MESSAGE".len() as u8);
-                bytes::BufMut::put_slice(&mut wire, b"MESSAGE");
-                bytes::BufMut::put_slice(&mut wire, &body);
+                let wire = CurveTransform::message_command_frame(&body);
                 let flags = if more {
                     FrameFlags::MORE
                 } else {
                     FrameFlags::LAST
                 };
-                Ok((flags, wire.freeze()))
+                Ok((flags, wire))
             }
             #[cfg(feature = "blake3zmq")]
             Self::Blake3Zmq(tx) => {

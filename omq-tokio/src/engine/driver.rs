@@ -116,6 +116,17 @@ impl std::fmt::Debug for YringSink {
     }
 }
 
+impl YringSink {
+    fn flush_and_signal(&mut self) {
+        if let yring::FlushResult::Flushed {
+            was_empty: true, ..
+        } = self.producer.flush_and_check()
+        {
+            (self.signal)();
+        }
+    }
+}
+
 impl RecvSink {
     async fn send(&mut self, m: Message) -> bool {
         match self {
@@ -125,12 +136,7 @@ impl RecvSink {
                 loop {
                     match sink.producer.push(msg) {
                         Ok(()) => {
-                            if let yring::FlushResult::Flushed {
-                                was_empty: true, ..
-                            } = sink.producer.flush_and_check()
-                            {
-                                (sink.signal)();
-                            }
+                            sink.flush_and_signal();
                             return true;
                         }
                         Err(returned) => {
@@ -140,6 +146,8 @@ impl RecvSink {
                             notified.as_mut().enable();
                             match sink.producer.push(msg) {
                                 Ok(()) => {
+                                    // Can't call flush_and_signal(): `notified`
+                                    // borrows `sink.space` until end of scope.
                                     if let yring::FlushResult::Flushed {
                                         was_empty: true, ..
                                     } = sink.producer.flush_and_check()
