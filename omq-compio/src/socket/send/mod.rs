@@ -78,7 +78,12 @@ pub(super) fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Re
         return Ok(true);
     }
 
-    if let Some((ref sentinel, threshold)) = state.transform_passthrough
+    #[cfg(feature = "ws")]
+    let skip_passthrough = state.is_ws;
+    #[cfg(not(feature = "ws"))]
+    let skip_passthrough = false;
+    if !skip_passthrough
+        && let Some((ref sentinel, threshold)) = state.transform_passthrough
         && state.handshake_done.get()
         && msg.iter().all(|b| b.len() < threshold)
     {
@@ -113,6 +118,11 @@ pub(super) fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Re
         return Ok(false);
     }
     for wire in &wires {
+        #[cfg(feature = "ws")]
+        if state.is_ws {
+            eq.encode_ws(wire, state.ws_masked);
+            continue;
+        }
         eq.encode_auto(wire);
     }
     drop(eq);

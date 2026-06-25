@@ -51,7 +51,8 @@ impl Socket {
         }
         #[cfg(feature = "ws")]
         if endpoint.is_ws_family() {
-            match &endpoint {
+            let plain = endpoint.underlying_ws();
+            match &plain {
                 Endpoint::Ws {
                     host: Host::Name(name),
                     port,
@@ -72,7 +73,7 @@ impl Socket {
             let accept_invalid_certs = self.inner().options.wss_tls.accept_invalid_certs;
             compio::runtime::spawn(async move {
                 let Ok(upgraded) =
-                    crate::transport::ws::connect(&ep, &mechanism, accept_invalid_certs).await
+                    crate::transport::ws::connect(&plain, &mechanism, accept_invalid_certs).await
                 else {
                     return;
                 };

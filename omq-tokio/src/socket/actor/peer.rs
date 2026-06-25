@@ -258,7 +258,11 @@ impl SocketDriver {
             cfg = cfg.max_message_size(n);
         }
         #[cfg(feature = "ws")]
-        if matches!(&stream, AnyStream::Ws(_)) {
+        let is_ws = matches!(&stream, AnyStream::Ws(_));
+        #[cfg(feature = "ws")]
+        let ws_masked = is_ws && !is_server;
+        #[cfg(feature = "ws")]
+        if is_ws {
             let ws_role = if is_server {
                 omq_proto::proto::connection::WsRole::Server
             } else {
@@ -338,6 +342,10 @@ impl SocketDriver {
                 passthrough_info,
                 arena_threshold,
                 wire_slot_cap,
+                #[cfg(feature = "ws")]
+                is_ws,
+                #[cfg(feature = "ws")]
+                ws_masked,
             );
             Some(s)
         };

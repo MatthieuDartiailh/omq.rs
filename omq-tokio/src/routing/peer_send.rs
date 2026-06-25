@@ -86,6 +86,14 @@ impl PeerSend {
         }
     }
 
+    #[cfg(feature = "ws")]
+    pub(crate) fn is_ws(&self) -> bool {
+        match self {
+            Self::Wire { slot, .. } => slot.is_ws(),
+            Self::Inbox(_) => false,
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             Self::Wire { slot, .. } => slot.is_empty(),

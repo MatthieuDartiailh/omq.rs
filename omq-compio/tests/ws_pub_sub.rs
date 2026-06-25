@@ -79,3 +79,59 @@ async fn ws_pub_sub_unsubscribe() {
         "message should not arrive after unsubscribe"
     );
 }
+
+#[compio::test]
+async fn ws_pub_sub_fan_out() {
+    use bytes::Bytes;
+
+    const N_SUBS: usize = 4;
+    const N_MSGS: usize = 50;
+
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let bound = pub_.bind(ws_endpoint(0)).await.unwrap();
+    let port = get_port(&bound);
+
+    let mut mon = pub_.monitor();
+    let mut subs = Vec::with_capacity(N_SUBS);
+    for _ in 0..N_SUBS {
+        let s = Socket::new(SocketType::Sub, Options::default());
+        s.connect(ws_endpoint(port)).await.unwrap();
+        s.subscribe(Bytes::new()).await.unwrap();
+        subs.push(s);
+    }
+
+    let fut = async {
+        let mut count = 0;
+        while count < N_SUBS {
+            match mon.recv().await {
+                Ok(omq_compio::MonitorEvent::SubscribeReceived { .. }) => count += 1,
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed after {count}/{N_SUBS} subscribes: {e:?}"),
+            }
+        }
+    };
+    compio::time::timeout(Duration::from_secs(5), fut)
+        .await
+        .expect("subscribes did not propagate");
+
+    for i in 0..N_MSGS {
+        pub_.send(Message::single(format!("msg-{i:04}")))
+            .await
+            .unwrap();
+    }
+
+    for (si, sub) in subs.iter().enumerate() {
+        for i in 0..N_MSGS {
+            let m = compio::time::timeout(Duration::from_secs(5), sub.recv())
+                .await
+                .unwrap_or_else(|_| panic!("sub {si} timed out at msg {i}"))
+                .unwrap();
+            let expected = format!("msg-{i:04}");
+            assert_eq!(
+                m.part_bytes(0).unwrap(),
+                expected.as_bytes(),
+                "sub {si} msg {i}"
+            );
+        }
+    }
+}

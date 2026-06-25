@@ -219,6 +219,8 @@ async fn dial_supervisor<F, Fut>(
             #[cfg(feature = "ws")]
             None,
         );
+        #[cfg(feature = "ws")]
+        let is_ws = endpoint.is_ws_family();
         let state = DirectIoState::new(
             peer_io,
             peer.writer,
@@ -229,9 +231,9 @@ async fn dial_supervisor<F, Fut>(
             uses_crypto,
             inner.options.large_message_threshold.unwrap_or(0),
             #[cfg(feature = "ws")]
-            false,
+            is_ws,
             #[cfg(feature = "ws")]
-            false,
+            is_ws, // dialed peers are always clients → masked
         );
         install_and_run(
             &inner,

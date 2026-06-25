@@ -5,7 +5,7 @@
 
 use crate::error::{Error, Result};
 
-const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-5AB5B7C62A11";
+const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// Generate a random 16-byte `Sec-WebSocket-Key`, base64-encoded (24 chars).
 pub fn generate_ws_key() -> String {
@@ -329,13 +329,13 @@ mod tests {
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
         let accept = compute_ws_accept(key);
         // Verified against Python: hashlib.sha1(key + GUID).digest() -> base64
-        assert_eq!(accept, "SMKhevRK+OBO0OqLVjVnnQFNHvc=");
+        assert_eq!(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
     #[test]
     fn validate_accept_works() {
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
-        assert!(validate_ws_accept(key, "SMKhevRK+OBO0OqLVjVnnQFNHvc="));
+        assert!(validate_ws_accept(key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
         assert!(!validate_ws_accept(key, "wrong"));
     }
 

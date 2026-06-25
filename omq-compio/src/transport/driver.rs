@@ -200,6 +200,11 @@ impl DriverLoopState {
             let mut eq = state.encoded_queue.borrow_mut();
             let cr = eq.total_bytes() >= cap;
             for wire in &wires {
+                #[cfg(feature = "ws")]
+                if state.is_ws {
+                    eq.encode_ws(wire, state.ws_masked);
+                    continue;
+                }
                 eq.encode_auto(wire);
             }
             Ok(cr)
@@ -239,6 +244,11 @@ impl DriverLoopState {
                         drop(enc);
                         let mut eq = state.encoded_queue.borrow_mut();
                         for wire in &wires {
+                            #[cfg(feature = "ws")]
+                            if state.is_ws {
+                                eq.encode_ws(wire, state.ws_masked);
+                                continue;
+                            }
                             eq.encode_auto(wire);
                         }
                     } else if state.uses_crypto {

@@ -37,6 +37,10 @@ pub(crate) struct PeerWireSlot {
     pub(crate) has_transform: bool,
     #[allow(dead_code)]
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
+    #[cfg(feature = "ws")]
+    is_ws: bool,
+    #[cfg(feature = "ws")]
+    ws_masked: bool,
     pub(crate) dead: AtomicBool,
     pub(crate) peer_id: u64,
 }
@@ -62,6 +66,8 @@ impl PeerWireSlot {
         transform_passthrough: Option<(Bytes, usize)>,
         arena_threshold: usize,
         cap: usize,
+        #[cfg(feature = "ws")] is_ws: bool,
+        #[cfg(feature = "ws")] ws_masked: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             eq: Mutex::new(EncodedQueue::with_arena_threshold(arena_threshold)),
@@ -72,9 +78,18 @@ impl PeerWireSlot {
             pending: AtomicBool::new(false),
             has_transform,
             transform_passthrough,
+            #[cfg(feature = "ws")]
+            is_ws,
+            #[cfg(feature = "ws")]
+            ws_masked,
             dead: AtomicBool::new(false),
             peer_id,
         })
+    }
+
+    #[cfg(feature = "ws")]
+    pub(crate) fn is_ws(&self) -> bool {
+        self.is_ws
     }
 
     pub(crate) fn try_encode(&self, msg: &Message) -> TryEncodeResult {
@@ -83,6 +98,21 @@ impl PeerWireSlot {
         }
         if !self.handshake_done.load(Ordering::Acquire) {
             return TryEncodeResult::Ineligible;
+        }
+
+        #[cfg(feature = "ws")]
+        if self.is_ws {
+            if self.has_transform {
+                return TryEncodeResult::Ineligible;
+            }
+            let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
+            if eq.total_bytes() >= self.cap {
+                return TryEncodeResult::Full;
+            }
+            eq.encode_ws(msg, self.ws_masked);
+            drop(eq);
+            self.signal_encoded();
+            return TryEncodeResult::Ok;
         }
 
         if !self.has_transform {
