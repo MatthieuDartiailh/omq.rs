@@ -45,9 +45,6 @@ jobs:
           - toolchain: stable
             os: windows-latest
             target: x86_64-pc-windows-msvc
-          - toolchain: stable
-            os: windows-latest
-            target: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
