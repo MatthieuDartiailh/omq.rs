@@ -49,6 +49,7 @@ fn random_inproc(rng: &mut StdRng) -> Endpoint {
     }
 }
 
+#[cfg(unix)]
 fn random_ipc(rng: &mut StdRng) -> Endpoint {
     let id: u64 = rng.random();
     Endpoint::Ipc(IpcPath::Abstract(format!(
@@ -57,15 +58,40 @@ fn random_ipc(rng: &mut StdRng) -> Endpoint {
     )))
 }
 
+#[cfg(not(unix))]
+fn random_tcp() -> Endpoint {
+    use omq_proto::endpoint::Host;
+    use std::net::Ipv4Addr;
+    Endpoint::Tcp {
+        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
+        port: 0,
+    }
+}
+
+fn random_ipc_or_tcp(rng: &mut StdRng) -> Endpoint {
+    #[cfg(unix)]
+    {
+        if rng.random_bool(0.5) {
+            random_inproc(rng)
+        } else {
+            random_ipc(rng)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if rng.random_bool(0.5) {
+            random_inproc(rng)
+        } else {
+            random_tcp()
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fuzz_pub_sub_action_sequences() {
     let mut rng = rng();
     for it in 0..iters() {
-        let ep = if rng.random_bool(0.5) {
-            random_inproc(&mut rng)
-        } else {
-            random_ipc(&mut rng)
-        };
+        let ep = random_ipc_or_tcp(&mut rng);
 
         let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
         pub_.bind(ep.clone()).await.unwrap();
@@ -143,11 +169,7 @@ async fn fuzz_pub_sub_action_sequences() {
 async fn fuzz_push_pull_action_sequences() {
     let mut rng = rng();
     for it in 0..iters() {
-        let ep = if rng.random_bool(0.5) {
-            random_inproc(&mut rng)
-        } else {
-            random_ipc(&mut rng)
-        };
+        let ep = random_ipc_or_tcp(&mut rng);
 
         let pull = Socket::new(SocketType::Pull, Options::default());
         pull.bind(ep.clone()).await.unwrap();
