@@ -106,7 +106,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets --exclude omq-compio --exclude omq-interop-tests
+        run: cargo clippy --workspace --all-targets --all-features --exclude omq-compio --exclude omq-interop-tests
 
   pyomq:
     name: pyomq
