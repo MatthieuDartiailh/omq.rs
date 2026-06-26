@@ -46,8 +46,8 @@ use super::handle::Socket;
 /// parked in `select_biased!` (`driver_in_select == true`). When the driver is
 /// actively looping (steps 1-3), it will drain the queue naturally on its next
 /// step-3 pass — no spurious wakeup needed.
-const DIRECT_CAP: usize = 512 * 1024;
-const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
+pub(super) const DIRECT_CAP: usize = 512 * 1024;
+pub(super) const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
 
 /// Yield to the runtime when this many direct-encodes have accumulated
 /// without the driver fully flushing the `EncodedQueue`. Prevents

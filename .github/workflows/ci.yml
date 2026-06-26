@@ -52,8 +52,29 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
-      - name: Workspace tests (default features)
-        run: cargo test --workspace --exclude omq-compio --exclude omq-interop-tests --no-fail-fast
+      - run: cargo test --workspace --exclude omq-compio --exclude omq-interop-tests --no-fail-fast
+
+  compio:
+    name: omq-compio (nightly)
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: switch to stable once compio-driver drops cfg_select! or cfg_select!
+      # is stabilized (https://github.com/rust-lang/rust/issues/115585).
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      # TODO: remove --skip once compio builds on stable (cfg_select! stabilization:
+      # https://github.com/rust-lang/rust/issues/115585) and we can drop nightly.
+      # The skipped test passes 100% on stable but fails ~10% on nightly due to
+      # spawned-task starvation in compio's executor.
+      - run: cargo test -p omq-compio --no-fail-fast -- --skip pub_direct_write_tight_loop
+      - run: cargo test -p omq-compio --features curve
+      - run: cargo test -p omq-compio --features blake3zmq
+      - run: cargo test -p omq-compio --features lz4
+      - run: cargo clippy -p omq-compio --all-targets --all-features
 
   encryption:
     name: encryption (curve + blake3zmq, ${{ matrix.os }})
@@ -86,7 +107,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p omq-tokio --features lz4
 
-
   lint:
     name: fmt + clippy
     needs: [changes]
@@ -104,7 +124,7 @@ jobs:
       - run: cargo fmt --all --check
       - name: clippy (Linux)
         if: runner.os == 'Linux'
-        run: cargo clippy --workspace --all-targets --all-features --exclude omq-compio
+        run: cargo clippy --workspace --all-targets --all-features --exclude omq-compio --exclude omq-interop-tests
       - name: clippy (Windows)
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets --all-features --exclude omq-compio --exclude omq-interop-tests
@@ -133,7 +153,7 @@ jobs:
 
   ci-success:
     name: CI success
-    needs: [changes, test, encryption, compression, lint, pyomq]
+    needs: [changes, test, compio, encryption, compression, lint, pyomq]
     runs-on: ubuntu-latest
     if: always()
     steps:
