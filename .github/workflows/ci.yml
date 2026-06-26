@@ -52,7 +52,11 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
-      - name: Workspace tests (default features)
+      - name: Workspace tests (default features, Linux)
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --exclude omq-interop-tests --no-fail-fast
+      - name: Workspace tests (default features, Windows)
+        if: runner.os == 'Windows'
         run: cargo test --workspace --exclude omq-compio --exclude omq-interop-tests --no-fail-fast
 
   encryption:
@@ -70,6 +74,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p omq-tokio --features curve
       - run: cargo test -p omq-tokio --features blake3zmq
+      - name: omq-compio encryption
+        if: runner.os == 'Linux'
+        run: |
+          cargo test -p omq-compio --features curve
+          cargo test -p omq-compio --features blake3zmq
 
   compression:
     name: compression (${{ matrix.os }})
@@ -85,7 +94,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p omq-tokio --features lz4
-
+      - name: omq-compio compression
+        if: runner.os == 'Linux'
+        run: cargo test -p omq-compio --features lz4
 
   lint:
     name: fmt + clippy
@@ -104,7 +115,7 @@ jobs:
       - run: cargo fmt --all --check
       - name: clippy (Linux)
         if: runner.os == 'Linux'
-        run: cargo clippy --workspace --all-targets --all-features --exclude omq-compio
+        run: cargo clippy --workspace --all-targets --all-features
       - name: clippy (Windows)
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets --all-features --exclude omq-compio --exclude omq-interop-tests

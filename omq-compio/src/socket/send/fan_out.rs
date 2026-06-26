@@ -9,7 +9,9 @@ use omq_proto::message::Message;
 use crate::socket::handle::Socket;
 use crate::socket::inner::{DirectIoState, PeerOut};
 
-use super::{direct_push_encoded, direct_push_pre_encoded, try_direct_encode};
+use super::{
+    DIRECT_CAP, DIRECT_MSG_CAP, direct_push_encoded, direct_push_pre_encoded, try_direct_encode,
+};
 
 const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
 const FAN_OUT_ARENA_COPY_MAX: usize = 256;
@@ -75,6 +77,16 @@ impl Socket {
                 let dio_cache = inner.pub_sub.direct_io_cache.get();
                 if dio_cache.len() == targets.len() {
                     if targets.len() > 1 {
+                        let cap = DIRECT_CAP.saturating_sub(msg.byte_len() + 10);
+                        while dio_cache.iter().any(|state| {
+                            state.direct_msg_count.get() >= DIRECT_MSG_CAP
+                                || state
+                                    .encoded_queue
+                                    .try_borrow_mut()
+                                    .is_none_or(|eq| eq.total_bytes() >= cap)
+                        }) {
+                            crate::yield_now().await;
+                        }
                         fan_out_encode_dispatch(dio_cache, targets, &msg);
                     } else if !try_direct_encode(&msg, &dio_cache[0])? {
                         let _ = targets[0].send(msg.clone()).await;
