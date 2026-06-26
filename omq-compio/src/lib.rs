@@ -1,3 +1,6 @@
+// TODO: remove once clippy::unused_async_trait_impl exists on stable.
+#![allow(unknown_lints, clippy::unused_async_trait_impl)]
+
 //! omq-compio - compio-runtime backend for omq.
 //!
 //! Built on compio's thread-per-core executor with io_uring (Linux),
