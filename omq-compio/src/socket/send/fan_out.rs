@@ -90,6 +90,10 @@ impl Socket {
                         fan_out_encode_dispatch(dio_cache, targets, &msg);
                     } else if !try_direct_encode(&msg, &dio_cache[0])? {
                         let _ = targets[0].send(msg.clone()).await;
+                    } else if dio_cache[0].direct_msg_count.get()
+                        >= super::DIRECT_ENCODE_YIELD_BACKLOG
+                    {
+                        crate::yield_now().await;
                     }
                     if count.is_multiple_of(yield_interval(&msg)) {
                         crate::yield_now().await;
