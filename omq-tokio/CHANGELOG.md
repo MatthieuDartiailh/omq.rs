@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-06-26
+
+### Added
+
+- `lz4+ws://`, `lz4+wss://` compressed WebSocket transport.
+- Windows support (contributed by @MatthieuDartiailh).
+
+### Fixed
+
+- WS send bypass: encode as WS binary frames instead of raw ZMTP frames.
+
+### Changed
+
+- `#![forbid(unsafe_code)]` crate-wide. Replace `libc::setsockopt` with `socket2::SockRef`.
+- *(deps)* Bump `omq-proto` to 0.18.0, `yring` to 0.3.2.
+
 ## [0.14.4] - 2026-06-22
 
 ### Fixed

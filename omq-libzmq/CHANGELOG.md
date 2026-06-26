@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-06-26
+
+### Added
+
+- Windows support: platform-specific notification module, `PollWaiter` implementation (contributed by @MatthieuDartiailh).
+
+### Fixed
+
+- Inproc bypass: move sender unpark from `peek()` to `advance()`.
+
+### Changed
+
+- `LocalCell<T>` pattern for `OmqSocket` fields (`send_accum`, `bypass_send`, `bypass_recv`, `recv_cons`, `send_yield`), eliminating ~15 inline unsafe blocks.
+- Remove `Mutex` from `PollWaiter` hot path.
+- *(deps)* Bump `omq-tokio` to 0.14.5, `yring` to 0.3.2.
+
 ## [0.4.7] - 2026-06-22
 
 ### Fixed
