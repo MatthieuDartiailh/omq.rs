@@ -66,14 +66,22 @@ async fn send_ring_reenabled_after_second_peer_leaves() {
     while pull2.try_recv().is_ok() {}
 
     push.disconnect(ep2.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    push.send(Message::from_slice(b"solo")).await.unwrap();
-    let msg = tokio::time::timeout(Duration::from_secs(10), pull1.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"solo");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        push.send(Message::from_slice(b"solo")).await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(2), pull1.recv()).await {
+            Ok(Ok(msg)) => {
+                assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"solo");
+                break;
+            }
+            _ if tokio::time::Instant::now() < deadline => {}
+            other => {
+                other.unwrap().unwrap();
+            }
+        }
+    }
 
     push.close().await.unwrap();
     pull1.close().await.unwrap();

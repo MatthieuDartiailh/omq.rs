@@ -8,7 +8,7 @@ use crate::socket::handle::Socket;
 use crate::socket::inner::{CachedPeerRoute, DirectIoState, PeerOut};
 use crate::transport::driver::DriverCommand;
 
-use super::try_direct_encode;
+use super::{DIRECT_ENCODE_YIELD_BACKLOG, try_direct_encode};
 
 struct PeerSelection {
     out: PeerOut,
@@ -241,8 +241,12 @@ impl Socket {
                 if let Some(state) = direct
                     && try_direct_encode(&msg, &state)?
                 {
+                    let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_BACKLOG;
                     let cur_gen = self.inner().routing.generation.load(Ordering::Acquire);
                     *self.inner().direct_io.send.get() = Some((state, cur_gen));
+                    if backlogged {
+                        crate::yield_now().await;
+                    }
                     return Ok(());
                 }
                 // Fall back to per-peer cmd channel. If the driver died
