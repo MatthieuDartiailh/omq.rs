@@ -61,9 +61,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # TODO: switch to stable once compio-driver drops cfg_select! or cfg_select!
+      # is stabilized (https://github.com/rust-lang/rust/issues/115585).
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
+      # TODO: remove --skip once compio builds on stable (cfg_select! stabilization:
+      # https://github.com/rust-lang/rust/issues/115585) and we can drop nightly.
+      # The skipped test passes 100% on stable but fails ~10% on nightly due to
+      # spawned-task starvation in compio's executor.
       - run: cargo test -p omq-compio --no-fail-fast -- --skip pub_direct_write_tight_loop
       - run: cargo test -p omq-compio --features curve
       - run: cargo test -p omq-compio --features blake3zmq
