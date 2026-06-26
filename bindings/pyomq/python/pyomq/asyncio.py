@@ -526,8 +526,13 @@ class Poller:
 class Context(_SyncContext):
     _socket_class = None
 
-    def __init__(self, io_threads=1):
-        self._ctx = _native.AsyncContext(io_threads)
+    def __init__(self, io_threads=1, *, _shadow_ctx=None):
+        if _shadow_ctx is not None:
+            self._ctx = _shadow_ctx._ctx
+            self._is_shadow = True
+        else:
+            self._ctx = _native.AsyncContext(io_threads)
+            self._is_shadow = False
         self._closed = False
         self._sockets = weakref.WeakSet()
         self._ctx_id = next(_next_ctx_id)

@@ -1,9 +1,54 @@
-"""_ShadowSocket and Socket.shadow() tests."""
+"""_ShadowSocket, Socket.shadow(), and Context.shadow() tests."""
 
 import pytest
 
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
+
+
+# ── Context.shadow ──────────────────────────────────────────────────
+
+
+def test_context_shadow_shares_native():
+    ctx = zmq.Context()
+    try:
+        shadow = zmq.Context.shadow(ctx)
+        assert shadow is not ctx
+        assert shadow._ctx is ctx._ctx
+    finally:
+        shadow.term()
+        ctx.term()
+
+
+def test_context_shadow_creates_sockets():
+    ctx = zmq.Context()
+    try:
+        shadow = zmq.Context.shadow(ctx)
+        sock = shadow.socket(zmq.PUSH)
+        assert sock.socket_type == zmq.PUSH
+        sock.close()
+    finally:
+        shadow.term()
+        ctx.term()
+
+
+def test_context_shadow_term_does_not_destroy_original():
+    ctx = zmq.Context()
+    shadow = zmq.Context.shadow(ctx)
+    shadow.term()
+    assert shadow.closed
+    sock = ctx.socket(zmq.PUSH)
+    sock.close()
+    ctx.term()
+
+
+def test_context_shadow_int_uses_instance():
+    shadow = zmq.Context.shadow(0)
+    assert shadow._ctx is zmq.Context.instance()._ctx
+    shadow.term()
+
+
+# ── Socket.shadow ───────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio

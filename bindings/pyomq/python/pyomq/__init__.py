@@ -831,8 +831,13 @@ class Context:
     _instance_lock = threading.Lock()
     _socket_class = None  # set after Socket is defined
 
-    def __init__(self, io_threads=1):
-        self._ctx = _native.Context(io_threads)
+    def __init__(self, io_threads=1, *, _shadow_ctx=None):
+        if _shadow_ctx is not None:
+            self._ctx = _shadow_ctx._ctx
+            self._is_shadow = True
+        else:
+            self._ctx = _native.Context(io_threads)
+            self._is_shadow = False
         self._closed = False
         self._sockets = weakref.WeakSet()
         self._ctx_id = next(_next_ctx_id)
@@ -879,6 +884,14 @@ class Context:
         return s
 
     @classmethod
+    def shadow(cls, address):
+        if isinstance(address, Context):
+            return cls(_shadow_ctx=address)
+        if isinstance(address, int):
+            return cls(_shadow_ctx=Context.instance())
+        raise TypeError(f"expected Context or int, got {type(address).__name__}")
+
+    @classmethod
     def instance(cls, io_threads=1):
         with cls._instance_lock:
             if cls._instance is None or cls._instance._closed:
@@ -891,7 +904,8 @@ class Context:
             if not s.closed:
                 s.close()
         self._sockets.clear()
-        self._ctx.term()
+        if not self._is_shadow:
+            self._ctx.term()
 
     def destroy(self, linger=None):
         for s in list(self._sockets):
