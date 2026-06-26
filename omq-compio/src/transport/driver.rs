@@ -78,6 +78,7 @@ struct DriverLoopState {
     closing: bool,
     deadline: Option<Instant>,
     hb_next: Option<Instant>,
+    hb_ping_sent: bool,
     pending_cmds: VecDeque<DriverCommand>,
     codec_maybe_dirty: bool,
     codec_has_input: bool,
@@ -93,6 +94,7 @@ impl DriverLoopState {
             closing: false,
             deadline: handshake_timeout.map(|t| Instant::now() + t),
             hb_next: None,
+            hb_ping_sent: false,
             pending_cmds: VecDeque::new(),
             codec_maybe_dirty: true,
             codec_has_input: true,
@@ -743,11 +745,13 @@ impl DriverLoopState {
         hb_ttl_deciseconds: u16,
         hb_timeout: Duration,
     ) -> Result<()> {
-        let now_nanos = state.hb_epoch.elapsed().as_nanos() as u64;
-        let last_nanos = state.last_input_nanos.load(Ordering::Relaxed);
-        let elapsed = Duration::from_nanos(now_nanos.saturating_sub(last_nanos));
-        if elapsed > hb_timeout {
-            return Err(Error::Timeout);
+        if self.hb_ping_sent {
+            let now_nanos = state.hb_epoch.elapsed().as_nanos() as u64;
+            let last_nanos = state.last_input_nanos.load(Ordering::Relaxed);
+            let elapsed = Duration::from_nanos(now_nanos.saturating_sub(last_nanos));
+            if elapsed > hb_timeout {
+                return Err(Error::Timeout);
+            }
         }
         let ping = Command::Ping {
             ttl_deciseconds: hb_ttl_deciseconds,
@@ -758,6 +762,7 @@ impl DriverLoopState {
             let _ = io.codec.send_command(&ping);
             self.codec_maybe_dirty = true;
         }
+        self.hb_ping_sent = true;
         if let Some(iv) = hb_interval {
             self.hb_next = Some(Instant::now() + iv);
         }
