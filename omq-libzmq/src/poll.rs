@@ -1,4 +1,11 @@
-//! `zmq_poll` -- multiplexed I/O readiness via poll on eventfds.
+//! `zmq_poll` -- multiplexed I/O readiness.
+//!
+//! Three-phase algorithm:
+//! 1. `check_immediate`: scan yring consumers and bypass rings (zero syscalls).
+//! 2. `PollWaiter::wait`: block on OS events (`poll()` on Unix, WFMO on Windows).
+//! 3. `accumulate_buffered`: pick up messages that arrived while blocking.
+//!
+//! Platform-specific logic lives in `notify.rs`; this file has no `#[cfg]` gates.
 
 use std::ffi::c_int;
 use std::sync::Arc;
@@ -6,9 +13,10 @@ use std::sync::Arc;
 use crate::consts;
 use crate::socket::OmqSocket;
 
-const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
-const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
-const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_short;
+pub(crate) const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
+pub(crate) const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
+#[allow(dead_code)]
+pub(crate) const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_short;
 
 /// `zmq_pollitem_t` layout compatible with libzmq.
 #[repr(C)]
@@ -18,64 +26,6 @@ pub struct ZmqPollItem {
     pub fd: libc::c_int,
     pub events: libc::c_short,
     pub revents: libc::c_short,
-}
-
-fn build_pollfds(items: &[ZmqPollItem]) -> (Vec<libc::pollfd>, Vec<(usize, libc::c_short)>) {
-    let mut pfds = Vec::new();
-    let mut map = Vec::new();
-
-    for (i, item) in items.iter().enumerate() {
-        if !item.socket.is_null() {
-            // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
-            let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
-
-            if (item.events & ZMQ_POLLIN) != 0 {
-                #[cfg(target_os = "linux")]
-                let fd = sock.notify.recv_fd;
-                #[cfg(not(target_os = "linux"))]
-                let fd = sock.notify.recv_read;
-
-                pfds.push(libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                });
-                map.push((i, ZMQ_POLLIN));
-            }
-            if (item.events & ZMQ_POLLOUT) != 0 {
-                #[cfg(target_os = "linux")]
-                let fd = sock.notify.send_fd;
-                #[cfg(not(target_os = "linux"))]
-                let fd = sock.notify.send_read;
-
-                pfds.push(libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                });
-                map.push((i, ZMQ_POLLOUT));
-            }
-        } else if item.fd >= 0 {
-            let mut events: libc::c_short = 0;
-            if (item.events & ZMQ_POLLIN) != 0 {
-                events |= libc::POLLIN;
-            }
-            if (item.events & ZMQ_POLLOUT) != 0 {
-                events |= libc::POLLOUT;
-            }
-            if (item.events & ZMQ_POLLERR) != 0 {
-                events |= libc::POLLERR;
-            }
-            pfds.push(libc::pollfd {
-                fd: item.fd,
-                events,
-                revents: 0,
-            });
-            map.push((i, 0));
-        }
-    }
-
-    (pfds, map)
 }
 
 fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
@@ -116,8 +66,9 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
     ready
 }
 
-fn drain_eventfds(items: &[ZmqPollItem]) {
-    for item in items {
+fn accumulate_buffered(items: &mut [ZmqPollItem]) -> i32 {
+    let mut ready = 0i32;
+    for item in items.iter_mut() {
         if item.socket.is_null() {
             continue;
         }
@@ -125,29 +76,28 @@ fn drain_eventfds(items: &[ZmqPollItem]) {
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
-            #[cfg(target_os = "linux")]
-            {
-                let fd = sock.notify.recv_fd;
-                let mut val = 0u64;
-                // SAFETY: fd is a valid eventfd; 8-byte read drains the counter.
-                unsafe { libc::read(fd, (&raw mut val).cast(), 8) };
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let fd = sock.notify.recv_read;
-                let mut buf = [0u8; 64];
-                loop {
-                    // SAFETY: fd is a valid pipe read end; draining buffered signal bytes.
-                    let n = unsafe {
-                        libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
-                    };
-                    if n <= 0 {
-                        break;
-                    }
+            let drain_nonempty = sock
+                .drain_nonempty
+                .load(std::sync::atomic::Ordering::Relaxed);
+
+            let cons_ptr = &*sock.recv_cons.get();
+            let recv_cons_has_data = cons_ptr
+                .as_ref()
+                .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty());
+
+            let bypass_recv_has_data = crate::notify::has_bypass_data(sock);
+
+            let has_buffered = drain_nonempty || recv_cons_has_data || bypass_recv_has_data;
+
+            if has_buffered {
+                if item.revents == 0 {
+                    ready += 1;
                 }
+                item.revents |= ZMQ_POLLIN;
             }
         }
     }
+    ready
 }
 
 #[unsafe(no_mangle)]
@@ -171,68 +121,29 @@ pub extern "C" fn zmq_poll(
         return ready;
     }
 
-    let (mut pfds, map) = build_pollfds(items_slice);
-    if pfds.is_empty() {
+    let mut waiter = crate::notify::PollWaiter::new(items_slice);
+    if waiter.has_no_handles() {
         if timeout_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
         }
         return 0;
     }
 
-    drain_eventfds(items_slice);
+    waiter.prepare_for_wait();
+
     let ready = check_immediate(items_slice);
     if ready > 0 {
         return ready;
     }
 
-    let poll_timeout = if timeout_ms < 0 {
-        -1
-    } else {
-        timeout_ms as c_int
-    };
-    // SAFETY: pfds is a valid pollfd array; poll blocks until events or timeout.
-    let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, poll_timeout) };
-    if rc < 0 {
-        return crate::error::fail(
-            std::io::Error::last_os_error()
-                .raw_os_error()
-                .unwrap_or(libc::EINTR) as libc::c_int,
-        );
-    }
-    if rc == 0 {
-        return 0;
-    }
+    let _rc = waiter.wait(timeout_ms, items_slice);
+    let _buffered = accumulate_buffered(items_slice);
 
-    for item in items_slice.iter_mut() {
-        item.revents = 0;
-    }
-
-    for (pfd_idx, pfd) in pfds.iter().enumerate() {
-        if pfd.revents == 0 {
-            continue;
-        }
-        let (item_idx, zmq_event) = map[pfd_idx];
-
-        if zmq_event == 0 {
-            if (pfd.revents & libc::POLLIN) != 0 {
-                items_slice[item_idx].revents |= ZMQ_POLLIN;
-            }
-            if (pfd.revents & libc::POLLOUT) != 0 {
-                items_slice[item_idx].revents |= ZMQ_POLLOUT;
-            }
-            if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
-                items_slice[item_idx].revents |= ZMQ_POLLERR;
-            }
-        } else {
-            items_slice[item_idx].revents |= zmq_event;
-        }
-    }
-
-    let mut ready_count = 0i32;
-    for item in items_slice.iter() {
+    let mut ready = 0i32;
+    for item in items_slice {
         if item.revents != 0 {
-            ready_count += 1;
+            ready += 1;
         }
     }
-    ready_count
+    ready
 }

@@ -8,6 +8,7 @@ mod error;
 mod inproc_bypass;
 mod local_cell;
 mod msg;
+mod notify;
 mod opts;
 pub mod poll;
 pub mod proxy;

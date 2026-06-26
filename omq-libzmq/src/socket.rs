@@ -18,6 +18,7 @@ use tokio::sync::Notify;
 
 use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, fail, map_omq_err, set_errno};
+use crate::notify::{NotifyHandle, PlatformNotifyHandle, RecvNotify};
 use crate::opts::SocketOverlay;
 
 /// Rewrite `Host::Wildcard` to IPv6 unspecified (::) for dual-stack bind.
@@ -36,124 +37,6 @@ fn ipv6_rewrite_wildcard(ep: Endpoint) -> Endpoint {
 
 // Default channel capacity (matches default HWM).
 pub(crate) const DEFAULT_HWM: usize = 1000;
-
-/// Eventfd-based notification pair on Linux; pipe pair on other platforms.
-#[cfg(target_os = "linux")]
-pub(crate) struct NotifyFd {
-    /// eventfd signaled (+1) for each message delivered to the recv ring.
-    pub recv_fd: std::os::unix::io::RawFd,
-    /// eventfd signaled (+1) for each send slot freed.
-    pub send_fd: std::os::unix::io::RawFd,
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) struct NotifyFd {
-    pub recv_read: std::os::unix::io::RawFd,
-    pub recv_write: std::os::unix::io::RawFd,
-    pub send_read: std::os::unix::io::RawFd,
-    pub send_write: std::os::unix::io::RawFd,
-}
-
-impl std::fmt::Debug for NotifyFd {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("NotifyFd { .. }")
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl NotifyFd {
-    fn new() -> Option<Self> {
-        // Non-semaphore: a single read returns the accumulated count
-        // and resets to 0. This allows O(1) drain instead of O(N).
-        // SAFETY: eventfd returns a valid fd on success, -1 on failure.
-        let recv_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
-        if recv_fd < 0 {
-            return None;
-        }
-        // SAFETY: same as above.
-        let send_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
-        if send_fd < 0 {
-            // SAFETY: recv_fd is a valid open fd from the successful eventfd call above.
-            unsafe { libc::close(recv_fd) };
-            return None;
-        }
-        Some(Self { recv_fd, send_fd })
-    }
-
-    fn close(&self) {
-        // SAFETY: recv_fd and send_fd are valid fds opened by new().
-        unsafe {
-            libc::close(self.recv_fd);
-            libc::close(self.send_fd);
-        }
-    }
-
-    pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
-        let val: u64 = 1;
-        // SAFETY: fd is a valid eventfd; writing 8 bytes atomically increments the counter.
-        unsafe {
-            libc::write(fd, (&raw const val).cast::<libc::c_void>(), 8);
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-impl NotifyFd {
-    fn new() -> Option<Self> {
-        let mut fds = [-1i32; 2];
-        // SAFETY: fds is a valid 2-element array; pipe() writes two fds into it on success.
-        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        if rc != 0 {
-            return None;
-        }
-        // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
-        unsafe {
-            libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
-            libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
-        }
-        let (recv_read, recv_write) = (fds[0], fds[1]);
-        // SAFETY: same as above.
-        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        if rc != 0 {
-            // SAFETY: recv_read and recv_write are valid open fds.
-            unsafe {
-                libc::close(recv_read);
-                libc::close(recv_write);
-            }
-            return None;
-        }
-        // SAFETY: fds[0] and fds[1] are valid fds from the successful pipe() call.
-        unsafe {
-            libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
-            libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
-        }
-        let (send_read, send_write) = (fds[0], fds[1]);
-        Some(Self {
-            recv_read,
-            recv_write,
-            send_read,
-            send_write,
-        })
-    }
-
-    fn close(&self) {
-        // SAFETY: all fds are valid, opened by new().
-        unsafe {
-            libc::close(self.recv_read);
-            libc::close(self.recv_write);
-            libc::close(self.send_read);
-            libc::close(self.send_write);
-        }
-    }
-
-    pub(crate) fn signal_recv(fd: std::os::unix::io::RawFd) {
-        let b: u8 = 1;
-        // SAFETY: fd is a valid pipe write end; writing 1 byte signals readiness.
-        unsafe {
-            libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
-        }
-    }
-}
 
 /// Dual yring consumers for the recv path.
 #[derive(Debug)]
@@ -199,7 +82,7 @@ pub(crate) struct OmqSocket {
     /// Shared config for recycling the recv fast yring on peer churn.
     pub recv_sink_config: std::sync::OnceLock<Arc<omq_tokio::engine::RecvSinkConfig>>,
     pub last_endpoint: Mutex<Option<String>>,
-    pub notify: NotifyFd,
+    pub notify: Arc<PlatformNotifyHandle>,
     pub bound_or_connected: AtomicBool,
     pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
     /// Send yield state: (message count, bytes queued). Accessed only
@@ -277,15 +160,12 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
         shwm.min(rhwm).max(16)
     };
 
-    #[cfg(target_os = "linux")]
-    let recv_fd = receiver.notify.recv_fd;
-    #[cfg(not(target_os = "linux"))]
-    let recv_fd = receiver.notify.recv_write;
+    let recv_notify = receiver.notify.recv_notifier();
 
     // Byte ring capacity: enough for `capacity` messages at a generous
     // average size. Rounded up to a power of two internally.
     let byte_ring_cap = capacity * 1024;
-    let (bsend, brecv) = crate::inproc_bypass::create_bypass(byte_ring_cap, recv_fd);
+    let (bsend, brecv) = crate::inproc_bypass::create_bypass(byte_ring_cap, recv_notify);
     *sender.bypass_send.get() = Some(bsend);
     *receiver.bypass_recv.get() = Some(brecv);
 }
@@ -366,7 +246,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         return std::ptr::null_mut();
     }
 
-    let Some(notify) = NotifyFd::new() else {
+    let Some(notify) = crate::notify::create_notify() else {
         set_errno(libc::EMFILE);
         return std::ptr::null_mut();
     };
@@ -429,11 +309,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
 
     let socket_type = sock.socket_type;
 
-    #[cfg(target_os = "linux")]
-    let recv_signal_fd = sock.notify.recv_fd;
-    #[cfg(not(target_os = "linux"))]
-    let recv_signal_fd = sock.notify.recv_write;
-
+    let recv_notify = sock.notify.recv_notifier();
     let cap = recv_hwm.max(16);
     let (fast_prod, fast_cons) = yring::spsc(cap);
     let (mut pump_prod, pump_cons) = yring::spsc(cap);
@@ -446,8 +322,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     let _ = sock.recv_space.set(recv_space.clone());
 
     // Build the RecvSink::Yring for the driver's direct fast path.
-    let signal_fd = recv_signal_fd;
-    let signal_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || NotifyFd::signal_recv(signal_fd));
+    let signal_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || recv_notify.signal());
     let recv_sink = omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
         producer: fast_prod,
         signal: Box::new({
@@ -484,7 +359,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
             let s_recv = inner.clone();
             let recv_pump = tokio::spawn(async move {
                 while let Ok(msg) = s_recv.recv().await {
-                    push_to_pump(&mut pump_prod, msg, recv_signal_fd, &recv_space).await;
+                    push_to_pump(&mut pump_prod, msg, recv_notify, &recv_space).await;
                 }
             });
 
@@ -547,6 +422,13 @@ unsafe fn parse_endpoint_args<'a>(
         return Err(libc::EINVAL);
     };
     let addr_str = addr_str.to_owned();
+
+    // Windows: reject IPC transport (not supported).
+    #[cfg(windows)]
+    if addr_str.starts_with("ipc://") {
+        return Err(libc::ENOTSUP);
+    }
+
     let Ok(endpoint) = omq_tokio::Endpoint::from_str(&addr_str) else {
         return Err(libc::EINVAL);
     };
@@ -804,7 +686,7 @@ pub extern "C" fn zmq_socket_monitor(
 async fn push_to_pump(
     prod: &mut yring::Producer<omq_tokio::Message>,
     msg: omq_tokio::Message,
-    signal_fd: std::os::unix::io::RawFd,
+    recv_notify: RecvNotify,
     space: &Notify,
 ) {
     let flush_signal = |prod: &mut yring::Producer<omq_tokio::Message>| {
@@ -812,7 +694,7 @@ async fn push_to_pump(
             was_empty: true, ..
         } = prod.flush_and_check()
         {
-            NotifyFd::signal_recv(signal_fd);
+            recv_notify.signal();
         }
     };
     let mut m = msg;

@@ -14,6 +14,8 @@ use omq_tokio::MechanismSetup;
 use omq_tokio::options::{KeepAlive, ReconnectPolicy};
 
 use crate::error::fail;
+#[cfg(unix)]
+use crate::notify::NotifyHandle;
 use crate::socket::DEFAULT_HWM;
 
 macro_rules! lock_overlay {
@@ -756,11 +758,13 @@ pub extern "C" fn zmq_getsockopt(
             write_i32(optval, optvallen, v)
         }
         ZMQ_FD => {
-            #[cfg(target_os = "linux")]
-            let fd = sock_arc.notify.recv_fd;
-            #[cfg(not(target_os = "linux"))]
-            let fd = sock_arc.notify.recv_read;
-            write_i32(optval, optvallen, fd)
+            #[cfg(windows)]
+            return crate::error::fail(libc::ENOPROTOOPT);
+            #[cfg(unix)]
+            {
+                let fd = sock_arc.notify.recv_fd();
+                write_i32(optval, optvallen, fd)
+            }
         }
         ZMQ_EVENTS => {
             let mut events = ZMQ_POLLOUT; // optimistic: always writable

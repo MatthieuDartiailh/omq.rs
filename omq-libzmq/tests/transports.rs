@@ -38,6 +38,7 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
 // --- IPC (abstract namespace) ---
 
 #[test]
+#[cfg(unix)]
 fn ipc_push_pull() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
@@ -118,6 +119,71 @@ fn ipc_abstract_pub_sub() {
     assert_eq!(&buf[..7], b"ipc-pub");
 
     zmq_close(sub);
+    zmq_close(pub_);
+    zmq_ctx_term(ctx);
+}
+
+// --- tcp pub/sub (cross-platform) ---
+
+#[test]
+fn tcp_pub_sub() {
+    let port = helpers::free_port();
+    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
+
+    let ctx = zmq_ctx_new();
+    let pub_ = zmq_socket(ctx, ZMQ_PUB);
+    let sub = zmq_socket(ctx, ZMQ_SUB);
+
+    zmq_bind(pub_, addr.as_ptr());
+    zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
+    zmq_connect(sub, addr.as_ptr());
+    std::thread::sleep(Duration::from_millis(100));
+    set_timeo(sub, 2000);
+
+    zmq_send(pub_, b"tcp-pub".as_ptr().cast(), 7, 0);
+
+    let mut buf = [0u8; 64];
+    let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert_eq!(rc, 7);
+    assert_eq!(&buf[..7], b"tcp-pub");
+
+    zmq_close(sub);
+    zmq_close(pub_);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn tcp_pub_sub_multiple_subscribers() {
+    let port = helpers::free_port();
+    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
+
+    let ctx = zmq_ctx_new();
+    let pub_ = zmq_socket(ctx, ZMQ_PUB);
+    let sub1 = zmq_socket(ctx, ZMQ_SUB);
+    let sub2 = zmq_socket(ctx, ZMQ_SUB);
+
+    zmq_bind(pub_, addr.as_ptr());
+    zmq_setsockopt(sub1, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
+    zmq_setsockopt(sub2, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
+    zmq_connect(sub1, addr.as_ptr());
+    zmq_connect(sub2, addr.as_ptr());
+    std::thread::sleep(Duration::from_millis(100));
+    set_timeo(sub1, 2000);
+    set_timeo(sub2, 2000);
+
+    zmq_send(pub_, b"multi".as_ptr().cast(), 5, 0);
+
+    let mut buf1 = [0u8; 64];
+    let mut buf2 = [0u8; 64];
+    let rc1 = zmq_recv(sub1, buf1.as_mut_ptr().cast(), buf1.len(), 0);
+    let rc2 = zmq_recv(sub2, buf2.as_mut_ptr().cast(), buf2.len(), 0);
+    assert_eq!(rc1, 5);
+    assert_eq!(rc2, 5);
+    assert_eq!(&buf1[..5], b"multi");
+    assert_eq!(&buf2[..5], b"multi");
+
+    zmq_close(sub1);
+    zmq_close(sub2);
     zmq_close(pub_);
     zmq_ctx_term(ctx);
 }

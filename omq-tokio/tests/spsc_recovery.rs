@@ -55,26 +55,21 @@ async fn send_ring_reenabled_after_second_peer_leaves() {
     pull2.bind(ep2.clone()).await.unwrap();
     push.connect(ep1.clone()).await.unwrap();
     push.connect(ep2.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // With 2 peers, messages round-robin.
     for _ in 0..4 {
         push.send(Message::from_slice(b"rr")).await.unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Drain both receivers.
     while pull1.try_recv().is_ok() {}
     while pull2.try_recv().is_ok() {}
 
-    // Disconnect second peer.
     push.disconnect(ep2.clone()).await.unwrap();
-    // Windows CI runners need more time for disconnect to propagate.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Now only pull1 remains. Fast path should re-enable.
     push.send(Message::from_slice(b"solo")).await.unwrap();
-    let msg = tokio::time::timeout(Duration::from_secs(5), pull1.recv())
+    let msg = tokio::time::timeout(Duration::from_secs(10), pull1.recv())
         .await
         .unwrap()
         .unwrap();

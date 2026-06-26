@@ -1,9 +1,7 @@
 //! `zmq_send` / `zmq_recv` entry points.
 //!
 //! Send: direct `Handle::block_on(socket.send())`, no relay.
-//! Recv: yring SPSC relay with batched prefetch. The recv pump on the
-//! tokio thread fills the ring; the C thread drains it lock-free.
-//! Blocking recv parks on the eventfd via `libc::poll`.
+//! Recv: bypass ring -> yring consumers -> block on `RecvNotify`.
 #![expect(clippy::cast_possible_wrap)]
 
 use std::ffi::c_int;
@@ -14,6 +12,7 @@ use bytes::Bytes;
 
 use crate::consts::{ZMQ_DONTWAIT, ZMQ_SNDMORE};
 use crate::error::{ETERM, fail};
+use crate::notify::NotifyHandle;
 use crate::socket::OmqSocket;
 
 /// Clear a bypass option if the peer has closed the pipe.
@@ -44,8 +43,6 @@ impl HasPipeClosed for crate::inproc_bypass::BypassRecv {
     }
 }
 
-/// Block on the recv eventfd until `try_pop` succeeds or the timeout
-/// expires. Returns `Err(EAGAIN)` on timeout.
 fn block_recv<T>(
     sock: &OmqSocket,
     rcvtimeo: i64,
@@ -59,14 +56,16 @@ fn block_recv<T>(
                 return Err(libc::EAGAIN);
             }
             let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
-            wait_recv_eventfd(sock, ms);
+            let recv_notify = sock.notify.recv_notifier();
+            let _ = recv_notify.wait_for_readable(ms);
             if let Some(val) = try_pop() {
                 return Ok(val);
             }
         }
     }
     loop {
-        wait_recv_eventfd(sock, -1);
+        let recv_notify = sock.notify.recv_notifier();
+        let _ = recv_notify.wait_for_readable(-1);
         if let Some(val) = try_pop() {
             return Ok(val);
         }
@@ -272,6 +271,11 @@ pub extern "C" fn zmq_recv(
     {
         return fail(ETERM);
     }
+
+    zmq_recv_impl(sock, buf, buf_len, flags)
+}
+
+fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags: c_int) -> c_int {
     // Inproc bypass fast path: copy from byte ring directly into user
     // buffer. Zero intermediate Bytes allocation.
     // SAFETY: zmq contract guarantees single-threaded access per socket.
@@ -298,23 +302,6 @@ fn signal_recv_space(sock: &OmqSocket) {
     if let Some(n) = sock.recv_space.get() {
         n.notify_one();
     }
-}
-
-/// Block on the recv eventfd until readable or timeout.
-/// Returns 0 on readable, -1 on timeout/error.
-fn wait_recv_eventfd(sock: &OmqSocket, timeout_ms: c_int) -> c_int {
-    #[cfg(target_os = "linux")]
-    let fd = sock.notify.recv_fd;
-    #[cfg(not(target_os = "linux"))]
-    let fd = sock.notify.recv_read;
-
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: pfd is a valid single-element pollfd.
-    unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) }
 }
 
 /// Pop one frame from the socket, honoring flags/timeout.

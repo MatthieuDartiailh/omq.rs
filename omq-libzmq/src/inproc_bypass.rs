@@ -12,14 +12,12 @@ use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::socket::NotifyFd;
-
 /// Shared state between the sender and receiver halves of an inproc bypass.
 pub(crate) struct InprocPipe {
     pub(crate) closed: AtomicBool,
-    /// Receiver's recv eventfd. Signaled by the sender when the pipe
+    /// Receiver's notification handle. Signaled by the sender when the pipe
     /// transitions from empty to non-empty.
-    pub(crate) recv_signal_fd: std::os::unix::io::RawFd,
+    pub(crate) recv_notify: crate::notify::RecvNotify,
     /// True when the sender is parked waiting for ring space.
     sender_waiting: AtomicBool,
     /// Handle for unparking the sender thread. Written by sender under
@@ -324,12 +322,12 @@ pub(crate) struct BypassRecv {
 /// `byte_capacity` is the total byte ring size (will be rounded up to power of two).
 pub(crate) fn create_bypass(
     byte_capacity: usize,
-    recv_signal_fd: std::os::unix::io::RawFd,
+    recv_notify: crate::notify::RecvNotify,
 ) -> (BypassSend, BypassRecv) {
     let (producer, consumer) = ring_pair(byte_capacity);
     let pipe = Arc::new(InprocPipe {
         closed: AtomicBool::new(false),
-        recv_signal_fd,
+        recv_notify,
         sender_waiting: AtomicBool::new(false),
         sender_thread: std::sync::Mutex::new(None),
     });
@@ -344,14 +342,14 @@ pub(crate) fn create_bypass(
 
 impl BypassSend {
     /// Try to push raw payload bytes. Returns false if full.
-    /// Signals the receiver's eventfd on empty-to-non-empty transitions.
+    /// Signals the receiver's event on empty-to-non-empty transitions.
     #[inline]
     pub(crate) fn push(&mut self, data: &[u8]) -> bool {
         if !self.producer.try_push(data) {
             return false;
         }
         if self.producer.flush() {
-            NotifyFd::signal_recv(self.pipe.recv_signal_fd);
+            self.pipe.recv_notify.signal();
         }
         true
     }
@@ -374,7 +372,7 @@ impl BypassSend {
             }
             self.pipe.sender_waiting.store(false, Ordering::Relaxed);
             if self.producer.flush() {
-                NotifyFd::signal_recv(self.pipe.recv_signal_fd);
+                self.pipe.recv_notify.signal();
             }
             return;
         }
@@ -403,33 +401,12 @@ impl BypassRecv {
             t.unpark();
         }
         if self.consumer.is_empty() {
-            drain_recv_fd(self.pipe.recv_signal_fd);
+            self.pipe.recv_notify.drain();
         }
     }
 
     /// Check if the ring is empty.
     pub(crate) fn is_empty(&self) -> bool {
         self.consumer.is_empty()
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn drain_recv_fd(fd: std::os::unix::io::RawFd) {
-    let mut buf = 0u64;
-    // SAFETY: fd is a valid eventfd; 8-byte read drains the counter.
-    unsafe {
-        libc::read(fd, (&raw mut buf).cast::<libc::c_void>(), 8);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn drain_recv_fd(fd: std::os::unix::io::RawFd) {
-    let mut buf = [0u8; 64];
-    loop {
-        // SAFETY: fd is a valid pipe read end; draining signal bytes.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
-        if n <= 0 {
-            break;
-        }
     }
 }
