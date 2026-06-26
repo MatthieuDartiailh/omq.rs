@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-06-26
+
+### Added
+
+- `lz4+ws://`, `lz4+wss://` compressed WebSocket endpoint variants.
+
+### Fixed
+
+- WS send bypass: encode as WS binary frames instead of raw ZMTP frames (caused silent message loss on bypass paths).
+- WS upgrade: parse HTTP status code as integer instead of substring match.
+- `clear_arena`: add `debug_assert` for external entries invariant.
+
+### Changed
+
+- `#![forbid(unsafe_code)]` crate-wide. Replace `MaybeUninit` arrays with `[0u8; N]`, `align_to_mut` with `as_chunks_mut` in WS masking.
+
+### Removed
+
+- `SocketType::is_draft()` method.
+
 ## [0.17.3] - 2026-06-22
 
 ### Fixed

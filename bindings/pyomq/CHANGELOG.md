@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-06-26
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.14.5 (lz4+ws transport, WS send bypass fix, Windows support).
+
 ## [0.12.5] - 2026-06-22
 
 ### Fixed

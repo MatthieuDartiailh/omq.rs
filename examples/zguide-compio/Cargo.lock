@@ -42,7 +42,7 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "blume"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "event-listener",
 ]
@@ -103,20 +103,42 @@ name = "compio"
 version = "0.19.0"
 source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a02762a11a92207640ad17546cf54"
 dependencies = [
- "compio-buf",
- "compio-driver",
+ "compio-buf 0.8.2",
+ "compio-driver 0.12.2",
+ "compio-log 0.2.0 (git+https://github.com/compio-rs/compio.git?rev=cf746eb8)",
+ "compio-macros 0.2.0 (git+https://github.com/compio-rs/compio.git?rev=cf746eb8)",
+ "compio-runtime 0.12.0",
+]
+
+[[package]]
+name = "compio"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5cf9e29d3c2d2a37078198795631b61d2b5c9cab68191e31526fe342d742135"
+dependencies = [
+ "compio-buf 0.8.3",
+ "compio-driver 0.12.3",
  "compio-io",
- "compio-log",
- "compio-macros",
+ "compio-log 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "compio-macros 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "compio-net",
  "compio-quic",
- "compio-runtime",
+ "compio-runtime 0.12.2",
 ]
 
 [[package]]
 name = "compio-buf"
 version = "0.8.2"
 source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a02762a11a92207640ad17546cf54"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "compio-buf"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b51a2c35873865376ed4cdb6cfeb602b6cf569815f017ddd7bd8f86ad49b34c7"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -130,8 +152,37 @@ source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a0
 dependencies = [
  "bitflags",
  "cfg_aliases",
- "compio-buf",
- "compio-log",
+ "compio-buf 0.8.2",
+ "compio-log 0.2.0 (git+https://github.com/compio-rs/compio.git?rev=cf746eb8)",
+ "compio-send-wrapper",
+ "crossbeam-queue",
+ "flume",
+ "futures-util",
+ "io-uring",
+ "libc",
+ "linux-raw-sys",
+ "mod_use",
+ "once_cell",
+ "pastey",
+ "polling",
+ "rustix",
+ "smallvec",
+ "socket2",
+ "synchrony",
+ "thin-cell",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "compio-driver"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a580d231c022f336ccb7a2e133eaf56e34bf586417176a1a8d392a4a6e9a41f4"
+dependencies = [
+ "bitflags",
+ "cfg_aliases",
+ "compio-buf 0.8.3",
+ "compio-log 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "compio-send-wrapper",
  "crossbeam-queue",
  "flume",
@@ -156,7 +207,20 @@ name = "compio-executor"
 version = "0.1.1"
 source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a02762a11a92207640ad17546cf54"
 dependencies = [
- "compio-log",
+ "compio-log 0.2.0 (git+https://github.com/compio-rs/compio.git?rev=cf746eb8)",
+ "compio-send-wrapper",
+ "crossbeam-queue",
+ "loom",
+ "slotmap",
+]
+
+[[package]]
+name = "compio-executor"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "809fc31e0180a97ea760300b9aa97d99fbb19c9831cc49cebfd5a98f44a8371b"
+dependencies = [
+ "compio-log 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "compio-send-wrapper",
  "crossbeam-queue",
  "loom",
@@ -165,14 +229,16 @@ dependencies = [
 
 [[package]]
 name = "compio-io"
-version = "0.10.0"
-source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a02762a11a92207640ad17546cf54"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3a354e085c4046dd8d2d9d514cf8c15c615eb8adf6c5f41dbf7899420457e9b"
 dependencies = [
  "bytemuck",
- "compio-buf",
+ "compio-buf 0.8.3",
  "futures-util",
  "libc",
  "pastey",
+ "pin-project-lite",
  "rustix",
  "synchrony",
  "windows-sys 0.61.2",
@@ -181,9 +247,31 @@ dependencies = [
 [[package]]
 name = "compio-log"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef39fff6341af7ab6c27fae9a3887e1ec618320d43f3b9c924c7a644f693a859"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
+name = "compio-log"
+version = "0.2.0"
 source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a02762a11a92207640ad17546cf54"
 dependencies = [
  "tracing",
+]
+
+[[package]]
+name = "compio-macros"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9ac573b3bb60fffabf47c2ce01c61536fb5eb2168d66e0375e85603e7d51614"
+dependencies = [
+ "darling",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -200,13 +288,14 @@ dependencies = [
 
 [[package]]
 name = "compio-net"
-version = "0.12.0"
-source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a02762a11a92207640ad17546cf54"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a985ea5d7580318104d44f4a3c8ae48a7ee750e9c98b68a69a869e01d4d6df0"
 dependencies = [
- "compio-buf",
- "compio-driver",
+ "compio-buf 0.8.3",
+ "compio-driver 0.12.3",
  "compio-io",
- "compio-runtime",
+ "compio-runtime 0.12.2",
  "either",
  "futures-util",
  "libc",
@@ -221,14 +310,15 @@ dependencies = [
 [[package]]
 name = "compio-quic"
 version = "0.8.0"
-source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a02762a11a92207640ad17546cf54"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd50cb1b2c2c8276728871bc3bf3c12618c551cdd550123d564aa49b059aea5"
 dependencies = [
  "cfg_aliases",
- "compio-buf",
+ "compio-buf 0.8.3",
  "compio-io",
- "compio-log",
+ "compio-log 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "compio-net",
- "compio-runtime",
+ "compio-runtime 0.12.2",
  "flume",
  "futures-util",
  "libc",
@@ -245,11 +335,31 @@ name = "compio-runtime"
 version = "0.12.0"
 source = "git+https://github.com/compio-rs/compio.git?rev=cf746eb8#cf746eb8dd6a02762a11a92207640ad17546cf54"
 dependencies = [
- "compio-buf",
- "compio-driver",
- "compio-executor",
+ "compio-buf 0.8.2",
+ "compio-driver 0.12.2",
+ "compio-executor 0.1.1",
+ "compio-log 0.2.0 (git+https://github.com/compio-rs/compio.git?rev=cf746eb8)",
+ "compio-send-wrapper",
+ "core_affinity",
+ "futures-util",
+ "libc",
+ "pin-project-lite",
+ "scoped-tls",
+ "synchrony",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "compio-runtime"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dde4b0b7de96fc8b99e089964d65e9ed5669f8ea39bc46381f7fd563dc10a753"
+dependencies = [
+ "compio-buf 0.8.3",
+ "compio-driver 0.12.3",
+ "compio-executor 0.1.2",
  "compio-io",
- "compio-log",
+ "compio-log 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "compio-send-wrapper",
  "core_affinity",
  "futures-util",
@@ -734,12 +844,12 @@ dependencies = [
 
 [[package]]
 name = "omq-compio"
-version = "0.12.1"
+version = "0.12.4"
 dependencies = [
  "async-lock",
  "blume",
  "bytes",
- "compio",
+ "compio 0.19.1",
  "concurrent-queue",
  "event-listener",
  "flume",
@@ -755,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.16.0"
+version = "0.18.0"
 dependencies = [
  "bytes",
  "patricia_tree",
@@ -1685,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.0"
+version = "0.3.2"
 
 [[package]]
 name = "zerocopy"
@@ -1718,7 +1828,7 @@ name = "zguide-compio-01-req-rep"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1727,7 +1837,7 @@ name = "zguide-compio-02-pub-sub"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1736,7 +1846,7 @@ name = "zguide-compio-03-pipeline"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1745,7 +1855,7 @@ name = "zguide-compio-04-lazy-pirate"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1754,7 +1864,7 @@ name = "zguide-compio-05-heartbeat"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1763,7 +1873,7 @@ name = "zguide-compio-06-last-value-cache"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1772,7 +1882,7 @@ name = "zguide-compio-07-clone"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1781,7 +1891,7 @@ name = "zguide-compio-08-majordomo"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1790,7 +1900,7 @@ name = "zguide-compio-09-titanic"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1799,7 +1909,7 @@ name = "zguide-compio-10-binary-star"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 
@@ -1808,7 +1918,7 @@ name = "zguide-compio-11-freelance"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "compio",
+ "compio 0.19.0",
  "omq-compio",
 ]
 

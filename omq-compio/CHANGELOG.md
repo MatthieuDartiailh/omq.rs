@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-06-26
+
+### Added
+
+- `lz4+ws://`, `lz4+wss://` compressed WebSocket transport.
+
+### Fixed
+
+- WS send bypass: encode as WS binary frames instead of raw ZMTP frames.
+- Direct-encode send path: yield periodically to prevent driver starvation under sustained load. Fixes `soak_multi_socket` throughput collapse.
+- Eliminate double-load of `large_recv_pending` atomic in recv path.
+
+### Performance
+
+- Fan-out (PUB/XPUB multi-peer): arena-only dispatch for small messages (memcpy, no `Bytes::clone` atomics), adaptive byte-based yield interval, thread-local `EncodedQueue` + `Vec<Bytes>` reuse.
+- Single-peer PUB/XPUB: direct-encode into peer's `EncodedQueue`, bypassing `PeerOut::send` channel + driver wakeup.
+
+### Changed
+
+- Introduce `LocalCell<T>` wrapping `UnsafeCell` with debug-mode thread-ID check. Replaces `RecvCache` and raw `UnsafeCell` fields, eliminating ~25 inline unsafe blocks.
+- *(deps)* Bump `omq-proto` to 0.18.0, `blume` to 0.4.2, `yring` to 0.3.2.
+
 ## [0.12.3] - 2026-06-22
 
 ### Fixed
