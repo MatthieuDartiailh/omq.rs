@@ -82,8 +82,8 @@ cargo add omq-tokio               # default: multi-thread tokio (Linux/macOS)
 
 Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `interop_compio` test suites:
 
-- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS/Windows)
-- [`omq-compio`](omq-compio/): single-thread io_uring/IOCP (Linux; not yet on crates.io)
+- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS/Windows). Recommended backend.
+- [`omq-compio`](omq-compio/): single-thread io_uring/IOCP (Linux; not yet on crates.io). **Experimental.**
 
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
 
@@ -141,12 +141,12 @@ Seven crates, one repo.
 
 | Crate | What it does |
 |-------|-------------|
-| [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions |
-| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows) |
+| [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions. `#![forbid(unsafe_code)]` |
+| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows). `#![forbid(unsafe_code)]` |
 | [`omq-compio`](omq-compio/) | Single-thread io_uring / IOCP backend (Linux) |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
-| [`blume`](blume/) | Batching MPSC channel with swap-drain consumer |
-| [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch |
+| [`blume`](blume/) | Batching MPSC channel with swap-drain consumer. `#![forbid(unsafe_code)]` |
+| [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch. Miri-tested |
 | [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) |
 
 ## Testing
@@ -158,10 +158,14 @@ covered by integration tests on both backends. The full suite:
   socket-type x transport x mechanism cell).
 - **Protocol fuzzing** (~10M iterations per suite): hand-rolled fuzz of
   the wire parser and the socket-action state machine.
-- **18 soak test scenarios** per backend: peer churn, reconnect storms,
-  PUB/SUB churn, compression, PLAIN / CURVE / BLAKE3ZMQ auth
-  large-message throughput, multi-socket. Each scenario samples
-  RSS and file-descriptor counts to detect leaks.
+- **29 soak test scenarios** (18 omq-tokio, 11 omq-compio): peer churn,
+  reconnect storms, PUB/SUB churn, XPUB/XSUB churn, ROUTER/DEALER
+  churn, HWM reconnect, cancel safety, compression (lz4), PLAIN /
+  CURVE / BLAKE3ZMQ auth, mechanism reconnect, large-message
+  throughput, multi-socket, inproc cross-thread, WebSocket throughput
+  and reconnect. 10 min per scenario. Each scenario samples RSS and
+  file-descriptor counts to detect leaks.
+- **Miri** on all crates with `unsafe` code (`yring`).
 - **Cross-runtime interop**: omq-compio <-> omq-tokio over TCP.
 - **Wire interop** with libzmq (C) and pyzmq.
 
