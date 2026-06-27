@@ -2,7 +2,13 @@
 
 Bounded SPSC ring buffer with ypipe-style batched flush/prefetch.
 
-## Algorithm
+## The problem
+
+Existing Rust SPSC ring buffers (`rtrb`, `ringbuf`, `crossbeam`) do 1-2
+atomic operations per item. At millions of items per second, those
+atomics become the bottleneck.
+
+## The solution
 
 Three pointers instead of two:
 
@@ -10,35 +16,73 @@ Three pointers instead of two:
 - `tail`: producer write position (plain usize, producer-private, no atomic)
 - `flush`: last flushed position (AtomicUsize, producer writes / consumer reads)
 
-`push`: zero atomics. `flush`: one Release store. `pop`: zero atomics.
-`prefetch`: one Acquire load. Result: one atomic per batch on each side.
+`push()` writes to the ring with zero atomics. `flush()` makes all
+pending writes visible with a single Release store. `pop()` reads with
+zero atomics. `prefetch()` loads all available items with a single
+Acquire load. Result: 2 atomic ops per batch, not per item.
 
 This is the core ypipe innovation from ZeroMQ, applied to a fixed-capacity
 ring buffer instead of a linked list.
-
-## Performance
-
-760M items/s between threads (u64-sized values, batch of 256, capacity
-1024). Batching amortizes synchronization cost to near zero under load.
-Run `cargo bench -p yring` to reproduce.
 
 ## Usage
 
 ```rust
 let (mut producer, mut consumer) = yring::spsc(1024);
 
-// Producer side: push with zero atomics, flush once per batch
+// Producer: push with zero atomics, flush once per batch
 for i in 0..100 {
     producer.push(i).unwrap();
 }
 producer.flush(); // one Release store makes all 100 items visible
 
-// Consumer side: prefetch with one Acquire load, pop with zero atomics
+// Consumer: prefetch with one Acquire load, pop with zero atomics
 consumer.prefetch(); // one Acquire load
 while let Some(val) = consumer.pop() {
     // process val
 }
+consumer.release(); // one Release store frees slots for producer
 ```
+
+The key advantage over chunk-based batching APIs (like `rtrb`'s
+`write_chunk_uninit`): you keep the simple per-item `push()`/`pop()`
+API. No upfront batch size, no slice management, no restructuring your
+code. Push items one at a time, flush when you're ready.
+
+## Backpressure
+
+`push()` returns `Err(val)` when the ring is full. `pop()` returns
+`None` when the prefetched window is exhausted. Neither side blocks or
+spins internally.
+
+The `async` feature (opt-in) adds `AsyncProducer`/`AsyncConsumer` with
+waker integration: the producer wakes the consumer on flush, the
+consumer wakes the producer on release.
+
+## Benchmarks
+
+Cross-thread throughput (M items/s), 2 seconds per configuration,
+cap=1024, batch=64:
+
+| Channel | API | u64 (8 B) | [u8; 32] | [u8; 64] | [u8; 128] |
+|---------|-----|----------:|----------:|----------:|----------:|
+| **yring** | per-item, batch=1 | 265 | 134 | 66 | 49 |
+| **yring** | per-item, batch=64 | **595** | **386** | **192** | **111** |
+| rtrb | per-item | 32 | 32 | 32 | 32 |
+| rtrb | chunk, batch=64 | 2083 | 486 | 293 | 194 |
+| crossbeam | bounded | 15 | 15 | 15 | 14 |
+
+yring vs rtrb per-item (the natural API comparison): **6x** at 64
+bytes, **12x** at 32 bytes. rtrb's chunk API is faster in raw
+throughput because it copies contiguous slices in bulk, but requires
+restructuring code around upfront chunk sizes.
+
+<p align="center">
+  <img src="doc/spsc_comparison.svg" alt="SPSC comparison chart" width="700">
+</p>
+
+Measured on Linux VM, i7-8700B @ 3.20 GHz (6 cores), performance
+governor, turbo off. Reproduce with `cargo bench -p yring --bench
+comparison`.
 
 ## License
 

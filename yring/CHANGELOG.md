@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-06-27
+
+### Changed
+
+- Rewrite README: problem/solution framing, backpressure docs, comparison benchmarks, chart.
+
+### Added
+
+- Comparison benchmark against rtrb and crossbeam-channel.
+- Dark-theme SVG chart (`doc/spsc_comparison.svg`).
+- Loom tests for sync ring protocol and `push_async`.
+
+### Fixed
+
+- `examples/basic.rs`: add missing `consumer.release()` call.
+
 ## [0.3.2] - 2026-06-26
 
 ### Changed
