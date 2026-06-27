@@ -673,3 +673,21 @@ fn curve_key_non_utf8_does_not_crash() {
     zmq_close(s);
     zmq_ctx_term(ctx);
 }
+
+#[test]
+fn setsockopt_null_optval_returns_einval() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    let rc = zmq_setsockopt(s, ZMQ_SNDHWM, std::ptr::null(), size_of::<i32>());
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    let v: i32 = 100;
+    let rc = zmq_setsockopt(s, ZMQ_SNDHWM, (&v as *const i32).cast(), 2);
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}

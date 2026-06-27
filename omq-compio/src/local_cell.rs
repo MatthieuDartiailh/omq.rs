@@ -14,7 +14,11 @@ pub(crate) struct LocalCell<T> {
 }
 
 // SAFETY: compio is single-threaded cooperative. All access happens on
-// the runtime thread that created the cell. No concurrent access.
+// the runtime thread that created the cell, so no concurrent mutation is
+// possible. In debug builds, every `get()` call asserts the current thread
+// matches the creating thread. In release builds this assertion is compiled
+// out for zero overhead. The type is `pub(crate)` and only used inside
+// compio driver internals. Callers must not move a LocalCell to another thread.
 unsafe impl<T: Send> Sync for LocalCell<T> {}
 
 impl<T> LocalCell<T> {

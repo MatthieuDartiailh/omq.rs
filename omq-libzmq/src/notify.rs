@@ -417,6 +417,7 @@ mod unix {
             }
 
             let mut ready_count = 0i32;
+            let mut counted = vec![false; items.len()];
             for (pfd_idx, pfd) in self.pfds.iter().enumerate() {
                 if pfd.revents == 0 {
                     continue;
@@ -442,9 +443,8 @@ mod unix {
                     items[item_idx].revents |= zmq_event;
                 }
 
-                if items[item_idx].revents != 0 && ready_count == 0 {
-                    ready_count = 1;
-                } else if items[item_idx].revents != 0 {
+                if items[item_idx].revents != 0 && !counted[item_idx] {
+                    counted[item_idx] = true;
                     ready_count += 1;
                 }
             }

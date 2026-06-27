@@ -405,6 +405,8 @@ pub extern "C" fn zmq_msg_send(
         // SAFETY: boxed was created by Box::into_raw; reclaiming ownership.
         let owned = unsafe { *Box::from_raw(r.boxed.cast::<Bytes>()) };
         r.boxed = std::ptr::null_mut();
+        r.ptr = std::ptr::null_mut();
+        r.size = 0;
         owned
     } else {
         extract_bytes(msg)

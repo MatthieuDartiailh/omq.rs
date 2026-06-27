@@ -298,27 +298,37 @@ pub extern "C" fn zmq_setsockopt(
 
     match option {
         ZMQ_SNDTIMEO => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             sock_arc
                 .sndtimeo_ms
                 .store(i64::from(v), std::sync::atomic::Ordering::Relaxed);
         }
         ZMQ_RCVTIMEO => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             sock_arc
                 .rcvtimeo_ms
                 .store(i64::from(v), std::sync::atomic::Ordering::Relaxed);
         }
         ZMQ_SNDHWM => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).send_hwm = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_RCVHWM => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).recv_hwm = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_LINGER => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).linger = if v < 0 {
                 None
             } else {
@@ -334,7 +344,9 @@ pub extern "C" fn zmq_setsockopt(
             lock_overlay!(sock_arc).identity = Bytes::copy_from_slice(bytes);
         }
         ZMQ_RECONNECT_IVL => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).reconnect_ivl = if v <= 0 {
                 None
             } else {
@@ -342,7 +354,9 @@ pub extern "C" fn zmq_setsockopt(
             };
         }
         ZMQ_RECONNECT_IVL_MAX => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).reconnect_ivl_max = if v <= 0 {
                 None
             } else {
@@ -350,7 +364,9 @@ pub extern "C" fn zmq_setsockopt(
             };
         }
         ZMQ_HEARTBEAT_IVL => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).heartbeat_ivl = if v <= 0 {
                 None
             } else {
@@ -358,7 +374,9 @@ pub extern "C" fn zmq_setsockopt(
             };
         }
         ZMQ_HEARTBEAT_TTL => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).heartbeat_ttl = if v <= 0 {
                 None
             } else {
@@ -366,7 +384,9 @@ pub extern "C" fn zmq_setsockopt(
             };
         }
         ZMQ_HEARTBEAT_TIMEOUT => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).heartbeat_timeout = if v <= 0 {
                 None
             } else {
@@ -374,7 +394,9 @@ pub extern "C" fn zmq_setsockopt(
             };
         }
         ZMQ_HANDSHAKE_IVL => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).handshake_ivl = if v <= 0 {
                 None
             } else {
@@ -382,27 +404,39 @@ pub extern "C" fn zmq_setsockopt(
             };
         }
         ZMQ_MAXMSGSIZE => {
-            let v = read_i64(optval, optvallen);
+            let Some(v) = read_i64(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).max_message_size = if v < 0 { None } else { Some(v as usize) };
         }
         ZMQ_ROUTER_MANDATORY => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).router_mandatory = v != 0;
         }
         ZMQ_CONFLATE => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).conflate = v != 0;
         }
         ZMQ_TCP_KEEPALIVE => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).tcp_keepalive = v;
         }
         ZMQ_TCP_KEEPALIVE_CNT => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).tcp_keepalive_cnt = if v <= 0 { None } else { Some(v as u32) };
         }
         ZMQ_TCP_KEEPALIVE_IDLE => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).tcp_keepalive_idle = if v <= 0 {
                 None
             } else {
@@ -410,7 +444,9 @@ pub extern "C" fn zmq_setsockopt(
             };
         }
         ZMQ_TCP_KEEPALIVE_INTVL => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).tcp_keepalive_intvl = if v <= 0 {
                 None
             } else {
@@ -418,15 +454,21 @@ pub extern "C" fn zmq_setsockopt(
             };
         }
         ZMQ_SNDBUF => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).sndbuf = if v <= 0 { None } else { Some(v as usize) };
         }
         ZMQ_RCVBUF => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).rcvbuf = if v <= 0 { None } else { Some(v as usize) };
         }
         ZMQ_XPUB_VERBOSE => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             lock_overlay!(sock_arc).xpub_verbose = v != 0;
         }
         ZMQ_SUBSCRIBE => {
@@ -436,7 +478,9 @@ pub extern "C" fn zmq_setsockopt(
             return do_subscribe(sock_arc, optval, optvallen, false);
         }
         ZMQ_PLAIN_SERVER => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             let mut ov = lock_overlay!(sock_arc);
             if v != 0 {
                 ov.mechanism = MechanismOverlay::PlainServer;
@@ -445,7 +489,9 @@ pub extern "C" fn zmq_setsockopt(
             }
         }
         ZMQ_PLAIN_USERNAME => {
-            let s = read_string(optval, optvallen);
+            let Some(s) = read_string(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { username, .. } => *username = s,
@@ -458,7 +504,9 @@ pub extern "C" fn zmq_setsockopt(
             }
         }
         ZMQ_PLAIN_PASSWORD => {
-            let s = read_string(optval, optvallen);
+            let Some(s) = read_string(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { password, .. } => *password = s,
@@ -471,7 +519,9 @@ pub extern "C" fn zmq_setsockopt(
             }
         }
         ZMQ_CURVE_SERVER => {
-            let v = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             let mut ov = lock_overlay!(sock_arc);
             if v != 0 {
                 if !matches!(ov.mechanism, MechanismOverlay::CurveServer { .. }) {
@@ -484,7 +534,9 @@ pub extern "C" fn zmq_setsockopt(
             }
         }
         ZMQ_CURVE_PUBLICKEY => {
-            let key = read_key(optval, optvallen);
+            let Some(key) = read_key(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { public_key, .. } => *public_key = key,
@@ -498,7 +550,9 @@ pub extern "C" fn zmq_setsockopt(
             }
         }
         ZMQ_CURVE_SECRETKEY => {
-            let key = read_key(optval, optvallen);
+            let Some(key) = read_key(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::CurveServer { secret_key, .. }
@@ -513,7 +567,9 @@ pub extern "C" fn zmq_setsockopt(
             }
         }
         ZMQ_CURVE_SERVERKEY => {
-            let key = read_key(optval, optvallen);
+            let Some(key) = read_key(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
             let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::CurveClient { server_key, .. } => *server_key = key,
@@ -527,34 +583,61 @@ pub extern "C" fn zmq_setsockopt(
             }
         }
         ZMQ_IPV6 => {
-            lock_overlay!(sock_arc).ipv6 = read_i32(optval, optvallen) != 0;
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).ipv6 = v != 0;
         }
         ZMQ_IPV4ONLY => {
-            lock_overlay!(sock_arc).ipv6 = read_i32(optval, optvallen) == 0;
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).ipv6 = v == 0;
         }
         // Always-on in omq; accept silently.
         #[expect(clippy::match_same_arms)]
         ZMQ_ROUTER_HANDOVER => {}
         ZMQ_BACKLOG => {
-            lock_overlay!(sock_arc).backlog = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).backlog = v;
         }
         ZMQ_IMMEDIATE => {
-            lock_overlay!(sock_arc).immediate = read_i32(optval, optvallen) != 0;
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).immediate = v != 0;
         }
         ZMQ_CONNECT_TIMEOUT => {
-            lock_overlay!(sock_arc).connect_timeout = read_i32(optval, optvallen);
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).connect_timeout = v;
         }
         ZMQ_PROBE_ROUTER => {
-            lock_overlay!(sock_arc).probe_router = read_i32(optval, optvallen) != 0;
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).probe_router = v != 0;
         }
         ZMQ_REQ_CORRELATE => {
-            lock_overlay!(sock_arc).req_correlate = read_i32(optval, optvallen) != 0;
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).req_correlate = v != 0;
         }
         ZMQ_REQ_RELAXED => {
-            lock_overlay!(sock_arc).req_relaxed = read_i32(optval, optvallen) != 0;
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).req_relaxed = v != 0;
         }
         ZMQ_XPUB_NODROP => {
-            lock_overlay!(sock_arc).xpub_nodrop = read_i32(optval, optvallen) != 0;
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).xpub_nodrop = v != 0;
         }
         #[expect(clippy::match_same_arms)]
         ZMQ_AFFINITY
@@ -1044,34 +1127,37 @@ pub extern "C" fn zmq_getsockopt(
     }
 }
 
-fn read_i32(optval: *const libc::c_void, optvallen: usize) -> i32 {
+fn read_i32(optval: *const libc::c_void, optvallen: usize) -> Option<i32> {
     if optval.is_null() || optvallen < 4 {
-        return 0;
+        return None;
     }
     // SAFETY: optval is non-null (checked above) and points to at least 4 readable bytes.
-    unsafe { std::ptr::read_unaligned(optval.cast::<i32>()) }
+    Some(unsafe { std::ptr::read_unaligned(optval.cast::<i32>()) })
 }
 
-fn read_i64(optval: *const libc::c_void, optvallen: usize) -> i64 {
+fn read_i64(optval: *const libc::c_void, optvallen: usize) -> Option<i64> {
     if optval.is_null() || optvallen < 8 {
-        return 0;
+        return None;
     }
     // SAFETY: optval is non-null (checked above) and points to at least 8 readable bytes.
-    unsafe { std::ptr::read_unaligned(optval.cast::<i64>()) }
+    Some(unsafe { std::ptr::read_unaligned(optval.cast::<i64>()) })
 }
 
-fn read_string(optval: *const libc::c_void, optvallen: usize) -> String {
-    if optval.is_null() || optvallen == 0 {
-        return String::new();
+fn read_string(optval: *const libc::c_void, optvallen: usize) -> Option<String> {
+    if optval.is_null() {
+        return None;
+    }
+    if optvallen == 0 {
+        return Some(String::new());
     }
     // SAFETY: optval is non-null with optvallen > 0 (checked above).
     let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
-    String::from_utf8_lossy(slice).into_owned()
+    Some(String::from_utf8_lossy(slice).into_owned())
 }
 
-fn read_key(optval: *const libc::c_void, optvallen: usize) -> [u8; 32] {
+fn read_key(optval: *const libc::c_void, optvallen: usize) -> Option<[u8; 32]> {
     if optval.is_null() {
-        return [0; 32];
+        return None;
     }
     let mut key = [0u8; 32];
     if optvallen == 32 {
@@ -1082,7 +1168,7 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> [u8; 32] {
         // SAFETY: optval is non-null (checked above) and optvallen >= 40.
         let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 40) };
         let Ok(s) = std::str::from_utf8(slice) else {
-            return key;
+            return Some(key);
         };
         if let Ok(decoded) = omq_tokio::proto::z85::decode(s)
             && decoded.len() == 32
@@ -1090,7 +1176,7 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> [u8; 32] {
             key.copy_from_slice(&decoded);
         }
     }
-    key
+    Some(key)
 }
 
 fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_int {

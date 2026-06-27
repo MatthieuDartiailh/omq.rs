@@ -306,9 +306,7 @@ impl Submitter {
                     interval = (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32;
                 } else {
                     if self.xpub_nodrop {
-                        while !targets_have_space(&targets) {
-                            tokio::task::yield_now().await;
-                        }
+                        wait_for_targets_space(&targets).await;
                     }
                     dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
                     interval = yield_interval(targets.len());
@@ -323,9 +321,7 @@ impl Submitter {
 
         let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop {
-            while !targets_have_space(&targets) {
-                tokio::task::yield_now().await;
-            }
+            wait_for_targets_space(&targets).await;
         }
         dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
         let interval = yield_interval(targets.len());
@@ -578,9 +574,35 @@ impl FanOutSend {
 
 fn targets_have_space(targets: &[PeerSend]) -> bool {
     targets.iter().all(|t| match t {
-        PeerSend::Wire { slot, .. } => slot.has_space(),
+        PeerSend::Wire { slot, .. } => slot.has_space() || slot.dead.load(Ordering::Acquire),
         PeerSend::Inbox(_) => true,
     })
+}
+
+async fn wait_for_targets_space(targets: &[PeerSend]) {
+    while !targets_have_space(targets) {
+        let notified = targets.iter().find_map(|t| match t {
+            PeerSend::Wire { slot, .. }
+                if !slot.has_space() && !slot.dead.load(Ordering::Acquire) =>
+            {
+                Some(slot.space_available.notified())
+            }
+            _ => None,
+        });
+        match notified {
+            Some(notified) => {
+                if targets_have_space(targets) {
+                    return;
+                }
+                tokio::select! {
+                    biased;
+                    () = notified => {}
+                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+            }
+            None => return,
+        }
+    }
 }
 
 fn dispatch_encoded(

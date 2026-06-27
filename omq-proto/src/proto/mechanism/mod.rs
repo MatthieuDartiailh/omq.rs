@@ -368,10 +368,7 @@ impl SecurityMechanism {
             #[cfg(feature = "blake3zmq")]
             Self::Blake3Zmq(m) => m.start(out, our_props, our_greeting, peer_greeting),
             #[cfg(feature = "plain")]
-            Self::Plain(m) => {
-                m.start(out, our_props);
-                Ok(())
-            }
+            Self::Plain(m) => m.start(out, our_props),
         }
     }
 
