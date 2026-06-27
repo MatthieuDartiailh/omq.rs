@@ -28,6 +28,7 @@ fn main() {
                 assert_eq!(v, received);
                 received += 1;
             }
+            consumer.release();
         } else {
             thread::yield_now();
         }

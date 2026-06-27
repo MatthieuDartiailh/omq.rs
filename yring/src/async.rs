@@ -33,8 +33,8 @@ impl<T> Drop for AsyncRing<T> {
     fn drop(&mut self) {
         self.ring.drop_remaining();
         // Zero out counters so Ring::Drop is a no-op (no double-free).
-        *self.ring.head.0.get_mut() = 0;
-        *self.ring.flush.0.get_mut() = 0;
+        self.ring.head.0.store(0, Ordering::Relaxed);
+        self.ring.flush.0.store(0, Ordering::Relaxed);
     }
 }
 

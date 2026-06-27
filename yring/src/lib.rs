@@ -15,10 +15,13 @@ mod r#async;
 #[cfg(feature = "async")]
 pub use r#async::{AsyncConsumer, AsyncProducer, async_spsc};
 
-use std::cell::UnsafeCell;
+mod compat;
+
 use std::mem::MaybeUninit;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[cfg(not(loom))]
+use compat::UnsafeCellExt;
+use compat::{Arc, AtomicBool, AtomicUsize, Ordering, UnsafeCell};
 
 #[repr(align(64))]
 pub(crate) struct Padded<T>(pub(crate) T);
@@ -80,9 +83,9 @@ impl<T> Ring<T> {
         }
         // SAFETY: capacity check above guarantees this slot is not
         // visible to the consumer (tail < head + capacity).
-        unsafe {
-            (*self.buf[*tail & self.mask].get()).write(val);
-        }
+        self.buf[*tail & self.mask].with_mut(|ptr| unsafe {
+            (*ptr).write(val);
+        });
         *tail += 1;
         Ok(())
     }
@@ -127,7 +130,7 @@ impl<T> Ring<T> {
         }
         // SAFETY: head < cached_flush, so this slot was written by the
         // producer and made visible via flush (Release store).
-        let val = unsafe { (*self.buf[*head & self.mask].get()).assume_init_read() };
+        let val = self.buf[*head & self.mask].with_mut(|ptr| unsafe { (*ptr).assume_init_read() });
         *head += 1;
         Some(val)
     }
@@ -159,14 +162,14 @@ impl<T> Ring<T> {
     /// exclusive access (i.e. in a `Drop` impl or when no concurrent
     /// readers/writers exist).
     pub(crate) fn drop_remaining(&mut self) {
-        let head = *self.head.0.get_mut();
-        let flush = *self.flush.0.get_mut();
+        let head = self.head.0.load(Ordering::Relaxed);
+        let flush = self.flush.0.load(Ordering::Relaxed);
         for i in head..flush {
             // SAFETY: &mut self guarantees exclusive access. Slots
             // [head..flush] were written by the producer and flushed.
-            unsafe {
-                self.buf[i & self.mask].get_mut().assume_init_drop();
-            }
+            self.buf[i & self.mask].with_mut(|ptr| unsafe {
+                (*ptr).assume_init_drop();
+            });
         }
     }
 }
@@ -196,6 +199,8 @@ pub struct Producer<T> {
 }
 
 impl<T> Producer<T> {
+    /// Address of the underlying ring allocation. Two producers or
+    /// consumers sharing the same ring return the same value.
     pub fn ring_addr(&self) -> usize {
         Arc::as_ptr(&self.ring) as usize
     }
@@ -222,6 +227,8 @@ pub struct Consumer<T> {
 }
 
 impl<T> Consumer<T> {
+    /// Address of the underlying ring allocation. Two producers or
+    /// consumers sharing the same ring return the same value.
     pub fn ring_addr(&self) -> usize {
         Arc::as_ptr(&self.ring) as usize
     }
