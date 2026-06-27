@@ -249,3 +249,39 @@ async fn pub_tcp_subscriber_churn() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+#[tokio::test]
+async fn xpub_nodrop_delivers_all_under_backpressure() {
+    let mut opts = Options::default().send_hwm(2);
+    opts.xpub_nodrop = true;
+    let pub_ = Socket::new(SocketType::XPub, opts);
+    let port = test_support::bind_loopback(&pub_).await;
+
+    let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(2));
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    sub.connect(test_support::tcp_loopback(port)).await.unwrap();
+    test_support::wait_for_subscribe(&pub_).await;
+
+    let count = 10u32;
+    let sender = tokio::spawn({
+        let pub_ = pub_.clone();
+        async move {
+            for i in 0..count {
+                pub_.send(Message::single(i.to_le_bytes().to_vec()))
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+
+    for i in 0..count {
+        let m = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .expect("recv timed out")
+            .unwrap();
+        let body = m.part_bytes(0).unwrap();
+        assert_eq!(u32::from_le_bytes(body[..4].try_into().unwrap()), i);
+    }
+
+    sender.await.unwrap();
+}
