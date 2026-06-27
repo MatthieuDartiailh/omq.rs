@@ -468,3 +468,52 @@ fn poll_128_sockets_fairness() {
     }
     zmq_ctx_term(ctx);
 }
+
+#[test]
+#[serial]
+fn poll_both_events_counts_as_one_item() {
+    let ctx = zmq_ctx_new();
+    let a = zmq_socket(ctx, ZMQ_PAIR);
+    let b = zmq_socket(ctx, ZMQ_PAIR);
+    set_timeo(a, 1000);
+    set_timeo(b, 1000);
+
+    let addr = CString::new("tcp://127.0.0.1:*").unwrap();
+    zmq_bind(a, addr.as_ptr());
+
+    let mut ep_buf = [0u8; 256];
+    let mut ep_sz = ep_buf.len();
+    const ZMQ_LAST_ENDPOINT: i32 = 32;
+    omq_zmq::zmq_getsockopt(a, ZMQ_LAST_ENDPOINT, ep_buf.as_mut_ptr().cast(), &mut ep_sz);
+    let ep_end = if ep_sz > 0 && ep_buf[ep_sz - 1] == 0 {
+        ep_sz - 1
+    } else {
+        ep_sz
+    };
+    let ep = CString::new(&ep_buf[..ep_end]).unwrap();
+    zmq_connect(b, ep.as_ptr());
+
+    std::thread::sleep(Duration::from_millis(50));
+
+    zmq_send(b, b"hi".as_ptr().cast(), 2, 0);
+    std::thread::sleep(Duration::from_millis(50));
+
+    let mut items = [PollItem {
+        socket: a,
+        fd: -1,
+        events: ZMQ_POLLIN | ZMQ_POLLOUT,
+        revents: 0,
+    }];
+
+    let rc = zmq_poll(items.as_mut_ptr().cast(), 1, 1000);
+    assert_ne!(items[0].revents & ZMQ_POLLIN, 0, "should be readable");
+    assert_ne!(items[0].revents & ZMQ_POLLOUT, 0, "should be writable");
+    assert_eq!(rc, 1, "ready_count should count items, not event types");
+
+    let mut buf = [0u8; 16];
+    zmq_recv(a, buf.as_mut_ptr().cast(), buf.len(), 0);
+
+    zmq_close(a);
+    zmq_close(b);
+    zmq_ctx_term(ctx);
+}
