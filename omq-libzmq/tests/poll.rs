@@ -472,6 +472,8 @@ fn poll_128_sockets_fairness() {
 #[test]
 #[serial]
 fn poll_both_events_counts_as_one_item() {
+    const ZMQ_LAST_ENDPOINT: i32 = 32;
+
     let ctx = zmq_ctx_new();
     let a = zmq_socket(ctx, ZMQ_PAIR);
     let b = zmq_socket(ctx, ZMQ_PAIR);
@@ -483,7 +485,6 @@ fn poll_both_events_counts_as_one_item() {
 
     let mut ep_buf = [0u8; 256];
     let mut ep_sz = ep_buf.len();
-    const ZMQ_LAST_ENDPOINT: i32 = 32;
     omq_zmq::zmq_getsockopt(a, ZMQ_LAST_ENDPOINT, ep_buf.as_mut_ptr().cast(), &mut ep_sz);
     let ep_end = if ep_sz > 0 && ep_buf[ep_sz - 1] == 0 {
         ep_sz - 1
