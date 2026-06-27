@@ -1064,8 +1064,8 @@ mod tests {
         assert_eq!(out.part_bytes(0).unwrap().len(), size);
         assert_eq!(&out.part_bytes(0).unwrap()[..8], &plain[..8]);
         assert_eq!(
-            &out.part_bytes(0).unwrap()[LZ4M_BLOCK_SIZE..LZ4M_BLOCK_SIZE + 8],
-            &plain[LZ4M_BLOCK_SIZE..LZ4M_BLOCK_SIZE + 8],
+            &out.part_bytes(0).unwrap()[LZ4M_BLOCK_SIZE..size],
+            &plain[LZ4M_BLOCK_SIZE..size],
         );
     }
 
@@ -1094,8 +1094,8 @@ mod tests {
         assert_eq!(out.part_bytes(0).unwrap().len(), size);
         assert_eq!(&out.part_bytes(0).unwrap()[..8], &plain[..8]);
         assert_eq!(
-            &out.part_bytes(0).unwrap()[LZ4M_BLOCK_SIZE..LZ4M_BLOCK_SIZE + 8],
-            &plain[LZ4M_BLOCK_SIZE..LZ4M_BLOCK_SIZE + 8],
+            &out.part_bytes(0).unwrap()[LZ4M_BLOCK_SIZE..size],
+            &plain[LZ4M_BLOCK_SIZE..size],
         );
     }
 
