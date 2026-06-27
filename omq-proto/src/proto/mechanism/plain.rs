@@ -69,10 +69,17 @@ impl PlainMechanism {
         })
     }
 
-    pub(crate) fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) {
+    pub(crate) fn start(
+        &mut self,
+        out: &mut Vec<Command>,
+        our_props: PeerProperties,
+    ) -> Result<()> {
         match self {
             Self::Client(c) => c.start(out, our_props),
-            Self::Server(s) => s.start(our_props),
+            Self::Server(s) => {
+                s.start(our_props);
+                Ok(())
+            }
         }
     }
 
@@ -92,13 +99,14 @@ impl PlainMechanism {
 }
 
 impl PlainClient {
-    fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) {
+    fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) -> Result<()> {
         self.our_props = our_props;
         out.push(Command::Unknown {
             name: Bytes::from_static(b"HELLO"),
-            body: encode_hello(&self.username, &self.password),
+            body: encode_hello(&self.username, &self.password)?,
         });
         self.state = PlainClientState::AwaitingWelcome;
+        Ok(())
     }
 
     fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
@@ -182,7 +190,17 @@ impl PlainServer {
     }
 }
 
-fn encode_hello(username: &str, password: &str) -> Bytes {
+fn encode_hello(username: &str, password: &str) -> Result<Bytes> {
+    if username.len() > 255 {
+        return Err(Error::HandshakeFailed(
+            "PLAIN username exceeds 255 bytes".into(),
+        ));
+    }
+    if password.len() > 255 {
+        return Err(Error::HandshakeFailed(
+            "PLAIN password exceeds 255 bytes".into(),
+        ));
+    }
     let u = username.as_bytes();
     let p = password.as_bytes();
     let mut buf = BytesMut::with_capacity(2 + u.len() + p.len());
@@ -190,7 +208,7 @@ fn encode_hello(username: &str, password: &str) -> Bytes {
     buf.put_slice(u);
     buf.put_u8(p.len() as u8);
     buf.put_slice(p);
-    buf.freeze()
+    Ok(buf.freeze())
 }
 
 fn decode_hello(body: &[u8]) -> Result<(String, String)> {
@@ -226,7 +244,7 @@ mod tests {
 
     #[test]
     fn hello_encode_decode_roundtrip() {
-        let wire = encode_hello("alice", "s3cret");
+        let wire = encode_hello("alice", "s3cret").unwrap();
         let (u, p) = decode_hello(&wire).unwrap();
         assert_eq!(u, "alice");
         assert_eq!(p, "s3cret");
@@ -234,7 +252,7 @@ mod tests {
 
     #[test]
     fn hello_empty_credentials() {
-        let wire = encode_hello("", "");
+        let wire = encode_hello("", "").unwrap();
         let (u, p) = decode_hello(&wire).unwrap();
         assert!(u.is_empty());
         assert!(p.is_empty());
@@ -262,7 +280,8 @@ mod tests {
         m.start(
             &mut out,
             PeerProperties::default().with_socket_type(SocketType::Push),
-        );
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         match &out[0] {
             Command::Unknown { name, body } => {
@@ -282,7 +301,8 @@ mod tests {
         m.start(
             &mut out,
             PeerProperties::default().with_socket_type(SocketType::Pull),
-        );
+        )
+        .unwrap();
         assert!(out.is_empty());
     }
 
@@ -296,14 +316,18 @@ mod tests {
         let mut c_out = Vec::new();
         let mut s_out = Vec::new();
 
-        client.start(
-            &mut c_out,
-            PeerProperties::default().with_socket_type(SocketType::Push),
-        );
-        server.start(
-            &mut s_out,
-            PeerProperties::default().with_socket_type(SocketType::Pull),
-        );
+        client
+            .start(
+                &mut c_out,
+                PeerProperties::default().with_socket_type(SocketType::Push),
+            )
+            .unwrap();
+        server
+            .start(
+                &mut s_out,
+                PeerProperties::default().with_socket_type(SocketType::Pull),
+            )
+            .unwrap();
         assert_eq!(c_out.len(), 1); // HELLO
         assert!(s_out.is_empty());
 
@@ -341,14 +365,16 @@ mod tests {
     fn auth_reject_sends_error() {
         let mut server = PlainMechanism::new_server(Authenticator::new(|_| false));
         let mut s_out = Vec::new();
-        server.start(
-            &mut s_out,
-            PeerProperties::default().with_socket_type(SocketType::Pull),
-        );
+        server
+            .start(
+                &mut s_out,
+                PeerProperties::default().with_socket_type(SocketType::Pull),
+            )
+            .unwrap();
 
         let hello = Command::Unknown {
             name: Bytes::from_static(b"HELLO"),
-            body: encode_hello("bad", "creds"),
+            body: encode_hello("bad", "creds").unwrap(),
         };
         let err = server.on_command(hello, &mut s_out).unwrap_err();
         assert!(matches!(err, Error::HandshakeFailed(_)));
@@ -357,13 +383,33 @@ mod tests {
     }
 
     #[test]
+    fn encode_hello_rejects_overlong_username() {
+        let long = "x".repeat(256);
+        assert!(encode_hello(&long, "ok").is_err());
+    }
+
+    #[test]
+    fn encode_hello_rejects_overlong_password() {
+        let long = "x".repeat(256);
+        assert!(encode_hello("ok", &long).is_err());
+    }
+
+    #[test]
+    fn encode_hello_accepts_max_length() {
+        let max = "x".repeat(255);
+        assert!(encode_hello(&max, &max).is_ok());
+    }
+
+    #[test]
     fn unexpected_command_rejected() {
         let mut client = PlainMechanism::new_client("u".into(), "p".into());
         let mut out = Vec::new();
-        client.start(
-            &mut out,
-            PeerProperties::default().with_socket_type(SocketType::Push),
-        );
+        client
+            .start(
+                &mut out,
+                PeerProperties::default().with_socket_type(SocketType::Push),
+            )
+            .unwrap();
         out.clear();
 
         let bogus = Command::Unknown {
