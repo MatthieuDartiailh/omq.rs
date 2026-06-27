@@ -47,6 +47,10 @@ impl std::fmt::Debug for Socket {
 
 impl Drop for Socket {
     fn drop(&mut self) {
+        // SAFETY: Arc::strong_count is racy under concurrent access, but
+        // compio is single-threaded cooperative. No other task executes
+        // between the read and the cleanup below, so the count cannot
+        // change underneath us.
         if Arc::strong_count(&self.user_life) == 1 {
             if let Ok(mut d) = self.inner.endpoints.dialers.write() {
                 d.clear();
