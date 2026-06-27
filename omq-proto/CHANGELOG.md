@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-06-27
+
+### Fixed
+
+- Validate PLAIN username/password length in `encode_hello`.
+- LZ4M 2 GiB test slice bounds.
+
+### Changed
+
+- Use `as_chunks::<N>()` instead of `chunks_exact(N)` in Z85 and WS handshake.
+- *(deps)* Bump `lz4rip` 0.8 to 0.9, `bytes` 1.11 to 1.12, `socket2` 0.6.3 to 0.6.4.
+
 ## [0.18.0] - 2026-06-26
 
 ### Added

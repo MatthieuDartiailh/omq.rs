@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-06-27
+
+### Fixed
+
+- PUB single-subscriber direct-encode yield starvation.
+- Heartbeat timeout check guarded with `hb_ping_sent`.
+- Fan-out backpressure on compio.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.18.1, `bytes` 1.11 to 1.12, `socket2` 0.6.3 to 0.6.4.
+
 ## [0.12.4] - 2026-06-26
 
 ### Added

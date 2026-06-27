@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.7] - 2026-06-27
+
+### Added
+
+- `Context.shadow()` method.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.14.6.
+
 ## [0.12.6] - 2026-06-26
 
 ### Changed

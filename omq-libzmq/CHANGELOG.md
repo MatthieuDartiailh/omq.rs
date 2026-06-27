@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-06-27
+
+### Fixed
+
+- Null dangling pointer and size in `zmq_msg_send` after `Box` reclaim.
+- `PollWaiter` `ready_count` to count items, not event types.
+- Return `EINVAL` for null/short `optval` in `zmq_setsockopt`.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.14.6, `bytes` 1.11 to 1.12.
+
 ## [0.4.8] - 2026-06-26
 
 ### Added

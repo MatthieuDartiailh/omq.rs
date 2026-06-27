@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.6] - 2026-06-27
+
+### Fixed
+
+- XPUB `nodrop` yield spin replaced with notify-based wait.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.18.1, `bytes` 1.11 to 1.12, `socket2` 0.6.3 to 0.6.4.
+
 ## [0.14.5] - 2026-06-26
 
 ### Added
