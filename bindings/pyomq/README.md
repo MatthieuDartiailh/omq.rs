@@ -41,7 +41,7 @@ await sock.close()
 
 ## Status
 
-Sync and `asyncio` APIs both ship in this release. All 19 ZMTP socket types are wired:
+Sync and `asyncio` APIs both ship in this release. All 20 ZMTP socket types are wired:
 
 - **Standard (RFC 28 + 47)**: PAIR, PUB, SUB, REQ, REP, DEALER, ROUTER, PULL, PUSH, XPUB, XSUB, STREAM.
 - **Draft**: SERVER, CLIENT (RFC 41), RADIO, DISH (RFC 48), GATHER, SCATTER (RFC 49), PEER, CHANNEL (RFC 51).
