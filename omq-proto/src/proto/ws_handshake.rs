@@ -212,7 +212,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 80];
         for (i, word) in w[..16].iter_mut().enumerate() {
             *word = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());

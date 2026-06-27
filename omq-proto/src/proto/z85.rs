@@ -36,7 +36,7 @@ pub fn encode(data: &[u8]) -> Result<String> {
     }
     let out_len = data.len() / 4 * 5;
     let mut out = Vec::with_capacity(out_len);
-    for chunk in data.chunks_exact(4) {
+    for chunk in data.as_chunks::<4>().0 {
         let value = u64::from(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         // 5 base-85 digits, most-significant first.
         let d4 = (value / 85u64.pow(4)) % 85;
@@ -68,7 +68,7 @@ pub fn decode(s: &str) -> Result<Vec<u8>> {
     }
     let out_len = bytes.len() / 5 * 4;
     let mut out = Vec::with_capacity(out_len);
-    for chunk in bytes.chunks_exact(5) {
+    for chunk in bytes.as_chunks::<5>().0 {
         let mut value: u64 = 0;
         for &c in chunk {
             let d = DECODER[c as usize];
