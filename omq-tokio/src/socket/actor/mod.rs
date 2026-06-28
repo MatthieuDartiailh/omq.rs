@@ -261,7 +261,7 @@ impl SocketDriver {
     async fn run(mut self) {
         loop {
             if self.should_exit() {
-                self.teardown().await;
+                self.teardown();
                 return;
             }
 
@@ -272,11 +272,11 @@ impl SocketDriver {
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {
-                    self.teardown().await;
+                    self.teardown();
                     return;
                 }
                 () = async { linger_sleep.unwrap().await }, if self.close_deadline.is_some() => {
-                    self.teardown().await;
+                    self.teardown();
                     return;
                 }
                 cmd = self.cmd_rx.recv(), if !self.closing => match cmd {
@@ -400,8 +400,7 @@ impl SocketDriver {
         }
     }
 
-    #[expect(clippy::unused_async)]
-    async fn teardown(&mut self) {
+    fn teardown(&mut self) {
         self.send_strategy.shutdown();
         for p in self.peers.values() {
             p.handle.cancel.cancel();

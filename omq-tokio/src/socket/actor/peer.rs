@@ -583,7 +583,7 @@ impl SocketDriver {
                     return;
                 }
                 if self.type_state_needs_transform() {
-                    let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg).await;
+                    let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg);
                     let Some(wrapped) = wrapped else { return };
                     let transformed = self
                         .type_state
