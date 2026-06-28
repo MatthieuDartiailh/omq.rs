@@ -51,7 +51,7 @@ async fn blake3zmq_push_pull_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over blake3zmq"[..]);
+    assert_eq!(m, Message::single("hello over blake3zmq"));
 }
 
 // =====================================================================
@@ -81,13 +81,13 @@ async fn blake3zmq_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
+    assert_eq!(q, Message::single("q"));
     rep.send(Message::single("a")).await.unwrap();
     let a = compio::time::timeout(Duration::from_secs(5), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(a, Message::single("a"));
 }
 
 #[compio::test]
@@ -116,8 +116,7 @@ async fn blake3zmq_dealer_router() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::multipart(["d1", "hi"]));
 }
 
 #[compio::test]
@@ -142,7 +141,7 @@ async fn blake3zmq_pub_sub() {
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
+            assert_eq!(m, Message::single("hello"));
             return;
         }
     }

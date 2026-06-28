@@ -64,7 +64,7 @@ async fn wss_push_pull() {
         .expect("recv timed out")
         .unwrap();
 
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"hello wss"[..]);
+    assert_eq!(msg, Message::single("hello wss"));
 }
 
 #[compio::test]
@@ -104,7 +104,5 @@ async fn wss_multipart() {
         .expect("recv timed out")
         .unwrap();
 
-    assert_eq!(received.len(), 2);
-    assert_eq!(received.part_bytes(0).unwrap(), &b"frame1"[..]);
-    assert_eq!(received.part_bytes(1).unwrap(), &b"frame2"[..]);
+    assert_eq!(received, Message::multipart(["frame1", "frame2"]));
 }

@@ -53,7 +53,7 @@ async fn ipv6_push_pull() {
         .await
         .expect("ipv6 push/pull timed out")
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hello v6"[..]);
+    assert_eq!(m, Message::single("hello v6"));
 }
 
 #[tokio::test]
@@ -72,14 +72,14 @@ async fn ipv6_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::single("ping"));
 
     rep.send(Message::single("pong")).await.unwrap();
     let r = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(r, Message::single("pong"));
 }
 
 #[tokio::test]

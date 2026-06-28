@@ -49,7 +49,7 @@ async fn push_pull_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::single("hi"));
 }
 
 async fn push_pull_roundtrip_tcp() {
@@ -62,7 +62,7 @@ async fn push_pull_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::single("hi"));
 }
 
 async fn req_rep_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
@@ -75,13 +75,13 @@ async fn req_rep_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
+    assert_eq!(q, Message::single("q"));
     rep.send(Message::single("a")).await.unwrap();
     let a = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(a, Message::single("a"));
 }
 
 async fn req_rep_roundtrip_tcp() {
@@ -94,13 +94,13 @@ async fn req_rep_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
+    assert_eq!(q, Message::single("q"));
     rep.send(Message::single("a")).await.unwrap();
     let a = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(a, Message::single("a"));
 }
 
 async fn dealer_router_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
@@ -116,8 +116,7 @@ async fn dealer_router_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::multipart(["d1", "hi"]));
 }
 
 async fn dealer_router_roundtrip_tcp() {
@@ -133,8 +132,7 @@ async fn dealer_router_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::multipart(["d1", "hi"]));
 }
 
 async fn pair_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
@@ -147,7 +145,7 @@ async fn pair_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"x"[..]);
+    assert_eq!(m, Message::single("x"));
 }
 
 async fn pair_roundtrip_tcp() {
@@ -160,7 +158,7 @@ async fn pair_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"x"[..]);
+    assert_eq!(m, Message::single("x"));
 }
 
 async fn pub_sub_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
@@ -173,7 +171,7 @@ async fn pub_sub_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
+            assert_eq!(m, Message::single("hello"));
             return;
         }
     }
@@ -190,7 +188,7 @@ async fn pub_sub_roundtrip_tcp() {
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
+            assert_eq!(m, Message::single("hello"));
             return;
         }
     }
@@ -210,8 +208,7 @@ async fn client_server_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"c1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::multipart(["c1", "ping"]));
 }
 
 async fn client_server_roundtrip_tcp() {
@@ -227,8 +224,7 @@ async fn client_server_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"c1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::multipart(["c1", "ping"]));
 }
 
 async fn scatter_gather_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
@@ -241,7 +237,7 @@ async fn scatter_gather_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"m"[..]);
+    assert_eq!(m, Message::single("m"));
 }
 
 async fn scatter_gather_roundtrip_tcp() {
@@ -254,7 +250,7 @@ async fn scatter_gather_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"m"[..]);
+    assert_eq!(m, Message::single("m"));
 }
 
 async fn channel_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
@@ -267,7 +263,7 @@ async fn channel_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::single("hi"));
 }
 
 async fn channel_roundtrip_tcp() {
@@ -280,7 +276,7 @@ async fn channel_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::single("hi"));
 }
 
 async fn peer_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
@@ -300,8 +296,7 @@ async fn peer_roundtrip(bind_ep: Endpoint, connect_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"pb"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hi a"[..]);
+    assert_eq!(m, Message::multipart(["pb", "hi a"]));
 }
 
 async fn peer_roundtrip_tcp() {
@@ -321,8 +316,7 @@ async fn peer_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"pb"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hi a"[..]);
+    assert_eq!(m, Message::multipart(["pb", "hi a"]));
 }
 
 // =====================================================================
@@ -484,7 +478,7 @@ async fn send_before_connect_ipc() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"early"[..]);
+    assert_eq!(m, Message::single("early"));
 }
 
 #[compio::test]
@@ -499,5 +493,5 @@ async fn send_before_connect_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"early"[..]);
+    assert_eq!(m, Message::single("early"));
 }

@@ -48,7 +48,7 @@ async fn ws_plain_push_pull() {
         .await
         .expect("recv timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"hello plain ws"[..]);
+    assert_eq!(msg, Message::single("hello plain ws"));
 }
 
 #[compio::test]

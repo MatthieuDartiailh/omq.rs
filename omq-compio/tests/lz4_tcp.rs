@@ -47,7 +47,7 @@ async fn lz4_small_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over lz4"[..]);
+    assert_eq!(m, Message::single("hello over lz4"));
 }
 
 #[compio::test]
@@ -81,8 +81,5 @@ async fn lz4_multipart_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.len(), 3);
-    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
-    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
+    assert_eq!(m, Message::multipart(["a", "bb", "ccc"]));
 }

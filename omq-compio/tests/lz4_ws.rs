@@ -77,7 +77,7 @@ async fn lz4_ws_small_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over lz4+ws"[..]);
+    assert_eq!(m, Message::single("hello over lz4+ws"));
 }
 
 #[compio::test]
@@ -112,10 +112,7 @@ async fn lz4_ws_multipart_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.len(), 3);
-    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
-    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
+    assert_eq!(m, Message::multipart(["a", "bb", "ccc"]));
 }
 
 #[compio::test]
@@ -190,14 +187,14 @@ async fn lz4_ws_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.part_bytes(0).unwrap(), &b"question"[..]);
+    assert_eq!(q, Message::single("question"));
 
     rep.send(Message::single("answer")).await.unwrap();
     let a = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.part_bytes(0).unwrap(), &b"answer"[..]);
+    assert_eq!(a, Message::single("answer"));
 }
 
 // ---- ROUTER / DEALER ----
@@ -220,9 +217,7 @@ async fn lz4_ws_router_dealer_identity_routing() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.len(), 2);
-    assert_eq!(got.part_bytes(0).unwrap(), &b"alice"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"hello"[..]);
+    assert_eq!(got, Message::multipart(["alice", "hello"]));
 
     router
         .send(Message::multipart(["alice", "reply"]))
@@ -232,7 +227,7 @@ async fn lz4_ws_router_dealer_identity_routing() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"reply"[..]);
+    assert_eq!(r, Message::single("reply"));
 }
 
 // ---- PUB / SUB ----
@@ -265,15 +260,13 @@ async fn lz4_ws_pub_sub_prefix_filter() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m1.part_bytes(0).unwrap(), &b"news.sports"[..]);
-    assert_eq!(m1.part_bytes(1).unwrap(), &b"ball scores"[..]);
+    assert_eq!(m1, Message::multipart(["news.sports", "ball scores"]));
 
     let m2 = compio::time::timeout(Duration::from_secs(2), subscriber.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m2.part_bytes(0).unwrap(), &b"news.tech"[..]);
-    assert_eq!(m2.part_bytes(1).unwrap(), &b"rust 2.0"[..]);
+    assert_eq!(m2, Message::multipart(["news.tech", "rust 2.0"]));
 
     let nothing = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(
@@ -396,7 +389,7 @@ async fn lz4_ws_reconnect_after_server_restart() {
         .await
         .expect("recv timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"before"[..]);
+    assert_eq!(msg, Message::single("before"));
 
     drop(push);
     pull1.close().await.unwrap();
@@ -421,7 +414,7 @@ async fn lz4_ws_reconnect_after_server_restart() {
         .await
         .expect("recv after restart timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"after"[..]);
+    assert_eq!(msg, Message::single("after"));
 }
 
 // ---- lz4+wss (TLS) ----
@@ -487,7 +480,7 @@ async fn lz4_wss_push_pull() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over lz4+wss"[..]);
+    assert_eq!(m, Message::single("hello over lz4+wss"));
 }
 
 #[compio::test]

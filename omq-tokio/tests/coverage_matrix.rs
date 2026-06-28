@@ -47,7 +47,7 @@ async fn push_pull_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::single("hi"));
 }
 
 async fn req_rep_roundtrip(server: &Socket, client_ep: Endpoint) {
@@ -58,13 +58,13 @@ async fn req_rep_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
+    assert_eq!(q, Message::single("q"));
     server.send(Message::single("a")).await.unwrap();
     let a = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(a, Message::single("a"));
 }
 
 async fn dealer_router_roundtrip(server: &Socket, client_ep: Endpoint) {
@@ -79,8 +79,7 @@ async fn dealer_router_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::multipart(["d1", "hi"]));
     server
         .send(Message::multipart(["d1", "reply"]))
         .await
@@ -89,8 +88,7 @@ async fn dealer_router_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.len(), 1);
-    assert_eq!(r.part_bytes(0).unwrap(), &b"reply"[..]);
+    assert_eq!(r, Message::single("reply"));
 }
 
 async fn pair_roundtrip(server: &Socket, client_ep: Endpoint) {
@@ -101,7 +99,7 @@ async fn pair_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"x"[..]);
+    assert_eq!(m, Message::single("x"));
 }
 
 async fn pub_sub_roundtrip(server: &Socket, client_ep: Endpoint) {
@@ -111,7 +109,7 @@ async fn pub_sub_roundtrip(server: &Socket, client_ep: Endpoint) {
     for _ in 0..30 {
         let _ = server.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
+            assert_eq!(m, Message::single("hello"));
             return;
         }
     }
@@ -130,8 +128,7 @@ async fn client_server_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"c1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::multipart(["c1", "ping"]));
     server
         .send(Message::multipart(["c1", "pong"]))
         .await
@@ -140,8 +137,7 @@ async fn client_server_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.len(), 1);
-    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(r, Message::single("pong"));
 }
 
 async fn scatter_gather_roundtrip(server: &Socket, client_ep: Endpoint) {
@@ -153,7 +149,7 @@ async fn scatter_gather_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"m"[..]);
+    assert_eq!(m, Message::single("m"));
 }
 
 async fn channel_roundtrip(server: &Socket, client_ep: Endpoint) {
@@ -165,7 +161,7 @@ async fn channel_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::single("hi"));
 }
 
 async fn peer_roundtrip(server: &Socket, client_ep: Endpoint) {
@@ -180,8 +176,7 @@ async fn peer_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"pb"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hi a"[..]);
+    assert_eq!(m, Message::multipart(["pb", "hi a"]));
 }
 
 #[tokio::test]

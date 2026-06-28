@@ -902,7 +902,7 @@ mod tests {
     fn payload_inline_clone() {
         let p = Payload::inline(b"data");
         let p2 = p.clone();
-        assert_eq!(p.as_slice(), p2.as_slice());
+        assert_eq!(p, p2);
     }
 
     #[test]
@@ -1055,19 +1055,14 @@ mod tests {
     fn message_with_prefix() {
         let body = Message::single("hello");
         let m = Message::with_prefix(Bytes::from_static(b"id"), body);
-        assert_eq!(m.len(), 2);
-        assert_eq!(m.part_bytes(0).unwrap(), &b"id"[..]);
-        assert_eq!(m.part_bytes(1).unwrap(), &b"hello"[..]);
+        assert_eq!(m, Message::multipart([&b"id"[..], &b"hello"[..]]));
     }
 
     #[test]
     fn message_with_prefix_multipart_body() {
         let body = Message::multipart(["", "data"]);
         let m = Message::with_prefix(Bytes::from_static(b"id"), body);
-        assert_eq!(m.len(), 3);
-        assert_eq!(m.part_bytes(0).unwrap(), &b"id"[..]);
-        assert!(m.part_bytes(1).unwrap().is_empty());
-        assert_eq!(m.part_bytes(2).unwrap(), &b"data"[..]);
+        assert_eq!(m, Message::multipart([&b"id"[..], &b""[..], &b"data"[..]]));
     }
 
     #[test]
@@ -1120,7 +1115,7 @@ mod tests {
         let mut m = Message::from_inline(&data);
         m.push_part_payload(Payload::from_bytes(Bytes::from_static(b"extra")));
         assert_eq!(m.len(), 2);
-        assert_eq!(m.part_bytes(0).unwrap(), &data[..]);
-        assert_eq!(m.part_bytes(1).unwrap(), &b"extra"[..]);
+        assert_eq!(m.get(0).unwrap(), &data[..]);
+        assert_eq!(m.get(1).unwrap(), b"extra");
     }
 }

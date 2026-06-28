@@ -54,7 +54,7 @@ async fn dealer_identity_survives_reconnect() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"d1");
+    assert_eq!(m, Message::multipart(["d1", "before"]));
 
     router1
         .send(Message::multipart([
@@ -67,7 +67,7 @@ async fn dealer_identity_survives_reconnect() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap().as_ref(), b"reply1");
+    assert_eq!(r, Message::single("reply1"));
 
     router1.close().await.unwrap();
     let router2 = rebind(&ep, || Socket::new(SocketType::Router, Options::default())).await;
@@ -77,7 +77,7 @@ async fn dealer_identity_survives_reconnect() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"d1");
+    assert_eq!(m, Message::multipart(["d1", "after"]));
 
     router2
         .send(Message::multipart([
@@ -90,7 +90,7 @@ async fn dealer_identity_survives_reconnect() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap().as_ref(), b"reply2");
+    assert_eq!(r, Message::single("reply2"));
 }
 
 #[compio::test]
@@ -180,7 +180,7 @@ async fn client_identity_survives_reconnect_to_server() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"c1");
+    assert_eq!(m, Message::multipart(["c1", "ping1"]));
 
     server1
         .send(Message::multipart([
@@ -193,7 +193,7 @@ async fn client_identity_survives_reconnect_to_server() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap().as_ref(), b"pong1");
+    assert_eq!(r, Message::single("pong1"));
 
     server1.close().await.unwrap();
     let server2 = rebind(&ep, || Socket::new(SocketType::Server, Options::default())).await;
@@ -203,7 +203,7 @@ async fn client_identity_survives_reconnect_to_server() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"c1");
+    assert_eq!(m, Message::multipart(["c1", "ping2"]));
 
     server2
         .send(Message::multipart([
@@ -216,5 +216,5 @@ async fn client_identity_survives_reconnect_to_server() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap().as_ref(), b"pong2");
+    assert_eq!(r, Message::single("pong2"));
 }

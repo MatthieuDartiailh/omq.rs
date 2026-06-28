@@ -40,8 +40,7 @@ async fn ws_pub_sub_basic() {
         .expect("recv timed out")
         .unwrap();
 
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"news.sports"[..]);
-    assert_eq!(msg.part_bytes(1).unwrap(), &b"goal scored"[..]);
+    assert_eq!(msg, Message::multipart(["news.sports", "goal scored"]));
 }
 
 #[compio::test]
@@ -64,7 +63,7 @@ async fn ws_pub_sub_unsubscribe() {
         .await
         .expect("recv timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"news.sports"[..]);
+    assert_eq!(msg, Message::multipart(["news.sports", "first"]));
 
     sub.unsubscribe("news.").await.unwrap();
     compio::time::sleep(Duration::from_millis(200)).await;

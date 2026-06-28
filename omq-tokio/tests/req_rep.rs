@@ -39,8 +39,7 @@ async fn req_rep_basic_roundtrip() {
     req.send(Message::single("hello")).await.unwrap();
 
     let request = rep.recv().await.unwrap();
-    assert_eq!(request.len(), 1);
-    assert_eq!(request.part_bytes(0).unwrap(), &b"hello"[..]);
+    assert_eq!(request, Message::single("hello"));
 
     rep.send(Message::single("world")).await.unwrap();
 
@@ -48,8 +47,7 @@ async fn req_rep_basic_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.len(), 1);
-    assert_eq!(reply.part_bytes(0).unwrap(), &b"world"[..]);
+    assert_eq!(reply, Message::single("world"));
 }
 
 #[tokio::test]
@@ -115,8 +113,7 @@ async fn dealer_to_rep_envelope() {
         .unwrap();
 
     let got = rep.recv().await.unwrap();
-    assert_eq!(got.len(), 1);
-    assert_eq!(got.part_bytes(0).unwrap(), &b"hello"[..]);
+    assert_eq!(got, Message::single("hello"));
 
     rep.send(Message::single("world")).await.unwrap();
 
@@ -150,7 +147,7 @@ async fn rep_survives_client_disconnect_mid_cycle() {
             .await
             .expect("REP recv timed out for first client")
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"drop-me");
+        assert_eq!(m, Message::single("drop-me"));
         // req1 drops here: connection closes before REP replies.
     }
 
@@ -167,14 +164,14 @@ async fn rep_survives_client_disconnect_mid_cycle() {
         .await
         .expect("REP did not receive second client's request")
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap().as_ref(), b"real");
+    assert_eq!(got, Message::single("real"));
 
     rep.send(Message::single("reply")).await.unwrap();
     let reply = tokio::time::timeout(Duration::from_millis(500), req2.recv())
         .await
         .expect("REQ2 did not receive reply")
         .unwrap();
-    assert_eq!(reply.part_bytes(0).unwrap().as_ref(), b"reply");
+    assert_eq!(reply, Message::single("reply"));
 }
 
 #[tokio::test]

@@ -41,10 +41,8 @@ async fn radio_to_dish_with_matching_group() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m1.part_bytes(0).unwrap(), &b"weather"[..]);
-    assert_eq!(m1.part_bytes(1).unwrap(), &b"sunny"[..]);
-    assert_eq!(m2.part_bytes(0).unwrap(), &b"weather"[..]);
-    assert_eq!(m2.part_bytes(1).unwrap(), &b"rain"[..]);
+    assert_eq!(m1, Message::multipart(["weather", "sunny"]));
+    assert_eq!(m2, Message::multipart(["weather", "rain"]));
 
     let third = compio::time::timeout(Duration::from_millis(100), dish.recv()).await;
     assert!(third.is_err(), "non-joined group must not be delivered");
@@ -77,7 +75,7 @@ async fn dish_join_replays_to_new_radios() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(1).unwrap(), &b"joined"[..]);
+    assert_eq!(m, Message::multipart(["late", "joined"]));
 }
 
 #[compio::test]
@@ -98,7 +96,7 @@ async fn dish_leave_stops_delivery() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(1).unwrap(), &b"first"[..]);
+    assert_eq!(m, Message::multipart(["g", "first"]));
 
     dish.leave("g").await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;

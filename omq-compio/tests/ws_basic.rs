@@ -35,7 +35,7 @@ async fn push_pull_one_message() {
         .expect("recv timed out")
         .unwrap();
 
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"hello ws"[..]);
+    assert_eq!(msg, Message::single("hello ws"));
 }
 
 #[compio::test]
@@ -65,10 +65,7 @@ async fn push_pull_multipart() {
         .expect("recv timed out")
         .unwrap();
 
-    assert_eq!(received.len(), 3);
-    assert_eq!(received.part_bytes(0).unwrap(), &b"frame1"[..]);
-    assert_eq!(received.part_bytes(1).unwrap(), &b"frame2"[..]);
-    assert_eq!(received.part_bytes(2).unwrap(), &b"frame3"[..]);
+    assert_eq!(received, Message::multipart(["frame1", "frame2", "frame3"]));
 }
 
 #[compio::test]

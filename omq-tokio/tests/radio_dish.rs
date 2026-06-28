@@ -43,10 +43,8 @@ async fn radio_to_dish_with_matching_group() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m1.part_bytes(0).unwrap(), &b"weather"[..]);
-    assert_eq!(m1.part_bytes(1).unwrap(), &b"sunny"[..]);
-    assert_eq!(m2.part_bytes(0).unwrap(), &b"weather"[..]);
-    assert_eq!(m2.part_bytes(1).unwrap(), &b"rain"[..]);
+    assert_eq!(m1, Message::multipart(["weather", "sunny"]));
+    assert_eq!(m2, Message::multipart(["weather", "rain"]));
 
     // The "news" message is not delivered.
     let third = tokio::time::timeout(Duration::from_millis(100), dish.recv()).await;

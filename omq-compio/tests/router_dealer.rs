@@ -52,9 +52,7 @@ async fn router_addresses_dealer_by_identity() {
         .await
         .expect("router recv timeout")
         .unwrap();
-    assert_eq!(r.len(), 2);
-    assert_eq!(r.part_bytes(0).unwrap(), &b"dealer-1"[..]);
-    assert_eq!(r.part_bytes(1).unwrap(), &b"hello"[..]);
+    assert_eq!(r, Message::multipart(["dealer-1", "hello"]));
 
     // ROUTER replies by prefixing the dealer identity.
     let reply = Message::multipart([
@@ -67,7 +65,7 @@ async fn router_addresses_dealer_by_identity() {
         .await
         .expect("dealer recv timeout")
         .unwrap();
-    assert_eq!(d.part_bytes(0).unwrap(), &b"world"[..]);
+    assert_eq!(d, Message::single("world"));
 }
 
 #[compio::test]
@@ -89,7 +87,7 @@ async fn router_mandatory_errors_on_unknown_identity() {
         .await
         .expect("router recv timeout")
         .unwrap();
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"ping");
+    assert_eq!(m, Message::multipart(["dealer-known", "ping"]));
 
     // Send to an identity nobody owns.
     let bad = Message::multipart([Bytes::from_static(b"ghost"), Bytes::from_static(b"oops")]);
@@ -110,7 +108,7 @@ async fn router_drops_unknown_identity_by_default() {
         .await
         .expect("router recv timeout")
         .unwrap();
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"ping");
+    assert_eq!(m, Message::multipart(["d", "ping"]));
 
     let bad = Message::multipart([Bytes::from_static(b"nope"), Bytes::from_static(b"oops")]);
     // Default is silent drop (libzmq matches).
@@ -149,7 +147,7 @@ async fn router_assigns_identity_for_peers_without_one() {
         .await
         .expect("dealer recv timeout")
         .unwrap();
-    assert_eq!(reply.part_bytes(0).unwrap(), &b"reply"[..]);
+    assert_eq!(reply, Message::single("reply"));
 }
 
 // --- Handover tests ---
@@ -168,8 +166,7 @@ async fn router_handover_evicts_old_peer() {
         .await
         .expect("router recv timeout")
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"alpha"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"hello"[..]);
+    assert_eq!(got, Message::multipart(["alpha", "hello"]));
 
     router
         .send(Message::multipart([
@@ -182,7 +179,7 @@ async fn router_handover_evicts_old_peer() {
         .await
         .expect("dealer_a recv timeout")
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"reply-1"[..]);
+    assert_eq!(r, Message::single("reply-1"));
 
     let dealer_b = Socket::new(SocketType::Dealer, opts_no_reconnect("alpha"));
     dealer_b.connect(ep).await.unwrap();
@@ -193,8 +190,7 @@ async fn router_handover_evicts_old_peer() {
         .await
         .expect("router recv timeout")
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"alpha"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"world"[..]);
+    assert_eq!(got, Message::multipart(["alpha", "world"]));
 
     router
         .send(Message::multipart([
@@ -207,7 +203,7 @@ async fn router_handover_evicts_old_peer() {
         .await
         .expect("dealer_b recv timeout")
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"reply-2"[..]);
+    assert_eq!(r, Message::single("reply-2"));
 }
 
 #[compio::test]
@@ -324,8 +320,7 @@ async fn server_handover_evicts_old_peer() {
         .await
         .expect("server recv timeout")
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"cli"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(got, Message::multipart(["cli", "ping"]));
 
     let client_b = Socket::new(SocketType::Client, opts_no_reconnect("cli"));
     client_b.connect(tcp_ep(port)).await.unwrap();
@@ -350,6 +345,5 @@ async fn server_handover_evicts_old_peer() {
         .await
         .expect("server recv timeout")
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"cli"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"pong"[..]);
+    assert_eq!(got, Message::multipart(["cli", "pong"]));
 }

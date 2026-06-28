@@ -41,8 +41,7 @@ async fn ws_radio_dish_basic() {
         .expect("recv timed out")
         .unwrap();
 
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"weather"[..]);
-    assert_eq!(msg.part_bytes(1).unwrap(), &b"sunny"[..]);
+    assert_eq!(msg, Message::multipart(["weather", "sunny"]));
 }
 
 #[compio::test]
@@ -66,7 +65,7 @@ async fn ws_radio_dish_leave() {
         .await
         .expect("recv timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"weather"[..]);
+    assert_eq!(msg, Message::multipart(["weather", "sunny"]));
 
     dish.leave("weather").await.unwrap();
     compio::time::sleep(Duration::from_millis(200)).await;

@@ -53,7 +53,7 @@ async fn heartbeat_keeps_idle_connection_alive() {
         .await
         .expect("recv timeout")
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"first"[..]);
+    assert_eq!(m, Message::single("first"));
 
     // Idle window covers several heartbeat intervals - PINGs fire
     // on both sides, codec PONGs them, neither side observes
@@ -65,7 +65,7 @@ async fn heartbeat_keeps_idle_connection_alive() {
         .await
         .expect("recv timeout post-idle")
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"after-idle"[..]);
+    assert_eq!(m, Message::single("after-idle"));
 }
 
 #[compio::test]

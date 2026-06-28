@@ -47,7 +47,7 @@ async fn connect_retries_until_listener_appears() {
         .await
         .expect("recv timeout")
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"eventually"[..]);
+    assert_eq!(m, Message::single("eventually"));
 }
 
 #[tokio::test]

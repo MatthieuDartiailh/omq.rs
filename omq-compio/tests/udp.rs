@@ -56,8 +56,7 @@ async fn radio_to_dish_matching_group_delivers() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"weather"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"sunny"[..]);
+    assert_eq!(m, Message::multipart(["weather", "sunny"]));
 }
 
 #[compio::test]
@@ -85,8 +84,7 @@ async fn dish_filters_unjoined_groups_locally() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"weather"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"rain"[..]);
+    assert_eq!(m, Message::multipart(["weather", "rain"]));
 
     // The "news" datagram must not surface.
     let third = compio::time::timeout(Duration::from_millis(100), dish.recv()).await;
@@ -122,7 +120,7 @@ async fn dish_leave_drops_subsequent_messages() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(1).unwrap(), &b"first"[..]);
+    assert_eq!(m, Message::multipart(["weather", "first"]));
 
     dish.leave("weather").await.unwrap();
     radio
