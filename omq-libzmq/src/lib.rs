@@ -1,4 +1,15 @@
 //! omq-libzmq -- libzmq-compatible C interface backed by omq-tokio.
+//!
+//! # Panic safety
+//!
+//! Since Rust 1.71, panics in `extern "C"` functions abort rather than
+//! UB. No `catch_unwind` wrappers are used: wrapping 50+ FFI functions
+//! in `AssertUnwindSafe` would weaken static guarantees for marginal
+//! benefit. libzmq itself aborts on internal errors, so abort-on-panic
+//! is acceptable behavior for a drop-in replacement.
+
+// Crate-level: 53 of 64 extern "C" fns trigger this lint. Per-function
+// #[expect] would be pure noise for a C API crate.
 #![expect(clippy::not_unsafe_ptr_arg_deref)]
 
 mod consts;

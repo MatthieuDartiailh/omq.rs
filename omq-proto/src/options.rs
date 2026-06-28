@@ -21,6 +21,9 @@ use crate::socket_ref::SocketRef;
 const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
 /// Per-socket configuration.
+// Compression fields (compression_dict through compression_offload_threshold)
+// could be grouped into a sub-struct, but the public API change would touch
+// every backend file that accesses them.
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {

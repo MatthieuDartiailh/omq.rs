@@ -3,6 +3,9 @@
 //! `Socket::monitor()` returns a [`MonitorStream`] that delivers
 //! [`MonitorEvent`]s. Multiple monitors can be active simultaneously.
 //!
+// NOTE: MonitorPublisher logic is duplicated with omq-tokio. It is
+// runtime-agnostic and could theoretically live in omq-proto, but the
+// cross-crate refactor is not worth the churn given how stable this code is.
 //! Implementation: each subscriber gets a bounded `flume` channel plus
 //! a lagged counter. Publishing iterates subscribers and `try_send`s;
 //! when a subscriber's queue is full the new event is dropped and the

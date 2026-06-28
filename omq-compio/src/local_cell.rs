@@ -30,6 +30,11 @@ impl<T> LocalCell<T> {
         }
     }
 
+    // Callers must not hold overlapping borrows. The cooperative runtime
+    // prevents preemption, so this only happens if get() is called while
+    // a previous &mut T is still live in the same call stack. A guard-based
+    // API (like EncodedQueueCell) would enforce this statically but would
+    // require changing all 28 call sites.
     #[inline]
     #[expect(clippy::mut_from_ref)]
     pub(crate) fn get(&self) -> &mut T {

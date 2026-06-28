@@ -204,6 +204,7 @@ impl Endpoint {
 
     /// Whether this endpoint rides on the TCP byte-stream transport.
     /// Includes the compression-wrapped variants.
+    // Not matches!(): #[cfg] attributes are not allowed inside macro patterns.
     pub fn is_tcp_family(&self) -> bool {
         match self {
             Endpoint::Tcp { .. } => true,
