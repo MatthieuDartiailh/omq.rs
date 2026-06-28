@@ -33,7 +33,9 @@ pub extern "C" fn zmq_has(capability: *const libc::c_char) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_sleep(seconds: c_int) {
-    std::thread::sleep(std::time::Duration::from_secs(seconds as u64));
+    if seconds > 0 {
+        std::thread::sleep(std::time::Duration::from_secs(seconds as u64));
+    }
 }
 
 #[unsafe(no_mangle)]
