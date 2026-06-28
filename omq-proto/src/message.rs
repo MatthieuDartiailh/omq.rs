@@ -163,6 +163,14 @@ impl Clone for Payload {
     }
 }
 
+impl PartialEq for Payload {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for Payload {}
+
 impl Default for Payload {
     fn default() -> Self {
         Self::new()
@@ -642,6 +650,23 @@ impl Clone for Message {
         }
     }
 }
+
+impl PartialEq for Message {
+    fn eq(&self, other: &Self) -> bool {
+        let n = self.len();
+        if n != other.len() {
+            return false;
+        }
+        for i in 0..n {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Eq for Message {}
 
 impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
