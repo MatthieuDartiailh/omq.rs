@@ -37,9 +37,9 @@ async fn push_pull_single_peer() {
     let m1 = pull.recv().await.unwrap();
     let m2 = pull.recv().await.unwrap();
     let m3 = pull.recv().await.unwrap();
-    assert_eq!(m1.part_bytes(0).unwrap(), &b"a"[..]);
-    assert_eq!(m2.part_bytes(0).unwrap(), &b"b"[..]);
-    assert_eq!(m3.part_bytes(0).unwrap(), &b"c"[..]);
+    assert_eq!(m1, Message::single("a"));
+    assert_eq!(m2, Message::single("b"));
+    assert_eq!(m3, Message::single("c"));
 }
 
 #[compio::test]
@@ -258,7 +258,7 @@ async fn push_delivers_to_alive_peer_after_dead_slot() {
             .await
             .expect("pull1 recv timed out")
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"first");
+        assert_eq!(m, Message::single("first"));
         // pull1 drops here — slot 0 becomes dead.
     }
     compio::time::sleep(Duration::from_millis(500)).await;
@@ -273,7 +273,7 @@ async fn push_delivers_to_alive_peer_after_dead_slot() {
         .await
         .expect("pull2 did not receive message after dead slot")
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"second");
+    assert_eq!(m, Message::single("second"));
 }
 
 /// TCP PUSH/PULL with peer churn: PULL connects, receives, disconnects;

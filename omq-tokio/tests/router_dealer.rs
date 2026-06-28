@@ -36,9 +36,7 @@ async fn router_prefixes_identity_on_recv() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.len(), 2, "router message is [identity, body]");
-    assert_eq!(got.part_bytes(0).unwrap(), &b"alice"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"hello"[..]);
+    assert_eq!(got, Message::multipart(["alice", "hello"]));
 }
 
 #[tokio::test]
@@ -58,8 +56,7 @@ async fn router_routes_back_by_identity() {
     dealer.send(Message::single("ping")).await.unwrap();
 
     let incoming = router.recv().await.unwrap();
-    assert_eq!(incoming.part_bytes(0).unwrap(), &b"bob"[..]);
-    assert_eq!(incoming.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(incoming, Message::multipart(["bob", "ping"]));
 
     // Reply: [identity, body]. Router strips identity, routes to the peer.
     router
@@ -71,7 +68,7 @@ async fn router_routes_back_by_identity() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(reply, Message::single("pong"));
 }
 
 #[tokio::test]
@@ -177,7 +174,7 @@ async fn router_assigns_identity_for_peers_without_one() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.part_bytes(0).unwrap(), &b"reply"[..]);
+    assert_eq!(reply, Message::single("reply"));
 }
 
 // --- Handover tests ---
@@ -198,8 +195,7 @@ async fn router_handover_evicts_old_peer() {
 
     dealer_a.send(Message::single("hello")).await.unwrap();
     let got = router.recv().await.unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"alpha"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"hello"[..]);
+    assert_eq!(got, Message::multipart(["alpha", "hello"]));
 
     router
         .send(Message::multipart(["alpha", "reply-1"]))
@@ -209,7 +205,7 @@ async fn router_handover_evicts_old_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"reply-1"[..]);
+    assert_eq!(r, Message::single("reply-1"));
 
     let dealer_b = Socket::new(SocketType::Dealer, no_reconnect);
     dealer_b.connect(ep).await.unwrap();
@@ -220,8 +216,7 @@ async fn router_handover_evicts_old_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"alpha"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"world"[..]);
+    assert_eq!(got, Message::multipart(["alpha", "world"]));
 
     router
         .send(Message::multipart(["alpha", "reply-2"]))
@@ -231,7 +226,7 @@ async fn router_handover_evicts_old_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"reply-2"[..]);
+    assert_eq!(r, Message::single("reply-2"));
 
     let r = tokio::time::timeout(Duration::from_millis(100), dealer_a.recv()).await;
     assert!(r.is_err(), "dealer_a should not receive after handover");
@@ -343,8 +338,7 @@ async fn server_handover_evicts_old_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"cli"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(got, Message::multipart(["cli", "ping"]));
 
     let client_b = Socket::new(SocketType::Client, no_reconnect);
     client_b.connect(ep).await.unwrap();
@@ -370,6 +364,5 @@ async fn server_handover_evicts_old_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"cli"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"pong"[..]);
+    assert_eq!(got, Message::multipart(["cli", "pong"]));
 }

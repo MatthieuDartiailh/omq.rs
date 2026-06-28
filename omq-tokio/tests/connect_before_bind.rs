@@ -76,7 +76,7 @@ async fn push_pull_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"late"[..]);
+    assert_eq!(m, Message::single("late"));
 }
 
 #[tokio::test]
@@ -110,14 +110,14 @@ async fn req_rep_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
+    assert_eq!(q, Message::single("q"));
 
     rep.send(Message::single("a")).await.unwrap();
     let a = tokio::time::timeout(TIMEOUT, req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(a, Message::single("a"));
 }
 
 #[tokio::test]
@@ -151,14 +151,14 @@ async fn pair_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"from-a"[..]);
+    assert_eq!(m, Message::single("from-a"));
 
     b.send(Message::single("from-b")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, a.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"from-b"[..]);
+    assert_eq!(m, Message::single("from-b"));
 }
 
 #[tokio::test]
@@ -192,7 +192,7 @@ async fn pub_sub_connect_before_bind(ep: Endpoint) {
     loop {
         pub_.send(Message::single("x.hit")).await.unwrap();
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), sub.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap(), &b"x.hit"[..]);
+            assert_eq!(m, Message::single("x.hit"));
             break;
         }
         assert!(
@@ -207,7 +207,7 @@ async fn pub_sub_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"x.second"[..]);
+    assert_eq!(m, Message::single("x.second"));
 }
 
 #[tokio::test]
@@ -244,8 +244,7 @@ async fn dealer_router_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hello"[..]);
+    assert_eq!(m, Message::multipart(["d1", "hello"]));
 
     router
         .send(Message::multipart([
@@ -258,7 +257,7 @@ async fn dealer_router_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"world"[..]);
+    assert_eq!(m, Message::single("world"));
 }
 
 #[tokio::test]
@@ -295,8 +294,7 @@ async fn client_server_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"c1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::multipart(["c1", "ping"]));
 
     server
         .send(Message::multipart([
@@ -309,7 +307,7 @@ async fn client_server_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(m, Message::single("pong"));
 }
 
 #[tokio::test]
@@ -343,7 +341,7 @@ async fn scatter_gather_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"late"[..]);
+    assert_eq!(m, Message::single("late"));
 }
 
 #[tokio::test]
@@ -377,8 +375,7 @@ async fn radio_dish_connect_before_bind(ep: Endpoint) {
     loop {
         radio.send(Message::multipart(["w", "hit"])).await.unwrap();
         if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(200), dish.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap(), &b"w"[..]);
-            assert_eq!(m.part_bytes(1).unwrap(), &b"hit"[..]);
+            assert_eq!(m, Message::multipart(["w", "hit"]));
             break;
         }
         assert!(

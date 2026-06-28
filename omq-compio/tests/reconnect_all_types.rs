@@ -48,7 +48,7 @@ async fn req_rep_reconnect_after_server_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap().as_ref(), b"ping1");
+    assert_eq!(got, Message::single("ping1"));
     rep1.send(Message::single("pong1")).await.unwrap();
     compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
@@ -63,13 +63,13 @@ async fn req_rep_reconnect_after_server_restart() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(got2.part_bytes(0).unwrap().as_ref(), b"ping2");
+    assert_eq!(got2, Message::single("ping2"));
     rep2.send(Message::single("pong2")).await.unwrap();
     let reply2 = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .expect("post-restart reply timed out")
         .unwrap();
-    assert_eq!(reply2.part_bytes(0).unwrap().as_ref(), b"pong2");
+    assert_eq!(reply2, Message::single("pong2"));
 }
 
 #[compio::test]
@@ -102,13 +102,13 @@ async fn req_state_machine_survives_drop_mid_cycle() {
         .await
         .expect("post-drop recv timed out")
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap().as_ref(), b"c");
+    assert_eq!(got, Message::single("c"));
     rep2.send(Message::single("c-reply")).await.unwrap();
     let reply = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .expect("post-drop reply timed out")
         .unwrap();
-    assert_eq!(reply.part_bytes(0).unwrap().as_ref(), b"c-reply");
+    assert_eq!(reply, Message::single("c-reply"));
 }
 
 // ── PUB / SUB ────────────────────────────────────────────────────────────────
@@ -128,7 +128,7 @@ async fn pub_sub_reconnect_replays_subscriptions() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(m1.part_bytes(0).unwrap().as_ref(), b"x.hello");
+    assert_eq!(m1, Message::single("x.hello"));
 
     pub1.close().await.unwrap();
     let pub2 = rebind(&ep, || Socket::new(SocketType::Pub, Options::default())).await;
@@ -143,12 +143,12 @@ async fn pub_sub_reconnect_replays_subscriptions() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(m2.part_bytes(0).unwrap().as_ref(), b"x.world");
+    assert_eq!(m2, Message::single("x.world"));
     let m3 = compio::time::timeout(Duration::from_millis(500), sub.recv())
         .await
         .expect("second post-restart recv timed out")
         .unwrap();
-    assert_eq!(m3.part_bytes(0).unwrap().as_ref(), b"x.again");
+    assert_eq!(m3, Message::single("x.again"));
 }
 
 // ── DEALER / ROUTER ──────────────────────────────────────────────────────────
@@ -173,8 +173,7 @@ async fn dealer_router_reconnect_after_router_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got1.part_bytes(0).unwrap().as_ref(), b"d1");
-    assert_eq!(got1.part_bytes(1).unwrap().as_ref(), b"hello");
+    assert_eq!(got1, Message::multipart(["d1", "hello"]));
 
     router1.close().await.unwrap();
     let router2 = rebind(&ep, || Socket::new(SocketType::Router, Options::default())).await;
@@ -184,8 +183,7 @@ async fn dealer_router_reconnect_after_router_restart() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(got2.part_bytes(0).unwrap().as_ref(), b"d1");
-    assert_eq!(got2.part_bytes(1).unwrap().as_ref(), b"after");
+    assert_eq!(got2, Message::multipart(["d1", "after"]));
 }
 
 // ── PAIR ─────────────────────────────────────────────────────────────────────
@@ -204,7 +202,7 @@ async fn pair_reconnect_after_bind_side_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got1.part_bytes(0).unwrap().as_ref(), b"hi");
+    assert_eq!(got1, Message::single("hi"));
     pair_a1.send(Message::single("there")).await.unwrap();
     compio::time::timeout(Duration::from_secs(2), pair_b.recv())
         .await
@@ -219,13 +217,13 @@ async fn pair_reconnect_after_bind_side_restart() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(got2.part_bytes(0).unwrap().as_ref(), b"again");
+    assert_eq!(got2, Message::single("again"));
     pair_a2.send(Message::single("back")).await.unwrap();
     let reply2 = compio::time::timeout(Duration::from_secs(2), pair_b.recv())
         .await
         .expect("post-restart reply timed out")
         .unwrap();
-    assert_eq!(reply2.part_bytes(0).unwrap().as_ref(), b"back");
+    assert_eq!(reply2, Message::single("back"));
 }
 
 // ── CLIENT / SERVER ──────────────────────────────────────────────────────────
@@ -250,8 +248,7 @@ async fn client_server_reconnect_after_server_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got1.part_bytes(0).unwrap().as_ref(), b"c1");
-    assert_eq!(got1.part_bytes(1).unwrap().as_ref(), b"ping1");
+    assert_eq!(got1, Message::multipart(["c1", "ping1"]));
 
     server1
         .send(Message::multipart([
@@ -264,7 +261,7 @@ async fn client_server_reconnect_after_server_restart() {
         .await
         .expect("initial reply timed out")
         .unwrap();
-    assert_eq!(reply1.part_bytes(0).unwrap().as_ref(), b"pong1");
+    assert_eq!(reply1, Message::single("pong1"));
 
     server1.close().await.unwrap();
     let server2 = rebind(&ep, || Socket::new(SocketType::Server, Options::default())).await;
@@ -274,8 +271,7 @@ async fn client_server_reconnect_after_server_restart() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(got2.part_bytes(0).unwrap().as_ref(), b"c1");
-    assert_eq!(got2.part_bytes(1).unwrap().as_ref(), b"ping2");
+    assert_eq!(got2, Message::multipart(["c1", "ping2"]));
 }
 
 // ── SCATTER / GATHER ─────────────────────────────────────────────────────────
@@ -294,7 +290,7 @@ async fn scatter_gather_reconnect_after_bind_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got1.part_bytes(0).unwrap().as_ref(), b"before");
+    assert_eq!(got1, Message::single("before"));
 
     gather1.close().await.unwrap();
     let gather2 = rebind(&ep, || Socket::new(SocketType::Gather, Options::default())).await;
@@ -304,7 +300,7 @@ async fn scatter_gather_reconnect_after_bind_restart() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(got2.part_bytes(0).unwrap().as_ref(), b"after");
+    assert_eq!(got2, Message::single("after"));
 }
 
 // ── RADIO / DISH ─────────────────────────────────────────────────────────────
@@ -325,7 +321,7 @@ async fn radio_dish_reconnect_replays_joins() {
             .await
             .unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), dish.recv()).await {
-            assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"probe");
+            assert_eq!(m, Message::multipart(["w", "probe"]));
             break;
         }
         assert!(
@@ -344,8 +340,7 @@ async fn radio_dish_reconnect_replays_joins() {
             .await
             .unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), dish.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"w");
-            assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"after");
+            assert_eq!(m, Message::multipart(["w", "after"]));
             break;
         }
         assert!(
@@ -366,7 +361,7 @@ async fn radio_dish_reconnect_replays_joins() {
         .await
         .expect("final recv timed out")
         .unwrap();
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"final");
+    assert_eq!(m, Message::multipart(["w", "final"]));
 }
 
 // ── PEER ─────────────────────────────────────────────────────────────────────
@@ -395,8 +390,7 @@ async fn peer_reconnect_after_bind_side_restart() {
             .await
             .unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), peer_a1.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"pb");
-            assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"hello");
+            assert_eq!(m, Message::multipart(["pb", "hello"]));
             break;
         }
         assert!(
@@ -421,8 +415,7 @@ async fn peer_reconnect_after_bind_side_restart() {
             .await
             .unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), peer_a2.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"pb");
-            assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"after");
+            assert_eq!(m, Message::multipart(["pb", "after"]));
             break;
         }
         assert!(
@@ -448,7 +441,7 @@ async fn channel_reconnect_after_bind_side_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got1.part_bytes(0).unwrap().as_ref(), b"hi");
+    assert_eq!(got1, Message::single("hi"));
     ch_a1.send(Message::single("there")).await.unwrap();
     compio::time::timeout(Duration::from_secs(2), ch_b.recv())
         .await
@@ -463,13 +456,13 @@ async fn channel_reconnect_after_bind_side_restart() {
         .await
         .expect("post-restart recv timed out")
         .unwrap();
-    assert_eq!(got2.part_bytes(0).unwrap().as_ref(), b"again");
+    assert_eq!(got2, Message::single("again"));
     ch_a2.send(Message::single("back")).await.unwrap();
     let reply2 = compio::time::timeout(Duration::from_secs(2), ch_b.recv())
         .await
         .expect("post-restart reply timed out")
         .unwrap();
-    assert_eq!(reply2.part_bytes(0).unwrap().as_ref(), b"back");
+    assert_eq!(reply2, Message::single("back"));
 }
 
 // ── XPUB / XSUB ─────────────────────────────────────────────────────────────

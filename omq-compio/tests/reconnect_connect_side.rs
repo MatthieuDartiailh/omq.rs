@@ -35,7 +35,7 @@ async fn push_pull_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"before");
+    assert_eq!(m, Message::single("before"));
 
     push1.close().await.unwrap();
 
@@ -48,7 +48,7 @@ async fn push_pull_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"after");
+    assert_eq!(m, Message::single("after"));
 }
 
 // ── REQ / REP ────────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ async fn req_rep_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"q1");
+    assert_eq!(m, Message::single("q1"));
     rep.send(Message::single("a1")).await.unwrap();
     compio::time::timeout(TIMEOUT, req1.recv())
         .await
@@ -83,13 +83,13 @@ async fn req_rep_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"q2");
+    assert_eq!(m, Message::single("q2"));
     rep.send(Message::single("a2")).await.unwrap();
     let m = compio::time::timeout(TIMEOUT, req2.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"a2");
+    assert_eq!(m, Message::single("a2"));
 }
 
 // ── PUB / SUB ────────────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ async fn pub_sub_reconnect_connect_side() {
     loop {
         pub_.send(Message::single("x.probe1")).await.unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), sub1.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"x.probe1");
+            assert_eq!(m, Message::single("x.probe1"));
             break;
         }
         assert!(
@@ -126,7 +126,7 @@ async fn pub_sub_reconnect_connect_side() {
     loop {
         pub_.send(Message::single("x.probe2")).await.unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), sub2.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"x.probe2");
+            assert_eq!(m, Message::single("x.probe2"));
             break;
         }
         assert!(
@@ -155,8 +155,7 @@ async fn dealer_router_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"d1");
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"hello");
+    assert_eq!(m, Message::multipart(["d1", "hello"]));
 
     dealer1.close().await.unwrap();
 
@@ -172,8 +171,7 @@ async fn dealer_router_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"d1");
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"again");
+    assert_eq!(m, Message::multipart(["d1", "again"]));
 }
 
 // ── CLIENT / SERVER ──────────────────────────────────────────────────────────
@@ -195,8 +193,7 @@ async fn client_server_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"c1");
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"ping");
+    assert_eq!(m, Message::multipart(["c1", "ping"]));
 
     client1.close().await.unwrap();
 
@@ -212,8 +209,7 @@ async fn client_server_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"c1");
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"pong");
+    assert_eq!(m, Message::multipart(["c1", "pong"]));
 }
 
 // ── SCATTER / GATHER ─────────────────────────────────────────────────────────
@@ -232,7 +228,7 @@ async fn scatter_gather_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"before");
+    assert_eq!(m, Message::single("before"));
 
     scatter1.close().await.unwrap();
 
@@ -245,7 +241,7 @@ async fn scatter_gather_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"after");
+    assert_eq!(m, Message::single("after"));
 }
 
 // ── RADIO / DISH ─────────────────────────────────────────────────────────────
@@ -266,7 +262,7 @@ async fn radio_dish_reconnect_connect_side() {
             .await
             .unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), dish1.recv()).await {
-            assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"probe1");
+            assert_eq!(m, Message::multipart(["w", "probe1"]));
             break;
         }
         assert!(
@@ -288,7 +284,7 @@ async fn radio_dish_reconnect_connect_side() {
             .await
             .unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), dish2.recv()).await {
-            assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"probe2");
+            assert_eq!(m, Message::multipart(["w", "probe2"]));
             break;
         }
         assert!(
@@ -314,7 +310,7 @@ async fn pair_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"hi");
+    assert_eq!(m, Message::single("hi"));
 
     pair_b1.close().await.unwrap();
 
@@ -327,14 +323,14 @@ async fn pair_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"again");
+    assert_eq!(m, Message::single("again"));
 
     pair_a.send(Message::single("back")).await.unwrap();
     let m = compio::time::timeout(TIMEOUT, pair_b2.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"back");
+    assert_eq!(m, Message::single("back"));
 }
 
 // ── PEER ─────────────────────────────────────────────────────────────────────
@@ -360,8 +356,7 @@ async fn peer_reconnect_connect_side() {
             .await
             .unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), peer_a.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"pb");
-            assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"hello");
+            assert_eq!(m, Message::multipart(["pb", "hello"]));
             break;
         }
         assert!(
@@ -385,8 +380,7 @@ async fn peer_reconnect_connect_side() {
             .await
             .unwrap();
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), peer_a.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"pb");
-            assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"again");
+            assert_eq!(m, Message::multipart(["pb", "again"]));
             break;
         }
         assert!(
@@ -412,7 +406,7 @@ async fn channel_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"hi");
+    assert_eq!(m, Message::single("hi"));
 
     ch_b1.close().await.unwrap();
 
@@ -425,12 +419,12 @@ async fn channel_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"again");
+    assert_eq!(m, Message::single("again"));
 
     ch_a.send(Message::single("back")).await.unwrap();
     let m = compio::time::timeout(TIMEOUT, ch_b2.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"back");
+    assert_eq!(m, Message::single("back"));
 }

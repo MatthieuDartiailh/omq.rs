@@ -53,7 +53,7 @@ async fn plain_push_pull_roundtrip_over_ipc() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over plain"[..]);
+    assert_eq!(m, Message::single("hello over plain"));
 }
 
 #[compio::test]
@@ -86,10 +86,7 @@ async fn plain_multipart_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.len(), 3);
-    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
-    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
+    assert_eq!(m, Message::multipart(["a", "bb", "ccc"]));
 }
 
 #[compio::test]
@@ -146,7 +143,7 @@ async fn plain_authenticator_callback_runs() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"hi");
+    assert_eq!(m, Message::single("hi"));
     assert!(saw.load(Ordering::SeqCst), "authenticator must run");
 }
 
@@ -171,14 +168,14 @@ async fn plain_req_rep() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.part_bytes(0).unwrap(), &b"q"[..]);
+    assert_eq!(q, Message::single("q"));
 
     rep.send(Message::single("a")).await.unwrap();
     let a = compio::time::timeout(Duration::from_secs(5), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
+    assert_eq!(a, Message::single("a"));
 }
 
 #[compio::test]
@@ -205,8 +202,7 @@ async fn plain_dealer_router() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+    assert_eq!(m, Message::multipart(["d1", "hi"]));
 }
 
 #[compio::test]
@@ -229,7 +225,7 @@ async fn plain_pub_sub() {
     for _ in 0..30 {
         let _ = p.send(Message::single("hello")).await;
         if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(50), s.recv()).await {
-            assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
+            assert_eq!(m, Message::single("hello"));
             return;
         }
     }

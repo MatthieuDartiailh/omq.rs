@@ -35,7 +35,7 @@ async fn ws_reconnect_after_server_restart() {
         .await
         .expect("recv timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"before"[..]);
+    assert_eq!(msg, Message::single("before"));
 
     drop(push1);
     pull1.close().await.unwrap();
@@ -61,5 +61,5 @@ async fn ws_reconnect_after_server_restart() {
         .await
         .expect("recv after restart timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"after"[..]);
+    assert_eq!(msg, Message::single("after"));
 }

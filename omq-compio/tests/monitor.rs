@@ -212,7 +212,7 @@ async fn pub_sees_disconnect_after_message_exchange() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
+    assert_eq!(msg, Message::single("hello"));
 
     subscriber.close().await.unwrap();
 
@@ -239,13 +239,13 @@ async fn req_sees_disconnect_after_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(request.part_bytes(0).unwrap(), &b"ping"[..]);
+    assert_eq!(request, Message::single("ping"));
     rep.send(Message::single("pong")).await.unwrap();
     let reply = compio::time::timeout(Duration::from_millis(500), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(reply, Message::single("pong"));
 
     rep.close().await.unwrap();
 

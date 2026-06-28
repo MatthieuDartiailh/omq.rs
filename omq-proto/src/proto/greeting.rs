@@ -91,6 +91,8 @@ impl MechanismName {
     }
 
     /// Trimmed name as `&str`. Returns an error if non-ASCII.
+    // Returns Result because from_padded() accepts raw wire bytes without
+    // ASCII validation, so a wire-received name can contain non-UTF-8.
     pub fn as_str(&self) -> Result<&str> {
         std::str::from_utf8(self.as_bytes())
             .map_err(|_| Error::Protocol("mechanism name is not valid ASCII".into()))

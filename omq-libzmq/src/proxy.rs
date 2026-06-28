@@ -110,7 +110,7 @@ pub extern "C" fn zmq_proxy_steerable(
             let mut cmd = [0u8; 64];
             let rc = zmq_recv(control, cmd.as_mut_ptr().cast(), cmd.len(), ZMQ_DONTWAIT);
             if rc > 0 {
-                let msg = std::str::from_utf8(&cmd[..rc as usize]).unwrap_or("");
+                let msg = std::str::from_utf8(&cmd[..(rc as usize).min(cmd.len())]).unwrap_or("");
                 if msg == "TERMINATE" || msg == "KILL" {
                     return 0;
                 }
@@ -127,7 +127,8 @@ pub extern "C" fn zmq_proxy_steerable(
                             let rc =
                                 zmq_recv(control, cmd.as_mut_ptr().cast(), cmd.len(), ZMQ_DONTWAIT);
                             if rc > 0 {
-                                let m = std::str::from_utf8(&cmd[..rc as usize]).unwrap_or("");
+                                let m = std::str::from_utf8(&cmd[..(rc as usize).min(cmd.len())])
+                                    .unwrap_or("");
                                 if m == "RESUME" {
                                     break;
                                 }

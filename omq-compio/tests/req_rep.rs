@@ -96,7 +96,7 @@ async fn rep_survives_client_disconnect_mid_cycle() {
             .await
             .expect("REP recv timed out for first client")
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"drop-me");
+        assert_eq!(m, Message::single("drop-me"));
         // req1 drops here: connection closes before REP replies.
     }
 
@@ -112,14 +112,14 @@ async fn rep_survives_client_disconnect_mid_cycle() {
         .await
         .expect("REP did not receive second client's request")
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap().as_ref(), b"real");
+    assert_eq!(got, Message::single("real"));
 
     rep.send(Message::single("reply")).await.unwrap();
     let reply = compio::time::timeout(Duration::from_millis(500), req2.recv())
         .await
         .expect("REQ2 did not receive reply")
         .unwrap();
-    assert_eq!(reply.part_bytes(0).unwrap().as_ref(), b"reply");
+    assert_eq!(reply, Message::single("reply"));
 }
 
 #[compio::test]
@@ -167,14 +167,14 @@ async fn req_rep_roundtrip_sequential_ipv4() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::single("ping"));
 
     rep.send(Message::single("pong")).await.unwrap();
     let r = compio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(r, Message::single("pong"));
 }
 
 #[compio::test]
@@ -191,7 +191,7 @@ async fn req_rep_roundtrip_sequential_with_yield() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::single("ping"));
 
     rep.send(Message::single("pong")).await.unwrap();
     // Explicit yield to let REP's driver flush encoded_queue.
@@ -200,7 +200,7 @@ async fn req_rep_roundtrip_sequential_with_yield() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(r, Message::single("pong"));
 }
 
 #[compio::test]
@@ -216,7 +216,7 @@ async fn req_rep_roundtrip_sequential_with_long_yield() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::single("ping"));
 
     rep.send(Message::single("pong")).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
@@ -224,7 +224,7 @@ async fn req_rep_roundtrip_sequential_with_long_yield() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(r, Message::single("pong"));
 }
 
 #[compio::test]
@@ -241,7 +241,7 @@ async fn req_rep_roundtrip_sequential_spawned_recv() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::single("ping"));
 
     rep.send(Message::single("pong")).await.unwrap();
 
@@ -253,7 +253,7 @@ async fn req_rep_roundtrip_sequential_spawned_recv() {
             .unwrap()
     });
     let r = recv_task.await.unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(r, Message::single("pong"));
 }
 
 #[compio::test]
@@ -269,7 +269,7 @@ async fn req_rep_sequential_longer_timeout() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"ping"[..]);
+    assert_eq!(m, Message::single("ping"));
 
     rep.send(Message::single("pong")).await.unwrap();
     // 10 second timeout - if req.recv() eventually succeeds it's a scheduling issue
@@ -277,7 +277,7 @@ async fn req_rep_sequential_longer_timeout() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(r, Message::single("pong"));
 }
 
 /// REP serves multiple REQ clients that connect and disconnect in

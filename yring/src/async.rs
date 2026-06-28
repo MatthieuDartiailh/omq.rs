@@ -31,10 +31,10 @@ unsafe impl<T: Send> Sync for AsyncRing<T> {}
 
 impl<T> Drop for AsyncRing<T> {
     fn drop(&mut self) {
+        // Drain leftover items. `drop_remaining` advances `head` to `flush`,
+        // so the subsequent automatic `Ring::drop` is a no-op and the `buf`
+        // allocation is freed normally (no double-drop, no leak).
         self.ring.drop_remaining();
-        // Zero out counters so Ring::Drop is a no-op (no double-free).
-        self.ring.head.0.store(0, Ordering::Relaxed);
-        self.ring.flush.0.store(0, Ordering::Relaxed);
     }
 }
 

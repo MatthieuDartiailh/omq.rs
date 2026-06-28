@@ -163,6 +163,14 @@ impl Clone for Payload {
     }
 }
 
+impl PartialEq for Payload {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for Payload {}
+
 impl Default for Payload {
     fn default() -> Self {
         Self::new()
@@ -643,6 +651,23 @@ impl Clone for Message {
     }
 }
 
+impl PartialEq for Message {
+    fn eq(&self, other: &Self) -> bool {
+        let n = self.len();
+        if n != other.len() {
+            return false;
+        }
+        for i in 0..n {
+            if self.get(i) != other.get(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Eq for Message {}
+
 impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut list = f.debug_list();
@@ -724,10 +749,9 @@ impl From<Payload> for Message {
 /// ID in big-endian order, so the identity stays stable for the
 /// lifetime of the connection and cannot collide across peers.
 pub fn generated_identity(id: u64) -> Bytes {
-    let mut buf = Vec::with_capacity(9);
-    buf.push(0);
-    buf.extend_from_slice(&id.to_be_bytes());
-    Bytes::from(buf)
+    let mut buf = [0u8; 9];
+    buf[1..].copy_from_slice(&id.to_be_bytes());
+    Bytes::copy_from_slice(&buf)
 }
 
 #[cfg(test)]
@@ -878,7 +902,7 @@ mod tests {
     fn payload_inline_clone() {
         let p = Payload::inline(b"data");
         let p2 = p.clone();
-        assert_eq!(p.as_slice(), p2.as_slice());
+        assert_eq!(p, p2);
     }
 
     #[test]
@@ -1031,19 +1055,14 @@ mod tests {
     fn message_with_prefix() {
         let body = Message::single("hello");
         let m = Message::with_prefix(Bytes::from_static(b"id"), body);
-        assert_eq!(m.len(), 2);
-        assert_eq!(m.part_bytes(0).unwrap(), &b"id"[..]);
-        assert_eq!(m.part_bytes(1).unwrap(), &b"hello"[..]);
+        assert_eq!(m, Message::multipart([&b"id"[..], &b"hello"[..]]));
     }
 
     #[test]
     fn message_with_prefix_multipart_body() {
         let body = Message::multipart(["", "data"]);
         let m = Message::with_prefix(Bytes::from_static(b"id"), body);
-        assert_eq!(m.len(), 3);
-        assert_eq!(m.part_bytes(0).unwrap(), &b"id"[..]);
-        assert!(m.part_bytes(1).unwrap().is_empty());
-        assert_eq!(m.part_bytes(2).unwrap(), &b"data"[..]);
+        assert_eq!(m, Message::multipart([&b"id"[..], &b""[..], &b"data"[..]]));
     }
 
     #[test]
@@ -1096,7 +1115,7 @@ mod tests {
         let mut m = Message::from_inline(&data);
         m.push_part_payload(Payload::from_bytes(Bytes::from_static(b"extra")));
         assert_eq!(m.len(), 2);
-        assert_eq!(m.part_bytes(0).unwrap(), &data[..]);
-        assert_eq!(m.part_bytes(1).unwrap(), &b"extra"[..]);
+        assert_eq!(m.get(0).unwrap(), &data[..]);
+        assert_eq!(m.get(1).unwrap(), b"extra");
     }
 }

@@ -583,7 +583,7 @@ impl SocketDriver {
                     return;
                 }
                 if self.type_state_needs_transform() {
-                    let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg).await;
+                    let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg);
                     let Some(wrapped) = wrapped else { return };
                     let transformed = self
                         .type_state
@@ -802,7 +802,7 @@ struct InprocDriverCtx {
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
 /// then forwards Messages and Commands between the `SocketDriver`'s
 /// inbox and the partner's channels until either side drops.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
     mut in_rx: mpsc::Receiver<InboundFrame>,

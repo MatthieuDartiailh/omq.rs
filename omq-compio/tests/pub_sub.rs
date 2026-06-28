@@ -43,9 +43,8 @@ async fn pub_sub_simple_prefix_match() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got1.part_bytes(0).unwrap(), &b"news.sports"[..]);
-    assert_eq!(got1.part_bytes(1).unwrap(), &b"ball scores"[..]);
-    assert_eq!(got2.part_bytes(0).unwrap(), &b"news.tech"[..]);
+    assert_eq!(got1, Message::multipart(["news.sports", "ball scores"]));
+    assert_eq!(got2, Message::multipart(["news.tech", "rust 1.85"]));
 
     let third = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(third.is_err(), "non-matching message must not be delivered");
@@ -75,7 +74,7 @@ async fn pub_sub_late_subscriber_misses_earlier() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"post-subscribe"[..]);
+    assert_eq!(m, Message::single("post-subscribe"));
 
     let other = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
@@ -140,7 +139,7 @@ async fn pub_sub_unsubscribe() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"apricot"[..]);
+    assert_eq!(m, Message::single("apricot"));
 
     let other = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
@@ -164,7 +163,7 @@ async fn sub_replays_subscriptions_on_new_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"x.hello"[..]);
+    assert_eq!(m, Message::single("x.hello"));
     let other = compio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
 }

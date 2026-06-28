@@ -397,17 +397,18 @@ pub extern "C" fn zmq_msg_send(
 
     let group = msg_group_bytes(msg);
 
-    // For KIND_BYTES, steal the arc instead of copying. Set boxed to null so
-    // zmq_msg_close (called on success below) skips the drop.
+    // For KIND_BYTES, clone the Bytes (a zero-copy Arc bump) rather than
+    // copying the payload. We must NOT mutate `msg` here: libzmq leaves the
+    // message intact when a send fails, and the caller may then retry, copy,
+    // or close it. Stealing the Box and nulling the fields used to leave the
+    // message in a KIND_BYTES-with-null-boxed state that made a subsequent
+    // zmq_msg_copy dereference a null pointer. On success the Box is dropped
+    // by zmq_msg_close below.
     // SAFETY: msg is non-null (checked above).
-    let r = unsafe { &mut *msg };
+    let r = unsafe { &*msg };
     let bytes = if r.kind == KIND_BYTES && !r.boxed.is_null() {
-        // SAFETY: boxed was created by Box::into_raw; reclaiming ownership.
-        let owned = unsafe { *Box::from_raw(r.boxed.cast::<Bytes>()) };
-        r.boxed = std::ptr::null_mut();
-        r.ptr = std::ptr::null_mut();
-        r.size = 0;
-        owned
+        // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv; non-null.
+        unsafe { &*(r.boxed.cast::<Bytes>()) }.clone()
     } else {
         extract_bytes(msg)
     };

@@ -124,7 +124,7 @@ async fn try_recv_returns_buffered_message() {
     // Yield so the inproc frame is forwarded through in_tx/in_rx.
     let _ = compio::runtime::spawn(async {}).await;
     let msg = pull.try_recv().unwrap();
-    assert_eq!(&*msg.part_bytes(0).unwrap(), b"hello");
+    assert_eq!(msg, Message::single("hello"));
 }
 
 #[compio::test]
@@ -139,7 +139,7 @@ async fn try_send_no_peers_returns_would_block() {
         Err(TrySendError::Full(m)) => m,
         other => panic!("expected TrySendError::Full, got {other:?}"),
     };
-    assert_eq!(&*returned.part_bytes(0).unwrap(), b"x");
+    assert_eq!(returned, Message::single("x"));
 }
 
 #[compio::test]

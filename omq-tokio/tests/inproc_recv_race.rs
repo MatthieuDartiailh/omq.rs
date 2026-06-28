@@ -55,7 +55,7 @@ async fn recv_after_inproc_peer_close_sees_tcp_messages() {
         .await
         .expect("recv inproc msg timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"from-inproc");
+    assert_eq!(msg, Message::single("from-inproc"));
 
     push_inproc.close().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -72,7 +72,7 @@ async fn recv_after_inproc_peer_close_sees_tcp_messages() {
         .await
         .expect("pull.recv() hung after inproc peer closed (bug #2: recv stuck on recv_notify)")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"from-tcp");
+    assert_eq!(msg, Message::single("from-tcp"));
 }
 
 /// Bug 2 variant: after an inproc peer exits, messages from a second
@@ -94,7 +94,7 @@ async fn recv_after_inproc_peer_close_sees_new_inproc_messages() {
         .await
         .expect("recv a timed out")
         .unwrap();
-    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"a");
+    assert_eq!(msg, Message::single("a"));
 
     push_a.close().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;

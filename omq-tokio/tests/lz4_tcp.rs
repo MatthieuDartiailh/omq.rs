@@ -67,7 +67,7 @@ async fn small_message_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hello"[..]);
+    assert_eq!(m, Message::single("hello"));
 }
 
 #[tokio::test]
@@ -240,14 +240,14 @@ async fn req_rep_over_lz4() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(q.part_bytes(0).unwrap(), &b"question"[..]);
+    assert_eq!(q, Message::single("question"));
 
     rep.send(Message::single("answer")).await.unwrap();
     let a = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(a.part_bytes(0).unwrap(), &b"answer"[..]);
+    assert_eq!(a, Message::single("answer"));
 }
 
 #[tokio::test]

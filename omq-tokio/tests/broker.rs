@@ -56,14 +56,14 @@ async fn router_dealer_rep_single_cycle() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(work.part_bytes(0).unwrap(), &b"work"[..]);
+    assert_eq!(work, Message::single("work"));
     rep.send(Message::single("done")).await.unwrap();
 
     let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.part_bytes(0).unwrap(), &b"done"[..]);
+    assert_eq!(reply, Message::single("done"));
 
     broker.await.unwrap();
 }

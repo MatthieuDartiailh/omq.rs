@@ -161,6 +161,10 @@ impl<T> Ring<T> {
     /// Drop all items between head and flush. Must only be called with
     /// exclusive access (i.e. in a `Drop` impl or when no concurrent
     /// readers/writers exist).
+    ///
+    /// Idempotent: it advances `head` to `flush` as it drains, so a second
+    /// call (e.g. `Ring::drop` running after an async wrapper already
+    /// drained) sees an empty range and cannot double-drop.
     pub(crate) fn drop_remaining(&mut self) {
         let head = self.head.0.load(Ordering::Relaxed);
         let flush = self.flush.0.load(Ordering::Relaxed);
@@ -171,6 +175,7 @@ impl<T> Ring<T> {
                 (*ptr).assume_init_drop();
             });
         }
+        self.head.0.store(flush, Ordering::Relaxed);
     }
 }
 

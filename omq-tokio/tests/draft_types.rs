@@ -31,9 +31,7 @@ async fn client_server_basic_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.len(), 2);
-    assert_eq!(got.part_bytes(0).unwrap(), &b"cli1"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(got, Message::multipart(["cli1", "ping"]));
 
     // Server replies via [routing_id, body].
     server
@@ -45,8 +43,7 @@ async fn client_server_basic_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.len(), 1);
-    assert_eq!(reply.part_bytes(0).unwrap(), &b"pong"[..]);
+    assert_eq!(reply, Message::single("pong"));
 }
 
 #[tokio::test]
@@ -114,14 +111,14 @@ async fn channel_pair_one_to_one() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"hi"[..]);
+    assert_eq!(got, Message::single("hi"));
 
     b.send(Message::single("there")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_millis(500), a.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"there"[..]);
+    assert_eq!(got, Message::single("there"));
 }
 
 #[tokio::test]
@@ -155,8 +152,7 @@ async fn peer_bidirectional_identity_routing() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"peer-b"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"hello a"[..]);
+    assert_eq!(got, Message::multipart(["peer-b", "hello a"]));
 
     a.send(Message::multipart(["peer-b", "hello b"]))
         .await
@@ -165,8 +161,7 @@ async fn peer_bidirectional_identity_routing() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"peer-a"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"hello b"[..]);
+    assert_eq!(got, Message::multipart(["peer-a", "hello b"]));
 }
 
 #[tokio::test]
@@ -329,8 +324,7 @@ async fn peer_three_way() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"C"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hello from C"[..]);
+    assert_eq!(m, Message::multipart(["C", "hello from C"]));
 
     // A -> C
     a.send(Message::multipart(["C", "reply from A"]))
@@ -340,8 +334,7 @@ async fn peer_three_way() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"A"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"reply from A"[..]);
+    assert_eq!(m, Message::multipart(["A", "reply from A"]));
 
     // C -> B
     c.send(Message::multipart(["B", "hello from C"]))
@@ -351,6 +344,5 @@ async fn peer_three_way() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"C"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"hello from C"[..]);
+    assert_eq!(m, Message::multipart(["C", "hello from C"]));
 }

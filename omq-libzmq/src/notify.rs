@@ -227,6 +227,8 @@ mod unix {
             }
         }
 
+        // Takes &self (behind Arc), so fds can't be invalidated after close.
+        // No double-close path exists: called once from zmq_close, then dropped.
         fn close(&self) {
             #[cfg(target_os = "linux")]
             if let Some(linux) = &self.0 {

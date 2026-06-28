@@ -48,7 +48,7 @@ async fn curve_push_pull_roundtrip_over_ipc() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap(), &b"hello over curve"[..]);
+    assert_eq!(m, Message::single("hello over curve"));
 }
 
 #[compio::test]
@@ -82,10 +82,7 @@ async fn curve_multipart_roundtrip_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.len(), 3);
-    assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
-    assert_eq!(m.part_bytes(1).unwrap(), &b"bb"[..]);
-    assert_eq!(m.part_bytes(2).unwrap(), &b"ccc"[..]);
+    assert_eq!(m, Message::multipart(["a", "bb", "ccc"]));
 }
 
 #[compio::test]

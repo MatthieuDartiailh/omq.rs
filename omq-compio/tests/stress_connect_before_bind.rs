@@ -78,7 +78,7 @@ async fn stress_push_pull(transport: &Transport, bind_side: &str) {
             .await
             .unwrap_or_else(|_| panic!("push/pull {bind_side}-binds round {i} timed out"))
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap(), &b"x"[..]);
+        assert_eq!(m, Message::single("x"));
     }
 }
 
@@ -106,14 +106,14 @@ async fn stress_req_rep(transport: &Transport, bind_side: &str) {
             .await
             .unwrap_or_else(|_| panic!("req/rep {bind_side}-binds round {i} recv timed out"))
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap(), &b"q"[..]);
+        assert_eq!(m, Message::single("q"));
 
         rep.send(Message::single("a")).await.unwrap();
         let m = compio::time::timeout(TIMEOUT, req.recv())
             .await
             .unwrap_or_else(|_| panic!("req/rep {bind_side}-binds round {i} reply timed out"))
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
+        assert_eq!(m, Message::single("a"));
     }
 }
 
@@ -142,7 +142,7 @@ async fn stress_pub_sub(transport: &Transport, bind_side: &str) {
         loop {
             pub_.send(Message::single("m")).await.unwrap();
             if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(100), sub.recv()).await {
-                assert_eq!(m.part_bytes(0).unwrap(), &b"m"[..]);
+                assert_eq!(m, Message::single("m"));
                 break;
             }
             assert!(
@@ -167,14 +167,14 @@ async fn stress_pair(transport: &Transport) {
             .await
             .unwrap_or_else(|_| panic!("pair round {i} a->b timed out"))
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap(), &b"ab"[..]);
+        assert_eq!(m, Message::single("ab"));
 
         b.send(Message::single("ba")).await.unwrap();
         let m = compio::time::timeout(TIMEOUT, a.recv())
             .await
             .unwrap_or_else(|_| panic!("pair round {i} b->a timed out"))
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap(), &b"ba"[..]);
+        assert_eq!(m, Message::single("ba"));
     }
 }
 
@@ -208,8 +208,7 @@ async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
             .await
             .unwrap_or_else(|_| panic!("dealer/router {bind_side}-binds round {i} timed out"))
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
-        assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+        assert_eq!(m, Message::multipart(["d1", "hi"]));
 
         router
             .send(Message::multipart([
@@ -222,7 +221,7 @@ async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
             .await
             .unwrap_or_else(|_| panic!("dealer/router {bind_side}-binds round {i} reply timed out"))
             .unwrap();
-        assert_eq!(m.part_bytes(0).unwrap(), &b"yo"[..]);
+        assert_eq!(m, Message::single("yo"));
     }
 }
 

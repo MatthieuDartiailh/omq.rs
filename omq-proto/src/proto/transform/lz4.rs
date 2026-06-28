@@ -42,6 +42,15 @@ const ENVELOPE_LZ4B: usize = 12;
 /// 1 GiB, well within the LZ4 block API's i32 parameter limit.
 const LZ4M_BLOCK_SIZE: usize = 0x4000_0000;
 
+/// LZ4's worst-case decoder expansion ratio. A single block byte can
+/// expand to at most this many output bytes (a maximal match costs
+/// roughly 3 + len/255 input bytes per `len` output bytes, so the ratio
+/// approaches but never reaches 255:1). A declared output larger than
+/// the available compressed bytes times this ratio is impossible and
+/// signals a hostile or corrupt frame. Used to bound the up-front LZ4M
+/// allocation even when no `max_message_size` budget is configured.
+const LZ4_MAX_EXPANSION: usize = 255;
+
 /// Below this size, plaintext passthrough always wins net of the 4-byte
 /// envelope. Matches `omq-lz4` RFC §5.4.
 const MIN_COMPRESS_NO_DICT: usize = 512;
@@ -514,6 +523,18 @@ fn decode_lz4m(
         .map_err(|_| Error::Protocol("LZ4M declared size exceeds usize".into()))?;
     take_budget(budget, decompressed_size)?;
 
+    // Decompression-bomb guard. `decompressed_size` is an attacker-controlled
+    // 8-byte wire field and `take_budget` is a no-op when no max_message_size
+    // is set (the default), so without this the line below would allocate an
+    // arbitrary amount from a tiny frame. The decompressed output cannot
+    // exceed the available compressed bytes times LZ4's max expansion ratio.
+    let avail = body.len() - 8;
+    if decompressed_size > avail.saturating_mul(LZ4_MAX_EXPANSION) {
+        return Err(Error::Protocol(
+            "LZ4M declared size implausibly large for compressed input".into(),
+        ));
+    }
+
     let mut out = vec![0u8; decompressed_size];
     let mut src_pos = 8;
     let mut dst_pos = 0;
@@ -895,6 +916,22 @@ mod tests {
         let mut dec = test_dec().with_max_message_size(Some(TEST_BLOCK));
         let err = dec.decode(wire.into_iter().next().unwrap()).unwrap_err();
         assert!(matches!(err, Error::MessageTooLarge { .. }));
+    }
+
+    #[test]
+    fn lz4m_decompression_bomb_rejected() {
+        // A tiny LZ4M frame declaring a huge decompressed size must be
+        // rejected without allocating, even with no max_message_size budget
+        // configured (the default). Without the expansion-ratio guard this
+        // would attempt `vec![0u8; declared]` and abort/OOM the process.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&SENTINEL_LZ4M);
+        frame.extend_from_slice(&u64::MAX.to_le_bytes()); // declared ~18 EiB
+        // no compressed blocks follow
+
+        let mut dec = test_dec(); // budget = None
+        let err = dec.decode(Message::single(frame)).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)));
     }
 
     #[test]
