@@ -16,6 +16,13 @@ use super::FrameTransform;
 use super::blake3zmq_aad;
 use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 
+/// Absolute ceiling for a handshake command frame when the connection has
+/// no `max_message_size` configured. Real handshake commands (socket-type
+/// and identity properties, CURVE/BLAKE3ZMQ handshake messages) are a few
+/// hundred bytes at most; this only exists to stop a pre-auth peer from
+/// making us buffer unbounded data during the handshake.
+const MAX_HANDSHAKE_COMMAND: usize = 256 * 1024;
+
 /// Build a `Message::Inline` from a `ChunkedInputBuf`. The caller must
 /// ensure `payload_len` bytes are available in `buf`.
 #[inline]
@@ -116,6 +123,22 @@ impl Connection {
     }
 
     fn try_advance_mechanism(&mut self) -> Result<bool> {
+        // Bound the frame before buffering its whole body. This runs
+        // pre-authentication, so a peer must not be able to make us buffer an
+        // arbitrary amount by declaring a huge command frame and dribbling
+        // bytes. Handshake commands (READY, CURVE HELLO/WELCOME/INITIATE,
+        // BLAKE3ZMQ messages) are never legitimately large, so cap them at an
+        // absolute ceiling. This is independent of `max_message_size`, which
+        // bounds user data messages: a user may set a tiny data limit yet must
+        // still exchange the (larger) handshake commands.
+        if let Some(hdr) = frame::peek_frame_header(&self.in_buf)?
+            && hdr.payload_len > MAX_HANDSHAKE_COMMAND
+        {
+            return Err(Error::HandshakeFailed(format!(
+                "handshake command frame too large: {} bytes (max {MAX_HANDSHAKE_COMMAND})",
+                hdr.payload_len
+            )));
+        }
         let Some(frame) = frame::try_decode_frame(&mut self.in_buf)? else {
             return Ok(false);
         };
@@ -551,6 +574,24 @@ impl Connection {
                 .header_len
                 .checked_add(payload_len)
                 .ok_or_else(|| Error::Protocol("WS frame size overflow".into()))?;
+            // Bound the declared payload before waiting for the whole frame to
+            // arrive. Without this a peer can declare a huge WS frame and
+            // dribble bytes, defeating a configured limit. In the Ready state
+            // apply the user's data limit (`max_message_size`, unbounded when
+            // unset, matching ZMQ). Before Ready the frames carry handshake
+            // commands, so apply the absolute pre-auth ceiling regardless.
+            let cap = if matches!(self.state, State::Ready) {
+                self.config.max_message_size
+            } else {
+                Some(MAX_HANDSHAKE_COMMAND)
+            };
+            if let Some(cap) = cap
+                && payload_len > cap
+            {
+                return Err(Error::Protocol(format!(
+                    "WS frame too large: {payload_len} bytes (max {cap})"
+                )));
+            }
             if self.in_buf.len() < total_frame {
                 return Ok(());
             }

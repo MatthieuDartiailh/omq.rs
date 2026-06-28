@@ -179,6 +179,30 @@ fn oversized_message_rejected() {
 }
 
 #[test]
+fn oversized_handshake_command_rejected() {
+    // A peer must not be able to make us buffer an unbounded amount of data
+    // pre-authentication by declaring a huge handshake command frame. The
+    // declared size is rejected from the header alone, before the body is
+    // buffered. This holds even with no max_message_size configured (which
+    // bounds user data, not protocol handshake commands).
+    let mut a = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+    let b = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
+
+    // Feed `a` a real greeting so it enters the mechanism-handshake state.
+    let greeting = b.poll_transmit();
+    assert_eq!(greeting.len(), 64, "full greeting in one transmit");
+    let greeting = Bytes::copy_from_slice(&greeting);
+    a.handle_input(greeting).unwrap();
+
+    // Long-form COMMAND frame header declaring ~256 MiB, no body.
+    let declared: u64 = 256 * 1024 * 1024;
+    let mut hdr = vec![0x06u8]; // FLAG_COMMAND | FLAG_LONG
+    hdr.extend_from_slice(&declared.to_be_bytes());
+    let err = a.handle_input(Bytes::from(hdr)).unwrap_err();
+    assert!(matches!(err, Error::HandshakeFailed(_)), "got {err:?}");
+}
+
+#[test]
 fn streaming_one_byte_at_a_time_handshake() {
     let mut push = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
     let mut pull = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
