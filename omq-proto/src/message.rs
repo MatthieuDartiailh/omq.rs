@@ -724,10 +724,9 @@ impl From<Payload> for Message {
 /// ID in big-endian order, so the identity stays stable for the
 /// lifetime of the connection and cannot collide across peers.
 pub fn generated_identity(id: u64) -> Bytes {
-    let mut buf = Vec::with_capacity(9);
-    buf.push(0);
-    buf.extend_from_slice(&id.to_be_bytes());
-    Bytes::from(buf)
+    let mut buf = [0u8; 9];
+    buf[1..].copy_from_slice(&id.to_be_bytes());
+    Bytes::copy_from_slice(&buf)
 }
 
 #[cfg(test)]
