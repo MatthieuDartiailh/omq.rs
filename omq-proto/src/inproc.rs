@@ -16,13 +16,6 @@ pub enum InboundFrame {
     Command(Box<Command>),
 }
 
-impl InboundFrame {
-    /// Construct a `Message` frame.
-    pub fn message(msg: Message) -> Self {
-        Self::Message(msg)
-    }
-}
-
 /// Pre-computed peer info known at connect/accept time for inproc
 /// peers. Stands in for the `READY` properties that real ZMTP
 /// exchanges over the wire.
