@@ -117,6 +117,12 @@ impl SocketType {
     }
 }
 
+impl std::fmt::Display for SocketType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// ZMTP socket-type compatibility matrix (RFC 23 + 37 + 48 + 52).
 ///
 /// Returns true iff a socket of type `ours` can handshake with a peer of type
