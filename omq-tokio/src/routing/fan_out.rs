@@ -591,12 +591,14 @@ async fn wait_for_targets_space(targets: &[PeerSend]) {
         });
         match notified {
             Some(notified) => {
+                let mut notified = std::pin::pin!(notified);
+                notified.as_mut().enable();
                 if targets_have_space(targets) {
                     return;
                 }
                 tokio::select! {
                     biased;
-                    () = notified => {}
+                    () = &mut notified => {}
                     () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
                 }
             }
