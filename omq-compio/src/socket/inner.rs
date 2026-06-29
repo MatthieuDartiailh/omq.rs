@@ -184,7 +184,7 @@ pub(super) struct PeerRouting {
     /// Cached round-robin direct-encode targets for the multi-peer
     /// wire-only case, with the generation they were built at. Lets the
     /// hot path index a `Vec<Arc<DirectIoState>>` instead of re-acquiring
-    /// the `peers` / `peer_keys` / per-peer `direct_io` RwLocks on every
+    /// the `peers` / `peer_keys` / per-peer `direct_io` `RwLock`s on every
     /// send. Readiness (handshake) is a live `Cell` inside each
     /// `DirectIoState`, so cached entries stay valid across handshake
     /// completion; only peer add/remove (which bumps `generation`)

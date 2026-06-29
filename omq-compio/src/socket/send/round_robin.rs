@@ -93,7 +93,7 @@ impl Socket {
     ///
     /// The wire target list is cached by `generation` so the hot path
     /// avoids re-acquiring the `peers` / `peer_keys` / per-peer `direct_io`
-    /// RwLocks on every send (that re-locking dominated the profile -
+    /// `RwLock`s on every send (that re-locking dominated the profile -
     /// ~34% of PUSH CPU). Per-peer handshake readiness is a live `Cell`
     /// inside each `DirectIoState`, checked by `try_direct_encode`, so the
     /// cache stays correct across handshake completion; only peer
