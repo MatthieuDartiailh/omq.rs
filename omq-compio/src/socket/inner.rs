@@ -181,6 +181,15 @@ pub(super) struct PeerRouting {
     /// Cached route for the common single-peer case. Invalidated
     /// when `generation` advances past the stored generation.
     pub(super) cached_route: Mutex<Option<CachedPeerRoute>>,
+    /// Cached round-robin direct-encode targets for the multi-peer
+    /// wire-only case, with the generation they were built at. Lets the
+    /// hot path index a `Vec<Arc<DirectIoState>>` instead of re-acquiring
+    /// the `peers` / `peer_keys` / per-peer `direct_io` RwLocks on every
+    /// send. Readiness (handshake) is a live `Cell` inside each
+    /// `DirectIoState`, so cached entries stay valid across handshake
+    /// completion; only peer add/remove (which bumps `generation`)
+    /// invalidates the cache.
+    pub(super) cached_rr_targets: Mutex<Option<(u64, Vec<Arc<DirectIoState>>)>>,
     /// Identity -> slot index for ROUTER outbound.
     pub(super) identity_to_slot: RwLock<FxHashMap<Bytes, usize>>,
     /// `connection_id` -> peer identity for the recv path.
@@ -357,6 +366,7 @@ impl SocketInner {
                 peer_count: out_peer_count.clone(),
                 inproc_count: AtomicUsize::new(0),
                 cached_route: Mutex::new(None),
+                cached_rr_targets: Mutex::new(None),
                 identity_to_slot: RwLock::new(FxHashMap::default()),
                 conn_id_to_identity: RwLock::new(FxHashMap::default()),
                 rr_index: AtomicUsize::new(0),

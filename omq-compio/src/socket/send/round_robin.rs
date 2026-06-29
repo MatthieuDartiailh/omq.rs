@@ -85,32 +85,59 @@ impl Socket {
     }
 
     /// Encode `msg` directly into the next available peer's `EncodedQueue`,
-    /// scanning round-robin from `rr_index`. Returns the chosen peer's
-    /// [`DirectIoState`] on success (so the caller can do backlog/yield
-    /// accounting), or `None` if no wire peer could accept it directly
-    /// (queue full, codec busy, or handshake not yet complete).
+    /// scanning round-robin from `rr_index`. Returns `Some(should_yield)`
+    /// when a peer accepted the message (`should_yield` true when that
+    /// peer's unflushed backlog crossed the yield threshold), or `None`
+    /// when no wire peer could accept it directly (queue full, codec busy,
+    /// or handshake not yet complete).
     ///
-    /// Holds only the `peers`/`peer_keys` read locks; `try_direct_encode`
-    /// is synchronous, so no `.await` happens while the locks are held.
-    fn try_direct_round_robin(&self, msg: &Message) -> Result<Option<Arc<DirectIoState>>> {
+    /// The wire target list is cached by `generation` so the hot path
+    /// avoids re-acquiring the `peers` / `peer_keys` / per-peer `direct_io`
+    /// RwLocks on every send (that re-locking dominated the profile -
+    /// ~34% of PUSH CPU). Per-peer handshake readiness is a live `Cell`
+    /// inside each `DirectIoState`, checked by `try_direct_encode`, so the
+    /// cache stays correct across handshake completion; only peer
+    /// add/remove (which bumps `generation`) rebuilds it.
+    fn try_direct_round_robin(&self, msg: &Message) -> Result<Option<bool>> {
         let inner = self.inner();
-        let peers = inner.routing.peers.read().expect("peers lock");
-        let keys = inner.routing.peer_keys.read().expect("peer_keys lock");
-        let n = keys.len();
+        let cur_gen = inner.routing.generation.load(Ordering::Acquire);
+        let mut cache = inner
+            .routing
+            .cached_rr_targets
+            .lock()
+            .expect("cached_rr_targets lock");
+        if cache.as_ref().map(|(g, _)| *g) != Some(cur_gen) {
+            let peers = inner.routing.peers.read().expect("peers lock");
+            let keys = inner.routing.peer_keys.read().expect("peer_keys lock");
+            let mut targets = Vec::with_capacity(keys.len());
+            for &idx in keys.iter() {
+                let p = &peers[idx];
+                let PeerOut::Wire(_) = &p.out else { continue };
+                let Some(handle) = &p.direct_io else { continue };
+                if let Some(state) = handle.read().expect("direct_io handle lock").as_ref() {
+                    targets.push(state.clone());
+                }
+            }
+            *cache = Some((cur_gen, targets));
+        }
+        let targets = &cache.as_ref().expect("just populated").1;
+        let n = targets.len();
         if n == 0 {
             return Ok(None);
         }
         for _ in 0..n {
-            let idx = keys[inner.routing.rr_index.fetch_add(1, Ordering::Relaxed) % n];
-            let p = &peers[idx];
-            let PeerOut::Wire(_) = &p.out else { continue };
-            let Some(handle) = &p.direct_io else { continue };
-            let guard = handle.read().expect("direct_io handle lock");
-            let Some(state) = guard.as_ref() else {
-                continue;
-            };
+            let i = inner.routing.rr_index.fetch_add(1, Ordering::Relaxed) % n;
+            let state = &targets[i];
             if try_direct_encode(msg, state)? {
-                return Ok(Some(state.clone()));
+                let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
+                    || state
+                        .encoded_queue
+                        .try_borrow_mut()
+                        .is_some_and(|eq| eq.total_bytes() >= DIRECT_ENCODE_YIELD_BYTES);
+                if backlogged {
+                    state.direct_msg_count.set(0);
+                }
+                return Ok(Some(backlogged));
             }
         }
         Ok(None)
@@ -118,27 +145,12 @@ impl Socket {
 
     pub(super) async fn send_round_robin(&self, msg: Message) -> Result<()> {
         let inner = self.inner();
-        // Fast path: reuse cached route when the peer set hasn't changed.
-        let cur_gen = inner.routing.generation.load(Ordering::Acquire);
-        let cached = {
-            let cache = inner.routing.cached_route.lock().expect("cached_route");
-            if let Some(ref cr) = *cache
-                && cr.generation == cur_gen
-            {
-                Some((cr.out.clone(), cr.direct.clone(), cr.slot_idx))
-            } else {
-                None
-            }
-        };
-        if let Some((out, direct, slot_idx)) = cached {
-            return self.slow_round_robin(out, msg, 1, direct, slot_idx).await;
-        }
 
-        // Multi-peer wire-only fast path: skip select_peer entirely.
-        // Wire drivers can work-steal from the shared queue; inproc peers
-        // don't, so we can only bypass when there are no inproc peers.
-        // Gate on total > 1 so single-peer wire still bootstraps the
-        // direct_send_io cache via select_peer -> slow_round_robin.
+        // Multi-peer wire-only fast path, checked FIRST so it skips the
+        // single-peer `cached_route` Mutex (that lock is only ever
+        // populated when peer_count == 1). Wire drivers can work-steal
+        // from the shared queue; inproc peers don't, so we only bypass
+        // when there are no inproc peers.
         if inner.routing.peer_count.load(Ordering::Acquire) > 1
             && inner.routing.inproc_count.load(Ordering::Relaxed) == 0
         {
@@ -153,17 +165,13 @@ impl Socket {
             // semantics). Only when no peer can take the message directly
             // (all at HWM or mid-handshake) do we fall back to the shared
             // work-stealing queue, which preserves `send_hwm` backpressure.
-            if let Some(state) = self.try_direct_round_robin(&msg)? {
-                let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
-                    || state
-                        .encoded_queue
-                        .try_borrow_mut()
-                        .is_some_and(|eq| eq.total_bytes() >= DIRECT_ENCODE_YIELD_BYTES);
-                if backlogged {
-                    state.direct_msg_count.set(0);
+            match self.try_direct_round_robin(&msg)? {
+                Some(true) => {
                     crate::yield_now().await;
+                    return Ok(());
                 }
-                return Ok(());
+                Some(false) => return Ok(()),
+                None => {}
             }
             let stx = inner
                 .shared_send_tx
@@ -172,6 +180,23 @@ impl Socket {
                 .clone()
                 .ok_or(Error::Closed)?;
             return stx.send_async(msg).await;
+        }
+
+        // Single-peer / inproc path: reuse the cached route when the peer
+        // set hasn't changed.
+        let cur_gen = inner.routing.generation.load(Ordering::Acquire);
+        let cached = {
+            let cache = inner.routing.cached_route.lock().expect("cached_route");
+            if let Some(ref cr) = *cache
+                && cr.generation == cur_gen
+            {
+                Some((cr.out.clone(), cr.direct.clone(), cr.slot_idx))
+            } else {
+                None
+            }
+        };
+        if let Some((out, direct, slot_idx)) = cached {
+            return self.slow_round_robin(out, msg, 1, direct, slot_idx).await;
         }
 
         loop {
