@@ -90,9 +90,13 @@ impl Socket {
                         fan_out_encode_dispatch(dio_cache, targets, &msg);
                     } else if !try_direct_encode(&msg, &dio_cache[0])? {
                         let _ = targets[0].send(msg.clone()).await;
-                    } else if dio_cache[0].direct_msg_count.get()
-                        >= super::DIRECT_ENCODE_YIELD_BACKLOG
+                    } else if dio_cache[0].direct_msg_count.get() >= super::DIRECT_ENCODE_YIELD_MSGS
+                        || dio_cache[0]
+                            .encoded_queue
+                            .try_borrow_mut()
+                            .is_some_and(|eq| eq.total_bytes() >= super::DIRECT_ENCODE_YIELD_BYTES)
                     {
+                        dio_cache[0].direct_msg_count.set(0);
                         crate::yield_now().await;
                     }
                     if count.is_multiple_of(yield_interval(&msg)) {

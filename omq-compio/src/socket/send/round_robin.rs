@@ -8,7 +8,7 @@ use crate::socket::handle::Socket;
 use crate::socket::inner::{CachedPeerRoute, DirectIoState, PeerOut};
 use crate::transport::driver::DriverCommand;
 
-use super::{DIRECT_ENCODE_YIELD_BACKLOG, try_direct_encode};
+use super::{DIRECT_ENCODE_YIELD_BYTES, DIRECT_ENCODE_YIELD_MSGS, try_direct_encode};
 
 struct PeerSelection {
     out: PeerOut,
@@ -241,7 +241,14 @@ impl Socket {
                 if let Some(state) = direct
                     && try_direct_encode(&msg, &state)?
                 {
-                    let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_BACKLOG;
+                    let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
+                        || state
+                            .encoded_queue
+                            .try_borrow_mut()
+                            .is_some_and(|eq| eq.total_bytes() >= DIRECT_ENCODE_YIELD_BYTES);
+                    if backlogged {
+                        state.direct_msg_count.set(0);
+                    }
                     let cur_gen = self.inner().routing.generation.load(Ordering::Acquire);
                     *self.inner().direct_io.send.get() = Some((state, cur_gen));
                     if backlogged {

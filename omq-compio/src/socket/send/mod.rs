@@ -49,14 +49,12 @@ use super::handle::Socket;
 pub(super) const DIRECT_CAP: usize = 512 * 1024;
 pub(super) const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
 
-/// Yield to the runtime when this many direct-encodes have accumulated
-/// without the driver fully flushing the `EncodedQueue`. Prevents
-/// driver starvation under sustained single-peer send bursts: the
-/// driver only runs when the sender yields, so a tight encode loop
-/// can starve the flush path. The threshold is per-peer, so with N
-/// peers each hitting this limit, the runtime gets N yield points per
-/// pass through the send loop.
-const DIRECT_ENCODE_YIELD_BACKLOG: usize = 4;
+/// Yield to the runtime when unflushed direct-encodes exceed these
+/// thresholds. Prevents driver starvation under sustained single-peer
+/// send bursts: the driver only runs when the sender yields, so a
+/// tight encode loop can starve the flush path.
+pub(super) const DIRECT_ENCODE_YIELD_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const DIRECT_ENCODE_YIELD_MSGS: usize = 256;
 
 pub(super) fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
     // Crypto connections must go through the codec's send_message.
@@ -266,7 +264,13 @@ impl Socket {
                 && *cached_gen == inner.routing.generation.load(Ordering::Acquire)
                 && try_direct_encode(&msg, state)?
             {
-                if state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_BACKLOG {
+                if state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
+                    || state
+                        .encoded_queue
+                        .try_borrow_mut()
+                        .is_some_and(|eq| eq.total_bytes() >= DIRECT_ENCODE_YIELD_BYTES)
+                {
+                    state.direct_msg_count.set(0);
                     crate::yield_now().await;
                 }
                 return Ok(());
