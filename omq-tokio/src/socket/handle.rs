@@ -23,6 +23,22 @@ use crate::transport::inproc::InprocSpsc;
 
 pub(crate) type WireSlotHolder = Arc<Mutex<Option<Arc<PeerWireSlot>>>>;
 
+/// Multi-peer round-robin wire slots, shared between the handle (reads)
+/// and the actor (writes on peer add/remove). When more than one wire
+/// peer is active on a round-robin socket and none are inproc, the actor
+/// fills `slots` with every peer's [`PeerWireSlot`]; the handle picks the
+/// next one per send via `cursor`, giving strict round-robin distribution
+/// over the per-peer direct-encode fast path. Empty for single-peer /
+/// inproc-mixed / identity-routed sockets (those fall back to the shared
+/// work-stealing queue).
+pub(crate) type RrSlots = Arc<RrSlotsInner>;
+
+#[derive(Debug, Default)]
+pub(crate) struct RrSlotsInner {
+    pub(crate) slots: Mutex<Vec<Arc<PeerWireSlot>>>,
+    pub(crate) cursor: std::sync::atomic::AtomicUsize,
+}
+
 pub use omq_proto::error::TrySendError;
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
@@ -212,6 +228,10 @@ struct Inner {
     /// driver flushes them to the wire. Set by the actor when exactly
     /// one wire peer is active; cleared on multi-peer or disconnect.
     wire_slot: WireSlotHolder,
+    /// Multi-peer round-robin wire slots (see [`RrSlots`]). Used by
+    /// `send_via_wire_slot` to dispatch directly to one peer at a time
+    /// instead of funneling every message through the shared queue.
+    rr_slots: RrSlots,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
 }
 
@@ -271,6 +291,7 @@ impl Socket {
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let wire_slot: WireSlotHolder = Arc::new(Mutex::new(None));
+        let rr_slots: RrSlots = Arc::new(RrSlotsInner::default());
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -283,6 +304,7 @@ impl Socket {
             type_state.clone(),
             req_awaiting_reply.clone(),
             wire_slot.clone(),
+            rr_slots.clone(),
             recv_sink_config,
         );
         spawn_driver(driver);
@@ -307,6 +329,7 @@ impl Socket {
                 type_state,
                 req_awaiting_reply,
                 wire_slot,
+                rr_slots,
                 last_bound_endpoint: RwLock::new(None),
             }),
         }
@@ -753,7 +776,7 @@ impl Socket {
     async fn send_via_wire_slot(&self, msg: Message) -> Result<()> {
         let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
         let Some(ref slot) = slot else {
-            return self.inner.send_submitter.send(msg).await;
+            return self.send_round_robin_wire(msg).await;
         };
         match slot.try_encode(&msg) {
             TryEncodeResult::Ok => Ok(()),
@@ -777,6 +800,33 @@ impl Socket {
                 self.inner.send_submitter.send(msg).await
             }
         }
+    }
+
+    /// Multi-peer round-robin over per-peer wire slots. Picks the next
+    /// slot via `rr_slots.cursor` and encodes directly into it, skipping
+    /// peers that are full or dead. This keeps the single-peer direct
+    /// path's throughput for multi-peer PUSH and gives strict round-robin
+    /// distribution (libzmq `lb_t` semantics), instead of funneling every
+    /// message through the shared work-stealing queue where one driver
+    /// could monopolize the stream and starve the others.
+    ///
+    /// Falls back to the shared queue (which enforces `send_hwm`
+    /// backpressure and serves inproc / transform / pre-handshake peers)
+    /// only when no wire slot can take the message directly.
+    async fn send_round_robin_wire(&self, msg: Message) -> Result<()> {
+        {
+            let slots = self.inner.rr_slots.slots.lock().expect("rr_slots");
+            let n = slots.len();
+            for _ in 0..n {
+                let i = self.inner.rr_slots.cursor.fetch_add(1, Ordering::Relaxed) % n;
+                if slots[i].try_encode(&msg) == TryEncodeResult::Ok {
+                    return Ok(());
+                }
+            }
+        }
+        // No peer slot accepted directly (none registered, all at HWM, dead,
+        // or ineligible for direct encode): fall back to the shared queue.
+        self.inner.send_submitter.send(msg).await
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {

@@ -1,7 +1,10 @@
 //! Multi-peer routing tests for omq-tokio:
 //! - PUSH→3 PULLs work-stealing distribution.
+//! - PUSH→3 PULLs round-robin fairness over TCP (wire path).
 //! - 3 PUSHes→PULL fair-queue.
 //! - PUB→3 SUBs fan-out with subscription filtering.
+
+mod test_support;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -59,6 +62,70 @@ async fn push_distributes_across_three_pulls() {
         assert!(
             n > N / 20,
             "pull got only {n} / {N}; distribution too skewed"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_distributes_fairly_over_tcp() {
+    // Regression guard for multi-peer PUSH round-robin on the WIRE path.
+    // The inproc test above never exercised it: previously every wire
+    // peer drained a single shared queue, which let one connection driver
+    // monopolize the stream and starve the others (a 0/100 split).
+    //
+    // The starvation only appears under SUSTAINED load with peers draining
+    // CONCURRENTLY (so PUSH drivers never block on a full TCP buffer).
+    // Drain first, then send, on a multi-threaded runtime.
+    const N: usize = 3;
+    const M: usize = 60_000;
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    let port = test_support::bind_loopback(&push).await;
+
+    let pulls: Vec<Socket> = (0..N)
+        .map(|_| Socket::new(SocketType::Pull, Options::default()))
+        .collect();
+    for p in &pulls {
+        p.connect(test_support::tcp_loopback(port)).await.unwrap();
+        test_support::wait_for_handshake(p).await;
+    }
+
+    // Spawn concurrent drainers BEFORE sending so the push side stays hot.
+    let counts: Vec<Arc<AtomicUsize>> = (0..N).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    let mut handles = Vec::new();
+    for (p, c) in pulls.into_iter().zip(counts.iter().cloned()) {
+        handles.push(tokio::spawn(async move {
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), p.recv()).await {
+                    Ok(Ok(_)) => {
+                        c.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => return,
+                }
+            }
+        }));
+    }
+
+    for i in 0..M {
+        push.send(Message::single(format!("m{i}"))).await.unwrap();
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let total: usize = counts.iter().map(|c| c.load(Ordering::SeqCst)).sum();
+    assert_eq!(total, M, "every message must reach exactly one pull");
+    // No peer may be starved. With direct round-robin the split is even
+    // (~M/N each); the shared-queue regression let one connection driver
+    // monopolize the stream, starving the others toward zero. A 1/4
+    // fair-share floor catches that without flaking on the skip-on-full
+    // jitter that CPU contention (parallel tests) adds to the even split.
+    let fair_share = M / N;
+    for (i, c) in counts.iter().enumerate() {
+        let n = c.load(Ordering::SeqCst);
+        assert!(
+            n >= fair_share / 4,
+            "pull {i} got {n} / {M} (fair share {fair_share}); a peer is being starved"
         );
     }
 }

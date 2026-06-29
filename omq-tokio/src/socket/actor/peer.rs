@@ -148,6 +148,8 @@ impl SocketDriver {
             return;
         }
         let mut guard = self.wire_slot.lock().expect("wire_slot");
+        let mut rr = self.rr_slots.slots.lock().expect("rr_slots");
+        rr.clear();
         if self.peers.len() == 1 {
             let peer = self.peers.values().next().unwrap();
             if let Some(ref slot) = peer.handle.wire_slot {
@@ -156,6 +158,21 @@ impl SocketDriver {
             }
         }
         *guard = None;
+        // Multi-peer round-robin: populate per-peer wire slots so the handle
+        // dispatches directly to one peer at a time. Only when every peer is
+        // a wire peer (no inproc) - inproc peers have no wire slot and would
+        // be starved if the round-robin only cycled wire slots. Mixed or
+        // inproc-only sets fall back to the shared queue (rr left empty).
+        if matches!(cat, SendCategory::RoundRobin)
+            && self.peers.len() > 1
+            && self.peers.values().all(|p| p.handle.wire_slot.is_some())
+        {
+            for p in self.peers.values() {
+                if let Some(ref slot) = p.handle.wire_slot {
+                    rr.push(slot.clone());
+                }
+            }
+        }
     }
 
     fn evict_peer_for_handover(&mut self, peer_id: u64) {
