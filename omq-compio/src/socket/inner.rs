@@ -189,7 +189,13 @@ pub(super) struct PeerRouting {
     /// `DirectIoState`, so cached entries stay valid across handshake
     /// completion; only peer add/remove (which bumps `generation`)
     /// invalidates the cache.
-    pub(super) cached_rr_targets: Mutex<Option<(u64, Vec<Arc<DirectIoState>>)>>,
+    ///
+    /// A `LocalCell` (not a `Mutex`): the multi-peer round-robin send
+    /// fast path is inlined into `Socket::send` and only ever runs on
+    /// the runtime thread, exactly like `DirectIoCache::send`. Dropping
+    /// the `Mutex` removes a lock/unlock pair from every multi-peer
+    /// PUSH send (it dominated the profile after the target cache landed).
+    pub(super) cached_rr_targets: LocalCell<Option<(u64, Vec<Arc<DirectIoState>>)>>,
     /// Identity -> slot index for ROUTER outbound.
     pub(super) identity_to_slot: RwLock<FxHashMap<Bytes, usize>>,
     /// `connection_id` -> peer identity for the recv path.
@@ -366,7 +372,7 @@ impl SocketInner {
                 peer_count: out_peer_count.clone(),
                 inproc_count: AtomicUsize::new(0),
                 cached_route: Mutex::new(None),
-                cached_rr_targets: Mutex::new(None),
+                cached_rr_targets: LocalCell::new(None),
                 identity_to_slot: RwLock::new(FxHashMap::default()),
                 conn_id_to_identity: RwLock::new(FxHashMap::default()),
                 rr_index: AtomicUsize::new(0),

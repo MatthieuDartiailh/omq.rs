@@ -98,14 +98,14 @@ impl Socket {
     /// inside each `DirectIoState`, checked by `try_direct_encode`, so the
     /// cache stays correct across handshake completion; only peer
     /// add/remove (which bumps `generation`) rebuilds it.
-    fn try_direct_round_robin(&self, msg: &Message) -> Result<Option<bool>> {
+    pub(super) fn try_direct_round_robin(&self, msg: &Message) -> Result<Option<bool>> {
         let inner = self.inner();
         let cur_gen = inner.routing.generation.load(Ordering::Acquire);
-        let mut cache = inner
-            .routing
-            .cached_rr_targets
-            .lock()
-            .expect("cached_rr_targets lock");
+        // `LocalCell`: single-thread interior mutability, no lock. The
+        // `&mut` borrow lives only for this sync function (no `.await`
+        // inside), so the exclusive access is sound; the caller does any
+        // `yield_now` after we return.
+        let cache = inner.routing.cached_rr_targets.get();
         if cache.as_ref().map(|(g, _)| *g) != Some(cur_gen) {
             let peers = inner.routing.peers.read().expect("peers lock");
             let keys = inner.routing.peer_keys.read().expect("peer_keys lock");
@@ -173,13 +173,7 @@ impl Socket {
                 Some(false) => return Ok(()),
                 None => {}
             }
-            let stx = inner
-                .shared_send_tx
-                .read()
-                .expect("shared_send_tx lock")
-                .clone()
-                .ok_or(Error::Closed)?;
-            return stx.send_async(msg).await;
+            return self.send_rr_shared(msg).await;
         }
 
         // Single-peer / inproc path: reuse the cached route when the peer
@@ -245,6 +239,20 @@ impl Socket {
     /// so `try_send` always has room after the drain. Safe without locks
     /// in compio's cooperative single-threaded runtime: no `.await`
     /// between the drain and the send means no other task can interpose.
+    /// Submit `msg` to the shared work-stealing queue (the multi-peer
+    /// round-robin fallback when no peer accepted a direct-encode). Async
+    /// because the queue applies `send_hwm` backpressure when full.
+    pub(super) async fn send_rr_shared(&self, msg: Message) -> Result<()> {
+        let stx = self
+            .inner()
+            .shared_send_tx
+            .read()
+            .expect("shared_send_tx lock")
+            .clone()
+            .ok_or(Error::Closed)?;
+        stx.send_async(msg).await
+    }
+
     fn conflate_shared_queue_send(&self, msg: Message) -> Result<()> {
         let inner = self.inner();
         let stx = inner

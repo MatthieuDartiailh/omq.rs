@@ -276,6 +276,34 @@ impl Socket {
                 return Ok(());
             }
         }
+        // Multi-peer wire round-robin fast path: round-robin
+        // direct-encode across the cached wire targets, mirroring the
+        // single-peer fast path above. Uses a `LocalCell` target cache
+        // (no Mutex) and stays inline in `send` (no async
+        // `send_round_robin` frame). Conflate and any inproc peer fall
+        // through to the general dispatch. On `None` (every peer at HWM
+        // or mid-handshake) we hand off to the shared work-stealing
+        // queue, which preserves `send_hwm` backpressure.
+        if matches!(
+            st,
+            SocketType::Push | SocketType::Dealer | SocketType::Channel
+        ) && !pre_send_needs_type_state(st)
+            && !self.inner().options.conflate
+        {
+            let inner = self.inner();
+            if inner.routing.peer_count.load(Ordering::Acquire) > 1
+                && inner.routing.inproc_count.load(Ordering::Relaxed) == 0
+            {
+                match self.try_direct_round_robin(&msg)? {
+                    Some(true) => {
+                        crate::yield_now().await;
+                        return Ok(());
+                    }
+                    Some(false) => return Ok(()),
+                    None => return self.send_rr_shared(msg).await,
+                }
+            }
+        }
         // TypeState's pre_send is a no-op for round-robin / fan-out
         // socket types - only REQ / REP / draft single-frame types
         // touch it. Skip the mutex acquisition entirely when not
