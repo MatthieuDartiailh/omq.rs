@@ -134,6 +134,33 @@ fn crossbeam_bounded<T: Copy + Send + 'static>(cap: usize, val: T) -> f64 {
     received as f64 / start.elapsed().as_secs_f64()
 }
 
+fn flume_bounded<T: Copy + Send + 'static>(cap: usize, val: T) -> f64 {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = flume::bounded::<T>(cap);
+
+    let stop2 = stop.clone();
+    let sender = thread::spawn(move || {
+        while !stop2.load(Ordering::Relaxed) {
+            if tx.try_send(val).is_err() {
+                thread::yield_now();
+            }
+        }
+    });
+
+    let start = Instant::now();
+    let mut received = 0u64;
+    while start.elapsed() < DURATION {
+        match rx.try_recv() {
+            Ok(_) => received += 1,
+            Err(_) => thread::yield_now(),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    sender.join().unwrap();
+
+    received as f64 / start.elapsed().as_secs_f64()
+}
+
 fn run_suite<T: Copy + Send + 'static>(label: &str, cap: usize, batch: usize, val: T) {
     println!("--- {label} ---");
 
@@ -159,6 +186,9 @@ fn run_suite<T: Copy + Send + 'static>(label: &str, cap: usize, batch: usize, va
 
     let r = crossbeam_bounded(cap, val);
     println!("  crossbeam bounded          {:>7.1}M items/s", m(r));
+
+    let r = flume_bounded(cap, val);
+    println!("  flume bounded              {:>7.1}M items/s", m(r));
 
     println!();
 }
