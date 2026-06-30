@@ -23,7 +23,7 @@ use std::mem::MaybeUninit;
 use compat::UnsafeCellExt;
 use compat::{Arc, AtomicBool, AtomicUsize, Ordering, UnsafeCell};
 
-#[repr(align(64))]
+#[repr(align(128))]
 pub(crate) struct Padded<T>(pub(crate) T);
 
 pub(crate) struct Ring<T> {
