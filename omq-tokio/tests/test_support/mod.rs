@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
-use omq_tokio::{Endpoint, MonitorEvent, Socket};
+use omq_tokio::{Endpoint, MonitorEvent, MonitorStream, Socket};
 
 pub fn tcp_loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -28,6 +28,10 @@ pub async fn bind_loopback(sock: &Socket) -> u16 {
 
 pub async fn wait_for_handshake(sock: &Socket) {
     let mut mon = sock.monitor();
+    wait_for_handshake_on(&mut mon).await;
+}
+
+pub async fn wait_for_handshake_on(mon: &mut MonitorStream) {
     let fut = async {
         loop {
             match mon.recv().await {

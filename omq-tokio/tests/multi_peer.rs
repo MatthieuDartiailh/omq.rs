@@ -85,9 +85,12 @@ async fn push_distributes_fairly_over_tcp() {
     let pulls: Vec<Socket> = (0..N)
         .map(|_| Socket::new(SocketType::Pull, Options::default()))
         .collect();
+    let mut monitors: Vec<_> = pulls.iter().map(Socket::monitor).collect();
     for p in &pulls {
         p.connect(test_support::tcp_loopback(port)).await.unwrap();
-        test_support::wait_for_handshake(p).await;
+    }
+    for mon in &mut monitors {
+        test_support::wait_for_handshake_on(mon).await;
     }
 
     // Spawn concurrent drainers BEFORE sending so the push side stays hot.
