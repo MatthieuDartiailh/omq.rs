@@ -162,12 +162,17 @@ impl<T> Ring<T> {
     /// exclusive access (i.e. in a `Drop` impl or when no concurrent
     /// readers/writers exist).
     ///
-    /// Idempotent: it advances `head` to `flush` as it drains, so a second
-    /// call (e.g. `Ring::drop` running after an async wrapper already
-    /// drained) sees an empty range and cannot double-drop.
+    /// Idempotent: it advances `head` to `flush` before draining, so a
+    /// second call (e.g. `Ring::drop` running after an async wrapper
+    /// already drained) sees an empty range and cannot double-drop.
+    /// If a `T::drop` panics mid-loop, items past the panicking one are
+    /// leaked rather than double-dropped.
     pub(crate) fn drop_remaining(&mut self) {
         let head = self.head.0.load(Ordering::Relaxed);
         let flush = self.flush.0.load(Ordering::Relaxed);
+        // Advance head before the loop so a panicking T::drop cannot
+        // cause a second call to re-drop the same items.
+        self.head.0.store(flush, Ordering::Relaxed);
         for i in head..flush {
             // SAFETY: &mut self guarantees exclusive access. Slots
             // [head..flush] were written by the producer and flushed.
@@ -175,7 +180,6 @@ impl<T> Ring<T> {
                 (*ptr).assume_init_drop();
             });
         }
-        self.head.0.store(flush, Ordering::Relaxed);
     }
 }
 
@@ -528,6 +532,39 @@ mod tests {
         drop(p);
         drop(c);
         assert_eq!(DROPS.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn drop_remaining_panicking_drop() {
+        use std::sync::atomic::AtomicUsize;
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        #[derive(Debug)]
+        struct PanicOnDrop(bool);
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::Relaxed);
+                if self.0 {
+                    self.0 = false;
+                    panic!("intentional panic in drop");
+                }
+            }
+        }
+
+        DROPS.store(0, Ordering::Relaxed);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (mut p, _c) = spsc::<PanicOnDrop>(4);
+            p.push(PanicOnDrop(false)).unwrap();
+            p.push(PanicOnDrop(true)).unwrap(); // this one panics
+            p.push(PanicOnDrop(false)).unwrap();
+            p.flush();
+            // Ring::drop runs, calls drop_remaining. Item 1 panics.
+            // Items 0 and 1 are dropped. Item 2 is leaked (not double-dropped).
+        }));
+        assert!(result.is_err());
+        // Item 0 dropped normally, item 1's Drop panicked (but incremented
+        // before panicking), item 2 leaked. Exactly 2 drops.
+        assert_eq!(DROPS.load(Ordering::Relaxed), 2);
     }
 
     #[test]
