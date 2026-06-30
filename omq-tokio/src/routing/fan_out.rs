@@ -5,12 +5,10 @@
 //! into the fan-out arena, then the pre-encoded bytes are pushed into
 //! each matching peer's `EncodedQueue`. The driver flushes to the wire.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
 
 use smallvec::SmallVec;
 
@@ -52,66 +50,8 @@ enum CachedResult {
     Cached {
         targets: Arc<Vec<PeerSend>>,
         encoder: Option<Arc<Mutex<MessageEncoder>>>,
-        all_wire: bool,
     },
     Miss,
-}
-
-#[derive(Debug)]
-pub(crate) struct FanOutArena {
-    eq: Mutex<EncodedQueue>,
-    data_ready: Notify,
-    pending: AtomicBool,
-}
-
-impl FanOutArena {
-    fn new() -> Self {
-        Self {
-            eq: Mutex::new(EncodedQueue::one_shot()),
-            data_ready: Notify::new(),
-            pending: AtomicBool::new(false),
-        }
-    }
-
-    fn drain_to(&self, targets: &[PeerSend], chunks: &mut Vec<Bytes>) {
-        let mut eq = self.eq.lock().unwrap();
-        if eq.is_empty() {
-            self.pending.store(false, Ordering::Relaxed);
-            return;
-        }
-        if eq.has_arena_only()
-            && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET
-        {
-            let frozen = eq.take_arena_bytes();
-            self.pending.store(false, Ordering::Relaxed);
-            drop(eq);
-            for t in targets {
-                if let PeerSend::Wire { slot, .. } = t {
-                    let _ = slot.try_push_pre_encoded_no_signal(&frozen);
-                }
-            }
-            for t in targets {
-                if let PeerSend::Wire { slot, .. } = t {
-                    slot.signal_encoded();
-                }
-            }
-        } else {
-            chunks.clear();
-            eq.drain_into_vec(chunks, 1024);
-            self.pending.store(false, Ordering::Relaxed);
-            drop(eq);
-            for t in targets {
-                if let PeerSend::Wire { slot, .. } = t {
-                    let _ = slot.try_push_encoded(chunks);
-                }
-            }
-        }
-    }
-
-    fn drain_to_targets(&self, targets: &[PeerSend]) {
-        let mut chunks = Vec::new();
-        self.drain_to(targets, &mut chunks);
-    }
 }
 
 #[derive(Debug)]
@@ -122,7 +62,6 @@ pub(crate) struct Submitter {
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
     cached: Mutex<CachedFanOut>,
-    arena: Arc<FanOutArena>,
 }
 
 #[derive(Debug, Default)]
@@ -143,7 +82,6 @@ impl Clone for Submitter {
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
             cached: Mutex::new(CachedFanOut::default()),
-            arena: self.arena.clone(),
         }
     }
 }
@@ -179,11 +117,6 @@ impl Submitter {
         let current = self.generation.load(Ordering::Acquire);
         let mut cached = self.cached.lock().unwrap();
         if cached.generation != current {
-            if cached.all_wire
-                && let Some(ref targets) = cached.all_targets
-            {
-                self.arena.drain_to_targets(targets);
-            }
             let g = self.inner.lock().expect("fanout inner poisoned");
             if g.all_subscribe_all && g.all_targets.len() == 1 && g.fan_out_encoder.is_none() {
                 cached.sole_wire = Some(g.all_targets[0].clone());
@@ -215,7 +148,6 @@ impl Submitter {
             return CachedResult::Cached {
                 targets: targets.clone(),
                 encoder: cached.encoder.clone(),
-                all_wire: cached.all_wire,
             };
         }
         CachedResult::Miss
@@ -238,14 +170,7 @@ impl Submitter {
                     TryEncodeResult::Full => Err(omq_proto::error::TrySendError::Full(forwarded)),
                 };
             }
-            CachedResult::Cached {
-                targets,
-                encoder,
-                all_wire,
-            } => {
-                if all_wire {
-                    self.arena.drain_to_targets(&targets);
-                }
+            CachedResult::Cached { targets, encoder } => {
                 if self.xpub_nodrop && !targets_have_space(&targets) {
                     return Err(omq_proto::error::TrySendError::Full(forwarded));
                 }
@@ -268,11 +193,7 @@ impl Submitter {
 
         match self.try_cached(&forwarded, group.as_deref()) {
             CachedResult::SoleWire(TryEncodeResult::Ok) => return Ok(()),
-            CachedResult::Cached {
-                targets,
-                encoder,
-                all_wire: _,
-            } => {
+            CachedResult::Cached { targets, encoder } => {
                 // Encode once and distribute synchronously on this task via
                 // the thread-local arena (`dispatch_to_targets`), the same
                 // path `try_send` uses. The earlier all-wire fast path
@@ -341,9 +262,6 @@ pub(crate) struct FanOutSend {
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
     xpub_nodrop: bool,
-    arena: Arc<FanOutArena>,
-    pump_cancel: CancellationToken,
-    pump_spawned: bool,
 }
 
 struct FanOutInner {
@@ -421,9 +339,6 @@ impl FanOutSend {
             generation: Arc::new(AtomicU64::new(0)),
             mode,
             xpub_nodrop: options.xpub_nodrop,
-            arena: Arc::new(FanOutArena::new()),
-            pump_cancel: CancellationToken::new(),
-            pump_spawned: false,
         }
     }
 
@@ -439,7 +354,6 @@ impl FanOutSend {
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
             cached: Mutex::new(CachedFanOut::default()),
-            arena: self.arena.clone(),
         }
     }
 
@@ -453,15 +367,6 @@ impl FanOutSend {
 
     #[expect(clippy::needless_pass_by_value)]
     fn add_peer(&mut self, peer_id: u64, handle: DriverHandle, any_groups: bool) {
-        if !self.pump_spawned {
-            self.pump_spawned = true;
-            tokio::spawn(fan_out_pump(
-                self.arena.clone(),
-                self.inner.clone(),
-                self.generation.clone(),
-                self.pump_cancel.child_token(),
-            ));
-        }
         let has_transform = handle.wire_slot.as_ref().is_some_and(|s| s.has_transform);
         let target = PeerSend::from_handle(&handle);
         let mut g = self.inner.lock().expect("fanout inner poisoned");
@@ -533,16 +438,12 @@ impl FanOutSend {
         }
     }
 
-    pub(crate) fn shutdown(&self) {
-        self.pump_cancel.cancel();
-    }
+    // Kept for the SendStrategy enum dispatch; fan-out has no pump task
+    // to cancel since dispatch is inline on the sending task.
+    #[expect(clippy::unused_self)]
+    pub(crate) fn shutdown(&self) {}
 
     pub(crate) fn is_drained(&self) -> bool {
-        let eq = self.arena.eq.lock().unwrap();
-        if !eq.is_empty() {
-            return false;
-        }
-        drop(eq);
         let g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.values().all(|p| p.target.is_empty())
     }
@@ -677,44 +578,4 @@ fn dispatch_to_targets(
 
 fn first_frame_bytes(msg: &Message) -> Bytes {
     msg.part_bytes(0).unwrap_or_default()
-}
-
-async fn fan_out_pump(
-    arena: Arc<FanOutArena>,
-    inner: Arc<Mutex<FanOutInner>>,
-    generation: Arc<AtomicU64>,
-    cancel: CancellationToken,
-) {
-    let mut chunks = Vec::new();
-    let mut cached_gen = 0u64;
-    let mut targets: Vec<PeerSend> = Vec::new();
-    loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                refresh_pump_targets(&inner, &generation, &mut cached_gen, &mut targets);
-                arena.drain_to(&targets, &mut chunks);
-                return;
-            }
-            () = async { arena.data_ready.notified().await } => {
-                let current = generation.load(Ordering::Acquire);
-                if cached_gen != current {
-                    refresh_pump_targets(&inner, &generation, &mut cached_gen, &mut targets);
-                }
-                arena.drain_to(&targets, &mut chunks);
-            }
-        }
-    }
-}
-
-fn refresh_pump_targets(
-    inner: &Mutex<FanOutInner>,
-    generation: &AtomicU64,
-    cached_gen: &mut u64,
-    targets: &mut Vec<PeerSend>,
-) {
-    let g = inner.lock().expect("fanout inner poisoned");
-    targets.clear();
-    targets.extend_from_slice(&g.all_targets);
-    *cached_gen = generation.load(Ordering::Acquire);
 }
