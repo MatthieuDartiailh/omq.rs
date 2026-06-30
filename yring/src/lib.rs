@@ -15,6 +15,9 @@ mod r#async;
 #[cfg(feature = "async")]
 pub use r#async::{AsyncConsumer, AsyncProducer, async_spsc};
 
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("yring requires a 64-bit target (AtomicUsize must not wrap in practice)");
+
 mod compat;
 
 use std::mem::MaybeUninit;
