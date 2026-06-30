@@ -36,10 +36,6 @@ pub(crate) enum FanOutMode {
     Group,
 }
 
-/// Yield to the runtime after encoding this many arena bytes, so a large
-/// fan-out does not starve other tasks on the same thread.
-const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
-
 /// Per-peer copy budget for pre-encoded bytes before yielding.
 const FAN_OUT_COPY_BUDGET: usize = 128 * 1024;
 
@@ -74,28 +70,6 @@ impl FanOutArena {
             eq: Mutex::new(EncodedQueue::one_shot()),
             data_ready: Notify::new(),
             pending: AtomicBool::new(false),
-        }
-    }
-
-    fn encode_and_signal(&self, msg: &Message, encoder: Option<&Mutex<MessageEncoder>>) {
-        let mut eq = self.eq.lock().unwrap();
-        if let Some(enc_mtx) = encoder {
-            let transformed = {
-                let mut enc = enc_mtx.lock().expect("fan_out_encoder poisoned");
-                match enc.encode(msg) {
-                    Ok(t) => t,
-                    Err(_) => return,
-                }
-            };
-            for wire_msg in &transformed {
-                eq.encode_auto(wire_msg);
-            }
-        } else {
-            eq.encode_auto(msg);
-        }
-        drop(eq);
-        if !self.pending.swap(true, Ordering::Release) {
-            self.data_ready.notify_one();
         }
     }
 
@@ -297,20 +271,22 @@ impl Submitter {
             CachedResult::Cached {
                 targets,
                 encoder,
-                all_wire,
+                all_wire: _,
             } => {
-                let interval;
-                if all_wire && !self.xpub_nodrop {
-                    self.arena.encode_and_signal(&forwarded, encoder.as_deref());
-                    let wire_size = forwarded.byte_len() + 10;
-                    interval = (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32;
-                } else {
-                    if self.xpub_nodrop {
-                        wait_for_targets_space(&targets).await;
-                    }
-                    dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
-                    interval = yield_interval(targets.len());
+                // Encode once and distribute synchronously on this task via
+                // the thread-local arena (`dispatch_to_targets`), the same
+                // path `try_send` uses. The earlier all-wire fast path
+                // handed the message to a single `fan_out_pump` task through
+                // `FanOutArena.eq`; under the multi-thread runtime that put
+                // the send task and the pump task in a per-message ping-pong
+                // on that mutex plus a cross-thread `Notify` wakeup, burning
+                // CPU without adding parallelism (distribution stays serial
+                // on the one pump). Inline dispatch removes both hops.
+                if self.xpub_nodrop {
+                    wait_for_targets_space(&targets).await;
                 }
+                dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
+                let interval = yield_interval(targets.len());
                 if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
                     tokio::task::yield_now().await;
                 }

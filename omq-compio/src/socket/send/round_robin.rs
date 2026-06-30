@@ -128,12 +128,9 @@ impl Socket {
         for _ in 0..n {
             let i = inner.routing.rr_index.fetch_add(1, Ordering::Relaxed) % n;
             let state = &targets[i];
-            if try_direct_encode(msg, state)? {
+            if let Some(qbytes) = try_direct_encode(msg, state)? {
                 let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
-                    || state
-                        .encoded_queue
-                        .try_borrow_mut()
-                        .is_some_and(|eq| eq.total_bytes() >= DIRECT_ENCODE_YIELD_BYTES);
+                    || qbytes >= DIRECT_ENCODE_YIELD_BYTES;
                 if backlogged {
                     state.direct_msg_count.set(0);
                 }
@@ -324,13 +321,10 @@ impl Socket {
             PeerOut::Wire(handle) if peer_count == 1 => {
                 // Fast path: encode directly into the codec buffer.
                 if let Some(state) = direct
-                    && try_direct_encode(&msg, &state)?
+                    && let Some(qbytes) = try_direct_encode(&msg, &state)?
                 {
                     let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
-                        || state
-                            .encoded_queue
-                            .try_borrow_mut()
-                            .is_some_and(|eq| eq.total_bytes() >= DIRECT_ENCODE_YIELD_BYTES);
+                        || qbytes >= DIRECT_ENCODE_YIELD_BYTES;
                     if backlogged {
                         state.direct_msg_count.set(0);
                     }

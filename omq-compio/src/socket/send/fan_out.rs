@@ -88,16 +88,15 @@ impl Socket {
                             crate::yield_now().await;
                         }
                         fan_out_encode_dispatch(dio_cache, targets, &msg);
-                    } else if !try_direct_encode(&msg, &dio_cache[0])? {
+                    } else if let Some(qbytes) = try_direct_encode(&msg, &dio_cache[0])? {
+                        if dio_cache[0].direct_msg_count.get() >= super::DIRECT_ENCODE_YIELD_MSGS
+                            || qbytes >= super::DIRECT_ENCODE_YIELD_BYTES
+                        {
+                            dio_cache[0].direct_msg_count.set(0);
+                            crate::yield_now().await;
+                        }
+                    } else {
                         let _ = targets[0].send(msg.clone()).await;
-                    } else if dio_cache[0].direct_msg_count.get() >= super::DIRECT_ENCODE_YIELD_MSGS
-                        || dio_cache[0]
-                            .encoded_queue
-                            .try_borrow_mut()
-                            .is_some_and(|eq| eq.total_bytes() >= super::DIRECT_ENCODE_YIELD_BYTES)
-                    {
-                        dio_cache[0].direct_msg_count.set(0);
-                        crate::yield_now().await;
                     }
                     if count.is_multiple_of(yield_interval(&msg)) {
                         crate::yield_now().await;
@@ -158,7 +157,11 @@ impl Socket {
                 if dio_cache.len() == targets.len() {
                     if targets.len() > 1 {
                         fan_out_encode_dispatch(dio_cache, targets, msg);
-                    } else if !try_direct_encode(msg, &dio_cache[0]).unwrap_or(false) {
+                    } else if try_direct_encode(msg, &dio_cache[0])
+                        .ok()
+                        .flatten()
+                        .is_none()
+                    {
                         let _ = targets[0].try_send_immediate(msg.clone());
                     }
                     return;
