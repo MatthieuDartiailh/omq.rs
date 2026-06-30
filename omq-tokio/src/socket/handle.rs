@@ -529,7 +529,11 @@ impl Socket {
                 if self.try_send_wire(&msg) {
                     return Ok(());
                 }
-                self.send_round_robin_wire(msg).await
+                if self.inner.wire_slot.lock().expect("wire_slot").is_some() {
+                    self.send_wire_slow(msg).await
+                } else {
+                    self.send_round_robin_wire(msg).await
+                }
             }
         }
     }

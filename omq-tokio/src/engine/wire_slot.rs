@@ -234,6 +234,10 @@ mod tests {
             None,
             omq_proto::encoded_queue::ARENA_THRESHOLD,
             WIRE_SLOT_CAP_DEFAULT,
+            #[cfg(feature = "ws")]
+            false,
+            #[cfg(feature = "ws")]
+            false,
         );
         slot.handshake_done.store(true, Ordering::Release);
         let msg = Message::from("x");
