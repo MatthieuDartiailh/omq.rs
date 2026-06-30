@@ -404,8 +404,11 @@ pub(crate) async fn run_connection(
         // Clear the driver_in_select flag at the top of every iteration.
         // The flag is set again just before we park in select_biased!
         // so the fast-path sender can tell whether a transmit_ready
-        // notification is worth issuing.
+        // notification is worth issuing. Also clear transmit_notified so
+        // the next park cycle accepts one fresh notify (the coalescing
+        // flag in signal_encoded).
         state.driver_in_select.set(false);
+        state.transmit_notified.set(false);
 
         if !ls.closing && state.socket_closing.get() {
             ls.closing = true;
