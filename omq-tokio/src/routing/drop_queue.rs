@@ -182,10 +182,7 @@ impl QueueReceiver {
     /// others, but always at least 1.
     pub(crate) fn batch_limit(&self) -> usize {
         let peers = self.peer_count.load(std::sync::atomic::Ordering::Relaxed);
-        if peers <= 1 {
-            return super::SHARED_MAX_BATCH_MSGS;
-        }
-        (self.inner.queue.len() / peers).clamp(1, super::SHARED_MAX_BATCH_MSGS)
+        omq_proto::flow::fair_share(self.inner.queue.len(), peers, super::SHARED_MAX_BATCH_MSGS)
     }
 
     pub(crate) fn set_peer_count(&self, n: usize) {
