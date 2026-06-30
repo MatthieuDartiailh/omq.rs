@@ -123,10 +123,7 @@ impl SharedQueueReceiver {
     /// others, but always at least 1.
     pub(crate) fn batch_limit(&self) -> usize {
         let peers = self.peer_count.load(std::sync::atomic::Ordering::Relaxed);
-        if peers <= 1 {
-            return MAX_DRAIN;
-        }
-        (self.inner.queue.len() / peers).clamp(1, MAX_DRAIN)
+        omq_proto::flow::fair_share(self.inner.queue.len(), peers, MAX_DRAIN)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

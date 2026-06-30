@@ -49,42 +49,56 @@ use super::handle::Socket;
 pub(super) const DIRECT_CAP: usize = 512 * 1024;
 pub(super) const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
 
-/// Yield to the runtime when this many direct-encodes have accumulated
-/// without the driver fully flushing the `EncodedQueue`. Prevents
-/// driver starvation under sustained single-peer send bursts: the
-/// driver only runs when the sender yields, so a tight encode loop
-/// can starve the flush path. The threshold is per-peer, so with N
-/// peers each hitting this limit, the runtime gets N yield points per
-/// pass through the send loop.
-const DIRECT_ENCODE_YIELD_BACKLOG: usize = 4;
+/// Yield to the runtime when unflushed direct-encodes exceed these
+/// thresholds. Prevents driver starvation under sustained single-peer
+/// send bursts: the driver only runs when the sender yields, so a
+/// tight encode loop can starve the flush path.
+pub(super) const DIRECT_ENCODE_YIELD_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const DIRECT_ENCODE_YIELD_MSGS: usize = 256;
 
-pub(super) fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
+/// Encode `msg` directly into the peer's `EncodedQueue`, bypassing the
+/// flume channel. Returns `Some(total_bytes)` (the queue's post-encode
+/// byte count) on success, `None` when the peer can't take the direct
+/// path (crypto, mid-handshake, queue borrowed, or at the capacity cap).
+///
+/// The returned byte count lets the caller make the
+/// `DIRECT_ENCODE_YIELD_BYTES` backlog decision without re-borrowing the
+/// queue: we already hold the borrow here, so reading `total_bytes()`
+/// once and returning it removes a second `try_borrow_mut()` from every
+/// direct send on the hot path.
+#[inline]
+pub(super) fn try_direct_encode(
+    msg: &Message,
+    state: &Arc<DirectIoState>,
+) -> Result<Option<usize>> {
     // Crypto connections must go through the codec's send_message.
     if state.uses_crypto {
-        return Ok(false);
+        return Ok(None);
     }
 
     if !state.has_transform {
         if !state.handshake_done.get() {
-            return Ok(false);
+            return Ok(None);
         }
         let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
-            return Ok(false);
+            return Ok(None);
         };
         if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
-            return Ok(false);
+            return Ok(None);
         }
         #[cfg(feature = "ws")]
         if state.is_ws {
             eq.encode_ws(msg, state.ws_masked);
+            let qbytes = eq.total_bytes();
             drop(eq);
             state.signal_encoded();
-            return Ok(true);
+            return Ok(Some(qbytes));
         }
         eq.encode_auto(msg);
+        let qbytes = eq.total_bytes();
         drop(eq);
         state.signal_encoded();
-        return Ok(true);
+        return Ok(Some(qbytes));
     }
 
     #[cfg(feature = "ws")]
@@ -97,22 +111,23 @@ pub(super) fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Re
         && msg.iter().all(|b| b.len() < threshold)
     {
         let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
-            return Ok(false);
+            return Ok(None);
         };
         if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
-            return Ok(false);
+            return Ok(None);
         }
         eq.encode_prefixed_auto(sentinel, msg);
+        let qbytes = eq.total_bytes();
         drop(eq);
         state.signal_encoded();
-        return Ok(true);
+        return Ok(Some(qbytes));
     }
 
     let Some(mut enc_guard) = state.encoder.try_lock() else {
-        return Ok(false);
+        return Ok(None);
     };
     if !state.handshake_done.get() {
-        return Ok(false);
+        return Ok(None);
     }
     let enc = enc_guard
         .as_mut()
@@ -121,10 +136,10 @@ pub(super) fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Re
     drop(enc_guard);
 
     let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
-        return Ok(false);
+        return Ok(None);
     };
     if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
-        return Ok(false);
+        return Ok(None);
     }
     for wire in &wires {
         #[cfg(feature = "ws")]
@@ -134,9 +149,10 @@ pub(super) fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Re
         }
         eq.encode_auto(wire);
     }
+    let qbytes = eq.total_bytes();
     drop(eq);
     state.signal_encoded();
-    Ok(true)
+    Ok(Some(qbytes))
 }
 
 /// Push pre-encoded ZMTP chunks directly into a peer's `EncodedQueue`,
@@ -264,12 +280,43 @@ impl Socket {
             let dio = inner.direct_io.send.get();
             if let Some((state, cached_gen)) = dio
                 && *cached_gen == inner.routing.generation.load(Ordering::Acquire)
-                && try_direct_encode(&msg, state)?
+                && let Some(qbytes) = try_direct_encode(&msg, state)?
             {
-                if state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_BACKLOG {
+                if state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
+                    || qbytes >= DIRECT_ENCODE_YIELD_BYTES
+                {
+                    state.direct_msg_count.set(0);
                     crate::yield_now().await;
                 }
                 return Ok(());
+            }
+        }
+        // Multi-peer wire round-robin fast path: round-robin
+        // direct-encode across the cached wire targets, mirroring the
+        // single-peer fast path above. Uses a `LocalCell` target cache
+        // (no Mutex) and stays inline in `send` (no async
+        // `send_round_robin` frame). Conflate and any inproc peer fall
+        // through to the general dispatch. On `None` (every peer at HWM
+        // or mid-handshake) we hand off to the shared work-stealing
+        // queue, which preserves `send_hwm` backpressure.
+        if matches!(
+            st,
+            SocketType::Push | SocketType::Dealer | SocketType::Channel
+        ) && !pre_send_needs_type_state(st)
+            && !self.inner().options.conflate
+        {
+            let inner = self.inner();
+            if inner.routing.peer_count.load(Ordering::Acquire) > 1
+                && inner.routing.inproc_count.load(Ordering::Relaxed) == 0
+            {
+                match self.try_direct_round_robin(&msg)? {
+                    Some(true) => {
+                        crate::yield_now().await;
+                        return Ok(());
+                    }
+                    Some(false) => return Ok(()),
+                    None => return self.send_rr_shared(msg).await,
+                }
             }
         }
         // TypeState's pre_send is a no-op for round-robin / fan-out

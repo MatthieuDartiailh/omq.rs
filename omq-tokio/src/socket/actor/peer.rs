@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use super::{
     AnyConn, AnyStream, ConnectionConfig, ConnectionDriver, DisconnectReason, DriverConfig,
@@ -148,14 +149,38 @@ impl SocketDriver {
             return;
         }
         let mut guard = self.wire_slot.lock().expect("wire_slot");
+        let mut rr = self.rr_slots.slots.lock().expect("rr_slots");
+        rr.clear();
         if self.peers.len() == 1 {
             let peer = self.peers.values().next().unwrap();
-            if let Some(ref slot) = peer.handle.wire_slot {
+            if let Some(ref slot) = peer.handle.wire_slot
+                && slot.handshake_done.load(Ordering::Acquire)
+            {
                 *guard = Some(slot.clone());
                 return;
             }
         }
         *guard = None;
+        // Multi-peer round-robin: populate per-peer wire slots so the handle
+        // dispatches directly to one peer at a time. Only when every peer is
+        // a wire peer (no inproc) - inproc peers have no wire slot and would
+        // be starved if the round-robin only cycled wire slots. Mixed or
+        // inproc-only sets fall back to the shared queue (rr left empty).
+        if matches!(cat, SendCategory::RoundRobin)
+            && self.peers.len() > 1
+            && self.peers.values().all(|p| {
+                p.handle
+                    .wire_slot
+                    .as_ref()
+                    .is_some_and(|slot| slot.handshake_done.load(Ordering::Acquire))
+            })
+        {
+            for p in self.peers.values() {
+                if let Some(ref slot) = p.handle.wire_slot {
+                    rr.push(slot.clone());
+                }
+            }
+        }
     }
 
     fn evict_peer_for_handover(&mut self, peer_id: u64) {
@@ -361,16 +386,37 @@ impl SocketDriver {
         // skipping the actor's event loop.
         let driver = if can_bypass_actor_recv(self.socket_type) {
             let can_use_yring = !matches!(self.socket_type, SocketType::Req);
-            let from_slot = if can_use_yring {
-                self.recv_sink_config
+            if can_use_yring {
+                let from_slot = self
+                    .recv_sink_config
                     .as_ref()
-                    .and_then(|cfg| cfg.slot.lock().unwrap().take())
+                    .and_then(|cfg| cfg.slot.lock().unwrap().take());
+                if let Some(sink) = from_slot {
+                    driver.with_recv_sink(sink)
+                } else {
+                    let cap = self.options.recv_hwm.unwrap_or(1024).max(16) as usize;
+                    let (prod, cons) = yring::spsc(cap);
+                    let recv_notify = self.spsc.recv_notify.clone();
+                    let space = std::sync::Arc::new(tokio::sync::Notify::new());
+                    let sink = crate::engine::RecvSink::Yring(crate::engine::YringSink {
+                        producer: prod,
+                        signal: Box::new(move || recv_notify.notify_one()),
+                        space: space.clone(),
+                    });
+                    let entry = std::sync::Arc::new(crate::socket::handle::TcpYringConsumer {
+                        consumer: std::sync::Mutex::new(cons),
+                        space,
+                        peer_id,
+                    });
+                    self.spsc.tcp_consumers.write().unwrap().push(entry);
+                    self.spsc
+                        .consumer_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Release);
+                    self.spsc.activated.notify_one();
+                    driver.with_recv_sink(sink)
+                }
             } else {
-                None
-            };
-            match from_slot {
-                Some(sink) => driver.with_recv_sink(sink),
-                None => driver.with_recv_direct(self.recv_tx.clone()),
+                driver.with_recv_direct(self.recv_tx.clone())
             }
         } else {
             driver

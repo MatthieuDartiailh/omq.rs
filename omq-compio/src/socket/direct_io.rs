@@ -34,6 +34,13 @@ pub(crate) struct DirectIoState {
     pub(crate) encoder: async_lock::Mutex<Option<MessageEncoder>>,
     pub(crate) encoded_queue: EncodedQueueCell,
     pub(crate) driver_in_select: Cell<bool>,
+    /// Set when a sender has already issued a `transmit_ready` notify for
+    /// the driver's current park. Coalesces the per-message notify: while
+    /// the cooperative driver is parked, a sender burst would otherwise
+    /// call `Event::notify` (an internal-lock op) on every message even
+    /// though the first wakeup already arms the driver. Reset by the
+    /// driver at the top of its loop once it is running again.
+    pub(crate) transmit_notified: Cell<bool>,
     pub(crate) direct_msg_count: Cell<usize>,
     pub(crate) socket_closing: Cell<bool>,
     pub(crate) large_recv_pending: AtomicUsize,
@@ -222,7 +229,12 @@ impl DirectIoState {
     #[inline]
     pub(crate) fn signal_encoded(&self) {
         self.direct_msg_count.set(self.direct_msg_count.get() + 1);
-        if self.driver_in_select.get() {
+        // Coalesce: only the first sender after the driver parks needs to
+        // wake it. Subsequent messages in the same cooperative burst skip
+        // the event_listener notify (an internal-lock op, ~16% of the
+        // small-message fan-out send path per perf). The driver resets
+        // `transmit_notified` when it resumes.
+        if self.driver_in_select.get() && !self.transmit_notified.replace(true) {
             self.transmit_ready.notify(1);
         }
     }
@@ -274,6 +286,7 @@ impl DirectIoState {
             encoder: async_lock::Mutex::new(encoder),
             encoded_queue: EncodedQueueCell::new(),
             driver_in_select: Cell::new(false),
+            transmit_notified: Cell::new(false),
             direct_msg_count: Cell::new(0),
             socket_closing: Cell::new(false),
             large_recv_pending: AtomicUsize::new(0),

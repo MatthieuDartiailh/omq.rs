@@ -1,7 +1,10 @@
 //! Multi-peer routing tests for omq-compio:
 //! - PUSH→3 PULLs work-stealing distribution.
+//! - PUSH→3 PULLs round-robin fairness over TCP (wire path).
 //! - 3 PUSHes→PULL fair-queue.
 //! - PUB→3 SUBs fan-out with subscription filtering.
+
+mod test_support;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -64,6 +67,64 @@ async fn push_distributes_across_three_pulls() {
         assert!(
             n > N / 20,
             "pull got only {n} / {N}; distribution too skewed"
+        );
+    }
+}
+
+#[compio::test]
+async fn push_distributes_fairly_over_tcp() {
+    // Regression guard for multi-peer PUSH round-robin on the WIRE path.
+    // The inproc test above never exercised it: previously every wire
+    // peer work-stole from a single shared queue, which let one
+    // connection driver monopolize the stream and starve the others.
+    // Use TCP so the wire send path (direct round-robin) is hit.
+    const N: usize = 3;
+    const M: usize = 600;
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    let port = test_support::bind_loopback(&push).await;
+
+    let pulls: Vec<Socket> = (0..N)
+        .map(|_| Socket::new(SocketType::Pull, Options::default()))
+        .collect();
+    for p in &pulls {
+        p.connect(test_support::tcp_loopback(port)).await.unwrap();
+        test_support::wait_for_handshake(p).await;
+    }
+
+    for i in 0..M {
+        push.send(Message::single(format!("m{i}"))).await.unwrap();
+    }
+
+    let counts: Vec<Arc<AtomicUsize>> = (0..N).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    let mut handles = Vec::new();
+    for (p, c) in pulls.into_iter().zip(counts.iter().cloned()) {
+        handles.push(compio::runtime::spawn(async move {
+            loop {
+                match compio::time::timeout(Duration::from_millis(300), p.recv()).await {
+                    Ok(Ok(_)) => {
+                        c.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => return,
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let total: usize = counts.iter().map(|c| c.load(Ordering::SeqCst)).sum();
+    assert_eq!(total, M, "every message must reach exactly one pull");
+    // No peer may be starved: direct round-robin splits evenly, a shared-
+    // queue regression would let one driver monopolize. A 1/4 fair-share
+    // floor catches starvation without flaking on scheduling jitter.
+    let fair_share = M / N;
+    for (i, c) in counts.iter().enumerate() {
+        let n = c.load(Ordering::SeqCst);
+        assert!(
+            n >= fair_share / 4,
+            "pull {i} got {n} / {M} (fair share {fair_share}); a peer is being starved"
         );
     }
 }

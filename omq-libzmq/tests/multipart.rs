@@ -68,6 +68,40 @@ fn msg_init_size() {
     zmq_msg_close(m.0.as_mut_ptr().cast());
 }
 
+#[test]
+fn msg_move_and_copy_self_alias_are_noops() {
+    let payload = b"alias";
+    let mut m = ZmqMsg([0u8; 64]);
+    assert_eq!(
+        zmq_msg_init_buffer(
+            m.0.as_mut_ptr().cast(),
+            payload.as_ptr().cast(),
+            payload.len()
+        ),
+        0
+    );
+
+    assert_eq!(
+        zmq_msg_move(m.0.as_mut_ptr().cast(), m.0.as_mut_ptr().cast()),
+        0
+    );
+    assert_eq!(zmq_msg_size(m.0.as_ptr().cast()), payload.len());
+    let data = zmq_msg_data(m.0.as_mut_ptr().cast());
+    let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), payload.len()) };
+    assert_eq!(slice, payload);
+
+    assert_eq!(
+        zmq_msg_copy(m.0.as_mut_ptr().cast(), m.0.as_ptr().cast()),
+        0
+    );
+    assert_eq!(zmq_msg_size(m.0.as_ptr().cast()), payload.len());
+    let data = zmq_msg_data(m.0.as_mut_ptr().cast());
+    let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), payload.len()) };
+    assert_eq!(slice, payload);
+
+    zmq_msg_close(m.0.as_mut_ptr().cast());
+}
+
 /// `zmq_msg_init_buffer` copies the buffer
 #[test]
 fn msg_init_buffer() {

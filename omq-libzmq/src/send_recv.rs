@@ -2,8 +2,6 @@
 //!
 //! Send: direct `Handle::block_on(socket.send())`, no relay.
 //! Recv: bypass ring -> yring consumers -> block on `RecvNotify`.
-#![expect(clippy::cast_possible_wrap)]
-
 use std::ffi::c_int;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +12,10 @@ use crate::consts::{ZMQ_DONTWAIT, ZMQ_SNDMORE};
 use crate::error::{ETERM, fail};
 use crate::notify::NotifyHandle;
 use crate::socket::OmqSocket;
+
+fn checked_c_int_len(n: usize) -> Result<c_int, c_int> {
+    c_int::try_from(n).map_err(|_| libc::EMSGSIZE)
+}
 
 /// Clear a bypass option if the peer has closed the pipe.
 ///
@@ -72,6 +74,35 @@ fn block_recv<T>(
     }
 }
 
+fn block_recv_result<T>(
+    sock: &OmqSocket,
+    rcvtimeo: i64,
+    mut try_pop: impl FnMut() -> Result<Option<T>, c_int>,
+) -> Result<T, c_int> {
+    if rcvtimeo > 0 {
+        let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(libc::EAGAIN);
+            }
+            let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
+            let recv_notify = sock.notify.recv_notifier();
+            let _ = recv_notify.wait_for_readable(ms);
+            if let Some(val) = try_pop()? {
+                return Ok(val);
+            }
+        }
+    }
+    loop {
+        let recv_notify = sock.notify.recv_notifier();
+        let _ = recv_notify.wait_for_readable(-1);
+        if let Some(val) = try_pop()? {
+            return Ok(val);
+        }
+    }
+}
+
 /// Core send dispatch. Takes a raw slice to avoid heap-allocating a `Bytes`
 /// on the hot path: single-part messages ≤55 bytes use `Message`'s inline
 /// storage (zero alloc). Only SNDMORE accumulation and XSUB subscription
@@ -79,6 +110,9 @@ fn block_recv<T>(
 #[expect(clippy::too_many_lines)]
 pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_int {
     let len = data.len();
+    let Ok(ret_len) = checked_c_int_len(len) else {
+        return fail(libc::EMSGSIZE);
+    };
 
     let max = sock
         .ctx
@@ -109,7 +143,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
                 }
             });
         return match result {
-            Ok(Ok(())) => len as c_int,
+            Ok(Ok(())) => ret_len,
             Ok(Err(ref e)) => fail(crate::error::map_omq_err(e)),
             Err(()) => fail(ETERM),
         };
@@ -131,13 +165,13 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
             if dontwait {
                 return if bypass.push(data) {
-                    len as c_int
+                    ret_len
                 } else {
                     fail(libc::EAGAIN)
                 };
             }
             bypass.push_blocking(data);
-            return len as c_int;
+            return ret_len;
         }
     }
 
@@ -147,7 +181,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     // If SNDMORE: buffer and return immediately.
     if flags & ZMQ_SNDMORE != 0 {
         accum.push(Bytes::copy_from_slice(data));
-        return len as c_int;
+        return ret_len;
     }
 
     // Drain accumulated parts + current frame into one message.
@@ -176,7 +210,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
                 *bytes = 0;
                 std::thread::yield_now();
             }
-            len as c_int
+            ret_len
         }
         Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => fail(ETERM),
         Err(omq_tokio::TrySendError::Full(_)) if dontwait => fail(libc::EAGAIN),
@@ -186,7 +220,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             for _ in 0..64 {
                 std::thread::yield_now();
                 match inner.try_send(msg) {
-                    Ok(()) => return len as c_int,
+                    Ok(()) => return ret_len,
                     Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => {
                         return fail(ETERM);
                     }
@@ -198,13 +232,13 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             if sndtimeo > 0 {
                 let timeout = Duration::from_millis(sndtimeo as u64);
                 match handle.block_on(async { tokio::time::timeout(timeout, s.send(msg)).await }) {
-                    Ok(Ok(())) => len as c_int,
+                    Ok(Ok(())) => ret_len,
                     Ok(Err(_)) => fail(ETERM),
                     Err(_elapsed) => fail(libc::EAGAIN),
                 }
             } else {
                 match handle.block_on(s.send(msg)) {
-                    Ok(()) => len as c_int,
+                    Ok(()) => ret_len,
                     Err(_) => fail(ETERM),
                 }
             }
@@ -290,7 +324,10 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
         Ok((frame, _more)) => {
             let frame_len = frame.len();
             copy_to_buf(buf, buf_len, &frame);
-            frame_len as c_int
+            match checked_c_int_len(frame_len) {
+                Ok(n) => n,
+                Err(e) => fail(e),
+            }
         }
         Err(e) => fail(e),
     }
@@ -401,8 +438,7 @@ fn recv_bypass_direct(
             }
             let frame_len = frame.len();
             copy_to_buf(buf, buf_len, &frame);
-            #[expect(clippy::cast_possible_wrap)]
-            return Ok(frame_len as c_int);
+            return checked_c_int_len(frame_len);
         }
         sock.drain_nonempty.store(false, Ordering::Relaxed);
     }
@@ -423,7 +459,7 @@ fn recv_bypass_direct(
     let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
 
-    if let Some(n) = try_recv_bypass_or_yring(sock, bypass, buf, buf_len) {
+    if let Some(n) = try_recv_bypass_or_yring(sock, bypass, buf, buf_len)? {
         return Ok(n);
     }
 
@@ -431,7 +467,7 @@ fn recv_bypass_direct(
         return Err(libc::EAGAIN);
     }
 
-    let n = block_recv(sock, rcvtimeo, || {
+    let n = block_recv_result(sock, rcvtimeo, || {
         try_recv_bypass_or_yring(sock, bypass, buf, buf_len)
     })?;
     Ok(n)
@@ -444,7 +480,7 @@ fn try_recv_bypass_or_yring(
     bypass: &mut crate::inproc_bypass::BypassRecv,
     buf: *mut libc::c_void,
     buf_len: usize,
-) -> Option<c_int> {
+) -> Result<Option<c_int>, c_int> {
     if let Some((ptr, len)) = bypass.peek() {
         let copy_len = len.min(buf_len);
         if !buf.is_null() && copy_len > 0 {
@@ -454,8 +490,7 @@ fn try_recv_bypass_or_yring(
             }
         }
         bypass.advance(len);
-        #[expect(clippy::cast_possible_wrap)]
-        return Some(len as c_int);
+        return checked_c_int_len(len).map(Some);
     }
     // SAFETY: zmq contract guarantees single-threaded access per socket.
     if let Some(cons) = sock.recv_cons.get()
@@ -469,10 +504,9 @@ fn try_recv_bypass_or_yring(
             let _ = decompose_message(sock, &m);
         }
         copy_to_buf(buf, buf_len, &frame);
-        #[expect(clippy::cast_possible_wrap)]
-        return Some(frame_len as c_int);
+        return checked_c_int_len(frame_len).map(Some);
     }
-    None
+    Ok(None)
 }
 
 #[inline]

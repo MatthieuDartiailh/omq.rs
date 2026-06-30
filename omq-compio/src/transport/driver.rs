@@ -30,6 +30,7 @@ use smallvec::SmallVec;
 
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::error::{Error, Result};
+use omq_proto::flow::max_batch_bytes;
 use omq_proto::message::{Message, generated_identity};
 use omq_proto::options::Options;
 use omq_proto::proto::command::PeerProperties;
@@ -42,25 +43,6 @@ use crate::socket::TaggedFrame;
 use crate::transport::dispatch::{Drained, MonitorCtx, SnapshotSink, dispatch_drained_events};
 use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader};
 use crate::transport::recv_stream::{StreamArmOutcome, pull_stream};
-
-/// Per-flush byte cap. Once a single drain has buffered this many
-/// bytes we stop pulling more from the inbox and let writev flush.
-/// 1 MiB folds large messages into bigger writev calls without
-/// outgrowing typical kernel TCP send buffers. Smaller caps (e.g.
-/// 256 KiB) under-utilize writev for 32 KiB+ messages and let the
-/// per-syscall overhead dominate; larger caps add latency without
-/// extra throughput once the kernel send buffer is the bottleneck.
-/// Override at runtime via `OMQ_BATCH_BYTES`.
-fn max_batch_bytes() -> usize {
-    use std::sync::OnceLock;
-    static CAP: OnceLock<usize> = OnceLock::new();
-    *CAP.get_or_init(|| {
-        std::env::var("OMQ_BATCH_BYTES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1024 * 1024)
-    })
-}
 
 /// Sleep until `deadline`, or hang forever when `None`. Lets the
 /// driver loop unconditionally include the timeout / heartbeat
@@ -422,8 +404,11 @@ pub(crate) async fn run_connection(
         // Clear the driver_in_select flag at the top of every iteration.
         // The flag is set again just before we park in select_biased!
         // so the fast-path sender can tell whether a transmit_ready
-        // notification is worth issuing.
+        // notification is worth issuing. Also clear transmit_notified so
+        // the next park cycle accepts one fresh notify (the coalescing
+        // flag in signal_encoded).
         state.driver_in_select.set(false);
+        state.transmit_notified.set(false);
 
         if !ls.closing && state.socket_closing.get() {
             ls.closing = true;

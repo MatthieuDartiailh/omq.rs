@@ -120,6 +120,7 @@ impl EncodedQueue {
         }
     }
 
+    #[inline]
     pub fn encode_arena(&mut self, msg: &Message) {
         let before = self.arena.len();
         frame::encode_message_flat(msg, &mut self.arena);
@@ -159,6 +160,7 @@ impl EncodedQueue {
         self.total_bytes += self.arena.len() - before;
     }
 
+    #[inline]
     pub fn encode_auto(&mut self, msg: &Message) {
         if msg.byte_len() < self.arena_threshold {
             self.encode_arena(msg);

@@ -419,6 +419,9 @@ impl Socket {
             .cached_route
             .lock()
             .expect("cached_route") = None;
+        // Drop cached round-robin direct targets so their
+        // `Arc<DirectIoState>` refs release with the socket.
+        *self.inner.routing.cached_rr_targets.get() = None;
 
         // Close the inbound channel so drivers blocked on
         // peer_in_tx.send_async() get unblocked with SendError.
