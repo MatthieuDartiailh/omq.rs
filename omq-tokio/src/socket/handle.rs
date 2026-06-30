@@ -586,7 +586,7 @@ impl Socket {
                     Ok(()) => return Ok(()),
                     Err(msg) => msg,
                 };
-                if self.try_send_wire(&msg) {
+                if self.try_send_single_wire(&msg)? {
                     return Ok(());
                 }
                 self.inner.send_submitter.try_send(msg)
@@ -876,8 +876,7 @@ impl Socket {
     /// the message was encoded into the peer's `EncodedQueue`.
     #[inline]
     fn try_send_wire(&self, msg: &Message) -> bool {
-        let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
-        if let Some(ref slot) = slot {
+        if let Some(ref slot) = self.single_wire_slot() {
             return slot.try_encode(msg) == TryEncodeResult::Ok;
         }
         false
@@ -935,7 +934,7 @@ impl Socket {
     /// Single-peer async slow path: handles backpressure (Full → wait
     /// for space) and falls back to the shared queue for ineligible peers.
     async fn send_wire_slow(&self, msg: Message) -> Result<()> {
-        let slot = self.inner.wire_slot.lock().expect("wire_slot").clone();
+        let slot = self.single_wire_slot();
         if let Some(ref slot) = slot {
             loop {
                 match slot.try_encode(&msg) {
@@ -952,6 +951,21 @@ impl Socket {
             }
         }
         self.inner.send_submitter.send(msg).await
+    }
+
+    fn try_send_single_wire(&self, msg: &Message) -> core::result::Result<bool, TrySendError> {
+        let Some(slot) = self.single_wire_slot() else {
+            return Ok(false);
+        };
+        match slot.try_encode(msg) {
+            TryEncodeResult::Ok => Ok(true),
+            TryEncodeResult::Full => Err(TrySendError::Full(msg.clone())),
+            TryEncodeResult::Dead | TryEncodeResult::Ineligible => Ok(false),
+        }
+    }
+
+    fn single_wire_slot(&self) -> Option<Arc<PeerWireSlot>> {
+        self.inner.wire_slot.lock().expect("wire_slot").clone()
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {

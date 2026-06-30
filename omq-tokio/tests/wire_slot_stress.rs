@@ -1,5 +1,6 @@
 //! Stress tests for `PeerWireSlot` refactor edge cases.
 use bytes::Bytes;
+use omq_proto::error::TrySendError;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
@@ -42,6 +43,34 @@ async fn push_pull_burst_single_peer() {
         let got = u32::from_be_bytes(m.part_bytes(0).unwrap()[..4].try_into().unwrap());
         assert_eq!(got, i, "message ordering broken at {i}");
     }
+}
+
+#[tokio::test]
+async fn try_send_single_peer_full_wire_slot_preserves_fifo() {
+    let ep = tcp_ep(free_port());
+    let push = Socket::new(SocketType::Push, Options::default().wire_slot_cap(1));
+    let pull = Socket::new(SocketType::Pull, opts());
+    pull.bind(ep.clone()).await.unwrap();
+    push.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    push.try_send(Message::single("first")).unwrap();
+    let returned = match push.try_send(Message::single("second")) {
+        Err(TrySendError::Full(msg)) => msg,
+        other => panic!("expected full wire slot, got {other:?}"),
+    };
+    push.send(returned).await.unwrap();
+
+    let first = tokio::time::timeout(TIMEOUT, pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(TIMEOUT, pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&first.part_bytes(0).unwrap()[..], b"first");
+    assert_eq!(&second.part_bytes(0).unwrap()[..], b"second");
 }
 
 /// PUSH/PULL: peer churn. Encode slot must re-enable after 2->1.
