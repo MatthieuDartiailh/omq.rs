@@ -31,7 +31,7 @@ unsafe impl<T: Send> Sync for AsyncRing<T> {}
 
 impl<T> Drop for AsyncRing<T> {
     fn drop(&mut self) {
-        // Drain leftover items. `drop_remaining` advances `head` to `flush`,
+        // Drain leftover items. `drop_remaining` advances `head` to `tail`,
         // so the subsequent automatic `Ring::drop` is a no-op and the `buf`
         // allocation is freed normally (no double-drop, no leak).
         self.ring.drop_remaining();
@@ -41,7 +41,7 @@ impl<T> Drop for AsyncRing<T> {
 /// Async sending half. Wakes the consumer on flush when the ring was empty.
 pub struct AsyncProducer<T> {
     ring: Arc<AsyncRing<T>>,
-    tail: usize,
+    cursor: usize,
     cached_head: usize,
 }
 
@@ -53,7 +53,7 @@ unsafe impl<T: Send> Send for AsyncProducer<T> {}
 pub struct AsyncConsumer<T> {
     ring: Arc<AsyncRing<T>>,
     head: usize,
-    cached_flush: usize,
+    cached_tail: usize,
 }
 
 // SAFETY: AsyncConsumer<T> is Send because it is single-owner (not Sync) and
@@ -71,13 +71,13 @@ pub fn async_spsc<T>(capacity: usize) -> (AsyncProducer<T>, AsyncConsumer<T>) {
     (
         AsyncProducer {
             ring: ring.clone(),
-            tail: 0,
+            cursor: 0,
             cached_head: 0,
         },
         AsyncConsumer {
             ring,
             head: 0,
-            cached_flush: 0,
+            cached_tail: 0,
         },
     )
 }
@@ -88,7 +88,7 @@ impl<T> AsyncProducer<T> {
     pub fn push(&mut self, val: T) -> Result<(), T> {
         self.ring
             .ring
-            .push(&mut self.tail, &mut self.cached_head, val)
+            .push(&mut self.cursor, &mut self.cached_head, val)
     }
 
     /// Make all pushed items visible and wake the consumer unconditionally.
@@ -101,7 +101,7 @@ impl<T> AsyncProducer<T> {
     /// (a no-op when no waker is registered) but is race-free.
     #[inline]
     pub fn flush(&mut self) {
-        self.ring.ring.flush.0.store(self.tail, Ordering::Release);
+        self.ring.ring.tail.0.store(self.cursor, Ordering::Release);
         self.ring.consumer_waker.0.wake();
     }
 
@@ -128,7 +128,7 @@ impl<T> AsyncProducer<T> {
 
     #[inline]
     pub fn is_full(&mut self) -> bool {
-        self.ring.ring.is_full(self.tail, &mut self.cached_head)
+        self.ring.ring.is_full(self.cursor, &mut self.cached_head)
     }
 
     #[inline]
@@ -138,12 +138,12 @@ impl<T> AsyncProducer<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.ring.ring.producer_len(self.tail)
+        self.ring.ring.producer_len(self.cursor)
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.ring.ring.producer_is_empty(self.tail)
+        self.ring.ring.producer_is_empty(self.cursor)
     }
 }
 
@@ -202,7 +202,7 @@ impl<T> AsyncConsumer<T> {
     /// Call [`release`](Self::release) after draining a batch.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
-        self.ring.ring.pop(&mut self.head, self.cached_flush)
+        self.ring.ring.pop(&mut self.head, self.cached_tail)
     }
 
     /// Publish consumed position so the producer can reuse slots,
@@ -216,13 +216,13 @@ impl<T> AsyncConsumer<T> {
     /// Load all items flushed since the last prefetch. One Acquire load.
     #[inline]
     pub fn prefetch(&mut self) -> usize {
-        self.ring.ring.prefetch(&mut self.cached_flush)
+        self.ring.ring.prefetch(&mut self.cached_tail)
     }
 
     /// Prefetch + pop + release in one call.
     #[inline]
     pub fn prefetch_and_pop(&mut self) -> Option<T> {
-        if self.head == self.cached_flush {
+        if self.head == self.cached_tail {
             self.prefetch();
         }
         let val = self.pop();
@@ -236,7 +236,7 @@ impl<T> AsyncConsumer<T> {
     pub fn is_empty(&self) -> bool {
         self.ring
             .ring
-            .consumer_is_empty(self.head, self.cached_flush)
+            .consumer_is_empty(self.head, self.cached_tail)
     }
 
     #[inline]
@@ -256,7 +256,7 @@ impl<T> Stream for AsyncConsumer<T> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        if this.head == this.cached_flush {
+        if this.head == this.cached_tail {
             this.prefetch();
         }
         if let Some(val) = this.pop() {
@@ -272,7 +272,7 @@ impl<T> Stream for AsyncConsumer<T> {
         this.ring.consumer_waker.0.register(cx.waker());
 
         // Re-check after registering to avoid lost wakes.
-        if this.head == this.cached_flush {
+        if this.head == this.cached_tail {
             this.prefetch();
         }
         if let Some(val) = this.pop() {

@@ -27,6 +27,7 @@ futures-lite = "2"
 loom = "0.7"
 rtrb = "0.3"
 crossbeam-channel = "0.5"
+flume = "0.11"
 
 [[bench]]
 name = "throughput"
