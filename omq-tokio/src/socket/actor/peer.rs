@@ -378,16 +378,37 @@ impl SocketDriver {
         // skipping the actor's event loop.
         let driver = if can_bypass_actor_recv(self.socket_type) {
             let can_use_yring = !matches!(self.socket_type, SocketType::Req);
-            let from_slot = if can_use_yring {
-                self.recv_sink_config
+            if can_use_yring {
+                let from_slot = self
+                    .recv_sink_config
                     .as_ref()
-                    .and_then(|cfg| cfg.slot.lock().unwrap().take())
+                    .and_then(|cfg| cfg.slot.lock().unwrap().take());
+                if let Some(sink) = from_slot {
+                    driver.with_recv_sink(sink)
+                } else {
+                    let cap = self.options.recv_hwm.unwrap_or(1024).max(16) as usize;
+                    let (prod, cons) = yring::spsc(cap);
+                    let recv_notify = self.spsc.recv_notify.clone();
+                    let space = std::sync::Arc::new(tokio::sync::Notify::new());
+                    let sink = crate::engine::RecvSink::Yring(crate::engine::YringSink {
+                        producer: prod,
+                        signal: Box::new(move || recv_notify.notify_one()),
+                        space: space.clone(),
+                    });
+                    let entry = std::sync::Arc::new(crate::socket::handle::TcpYringConsumer {
+                        consumer: std::sync::Mutex::new(cons),
+                        space,
+                        peer_id,
+                    });
+                    self.spsc.tcp_consumers.write().unwrap().push(entry);
+                    self.spsc
+                        .consumer_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Release);
+                    self.spsc.activated.notify_one();
+                    driver.with_recv_sink(sink)
+                }
             } else {
-                None
-            };
-            match from_slot {
-                Some(sink) => driver.with_recv_sink(sink),
-                None => driver.with_recv_direct(self.recv_tx.clone()),
+                driver.with_recv_direct(self.recv_tx.clone())
             }
         } else {
             driver

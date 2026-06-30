@@ -859,10 +859,6 @@ async fn drain_wire_slot<W: AsyncWrite + Unpin>(
         write_chunks(writer, drain_buf).await?;
         slot.space_available.notify_one();
         if batch_bytes >= max_batch_bytes() {
-            // Data remains in the wire slot. Self-notify so the next
-            // select! iteration re-enters this arm instead of parking
-            // on a notification that signal_encoded will skip (pending
-            // is still true).
             slot.data_ready.notify_one();
             break;
         }

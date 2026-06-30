@@ -180,6 +180,7 @@ pub fn encode_message_flat_ws_masked(msg: &Message, buf: &mut BytesMut) {
 
 /// Encode all frames of `msg` into a flat contiguous buffer (header + payload
 /// concatenated). Used by the compio fast send path for small messages.
+#[inline]
 pub fn encode_message_flat(msg: &Message, buf: &mut BytesMut) {
     let n = msg.len();
     let mut i = 0;

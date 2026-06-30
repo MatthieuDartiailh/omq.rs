@@ -98,15 +98,12 @@ impl Socket {
     /// inside each `DirectIoState`, checked by `try_direct_encode`, so the
     /// cache stays correct across handshake completion; only peer
     /// add/remove (which bumps `generation`) rebuilds it.
+    #[inline]
     pub(super) fn try_direct_round_robin(&self, msg: &Message) -> Result<Option<bool>> {
         let inner = self.inner();
         let cur_gen = inner.routing.generation.load(Ordering::Acquire);
-        // `LocalCell`: single-thread interior mutability, no lock. The
-        // `&mut` borrow lives only for this sync function (no `.await`
-        // inside), so the exclusive access is sound; the caller does any
-        // `yield_now` after we return.
         let cache = inner.routing.cached_rr_targets.get();
-        if cache.as_ref().map(|(g, _)| *g) != Some(cur_gen) {
+        if cache.as_ref().map(|(g, _, _)| *g) != Some(cur_gen) {
             let peers = inner.routing.peers.read().expect("peers lock");
             let keys = inner.routing.peer_keys.read().expect("peer_keys lock");
             let mut targets = Vec::with_capacity(keys.len());
@@ -118,15 +115,16 @@ impl Socket {
                     targets.push(state.clone());
                 }
             }
-            *cache = Some((cur_gen, targets));
+            *cache = Some((cur_gen, targets, 0));
         }
-        let targets = &cache.as_ref().expect("just populated").1;
+        let (_, targets, cursor) = cache.as_mut().expect("just populated");
         let n = targets.len();
         if n == 0 {
             return Ok(None);
         }
         for _ in 0..n {
-            let i = inner.routing.rr_index.fetch_add(1, Ordering::Relaxed) % n;
+            let i = *cursor;
+            *cursor = if i + 1 >= n { 0 } else { i + 1 };
             let state = &targets[i];
             if let Some(qbytes) = try_direct_encode(msg, state)? {
                 let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS

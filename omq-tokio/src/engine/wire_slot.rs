@@ -5,7 +5,7 @@
 // in-flight message may still be in the inbox while the next message
 // takes the wire slot fast path and reaches the wire first.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -15,6 +15,7 @@ use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::message::Message;
 
 pub(crate) const WIRE_SLOT_CAP_DEFAULT: usize = 2 * 1024 * 1024;
+pub(crate) const WIRE_SLOT_MSG_CAP_DEFAULT: usize = crate::routing::SHARED_MAX_BATCH_MSGS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TryEncodeResult {
@@ -42,6 +43,8 @@ pub(crate) struct PeerWireSlot {
     ws_masked: bool,
     pub(crate) dead: AtomicBool,
     pub(crate) peer_id: u64,
+    pub(crate) consecutive_full: AtomicU32,
+    queued_msgs: AtomicUsize,
 }
 
 impl std::fmt::Debug for PeerWireSlot {
@@ -82,6 +85,8 @@ impl PeerWireSlot {
             ws_masked,
             dead: AtomicBool::new(false),
             peer_id,
+            consecutive_full: AtomicU32::new(0),
+            queued_msgs: AtomicUsize::new(0),
         })
     }
 
@@ -90,6 +95,7 @@ impl PeerWireSlot {
         self.is_ws
     }
 
+    #[inline]
     pub(crate) fn try_encode(&self, msg: &Message) -> TryEncodeResult {
         if self.dead.load(Ordering::Acquire) {
             return TryEncodeResult::Dead;
@@ -104,10 +110,11 @@ impl PeerWireSlot {
                 return TryEncodeResult::Ineligible;
             }
             let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-            if eq.total_bytes() >= self.cap {
+            if self.is_full(&eq) {
                 return TryEncodeResult::Full;
             }
             eq.encode_ws(msg, self.ws_masked);
+            self.queued_msgs.fetch_add(1, Ordering::Relaxed);
             drop(eq);
             self.signal_encoded();
             return TryEncodeResult::Ok;
@@ -115,10 +122,11 @@ impl PeerWireSlot {
 
         if !self.has_transform {
             let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-            if eq.total_bytes() >= self.cap {
+            if self.is_full(&eq) {
                 return TryEncodeResult::Full;
             }
             eq.encode_auto(msg);
+            self.queued_msgs.fetch_add(1, Ordering::Relaxed);
             drop(eq);
             self.signal_encoded();
             return TryEncodeResult::Ok;
@@ -128,10 +136,11 @@ impl PeerWireSlot {
             && msg.iter().all(|part| part.len() < threshold)
         {
             let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-            if eq.total_bytes() >= self.cap {
+            if self.is_full(&eq) {
                 return TryEncodeResult::Full;
             }
             eq.encode_prefixed_auto(sentinel, msg);
+            self.queued_msgs.fetch_add(1, Ordering::Relaxed);
             drop(eq);
             self.signal_encoded();
             return TryEncodeResult::Ok;
@@ -145,10 +154,11 @@ impl PeerWireSlot {
             return TryEncodeResult::Dead;
         }
         let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-        if eq.total_bytes() >= self.cap {
+        if self.is_full(&eq) {
             return TryEncodeResult::Full;
         }
         eq.push_shared_chunks(chunks);
+        self.queued_msgs.fetch_add(1, Ordering::Relaxed);
         drop(eq);
         self.signal_encoded();
         TryEncodeResult::Ok
@@ -159,10 +169,11 @@ impl PeerWireSlot {
             return TryEncodeResult::Dead;
         }
         let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-        if eq.total_bytes() >= self.cap {
+        if self.is_full(&eq) {
             return TryEncodeResult::Full;
         }
         eq.push_pre_encoded(data);
+        self.queued_msgs.fetch_add(1, Ordering::Relaxed);
         TryEncodeResult::Ok
     }
 
@@ -177,6 +188,13 @@ impl PeerWireSlot {
         eq.drain_into_vec(buf, max_chunks);
         if eq.is_empty() {
             self.pending.store(false, Ordering::Relaxed);
+            self.queued_msgs.store(0, Ordering::Relaxed);
+        } else if !buf.is_empty() {
+            self.queued_msgs
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some(n.saturating_sub(max_chunks))
+                })
+                .ok();
         }
     }
 
@@ -185,7 +203,7 @@ impl PeerWireSlot {
             return false;
         }
         let eq = self.eq.lock().expect("wire_slot eq poisoned");
-        eq.total_bytes() < self.cap
+        !self.is_full(&eq)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -196,5 +214,37 @@ impl PeerWireSlot {
     pub(crate) fn mark_dead(&self) {
         self.dead.store(true, Ordering::Release);
         self.space_available.notify_waiters();
+    }
+
+    fn is_full(&self, eq: &EncodedQueue) -> bool {
+        eq.total_bytes() >= self.cap
+            || self.queued_msgs.load(Ordering::Relaxed) >= WIRE_SLOT_MSG_CAP_DEFAULT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_slot_caps_queued_messages_independent_of_bytes() {
+        let slot = PeerWireSlot::new(
+            1,
+            false,
+            None,
+            omq_proto::encoded_queue::ARENA_THRESHOLD,
+            WIRE_SLOT_CAP_DEFAULT,
+        );
+        slot.handshake_done.store(true, Ordering::Release);
+        let msg = Message::from("x");
+
+        for _ in 0..WIRE_SLOT_MSG_CAP_DEFAULT {
+            assert_eq!(slot.try_encode(&msg), TryEncodeResult::Ok);
+        }
+        assert_eq!(slot.try_encode(&msg), TryEncodeResult::Full);
+
+        let mut chunks = Vec::new();
+        slot.drain_into_vec(&mut chunks, 1024);
+        assert_eq!(slot.try_encode(&msg), TryEncodeResult::Ok);
     }
 }

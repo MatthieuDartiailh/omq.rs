@@ -66,6 +66,7 @@ pub(super) const DIRECT_ENCODE_YIELD_MSGS: usize = 256;
 /// queue: we already hold the borrow here, so reading `total_bytes()`
 /// once and returning it removes a second `try_borrow_mut()` from every
 /// direct send on the hot path.
+#[inline]
 pub(super) fn try_direct_encode(
     msg: &Message,
     state: &Arc<DirectIoState>,

@@ -195,7 +195,8 @@ pub(super) struct PeerRouting {
     /// the runtime thread, exactly like `DirectIoCache::send`. Dropping
     /// the `Mutex` removes a lock/unlock pair from every multi-peer
     /// PUSH send (it dominated the profile after the target cache landed).
-    pub(super) cached_rr_targets: LocalCell<Option<(u64, Vec<Arc<DirectIoState>>)>>,
+    #[expect(clippy::type_complexity)]
+    pub(super) cached_rr_targets: LocalCell<Option<(u64, Vec<Arc<DirectIoState>>, usize)>>,
     /// Identity -> slot index for ROUTER outbound.
     pub(super) identity_to_slot: RwLock<FxHashMap<Bytes, usize>>,
     /// `connection_id` -> peer identity for the recv path.

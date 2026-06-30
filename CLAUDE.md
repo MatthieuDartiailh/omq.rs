@@ -86,42 +86,37 @@ reconnections, framing, and multiplexing internally. The transport
 (TCP, IPC, inproc, UDP) is chosen by endpoint URI and is transparent
 to the application.
 
-**Reliability is non-negotiable.** ZMQ users expect the library to
-Just Work. No errors from peer failures. No hangs. No stuck states.
-Connections self-heal automatically. Back-pressure is applied silently.
-The library must always take the optimal performance path and recover
-from any transient failure without user intervention. A ZMQ library
-that surfaces transport-level errors to the user, requires manual
-reconnection, or gets stuck in a degraded state is broken. Never
-propose a fix that weakens self-healing, adds user-visible failure
-modes, or trades reliability for convenience.
+**Reliability is non-negotiable.** Self-healing, silent
+back-pressure, no user-visible errors from peer failures. Never
+propose a fix that weakens self-healing or trades reliability for
+convenience. Core guarantees:
 
-Core guarantees that omq must uphold:
-
-- **Send/recv never fail due to peers.** A peer disconnecting, a TCP
-  connection dropping, or a slow consumer does not cause `send` or
-  `recv` to return an error. The socket reconnects automatically and
-  resumes delivery. The only user-visible send errors are protocol
-  violations (e.g. REQ sending twice without recv) or socket closed.
-- **Connect-before-bind works.** `connect()` queues internally and
-  waits for the bind to appear. Never suggest connection ordering as
-  a cause for failures or hangs.
-- **Automatic reconnection.** ZMTP peers reconnect on disconnect
-  with configurable backoff. The application does not manage
-  connection lifecycle.
-- **Messages are atomic.** A multipart message is delivered in full
-  or not at all. No partial delivery.
+- **Send/recv never fail due to peers.** Peer disconnects,
+  TCP drops, slow consumers: no errors. Reconnects automatically.
+  Only user-visible send errors: protocol violations or socket closed.
+- **Connect-before-bind works.** `connect()` retries until the
+  remote `bind()` appears. Never blame connection ordering.
+- **Automatic reconnection.** Configurable backoff. The
+  application does not manage connection lifecycle.
+- **Heartbeats detect dead peers, not slow ones.** A slow peer
+  that still responds to PINGs is alive. Heartbeat timeout only
+  fires when a peer stops responding entirely. Never assume
+  heartbeat will resolve a slow-consumer backpressure situation.
+- **Messages are atomic.** Delivered in full or not at all.
 - **HWM back-pressure, not errors.** When the outbound queue is
   full, the socket either drops (PUB default) or blocks (PUSH
   default, configurable via OnMute). It does not return an error.
-- **Transport-agnostic.** The same socket can bind on TCP and IPC
-  simultaneously. Inproc is in-process (no kernel, no serialization).
-- **Subscriptions are prefix-matched.** SUB subscribes to byte
-  prefixes. Empty prefix = all messages. PUB filters per subscriber.
-- **Thread safety contract.** A single socket must not be used from
-  multiple threads concurrently (ZMQ's rule). omq-tokio relaxes this
-  for async (send/recv serialize internally), but the principle holds
-  for omq-libzmq's C API.
+- **No peer starvation.** A slow peer must never be permanently
+  starved. Round-robin (PUSH) waits for a full peer's slot to
+  drain rather than skipping it indefinitely. A slow peer must
+  also never block fast peers from making progress.
+- **Fair fan-in.** Consumer fair-queues across all connections.
+- **Transport-agnostic.** Bind TCP and IPC simultaneously. Inproc
+  is in-process (no kernel, no serialization).
+- **Subscriptions are prefix-matched.** Empty prefix = all
+  messages. PUB filters per subscriber.
+- **Thread safety.** One socket, one thread. omq-tokio relaxes
+  this for async; omq-libzmq does not.
 
 ## Performance invariants
 
