@@ -73,6 +73,24 @@ async fn try_send_single_peer_full_wire_slot_preserves_fifo() {
     assert_eq!(&second.part_bytes(0).unwrap()[..], b"second");
 }
 
+#[tokio::test]
+async fn req_try_send_uses_single_peer_wire_slot() {
+    let ep = tcp_ep(free_port());
+    let req = Socket::new(SocketType::Req, Options::default().wire_slot_cap(1));
+    let rep = Socket::new(SocketType::Rep, opts());
+    rep.bind(ep.clone()).await.unwrap();
+    req.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    req.try_send(Message::single("first")).unwrap();
+
+    let first = tokio::time::timeout(TIMEOUT, rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&first.part_bytes(0).unwrap()[..], b"first");
+}
+
 /// PUSH/PULL: peer churn. Encode slot must re-enable after 2->1.
 #[tokio::test]
 async fn push_pull_peer_churn_wire_slot() {

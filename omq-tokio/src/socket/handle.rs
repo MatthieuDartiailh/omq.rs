@@ -556,7 +556,11 @@ impl Socket {
                     )));
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
-                let result = self.inner.send_submitter.try_send(msg);
+                let result = match self.try_send_single_wire(&msg) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => self.inner.send_submitter.try_send(msg),
+                    Err(e) => Err(e),
+                };
                 if result.is_err() {
                     self.inner
                         .req_awaiting_reply

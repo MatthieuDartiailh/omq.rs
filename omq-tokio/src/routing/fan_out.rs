@@ -54,6 +54,12 @@ enum CachedResult {
     Miss,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchStatus {
+    Ok,
+    Full,
+}
+
 #[derive(Debug)]
 pub(crate) struct Submitter {
     inner: Arc<Mutex<FanOutInner>>,
@@ -174,7 +180,13 @@ impl Submitter {
                 if self.xpub_nodrop && !targets_have_space(&targets) {
                     return Err(omq_proto::error::TrySendError::Full(forwarded));
                 }
-                dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
+                if dispatch_to_targets(&targets, &forwarded, encoder.as_deref())
+                    .map_err(omq_proto::error::TrySendError::Error)?
+                    == DispatchStatus::Full
+                    && self.xpub_nodrop
+                {
+                    return Err(omq_proto::error::TrySendError::Full(forwarded));
+                }
                 return Ok(());
             }
             CachedResult::Miss => {}
@@ -184,7 +196,13 @@ impl Submitter {
         if self.xpub_nodrop && !targets_have_space(&targets) {
             return Err(omq_proto::error::TrySendError::Full(forwarded));
         }
-        dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
+        if dispatch_to_targets(&targets, &forwarded, encoder.as_deref())
+            .map_err(omq_proto::error::TrySendError::Error)?
+            == DispatchStatus::Full
+            && self.xpub_nodrop
+        {
+            return Err(omq_proto::error::TrySendError::Full(forwarded));
+        }
         Ok(())
     }
 
@@ -204,9 +222,10 @@ impl Submitter {
                 // CPU without adding parallelism (distribution stays serial
                 // on the one pump). Inline dispatch removes both hops.
                 if self.xpub_nodrop {
-                    wait_for_targets_space(&targets).await;
+                    send_to_targets_nodrop(&targets, forwarded.clone()).await?;
+                    return Ok(());
                 }
-                dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
+                dispatch_to_targets(&targets, &forwarded, encoder.as_deref())?;
                 let interval = yield_interval(targets.len());
                 if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
                     tokio::task::yield_now().await;
@@ -218,9 +237,10 @@ impl Submitter {
 
         let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
         if self.xpub_nodrop {
-            wait_for_targets_space(&targets).await;
+            send_to_targets_nodrop(&targets, forwarded.clone()).await?;
+            return Ok(());
         }
-        dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
+        dispatch_to_targets(&targets, &forwarded, encoder.as_deref())?;
         let interval = yield_interval(targets.len());
         if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
             tokio::task::yield_now().await;
@@ -456,32 +476,11 @@ fn targets_have_space(targets: &[PeerSend]) -> bool {
     })
 }
 
-async fn wait_for_targets_space(targets: &[PeerSend]) {
-    while !targets_have_space(targets) {
-        let notified = targets.iter().find_map(|t| match t {
-            PeerSend::Wire { slot, .. }
-                if !slot.has_space() && !slot.dead.load(Ordering::Acquire) =>
-            {
-                Some(slot.space_available.notified())
-            }
-            _ => None,
-        });
-        match notified {
-            Some(notified) => {
-                let mut notified = std::pin::pin!(notified);
-                notified.as_mut().enable();
-                if targets_have_space(targets) {
-                    return;
-                }
-                tokio::select! {
-                    biased;
-                    () = &mut notified => {}
-                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                }
-            }
-            None => return,
-        }
+async fn send_to_targets_nodrop(targets: &[PeerSend], msg: Message) -> Result<()> {
+    for target in targets {
+        target.send(msg.clone()).await?;
     }
+    Ok(())
 }
 
 fn dispatch_encoded(
@@ -489,16 +488,19 @@ fn dispatch_encoded(
     targets: &[PeerSend],
     msg: &Message,
     chunks: &mut Vec<Bytes>,
-) {
+) -> DispatchStatus {
+    let mut full = false;
     if eq.has_arena_only() && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET {
         let raw = eq.uncommitted_arena();
         for t in targets {
             match t {
                 PeerSend::Wire { slot, .. } => {
-                    let _ = slot.try_push_pre_encoded_no_signal(raw);
+                    full |= slot.try_push_pre_encoded_no_signal(raw) == TryEncodeResult::Full;
                 }
                 PeerSend::Inbox(tx) => {
-                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
+                    full |= tx
+                        .try_send(DriverCommand::SendMessage(msg.clone()))
+                        .is_err();
                 }
             }
         }
@@ -514,14 +516,21 @@ fn dispatch_encoded(
         for t in targets {
             match t {
                 PeerSend::Wire { slot, .. } => {
-                    let _ = slot.try_push_encoded(chunks);
+                    full |= slot.try_push_encoded(chunks) == TryEncodeResult::Full;
                 }
                 PeerSend::Inbox(tx) => {
-                    let _ = tx.try_send(DriverCommand::SendMessage(msg.clone()));
+                    full |= tx
+                        .try_send(DriverCommand::SendMessage(msg.clone()))
+                        .is_err();
                 }
             }
         }
         chunks.clear();
+    }
+    if full {
+        DispatchStatus::Full
+    } else {
+        DispatchStatus::Ok
     }
 }
 
@@ -529,21 +538,27 @@ fn dispatch_to_targets(
     targets: &[PeerSend],
     msg: &Message,
     encoder: Option<&Mutex<MessageEncoder>>,
-) {
+) -> Result<DispatchStatus> {
     use std::cell::RefCell;
 
     match targets.len() {
-        0 => {}
-        1 => {
-            let _ = targets[0].try_encode(msg);
-        }
+        0 => Ok(DispatchStatus::Ok),
+        1 => match targets[0].try_encode(msg) {
+            TryEncodeResult::Full => Ok(DispatchStatus::Full),
+            _ => Ok(DispatchStatus::Ok),
+        },
         _ => {
             #[cfg(feature = "ws")]
             if targets.iter().any(PeerSend::is_ws) {
+                let mut full = false;
                 for t in targets {
-                    let _ = t.try_encode(msg);
+                    full |= t.try_encode(msg) == TryEncodeResult::Full;
                 }
-                return;
+                return Ok(if full {
+                    DispatchStatus::Full
+                } else {
+                    DispatchStatus::Ok
+                });
             }
 
             thread_local! {
@@ -557,10 +572,7 @@ fn dispatch_to_targets(
                 if let Some(enc_mtx) = encoder {
                     let transformed = {
                         let mut enc = enc_mtx.lock().expect("fan_out_encoder poisoned");
-                        match enc.encode(msg) {
-                            Ok(t) => t,
-                            Err(_) => return,
-                        }
+                        enc.encode(msg)?
                     };
                     for wire_msg in &transformed {
                         eq.encode_auto(wire_msg);
@@ -568,10 +580,8 @@ fn dispatch_to_targets(
                 } else {
                     eq.encode_auto(msg);
                 }
-                CHUNKS.with(|drain| {
-                    dispatch_encoded(eq, targets, msg, &mut drain.borrow_mut());
-                });
-            });
+                CHUNKS.with(|drain| Ok(dispatch_encoded(eq, targets, msg, &mut drain.borrow_mut())))
+            })
         }
     }
 }

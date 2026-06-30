@@ -215,6 +215,9 @@ pub extern "C" fn zmq_msg_move(dst: *mut OmqMsgRepr, src: *mut OmqMsgRepr) -> c_
     if dst.is_null() || src.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    if dst == src {
+        return 0;
+    }
     // Close dst first.
     zmq_msg_close(dst);
     // SAFETY: src and dst are non-null (checked above) and don't overlap
@@ -230,6 +233,9 @@ pub extern "C" fn zmq_msg_move(dst: *mut OmqMsgRepr, src: *mut OmqMsgRepr) -> c_
 pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> c_int {
     if dst.is_null() || src.is_null() {
         return crate::error::fail(libc::EFAULT);
+    }
+    if std::ptr::addr_eq(dst.cast_const(), src) {
+        return 0;
     }
     zmq_msg_close(dst);
     // SAFETY: src is non-null (checked above).
@@ -501,9 +507,9 @@ pub extern "C" fn zmq_msg_recv(
             r.hint = std::ptr::null_mut();
             r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
             r.reserved = [0; 16];
-            #[expect(clippy::cast_possible_wrap)]
-            {
-                sz as c_int
+            match c_int::try_from(sz) {
+                Ok(n) => n,
+                Err(_) => crate::error::fail(libc::EMSGSIZE),
             }
         }
         Err(e) => crate::error::fail(e),
