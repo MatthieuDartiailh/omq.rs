@@ -1,6 +1,7 @@
 //! Socket actor: owns per-socket state, multiplexes commands + internal events.
 
 mod endpoints;
+mod lifecycle;
 mod peer;
 
 pub(crate) use peer::spawn_driver;
