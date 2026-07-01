@@ -18,26 +18,8 @@ use omq_proto::type_state::TypeState;
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
 use super::recv::{SpscAwareRecv, SpscHandles};
-use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult};
+use super::wire_slot_cache::WireSlotCache;
 use crate::routing::{SendStrategy, SendSubmitter};
-
-pub(crate) type WireSlotHolder = Arc<Mutex<Option<Arc<PeerWireSlot>>>>;
-
-/// Multi-peer round-robin wire slots, shared between the handle (reads)
-/// and the actor (writes on peer add/remove). When more than one wire
-/// peer is active on a round-robin socket and none are inproc, the actor
-/// fills `slots` with every peer's [`PeerWireSlot`]; the handle picks the
-/// next one per send via `cursor`, giving strict round-robin distribution
-/// over the per-peer direct-encode fast path. Empty for single-peer /
-/// inproc-mixed / identity-routed sockets (those fall back to the shared
-/// work-stealing queue).
-pub(crate) type RrSlots = Arc<RrSlotsInner>;
-
-#[derive(Debug, Default)]
-pub(crate) struct RrSlotsInner {
-    pub(crate) slots: Mutex<Vec<Arc<PeerWireSlot>>>,
-    pub(crate) cursor: std::sync::atomic::AtomicUsize,
-}
 
 pub use omq_proto::error::TrySendError;
 
@@ -74,15 +56,7 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
-    /// Single-peer encode fast path. When set, the handle encodes
-    /// ZMTP frames directly into the peer's `EncodedQueue` and the
-    /// driver flushes them to the wire. Set by the actor when exactly
-    /// one wire peer is active; cleared on multi-peer or disconnect.
-    wire_slot: WireSlotHolder,
-    /// Multi-peer round-robin wire slots (see [`RrSlots`]). Used by
-    /// `send_via_wire_slot` to dispatch directly to one peer at a time
-    /// instead of funneling every message through the shared queue.
-    rr_slots: RrSlots,
+    wire_slots: WireSlotCache,
     /// Cooperative yield counter. Every `SEND_YIELD_INTERVAL` successful
     /// synchronous sends, `send()` yields to the runtime so driver tasks
     /// on the same worker thread can drain and flush.
@@ -142,8 +116,7 @@ impl Socket {
         let spsc = SpscHandles::default();
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
-        let wire_slot: WireSlotHolder = Arc::new(Mutex::new(None));
-        let rr_slots: RrSlots = Arc::new(RrSlotsInner::default());
+        let wire_slots = WireSlotCache::new();
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -155,8 +128,7 @@ impl Socket {
             spsc.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
-            wire_slot.clone(),
-            rr_slots.clone(),
+            wire_slots.clone(),
             recv_sink_config,
         );
         spawn_driver(driver);
@@ -170,8 +142,7 @@ impl Socket {
                 send_submitter,
                 type_state,
                 req_awaiting_reply,
-                wire_slot,
-                rr_slots,
+                wire_slots,
                 send_ops: AtomicU32::new(0),
                 last_bound_endpoint: RwLock::new(None),
             }),
@@ -250,7 +221,7 @@ impl Socket {
                         break;
                     }
                     tokio::task::yield_now().await;
-                    if self.is_wire_slot_dead() {
+                    if self.inner.wire_slots.single_dead() {
                         self.inner
                             .req_awaiting_reply
                             .store(false, Ordering::Release);
@@ -294,7 +265,7 @@ impl Socket {
                 if self.try_send_wire(&msg) {
                     return Ok(());
                 }
-                if self.inner.wire_slot.lock().expect("wire_slot").is_some() {
+                if self.inner.wire_slots.single_exists() {
                     self.send_wire_slow(msg).await
                 } else {
                     self.send_round_robin_wire(msg).await
@@ -618,14 +589,8 @@ impl Socket {
         self.inner.recv_rx.try_push_spsc(msg)
     }
 
-    /// Synchronous single-peer wire encode fast path. Returns true if
-    /// the message was encoded into the peer's `EncodedQueue`.
-    #[inline]
     fn try_send_wire(&self, msg: &Message) -> bool {
-        if let Some(ref slot) = self.single_wire_slot() {
-            return slot.try_encode(msg) == TryEncodeResult::Ok;
-        }
-        false
+        self.inner.wire_slots.try_send(msg)
     }
 
     /// Multi-peer round-robin with anti-starvation.
@@ -637,94 +602,25 @@ impl Socket {
     /// breaks the TCP flow-control feedback loop that otherwise
     /// causes permanent starvation under MT scheduling.
     async fn send_round_robin_wire(&self, msg: Message) -> Result<()> {
-        let starved = {
-            let slots = self.inner.rr_slots.slots.lock().expect("rr_slots");
-            let n = slots.len();
-            let mut starved_slot = None;
-            for _ in 0..n {
-                let i = self.inner.rr_slots.cursor.fetch_add(1, Ordering::Relaxed) % n;
-                match slots[i].try_encode(&msg) {
-                    TryEncodeResult::Ok => {
-                        slots[i].consecutive_full.store(0, Ordering::Relaxed);
-                        return Ok(());
-                    }
-                    TryEncodeResult::Full => {
-                        let prev = slots[i].consecutive_full.fetch_add(1, Ordering::Relaxed);
-                        if prev >= Self::STARVATION_THRESHOLD {
-                            starved_slot = Some(slots[i].clone());
-                            break;
-                        }
-                    }
-                    TryEncodeResult::Dead | TryEncodeResult::Ineligible => {}
-                }
-            }
-            starved_slot
-        };
-
-        if let Some(slot) = starved {
-            let notified = slot.space_available.notified();
-            if slot.try_encode(&msg) == TryEncodeResult::Ok {
-                slot.consecutive_full.store(0, Ordering::Relaxed);
-                return Ok(());
-            }
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(1), notified).await;
-            if slot.try_encode(&msg) == TryEncodeResult::Ok {
-                slot.consecutive_full.store(0, Ordering::Relaxed);
-                return Ok(());
-            }
-        }
-
-        self.inner.send_submitter.send(msg).await
+        self.inner
+            .wire_slots
+            .send_round_robin(msg, &self.inner.send_submitter, Self::STARVATION_THRESHOLD)
+            .await
     }
 
-    /// Single-peer async slow path: handles backpressure (Full → wait
-    /// for space) and falls back to the shared queue for ineligible peers.
     async fn send_wire_slow(&self, msg: Message) -> Result<()> {
-        let slot = self.single_wire_slot();
-        if let Some(ref slot) = slot {
-            loop {
-                match slot.try_encode(&msg) {
-                    TryEncodeResult::Ok => return Ok(()),
-                    TryEncodeResult::Dead | TryEncodeResult::Ineligible => break,
-                    TryEncodeResult::Full => {
-                        let notified = slot.space_available.notified();
-                        if slot.try_encode(&msg) == TryEncodeResult::Ok {
-                            return Ok(());
-                        }
-                        notified.await;
-                    }
-                }
-            }
-        }
-        self.inner.send_submitter.send(msg).await
+        self.inner
+            .wire_slots
+            .send_single_slow(msg, &self.inner.send_submitter)
+            .await
     }
 
     fn try_send_single_wire(&self, msg: &Message) -> core::result::Result<bool, TrySendError> {
-        let Some(slot) = self.single_wire_slot() else {
-            return Ok(false);
-        };
-        match slot.try_encode(msg) {
-            TryEncodeResult::Ok => Ok(true),
-            TryEncodeResult::Full => Err(TrySendError::Full(msg.clone())),
-            TryEncodeResult::Dead | TryEncodeResult::Ineligible => Ok(false),
-        }
-    }
-
-    fn single_wire_slot(&self) -> Option<Arc<PeerWireSlot>> {
-        self.inner.wire_slot.lock().expect("wire_slot").clone()
+        self.inner.wire_slots.try_send_single(msg)
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {
         self.inner.send_submitter.send(msg).await
-    }
-
-    fn is_wire_slot_dead(&self) -> bool {
-        self.inner
-            .wire_slot
-            .lock()
-            .expect("wire_slot")
-            .as_ref()
-            .is_some_and(|s| s.dead.load(Ordering::Acquire))
     }
 }
 

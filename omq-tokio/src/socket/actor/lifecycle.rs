@@ -23,7 +23,7 @@ impl<'a> PeerLifecycle<'a> {
         self.publish_disconnect(peer.as_ref(), reason);
         Self::invalidate_spsc(peer.as_ref());
         self.update_send_ring();
-        self.invalidate_wire_slot(peer_id, peer.as_ref());
+        self.invalidate_wire_slot(peer.as_ref());
         self.update_wire_slot();
         self.refill_recv_sink();
         self.reset_type_state_if_last_peer();
@@ -33,7 +33,7 @@ impl<'a> PeerLifecycle<'a> {
     pub(super) fn after_peer_inserted(&mut self) {
         if self.driver.peers.len() > 1 {
             self.update_send_ring();
-            *self.driver.wire_slot.lock().expect("wire_slot") = None;
+            self.driver.wire_slots.clear_single();
         }
     }
 
@@ -66,45 +66,14 @@ impl<'a> PeerLifecycle<'a> {
     }
 
     pub(super) fn update_wire_slot(&mut self) {
-        use omq_proto::routing::SendCategory;
-
-        let cat = omq_proto::routing::send_category(self.driver.socket_type);
-        if !matches!(cat, SendCategory::RoundRobin | SendCategory::Exclusive) {
-            return;
-        }
-        let mut guard = self.driver.wire_slot.lock().expect("wire_slot");
-        let mut rr = self.driver.rr_slots.slots.lock().expect("rr_slots");
-        rr.clear();
-        if self.driver.peers.len() == 1 {
-            let peer = self.driver.peers.values().next().unwrap();
-            if let Some(ref slot) = peer.handle.wire_slot
-                && slot.handshake_done.load(Ordering::Acquire)
-            {
-                *guard = Some(slot.clone());
-                return;
-            }
-        }
-        *guard = None;
-        // Multi-peer round-robin: populate per-peer wire slots so the handle
-        // dispatches directly to one peer at a time. Only when every peer is
-        // a wire peer (no inproc) - inproc peers have no wire slot and would
-        // be starved if the round-robin only cycled wire slots. Mixed or
-        // inproc-only sets fall back to the shared queue (rr left empty).
-        if matches!(cat, SendCategory::RoundRobin)
-            && self.driver.peers.len() > 1
-            && self.driver.peers.values().all(|p| {
-                p.handle
-                    .wire_slot
-                    .as_ref()
-                    .is_some_and(|slot| slot.handshake_done.load(Ordering::Acquire))
-            })
-        {
-            for p in self.driver.peers.values() {
-                if let Some(ref slot) = p.handle.wire_slot {
-                    rr.push(slot.clone());
-                }
-            }
-        }
+        self.driver.wire_slots.rebuild(
+            self.driver.socket_type,
+            self.driver.peers.len(),
+            self.driver
+                .peers
+                .values()
+                .map(|peer| peer.handle.wire_slot.clone()),
+        );
     }
 
     pub(super) fn register_inproc_consumer(
@@ -166,16 +135,13 @@ impl<'a> PeerLifecycle<'a> {
         }
     }
 
-    fn invalidate_wire_slot(&self, peer_id: u64, peer: Option<&PeerEntry>) {
+    fn invalidate_wire_slot(&self, peer: Option<&PeerEntry>) {
         if let Some(peer) = peer
             && let Some(ref slot) = peer.handle.wire_slot
         {
             slot.mark_dead();
         }
-        let mut guard = self.driver.wire_slot.lock().expect("wire_slot");
-        if guard.as_ref().is_some_and(|s| s.peer_id == peer_id) {
-            *guard = None;
-        }
+        self.driver.wire_slots.clear_single();
     }
 
     fn refill_recv_sink(&self) {

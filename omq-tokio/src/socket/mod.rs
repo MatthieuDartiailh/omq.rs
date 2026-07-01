@@ -13,6 +13,7 @@ pub mod monitor;
 pub(crate) mod recv;
 pub(crate) mod type_state;
 pub(crate) mod udp;
+pub(crate) mod wire_slot_cache;
 
 pub use handle::Socket;
 pub use monitor::{
