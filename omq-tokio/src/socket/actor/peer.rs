@@ -403,7 +403,7 @@ impl SocketDriver {
                         signal: Box::new(move || recv_notify.notify_one()),
                         space: space.clone(),
                     });
-                    let entry = std::sync::Arc::new(crate::socket::handle::TcpYringConsumer {
+                    let entry = std::sync::Arc::new(crate::socket::recv::TcpYringConsumer {
                         consumer: std::sync::Mutex::new(cons),
                         space,
                         peer_id,
