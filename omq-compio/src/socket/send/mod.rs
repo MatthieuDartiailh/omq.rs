@@ -18,6 +18,10 @@ mod round_robin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use omq_proto::direct_encode::{
+    DirectEncodeCaps, DirectEncodeDecision, DirectEncodeState, can_push_pre_encoded,
+    decide_direct_encode,
+};
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
@@ -76,47 +80,45 @@ pub(super) fn try_direct_encode(
         return Ok(None);
     }
 
-    if !state.has_transform {
-        if !state.handshake_done.get() {
-            return Ok(None);
-        }
-        let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
-            return Ok(None);
-        };
-        if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
-            return Ok(None);
-        }
-        #[cfg(feature = "ws")]
-        if state.is_ws {
-            eq.encode_ws(msg, state.ws_masked);
-            let qbytes = eq.total_bytes();
-            drop(eq);
-            state.signal_encoded();
-            return Ok(Some(qbytes));
-        }
-        eq.encode_auto(msg);
-        let qbytes = eq.total_bytes();
-        drop(eq);
-        state.signal_encoded();
-        return Ok(Some(qbytes));
-    }
-
-    #[cfg(feature = "ws")]
-    let skip_passthrough = state.is_ws;
-    #[cfg(not(feature = "ws"))]
-    let skip_passthrough = false;
-    if !skip_passthrough
-        && let Some((ref sentinel, threshold)) = state.transform_passthrough
-        && state.handshake_done.get()
-        && msg.iter().all(|b| b.len() < threshold)
+    if !state.has_transform
+        || state
+            .transform_passthrough
+            .as_ref()
+            .is_some_and(|(_, threshold)| msg.iter().all(|b| b.len() < *threshold))
     {
         let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
             return Ok(None);
         };
-        if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
-            return Ok(None);
+        let decision = decide_direct_encode(
+            DirectEncodeState {
+                uses_crypto: false,
+                handshake_done: state.handshake_done.get(),
+                has_transform: state.has_transform,
+                transform_passthrough: state.transform_passthrough.as_ref(),
+                #[cfg(feature = "ws")]
+                is_ws: state.is_ws,
+                #[cfg(not(feature = "ws"))]
+                is_ws: false,
+                queued_bytes: eq.total_bytes(),
+                queued_messages: state.direct_msg_count.get(),
+            },
+            DirectEncodeCaps {
+                byte_cap: DIRECT_CAP,
+                message_cap: DIRECT_MSG_CAP,
+            },
+            msg,
+        );
+        match decision {
+            DirectEncodeDecision::Plain => eq.encode_auto(msg),
+            #[cfg(feature = "ws")]
+            DirectEncodeDecision::WebSocket => eq.encode_ws(msg, state.ws_masked),
+            #[cfg(not(feature = "ws"))]
+            DirectEncodeDecision::WebSocket => unreachable!("ws disabled"),
+            DirectEncodeDecision::TransformPassthrough { sentinel } => {
+                eq.encode_prefixed_auto(sentinel, msg);
+            }
+            DirectEncodeDecision::Full | DirectEncodeDecision::Ineligible => return Ok(None),
         }
-        eq.encode_prefixed_auto(sentinel, msg);
         let qbytes = eq.total_bytes();
         drop(eq);
         state.signal_encoded();
@@ -175,7 +177,24 @@ pub(super) fn direct_push_encoded(state: &DirectIoState, encoded: &[bytes::Bytes
     let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
         return false;
     };
-    if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
+    if !can_push_pre_encoded(
+        DirectEncodeState {
+            uses_crypto: state.uses_crypto,
+            handshake_done: state.handshake_done.get(),
+            has_transform: state.has_transform,
+            transform_passthrough: state.transform_passthrough.as_ref(),
+            #[cfg(feature = "ws")]
+            is_ws: state.is_ws,
+            #[cfg(not(feature = "ws"))]
+            is_ws: false,
+            queued_bytes: eq.total_bytes(),
+            queued_messages: state.direct_msg_count.get(),
+        },
+        DirectEncodeCaps {
+            byte_cap: DIRECT_CAP,
+            message_cap: DIRECT_MSG_CAP,
+        },
+    ) {
         return false;
     }
     eq.push_shared_chunks(encoded);
@@ -204,7 +223,24 @@ pub(super) fn direct_push_pre_encoded(state: &DirectIoState, data: &[u8]) -> boo
     let Some(mut eq) = state.encoded_queue.try_borrow_mut() else {
         return false;
     };
-    if eq.total_bytes() >= DIRECT_CAP || state.direct_msg_count.get() >= DIRECT_MSG_CAP {
+    if !can_push_pre_encoded(
+        DirectEncodeState {
+            uses_crypto: state.uses_crypto,
+            handshake_done: state.handshake_done.get(),
+            has_transform: state.has_transform,
+            transform_passthrough: state.transform_passthrough.as_ref(),
+            #[cfg(feature = "ws")]
+            is_ws: state.is_ws,
+            #[cfg(not(feature = "ws"))]
+            is_ws: false,
+            queued_bytes: eq.total_bytes(),
+            queued_messages: state.direct_msg_count.get(),
+        },
+        DirectEncodeCaps {
+            byte_cap: DIRECT_CAP,
+            message_cap: DIRECT_MSG_CAP,
+        },
+    ) {
         return false;
     }
     eq.push_pre_encoded(data);

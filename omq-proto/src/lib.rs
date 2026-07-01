@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backoff;
+pub mod direct_encode;
 pub mod encoded_queue;
 pub mod endpoint;
 pub mod error;
