@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use omq_proto::direct_encode::{
+    DirectEncodeCaps, DirectEncodeDecision, DirectEncodeState, decide_direct_encode,
+};
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::message::Message;
 
@@ -104,49 +107,42 @@ impl PeerWireSlot {
             return TryEncodeResult::Ineligible;
         }
 
-        #[cfg(feature = "ws")]
-        if self.is_ws {
-            if self.has_transform {
-                return TryEncodeResult::Ineligible;
+        let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
+        let decision = decide_direct_encode(
+            DirectEncodeState {
+                uses_crypto: false,
+                handshake_done: true,
+                has_transform: self.has_transform,
+                transform_passthrough: self.transform_passthrough.as_ref(),
+                #[cfg(feature = "ws")]
+                is_ws: self.is_ws,
+                #[cfg(not(feature = "ws"))]
+                is_ws: false,
+                queued_bytes: eq.total_bytes(),
+                queued_messages: self.queued_msgs.load(Ordering::Relaxed),
+            },
+            DirectEncodeCaps {
+                byte_cap: self.cap,
+                message_cap: WIRE_SLOT_MSG_CAP_DEFAULT,
+            },
+            msg,
+        );
+        match decision {
+            DirectEncodeDecision::Plain => eq.encode_auto(msg),
+            #[cfg(feature = "ws")]
+            DirectEncodeDecision::WebSocket => eq.encode_ws(msg, self.ws_masked),
+            #[cfg(not(feature = "ws"))]
+            DirectEncodeDecision::WebSocket => unreachable!("ws disabled"),
+            DirectEncodeDecision::TransformPassthrough { sentinel } => {
+                eq.encode_prefixed_auto(sentinel, msg);
             }
-            let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-            if self.is_full(&eq) {
-                return TryEncodeResult::Full;
-            }
-            eq.encode_ws(msg, self.ws_masked);
-            self.queued_msgs.fetch_add(1, Ordering::Relaxed);
-            drop(eq);
-            self.signal_encoded();
-            return TryEncodeResult::Ok;
+            DirectEncodeDecision::Full => return TryEncodeResult::Full,
+            DirectEncodeDecision::Ineligible => return TryEncodeResult::Ineligible,
         }
-
-        if !self.has_transform {
-            let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-            if self.is_full(&eq) {
-                return TryEncodeResult::Full;
-            }
-            eq.encode_auto(msg);
-            self.queued_msgs.fetch_add(1, Ordering::Relaxed);
-            drop(eq);
-            self.signal_encoded();
-            return TryEncodeResult::Ok;
-        }
-
-        if let Some((ref sentinel, threshold)) = self.transform_passthrough
-            && msg.iter().all(|part| part.len() < threshold)
-        {
-            let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
-            if self.is_full(&eq) {
-                return TryEncodeResult::Full;
-            }
-            eq.encode_prefixed_auto(sentinel, msg);
-            self.queued_msgs.fetch_add(1, Ordering::Relaxed);
-            drop(eq);
-            self.signal_encoded();
-            return TryEncodeResult::Ok;
-        }
-
-        TryEncodeResult::Ineligible
+        self.queued_msgs.fetch_add(1, Ordering::Relaxed);
+        drop(eq);
+        self.signal_encoded();
+        TryEncodeResult::Ok
     }
 
     pub(crate) fn try_push_encoded(&self, chunks: &[Bytes]) -> TryEncodeResult {

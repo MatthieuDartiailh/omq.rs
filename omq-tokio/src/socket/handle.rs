@@ -1,6 +1,6 @@
 //! Public `Socket` handle.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
@@ -17,241 +17,11 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
-use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult};
+use super::recv::{SpscAwareRecv, SpscHandles};
+use super::wire_slot_cache::WireSlotCache;
 use crate::routing::{SendStrategy, SendSubmitter};
-use crate::transport::inproc::InprocSpsc;
-
-pub(crate) type WireSlotHolder = Arc<Mutex<Option<Arc<PeerWireSlot>>>>;
-
-/// Multi-peer round-robin wire slots, shared between the handle (reads)
-/// and the actor (writes on peer add/remove). When more than one wire
-/// peer is active on a round-robin socket and none are inproc, the actor
-/// fills `slots` with every peer's [`PeerWireSlot`]; the handle picks the
-/// next one per send via `cursor`, giving strict round-robin distribution
-/// over the per-peer direct-encode fast path. Empty for single-peer /
-/// inproc-mixed / identity-routed sockets (those fall back to the shared
-/// work-stealing queue).
-pub(crate) type RrSlots = Arc<RrSlotsInner>;
-
-#[derive(Debug, Default)]
-pub(crate) struct RrSlotsInner {
-    pub(crate) slots: Mutex<Vec<Arc<PeerWireSlot>>>,
-    pub(crate) cursor: std::sync::atomic::AtomicUsize,
-}
 
 pub use omq_proto::error::TrySendError;
-
-/// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
-pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
-
-/// Single-peer send fast path ring. Actor sets/clears.
-pub(crate) type SpscSendRing = Arc<RwLock<Option<Arc<InprocSpsc>>>>;
-
-/// Fast-path guard: true when `send_ring` contains `Some`. Lets TCP-only
-/// sockets skip the `RwLock` read entirely.
-pub(crate) type SpscSendRingActive = Arc<AtomicBool>;
-
-/// Shared recv notification. All inproc producers notify this.
-pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
-
-/// Notified by the actor when the consumers Vec changes. Wakes
-/// any `recv()` that's blocked on the normal `async_channel` path.
-pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
-
-/// Grouped handles for per-peer SPSC inproc fast path. Shared between
-/// the socket handle (recv side) and the actor (send-ring management,
-/// consumer registration).
-/// Bumped by the actor whenever the consumers Vec changes. Lets
-/// `SpscAwareRecv` skip re-cloning the Vec when nothing changed.
-pub(crate) type SpscConsumerGeneration = Arc<AtomicU64>;
-
-/// Per-TCP-peer yring consumer entry. The driver pushes decoded messages
-/// into its yring producer; the recv side drains the consumer here.
-pub(crate) struct TcpYringConsumer {
-    pub consumer: Mutex<yring::Consumer<Message>>,
-    pub space: Arc<tokio::sync::Notify>,
-    pub peer_id: u64,
-}
-
-impl std::fmt::Debug for TcpYringConsumer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TcpYringConsumer")
-            .field("peer_id", &self.peer_id)
-            .finish_non_exhaustive()
-    }
-}
-
-pub(crate) type TcpConsumers = Arc<RwLock<Vec<Arc<TcpYringConsumer>>>>;
-
-#[derive(Debug, Clone)]
-pub(crate) struct SpscHandles {
-    pub consumers: SpscConsumers,
-    pub consumer_generation: SpscConsumerGeneration,
-    pub send_ring: SpscSendRing,
-    pub send_ring_active: SpscSendRingActive,
-    pub recv_notify: SpscRecvNotify,
-    pub activated: SpscActivated,
-    pub tcp_consumers: TcpConsumers,
-}
-
-/// Recv channel that integrates per-peer SPSC awareness. Fair-queues
-/// across per-peer yring consumers (inproc + TCP), then falls back to
-/// the `async_channel`.
-#[derive(Debug)]
-struct SpscAwareRecv {
-    rx: async_channel::Receiver<Message>,
-    /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
-    consumers: Arc<std::sync::RwLock<Vec<Arc<InprocSpsc>>>>,
-    /// Per-TCP-peer yring consumers. Actor appends on handshake.
-    tcp_consumers: TcpConsumers,
-    /// Generation counter. Bumped by the actor on any consumer add/remove
-    /// (inproc or TCP).
-    consumer_generation: SpscConsumerGeneration,
-    /// Shared recv notification. All drivers/senders notify this.
-    recv_notify: Arc<tokio::sync::Notify>,
-    /// Notified when consumers Vec changes (new peer added).
-    activated: SpscActivated,
-    /// Single-peer send fast path ring (None when sender has >1 peer).
-    send_ring: Arc<std::sync::RwLock<Option<Arc<InprocSpsc>>>>,
-    /// True when `send_ring` is `Some`. Lets the hot path skip the `RwLock`.
-    send_ring_active: Arc<AtomicBool>,
-    /// Batched messages drained from consumers (inproc + TCP).
-    inproc_cache: std::sync::Mutex<std::collections::VecDeque<Message>>,
-    /// Cached clone of consumers Vecs, refreshed when generation changes.
-    cached_consumers: Mutex<CachedConsumers>,
-}
-
-struct CachedConsumers {
-    generation: u64,
-    inproc: Vec<Arc<InprocSpsc>>,
-    tcp: Vec<Arc<TcpYringConsumer>>,
-}
-
-impl std::fmt::Debug for CachedConsumers {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CachedConsumers")
-            .field("generation", &self.generation)
-            .field("inproc_count", &self.inproc.len())
-            .field("tcp_count", &self.tcp.len())
-            .finish()
-    }
-}
-
-impl SpscAwareRecv {
-    fn try_drain_consumers(&self) -> Option<Message> {
-        if self.consumer_generation.load(Ordering::Relaxed) == 0 {
-            return None;
-        }
-        {
-            let mut cache = self.inproc_cache.lock().unwrap();
-            if let Some(msg) = cache.pop_front() {
-                return Some(msg);
-            }
-        }
-        let current_gen = self.consumer_generation.load(Ordering::Acquire);
-        let mut cached = self.cached_consumers.lock().unwrap();
-        if cached.generation != current_gen {
-            cached.inproc.clone_from(&self.consumers.read().unwrap());
-            cached.tcp.clone_from(&self.tcp_consumers.read().unwrap());
-            cached.generation = current_gen;
-        }
-        let inproc = cached.inproc.clone();
-        let tcp = cached.tcp.clone();
-        drop(cached);
-        let mut cache = self.inproc_cache.lock().unwrap();
-        let mut has_disconnected = false;
-        for p in &inproc {
-            if let Ok(mut consumer) = p.consumer.try_lock() {
-                let got = consumer.prefetch();
-                if got > 0 {
-                    while let Some(msg) = consumer.pop() {
-                        cache.push_back(msg);
-                    }
-                    consumer.release();
-                } else if consumer.is_disconnected() {
-                    has_disconnected = true;
-                }
-            }
-        }
-        for tc in &tcp {
-            if let Ok(mut consumer) = tc.consumer.try_lock() {
-                let got = consumer.prefetch();
-                if got > 0 {
-                    while let Some(msg) = consumer.pop() {
-                        cache.push_back(msg);
-                    }
-                    consumer.release();
-                    tc.space.notify_one();
-                } else if consumer.is_disconnected() {
-                    has_disconnected = true;
-                }
-            }
-        }
-        let result = cache.pop_front();
-        drop(cache);
-        if has_disconnected {
-            self.consumers
-                .write()
-                .unwrap()
-                .retain(|p| p.consumer.try_lock().map_or(true, |c| !c.is_disconnected()));
-            self.tcp_consumers.write().unwrap().retain(|tc| {
-                tc.consumer
-                    .try_lock()
-                    .map_or(true, |c| !c.is_disconnected())
-            });
-            self.consumer_generation.fetch_add(1, Ordering::Release);
-            self.cached_consumers.lock().unwrap().generation = u64::MAX;
-        }
-        result
-    }
-
-    #[expect(clippy::needless_continue)]
-    async fn recv(&self) -> Result<Message> {
-        loop {
-            if let Some(msg) = self.try_drain_consumers() {
-                return Ok(msg);
-            }
-
-            if self.consumer_generation.load(Ordering::Acquire) > 0 {
-                let notified = self.recv_notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if let Some(msg) = self.try_drain_consumers() {
-                    return Ok(msg);
-                }
-                tokio::select! {
-                    biased;
-                    () = notified => continue,
-                    res = self.rx.recv() => {
-                        return res.map_err(|_| Error::Closed);
-                    }
-                    () = self.activated.notified() => continue,
-                }
-            } else {
-                let activated = self.activated.notified();
-                tokio::pin!(activated);
-                activated.as_mut().enable();
-                tokio::select! {
-                    biased;
-                    res = self.rx.recv() => {
-                        return res.map_err(|_| Error::Closed);
-                    }
-                    () = activated => continue,
-                }
-            }
-        }
-    }
-
-    fn try_recv(&self) -> Result<Message> {
-        if let Some(msg) = self.try_drain_consumers() {
-            return Ok(msg);
-        }
-        self.rx.try_recv().map_err(|e| match e {
-            async_channel::TryRecvError::Empty => Error::WouldBlock,
-            async_channel::TryRecvError::Closed => Error::Closed,
-        })
-    }
-}
 
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
 /// driver task. Close happens via the explicit [`Socket::close`] method
@@ -286,15 +56,7 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
-    /// Single-peer encode fast path. When set, the handle encodes
-    /// ZMTP frames directly into the peer's `EncodedQueue` and the
-    /// driver flushes them to the wire. Set by the actor when exactly
-    /// one wire peer is active; cleared on multi-peer or disconnect.
-    wire_slot: WireSlotHolder,
-    /// Multi-peer round-robin wire slots (see [`RrSlots`]). Used by
-    /// `send_via_wire_slot` to dispatch directly to one peer at a time
-    /// instead of funneling every message through the shared queue.
-    rr_slots: RrSlots,
+    wire_slots: WireSlotCache,
     /// Cooperative yield counter. Every `SEND_YIELD_INTERVAL` successful
     /// synchronous sends, `send()` yields to the runtime so driver tasks
     /// on the same worker thread can drain and flush.
@@ -351,19 +113,10 @@ impl Socket {
         let monitor = MonitorPublisher::new();
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
         let send_submitter = send_strategy.submitter();
-        let spsc = SpscHandles {
-            consumers: Arc::new(RwLock::new(Vec::new())),
-            consumer_generation: Arc::new(AtomicU64::new(0)),
-            send_ring: Arc::new(RwLock::new(None)),
-            send_ring_active: Arc::new(AtomicBool::new(false)),
-            recv_notify: Arc::new(tokio::sync::Notify::new()),
-            activated: Arc::new(tokio::sync::Notify::new()),
-            tcp_consumers: Arc::new(RwLock::new(Vec::new())),
-        };
+        let spsc = SpscHandles::default();
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
-        let wire_slot: WireSlotHolder = Arc::new(Mutex::new(None));
-        let rr_slots: RrSlots = Arc::new(RrSlotsInner::default());
+        let wire_slots = WireSlotCache::new();
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -375,8 +128,7 @@ impl Socket {
             spsc.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
-            wire_slot.clone(),
-            rr_slots.clone(),
+            wire_slots.clone(),
             recv_sink_config,
         );
         spawn_driver(driver);
@@ -384,29 +136,13 @@ impl Socket {
             inner: Arc::new(Inner {
                 socket_type,
                 cmd_tx,
-                recv_rx: SpscAwareRecv {
-                    rx: recv_rx,
-                    consumers: spsc.consumers,
-                    tcp_consumers: spsc.tcp_consumers,
-                    consumer_generation: spsc.consumer_generation,
-                    recv_notify: spsc.recv_notify,
-                    activated: spsc.activated,
-                    send_ring: spsc.send_ring,
-                    send_ring_active: spsc.send_ring_active,
-                    inproc_cache: std::sync::Mutex::new(std::collections::VecDeque::new()),
-                    cached_consumers: Mutex::new(CachedConsumers {
-                        generation: u64::MAX,
-                        inproc: Vec::new(),
-                        tcp: Vec::new(),
-                    }),
-                },
+                recv_rx: SpscAwareRecv::new(recv_rx, spsc),
                 monitor,
                 root_cancel: cancel,
                 send_submitter,
                 type_state,
                 req_awaiting_reply,
-                wire_slot,
-                rr_slots,
+                wire_slots,
                 send_ops: AtomicU32::new(0),
                 last_bound_endpoint: RwLock::new(None),
             }),
@@ -485,7 +221,7 @@ impl Socket {
                         break;
                     }
                     tokio::task::yield_now().await;
-                    if self.is_wire_slot_dead() {
+                    if self.inner.wire_slots.single_dead() {
                         self.inner
                             .req_awaiting_reply
                             .store(false, Ordering::Release);
@@ -529,7 +265,7 @@ impl Socket {
                 if self.try_send_wire(&msg) {
                     return Ok(());
                 }
-                if self.inner.wire_slot.lock().expect("wire_slot").is_some() {
+                if self.inner.wire_slots.single_exists() {
                     self.send_wire_slow(msg).await
                 } else {
                     self.send_round_robin_wire(msg).await
@@ -850,40 +586,11 @@ impl Socket {
     /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
     /// unavailable or the ring is full.
     fn try_push_spsc(&self, msg: Message) -> core::result::Result<(), Message> {
-        if !self.inner.recv_rx.send_ring_active.load(Ordering::Acquire) {
-            return Err(msg);
-        }
-        let spsc = self.inner.recv_rx.send_ring.read().unwrap().clone();
-        let Some(ref pair) = spsc else {
-            return Err(msg);
-        };
-        if !pair.recv_ready.load(std::sync::atomic::Ordering::Acquire)
-            || pair
-                .max_message_size
-                .is_some_and(|max| msg.byte_len() > max)
-        {
-            return Err(msg);
-        }
-        let Ok(mut producer) = pair.producer.try_lock() else {
-            return Err(msg);
-        };
-        if producer.is_full() {
-            return Err(msg);
-        }
-        let _ = producer.push(msg);
-        producer.flush();
-        pair.recv_notify.notify_one();
-        Ok(())
+        self.inner.recv_rx.try_push_spsc(msg)
     }
 
-    /// Synchronous single-peer wire encode fast path. Returns true if
-    /// the message was encoded into the peer's `EncodedQueue`.
-    #[inline]
     fn try_send_wire(&self, msg: &Message) -> bool {
-        if let Some(ref slot) = self.single_wire_slot() {
-            return slot.try_encode(msg) == TryEncodeResult::Ok;
-        }
-        false
+        self.inner.wire_slots.try_send(msg)
     }
 
     /// Multi-peer round-robin with anti-starvation.
@@ -895,94 +602,25 @@ impl Socket {
     /// breaks the TCP flow-control feedback loop that otherwise
     /// causes permanent starvation under MT scheduling.
     async fn send_round_robin_wire(&self, msg: Message) -> Result<()> {
-        let starved = {
-            let slots = self.inner.rr_slots.slots.lock().expect("rr_slots");
-            let n = slots.len();
-            let mut starved_slot = None;
-            for _ in 0..n {
-                let i = self.inner.rr_slots.cursor.fetch_add(1, Ordering::Relaxed) % n;
-                match slots[i].try_encode(&msg) {
-                    TryEncodeResult::Ok => {
-                        slots[i].consecutive_full.store(0, Ordering::Relaxed);
-                        return Ok(());
-                    }
-                    TryEncodeResult::Full => {
-                        let prev = slots[i].consecutive_full.fetch_add(1, Ordering::Relaxed);
-                        if prev >= Self::STARVATION_THRESHOLD {
-                            starved_slot = Some(slots[i].clone());
-                            break;
-                        }
-                    }
-                    TryEncodeResult::Dead | TryEncodeResult::Ineligible => {}
-                }
-            }
-            starved_slot
-        };
-
-        if let Some(slot) = starved {
-            let notified = slot.space_available.notified();
-            if slot.try_encode(&msg) == TryEncodeResult::Ok {
-                slot.consecutive_full.store(0, Ordering::Relaxed);
-                return Ok(());
-            }
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(1), notified).await;
-            if slot.try_encode(&msg) == TryEncodeResult::Ok {
-                slot.consecutive_full.store(0, Ordering::Relaxed);
-                return Ok(());
-            }
-        }
-
-        self.inner.send_submitter.send(msg).await
+        self.inner
+            .wire_slots
+            .send_round_robin(msg, &self.inner.send_submitter, Self::STARVATION_THRESHOLD)
+            .await
     }
 
-    /// Single-peer async slow path: handles backpressure (Full → wait
-    /// for space) and falls back to the shared queue for ineligible peers.
     async fn send_wire_slow(&self, msg: Message) -> Result<()> {
-        let slot = self.single_wire_slot();
-        if let Some(ref slot) = slot {
-            loop {
-                match slot.try_encode(&msg) {
-                    TryEncodeResult::Ok => return Ok(()),
-                    TryEncodeResult::Dead | TryEncodeResult::Ineligible => break,
-                    TryEncodeResult::Full => {
-                        let notified = slot.space_available.notified();
-                        if slot.try_encode(&msg) == TryEncodeResult::Ok {
-                            return Ok(());
-                        }
-                        notified.await;
-                    }
-                }
-            }
-        }
-        self.inner.send_submitter.send(msg).await
+        self.inner
+            .wire_slots
+            .send_single_slow(msg, &self.inner.send_submitter)
+            .await
     }
 
     fn try_send_single_wire(&self, msg: &Message) -> core::result::Result<bool, TrySendError> {
-        let Some(slot) = self.single_wire_slot() else {
-            return Ok(false);
-        };
-        match slot.try_encode(msg) {
-            TryEncodeResult::Ok => Ok(true),
-            TryEncodeResult::Full => Err(TrySendError::Full(msg.clone())),
-            TryEncodeResult::Dead | TryEncodeResult::Ineligible => Ok(false),
-        }
-    }
-
-    fn single_wire_slot(&self) -> Option<Arc<PeerWireSlot>> {
-        self.inner.wire_slot.lock().expect("wire_slot").clone()
+        self.inner.wire_slots.try_send_single(msg)
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {
         self.inner.send_submitter.send(msg).await
-    }
-
-    fn is_wire_slot_dead(&self) -> bool {
-        self.inner
-            .wire_slot
-            .lock()
-            .expect("wire_slot")
-            .as_ref()
-            .is_some_and(|s| s.dead.load(Ordering::Acquire))
     }
 }
 

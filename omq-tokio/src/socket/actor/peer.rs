@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use super::{
     AnyConn, AnyStream, ConnectionConfig, ConnectionDriver, DisconnectReason, DriverConfig,
@@ -9,6 +8,7 @@ use super::{
     generated_identity, max_peer_count, mpsc, peer_ident_socket_addr, supports_groups,
     supports_subscribe,
 };
+use crate::socket::actor::lifecycle::PeerLifecycle;
 
 impl SocketDriver {
     pub(super) async fn handle_internal_event(&mut self, evt: InternalEvent) {
@@ -38,7 +38,7 @@ impl SocketDriver {
                 self.handle_peer_event(peer_id, event).await;
             }
             InternalEvent::PeerClosed { peer_id, reason } => {
-                if let Some(peer) = self.remove_peer(peer_id, reason)
+                if let Some(peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason)
                     && peer.is_client
                     && !self.closing
                     && !matches!(self.options.reconnect, ReconnectPolicy::Disabled)
@@ -51,140 +51,10 @@ impl SocketDriver {
         }
     }
 
-    fn remove_peer(&mut self, peer_id: u64, reason: DisconnectReason) -> Option<PeerEntry> {
-        self.send_strategy.connection_removed(peer_id);
-        self.recv_strategy.connection_removed(peer_id);
-        let peer = self.peers.remove(&peer_id);
-        if let Some(ref peer) = peer
-            && let Some(ref info) = peer.info
-        {
-            self.monitor.publish(MonitorEvent::Disconnected {
-                endpoint: peer.endpoint.clone(),
-                peer: info.clone(),
-                reason,
-            });
-        }
-        // Mark the removed peer's SPSC ring as inactive so the send
-        // fast path stops targeting it. Don't remove it from the
-        // consumers Vec yet: the recv side may still have unconsumed
-        // messages. SpscAwareRecv::try_drain_consumers cleans up
-        // disconnected consumers lazily after they're drained.
-        if let Some(ref peer) = peer
-            && let Some(ref removed_spsc) = peer.spsc
-        {
-            removed_spsc
-                .recv_ready
-                .store(false, std::sync::atomic::Ordering::Release);
-        }
-        self.update_send_ring();
-        if let Some(ref peer) = peer
-            && let Some(ref slot) = peer.handle.wire_slot
-        {
-            slot.mark_dead();
-        }
-        {
-            let mut guard = self.wire_slot.lock().expect("wire_slot");
-            if guard.as_ref().is_some_and(|s| s.peer_id == peer_id) {
-                *guard = None;
-            }
-        }
-        self.update_wire_slot();
-        // Refill the RecvSink slot so the next wire peer gets the fast
-        // yring path instead of falling back to the recv pump.
-        if let Some(ref config) = self.recv_sink_config {
-            config.refill();
-        }
-        match self.socket_type {
-            SocketType::Req if self.peers.is_empty() => {
-                self.req_awaiting_reply
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                self.type_state
-                    .lock()
-                    .expect("type_state")
-                    .on_peer_disconnected();
-            }
-            SocketType::Rep if self.peers.is_empty() => {
-                self.type_state
-                    .lock()
-                    .expect("type_state")
-                    .on_peer_disconnected();
-            }
-            _ => {}
-        }
-        peer
-    }
-
-    /// Re-evaluate the SPSC send ring. Enables it when exactly one
-    /// peer with an SPSC ring exists; disables it otherwise.
-    fn update_send_ring(&mut self) {
-        let mut sole_spsc: Option<&Arc<crate::transport::inproc::InprocSpsc>> = None;
-        let mut count = 0;
-        for p in self.peers.values() {
-            if let Some(ref s) = p.spsc {
-                count += 1;
-                if count > 1 {
-                    break;
-                }
-                sole_spsc = Some(s);
-            }
-        }
-        if count == 1 && self.peers.len() == 1 {
-            let s = sole_spsc.unwrap();
-            *self.spsc.send_ring.write().unwrap() = Some(s.clone());
-            self.spsc
-                .send_ring_active
-                .store(true, std::sync::atomic::Ordering::Release);
-        } else {
-            *self.spsc.send_ring.write().unwrap() = None;
-            self.spsc
-                .send_ring_active
-                .store(false, std::sync::atomic::Ordering::Release);
-        }
-    }
-
-    fn update_wire_slot(&mut self) {
-        use omq_proto::routing::SendCategory;
-        let cat = omq_proto::routing::send_category(self.socket_type);
-        if !matches!(cat, SendCategory::RoundRobin | SendCategory::Exclusive) {
-            return;
-        }
-        let mut guard = self.wire_slot.lock().expect("wire_slot");
-        let mut rr = self.rr_slots.slots.lock().expect("rr_slots");
-        rr.clear();
-        if self.peers.len() == 1 {
-            let peer = self.peers.values().next().unwrap();
-            if let Some(ref slot) = peer.handle.wire_slot
-                && slot.handshake_done.load(Ordering::Acquire)
-            {
-                *guard = Some(slot.clone());
-                return;
-            }
-        }
-        *guard = None;
-        // Multi-peer round-robin: populate per-peer wire slots so the handle
-        // dispatches directly to one peer at a time. Only when every peer is
-        // a wire peer (no inproc) - inproc peers have no wire slot and would
-        // be starved if the round-robin only cycled wire slots. Mixed or
-        // inproc-only sets fall back to the shared queue (rr left empty).
-        if matches!(cat, SendCategory::RoundRobin)
-            && self.peers.len() > 1
-            && self.peers.values().all(|p| {
-                p.handle
-                    .wire_slot
-                    .as_ref()
-                    .is_some_and(|slot| slot.handshake_done.load(Ordering::Acquire))
-            })
-        {
-            for p in self.peers.values() {
-                if let Some(ref slot) = p.handle.wire_slot {
-                    rr.push(slot.clone());
-                }
-            }
-        }
-    }
-
     fn evict_peer_for_handover(&mut self, peer_id: u64) {
-        if let Some(peer) = self.remove_peer(peer_id, DisconnectReason::Handover) {
+        if let Some(peer) =
+            PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::Handover)
+        {
             peer.handle.cancel.cancel();
         }
     }
@@ -390,7 +260,7 @@ impl SocketDriver {
                 let from_slot = self
                     .recv_sink_config
                     .as_ref()
-                    .and_then(|cfg| cfg.slot.lock().unwrap().take());
+                    .and_then(|cfg| cfg.take_sink());
                 if let Some(sink) = from_slot {
                     driver.with_recv_sink(sink)
                 } else {
@@ -403,16 +273,7 @@ impl SocketDriver {
                         signal: Box::new(move || recv_notify.notify_one()),
                         space: space.clone(),
                     });
-                    let entry = std::sync::Arc::new(crate::socket::handle::TcpYringConsumer {
-                        consumer: std::sync::Mutex::new(cons),
-                        space,
-                        peer_id,
-                    });
-                    self.spsc.tcp_consumers.write().unwrap().push(entry);
-                    self.spsc
-                        .consumer_generation
-                        .fetch_add(1, std::sync::atomic::Ordering::Release);
-                    self.spsc.activated.notify_one();
+                    PeerLifecycle::new(self).register_tcp_consumer(cons, space, peer_id);
                     driver.with_recv_sink(sink)
                 }
             } else {
@@ -440,11 +301,7 @@ impl SocketDriver {
             },
         );
 
-        // Disable send fast paths when a second peer connects.
-        if self.peers.len() > 1 {
-            self.update_send_ring();
-            *self.wire_slot.lock().expect("wire_slot") = None;
-        }
+        PeerLifecycle::new(self).after_peer_inserted();
 
         tokio::spawn(async move {
             let _ = driver.run().await;
@@ -483,7 +340,7 @@ impl SocketDriver {
         );
 
         if self.peers.len() > 1 {
-            self.update_send_ring();
+            PeerLifecycle::new(self).update_send_ring();
         }
 
         self.send_strategy
@@ -547,7 +404,7 @@ impl SocketDriver {
         let recv_sink = if can_bypass_actor_recv(self.socket_type) && can_use_yring {
             self.recv_sink_config
                 .as_ref()
-                .and_then(|cfg| cfg.slot.lock().unwrap().take())
+                .and_then(|cfg| cfg.take_sink())
         } else {
             None
         };
@@ -583,17 +440,10 @@ impl SocketDriver {
 
         // Per-peer SPSC: always add to consumers Vec (recv side).
         if let Some(ref s) = spsc {
-            self.spsc.consumers.write().unwrap().push(s.clone());
-            self.spsc
-                .consumer_generation
-                .fetch_add(1, std::sync::atomic::Ordering::Release);
-            if can_bypass_actor_recv(self.socket_type) {
-                s.recv_ready
-                    .store(true, std::sync::atomic::Ordering::Release);
-            }
-            self.spsc.activated.notify_one();
+            let recv_bypass = can_bypass_actor_recv(self.socket_type);
+            PeerLifecycle::new(self).register_inproc_consumer(s, recv_bypass);
         }
-        self.update_send_ring();
+        PeerLifecycle::new(self).update_send_ring();
 
         tokio::spawn(inproc_peer_driver(
             inbox_rx,
@@ -695,7 +545,7 @@ impl SocketDriver {
         );
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;
-        self.update_wire_slot();
+        PeerLifecycle::new(self).update_wire_slot();
     }
 
     async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {

@@ -46,8 +46,8 @@ pub struct YringSink {
 /// the external consumer picks up the new consumer from
 /// `pending_consumer`.
 pub struct RecvSinkConfig {
-    pub slot: std::sync::Mutex<Option<RecvSink>>,
-    pub pending_consumer: std::sync::Mutex<Option<yring::Consumer<Message>>>,
+    slot: std::sync::Mutex<Option<RecvSink>>,
+    pending_consumer: std::sync::Mutex<Option<yring::Consumer<Message>>>,
     signal: Arc<dyn Fn() + Send + Sync>,
     space: Arc<tokio::sync::Notify>,
     cap: usize,
@@ -80,7 +80,7 @@ impl RecvSinkConfig {
     /// Create a fresh yring pair. Puts the `RecvSink` in `slot` and the
     /// consumer in `pending_consumer`. No-op if the slot already contains
     /// a sink.
-    pub fn refill(&self) {
+    pub fn refill_sink(&self) {
         let mut guard = self.slot.lock().unwrap();
         if guard.is_some() {
             return;
@@ -93,6 +93,18 @@ impl RecvSinkConfig {
             space: self.space.clone(),
         }));
         *self.pending_consumer.lock().unwrap() = Some(cons);
+    }
+
+    pub fn take_sink(&self) -> Option<RecvSink> {
+        self.slot.lock().unwrap().take()
+    }
+
+    pub fn try_take_pending_consumer(&self) -> Option<yring::Consumer<Message>> {
+        self.pending_consumer.try_lock().ok()?.take()
+    }
+
+    pub fn notify_space(&self) {
+        self.space.notify_one();
     }
 }
 
