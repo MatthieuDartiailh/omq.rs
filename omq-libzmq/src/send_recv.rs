@@ -336,8 +336,8 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
 /// Signal the recv pump that space is available in the recv ring.
 #[inline]
 fn signal_recv_space(sock: &OmqSocket) {
-    if let Some(n) = sock.recv_space.get() {
-        n.notify_one();
+    if let Some(cfg) = sock.recv_sink_config.get() {
+        cfg.notify_space();
     }
 }
 
@@ -516,8 +516,7 @@ fn try_pop_dual(
 ) -> Option<omq_tokio::Message> {
     if cons.fast.is_disconnected()
         && let Some(cfg) = sock.recv_sink_config.get()
-        && let Ok(mut guard) = cfg.pending_consumer.try_lock()
-        && let Some(new_cons) = guard.take()
+        && let Some(new_cons) = cfg.try_take_pending_consumer()
     {
         cons.fast = new_cons;
     }

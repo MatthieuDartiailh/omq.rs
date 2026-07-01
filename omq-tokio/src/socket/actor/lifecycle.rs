@@ -148,7 +148,7 @@ impl<'a> PeerLifecycle<'a> {
         // Refill the RecvSink slot so the next wire peer gets the fast
         // yring path instead of falling back to the recv pump.
         if let Some(ref config) = self.driver.recv_sink_config {
-            config.refill();
+            config.refill_sink();
         }
     }
 

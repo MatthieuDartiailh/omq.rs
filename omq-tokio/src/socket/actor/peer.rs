@@ -260,7 +260,7 @@ impl SocketDriver {
                 let from_slot = self
                     .recv_sink_config
                     .as_ref()
-                    .and_then(|cfg| cfg.slot.lock().unwrap().take());
+                    .and_then(|cfg| cfg.take_sink());
                 if let Some(sink) = from_slot {
                     driver.with_recv_sink(sink)
                 } else {
@@ -404,7 +404,7 @@ impl SocketDriver {
         let recv_sink = if can_bypass_actor_recv(self.socket_type) && can_use_yring {
             self.recv_sink_config
                 .as_ref()
-                .and_then(|cfg| cfg.slot.lock().unwrap().take())
+                .and_then(|cfg| cfg.take_sink())
         } else {
             None
         };
