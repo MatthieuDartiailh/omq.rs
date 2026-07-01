@@ -17,6 +17,7 @@ use bytes::Bytes;
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::error::{Error, Result};
+use omq_proto::fan_out_batch::{FanOutBatch, clear_fan_out_batch, finish_fan_out_batch};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::transform::MessageEncoder;
@@ -490,43 +491,42 @@ fn dispatch_encoded(
     chunks: &mut Vec<Bytes>,
 ) -> DispatchStatus {
     let mut full = false;
-    if eq.has_arena_only() && eq.uncommitted_arena().len() * targets.len() <= FAN_OUT_COPY_BUDGET {
-        let raw = eq.uncommitted_arena();
-        for t in targets {
-            match t {
-                PeerSend::Wire { slot, .. } => {
-                    full |= slot.try_push_pre_encoded_no_signal(raw) == TryEncodeResult::Full;
+    match finish_fan_out_batch(eq, chunks, targets.len(), FAN_OUT_COPY_BUDGET) {
+        FanOutBatch::Arena(raw) => {
+            for t in targets {
+                match t {
+                    PeerSend::Wire { slot, .. } => {
+                        full |= slot.try_push_pre_encoded_no_signal(raw) == TryEncodeResult::Full;
+                    }
+                    PeerSend::Inbox(tx) => {
+                        full |= tx
+                            .try_send(DriverCommand::SendMessage(msg.clone()))
+                            .is_err();
+                    }
                 }
-                PeerSend::Inbox(tx) => {
-                    full |= tx
-                        .try_send(DriverCommand::SendMessage(msg.clone()))
-                        .is_err();
+            }
+            for t in targets {
+                if let PeerSend::Wire { slot, .. } = t {
+                    slot.signal_encoded();
                 }
             }
         }
-        for t in targets {
-            if let PeerSend::Wire { slot, .. } = t {
-                slot.signal_encoded();
-            }
-        }
-        eq.clear_arena();
-    } else {
-        chunks.clear();
-        eq.drain_into_vec(chunks, 1024);
-        for t in targets {
-            match t {
-                PeerSend::Wire { slot, .. } => {
-                    full |= slot.try_push_encoded(chunks) == TryEncodeResult::Full;
-                }
-                PeerSend::Inbox(tx) => {
-                    full |= tx
-                        .try_send(DriverCommand::SendMessage(msg.clone()))
-                        .is_err();
+        FanOutBatch::Chunks(encoded) => {
+            for t in targets {
+                match t {
+                    PeerSend::Wire { slot, .. } => {
+                        full |= slot.try_push_encoded(encoded) == TryEncodeResult::Full;
+                    }
+                    PeerSend::Inbox(tx) => {
+                        full |= tx
+                            .try_send(DriverCommand::SendMessage(msg.clone()))
+                            .is_err();
+                    }
                 }
             }
         }
-        chunks.clear();
     }
+    clear_fan_out_batch(eq, chunks);
     if full {
         DispatchStatus::Full
     } else {

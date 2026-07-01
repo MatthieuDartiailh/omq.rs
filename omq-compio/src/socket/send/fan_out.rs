@@ -4,6 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::error::Result;
+use omq_proto::fan_out_batch::{FanOutBatch, build_fan_out_batch, clear_fan_out_batch};
 use omq_proto::message::Message;
 
 use crate::socket::handle::Socket;
@@ -18,7 +19,7 @@ const FAN_OUT_ARENA_COPY_MAX: usize = 256;
 
 fn yield_interval(msg: &Message) -> u32 {
     let wire_size = msg.byte_len() + 10;
-    (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 256) as u32
+    (ARENA_YIELD_BYTES / wire_size.max(1)).clamp(16, 64) as u32
 }
 
 thread_local! {
@@ -29,28 +30,26 @@ thread_local! {
 fn fan_out_encode_dispatch(dio_cache: &[Arc<DirectIoState>], targets: &[PeerOut], msg: &Message) {
     FAN_OUT_EQ.with(|cell| {
         let eq = &mut *cell.borrow_mut();
-        eq.encode_auto(msg);
-        if eq.has_arena_only() && eq.uncommitted_arena().len() <= FAN_OUT_ARENA_COPY_MAX {
-            let raw = eq.uncommitted_arena();
-            for (i, state) in dio_cache.iter().enumerate() {
-                if !direct_push_pre_encoded(state, raw) {
-                    let _ = targets[i].try_send_immediate(msg.clone());
-                }
-            }
-            eq.clear_arena();
-        } else {
-            FAN_OUT_CHUNKS.with(|drain| {
-                let chunks = &mut *drain.borrow_mut();
-                chunks.clear();
-                eq.drain_into_vec(chunks, 1024);
-                for (i, state) in dio_cache.iter().enumerate() {
-                    if !direct_push_encoded(state, chunks) {
-                        let _ = targets[i].try_send_immediate(msg.clone());
+        FAN_OUT_CHUNKS.with(|drain| {
+            let chunks = &mut *drain.borrow_mut();
+            match build_fan_out_batch(eq, msg, chunks, 1, FAN_OUT_ARENA_COPY_MAX) {
+                FanOutBatch::Arena(raw) => {
+                    for (i, state) in dio_cache.iter().enumerate() {
+                        if !direct_push_pre_encoded(state, raw) {
+                            let _ = targets[i].try_send_immediate(msg.clone());
+                        }
                     }
                 }
-                chunks.clear();
-            });
-        }
+                FanOutBatch::Chunks(encoded) => {
+                    for (i, state) in dio_cache.iter().enumerate() {
+                        if !direct_push_encoded(state, encoded) {
+                            let _ = targets[i].try_send_immediate(msg.clone());
+                        }
+                    }
+                }
+            }
+            clear_fan_out_batch(eq, chunks);
+        });
     });
 }
 

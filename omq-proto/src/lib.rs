@@ -13,6 +13,7 @@ pub mod direct_encode;
 pub mod encoded_queue;
 pub mod endpoint;
 pub mod error;
+pub mod fan_out_batch;
 pub mod flow;
 pub mod inproc;
 pub mod message;
