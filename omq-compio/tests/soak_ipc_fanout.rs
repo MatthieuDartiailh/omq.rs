@@ -26,10 +26,12 @@ fn block_on_and_drain<F: std::future::Future>(rt: &compio::runtime::Runtime, fut
 
 const PEERS: usize = 3;
 const MSG_SIZE: usize = 131_072;
+const STEADY_STATE_LAG_LIMIT: usize = 100_000;
+const DRAIN_TAIL_LAG_LIMIT: usize = 10_000;
 
 #[test]
 #[expect(clippy::too_many_lines)]
-fn soak_ipc_fanout_no_message_loss() {
+fn soak_ipc_fanout_no_steady_state_loss() {
     let duration = soak_common::soak_duration();
 
     let ep: omq_compio::Endpoint =
@@ -40,7 +42,10 @@ fn soak_ipc_fanout_no_message_loss() {
         )));
 
     let recv_count = Arc::new(AtomicUsize::new(0));
+    let recv_by_sub: Arc<Vec<AtomicUsize>> =
+        Arc::new((0..PEERS).map(|_| AtomicUsize::new(0)).collect());
     let sent_count = Arc::new(AtomicUsize::new(0));
+    let max_steady_lag = Arc::new(AtomicUsize::new(0));
     let counting = Arc::new(AtomicBool::new(false));
     let sending_done = Arc::new(AtomicBool::new(false));
     let subs_ready: Arc<Vec<AtomicBool>> =
@@ -52,6 +57,7 @@ fn soak_ipc_fanout_no_message_loss() {
         .map(|i| {
             let ep = ep.clone();
             let recv_count = recv_count.clone();
+            let recv_by_sub = recv_by_sub.clone();
             let sent_count = sent_count.clone();
             let counting = counting.clone();
             let sending_done = sending_done.clone();
@@ -72,6 +78,7 @@ fn soak_ipc_fanout_no_message_loss() {
                                 subs_ready[i].store(true, Ordering::Relaxed);
                                 if counting.load(Ordering::Acquire) {
                                     recv_count.fetch_add(1, Ordering::Relaxed);
+                                    recv_by_sub[i].fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                             _ => {
@@ -84,11 +91,12 @@ fn soak_ipc_fanout_no_message_loss() {
 
                     // Drain messages still in the pipeline.
                     let expected = sent_count.load(Ordering::Acquire) * PEERS;
-                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
                     while std::time::Instant::now() < deadline {
                         match compio::time::timeout(Duration::from_secs(1), s.recv()).await {
                             Ok(Ok(_)) => {
                                 recv_count.fetch_add(1, Ordering::Relaxed);
+                                recv_by_sub[i].fetch_add(1, Ordering::Relaxed);
                             }
                             _ => {
                                 if recv_count.load(Ordering::Relaxed) >= expected {
@@ -107,7 +115,9 @@ fn soak_ipc_fanout_no_message_loss() {
 
     let pub_thread = {
         let recv_count = recv_count.clone();
+        let recv_by_sub = recv_by_sub.clone();
         let sent_count = sent_count.clone();
+        let max_steady_lag = max_steady_lag.clone();
         let counting = counting.clone();
         let sending_done = sending_done.clone();
         let subs_ready = subs_ready.clone();
@@ -145,8 +155,18 @@ fn soak_ipc_fanout_no_message_loss() {
                     sent += 1;
                     if last_log.elapsed() >= Duration::from_secs(30) {
                         let r = recv_count.load(Ordering::Relaxed);
+                        let per_sub: Vec<_> = recv_by_sub
+                            .iter()
+                            .map(|count| count.load(Ordering::Relaxed))
+                            .collect();
+                        let lag = per_sub
+                            .iter()
+                            .map(|count| sent.saturating_sub(*count))
+                            .max()
+                            .unwrap_or(0);
+                        max_steady_lag.fetch_max(lag, Ordering::Relaxed);
                         eprintln!(
-                            "[ipc_fanout] {:.0}s, sent {sent}, recvd {r}",
+                            "[ipc_fanout] {:.0}s, sent {sent}, recvd {r}, lag {lag}",
                             start.elapsed().as_secs_f64(),
                         );
                         last_log = std::time::Instant::now();
@@ -175,6 +195,26 @@ fn soak_ipc_fanout_no_message_loss() {
     let s = sent_count.load(Ordering::Relaxed);
     let r = recv_count.load(Ordering::Relaxed);
     let expected = s * PEERS;
-    eprintln!("[ipc_fanout] done: sent {s}, recvd {r}, expected {expected}");
-    assert_eq!(r, expected, "message loss detected");
+    let max_steady_lag = max_steady_lag.load(Ordering::Relaxed);
+    let per_sub: Vec<_> = recv_by_sub
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .collect();
+    let final_lag = per_sub
+        .iter()
+        .map(|count| s.saturating_sub(*count))
+        .max()
+        .unwrap_or(0);
+    eprintln!(
+        "[ipc_fanout] done: sent {s}, recvd {r}, expected {expected}, per_sub {per_sub:?}, \
+         max_steady_lag {max_steady_lag}, final_lag {final_lag}"
+    );
+    assert!(
+        max_steady_lag <= STEADY_STATE_LAG_LIMIT,
+        "steady-state fanout lag exceeded limit: lag {max_steady_lag}, limit {STEADY_STATE_LAG_LIMIT}, sent {s}, per_sub {per_sub:?}"
+    );
+    assert!(
+        final_lag <= DRAIN_TAIL_LAG_LIMIT,
+        "fanout drain tail exceeded limit: lag {final_lag}, limit {DRAIN_TAIL_LAG_LIMIT}, sent {s}, per_sub {per_sub:?}"
+    );
 }

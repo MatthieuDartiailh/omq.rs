@@ -25,6 +25,7 @@ use crate::transport::driver::{self, DriverCommand};
 use crate::transport::inproc::{InprocConn, InprocPeerSnapshot};
 use crate::transport::peer_io::{WireReader, WireWriter};
 
+use super::direct_io::DIRECT_ARENA_THRESHOLD_DEFAULT;
 use super::inner::{
     DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner, WirePeerHandle,
     is_round_robin_send,
@@ -436,6 +437,10 @@ fn install_accepted_wire_peer_with_leftover(
         encoder,
         uses_crypto,
         inner.options.large_message_threshold.unwrap_or(0),
+        inner
+            .options
+            .arena_threshold
+            .unwrap_or(DIRECT_ARENA_THRESHOLD_DEFAULT),
         #[cfg(feature = "ws")]
         is_ws,
         #[cfg(feature = "ws")]

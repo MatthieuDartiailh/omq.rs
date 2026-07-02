@@ -23,6 +23,7 @@ use crate::transport::driver::DriverCommand;
 use crate::transport::peer_io::WireWriter;
 use crate::transport::{ipc as ipc_transport, tcp as tcp_transport};
 
+use super::direct_io::DIRECT_ARENA_THRESHOLD_DEFAULT;
 use super::inner::{
     DialerEntry, DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner, WirePeerHandle,
 };
@@ -230,6 +231,10 @@ async fn dial_supervisor<F, Fut>(
             peer.encoder,
             uses_crypto,
             inner.options.large_message_threshold.unwrap_or(0),
+            inner
+                .options
+                .arena_threshold
+                .unwrap_or(DIRECT_ARENA_THRESHOLD_DEFAULT),
             #[cfg(feature = "ws")]
             is_ws,
             #[cfg(feature = "ws")]

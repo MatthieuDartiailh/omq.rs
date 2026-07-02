@@ -15,6 +15,8 @@ use crate::transport::peer_io::{CancellableRecvStream, PeerIo, SharedPeerIo, Wir
 use super::inner::{LocalStream, RecvStreamState};
 use omq_proto::encoded_queue::EncodedQueue;
 
+pub(crate) const DIRECT_ARENA_THRESHOLD_DEFAULT: usize = 1024;
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct DirectIoState {
     pub(crate) peer_io: SharedPeerIo,
@@ -46,6 +48,7 @@ pub(crate) struct DirectIoState {
     pub(crate) large_recv_pending: AtomicUsize,
     pub(crate) pending_acc: Mutex<Option<BytesMut>>,
     pub(crate) large_message_threshold: usize,
+    pub(crate) arena_threshold: usize,
     pub(crate) multishot_rearms: AtomicUsize,
     #[cfg(feature = "ws")]
     pub(crate) is_ws: bool,
@@ -120,27 +123,38 @@ async fn one_shot_with_prefix(
     state: &Arc<DirectIoState>,
     sguard: &mut async_lock::MutexGuard<'_, Option<RecvStreamState>>,
     payload_len: usize,
-    mut acc: BytesMut,
+    acc: BytesMut,
 ) -> OneShotLargeRecvOutcome {
     **sguard = Some(RecvStreamState::OneShot);
+    state
+        .large_recv_pending
+        .store(payload_len, Ordering::Release);
+    *state.pending_acc.lock().expect("pending_acc") = Some(acc);
 
-    if acc.len() < payload_len {
+    let payload_bytes = {
+        let mut restore = crate::socket::AccRestore {
+            state,
+            buf: state.pending_acc.lock().expect("pending_acc").take(),
+        };
+        let acc = restore.buf.as_mut().expect("pending_acc");
         let fd = {
             let Ok(io) = state.peer_io.lock() else {
                 return OneShotLargeRecvOutcome::Skipped;
             };
             io.reader.fd_clone()
         };
-        if let Err(e) = fd.read_until(&mut acc, payload_len).await {
+        if acc.len() < payload_len
+            && let Err(e) = fd.read_until(acc, payload_len).await
+        {
             return OneShotLargeRecvOutcome::IoErr(e);
         }
-    }
+        restore.buf.take().unwrap().freeze()
+    };
     state.last_input_nanos.store(
         state.hb_epoch.elapsed().as_nanos() as u64,
         Ordering::Relaxed,
     );
-
-    let payload_bytes = acc.freeze();
+    state.large_recv_pending.store(0, Ordering::Release);
     {
         let Ok(mut io) = state.peer_io.lock() else {
             return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
@@ -260,6 +274,7 @@ impl DirectIoState {
         encoder: Option<MessageEncoder>,
         uses_crypto: bool,
         large_message_threshold: usize,
+        arena_threshold: usize,
         #[cfg(feature = "ws")] is_ws: bool,
         #[cfg(feature = "ws")] ws_masked: bool,
     ) -> Arc<Self> {
@@ -284,7 +299,7 @@ impl DirectIoState {
             uses_crypto,
             transform_passthrough,
             encoder: async_lock::Mutex::new(encoder),
-            encoded_queue: EncodedQueueCell::new(),
+            encoded_queue: EncodedQueueCell::with_arena_threshold(arena_threshold),
             driver_in_select: Cell::new(false),
             transmit_notified: Cell::new(false),
             direct_msg_count: Cell::new(0),
@@ -292,6 +307,7 @@ impl DirectIoState {
             large_recv_pending: AtomicUsize::new(0),
             pending_acc: Mutex::new(None),
             large_message_threshold,
+            arena_threshold,
             multishot_rearms: AtomicUsize::new(0),
             #[cfg(feature = "ws")]
             is_ws,
@@ -312,10 +328,10 @@ pub(crate) struct EncodedQueueCell {
 }
 
 impl EncodedQueueCell {
-    fn new() -> Self {
+    fn with_arena_threshold(arena_threshold: usize) -> Self {
         Self {
             borrowed: Cell::new(false),
-            inner: std::cell::UnsafeCell::new(EncodedQueue::new()),
+            inner: std::cell::UnsafeCell::new(EncodedQueue::with_arena_threshold(arena_threshold)),
         }
     }
 

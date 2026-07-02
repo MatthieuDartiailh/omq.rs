@@ -71,6 +71,10 @@ impl EncodedQueue {
         self.total_bytes
     }
 
+    pub fn arena_threshold(&self) -> usize {
+        self.arena_threshold
+    }
+
     pub fn arena_bytes(&self) -> &[u8] {
         &self.arena
     }

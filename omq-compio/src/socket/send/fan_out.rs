@@ -6,6 +6,7 @@ use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::error::Result;
 use omq_proto::fan_out_batch::{FanOutBatch, build_fan_out_batch, clear_fan_out_batch};
 use omq_proto::message::Message;
+use smallvec::SmallVec;
 
 use crate::socket::handle::Socket;
 use crate::socket::inner::{DirectIoState, PeerOut};
@@ -14,7 +15,7 @@ use super::{
     DIRECT_CAP, DIRECT_MSG_CAP, direct_push_encoded, direct_push_pre_encoded, try_direct_encode,
 };
 
-const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
+const ARENA_YIELD_BYTES: usize = 256 * 1024;
 const FAN_OUT_ARENA_COPY_MAX: usize = 256;
 
 fn yield_interval(msg: &Message) -> u32 {
@@ -27,7 +28,11 @@ thread_local! {
     static FAN_OUT_CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
 }
 
-fn fan_out_encode_dispatch(dio_cache: &[Arc<DirectIoState>], targets: &[PeerOut], msg: &Message) {
+fn fan_out_encode_dispatch(
+    dio_cache: &[Arc<DirectIoState>],
+    msg: &Message,
+) -> SmallVec<[usize; 8]> {
+    let mut failed = SmallVec::new();
     FAN_OUT_EQ.with(|cell| {
         let eq = &mut *cell.borrow_mut();
         FAN_OUT_CHUNKS.with(|drain| {
@@ -36,14 +41,14 @@ fn fan_out_encode_dispatch(dio_cache: &[Arc<DirectIoState>], targets: &[PeerOut]
                 FanOutBatch::Arena(raw) => {
                     for (i, state) in dio_cache.iter().enumerate() {
                         if !direct_push_pre_encoded(state, raw) {
-                            let _ = targets[i].try_send_immediate(msg.clone());
+                            failed.push(i);
                         }
                     }
                 }
                 FanOutBatch::Chunks(encoded) => {
                     for (i, state) in dio_cache.iter().enumerate() {
                         if !direct_push_encoded(state, encoded) {
-                            let _ = targets[i].try_send_immediate(msg.clone());
+                            failed.push(i);
                         }
                     }
                 }
@@ -51,6 +56,7 @@ fn fan_out_encode_dispatch(dio_cache: &[Arc<DirectIoState>], targets: &[PeerOut]
             clear_fan_out_batch(eq, chunks);
         });
     });
+    failed
 }
 
 impl Socket {
@@ -86,7 +92,9 @@ impl Socket {
                         }) {
                             crate::yield_now().await;
                         }
-                        fan_out_encode_dispatch(dio_cache, targets, &msg);
+                        for i in fan_out_encode_dispatch(dio_cache, &msg) {
+                            let _ = targets[i].send(msg.clone()).await;
+                        }
                     } else if let Some(qbytes) = try_direct_encode(&msg, &dio_cache[0])? {
                         if dio_cache[0].direct_msg_count.get() >= super::DIRECT_ENCODE_YIELD_MSGS
                             || qbytes >= super::DIRECT_ENCODE_YIELD_BYTES
@@ -155,7 +163,9 @@ impl Socket {
                 let dio_cache = inner.pub_sub.direct_io_cache.get();
                 if dio_cache.len() == targets.len() {
                     if targets.len() > 1 {
-                        fan_out_encode_dispatch(dio_cache, targets, msg);
+                        for i in fan_out_encode_dispatch(dio_cache, msg) {
+                            let _ = targets[i].try_send_immediate(msg.clone());
+                        }
                     } else if try_direct_encode(msg, &dio_cache[0])
                         .ok()
                         .flatten()

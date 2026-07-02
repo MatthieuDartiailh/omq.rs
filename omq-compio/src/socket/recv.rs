@@ -36,11 +36,12 @@ fn is_identity_recv(t: SocketType) -> bool {
 }
 
 #[inline]
-fn direct_recv_eligible(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Pull | SocketType::Sub | SocketType::Pair | SocketType::Req
-    )
+fn direct_recv_eligible(_t: SocketType) -> bool {
+    // Keep wire reads in the driver. A user `recv()` future can be
+    // externally canceled by timeout/select; if that future owns an
+    // in-flight wire read, cancellation can drop bytes consumed from a
+    // partially-read ZMTP frame.
+    false
 }
 
 enum PullOutcome {
@@ -348,9 +349,6 @@ impl Socket {
                 if let Some(msg) = cache.pop_front() {
                     return Ok(msg);
                 }
-            }
-            if let Some(msg) = self.try_direct_recv().await? {
-                return Ok(msg);
             }
         } else if direct_recv_eligible(st) {
             if let Some(msg) = self.drain_recv_cache(st)? {
