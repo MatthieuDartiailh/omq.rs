@@ -14,7 +14,7 @@ use super::{
     DIRECT_CAP, DIRECT_MSG_CAP, direct_push_encoded, direct_push_pre_encoded, try_direct_encode,
 };
 
-const ARENA_YIELD_BYTES: usize = 2 * 1024 * 1024;
+const ARENA_YIELD_BYTES: usize = 256 * 1024;
 const FAN_OUT_ARENA_COPY_MAX: usize = 256;
 
 fn yield_interval(msg: &Message) -> u32 {

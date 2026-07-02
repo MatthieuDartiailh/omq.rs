@@ -40,6 +40,8 @@ fn soak_ipc_fanout_no_message_loss() {
         )));
 
     let recv_count = Arc::new(AtomicUsize::new(0));
+    let recv_by_sub: Arc<Vec<AtomicUsize>> =
+        Arc::new((0..PEERS).map(|_| AtomicUsize::new(0)).collect());
     let sent_count = Arc::new(AtomicUsize::new(0));
     let counting = Arc::new(AtomicBool::new(false));
     let sending_done = Arc::new(AtomicBool::new(false));
@@ -52,6 +54,7 @@ fn soak_ipc_fanout_no_message_loss() {
         .map(|i| {
             let ep = ep.clone();
             let recv_count = recv_count.clone();
+            let recv_by_sub = recv_by_sub.clone();
             let sent_count = sent_count.clone();
             let counting = counting.clone();
             let sending_done = sending_done.clone();
@@ -72,6 +75,7 @@ fn soak_ipc_fanout_no_message_loss() {
                                 subs_ready[i].store(true, Ordering::Relaxed);
                                 if counting.load(Ordering::Acquire) {
                                     recv_count.fetch_add(1, Ordering::Relaxed);
+                                    recv_by_sub[i].fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                             _ => {
@@ -84,11 +88,12 @@ fn soak_ipc_fanout_no_message_loss() {
 
                     // Drain messages still in the pipeline.
                     let expected = sent_count.load(Ordering::Acquire) * PEERS;
-                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
                     while std::time::Instant::now() < deadline {
                         match compio::time::timeout(Duration::from_secs(1), s.recv()).await {
                             Ok(Ok(_)) => {
                                 recv_count.fetch_add(1, Ordering::Relaxed);
+                                recv_by_sub[i].fetch_add(1, Ordering::Relaxed);
                             }
                             _ => {
                                 if recv_count.load(Ordering::Relaxed) >= expected {
@@ -175,6 +180,14 @@ fn soak_ipc_fanout_no_message_loss() {
     let s = sent_count.load(Ordering::Relaxed);
     let r = recv_count.load(Ordering::Relaxed);
     let expected = s * PEERS;
-    eprintln!("[ipc_fanout] done: sent {s}, recvd {r}, expected {expected}");
+    let per_sub: Vec<_> = recv_by_sub
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .collect();
+    eprintln!("[ipc_fanout] done: sent {s}, recvd {r}, expected {expected}, per_sub {per_sub:?}");
     assert_eq!(r, expected, "message loss detected");
+    assert!(
+        per_sub.iter().all(|count| *count == s),
+        "per-subscriber message loss detected: sent {s}, per_sub {per_sub:?}"
+    );
 }

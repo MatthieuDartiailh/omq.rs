@@ -33,7 +33,7 @@ soak = []
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.18.1", default-features = false }
-yring = { path = "../yring", version = "0.3.2" }
+yring = { path = "../yring", version = "0.3.3" }
 blume = { path = "../blume", version = "0.4.2" }
 arc-swap = "1.7.1"
 async-channel = "2.5.0"
