@@ -188,10 +188,11 @@ async fn req_rep_1000_cycles_tcp() {
     req.connect(ep).await.unwrap();
     test_support::wait_for_handshake(&req).await;
 
+    let rep_worker = rep.clone();
     let rep_task = tokio::spawn(async move {
         for _ in 0..CYCLES {
-            let m = rep.recv().await.unwrap();
-            rep.send(m).await.unwrap(); // echo
+            let m = rep_worker.recv().await.unwrap();
+            rep_worker.send(m).await.unwrap(); // echo
         }
     });
 
