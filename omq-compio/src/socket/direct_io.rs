@@ -123,27 +123,38 @@ async fn one_shot_with_prefix(
     state: &Arc<DirectIoState>,
     sguard: &mut async_lock::MutexGuard<'_, Option<RecvStreamState>>,
     payload_len: usize,
-    mut acc: BytesMut,
+    acc: BytesMut,
 ) -> OneShotLargeRecvOutcome {
     **sguard = Some(RecvStreamState::OneShot);
+    state
+        .large_recv_pending
+        .store(payload_len, Ordering::Release);
+    *state.pending_acc.lock().expect("pending_acc") = Some(acc);
 
-    if acc.len() < payload_len {
+    let payload_bytes = {
+        let mut restore = crate::socket::AccRestore {
+            state,
+            buf: state.pending_acc.lock().expect("pending_acc").take(),
+        };
+        let acc = restore.buf.as_mut().expect("pending_acc");
         let fd = {
             let Ok(io) = state.peer_io.lock() else {
                 return OneShotLargeRecvOutcome::Skipped;
             };
             io.reader.fd_clone()
         };
-        if let Err(e) = fd.read_until(&mut acc, payload_len).await {
+        if acc.len() < payload_len
+            && let Err(e) = fd.read_until(acc, payload_len).await
+        {
             return OneShotLargeRecvOutcome::IoErr(e);
         }
-    }
+        restore.buf.take().unwrap().freeze()
+    };
     state.last_input_nanos.store(
         state.hb_epoch.elapsed().as_nanos() as u64,
         Ordering::Relaxed,
     );
-
-    let payload_bytes = acc.freeze();
+    state.large_recv_pending.store(0, Ordering::Release);
     {
         let Ok(mut io) = state.peer_io.lock() else {
             return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));

@@ -178,7 +178,9 @@ impl WireRecvFd {
         dst: &mut BytesMut,
         target_total: usize,
     ) -> io::Result<()> {
-        debug_assert!(dst.capacity() >= target_total);
+        if dst.capacity() < target_total {
+            dst.reserve(target_total - dst.capacity());
+        }
         while dst.len() < target_total {
             let tail = dst.split_off(dst.len());
             let BufResult(res, returned) = match self {
