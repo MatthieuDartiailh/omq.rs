@@ -8,7 +8,7 @@ use crate::socket::handle::Socket;
 use crate::socket::inner::{CachedPeerRoute, DirectIoState, PeerOut};
 use crate::transport::driver::DriverCommand;
 
-use super::{DIRECT_ENCODE_YIELD_BYTES, DIRECT_ENCODE_YIELD_MSGS, try_direct_encode};
+use super::{DIRECT_ENCODE_YIELD_BYTES, direct_encode_yield_msgs, try_direct_encode};
 
 struct PeerSelection {
     out: PeerOut,
@@ -127,7 +127,7 @@ impl Socket {
             *cursor = if i + 1 >= n { 0 } else { i + 1 };
             let state = &targets[i];
             if let Some(qbytes) = try_direct_encode(msg, state)? {
-                let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
+                let backlogged = state.direct_msg_count.get() >= direct_encode_yield_msgs(msg)
                     || qbytes >= DIRECT_ENCODE_YIELD_BYTES;
                 if backlogged {
                     state.direct_msg_count.set(0);
@@ -321,7 +321,7 @@ impl Socket {
                 if let Some(state) = direct
                     && let Some(qbytes) = try_direct_encode(&msg, &state)?
                 {
-                    let backlogged = state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
+                    let backlogged = state.direct_msg_count.get() >= direct_encode_yield_msgs(&msg)
                         || qbytes >= DIRECT_ENCODE_YIELD_BYTES;
                     if backlogged {
                         state.direct_msg_count.set(0);
@@ -371,11 +371,28 @@ impl Socket {
 
     pub(super) fn try_send_round_robin(&self, msg: &Message) -> Result<()> {
         let inner = self.inner();
+        if inner.routing.peer_count.load(Ordering::Acquire) == 1
+            && inner.routing.inproc_count.load(Ordering::Relaxed) == 0
+            && !inner.options.conflate
+            && let Some(state) = self.try_cached_single_wire_direct()
+        {
+            if state.direct_msg_count.get() >= direct_encode_yield_msgs(msg) {
+                return Err(Error::WouldBlock);
+            }
+            if try_direct_encode(msg, &state)?.is_some() {
+                return Ok(());
+            }
+        }
         if inner.routing.peer_count.load(Ordering::Acquire) > 1
             && inner.routing.inproc_count.load(Ordering::Relaxed) == 0
         {
             if inner.options.conflate {
                 return self.conflate_shared_queue_send(msg.clone());
+            }
+            match self.try_direct_round_robin(msg)? {
+                Some(true) => return Err(Error::WouldBlock),
+                Some(false) => return Ok(()),
+                None => {}
             }
             return self.try_send_via_shared(msg.clone());
         }
@@ -394,6 +411,40 @@ impl Socket {
         let peer_count = n;
         drop(peers);
         self.try_slow_round_robin(&chosen, msg.clone(), peer_count)
+    }
+
+    fn try_cached_single_wire_direct(&self) -> Option<Arc<DirectIoState>> {
+        let inner = self.inner();
+        let cur_gen = inner.routing.generation.load(Ordering::Acquire);
+        if let Some((state, cached_gen)) = inner.direct_io.send.get()
+            && *cached_gen == cur_gen
+        {
+            return Some(state.clone());
+        }
+
+        let peers = inner.routing.peers.read().expect("peers lock");
+        let keys = inner.routing.peer_keys.read().expect("peer_keys lock");
+        if keys.len() != 1 {
+            *inner.direct_io.send.get() = None;
+            return None;
+        }
+        let p = &peers[keys[0]];
+        let PeerOut::Wire(_) = &p.out else {
+            *inner.direct_io.send.get() = None;
+            return None;
+        };
+        let Some(handle) = &p.direct_io else {
+            *inner.direct_io.send.get() = None;
+            return None;
+        };
+        let state = handle.read().expect("direct_io handle lock").clone();
+        if let Some(state) = state {
+            *inner.direct_io.send.get() = Some((state.clone(), cur_gen));
+            Some(state)
+        } else {
+            *inner.direct_io.send.get() = None;
+            None
+        }
     }
 
     fn try_send_via_shared(&self, msg: Message) -> Result<()> {

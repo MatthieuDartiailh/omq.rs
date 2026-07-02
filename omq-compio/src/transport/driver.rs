@@ -176,7 +176,7 @@ fn encode_into_eq(eq: &mut EncodedQueue, msg: &Message, state: &DirectIoState) {
         eq.encode_ws(msg, state.ws_masked);
         return;
     }
-    let _ = state;
+    debug_assert_eq!(eq.arena_threshold(), state.arena_threshold);
     eq.encode_auto(msg);
 }
 

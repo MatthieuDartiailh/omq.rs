@@ -59,6 +59,16 @@ pub(super) const DIRECT_MSG_CAP: usize = DIRECT_CAP / 16;
 /// tight encode loop can starve the flush path.
 pub(super) const DIRECT_ENCODE_YIELD_BYTES: usize = 2 * 1024 * 1024;
 pub(super) const DIRECT_ENCODE_YIELD_MSGS: usize = 256;
+pub(super) const DIRECT_ENCODE_YIELD_TINY_MSGS: usize = 1024;
+
+#[inline]
+pub(super) fn direct_encode_yield_msgs(msg: &Message) -> usize {
+    if msg.byte_len() <= 64 {
+        DIRECT_ENCODE_YIELD_TINY_MSGS
+    } else {
+        DIRECT_ENCODE_YIELD_MSGS
+    }
+}
 
 /// Encode `msg` directly into the peer's `EncodedQueue`, bypassing the
 /// flume channel. Returns `Some(total_bytes)` (the queue's post-encode
@@ -318,7 +328,7 @@ impl Socket {
                 && *cached_gen == inner.routing.generation.load(Ordering::Acquire)
                 && let Some(qbytes) = try_direct_encode(&msg, state)?
             {
-                if state.direct_msg_count.get() >= DIRECT_ENCODE_YIELD_MSGS
+                if state.direct_msg_count.get() >= direct_encode_yield_msgs(&msg)
                     || qbytes >= DIRECT_ENCODE_YIELD_BYTES
                 {
                     state.direct_msg_count.set(0);
