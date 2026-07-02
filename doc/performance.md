@@ -206,6 +206,11 @@ enum WireWriter { Tcp(OwnedWriteHalf<TcpStream>), Ipc(OwnedWriteHalf<UnixStream>
 No heap alloc, no vtable. The variant set is closed -- new wire
 transports are rare.
 
+On Windows, IPC dispatch uses the same enum pattern with
+`NamedPipeServer`/`NamedPipeClient` variants. TCP and named pipes
+share no code paths but have zero-cost dispatch overhead: the enum
+is resolved at compile time, no runtime indirection.
+
 ## Compression split
 
 `MessageTransform` held both encode and decode behind one
@@ -238,7 +243,7 @@ buffer and accumulates into a single pre-allocated `BytesMut`.
 
 Two recv modes:
 
-```
+```text
 MultiShot --[ENOBUFS during accumulation]--> OneShot
     ^                                            |
     +------------[small frame]-------------------+
@@ -955,7 +960,7 @@ bookkeeping with no net gain. Reverted.
 The omq-libzmq compat layer originally relayed received messages
 through three thread crossings:
 
-```
+```text
 driver → async_channel → recv_pump_task → yring → eventfd → C thread
 ```
 
@@ -973,7 +978,7 @@ The fix bypasses the `async_channel` and recv pump entirely for the
 first connected peer. The `ConnectionDriver` pushes decoded messages
 directly into the yring and signals the eventfd:
 
-```
+```text
 driver → yring → eventfd → C thread
 ```
 
@@ -1090,7 +1095,7 @@ recv-side actor hop plus tokio's per-task wake cost.
 PUSH/PULL over `ws://127.0.0.1`, 1 peer, 2 s rounds, same machine.
 libzmq 4.3.5 built with `ENABLE_DRAFTS=ON`.
 
-```
+```text
                     128 B              2 KiB              8 KiB
                 msg/s    MB/s     msg/s    MB/s     msg/s    MB/s
 libzmq 4.3.5   1,911K    245      289K     592       69K     569
@@ -1148,4 +1153,3 @@ TCP throughput at 40 B (the old cliff): 12.6M to 17.0M msg/s
 `Message` at 80 B was tested and rejected. Per-message throughput
 did not improve at sizes the 64 B variant already covers, and the
 struct crosses a second cache line.
-

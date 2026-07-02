@@ -1,7 +1,7 @@
 # omq-tokio
 
 Tokio backend for [omq](https://crates.io/crates/omq). Multi-threaded, actor-based.
-Default backend when you `cargo add omq`. Works on Linux and macOS.
+Default backend when you `cargo add omq`. Works on Linux, macOS, and Windows.
 
 Built on [omq-proto](https://crates.io/crates/omq-proto) and
 [tokio](https://crates.io/crates/tokio).

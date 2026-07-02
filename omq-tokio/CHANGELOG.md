@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Windows named pipes support for IPC transport. Named pipes automatically handle Windows-specific requirements (buffer management, connection lifecycle). Socket types work identically to Unix: transparent to application layer.
+- All 20 socket types now available over IPC on Windows (PUSH, PULL, PUB, SUB, REQ, REP, ROUTER, DEALER, PAIR, CLIENT, SERVER, CHANNEL, SCATTER, GATHER, RADIO, DISH, XPUB, XSUB, PEER, STREAM).
+
 ## [0.15.0] - 2026-07-03
 
 ### Fixed

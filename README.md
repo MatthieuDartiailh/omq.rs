@@ -11,7 +11,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - No C compiler, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
 
-### The hard parts
+## The hard parts
 
 OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput. In one repo you get:
 
@@ -232,11 +232,10 @@ benchmarking happens on Linux. CI is Linux-only for required checks.
 **macOS** should work (`omq-tokio` via mio / kqueue) but is
 experimental. The test suite has not been run on macOS recently.
 
-**Windows** support is incomplete and experimental. `omq-tokio`
-compiles and partially works (mio / IOCP). CI runs Windows jobs as
-informational (failures do not block PRs). Known limitations:
+**Windows** support is substantially complete. `omq-tokio` fully
+works with TCP, IPC (named pipes), inproc, UDP, and WebSocket
+transports. Windows CI is required for merge. Known limitations:
 
-- IPC transport is not available.
 - `omq-libzmq` is excluded (Unix-only C API surface).
 - Some tests are flaky (timer-sensitive assertions).
 

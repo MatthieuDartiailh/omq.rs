@@ -7,7 +7,7 @@ runtime backends differ. Detail lives in [`compio.md`](compio.md),
 
 ## Three-layer split
 
-```
+```text
 +------------------------------------------------------------------+
 |  user code                                                       |
 |  depends directly on one backend crate:                          |
@@ -57,7 +57,7 @@ backend.
 Each socket has exactly two queues, regardless of how many peers are
 connected:
 
-```
+```text
                     Socket::recv
                          ^
                          |
@@ -165,7 +165,7 @@ transport cell on each backend) and `omq-tokio/tests/interop_compio.rs`
 | URI scheme | Transport | Backends |
 |---|---|---|
 | `tcp://host:port` | TCP, `TCP_NODELAY` set on accept/connect | both |
-| `ipc:///path` | Unix domain stream | both |
+| `ipc:///path` | IPC: Unix domain stream (Linux/macOS/BSD), named pipes (Windows) | both |
 | `inproc://name` | In-process channel; bypasses ZMTP codec entirely | both |
 | `udp://host:port` | UDP datagram (`RADIO` / `DISH` only) | both |
 | `lz4+tcp://host:port` | TCP + LZ4 transform | both, feature `lz4` |

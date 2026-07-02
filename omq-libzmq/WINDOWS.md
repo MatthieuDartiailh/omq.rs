@@ -13,6 +13,9 @@ This document describes the Windows-specific implementation, limitations, and us
 - **Transports:**
   - `inproc://` — In-process (zero-copy message passing)
   - `tcp://` — TCP/IP network communication
+  - `ipc://` — Inter-process communication
+    - **Windows:** Named pipes (e.g., `ipc://myapp` creates `\\.\pipe\myapp`)
+    - **Unix:** Unix domain sockets (filesystem or abstract namespace)
 
 - **Socket Types:**
   - PUSH/PULL
@@ -34,11 +37,6 @@ This document describes the Windows-specific implementation, limitations, and us
   - `zmq_poll()` — Event-driven multiplexing (uses native Windows events)
 
 ### ⚠️ Platform-Specific Limitations
-
-- **IPC Transport (`ipc://`):**
-  - Unix domain sockets are not available on Windows
-  - Returns `ENOTSUP` (POSIX error 95) when attempting to use IPC
-  - **Workaround:** Use `tcp://127.0.0.1:port` instead for inter-process communication
 
 - **File Descriptor Polling (`ZMQ_FD` socket option):**
   - Windows uses HANDLE-based I/O instead of file descriptors
