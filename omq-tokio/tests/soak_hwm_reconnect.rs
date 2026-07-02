@@ -44,7 +44,7 @@ fn run_hwm_storm(name: &str, mute: OnMute) {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         // Probe for a port, then close so we can rebind.
         let probe = Socket::new(SocketType::Pull, soak_common::soak_options());

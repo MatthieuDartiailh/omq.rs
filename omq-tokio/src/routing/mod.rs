@@ -66,6 +66,16 @@ pub(crate) enum SendSubmitter {
 }
 
 impl SendSubmitter {
+    pub(crate) fn shutdown(&self) {
+        match self {
+            Self::None => {}
+            Self::RoundRobin(s) => s.shutdown(),
+            Self::Exclusive(s) => s.shutdown(),
+            Self::FanOut(s) => s.shutdown(),
+            Self::Identity(s) => s.shutdown(),
+        }
+    }
+
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         match self {
             Self::None => Err(Error::Protocol("socket type does not support send".into())),

@@ -298,6 +298,7 @@ pub struct DriverHandle {
     pub inbox: mpsc::Sender<DriverCommand>,
     pub cancel: CancellationToken,
     pub(crate) wire_slot: Option<Arc<PeerWireSlot>>,
+    pub(crate) send_pipe: Option<blume::Sender<Message>>,
 }
 
 /// What a [`ConnectionDriver`] writes to its shared peer-event
@@ -352,6 +353,7 @@ where
     /// wire. Replaces the `DirectIo` pattern where the handle locked the
     /// writer directly.
     wire_slot: Option<Arc<PeerWireSlot>>,
+    send_pipe_rx: Option<blume::Receiver<Message>>,
     arena_threshold: usize,
 }
 
@@ -402,6 +404,7 @@ where
             compression_pool: None,
             offload_threshold: 0,
             wire_slot: None,
+            send_pipe_rx: None,
             arena_threshold: omq_proto::encoded_queue::ARENA_THRESHOLD,
         }
     }
@@ -468,6 +471,14 @@ where
         self
     }
 
+    /// Install a per-peer send pipe. The public socket handle pushes raw
+    /// messages into the sender; this driver drains and encodes locally.
+    #[must_use]
+    pub(crate) fn with_send_pipe(mut self, rx: blume::Receiver<Message>) -> Self {
+        self.send_pipe_rx = Some(rx);
+        self
+    }
+
     #[must_use]
     pub(crate) fn with_arena_threshold(mut self, threshold: usize) -> Self {
         self.arena_threshold = threshold;
@@ -481,14 +492,14 @@ where
     ///
     /// In every exit path (success or error) the driver sends one final
     /// `PeerOut::Closed` on the shared peer-event channel so the
-    /// `SocketDriver` can clean up its peer entry. The previous shim task
-    /// that did this wrapping is gone - we save one task spawn and one
-    /// per-message channel hop on every connection.
+    /// `SocketDriver` can clean up its peer entry. The notification is
+    /// best-effort because actor teardown joins peer tasks while it no
+    /// longer drains this channel.
     pub async fn run(self) -> Result<()> {
         let peer_out = self.peer_out.clone();
         let peer_id = self.peer_id;
         let result = self.run_inner_body().await;
-        let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
+        let _ = peer_out.try_send((peer_id, PeerOut::Closed));
         result
     }
 
@@ -509,6 +520,7 @@ where
             compression_pool,
             offload_threshold,
             wire_slot,
+            mut send_pipe_rx,
             arena_threshold,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
@@ -517,6 +529,7 @@ where
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
         let mut eq = EncodedQueue::with_arena_threshold(arena_threshold);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
+        let mut pipe_batch: Vec<Message> = Vec::with_capacity(SHARED_MAX_BATCH_MSGS);
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> =
             config.handshake_timeout.map(|d| last_input + d);
@@ -575,12 +588,6 @@ where
                     if let Some(ref slot) = wire_slot {
                         slot.mark_dead();
                     }
-                    drain_on_cancel(
-                        &mut inbox, shared_msg_rx.as_ref(),
-                        wire_slot.as_ref(),
-                        &mut encoder, &mut codec, &mut eq,
-                        &mut drain_buf, &mut writer, passthrough.as_ref(),
-                    ).await;
                     return Ok(());
                 }
 
@@ -758,6 +765,24 @@ where
                     ).await?;
                 },
 
+                // Per-peer send pipe: active round-robin pushes raw
+                // messages to this driver, which encodes and writes locally.
+                n = async {
+                    send_pipe_rx.as_mut().unwrap().recv_batch_mut(&mut pipe_batch).await
+                }, if send_pipe_rx.is_some() && codec.is_ready() => {
+                    if n.is_err() {
+                        drain_writes(&mut writer, &mut codec).await.ok();
+                        return Ok(());
+                    }
+                    drain_send_pipe_batch(
+                        &mut pipe_batch,
+                        &mut encoder, &mut codec, &mut eq,
+                        passthrough.as_ref(), compression_pool.as_ref(),
+                        offload_threshold, &mut offload_pipeline,
+                        &mut drain_buf, &mut writer,
+                    ).await?;
+                },
+
                 // Heartbeat tick: enabled only post-handshake when
                 // `heartbeat_interval` is set. Uses a persistent pinned
                 // sleep so the safety-net timeout doesn't reset it.
@@ -795,50 +820,6 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-#[expect(clippy::too_many_arguments)]
-async fn drain_on_cancel<W: AsyncWrite + Unpin>(
-    inbox: &mut mpsc::Receiver<DriverCommand>,
-    shared_msg_rx: Option<&QueueReceiver>,
-    wire_slot: Option<&Arc<PeerWireSlot>>,
-    encoder: &mut Option<MessageEncoder>,
-    codec: &mut Connection,
-    eq: &mut EncodedQueue,
-    drain_buf: &mut Vec<Bytes>,
-    writer: &mut W,
-    passthrough: Option<&(Bytes, usize)>,
-) {
-    if let Some(slot) = wire_slot {
-        drain_buf.clear();
-        slot.drain_into_vec(drain_buf, 1024);
-        eq.push_shared_chunks(drain_buf);
-        drain_buf.clear();
-    }
-    while let Ok(cmd) = inbox.try_recv() {
-        match cmd {
-            DriverCommand::SendMessage(msg) => {
-                encode_msg(&msg, encoder, codec, eq, passthrough).ok();
-            }
-            DriverCommand::SendEncoded(chunks) => {
-                eq.push_shared_chunks(&chunks);
-            }
-            DriverCommand::SendCommand(c) => {
-                let _ = codec.send_command(&c);
-            }
-            DriverCommand::Close => break,
-        }
-    }
-    if let Some(rx) = shared_msg_rx {
-        let mut drained = 0usize;
-        while let Some(msg) = rx.try_pop() {
-            encode_msg(&msg, encoder, codec, eq, passthrough).ok();
-            drained += 1;
-        }
-        rx.release_permits(drained);
-    }
-    let _ = flush_encoded_queue(writer, eq, drain_buf).await;
-    drain_writes(writer, codec).await.ok();
-}
-
 /// Flush `EncodedQueue` to the writer, then drain any pending codec
 /// transmits (command frames queued during encoding).
 async fn flush_all<W: AsyncWrite + Unpin>(
@@ -874,6 +855,39 @@ async fn drain_wire_slot<W: AsyncWrite + Unpin>(
             slot.data_ready.notify_one();
             break;
         }
+    }
+    Ok(())
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
+    batch: &mut Vec<Message>,
+    encoder: &mut Option<MessageEncoder>,
+    codec: &mut Connection,
+    eq: &mut EncodedQueue,
+    passthrough: Option<&(Bytes, usize)>,
+    compression_pool: Option<&Arc<CompressionPool>>,
+    offload_threshold: usize,
+    offload_pipeline: &mut OffloadPipeline,
+    drain_buf: &mut Vec<Bytes>,
+    writer: &mut W,
+) -> Result<()> {
+    batch.reverse();
+    while let Some(first) = batch.pop() {
+        batch_encode(
+            &first,
+            || batch.pop(),
+            SHARED_MAX_BATCH_MSGS,
+            encoder,
+            codec,
+            eq,
+            passthrough,
+            compression_pool,
+            offload_threshold,
+            offload_pipeline,
+        )
+        .await?;
+        flush_all(writer, eq, drain_buf, codec).await?;
     }
     Ok(())
 }
@@ -1248,12 +1262,14 @@ mod tests {
                 inbox: c_inbox_tx,
                 cancel: c_cancel,
                 wire_slot: None,
+                send_pipe: None,
             },
             EventAdapter { rx: c_evt_rx },
             DriverHandle {
                 inbox: s_inbox_tx,
                 cancel: s_cancel,
                 wire_slot: None,
+                send_pipe: None,
             },
             EventAdapter { rx: s_evt_rx },
         )

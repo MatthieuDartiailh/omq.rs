@@ -46,7 +46,7 @@ fn run_mechanism_storm(
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let probe = make_server();
         let ep = probe.bind(soak_common::tcp_ep(0)).await.unwrap();

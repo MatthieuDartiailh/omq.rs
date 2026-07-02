@@ -93,7 +93,7 @@ fn soak_large_message_throughput() {
     let recvd = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     let stats = Arc::new(std::sync::Mutex::new(PayloadStats::new()));
 
     rt.block_on(async {

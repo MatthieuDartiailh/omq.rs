@@ -28,6 +28,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -85,6 +94,13 @@ dependencies = [
  "constant_time_eq 0.4.2",
  "cpufeatures 0.3.0",
  "zeroize",
+]
+
+[[package]]
+name = "blume"
+version = "0.4.2"
+dependencies = [
+ "event-listener",
 ]
 
 [[package]]
@@ -648,7 +664,9 @@ dependencies = [
 name = "omq-tokio"
 version = "0.14.6"
 dependencies = [
+ "arc-swap",
  "async-channel",
+ "blume",
  "bytes",
  "concurrent-queue",
  "futures",

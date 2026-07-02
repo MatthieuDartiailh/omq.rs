@@ -13,6 +13,11 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
+    pub(crate) fn shutdown(&self) {
+        *self.peer.lock().expect("exclusive peer") = None;
+        self.peer_ready.notify_waiters();
+    }
+
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         loop {
             let handle = self.peer.lock().expect("exclusive peer").clone();
@@ -85,8 +90,10 @@ impl ExclusiveSend {
         *self.peer.lock().expect("exclusive peer") = None;
     }
 
-    #[expect(clippy::unused_self)]
-    pub(crate) fn shutdown(&self) {}
+    pub(crate) fn shutdown(&self) {
+        *self.peer.lock().expect("exclusive peer") = None;
+        self.peer_ready.notify_waiters();
+    }
 
     #[expect(clippy::unused_self)]
     pub(crate) fn is_drained(&self) -> bool {

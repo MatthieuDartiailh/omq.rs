@@ -34,7 +34,7 @@ fn soak_pub_sub_churn_tcp() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let publisher = Socket::new(SocketType::Pub, soak_common::soak_options());
         let ep = publisher.bind(soak_common::tcp_ep(0)).await.unwrap();

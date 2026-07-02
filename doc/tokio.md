@@ -11,8 +11,11 @@ header scratch) are described from the compio side in
 `omq-tokio` is the multi-thread backend. Its structure differs from
 compio's because tokio's runtime is preemptive and work-stealing across
 cores. The same high-level shape applies: per-connection driver tasks
-push into one socket-wide inbound queue and pull from one socket-wide
-outbound queue.
+push into one socket-wide inbound queue. Send-side routing depends on
+socket type: single-peer round-robin uses a direct wire slot, multi-peer
+round-robin uses active per-peer pipes, fan-out/identity/exclusive use
+per-peer targets, and a shared fallback queue remains for no-peer and
+inproc paths.
 
 ## Top-level shape
 
@@ -56,8 +59,8 @@ common message flow around it.
 ## State the actor owns
 
 - `HashMap<PeerId, PeerInfo>` -- every connected peer (TCP/IPC/inproc/
-  UDP), including each peer's outbound flume `Sender`, monitor handle,
-  codec config.
+  UDP), including each peer's driver handle, monitor handle, codec
+  config.
 - `TypeState` -- REQ/REP alternation flag, ROUTER identity-prefix
   table, DISH group memberships, XPUB subscription trie, conflate flag.
 - `SendStrategy` + `RecvStrategy` -- round-robin, fan-out,
@@ -91,7 +94,7 @@ actor state actually mutates per-message.
 For PUSH/DEALER/PUB/PAIR/CLIENT/SCATTER/CHANNEL send, `TypeState::pre_
 send` is identity or a stateless frame-count assert. Routing those
 messages through the actor would mean `cmd_tx.send(...).await` +
-per-message `tokio::spawn` + oneshot ack + flume push (~3 context
+per-message `tokio::spawn` + oneshot ack + queue push (~3 context
 switches) just to deliver a message the actor will only forward
 unchanged.
 
@@ -107,8 +110,11 @@ before the driver is spawned. `Socket::send` matches on socket type:
 - everything else -- inline-validate frame count and push straight into
   the submitter.
 
-`SendSubmitter` is lock-free MPMC over flume, so concurrent cloned
-`Socket` handles are safe.
+`SendSubmitter` is cloneable and safe for concurrent cloned `Socket`
+handles. The exact data structure depends on the routing strategy:
+round-robin uses a shared active-pipe table plus per-peer MPSC pipes,
+fan-out and identity route directly to peer targets, and the fallback
+queue uses a bounded concurrent queue.
 
 ## Recv bypass (`ConnectionDriver`)
 
@@ -134,25 +140,49 @@ via `TypeState::post_recv_req_direct`. This variant skips the
 `req_awaiting_reply` flag check to avoid a race with
 `on_peer_disconnected` in the actor.
 
-## Direct shared-queue arm; pump-task elimination
+## Round-robin active pipes
 
-An earlier shape kept the shared `DropQueue` receiver in the
-`RoundRobin` routing strategy and spawned a pump task per peer: pump
-raced `shared_rx`, forwarded one message at a time to the driver's
-inbox. Three task hops end-to-end.
+Round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`) have
+two hot paths:
 
-Now each `ConnectionDriver` holds
-`shared_msg_rx: Option<flume::Receiver<Message>>` for byte-stream
-(TCP/IPC) connections and polls it in a dedicated `select!` arm. The
-arm greedily drains up to 256 messages / 512 KiB per wakeup, encodes
-them all, then flushes with a tight `write_all` + `write_vectored`
-loop. Result: **one task hop** for byte-stream sockets.
+- **Single byte-stream peer**: `Socket::send` encodes directly into
+  that peer's `PeerWireSlot`. The driver owns the writer and flushes the
+  already-encoded chunks from its `data_ready` select arm.
+- **Multiple byte-stream peers**: each peer registers an active
+  per-peer `blume` pipe. The socket-side submitter scans active pipes
+  from a moving cursor and `try_send`s into the first pipe with capacity.
+  Full pipes are skipped for that attempt; if every active pipe is full,
+  async `send` waits on one rotating pipe and `try_send` reports HWM
+  backpressure.
 
-Pump tasks are still spawned for inproc peers on round-robin sockets,
-which use a per-peer inbox channel rather than a shared receiver.
-Fan-out and identity sockets no longer use pump tasks at all: they
-send via `PeerSend` which routes directly to the per-peer
-`PeerWireSlot` (wire) or driver inbox (inproc).
+The active pipe is `blume::Sender<Message>` on the socket side and a
+single `blume::Receiver<Message>` owned by the `ConnectionDriver`.
+`blume` is MPSC, not MPMC: senders are cloneable, but there is exactly
+one receiver. That matches the tokio socket API, where cloned socket
+handles may send concurrently while each peer has one driver task.
+
+The driver polls its pipe in a dedicated `select!` arm after the ZMTP
+handshake. `recv_batch_mut()` drains all currently queued messages in
+one swap, then the driver batch-encodes and flushes locally. Encoding
+happens on the connection driver's runtime worker instead of on the
+application task, so multi-peer PUSH can use the driver workers instead
+of serializing all per-peer encode work at the caller.
+
+The old shared `DropQueue` is still present, but it is now the fallback
+path:
+
+- no connected peer yet, so sends need to survive connect-before-bind
+  and drain after handshake;
+- inproc peers, which have no byte-stream driver pipe;
+- mixed byte-stream + inproc round-robin sets, where using only active
+  byte-stream pipes would starve inproc.
+
+Inproc fallback still uses a pump task from the shared queue to the
+peer inbox. Byte-stream drivers still poll `shared_msg_rx` so messages
+queued before a peer becomes active drain in order before new pipe
+traffic. Fan-out and identity sockets do not use pump tasks: they send
+via `PeerSend`, which routes directly to the per-peer `PeerWireSlot`
+(wire) or driver inbox (inproc).
 
 ## Arena encoding (`ARENA_THRESHOLD` = 96 KiB)
 
@@ -193,7 +223,7 @@ offloading, but the routing strategies do not wire this up yet.
 
 The connection driver reads into a `BytesMut` (128 KiB initial
 capacity) via `read_buf`. After each read, `buf.split().freeze()`
-hands the codec a zero-copy `Bytes` — no allocation or memcpy per
+hands the codec a zero-copy `Bytes`; no allocation or memcpy per
 syscall. `BytesMut` reuses its backing allocation across reads.
 
 ## Routing strategies
@@ -203,12 +233,12 @@ the actor:
 
 | Strategy | Used by | Shape |
 |---|---|---|
-| `round_robin` | PUSH / DEALER / REQ / CLIENT / SCATTER | One shared send queue + work-stealing send pumps; per-socket HWM |
+| `round_robin` | PUSH / DEALER / REQ / CLIENT / SCATTER | Single-peer `PeerWireSlot`; multi-peer active per-peer MPSC pipes; shared fallback queue for no-peer/inproc |
 | `exclusive` | PAIR / CHANNEL | Single-peer slot; awaits peer-ready on send-before-connect |
 | `fan_out` | PUB / XPUB / RADIO | Per-peer `PeerWireSlot`; subscription/group filter; conflate applies here |
 | `identity` | ROUTER / REP / SERVER / PEER | First frame is destination identity; lookup in identity table; per-peer `PeerWireSlot` |
 | `fair_queue` | PULL / SUB / XSUB / GATHER / DISH | Recv-only; round-robin across peer drivers |
-| `drop_queue` | (HWM behaviour) | Bounded queue with drop-on-full when `send_hwm` reached |
+| `drop_queue` | (HWM behavior) | Bounded queue with drop-on-full when `send_hwm` reached |
 | `pump` | inproc peers | Per-peer pump task between shared queue and inbox |
 | `peer_send` | (shared type) | `PeerSend` enum (`Wire`/`Inbox`): unified per-peer send dispatch used by fan-out, identity, and exclusive strategies |
 
@@ -245,9 +275,11 @@ The driver drain arm loops until the slot is empty (or
 `max_batch_bytes` reached), so messages that arrive during
 `write_vectored` are flushed without re-entering `select!`.
 
-`PeerWireSlot` is used by all send strategies for wire peers:
+`PeerWireSlot` is used by most send strategies for wire peers:
 
-- **RoundRobin**: single-peer fast path via `try_encode`.
+- **RoundRobin**: single-peer fast path via `try_encode`. Multi-peer
+  round-robin uses active raw-message pipes instead, so the peer driver
+  does encoding locally.
 - **Exclusive**: PAIR/CHANNEL direct to slot.
 - **FanOut**: message encoded once via `pre_encode()`, shared chunks
   pushed into each matching peer's slot via `try_push_encoded`.
@@ -265,9 +297,10 @@ driver drains enough bytes.
 
 Both follow the same shape as compio (see [`compio.md`](compio.md) for
 detail): a dial supervisor task owns a handle that is `None` while
-reconnect is in flight; sends fall back to the shared queue (bounded by
-`send_hwm`) and drain through the new driver after handshake.
-Subscriptions and group joins are replayed.
+reconnect is in flight. Round-robin sends fall back to the shared queue
+(bounded by `send_hwm`) while no active peer pipe exists and drain
+through the new driver after handshake. Subscriptions and group joins
+are replayed.
 
 `Socket::monitor()` returns the same `Stream<Item = MonitorEvent>`
 shape on both backends; events carry an owned `PeerInfo` snapshot.
@@ -275,9 +308,20 @@ shape on both backends; events carry an owned `PeerInfo` snapshot.
 ## Concurrency model
 
 Within a tokio runtime, multiple `Socket` clones can call `send` /
-`recv` concurrently from different worker threads. The hot-path
-`SendSubmitter` is a lock-free MPMC channel; the recv-side
-`async_channel::Sender` is also multi-producer. The actor remains the
-serialization point for any state that must be observed atomically
-(REQ alternation, ROUTER identity table, XPUB subscription trie),
-which is why those paths still go through `cmd_tx`.
+`recv` concurrently from different worker threads. The round-robin
+active-pipe table is protected by a short `std::sync::Mutex` around the
+peer vector and cursor; message payloads are moved into per-peer MPSC
+pipes outside actor control. The recv-side `async_channel::Sender` is
+multi-producer. The actor remains the serialization point for any state
+that must be observed atomically (REQ alternation, ROUTER identity
+table, XPUB subscription trie), which is why those paths still go
+through `cmd_tx`.
+
+## Benchmark note
+
+The fan-out comparison benchmark keeps `omq-tokio-mt` fan-out puller
+processes on current-thread runtimes while the pusher uses the
+multi-thread runtime. The benchmark is measuring the PUSH socket's
+multi-peer send path; giving every PULL process a full multi-thread
+worker pool oversubscribes the machine and can make peer fairness look
+broken even when the pusher distributes evenly.

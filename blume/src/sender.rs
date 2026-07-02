@@ -39,6 +39,30 @@ impl<T> Sender<T> {
     pub fn is_empty(&self) -> bool {
         self.shared.is_send_empty()
     }
+
+    /// Current number of values queued on the send side.
+    pub fn len(&self) -> usize {
+        self.shared.send_len()
+    }
+
+    /// Close the channel from the send side and drop queued values.
+    ///
+    /// Used by socket teardown when the receiver task may still be alive but
+    /// its queued payloads are no longer deliverable.
+    pub fn close(&self) {
+        let mut inner = self
+            .shared
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.closed_recv = true;
+        let drained = inner.queue.len();
+        inner.queue.clear();
+        self.shared.queued.fetch_sub(drained, Ordering::Release);
+        drop(inner);
+        self.shared.send_event.notify(usize::MAX);
+        self.shared.recv_event.notify(usize::MAX);
+    }
 }
 
 impl<T> Clone for Sender<T> {

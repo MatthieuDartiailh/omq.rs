@@ -68,7 +68,7 @@ fn soak_multi_socket() {
     let monitor = soak_common::ResourceMonitor::start();
     let mut tracker = soak_common::ThroughputTracker::new(Duration::from_secs(10));
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let pairs = create_pairs().await;
         eprintln!("[multi_socket] created {} socket pairs", pairs.len());
