@@ -5,7 +5,7 @@
 // in-flight message may still be in the inbox while the next message
 // takes the wire slot fast path and reaches the wire first.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -46,7 +46,6 @@ pub(crate) struct PeerWireSlot {
     ws_masked: bool,
     pub(crate) dead: AtomicBool,
     pub(crate) peer_id: u64,
-    pub(crate) consecutive_full: AtomicU32,
     queued_msgs: AtomicUsize,
 }
 
@@ -88,7 +87,6 @@ impl PeerWireSlot {
             ws_masked,
             dead: AtomicBool::new(false),
             peer_id,
-            consecutive_full: AtomicU32::new(0),
             queued_msgs: AtomicUsize::new(0),
         })
     }
@@ -209,6 +207,13 @@ impl PeerWireSlot {
 
     pub(crate) fn mark_dead(&self) {
         self.dead.store(true, Ordering::Release);
+        {
+            let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
+            *eq = EncodedQueue::one_shot();
+        }
+        self.pending.store(false, Ordering::Relaxed);
+        self.queued_msgs.store(0, Ordering::Relaxed);
+        self.data_ready.notify_waiters();
         self.space_available.notify_waiters();
     }
 

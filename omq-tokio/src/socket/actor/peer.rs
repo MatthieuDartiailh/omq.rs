@@ -38,14 +38,18 @@ impl SocketDriver {
                 self.handle_peer_event(peer_id, event).await;
             }
             InternalEvent::PeerClosed { peer_id, reason } => {
-                if let Some(peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason)
-                    && peer.is_client
-                    && !self.closing
-                    && !matches!(self.options.reconnect, ReconnectPolicy::Disabled)
-                {
-                    let ep = peer.endpoint.clone();
-                    self.dialers.retain(|d| d.endpoint != ep);
-                    self.start_dial(ep);
+                if let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) {
+                    if let Some(task) = peer.task.take() {
+                        let _ = task.await;
+                    }
+                    if peer.is_client
+                        && !self.closing
+                        && !matches!(self.options.reconnect, ReconnectPolicy::Disabled)
+                    {
+                        let ep = peer.endpoint.clone();
+                        self.dialers.retain(|d| d.endpoint != ep);
+                        self.start_dial(ep);
+                    }
                 }
             }
         }
@@ -249,6 +253,9 @@ impl SocketDriver {
             Some(ref s) => driver.with_wire_slot(s.clone()),
             None => driver,
         };
+        let pipe_cap = self.options.send_hwm.unwrap_or(1024).max(16) as usize;
+        let (send_pipe, send_pipe_rx) = blume::bounded(pipe_cap);
+        let driver = driver.with_send_pipe(send_pipe_rx);
 
         // Recv bypass: for socket types whose recv path is a plain fair-queue
         // delivery with no per-type post-processing, route messages directly
@@ -292,20 +299,25 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel,
                     wire_slot: slot.clone(),
+                    send_pipe: Some(send_pipe),
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint,
                 is_client: !is_server,
                 spsc: None,
+                task: None,
             },
         );
 
         PeerLifecycle::new(self).after_peer_inserted();
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let _ = driver.run().await;
         });
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.task = Some(task);
+        }
     }
 
     fn spawn_stream_connection(
@@ -336,6 +348,7 @@ impl SocketDriver {
                 endpoint,
                 is_client: !is_server,
                 spsc: None,
+                task: None,
             },
         );
 
@@ -423,12 +436,14 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
                     wire_slot: None,
+                    send_pipe: None,
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint,
                 is_client: !is_server,
                 spsc: spsc.clone(),
+                task: None,
             },
         );
 
@@ -445,7 +460,7 @@ impl SocketDriver {
         }
         PeerLifecycle::new(self).update_send_ring();
 
-        tokio::spawn(inproc_peer_driver(
+        let task = tokio::spawn(inproc_peer_driver(
             inbox_rx,
             in_rx,
             out,
@@ -460,6 +475,9 @@ impl SocketDriver {
                 recv_sink,
             },
         ));
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.task = Some(task);
+        }
     }
 
     async fn handle_peer_event(&mut self, peer_id: u64, event: ZmtpEvent) {
@@ -830,7 +848,7 @@ async fn inproc_peer_driver(
     if let Some(ref ring) = spsc {
         ring.recv_notify.notify_one();
     }
-    let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
+    let _ = peer_out.try_send((peer_id, PeerOut::Closed));
 }
 
 /// Try to push a message into the SPSC ring. Returns `None` if pushed
@@ -879,6 +897,6 @@ fn xpub_notification(tag: u8, prefix: &bytes::Bytes) -> Message {
 }
 
 /// Spawn a socket driver on the current tokio runtime.
-pub(crate) fn spawn_driver(driver: SocketDriver) {
-    tokio::spawn(async move { driver.run().await });
+pub(crate) fn spawn_driver(driver: SocketDriver) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move { driver.run().await })
 }

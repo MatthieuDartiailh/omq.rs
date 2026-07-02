@@ -77,12 +77,13 @@ pub(crate) fn spawn(
         // Disconnect notification.
         let notif = ZmtpEvent::Message(Message::single(Bytes::new()));
         let _ = peer_out_tx.send((peer_id, PeerOut::Event(notif))).await;
-        let _ = peer_out_tx.send((peer_id, PeerOut::Closed)).await;
+        let _ = peer_out_tx.try_send((peer_id, PeerOut::Closed));
     });
 
     DriverHandle {
         inbox: inbox_tx,
         cancel: handle_cancel,
         wire_slot: None,
+        send_pipe: None,
     }
 }

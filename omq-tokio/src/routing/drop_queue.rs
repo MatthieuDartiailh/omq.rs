@@ -158,6 +158,20 @@ impl DropQueue {
         self.inner.queue.close();
         self.inner.recv_notify.notify_waiters();
     }
+
+    pub(crate) fn shutdown(&self) {
+        self.inner.queue.close();
+        let mut drained = 0usize;
+        while self.inner.queue.pop().is_ok() {
+            drained += 1;
+        }
+        if drained > 0
+            && let Some(ref slots) = self.inner.slots
+        {
+            slots.add_permits(drained);
+        }
+        self.inner.recv_notify.notify_waiters();
+    }
 }
 
 impl QueueReceiver {

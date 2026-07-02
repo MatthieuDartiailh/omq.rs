@@ -94,6 +94,15 @@ impl Clone for Submitter {
 }
 
 impl Submitter {
+    pub(crate) fn shutdown(&self) {
+        let mut cached = self.cached.lock().unwrap();
+        cached.sole_wire = None;
+        cached.all_targets = None;
+        cached.encoder = None;
+        cached.all_wire = false;
+        cached.generation = u64::MAX;
+    }
+
     fn validate_group(msg: Message) -> core::result::Result<(Message, Option<String>), Error> {
         if msg.len() != 2 {
             return Err(Error::Protocol(
@@ -459,10 +468,15 @@ impl FanOutSend {
         }
     }
 
-    // Kept for the SendStrategy enum dispatch; fan-out has no pump task
-    // to cancel since dispatch is inline on the sending task.
-    #[expect(clippy::unused_self)]
-    pub(crate) fn shutdown(&self) {}
+    pub(crate) fn shutdown(&self) {
+        let mut g = self.inner.lock().expect("fanout inner poisoned");
+        g.peers.clear();
+        g.all_subscribe_all = false;
+        g.all_targets.clear();
+        g.fan_out_encoder = None;
+        drop(g);
+        self.bump_generation();
+    }
 
     pub(crate) fn is_drained(&self) -> bool {
         let g = self.inner.lock().expect("fanout inner poisoned");

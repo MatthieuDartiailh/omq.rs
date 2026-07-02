@@ -61,4 +61,8 @@ impl CompressionPool {
         self.encoders.lock().unwrap().push(enc);
         self.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
+
+    pub(crate) fn clear(&self) {
+        self.encoders.lock().unwrap().clear();
+    }
 }

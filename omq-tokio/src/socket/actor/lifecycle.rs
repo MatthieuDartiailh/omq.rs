@@ -1,7 +1,6 @@
+use super::{DisconnectReason, Message, MonitorEvent, PeerEntry, SocketDriver, SocketType};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-
-use super::{DisconnectReason, Message, MonitorEvent, PeerEntry, SocketDriver, SocketType};
 
 pub(super) struct PeerLifecycle<'a> {
     driver: &'a mut SocketDriver,
@@ -51,17 +50,9 @@ impl<'a> PeerLifecycle<'a> {
         }
         if count == 1 && self.driver.peers.len() == 1 {
             let s = sole_spsc.unwrap();
-            *self.driver.spsc.send_ring.write().unwrap() = Some(s.clone());
-            self.driver
-                .spsc
-                .send_ring_active
-                .store(true, Ordering::Release);
+            self.driver.spsc.send_ring.store(Some(s.clone()));
         } else {
-            *self.driver.spsc.send_ring.write().unwrap() = None;
-            self.driver
-                .spsc
-                .send_ring_active
-                .store(false, Ordering::Release);
+            self.driver.spsc.send_ring.store(None);
         }
     }
 

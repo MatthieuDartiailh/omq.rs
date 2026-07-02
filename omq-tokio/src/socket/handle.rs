@@ -62,13 +62,12 @@ struct Inner {
     /// on the same worker thread can drain and flush.
     send_ops: AtomicU32,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
+    actor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
-    const STARVATION_THRESHOLD: u32 = 2;
-
     /// Create a new socket of the given type with the given options. Spawns
     /// the driver task on the current tokio runtime.
     ///
@@ -131,7 +130,7 @@ impl Socket {
             wire_slots.clone(),
             recv_sink_config,
         );
-        spawn_driver(driver);
+        let actor_task = spawn_driver(driver);
         Self {
             inner: Arc::new(Inner {
                 socket_type,
@@ -145,6 +144,7 @@ impl Socket {
                 wire_slots,
                 send_ops: AtomicU32::new(0),
                 last_bound_endpoint: RwLock::new(None),
+                actor_task: Mutex::new(Some(actor_task)),
             }),
         }
     }
@@ -268,7 +268,7 @@ impl Socket {
                 if self.inner.wire_slots.single_exists() {
                     self.send_wire_slow(msg).await
                 } else {
-                    self.send_round_robin_wire(msg).await
+                    self.inner.send_submitter.send(msg).await
                 }
             }
         }
@@ -501,10 +501,18 @@ impl Socket {
             .await;
         // Even if the driver is already gone, the channel may be closed; we
         // treat that as "already closed" (success).
-        match rx.await {
+        let res = match rx.await {
             Ok(res) => res,
             Err(_) => Ok(()),
+        };
+        self.inner.send_submitter.shutdown();
+        self.inner.wire_slots.clear_single();
+        self.inner.recv_rx.shutdown();
+        let actor_task = self.inner.actor_task.lock().unwrap().take();
+        if let Some(task) = actor_task {
+            let _ = task.await;
         }
+        res
     }
 }
 
@@ -593,21 +601,6 @@ impl Socket {
         self.inner.wire_slots.try_send(msg)
     }
 
-    /// Multi-peer round-robin with anti-starvation.
-    ///
-    /// Normal path: try all slots, skip Full, encode into the first Ok.
-    /// Anti-starvation: when any slot has been skipped more than
-    /// `STARVATION_THRESHOLD` consecutive times, wait briefly for
-    /// that slot's driver to drain (bounded by timeout). This
-    /// breaks the TCP flow-control feedback loop that otherwise
-    /// causes permanent starvation under MT scheduling.
-    async fn send_round_robin_wire(&self, msg: Message) -> Result<()> {
-        self.inner
-            .wire_slots
-            .send_round_robin(msg, &self.inner.send_submitter, Self::STARVATION_THRESHOLD)
-            .await
-    }
-
     async fn send_wire_slow(&self, msg: Message) -> Result<()> {
         self.inner
             .wire_slots
@@ -629,5 +622,8 @@ impl Drop for Inner {
         // Last handle dropped: signal cancellation. The driver tears down
         // without waiting for linger since there's no one to await it.
         self.root_cancel.cancel();
+        self.send_submitter.shutdown();
+        self.wire_slots.clear_single();
+        self.recv_rx.shutdown();
     }
 }

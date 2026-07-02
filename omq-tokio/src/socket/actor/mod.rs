@@ -144,6 +144,7 @@ struct PeerEntry {
     is_client: bool,
     /// SPSC ring for this inproc peer (None for wire/stream peers).
     spsc: Option<Arc<crate::transport::inproc::InprocSpsc>>,
+    task: Option<JoinHandle<()>>,
 }
 
 struct ListenerEntry {
@@ -262,7 +263,7 @@ impl SocketDriver {
     async fn run(mut self) {
         loop {
             if self.should_exit() {
-                self.teardown();
+                self.teardown().await;
                 return;
             }
 
@@ -273,11 +274,11 @@ impl SocketDriver {
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {
-                    self.teardown();
+                    self.teardown().await;
                     return;
                 }
                 () = async { linger_sleep.unwrap().await }, if self.close_deadline.is_some() => {
-                    self.teardown();
+                    self.teardown().await;
                     return;
                 }
                 cmd = self.cmd_rx.recv(), if !self.closing => match cmd {
@@ -401,12 +402,26 @@ impl SocketDriver {
         }
     }
 
-    fn teardown(&mut self) {
+    async fn teardown(&mut self) {
+        self.cmd_rx.close();
+        self.internal_rx.close();
+        self.peer_out_rx.close();
         self.send_strategy.shutdown();
+        let mut peer_tasks = Vec::new();
         for p in self.peers.values() {
+            if let Some(ref slot) = p.handle.wire_slot {
+                slot.mark_dead();
+            }
+            if let Some(ref pipe) = p.handle.send_pipe {
+                pipe.close();
+            }
             p.handle.cancel.cancel();
         }
-        self.peers.clear();
+        for (_, mut peer) in self.peers.drain() {
+            if let Some(task) = peer.task.take() {
+                peer_tasks.push(task);
+            }
+        }
         for l in &self.listeners {
             l.cancel.cancel();
         }
@@ -415,6 +430,17 @@ impl SocketDriver {
             d.cancel.cancel();
         }
         self.dialers.clear();
+        if let Some(pool) = self.compression_pool.take() {
+            pool.clear();
+        }
+        for task in &peer_tasks {
+            if !task.is_finished() {
+                task.abort();
+            }
+        }
+        for task in peer_tasks {
+            let _ = task.await;
+        }
         self.monitor.publish(MonitorEvent::Closed);
         if let Some(ack) = self.close_ack.take() {
             let _ = ack.send(Ok(()));

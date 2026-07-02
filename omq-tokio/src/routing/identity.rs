@@ -32,6 +32,12 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
+    pub(crate) fn shutdown(&self) {
+        let mut g = self.inner.lock().expect("identity inner poisoned");
+        g.peers.clear();
+        g.identity_to_peer.clear();
+    }
+
     fn resolve_target(&self, msg: &mut Message) -> Result<Option<PeerSend>> {
         if msg.is_empty() {
             return Err(Error::Unroutable);
@@ -138,8 +144,11 @@ impl IdentitySend {
         g.identity_to_peer.get(identity).copied()
     }
 
-    #[expect(clippy::unused_self)]
-    pub(crate) fn shutdown(&self) {}
+    pub(crate) fn shutdown(&self) {
+        let mut g = self.inner.lock().expect("identity inner poisoned");
+        g.peers.clear();
+        g.identity_to_peer.clear();
+    }
 
     pub(crate) fn is_drained(&self) -> bool {
         let g = self.inner.lock().expect("identity inner poisoned");
