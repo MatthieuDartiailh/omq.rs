@@ -91,6 +91,45 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Drain all pending values into `out` through a mutable receiver
+    /// reference. This avoids holding `&Receiver` across `.await` in
+    /// `Send` futures while preserving the single-consumer contract.
+    pub async fn recv_batch_mut(&mut self, out: &mut Vec<T>) -> Result<usize, RecvError> {
+        let before = out.len();
+        {
+            let cache = self.cache.get_mut();
+            if Self::drain_cache_into(cache, out) > 0 {
+                return Ok(out.len() - before);
+            }
+            match self.shared.try_drain(cache) {
+                Ok(true) => {
+                    Self::drain_cache_into(cache, out);
+                    return Ok(out.len() - before);
+                }
+                Ok(false) => {}
+                Err(RecvError) => return Err(RecvError),
+            }
+        }
+
+        loop {
+            let listener = self.shared.recv_event.listen();
+
+            {
+                let cache = self.cache.get_mut();
+                match self.shared.try_drain(cache) {
+                    Ok(true) => {
+                        Self::drain_cache_into(cache, out);
+                        return Ok(out.len() - before);
+                    }
+                    Ok(false) => {}
+                    Err(RecvError) => return Err(RecvError),
+                }
+            }
+
+            listener.await;
+        }
+    }
+
     /// Whether both the local cache and the shared queue are empty.
     pub fn is_empty(&self) -> bool {
         let cache = self.cache.borrow();
@@ -100,12 +139,18 @@ impl<T> Receiver<T> {
     /// Signal senders that the receiver is closed. Subsequent and
     /// in-flight `send_async` calls will return `SendError`.
     pub fn close(&self) {
+        self.cache.borrow_mut().clear();
         let mut inner = self
             .shared
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.closed_recv = true;
+        let drained = inner.queue.len();
+        inner.queue.clear();
+        self.shared
+            .queued
+            .fetch_sub(drained, std::sync::atomic::Ordering::Release);
         drop(inner);
         self.shared.send_event.notify(usize::MAX);
     }

@@ -16,6 +16,7 @@ pub(crate) struct Inner<T> {
 pub(crate) struct Shared<T> {
     pub(crate) inner: Mutex<Inner<T>>,
     pub(crate) capacity: usize,
+    pub(crate) queued: AtomicUsize,
     pub(crate) sender_count: AtomicUsize,
     pub(crate) recv_event: Event,
     pub(crate) send_event: Event,
@@ -29,6 +30,7 @@ impl<T> Shared<T> {
                 closed_recv: false,
             }),
             capacity,
+            queued: AtomicUsize::new(0),
             sender_count: AtomicUsize::new(1),
             recv_event: Event::new(),
             send_event: Event::new(),
@@ -45,6 +47,7 @@ impl<T> Shared<T> {
         }
         let was_empty = inner.queue.is_empty();
         inner.queue.push_back(val);
+        self.queued.fetch_add(1, Ordering::Release);
         drop(inner);
         if was_empty {
             self.recv_event.notify(1);
@@ -99,7 +102,9 @@ impl<T> Shared<T> {
             };
         }
         let was_full = inner.queue.len() >= self.capacity;
+        let drained = inner.queue.len();
         std::mem::swap(cache, &mut inner.queue);
+        self.queued.fetch_sub(drained, Ordering::Release);
         drop(inner);
         if was_full {
             self.send_event.notify(usize::MAX);
@@ -123,8 +128,11 @@ impl<T> Shared<T> {
     }
 
     pub(crate) fn is_send_empty(&self) -> bool {
-        let inner = self.inner.lock().expect("blume: poisoned");
-        inner.queue.is_empty()
+        self.queued.load(Ordering::Acquire) == 0
+    }
+
+    pub(crate) fn send_len(&self) -> usize {
+        self.queued.load(Ordering::Acquire)
     }
 
     pub(crate) fn is_recv_disconnected(&self) -> bool {
