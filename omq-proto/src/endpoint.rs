@@ -23,9 +23,8 @@ use crate::error::{Error, Result};
 pub enum Endpoint {
     /// `tcp://host:port` (IPv4, IPv6, or DNS name).
     Tcp { host: Host, port: u16 },
-    /// `ipc://path` filesystem socket, or `ipc://@name` Linux abstract namespace.
-    /// Only available on Unix platforms.
-    #[cfg(unix)]
+    /// `ipc://path` filesystem socket (Unix), `ipc://@name` Linux abstract namespace,
+    /// or `ipc://name` Windows named pipe.
     Ipc(IpcPath),
     /// `inproc://name` in-process transport.
     Inproc { name: String },
@@ -69,15 +68,19 @@ pub enum Host {
     Wildcard,
 }
 
-/// IPC path, possibly in the Linux abstract namespace (leading `@`).
-/// Only available on Unix platforms.
-#[cfg(unix)]
+/// IPC path: filesystem socket (Unix), abstract namespace (Linux), or named pipe (Windows).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum IpcPath {
+    /// Unix filesystem socket path.
+    #[cfg(unix)]
     Filesystem(PathBuf),
     /// Linux abstract namespace (no filesystem entry).
+    #[cfg(unix)]
     Abstract(String),
+    /// Windows named pipe name (will become `\\.\ pipe\name` at bind/connect time).
+    #[cfg(target_os = "windows")]
+    NamedPipe(String),
 }
 
 /// Role for an endpoint in a single-string spec: bind, connect, or default.
@@ -112,7 +115,6 @@ impl FromStr for Endpoint {
 
         match scheme {
             "tcp" => parse_host_port(rest).map(|(host, port)| Endpoint::Tcp { host, port }),
-            #[cfg(unix)]
             "ipc" => Ok(Endpoint::Ipc(parse_ipc(rest)?)),
             "inproc" => {
                 if rest.is_empty() {
@@ -150,7 +152,6 @@ impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Tcp { host, port } => write!(f, "tcp://{host}:{port}"),
-            #[cfg(unix)]
             Self::Ipc(path) => write!(f, "ipc://{path}"),
             Self::Inproc { name } => write!(f, "inproc://{name}"),
             Self::Udp { group, host, port } => match group {
@@ -272,7 +273,6 @@ impl Endpoint {
     pub fn scheme(&self) -> &'static str {
         match self {
             Endpoint::Tcp { .. } => "tcp",
-            #[cfg(unix)]
             Endpoint::Ipc(_) => "ipc",
             Endpoint::Inproc { .. } => "inproc",
             Endpoint::Udp { .. } => "udp",
@@ -321,12 +321,15 @@ impl fmt::Display for Host {
     }
 }
 
-#[cfg(unix)]
 impl fmt::Display for IpcPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(unix)]
             Self::Filesystem(p) => write!(f, "{}", p.display()),
+            #[cfg(unix)]
             Self::Abstract(name) => write!(f, "@{name}"),
+            #[cfg(target_os = "windows")]
+            Self::NamedPipe(name) => write!(f, "{name}"),
         }
     }
 }
@@ -411,20 +414,73 @@ fn parse_host(s: &str) -> Result<Host> {
     Ok(Host::Name(s.to_string()))
 }
 
-#[cfg(unix)]
 fn parse_ipc(rest: &str) -> Result<IpcPath> {
     if rest.is_empty() {
         return Err(Error::InvalidEndpoint("empty ipc path".to_string()));
     }
-    if let Some(name) = rest.strip_prefix('@') {
-        if name.is_empty() {
-            return Err(Error::InvalidEndpoint(
-                "empty abstract ipc name".to_string(),
-            ));
+
+    #[cfg(unix)]
+    {
+        if let Some(name) = rest.strip_prefix('@') {
+            if name.is_empty() {
+                return Err(Error::InvalidEndpoint(
+                    "empty abstract ipc name".to_string(),
+                ));
+            }
+            return Ok(IpcPath::Abstract(name.to_string()));
         }
-        return Ok(IpcPath::Abstract(name.to_string()));
+        Ok(IpcPath::Filesystem(PathBuf::from(rest)))
     }
-    Ok(IpcPath::Filesystem(PathBuf::from(rest)))
+
+    #[cfg(target_os = "windows")]
+    {
+        validate_ipc_name(rest)?;
+        Ok(IpcPath::NamedPipe(rest.to_string()))
+    }
+
+    #[cfg(all(not(unix), not(target_os = "windows")))]
+    {
+        Err(Error::UnsupportedScheme(
+            "IPC is not supported on this platform".into(),
+        ))
+    }
+}
+
+/// Validate a Windows named pipe name.
+/// - Must be 1-256 characters
+/// - Cannot be empty
+/// - Cannot contain reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+/// - Cannot contain control characters or invalid NTFS characters (<>:"|?*)
+#[cfg(target_os = "windows")]
+pub fn validate_ipc_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 256 {
+        return Err(Error::InvalidEndpoint(format!(
+            "Windows IPC name must be 1-256 chars; got {} chars",
+            name.len()
+        )));
+    }
+
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
+        "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7",
+        "LPT8", "LPT9",
+    ];
+
+    let upper = name.to_uppercase();
+    if reserved.iter().any(|r| r.eq_ignore_ascii_case(&upper)) {
+        return Err(Error::InvalidEndpoint(
+            format!("'{name}' is a reserved Windows device name"),
+        ));
+    }
+
+    if name.chars().any(|c| c.is_control() || r#"<>:"|?*"#.contains(c)) {
+        return Err(Error::InvalidEndpoint(
+            "IPC name contains invalid characters; must not contain: < > : \" | ? *"
+                .into(),
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "ws")]
@@ -466,4 +522,126 @@ fn parse_udp(rest: &str) -> Result<Endpoint> {
     };
     let (host, port) = parse_host_port(hp)?;
     Ok(Endpoint::Udp { group, host, port })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_endpoint_parses() {
+        let ep: Endpoint = "tcp://localhost:5555".parse().unwrap();
+        assert_eq!(ep.scheme(), "tcp");
+        assert!(ep.is_tcp_family());
+    }
+
+    #[test]
+    fn inproc_endpoint_parses() {
+        let ep: Endpoint = "inproc://service".parse().unwrap();
+        assert_eq!(ep.scheme(), "inproc");
+        assert!(matches!(ep, Endpoint::Inproc { name } if name == "service"));
+    }
+
+    #[test]
+    fn endpoint_display_roundtrip() {
+        let endpoints = vec![
+            "tcp://localhost:5555",
+            "inproc://test",
+            "udp://localhost:5555",
+        ];
+
+        for ep_str in endpoints {
+            let ep: Endpoint = ep_str.parse().unwrap();
+            assert_eq!(ep.to_string(), ep_str);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_ipc_filesystem() {
+        let ep: Endpoint = "ipc:///tmp/socket".parse().unwrap();
+        assert_eq!(ep.scheme(), "ipc");
+        let ep_str = ep.to_string();
+        assert!(ep_str.starts_with("ipc://"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_ipc_abstract_namespace() {
+        let ep: Endpoint = "ipc://@myservice".parse().unwrap();
+        assert_eq!(ep.scheme(), "ipc");
+        assert_eq!(ep.to_string(), "ipc://@myservice");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_ipc_named_pipe() {
+        let ep: Endpoint = "ipc://myservice".parse().unwrap();
+        assert_eq!(ep.scheme(), "ipc");
+        assert_eq!(ep.to_string(), "ipc://myservice");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_ipc_validates_reserved_names() {
+        // Reserved names should be rejected
+        let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"];
+        for name in &reserved {
+            let result: Result<Endpoint> = format!("ipc://{name}").parse();
+            assert!(result.is_err(), "Reserved name '{name}' should be rejected");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_ipc_validates_invalid_chars() {
+        let invalid_names = vec!["my<pipe", "my|pipe", "my:pipe", "my?pipe", "my*pipe"];
+        for name in invalid_names {
+            let result: Result<Endpoint> = format!("ipc://{name}").parse();
+            assert!(result.is_err(), "Name '{name}' with invalid chars should be rejected");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_ipc_valid_names() {
+        let valid_names = vec!["myservice", "Service123", "my_service", "my-service"];
+        for name in valid_names {
+            let ep: Endpoint = format!("ipc://{name}").parse().unwrap();
+            assert_eq!(ep.scheme(), "ipc");
+        }
+    }
+
+    #[test]
+    fn endpoint_spec_with_bind_role() {
+        let spec: EndpointSpec = "@tcp://localhost:5555".parse().unwrap();
+        assert_eq!(spec.role, EndpointRole::Bind);
+        assert_eq!(spec.to_string(), "@tcp://localhost:5555");
+    }
+
+    #[test]
+    fn endpoint_spec_with_connect_role() {
+        let spec: EndpointSpec = ">tcp://localhost:5555".parse().unwrap();
+        assert_eq!(spec.role, EndpointRole::Connect);
+        assert_eq!(spec.to_string(), ">tcp://localhost:5555");
+    }
+
+    #[test]
+    fn endpoint_spec_with_default_role() {
+        let spec: EndpointSpec = "tcp://localhost:5555".parse().unwrap();
+        assert_eq!(spec.role, EndpointRole::Default);
+        assert_eq!(spec.to_string(), "tcp://localhost:5555");
+    }
+
+    #[test]
+    fn invalid_endpoint_missing_scheme() {
+        let result: Result<Endpoint> = "localhost:5555".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_endpoint_unknown_scheme() {
+        let result: Result<Endpoint> = "unknown://localhost:5555".parse();
+        assert!(result.is_err());
+    }
 }
