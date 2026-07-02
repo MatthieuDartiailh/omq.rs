@@ -30,9 +30,10 @@ async fn random_message_sizes() {
         .collect();
     let hashes: Vec<u128> = payloads.iter().map(|p| xxh3_128(p)).collect();
 
+    let push_sender = push.clone();
     let send_handle = tokio::spawn(async move {
         for payload in payloads {
-            push.send(Message::single(payload)).await.unwrap();
+            push_sender.send(Message::single(payload)).await.unwrap();
         }
     });
 
