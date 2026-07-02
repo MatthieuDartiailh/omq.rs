@@ -35,16 +35,43 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
     );
 }
 
-// --- IPC (abstract namespace) ---
+/// Generate platform-specific IPC endpoint for testing.
+/// - Windows: named pipe format (`ipc://name`)
+/// - Linux: abstract namespace (`ipc://@name`)
+/// - Other Unix: filesystem (`ipc:///tmp/name.sock`)
+fn ipc_test_endpoint(name: &str) -> String {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let suffix = format!("{name}-{pid}-{nanos}");
+
+    #[cfg(target_os = "windows")]
+    {
+        return format!("ipc://omq-libzmq-{suffix}");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return format!("ipc://@omq-libzmq-{suffix}");
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        return format!("ipc:///tmp/omq-libzmq-{suffix}.sock");
+    }
+}
+
+// --- IPC (cross-platform) ---
 
 #[test]
-#[cfg(unix)]
 fn ipc_push_pull() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    let addr = CString::new(format!("ipc://@omq-libzmq-test-{}", std::process::id())).unwrap();
+    let addr = CString::new(ipc_test_endpoint("push-pull")).unwrap();
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(50));
@@ -61,6 +88,33 @@ fn ipc_push_pull() {
 
     zmq_close(push);
     zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+// --- IPC PUB/SUB (cross-platform) ---
+
+#[test]
+fn ipc_pub_sub() {
+    let ctx = zmq_ctx_new();
+    let pub_ = zmq_socket(ctx, ZMQ_PUB);
+    let sub = zmq_socket(ctx, ZMQ_SUB);
+
+    let addr = CString::new(ipc_test_endpoint("pub-sub")).unwrap();
+    zmq_bind(pub_, addr.as_ptr());
+    zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
+    zmq_connect(sub, addr.as_ptr());
+    std::thread::sleep(Duration::from_millis(100));
+    set_timeo(sub, 2000);
+
+    zmq_send(pub_, b"ipc-pub".as_ptr().cast(), 7, 0);
+
+    let mut buf = [0u8; 64];
+    let rc = zmq_recv(sub, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert_eq!(rc, 7);
+    assert_eq!(&buf[..7], b"ipc-pub");
+
+    zmq_close(sub);
+    zmq_close(pub_);
     zmq_ctx_term(ctx);
 }
 

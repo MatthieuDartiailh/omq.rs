@@ -423,12 +423,6 @@ unsafe fn parse_endpoint_args<'a>(
     };
     let addr_str = addr_str.to_owned();
 
-    // Windows: reject IPC transport (not supported).
-    #[cfg(windows)]
-    if addr_str.starts_with("ipc://") {
-        return Err(libc::ENOTSUP);
-    }
-
     let Ok(endpoint) = omq_tokio::Endpoint::from_str(&addr_str) else {
         return Err(libc::EINVAL);
     };
