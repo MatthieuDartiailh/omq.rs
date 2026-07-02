@@ -29,7 +29,7 @@ fn soak_blake3zmq_sustained() {
     let client_kp = Blake3ZmqKeypair::generate();
     let server_pub = server_kp.public;
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let pull = Socket::new(
             SocketType::Pull,

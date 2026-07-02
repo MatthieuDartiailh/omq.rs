@@ -52,7 +52,7 @@ fn soak_ws_throughput() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let pull = Socket::new(SocketType::Pull, soak_common::soak_options());
         let ep = pull.bind(ws_ep(0)).await.unwrap();
@@ -112,7 +112,7 @@ fn soak_ws_reconnect_storm() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         // Probe for a port.
         let probe = Socket::new(SocketType::Pull, soak_common::soak_options());

@@ -21,7 +21,7 @@ fn soak_inproc_cross_thread() {
     let recvd = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let pull = Socket::new(SocketType::Pull, Options::default());
         pull.bind(ep.clone()).await.unwrap();

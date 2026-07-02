@@ -20,7 +20,7 @@ fn soak_pub_sub_churn() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let ep = soak_common::inproc_ep("soak-pub-sub-churn");
         let publisher = Socket::new(SocketType::Pub, Options::default());

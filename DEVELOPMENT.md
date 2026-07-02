@@ -68,6 +68,10 @@ CURVE reconnect, BLAKE3ZMQ reconnect.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s).
 Enable all feature-gated scenarios with the full feature set.
+For omq-tokio, `OMQ_SOAK_TOKIO_RUNTIME=multi_thread` (default) or
+`OMQ_SOAK_TOKIO_RUNTIME=current_thread` selects the runtime flavor used
+by each soak binary. Run both flavors when validating scheduler-sensitive
+changes.
 
 Each soak test is a separate binary, so `cargo test` runs them
 sequentially. Launch scenarios in batches of 4 (8 processes) to

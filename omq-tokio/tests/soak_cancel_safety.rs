@@ -45,7 +45,7 @@ fn soak_cancel_safety() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let mut rng = rand::make_rng::<StdRng>();
         let start = Instant::now();

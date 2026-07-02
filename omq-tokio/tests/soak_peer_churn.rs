@@ -16,7 +16,7 @@ use omq_tokio::{Message, Socket, SocketType};
 fn soak_peer_churn() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = soak_common::tokio_runtime();
     rt.block_on(async {
         let push = Socket::new(SocketType::Push, soak_common::soak_options().send_hwm(1024));
         let ep = push.bind(soak_common::tcp_ep(0)).await.unwrap();
