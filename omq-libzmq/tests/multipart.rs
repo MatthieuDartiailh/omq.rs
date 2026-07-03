@@ -11,8 +11,8 @@ use std::time::Duration;
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_msg_close,
     zmq_msg_copy, zmq_msg_data, zmq_msg_init, zmq_msg_init_buffer, zmq_msg_init_data,
-    zmq_msg_init_size, zmq_msg_more, zmq_msg_move, zmq_msg_recv, zmq_msg_send, zmq_msg_size,
-    zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_msg_init_size, zmq_msg_more, zmq_msg_move, zmq_msg_recv, zmq_msg_send, zmq_msg_set,
+    zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -20,6 +20,8 @@ const ZMQ_PULL: i32 = 7;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_RCVTIMEO: i32 = 27;
+const ZMQ_MORE: i32 = 1;
+const ZMQ_ROUTING_ID: i32 = 5;
 
 // 64-byte opaque zmq_msg_t, aligned to pointer size (OmqMsgRepr has *mut u8 fields).
 #[repr(C, align(8))]
@@ -120,6 +122,28 @@ fn msg_move_and_copy_self_alias_are_noops() {
     let data = zmq_msg_data(m.0.as_mut_ptr().cast());
     let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), payload.len()) };
     assert_eq!(slice, payload);
+
+    zmq_msg_close(m.0.as_mut_ptr().cast());
+}
+
+#[test]
+fn msg_set_handles_supported_and_invalid_properties() {
+    let mut m = ZmqMsg::new();
+
+    assert_eq!(zmq_msg_set(m.0.as_mut_ptr().cast(), ZMQ_MORE, 1), 0);
+    assert_eq!(zmq_msg_more(m.0.as_ptr().cast()), 1);
+
+    assert_eq!(
+        zmq_msg_set(m.0.as_mut_ptr().cast(), ZMQ_ROUTING_ID, 1234),
+        0
+    );
+    assert_eq!(omq_zmq::zmq_msg_routing_id(m.0.as_ptr().cast()), 1234);
+
+    assert_eq!(zmq_msg_set(m.0.as_mut_ptr().cast(), 9999, 1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    assert_eq!(zmq_msg_set(std::ptr::null_mut(), ZMQ_MORE, 1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
 
     zmq_msg_close(m.0.as_mut_ptr().cast());
 }

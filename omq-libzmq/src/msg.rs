@@ -317,8 +317,23 @@ pub extern "C" fn zmq_msg_get(msg: *const OmqMsgRepr, property: c_int) -> c_int 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn zmq_msg_set(_msg: *mut OmqMsgRepr, _property: c_int, _val: c_int) -> c_int {
-    0
+pub extern "C" fn zmq_msg_set(msg: *mut OmqMsgRepr, property: c_int, val: c_int) -> c_int {
+    if msg.is_null() {
+        return crate::error::fail(libc::EFAULT);
+    }
+    // SAFETY: msg is non-null (checked above).
+    let r = unsafe { repr(msg) };
+    match property {
+        1 => {
+            r.more = u8::from(val != 0);
+            0
+        }
+        5 => {
+            r.reserved[0..4].copy_from_slice(&(val as u32).to_le_bytes());
+            0
+        }
+        _ => crate::error::fail(libc::EINVAL),
+    }
 }
 
 #[unsafe(no_mangle)]
