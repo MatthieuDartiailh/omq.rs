@@ -461,22 +461,23 @@ pub fn validate_ipc_name(name: &str) -> Result<()> {
     }
 
     let reserved = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
-        "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7",
-        "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
 
     let upper = name.to_uppercase();
     if reserved.iter().any(|r| r.eq_ignore_ascii_case(&upper)) {
-        return Err(Error::InvalidEndpoint(
-            format!("'{name}' is a reserved Windows device name"),
-        ));
+        return Err(Error::InvalidEndpoint(format!(
+            "'{name}' is a reserved Windows device name"
+        )));
     }
 
-    if name.chars().any(|c| c.is_control() || r#"<>:"|?*"#.contains(c)) {
+    if name
+        .chars()
+        .any(|c| c.is_control() || r#"<>:"|?*"#.contains(c))
+    {
         return Err(Error::InvalidEndpoint(
-            "IPC name contains invalid characters; must not contain: < > : \" | ? *"
-                .into(),
+            "IPC name contains invalid characters; must not contain: < > : \" | ? *".into(),
         ));
     }
 
@@ -598,7 +599,10 @@ mod tests {
         let invalid_names = vec!["my<pipe", "my|pipe", "my:pipe", "my?pipe", "my*pipe"];
         for name in invalid_names {
             let result: Result<Endpoint> = format!("ipc://{name}").parse();
-            assert!(result.is_err(), "Name '{name}' with invalid chars should be rejected");
+            assert!(
+                result.is_err(),
+                "Name '{name}' with invalid chars should be rejected"
+            );
         }
     }
 

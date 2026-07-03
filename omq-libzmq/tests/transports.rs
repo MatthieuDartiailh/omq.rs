@@ -49,17 +49,17 @@ fn ipc_test_endpoint(name: &str) -> String {
 
     #[cfg(target_os = "windows")]
     {
-        return format!("ipc://omq-libzmq-{suffix}");
+        format!("ipc://omq-libzmq-{suffix}")
     }
 
     #[cfg(target_os = "linux")]
     {
-        return format!("ipc://@omq-libzmq-{suffix}");
+        format!("ipc://@omq-libzmq-{suffix}")
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        return format!("ipc:///tmp/omq-libzmq-{suffix}.sock");
+        format!("ipc:///tmp/omq-libzmq-{suffix}.sock")
     }
 }
 

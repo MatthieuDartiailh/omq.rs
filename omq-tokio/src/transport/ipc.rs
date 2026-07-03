@@ -340,42 +340,10 @@ fn connect_abstract_unix(_name: &str) -> Result<IpcStream> {
 const IPC_BUF_SIZE: u32 = 1024 * 1024;
 
 #[cfg(unix)]
-fn tune_unix_buffers(_stream: &IpcStream) {
-    #[cfg(unix)]
-    {
-        let sock = socket2::SockRef::from(_stream);
-        let _ = sock.set_send_buffer_size(IPC_BUF_SIZE as usize);
-        let _ = sock.set_recv_buffer_size(IPC_BUF_SIZE as usize);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // Windows named pipes have their own buffer management.
-        // No tuning needed.
-    }
-}
-
-/// Bound IPC listener. For filesystem-path binds, removes the socket
-/// file on drop; abstract-namespace binds carry no filesystem entry
-/// and need no cleanup.
-
-// ============================================================================
-// Unix bind/connect implementation
-// ============================================================================
-
-#[cfg(unix)]
-#[expect(clippy::unused_async)]
-async fn bind_filesystem_unix(endpoint: &Endpoint, path: &Path) -> Result<IpcListener> {
-    // Best-effort cleanup of any stale socket at this path. Ignore
-    // failure: the real bind below surfaces a precise error if the
-    // path is unusable.
-    let _ = std::fs::remove_file(path);
-    let listener = TokioUnixListener::bind(path)?;
-    Ok(IpcListener {
-        inner: listener,
-        endpoint: endpoint.clone(),
-        cleanup_path: Some(path.to_path_buf()),
-        ident: PeerIdent::Path(path.display().to_string()),
-    })
+fn tune_unix_buffers(stream: &IpcStream) {
+    let sock = socket2::SockRef::from(stream);
+    let _ = sock.set_send_buffer_size(IPC_BUF_SIZE as usize);
+    let _ = sock.set_recv_buffer_size(IPC_BUF_SIZE as usize);
 }
 
 // ============================================================================

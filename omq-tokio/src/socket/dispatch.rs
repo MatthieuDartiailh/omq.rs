@@ -17,10 +17,10 @@ use tokio::net::TcpStream;
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
 
-use crate::transport::IpcTransport;
+use crate::transport::ipc::IpcStream;
 use crate::transport::{
-    InprocConn, InprocPeerSnapshot, Listener as _, PeerIdent, TcpTransport, Transport as _,
-    inproc as inproc_transport,
+    InprocConn, InprocPeerSnapshot, IpcTransport, Listener as _, PeerIdent, TcpTransport,
+    Transport as _, inproc as inproc_transport,
 };
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP, IPC, WS).
@@ -29,7 +29,7 @@ use crate::transport::{
 #[derive(Debug)]
 pub(crate) enum AnyStream {
     Tcp(TcpStream),
-    Ipc(crate::transport::ipc::IpcStream),
+    Ipc(IpcStream),
     #[cfg(feature = "ws")]
     Ws(Box<crate::transport::ws::WsTransport>),
 }
@@ -365,6 +365,8 @@ pub(super) use omq_proto::message::generated_identity;
 mod tests {
     use super::*;
     use tokio::io::AsyncWrite;
+    #[cfg(unix)]
+    use tokio::net::UnixStream;
 
     #[test]
     fn any_stream_tcp_reports_write_vectored() {
