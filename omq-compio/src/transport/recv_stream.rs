@@ -56,10 +56,7 @@ async fn pull_stream_accumulating(
             if let Err(e) = fd.read_until(acc, payload_len).await {
                 return StreamArmOutcome::Err(e);
             }
-            state.last_input_nanos.store(
-                state.hb_epoch.elapsed().as_nanos() as u64,
-                Ordering::Relaxed,
-            );
+            state.mark_input();
             let payload = restore.buf.take().unwrap().freeze();
             state.large_recv_pending.store(0, Ordering::Release);
             let mut io = peer_io.lock().expect("peer_io");
@@ -82,10 +79,7 @@ async fn pull_stream_accumulating(
                 Some(Err(e)) => StreamArmOutcome::Err(e),
                 Some(Ok(buf)) if buf.is_empty() => StreamArmOutcome::Eof,
                 Some(Ok(buf)) => {
-                    state.last_input_nanos.store(
-                        state.hb_epoch.elapsed().as_nanos() as u64,
-                        Ordering::Relaxed,
-                    );
+                    state.mark_input();
                     let bytes = bytes::Bytes::copy_from_slice(&buf[..]);
                     drop(buf);
                     StreamArmOutcome::AccData(bytes)
@@ -138,10 +132,7 @@ pub(super) async fn pull_stream(
                     if buf.is_empty() {
                         return StreamArmOutcome::Eof;
                     }
-                    state.last_input_nanos.store(
-                        state.hb_epoch.elapsed().as_nanos() as u64,
-                        Ordering::Relaxed,
-                    );
+                    state.mark_input();
                     let handle_result = {
                         let mut io = peer_io.lock().expect("peer_io");
                         let bytes = bytes::Bytes::copy_from_slice(&buf[..]);

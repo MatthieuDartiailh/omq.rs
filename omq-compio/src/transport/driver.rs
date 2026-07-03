@@ -386,10 +386,7 @@ pub(crate) async fn run_connection(
         .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
         .unwrap_or(0);
     let mut ls = DriverLoopState::new(options.handshake_timeout);
-    state.last_input_nanos.store(
-        state.hb_epoch.elapsed().as_nanos() as u64,
-        Ordering::Relaxed,
-    );
+    state.mark_input();
 
     // Persistent futures: kept alive across loop iterations so their
     // internal heap state (flume hook, event_listener node) is reused
@@ -731,9 +728,9 @@ impl DriverLoopState {
         hb_timeout: Duration,
     ) -> Result<()> {
         if self.hb_ping_sent {
-            let now_nanos = state.hb_epoch.elapsed().as_nanos() as u64;
-            let last_nanos = state.last_input_nanos.load(Ordering::Relaxed);
-            let elapsed = Duration::from_nanos(now_nanos.saturating_sub(last_nanos));
+            let now_millis = state.hb_elapsed_millis();
+            let last_millis = state.last_input_millis.load(Ordering::Relaxed);
+            let elapsed = Duration::from_millis(now_millis.saturating_sub(last_millis));
             if elapsed > hb_timeout {
                 return Err(Error::Timeout);
             }
