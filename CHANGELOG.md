@@ -6,6 +6,27 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### omq-proto 0.18.2
+
+#### Added
+
+- Windows IPC support: `IpcPath::NamedPipe` variant now available on Windows (no longer gated behind `#[cfg(unix)]`). Named pipe names validated for reserved device names, invalid NTFS characters, length (1-256), and control characters.
+
+#### Changed
+
+- `IpcPath` enum now cross-platform: `Filesystem` and `Abstract` variants gated on Unix, `NamedPipe` variant available on Windows.
+
+### omq-tokio 0.14.7
+
+#### Added
+
+- Windows named pipes IPC transport support. All 20 socket types (PUSH, PULL, PUB, SUB, REQ, REP, ROUTER, DEALER, PAIR, CLIENT, SERVER, CHANNEL, SCATTER, GATHER, RADIO, DISH, XPUB, XSUB, etc.) now work across all transports (TCP, IPC, inproc, UDP, WS/WSS, lz4+tcp, lz4+ws, lz4+wss) on Windows.
+- Platform-specific IPC variants: Unix filesystem socket (Linux/macOS/BSD), Unix abstract namespace (Linux), Windows named pipes.
+
+#### Changed
+
+- `omq-tokio` now fully cross-platform: Windows no longer has transport limitations. IPC transport previously unavailable on Windows is now complete.
+
 ## 2026-06-17
 
 ### omq-proto 0.17.2

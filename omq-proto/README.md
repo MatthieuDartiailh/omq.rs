@@ -14,7 +14,7 @@ when building a custom backend or embedding the ZMTP codec into a non-standard t
 | Greeting / handshake | ZMTP 3.0/3.1 negotiation and mechanism dispatch |
 | Mechanisms | NULL, PLAIN, CURVE, BLAKE3ZMQ |
 | Transforms | LZ4 frame-level compression |
-| `Endpoint` | Parser for `tcp://`, `ipc://`, `inproc://`, `udp://`, `lz4+tcp://`, `ws://`, `wss://` |
+| `Endpoint` | Parser for `tcp://`, `ipc://` (Unix sockets / Windows named pipes), `inproc://`, `udp://`, `lz4+tcp://`, `ws://`, `wss://` |
 | `SocketType` | 19 types (11 stable + 8 draft) with compatibility matrix |
 | `SubscriptionSet` | Prefix-trie for PUB/SUB topic filtering |
 | Monitor types | `MonitorEvent`, `DisconnectReason`, `PeerInfo` |

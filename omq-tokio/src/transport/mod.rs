@@ -19,7 +19,6 @@ pub use omq_proto::monitor::PeerIdent;
 
 pub mod backoff;
 pub mod inproc;
-#[cfg(unix)]
 pub mod ipc;
 pub(crate) mod stream_raw;
 pub mod tcp;
@@ -27,7 +26,6 @@ pub mod udp;
 
 pub use backoff::{Canceled, dial_with_backoff};
 pub use inproc::{InprocConn, InprocListener};
-#[cfg(unix)]
 pub use ipc::IpcTransport;
 pub use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 pub use tcp::TcpTransport;

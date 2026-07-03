@@ -26,7 +26,6 @@ pub mod socket_ref;
 pub mod subscription;
 pub mod type_state;
 
-#[cfg(unix)]
 pub use endpoint::IpcPath;
 pub use endpoint::{Endpoint, EndpointRole, EndpointSpec};
 pub use error::{Error, Result, TrySendError};

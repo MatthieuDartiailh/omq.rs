@@ -138,6 +138,7 @@ fn reject_empty_inproc() {
     assert!("inproc://".parse::<Endpoint>().is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn reject_empty_ipc_abstract() {
     assert!("ipc://@".parse::<Endpoint>().is_err());

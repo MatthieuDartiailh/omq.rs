@@ -1,5 +1,9 @@
-#![cfg(unix)]
-//! IPC (Unix domain socket) end-to-end tests.
+//! IPC end-to-end tests.
+//!
+//! **Platform-specific implementations:**
+//! - Linux: Abstract namespace sockets (`IpcPath::Abstract`)
+//! - Windows: Named pipes (`IpcPath::NamedPipe`)
+//! - macOS/BSD: Filesystem sockets (`IpcPath::Filesystem`)
 
 mod test_support;
 
@@ -9,10 +13,32 @@ use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-ipc-test-{name}-{}",
-        std::process::id()
-    )))
+    #[cfg(target_os = "linux")]
+    {
+        Endpoint::Ipc(IpcPath::Abstract(format!(
+            "omq-ipc-test-{name}-{}",
+            std::process::id()
+        )))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Endpoint::Ipc(IpcPath::NamedPipe(format!(
+            "omq-ipc-test-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("omq-ipc-test-{name}-{}.sock", std::process::id()));
+        Endpoint::Ipc(IpcPath::Filesystem(dir))
+    }
 }
 
 #[tokio::test]
@@ -106,6 +132,7 @@ async fn ipc_connect_before_bind() {
     assert_eq!(m, Message::single("late-bind"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn ipc_socket_file_cleaned_on_close() {
     let mut dir = std::env::temp_dir();

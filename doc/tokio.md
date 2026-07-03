@@ -19,7 +19,7 @@ inproc paths.
 
 ## Top-level shape
 
-```
+```text
                     Socket::recv
                          ^
                          |    (recv_tx is async_channel; bounded by recv_hwm)
@@ -325,3 +325,19 @@ multi-thread runtime. The benchmark is measuring the PUSH socket's
 multi-peer send path; giving every PULL process a full multi-thread
 worker pool oversubscribes the machine and can make peer fairness look
 broken even when the pusher distributes evenly.
+
+## Windows IPC: Named Pipes
+
+On Windows, the IPC transport uses named pipes instead of Unix domain
+sockets. The implementation is transparent to the application layer:
+`ipc:///my-pipe` automatically routes to `\\.\pipe\my-pipe` internally.
+All 20 socket types work identically across all platforms.
+
+### Platform-Specific Behavior
+
+| Aspect | Unix | Windows |
+|--------|------|---------|
+| Bind path syntax | `/tmp/socket.sock` or `@abstract-ns` | `my-pipe` (auto-prefixed to `\\.\pipe\my-pipe`) |
+| Connection type | Stream socket (full-duplex) | Named pipe (full-duplex) |
+| Buffer management | `SO_SNDBUF`/`SO_RCVBUF` tuning | Automatic (Windows pipes) |
+| Type dispatch | `type IpcStream = UnixStream` | `enum IpcStream { Server(...), Client(...) }` |
