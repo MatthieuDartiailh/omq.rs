@@ -2,9 +2,8 @@
 """Generate comparison SVG charts from benchmarks/comparisons.jsonl.
 
 Produces:
-  doc/charts/pushpull/omq_tcp.svg  — TCP: throughput + CPU% (omq backends + libzmq)
-  doc/charts/pushpull/omq_ipc.svg  — IPC: throughput + CPU% (omq backends + libzmq)
-  doc/charts/pushpull/omq_inproc.svg — inproc: throughput + CPU% (omq backends + libzmq)
+  doc/charts/pushpull/classic_tcp.svg  — TCP throughput + CPU%, classic backends
+  doc/charts/pushpull/iouring_tcp.svg  — TCP throughput + CPU%, io_uring backends
 """
 
 import json
@@ -24,17 +23,19 @@ COLORS = {
     "omq-tokio-mt": "#dc2626",
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
+    "rzmq-iouring": "#16a34a",
     "omq-libzmq": "#06b6d4",
 }
 
 LABELS = {
     "libzmq": "libzmq v4.3.5",
-    "omq-compio": "omq-compio",
+    "omq-compio": "omq-compio (ST)",
     "omq-compio-st": "omq-compio (ST)",
-    "omq-tokio": "omq-tokio",
+    "omq-tokio": "omq-tokio (ST)",
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0",
-    "rzmq": "rzmq v0.5.18",
+    "rzmq": "rzmq v0.5.22 (MT)",
+    "rzmq-iouring": "rzmq v0.5.22 (io_uring, MT)",
     "omq-libzmq": "omq-libzmq",
 }
 
@@ -54,11 +55,15 @@ def load_jsonl() -> list[dict]:
         print(f"ERROR: {JSONL_PATH} not found", file=sys.stderr)
         sys.exit(1)
     rows = []
-    for line in JSONL_PATH.read_text().splitlines():
+    for seq, line in enumerate(JSONL_PATH.read_text().splitlines()):
         line = line.strip()
         if line:
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
+                if str(row.get("run_id", "")).startswith("debug-"):
+                    continue
+                row["_seq"] = seq
+                rows.append(row)
             except json.JSONDecodeError:
                 continue
     return rows
@@ -73,21 +78,21 @@ def load_data(transport: str, impls: list[str]) -> dict:
     lat: dict[int, dict[str, float]] = {}
     lat_cpu: dict[int, dict[str, float]] = {}
 
-    seen_tput: dict[tuple, str] = {}
-    seen_lat: dict[tuple, str] = {}
+    seen_tput: dict[tuple, int] = {}
+    seen_lat: dict[tuple, int] = {}
 
     for r in t_rows:
         impl_name = r.get("impl")
         if impl_name not in impls:
             continue
-        run_id = r.get("run_id", "")
+        seq = r.get("_seq", 0)
         size = r.get("msg_size")
         kind = r.get("kind")
 
         if kind == "throughput":
             key = (impl_name, size)
-            if key not in seen_tput or run_id >= seen_tput[key]:
-                seen_tput[key] = run_id
+            if key not in seen_tput or seq >= seen_tput[key]:
+                seen_tput[key] = seq
                 msgs_s = r.get("msgs_s", 0)
                 mbps = r.get("mbps", 0)
                 gbs = mbps / 1000.0
@@ -99,8 +104,8 @@ def load_data(transport: str, impls: list[str]) -> dict:
 
         elif kind == "latency":
             key = (impl_name, size)
-            if key not in seen_lat or run_id >= seen_lat[key]:
-                seen_lat[key] = run_id
+            if key not in seen_lat or seq >= seen_lat[key]:
+                seen_lat[key] = seq
                 lat.setdefault(size, {})[impl_name] = r.get("p50_us", 0)
                 cpu_time = r.get("cpu_time", 0)
                 elapsed = r.get("elapsed", 0)
@@ -137,20 +142,32 @@ def svg_text(x, y, text, anchor="middle", fill="#374151", size=10, weight=None,
 
 
 def svg_polyline(points: list[tuple[float, float]], color: str, width=2.5,
-                 dash=None) -> str:
+                 dash=None, opacity: float | None = None) -> str:
     pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
     d = f' stroke-dasharray="{dash}"' if dash else ""
+    o = f' opacity="{opacity:g}"' if opacity is not None else ""
     cap = ' stroke-linecap="round" stroke-linejoin="round"' if not dash else ""
     return (
         f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-        f' stroke-width="{width}"{cap}{d}/>'
+        f' stroke-width="{width}"{cap}{d}{o}/>'
     )
 
 
-def svg_dots(points: list[tuple[float, float]], color: str) -> list[str]:
+def svg_dots(points: list[tuple[float, float]], color: str, radius: float = 3) -> list[str]:
     return [
-        f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="3"'
+        f'  <circle cx="{x:.1f}" cy="{y:.1f}" r="{radius:g}"'
         f' fill="{color}" stroke="white" stroke-width="1"/>'
+        for x, y in points
+    ]
+
+
+def svg_x_marks(points: list[tuple[float, float]], color: str, radius: float = 3) -> list[str]:
+    return [
+        f'  <path d="M {x - radius:.1f},{y - radius:.1f}'
+        f' L {x + radius:.1f},{y + radius:.1f}'
+        f' M {x + radius:.1f},{y - radius:.1f}'
+        f' L {x - radius:.1f},{y + radius:.1f}"'
+        f' stroke="{color}" stroke-width="1.6" stroke-linecap="round" fill="none"/>'
         for x, y in points
     ]
 
@@ -175,6 +192,7 @@ def draw_throughput_panel(
         for s in sizes for name in impls if name in tput.get(s, {})
     ]
     msg_max = fixed_msg_max if fixed_msg_max else (max(all_msgs) * 1.15 if all_msgs else 16e6)
+    msg_max = max(msg_max, 1.0)
 
     all_gbs = [
         tput[s][name][1]
@@ -185,9 +203,11 @@ def draw_throughput_panel(
     if log_gbs:
         gbs_min = max(gbs_min, 0.01)
         log_lo = math.floor(math.log10(gbs_min * 0.8))
-        log_hi = math.ceil(math.log10((fixed_gbs_max or gbs_max) * 1.15))
+        log_ref = max(fixed_gbs_max or gbs_max, 0.01)
+        log_hi = math.ceil(math.log10(log_ref * 1.15))
     else:
         tput_max = fixed_gbs_max if fixed_gbs_max else gbs_max * 1.15
+        tput_max = max(tput_max, 0.001)
 
     if msg_break:
         break_val, bottom_frac = msg_break
@@ -311,7 +331,7 @@ def draw_throughput_panel(
 
     # dashed msg/s lines
     draw_order = [name for name in
-                  ["rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio",
+                  ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio",
                    "omq-compio-st", "omq-compio"]
                   if name in impls]
     for name in draw_order:
@@ -329,8 +349,19 @@ def draw_throughput_panel(
             for i in range(len(sizes)) if name in tput.get(sizes[i], {})
         ]
         if pts:
-            L.append(svg_polyline(pts, COLORS[name]))
-            L.extend(svg_dots(pts, COLORS[name]))
+            L.append(svg_polyline(pts, COLORS[name], width=1.5))
+            zero_pts = []
+            nonzero_pts = []
+            for i in range(len(sizes)):
+                if name not in tput.get(sizes[i], {}):
+                    continue
+                pt = (xs[i], y_tput(tput[sizes[i]][name][1]))
+                if tput[sizes[i]][name][0] == 0:
+                    zero_pts.append(pt)
+                else:
+                    nonzero_pts.append(pt)
+            L.extend(svg_dots(nonzero_pts, COLORS[name], radius=2.2))
+            L.extend(svg_x_marks(zero_pts, COLORS[name], radius=3))
 
     # x-axis labels
     for i, s in enumerate(sizes):
@@ -378,7 +409,7 @@ def draw_latency_panel(
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs",
+                  ["rzmq-iouring", "libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs",
                    "omq-compio-st", "omq-compio"]
                   if name in impls]
     for name in draw_order:
@@ -387,8 +418,8 @@ def draw_latency_panel(
             for i in range(len(sizes)) if name in lat.get(sizes[i], {})
         ]
         if pts:
-            L.append(svg_polyline(pts, COLORS[name]))
-            L.extend(svg_dots(pts, COLORS[name]))
+            L.append(svg_polyline(pts, COLORS[name], width=1.5))
+            L.extend(svg_dots(pts, COLORS[name], radius=2.2))
 
     # x-axis labels
     for i, s in enumerate(sizes):
@@ -444,15 +475,18 @@ def draw_throughput_cpu_panel(
     if log_gbs:
         gbs_min = max(gbs_min, 0.01)
         log_lo = math.floor(math.log10(gbs_min * 0.8))
-        log_hi = math.ceil(math.log10((fixed_gbs_max or gbs_max) * 1.15))
+        log_ref = max(fixed_gbs_max or gbs_max, 0.01)
+        log_hi = math.ceil(math.log10(log_ref * 1.15))
     else:
         gbs_max = fixed_gbs_max if fixed_gbs_max else (gbs_max * 1.15)
+        gbs_max = max(gbs_max, 0.001)
 
     all_msgs = [
         tput[s][name][0]
         for s in sizes for name in impls if name in tput.get(s, {})
     ]
     msg_max = fixed_msg_max if fixed_msg_max else (max(all_msgs) * 1.15 if all_msgs else 16e6)
+    msg_max = max(msg_max, 1.0)
 
     def y_cpu(v):
         frac = max(0, min(1, v / cpu_ceil))
@@ -537,7 +571,7 @@ def draw_throughput_cpu_panel(
     L.append(svg_text(40, mid_y, "CPU %", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
+                  ["rzmq-iouring", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
                    "omq-compio-st", "omq-compio", "rzmq", "zmq.rs"]
                   if name in impls]
 
@@ -548,7 +582,8 @@ def draw_throughput_cpu_panel(
             for i in range(len(sizes)) if name in tput_cpu.get(sizes[i], {})
         ]
         if pts:
-            L.append(svg_polyline(pts, COLORS[name], width=2, dash="2,3"))
+            L.append(svg_polyline(pts, COLORS[name], width=1.6,
+                                  dash="2,5", opacity=0.85))
 
     # dashed msg/s lines (outer right axis)
     for name in draw_order:
@@ -557,7 +592,25 @@ def draw_throughput_cpu_panel(
             for i in range(len(sizes)) if name in tput.get(sizes[i], {})
         ]
         if pts:
-            L.append(svg_polyline(pts, COLORS[name], width=1.5, dash="5,3"))
+            for i, size in enumerate(sizes):
+                val = tput.get(size, {}).get(name)
+                if val and len(val) >= 4 and val[2] > 0 and val[3] > 0:
+                    x = xs[i]
+                    y1 = y_msg(val[2])
+                    y2 = y_msg(val[3])
+                    L.append(
+                        f'  <line x1="{x:.1f}" y1="{y1:.1f}" x2="{x:.1f}" y2="{y2:.1f}"'
+                        f' stroke="{COLORS[name]}" stroke-width="1.0" opacity="0.45"/>'
+                    )
+                    L.append(
+                        f'  <line x1="{x - 3:.1f}" y1="{y1:.1f}" x2="{x + 3:.1f}" y2="{y1:.1f}"'
+                        f' stroke="{COLORS[name]}" stroke-width="1.0" opacity="0.45"/>'
+                    )
+                    L.append(
+                        f'  <line x1="{x - 3:.1f}" y1="{y2:.1f}" x2="{x + 3:.1f}" y2="{y2:.1f}"'
+                        f' stroke="{COLORS[name]}" stroke-width="1.0" opacity="0.45"/>'
+                    )
+            L.append(svg_polyline(pts, COLORS[name], width=2.0, dash="5,3"))
 
     # solid GB/s lines with dots (inner right axis)
     for name in draw_order:
@@ -566,8 +619,19 @@ def draw_throughput_cpu_panel(
             for i in range(len(sizes)) if name in tput.get(sizes[i], {})
         ]
         if pts:
-            L.append(svg_polyline(pts, COLORS[name]))
-            L.extend(svg_dots(pts, COLORS[name]))
+            L.append(svg_polyline(pts, COLORS[name], width=2.0))
+            zero_pts = []
+            nonzero_pts = []
+            for i in range(len(sizes)):
+                if name not in tput.get(sizes[i], {}):
+                    continue
+                pt = (xs[i], y_gbs(tput[sizes[i]][name][1]))
+                if tput[sizes[i]][name][0] == 0:
+                    zero_pts.append(pt)
+                else:
+                    nonzero_pts.append(pt)
+            L.extend(svg_dots(nonzero_pts, COLORS[name], radius=2.2))
+            L.extend(svg_x_marks(zero_pts, COLORS[name], radius=3))
 
     # x-axis labels
     for i, s in enumerate(sizes):
@@ -637,7 +701,7 @@ def draw_latency_cpu_panel(
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
+                  ["rzmq-iouring", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
                    "rzmq", "zmq.rs", "omq-compio-st", "omq-compio"]
                   if name in impls]
 
@@ -648,7 +712,8 @@ def draw_latency_cpu_panel(
             for i in range(len(sizes)) if name in lat_cpu.get(sizes[i], {})
         ]
         if pts:
-            L.append(svg_polyline(pts, COLORS[name], width=2, dash="2,3"))
+            L.append(svg_polyline(pts, COLORS[name], width=1.6,
+                                  dash="2,5", opacity=0.85))
 
     # solid latency lines with dots (left axis)
     for name in draw_order:
@@ -682,36 +747,58 @@ def detect_hardware() -> str | None:
     return _detect()
 
 
+def _legend_extra(n_items: int, show_st_mt: bool = False) -> float:
+    """Pre-compute vertical space consumed by the legend."""
+    row_gap = 20
+    n_rows = 2 if n_items > 4 else 1
+    extra = (n_rows - 1) * row_gap
+    if show_st_mt:
+        extra += 18
+    return extra
+
+
 def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float,
                       label_overrides: dict | None = None,
                       show_st_mt: bool = False) -> float:
-    """Draw impl legend. Returns extra vertical space consumed (0 or 18)."""
+    """Draw impl legend in up to two rows. Returns extra vertical space consumed."""
     legend_items = [(k, (label_overrides or {}).get(k, LABELS[k])) for k in impls if k in COLORS]
-    item_w = 145 if show_st_mt else 125
-    total_w = len(legend_items) * item_w
-    start_x = mid_x - total_w / 2
+    item_w = 190
+    row_gap = 20
 
-    for i, (key, label) in enumerate(legend_items):
-        lx = start_x + i * item_w
-        c = COLORS[key]
-        L.append(
-            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
-            f' stroke="{c}" stroke-width="2.5"/>'
-        )
-        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
-        L.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
-            f' font-size="11" font-weight="500">{label}</text>'
-        )
+    if len(legend_items) > 4:
+        mid = (len(legend_items) + 1) // 2
+        rows = [legend_items[:mid], legend_items[mid:]]
+    else:
+        rows = [legend_items]
+
+    extra = 0
+    for row_idx, row in enumerate(rows):
+        ry = leg_y + row_idx * row_gap
+        total_w = len(row) * item_w
+        start_x = mid_x - total_w / 2
+        for i, (key, label) in enumerate(row):
+            lx = start_x + i * item_w
+            c = COLORS[key]
+            L.append(
+                f'  <line x1="{lx:.0f}" y1="{ry}" x2="{lx + 14:.0f}" y2="{ry}"'
+                f' stroke="{c}" stroke-width="2.5"/>'
+            )
+            L.append(f'  <circle cx="{lx + 7:.0f}" cy="{ry}" r="2.5" fill="{c}"/>')
+            L.append(
+                f'  <text x="{lx + 20:.0f}" y="{ry + 4}" fill="#374151"'
+                f' font-size="11" font-weight="500">{label}</text>'
+            )
+    extra = (len(rows) - 1) * row_gap
 
     if show_st_mt:
+        st_y = leg_y + extra + 18
         L.append(
-            f'  <text x="{mid_x}" y="{leg_y + 18}" text-anchor="middle"'
+            f'  <text x="{mid_x}" y="{st_y}" text-anchor="middle"'
             f' fill="#9ca3af" font-size="9">'
             f'ST = single-threaded   MT = multi-threaded</text>'
         )
-        return 18
-    return 0
+        extra += 18
+    return extra
 
 
 def generate_chart(data: dict, impls: list[str], transport_label: str,
@@ -860,6 +947,8 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     sizes = data["sizes"]
     tput = data["tput"]
     tput_cpu = data.get("tput_cpu", {})
+    has_data = {name for s in sizes for name in tput.get(s, {})}
+    impls = [i for i in impls if i in has_data]
     n = len(sizes)
     if n < 2:
         print(f"WARNING: only {n} data points for {transport_label}", file=sys.stderr)
@@ -874,8 +963,8 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     mid_x = (x_left + x_right) / 2
     right_pad = 15
     svg_w = x_right2 + 80 + right_pad
-    st_mt_extra = 18 if show_st_mt else 0
-    svg_h = 520 + hw_offset + st_mt_extra
+    leg_extra = _legend_extra(len(impls), show_st_mt)
+    svg_h = 520 + hw_offset + leg_extra
 
     t1_y_top = 35 + hw_offset
     t1_y_bot = 400 + hw_offset
@@ -915,7 +1004,7 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
 
     L.append(
         f'  <line x1="{lt_start:.0f}" y1="{lt_y}" x2="{lt_start + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2" stroke-dasharray="2,3" opacity="0.7"/>'
+        f' stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>'
     )
     L.append(
         f'  <text x="{lt_start + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
@@ -925,9 +1014,9 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     lt_mid = lt_start + 145
     L.append(
         f'  <line x1="{lt_mid:.0f}" y1="{lt_y}" x2="{lt_mid + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2.5"/>'
+        f' stroke="#6b7280" stroke-width="2.0"/>'
     )
-    L.append(f'  <circle cx="{lt_mid + 7:.0f}" cy="{lt_y}" r="2" fill="#6b7280"/>')
+    L.append(f'  <circle cx="{lt_mid + 7:.0f}" cy="{lt_y}" r="1.8" fill="#6b7280"/>')
     L.append(
         f'  <text x="{lt_mid + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
         f' font-size="10">GB/s (inner right{", log" if log_gbs else ""})</text>'
@@ -936,7 +1025,7 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     lt_right = lt_mid + 165
     L.append(
         f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3"/>'
+        f' stroke="#6b7280" stroke-width="2.0" stroke-dasharray="5,3"/>'
     )
     L.append(
         f'  <text x="{lt_right + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
@@ -956,6 +1045,8 @@ def generate_latency_chart_cpu(data: dict, impls: list[str], transport_label: st
     sizes = data["sizes"]
     lat = data["lat"]
     lat_cpu = data.get("lat_cpu", {})
+    has_data = {name for s in sizes for name in lat.get(s, {})}
+    impls = [i for i in impls if i in has_data]
     n = len(sizes)
     if n < 2:
         return ""
@@ -965,9 +1056,9 @@ def generate_latency_chart_cpu(data: dict, impls: list[str], transport_label: st
         return ""
 
     hw_offset = 14 if hw_label else 0
-    st_mt_extra = 18 if show_st_mt else 0
+    leg_extra = _legend_extra(len(impls), show_st_mt)
     svg_w = 850
-    svg_h = 320 + hw_offset + st_mt_extra
+    svg_h = 320 + hw_offset + leg_extra
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
@@ -1019,7 +1110,7 @@ def generate_latency_chart_cpu(data: dict, impls: list[str], transport_label: st
     lt_right = lt_start + 170
     L.append(
         f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2" stroke-dasharray="2,3" opacity="0.7"/>'
+        f' stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>'
     )
     L.append(
         f'  <text x="{lt_right + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
@@ -1045,18 +1136,20 @@ def load_pubsub_data(transport: str, impls: list[str], peers: int) -> dict:
         impl_name = r.get("impl")
         if impl_name not in impls:
             continue
-        run_id = r.get("run_id", "")
+        cpu_time = r.get("cpu_time", 0)
+        elapsed = r.get("elapsed", 0)
+        if elapsed <= 0 or (cpu_time <= 0 and not r.get("zero_transport")):
+            continue
+        seq = r.get("_seq", 0)
         size = r.get("msg_size")
         key = (impl_name, size)
-        if key not in seen or run_id >= seen[key]:
-            seen[key] = run_id
+        if key not in seen or seq >= seen[key]:
+            seen[key] = seq
             msgs_s = r.get("msgs_s", 0)
             mbps = r.get("mbps", 0)
             # mbps is already aggregate (per-sub × peers) from run_comparisons.
             gbs = mbps / 1000.0
             tput.setdefault(size, {})[impl_name] = (msgs_s, gbs)
-            cpu_time = r.get("cpu_time", 0)
-            elapsed = r.get("elapsed", 0)
             if elapsed > 0 and cpu_time > 0:
                 tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
@@ -1086,7 +1179,7 @@ def generate_pubsub_chart(
     gap = 70
     hw_offset = 14 if hw_label else 0
     svg_w = 850
-    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20
+    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20 + _legend_extra(len(impls))
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
@@ -1137,26 +1230,9 @@ def generate_pubsub_chart(
 
     last_bot = hw_offset + 35 + (len(panels) - 1) * (panel_h + gap) + panel_h
     leg_y = last_bot + 40
+    extra = _draw_impl_legend(L, impls, mid_x, leg_y)
 
-    legend_items = [(k, LABELS[k]) for k in impls if k in COLORS]
-    item_w = 125
-    total_w = len(legend_items) * item_w
-    start_x = mid_x - total_w / 2
-
-    for i, (key, label) in enumerate(legend_items):
-        lx = start_x + i * item_w
-        c = COLORS[key]
-        L.append(
-            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
-            f' stroke="{c}" stroke-width="2.5"/>'
-        )
-        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
-        L.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
-            f' font-size="11" font-weight="500">{label}</text>'
-        )
-
-    lt_y = leg_y + 22
+    lt_y = leg_y + 22 + extra
     lt_total = 320
     lt_start = mid_x - lt_total / 2
 
@@ -1202,15 +1278,20 @@ def load_fanio_data(transport: str, impls: list[str], peers: int,
         impl_name = r.get("impl")
         if impl_name not in impls:
             continue
-        run_id = r.get("run_id", "")
+        seq = r.get("_seq", 0)
         size = r.get("msg_size")
         key = (impl_name, size)
-        if key not in seen or run_id >= seen[key]:
-            seen[key] = run_id
+        if key not in seen or seq >= seen[key]:
+            seen[key] = seq
             msgs_s = r.get("msgs_s", 0)
             mbps = r.get("mbps", 0)
             gbs = mbps / 1000.0
-            tput.setdefault(size, {})[impl_name] = (msgs_s, gbs)
+            tput.setdefault(size, {})[impl_name] = (
+                msgs_s,
+                gbs,
+                r.get("peer_min", 0),
+                r.get("peer_max", 0),
+            )
             cpu_time = r.get("cpu_time", 0)
             elapsed = r.get("elapsed", 0)
             if elapsed > 0 and cpu_time > 0:
@@ -1243,10 +1324,10 @@ def generate_multi_panel_cpu_chart(
     panel_h = 260
     gap = 70
     hw_offset = 14 if hw_label else 0
-    st_mt_extra = 18 if show_st_mt else 0
+    leg_extra = _legend_extra(len(impls), show_st_mt)
     right_pad = 15
     svg_w = x_right2 + 80 + right_pad
-    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20 + st_mt_extra
+    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20 + leg_extra
     mid_x = (x_left + x_right) / 2
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
@@ -1293,7 +1374,7 @@ def generate_multi_panel_cpu_chart(
 
     L.append(
         f'  <line x1="{lt_start:.0f}" y1="{lt_y}" x2="{lt_start + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2" stroke-dasharray="2,3" opacity="0.7"/>'
+        f' stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>'
     )
     L.append(
         f'  <text x="{lt_start + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
@@ -1303,9 +1384,9 @@ def generate_multi_panel_cpu_chart(
     lt_mid = lt_start + 145
     L.append(
         f'  <line x1="{lt_mid:.0f}" y1="{lt_y}" x2="{lt_mid + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2.5"/>'
+        f' stroke="#6b7280" stroke-width="2.0"/>'
     )
-    L.append(f'  <circle cx="{lt_mid + 7:.0f}" cy="{lt_y}" r="2" fill="#6b7280"/>')
+    L.append(f'  <circle cx="{lt_mid + 7:.0f}" cy="{lt_y}" r="1.8" fill="#6b7280"/>')
     L.append(
         f'  <text x="{lt_mid + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
         f' font-size="10">GB/s (inner right)</text>'
@@ -1314,7 +1395,7 @@ def generate_multi_panel_cpu_chart(
     lt_right = lt_mid + 165
     L.append(
         f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3"/>'
+        f' stroke="#6b7280" stroke-width="2.0" stroke-dasharray="5,3"/>'
     )
     L.append(
         f'  <text x="{lt_right + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
@@ -1331,66 +1412,48 @@ def main():
     FIXED_INPROC_LAT_MAX = 40.0
     hw = detect_hardware()
 
-    # ── Main charts (with CPU%): libzmq + omq backends ──────────
-    main_impls = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt"]
-
-    for transport, impls, label, log in [
-        ("tcp", main_impls, "TCP loopback, 2-process", False),
-        ("ipc", main_impls, "IPC, 2-process", False),
-        ("inproc", ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio", "omq-tokio-mt"], "inproc", True),
-    ]:
-        data = load_data(transport, impls)
-        if not data["sizes"]:
-            print(f"No {transport} data found", file=sys.stderr)
-            continue
-
-        inproc_overrides = {"omq-compio": "omq-compio (MT)"} if transport == "inproc" else None
-        svg = generate_chart_cpu(data, impls, label,
-                                 fixed_gbs_max=None if log else FIXED_GBS_MAX,
-                                 log_gbs=log,
-                                 hw_label=hw,
-                                 label_overrides=inproc_overrides)
-        if svg:
-            out = REPO / "doc" / "charts" / "pushpull" / f"omq_{transport}.svg"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(svg)
-            print(f"Written: {out}", file=sys.stderr)
-
-        lat_max = FIXED_INPROC_LAT_MAX if transport == "inproc" else FIXED_LAT_MAX
-        svg = generate_latency_chart_cpu(data, impls, label,
-                                         fixed_lat_max=lat_max, hw_label=hw,
-                                         label_overrides=inproc_overrides)
-        if svg:
-            out = REPO / "doc" / "charts" / "reqrep" / f"omq_{transport}.svg"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(svg)
-            print(f"Written: {out}", file=sys.stderr)
-
-    # ── Cross-impl charts (other impls vs slowest omq) ────────
-    alt_impls = ["libzmq", "omq-tokio", "zmq.rs", "rzmq"]
-    vs_overrides = {
+    # ── Cross-impl charts, split by I/O backend league ────────
+    # classic = epoll/mio impls; iouring = io_uring impls. omq's own line is
+    # omq-tokio in the classic league, omq-compio in the io_uring league.
+    classic_overrides = {
         "omq-tokio": "omq-tokio (ST)",
         "zmq.rs": "zmq.rs v0.6.0 (MT)",
-        "rzmq": "rzmq v0.5.18 (MT)",
+        "rzmq": "rzmq v0.5.22 (MT)",
+    }
+    iouring_overrides = {
+        "omq-compio": "omq-compio (ST)",
+        "rzmq-iouring": "rzmq v0.5.22 (io_uring, MT)",
+    }
+    label_for = {
+        "tcp": "TCP loopback, 2-process",
+        "ipc": "IPC, 2-process",
+        "inproc": "inproc",
     }
 
-    for transport, impls, label, log in [
-        ("tcp", alt_impls, "TCP loopback, 2-process", False),
-        ("ipc", alt_impls, "IPC, 2-process", False),
-        ("inproc", ["libzmq", "omq-tokio", "rzmq"], "inproc", True),
-    ]:
+    # (league, transport, impls, overrides, log).
+    cross_charts = [
+        ("classic", "tcp", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides, False),
+        ("classic", "ipc", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides, False),
+        ("classic", "inproc", ["libzmq", "omq-tokio", "omq-tokio-mt", "rzmq"], classic_overrides, True),
+        ("iouring", "tcp", ["omq-compio", "rzmq-iouring"], iouring_overrides, False),
+        ("iouring", "ipc", ["omq-compio"], iouring_overrides, False),
+        ("iouring", "inproc", ["omq-compio", "rzmq-iouring"], iouring_overrides, True),
+    ]
+
+    for league, transport, impls, overrides, log in cross_charts:
         data = load_data(transport, impls)
         if not data["sizes"]:
             continue
+        label = label_for[transport]
 
         svg = generate_chart_cpu(data, impls, label,
                                  fixed_gbs_max=None if log else FIXED_GBS_MAX,
                                  log_gbs=log,
                                  hw_label=hw,
-                                 label_overrides=vs_overrides,
+                                 label_overrides=overrides,
                                  show_st_mt=True)
         if svg:
-            out = REPO / "doc" / "charts" / "pushpull" / f"alt_{transport}.svg"
+            out = REPO / "doc" / "charts" / "pushpull" / f"{league}_{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
@@ -1398,62 +1461,42 @@ def main():
         lat_max = FIXED_INPROC_LAT_MAX if transport == "inproc" else FIXED_LAT_MAX
         svg = generate_latency_chart_cpu(data, impls, label,
                                          fixed_lat_max=lat_max, hw_label=hw,
-                                         label_overrides=vs_overrides,
+                                         label_overrides=overrides,
                                          show_st_mt=True)
         if svg:
-            out = REPO / "doc" / "charts" / "reqrep" / f"alt_{transport}.svg"
+            out = REPO / "doc" / "charts" / "reqrep" / f"{league}_{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
 
     # ── PUB/SUB charts ──────────────────────────────────────────
-    pubsub_impls = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt"]
-    pubsub_alt_impls = ["libzmq", "omq-tokio", "zmq.rs", "rzmq"]
     pubsub_peer_counts = [1, 8, 64]
 
     def pubsub_title(peers, tl):
         sub_label = "1 subscriber" if peers == 1 else f"{peers} subscribers"
         return f"PUB/SUB throughput, {sub_label}: {tl}"
 
-    for transport, label in [
-        ("tcp", "TCP loopback"),
-        ("ipc", "IPC"),
+    # PUB/SUB cross-impl charts, split by league (TCP only)
+    for league, impls, overrides in [
+        ("classic", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides),
+        ("iouring", ["omq-compio", "rzmq-iouring"], iouring_overrides),
     ]:
         panels = [
-            (p, load_pubsub_data(transport, pubsub_impls, p))
+            (p, load_pubsub_data("tcp", impls, p))
             for p in pubsub_peer_counts
         ]
         if any(d["sizes"] for _, d in panels):
             svg = generate_multi_panel_cpu_chart(
-                panels, pubsub_impls, label,
+                panels, impls, "TCP loopback",
                 hw_label=hw, title_fn=pubsub_title,
+                label_overrides=overrides, show_st_mt=True,
             )
             if svg:
-                out = REPO / "doc" / "charts" / "pubsub" / f"omq_{transport}.svg"
+                out = REPO / "doc" / "charts" / "pubsub" / f"{league}_tcp.svg"
                 out.write_text(svg)
                 print(f"Written: {out}", file=sys.stderr)
 
-    # PUB/SUB cross-impl charts
-    for transport, label in [
-        ("tcp", "TCP loopback"),
-    ]:
-        panels = [
-            (p, load_pubsub_data(transport, pubsub_alt_impls, p))
-            for p in pubsub_peer_counts
-        ]
-        if any(d["sizes"] for _, d in panels):
-            svg = generate_multi_panel_cpu_chart(
-                panels, pubsub_alt_impls, label,
-                hw_label=hw, title_fn=pubsub_title,
-                label_overrides=vs_overrides, show_st_mt=True,
-            )
-            if svg:
-                out = REPO / "doc" / "charts" / "pubsub" / f"alt_{transport}.svg"
-                out.write_text(svg)
-                print(f"Written: {out}", file=sys.stderr)
-
-    # ── Fan-out / fan-in charts (TCP only) ──────────────────────
-    fanio_impls = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt"]
+    # ── Fan-out / fan-in charts (TCP only), split by backend league ─────
     fanio_peers = [2, 4, 8]
 
     def fanout_title(peers, tl):
@@ -1462,38 +1505,48 @@ def main():
     def fanin_title(peers, tl):
         return f"PUSH fan-in ({peers} PUSH → 1 PULL): {tl}"
 
+    fanio_leagues = [
+        ("classic", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides),
+        ("iouring", ["omq-compio", "rzmq-iouring"], iouring_overrides),
+    ]
+
     for kind, tfn, dir_name in [
-        ("fan_out", fanout_title, "pushpull"),
-        ("fan_in", fanin_title, "pushpull"),
+        ("fan_out", fanout_title, "fanout"),
+        ("fan_in", fanin_title, "fanin"),
     ]:
-        panels = [
-            (p, load_fanio_data("tcp", fanio_impls, p, kind))
-            for p in fanio_peers
-        ]
-        if not any(d["sizes"] for _, d in panels):
-            continue
-        svg = generate_multi_panel_cpu_chart(
-            panels, fanio_impls, "TCP loopback",
-            hw_label=hw,
-            title_fn=tfn,
-        )
+        for league, impls, overrides in fanio_leagues:
+            panels = [
+                (p, load_fanio_data("tcp", impls, p, kind))
+                for p in fanio_peers
+            ]
+            if not any(d["sizes"] for _, d in panels):
+                continue
+            svg = generate_multi_panel_cpu_chart(
+                panels, impls, "TCP loopback",
+                hw_label=hw,
+                title_fn=tfn,
+                label_overrides=overrides,
+                show_st_mt=True,
+            )
+            if svg:
+                out = REPO / "doc" / "charts" / "pushpull" / dir_name / f"{league}_tcp.svg"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(svg)
+                print(f"Written: {out}", file=sys.stderr)
+
+
+    # ── Main hero charts, one per backend league ─────────────────
+    from gen_main_chart import (generate_main_chart, load_data as load_main_data,
+                                FAMILIES)
+    tput, _lat, msgs = load_main_data()
+    for family, cfg in FAMILIES.items():
+        svg = generate_main_chart(tput, msgs, cfg["impls"], cfg["draw_order"],
+                                  cfg["title"], hw)
         if svg:
-            slug = kind.replace("_", "")
-            out = REPO / "doc" / "charts" / dir_name / f"{slug}_tcp.svg"
+            out = REPO / "doc" / "charts" / f"main_{family}_tcp.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
-
-
-    # ── Main hero chart (all impls, throughput only) ─────────────
-    from gen_main_chart import generate_main_chart, load_data as load_main_data
-    tput, lat = load_main_data()
-    svg = generate_main_chart(tput, lat, hw)
-    if svg:
-        out = REPO / "doc" / "charts" / "main_tcp.svg"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(svg)
-        print(f"Written: {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 //!
 //! Usage:
 //!   `bench_peer_compio` push \<endpoint\> \<`msg_size_bytes`\>
+//!   `bench_peer_compio` push-fanout \<endpoint\> \<`msg_size_bytes`\> \<peers\>
 //!   `bench_peer_compio` pull \<endpoint\> \<`msg_size_bytes`\> \<`duration_secs`\>
 //!   `bench_peer_compio` rep  \<endpoint\> \<`msg_size_bytes`\>
 //!   `bench_peer_compio` req  \<endpoint\> \<`msg_size_bytes`\> \<iterations\> \<warmup\>
@@ -153,6 +154,12 @@ fn main() {
                 let size: usize = args[3].parse().expect("msg_size");
                 run_push(ep, size).await;
             }
+            Some("push-fanout") => {
+                let ep = parse_ep(&args[2]);
+                let size: usize = args[3].parse().expect("msg_size");
+                let peers: usize = args[4].parse().expect("peers");
+                run_push_fanout(ep, size, peers).await;
+            }
             Some("pull") => {
                 let ep = parse_ep(&args[2]);
                 let size: usize = args[3].parse().expect("msg_size");
@@ -235,6 +242,7 @@ fn main() {
             }
             _ => {
                 eprintln!("usage: bench_peer_compio push <endpoint> <size>");
+                eprintln!("       bench_peer_compio push-fanout <endpoint> <size> <peers>");
                 eprintln!("       bench_peer_compio pull <endpoint> <size> <duration_secs>");
                 eprintln!("       bench_peer_compio inproc <name> <size> <duration_secs>");
                 eprintln!("       bench_peer_compio inproc-st <name> <size> <duration_secs>");
@@ -260,30 +268,82 @@ async fn run_push(ep: Endpoint, size: usize) {
     let bound = push.bind(ep).await.expect("push bind");
     print_bound_port(&bound);
     let payload = bench_payload(size);
-    if size <= omq_proto::message::MAX_INLINE_MESSAGE {
-        loop {
-            push.send(Message::from_slice(&payload)).await.unwrap();
-        }
-    } else {
-        let msg = Message::single(payload);
-        loop {
-            push.send(msg.clone()).await.unwrap();
-        }
+    run_push_loop(&push, &payload).await;
+}
+
+async fn wait_for_start_barrier() {
+    let Some(start_at) = std::env::var("OMQ_BENCH_START_AT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    if start_at > now {
+        compio::time::sleep(Duration::from_secs_f64(start_at - now)).await;
     }
+}
+
+async fn wait_for_handshakes(sock: &Socket, mut monitor: omq_compio::MonitorStream, peers: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let connected = sock
+            .connections()
+            .await
+            .expect("connection snapshot")
+            .into_iter()
+            .filter(|c| c.peer_info.is_some())
+            .count();
+        if connected >= peers {
+            return;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for {peers} handshaked peers"
+        );
+        let _ = compio::time::timeout(deadline - now, monitor.recv()).await;
+    }
+}
+
+async fn run_push_fanout(ep: Endpoint, size: usize, peers: usize) {
+    let push = Socket::new(SocketType::Push, bench_options_server(size));
+    let monitor = push.monitor();
+    let bound = push.bind(ep).await.expect("push bind");
+    print_bound_port(&bound);
+    wait_for_handshakes(&push, monitor, peers).await;
+    wait_for_start_barrier().await;
+
+    let payload = bench_payload(size);
+    run_push_loop(&push, &payload).await;
 }
 
 async fn run_push_connect(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options_client(size));
     push.connect(ep).await.expect("push connect");
     let payload = bench_payload(size);
-    if size <= omq_proto::message::MAX_INLINE_MESSAGE {
+    run_push_loop(&push, &payload).await;
+}
+
+async fn send_fast(sock: &Socket, msg: Message) {
+    match sock.try_send(msg) {
+        Ok(()) => {}
+        Err(omq_compio::TrySendError::Full(msg)) => sock.send(msg).await.unwrap(),
+        Err(e) => panic!("try_send failed: {e}"),
+    }
+}
+
+async fn run_push_loop(sock: &Socket, payload: &Bytes) {
+    if payload.len() <= omq_compio::message::MAX_INLINE_MESSAGE {
         loop {
-            push.send(Message::from_slice(&payload)).await.unwrap();
+            send_fast(sock, Message::from_slice(payload)).await;
         }
     } else {
-        let msg = Message::single(payload);
+        let msg = Message::single(payload.clone());
         loop {
-            push.send(msg.clone()).await.unwrap();
+            send_fast(sock, msg.clone()).await;
         }
     }
 }
@@ -295,6 +355,7 @@ async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
 
     compio::time::sleep(Duration::from_millis(500)).await;
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
@@ -309,7 +370,8 @@ async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("{count} {elapsed:.6} {size}");
+    let cpu = cpu_time_secs() - cpu_before;
+    println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);
 }
 
@@ -471,6 +533,7 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
     pull.connect(ep.clone()).await.expect("pull connect");
 
     compio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_start_barrier().await;
 
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
@@ -756,18 +819,33 @@ async fn run_pub(ep: Endpoint, size: usize) {
     }
 }
 
+async fn recv_before_deadline(sock: &Socket, deadline: Instant) -> bool {
+    let now = Instant::now();
+    if now >= deadline {
+        return false;
+    }
+    matches!(
+        compio::time::timeout(deadline - now, sock.recv()).await,
+        Ok(Ok(_))
+    )
+}
+
 async fn run_sub(ep: Endpoint, size: usize, duration: Duration) {
     let sub = Socket::new(SocketType::Sub, bench_options(size));
     sub.connect(ep.clone()).await.expect("sub connect");
     sub.subscribe(Bytes::new()).await.expect("subscribe");
 
     compio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_start_barrier().await;
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
     loop {
-        sub.recv().await.unwrap();
+        if !recv_before_deadline(&sub, deadline).await {
+            break;
+        }
         count += 1;
         while sub.try_recv().is_ok() {
             count += 1;
@@ -777,7 +855,8 @@ async fn run_sub(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("{count} {elapsed:.6} {size}");
+    let cpu = cpu_time_secs() - cpu_before;
+    println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);
 }
 

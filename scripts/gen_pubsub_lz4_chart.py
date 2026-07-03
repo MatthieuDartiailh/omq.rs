@@ -361,14 +361,14 @@ def generate_svg(
             L.append(
                 f'  <polyline points="{pts}" fill="none"'
                 f' stroke="{COLORS[name]}"'
-                f' stroke-width="2.5" stroke-linecap="round"'
+                f' stroke-width="2.0" stroke-linecap="round"'
                 f' stroke-linejoin="round"/>'
             )
             for i, s in active:
                 yy = y_tput(d[s]["virt_mbps"])
                 L.append(
                     f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}"'
-                    f' r="2.5" fill="{COLORS[name]}"'
+                    f' r="2.2" fill="{COLORS[name]}"'
                     f' stroke="white" stroke-width="1"/>'
                 )
 
@@ -386,7 +386,7 @@ def generate_svg(
             L.append(
                 f'  <polyline points="{pts}" fill="none"'
                 f' stroke="{COLORS[name]}"'
-                f' stroke-width="1.5" stroke-dasharray="5,3"/>'
+                f' stroke-width="2.0" stroke-dasharray="5,3"/>'
             )
 
     # Legend
@@ -413,12 +413,12 @@ def generate_svg(
         L.append(
             f'  <line x1="{lx:.0f}" y1="{leg_y2}"'
             f' x2="{lx + 14:.0f}" y2="{leg_y2}"'
-            f' stroke="{c}" stroke-width="2.5"/>'
+            f' stroke="{c}" stroke-width="2.0"/>'
         )
         L.append(
             f'  <line x1="{lx:.0f}" y1="{leg_y3}"'
             f' x2="{lx + 14:.0f}" y2="{leg_y3}"'
-            f' stroke="{c}" stroke-width="1.5"'
+            f' stroke="{c}" stroke-width="2.0"'
             f' stroke-dasharray="5,3"/>'
         )
         L.append(
