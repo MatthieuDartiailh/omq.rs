@@ -175,7 +175,7 @@ impl Transport for IpcTransport {
 
     async fn connect(endpoint: &Endpoint) -> Result<Self::Stream> {
         match endpoint {
-            Endpoint::Ipc(IpcPath::NamedPipe(name)) => connect_named_pipe_windows(name),
+            Endpoint::Ipc(IpcPath::NamedPipe(name)) => connect_named_pipe_windows(name).await,
             other => Err(Error::InvalidEndpoint(format!(
                 "ipc transport got non-ipc endpoint: {other}"
             ))),
@@ -245,8 +245,9 @@ impl Listener for IpcListener {
         let mut server = self.inner.take().unwrap();
         // Wait for client connection
         server.connect().await?;
-        // Return the connected server as the stream, and prepare for next connection
-        self.inner = None; // Will create new server on next accept
+        // Prepare the next instance before handing this one to the connection driver.
+        // If creation fails, keep the accepted connection and retry on the next accept.
+        self.inner = ServerOptions::new().create(&self.pipe_path).ok();
         Ok((
             IpcStream::Server(server),
             PeerIdent::Path(self.name.clone()),
@@ -351,6 +352,9 @@ fn tune_unix_buffers(stream: &IpcStream) {
 // ============================================================================
 
 #[cfg(target_os = "windows")]
+const ERROR_PIPE_BUSY: i32 = 231;
+
+#[cfg(target_os = "windows")]
 fn bind_named_pipe_windows(endpoint: &Endpoint, name: &str) -> Result<IpcListener> {
     // Construct the full named pipe path
     let pipe_path = format!(r"\\.\pipe\{name}");
@@ -367,12 +371,19 @@ fn bind_named_pipe_windows(endpoint: &Endpoint, name: &str) -> Result<IpcListene
 }
 
 #[cfg(target_os = "windows")]
-fn connect_named_pipe_windows(name: &str) -> Result<IpcStream> {
+async fn connect_named_pipe_windows(name: &str) -> Result<IpcStream> {
     // Construct the full named pipe path
     let pipe_path = format!(r"\\.\pipe\{name}");
 
-    // Connect to the named pipe server using ClientOptions
-    let client = ClientOptions::new().open(&pipe_path)?;
+    let client = loop {
+        match ClientOptions::new().open(&pipe_path) {
+            Ok(client) => break client,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
 
     Ok(IpcStream::Client(client))
 }
@@ -478,8 +489,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[tokio::test]
     async fn windows_named_pipe_bind_connect_roundtrip() {
-        use std::time::Duration;
-
         let name = format!("omq-pipe-{}-{}", std::process::id(), rand::random::<u32>());
         let ep = Endpoint::Ipc(IpcPath::NamedPipe(name));
 
@@ -488,11 +497,7 @@ mod tests {
 
         // Connect client in background
         let ep2 = ep.clone();
-        let connect = tokio::spawn(async move {
-            // Give the server time to bind
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            IpcTransport::connect(&ep2).await
-        });
+        let connect = tokio::spawn(async move { IpcTransport::connect(&ep2).await });
 
         // Accept connection
         let (mut server_side, peer) = listener.accept().await.unwrap();
@@ -506,6 +511,35 @@ mod tests {
         let mut buf = [0u8; 7];
         server_side.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"windows");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_named_pipe_accepts_concurrent_clients() {
+        let name = format!("omq-pipe-{}-{}", std::process::id(), rand::random::<u32>());
+        let ep = Endpoint::Ipc(IpcPath::NamedPipe(name));
+        let mut listener = IpcTransport::bind(&ep).await.unwrap();
+
+        let ep1 = ep.clone();
+        let ep2 = ep.clone();
+        let connect1 = tokio::spawn(async move { IpcTransport::connect(&ep1).await });
+        let connect2 = tokio::spawn(async move { IpcTransport::connect(&ep2).await });
+
+        let (mut server1, _) = listener.accept().await.unwrap();
+        let (mut server2, _) = listener.accept().await.unwrap();
+        let mut client1 = connect1.await.unwrap().unwrap();
+        let mut client2 = connect2.await.unwrap().unwrap();
+
+        client1.write_all(b"hello").await.unwrap();
+        client2.write_all(b"hello").await.unwrap();
+
+        let mut buf1 = [0u8; 5];
+        let mut buf2 = [0u8; 5];
+        server1.read_exact(&mut buf1).await.unwrap();
+        server2.read_exact(&mut buf2).await.unwrap();
+
+        assert_eq!(&buf1, b"hello");
+        assert_eq!(&buf2, b"hello");
     }
 
     #[cfg(target_os = "windows")]
