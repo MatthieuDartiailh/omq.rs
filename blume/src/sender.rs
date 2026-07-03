@@ -50,14 +50,10 @@ impl<T> Sender<T> {
     /// Used by socket teardown when the receiver task may still be alive but
     /// its queued payloads are no longer deliverable.
     pub fn close(&self) {
-        let mut inner = self.shared.lock_inner();
-        inner.closed_recv = true;
-        let drained = inner.queue.len();
-        inner.queue.clear();
-        self.shared.queued.fetch_sub(drained, Ordering::Release);
-        drop(inner);
+        let queue = self.shared.close_recv();
         self.shared.send_event.notify(usize::MAX);
         self.shared.recv_event.notify(usize::MAX);
+        drop(queue);
     }
 }
 

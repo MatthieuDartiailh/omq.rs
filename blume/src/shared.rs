@@ -59,6 +59,15 @@ impl<T> Shared<T> {
         Ok(())
     }
 
+    pub(crate) fn close_recv(&self) -> VecDeque<T> {
+        let mut inner = self.lock_inner();
+        inner.closed_recv = true;
+        let drained = inner.queue.len();
+        let queue = std::mem::take(&mut inner.queue);
+        self.queued.fetch_sub(drained, Ordering::Release);
+        queue
+    }
+
     pub(crate) async fn send_async(&self, val: T) -> Result<(), SendError<T>> {
         let mut val = val;
         loop {

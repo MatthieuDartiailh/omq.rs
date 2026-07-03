@@ -139,16 +139,11 @@ impl<T> Receiver<T> {
     /// Signal senders that the receiver is closed. Subsequent and
     /// in-flight `send_async` calls will return `SendError`.
     pub fn close(&self) {
-        self.cache.borrow_mut().clear();
-        let mut inner = self.shared.lock_inner();
-        inner.closed_recv = true;
-        let drained = inner.queue.len();
-        inner.queue.clear();
-        self.shared
-            .queued
-            .fetch_sub(drained, std::sync::atomic::Ordering::Release);
-        drop(inner);
+        let cache = std::mem::take(&mut *self.cache.borrow_mut());
+        let queue = self.shared.close_recv();
         self.shared.send_event.notify(usize::MAX);
+        drop(queue);
+        drop(cache);
     }
 
     fn drain_cache_into(cache: &mut VecDeque<T>, out: &mut Vec<T>) -> usize {

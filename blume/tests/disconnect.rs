@@ -1,12 +1,23 @@
 use blume::{RecvError, SendError, TryRecvError, TrySendError};
 
+struct PanicOnDrop(bool);
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        if self.0 {
+            self.0 = false;
+            panic!("intentional panic in drop");
+        }
+    }
+}
+
 #[test]
 fn recv_after_all_senders_drop() {
     let (tx, rx) = blume::bounded::<i32>(4);
     tx.try_send(1).unwrap();
     drop(tx);
     assert_eq!(rx.try_recv(), Ok(1));
-    assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
 }
 
 #[test]
@@ -31,7 +42,7 @@ fn sender_close_disconnects_receiver() {
     tx.try_send(1).unwrap();
     tx.close();
 
-    assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
 }
 
 #[test]
@@ -45,6 +56,43 @@ fn async_recv_wakes_on_sender_close() {
         assert_eq!(rx.recv_async().await, Err(RecvError));
         handle.join().unwrap();
     });
+}
+
+#[test]
+fn sender_close_marks_disconnected_before_dropping_payloads() {
+    let (tx, rx) = blume::bounded::<PanicOnDrop>(4);
+    tx.try_send(PanicOnDrop(true)).unwrap();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tx.close();
+    }));
+
+    assert!(result.is_err());
+    assert!(tx.is_disconnected());
+    assert!(matches!(
+        tx.try_send(PanicOnDrop(false)),
+        Err(TrySendError::Disconnected(_))
+    ));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
+}
+
+#[test]
+fn receiver_close_marks_disconnected_before_dropping_cached_payloads() {
+    let (tx, rx) = blume::bounded::<PanicOnDrop>(4);
+    tx.try_send(PanicOnDrop(false)).unwrap();
+    tx.try_send(PanicOnDrop(true)).unwrap();
+    drop(rx.try_recv().unwrap());
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rx.close();
+    }));
+
+    assert!(result.is_err());
+    assert!(tx.is_disconnected());
+    assert!(matches!(
+        tx.try_send(PanicOnDrop(false)),
+        Err(TrySendError::Disconnected(_))
+    ));
 }
 
 #[test]
