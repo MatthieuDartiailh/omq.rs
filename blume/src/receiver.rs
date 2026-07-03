@@ -140,11 +140,7 @@ impl<T> Receiver<T> {
     /// in-flight `send_async` calls will return `SendError`.
     pub fn close(&self) {
         self.cache.borrow_mut().clear();
-        let mut inner = self
-            .shared
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = self.shared.lock_inner();
         inner.closed_recv = true;
         let drained = inner.queue.len();
         inner.queue.clear();

@@ -50,11 +50,7 @@ impl<T> Sender<T> {
     /// Used by socket teardown when the receiver task may still be alive but
     /// its queued payloads are no longer deliverable.
     pub fn close(&self) {
-        let mut inner = self
-            .shared
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = self.shared.lock_inner();
         inner.closed_recv = true;
         let drained = inner.queue.len();
         inner.queue.clear();
@@ -80,12 +76,7 @@ impl<T> Drop for Sender<T> {
             // Lock+drop synchronizes with try_drain: guarantees that any
             // in-flight send() has completed and its items are visible
             // before we notify the receiver of channel closure.
-            drop(
-                self.shared
-                    .inner
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            drop(self.shared.lock_inner());
             self.shared.recv_event.notify(usize::MAX);
         }
     }

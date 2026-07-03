@@ -26,6 +26,28 @@ fn async_send_after_receiver_drop() {
 }
 
 #[test]
+fn sender_close_disconnects_receiver() {
+    let (tx, rx) = blume::bounded::<i32>(4);
+    tx.try_send(1).unwrap();
+    tx.close();
+
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+}
+
+#[test]
+fn async_recv_wakes_on_sender_close() {
+    futures_lite::future::block_on(async {
+        let (tx, rx) = blume::bounded::<i32>(4);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            tx.close();
+        });
+        assert_eq!(rx.recv_async().await, Err(RecvError));
+        handle.join().unwrap();
+    });
+}
+
+#[test]
 fn is_disconnected_sender() {
     let (tx, rx) = blume::bounded::<i32>(4);
     assert!(!tx.is_disconnected());
