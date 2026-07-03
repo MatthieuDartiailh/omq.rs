@@ -64,6 +64,15 @@ fn ctx_set_max_sockets() {
 }
 
 #[test]
+fn ctx_set_negative_max_sockets_returns_einval() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_MAX_SOCKETS, -1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_MAX_SOCKETS), 1023);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn ctx_set_max_msgsz() {
     let ctx = zmq_ctx_new();
     assert_eq!(zmq_ctx_set(ctx, ZMQ_MAX_MSGSZ, 65536), 0);

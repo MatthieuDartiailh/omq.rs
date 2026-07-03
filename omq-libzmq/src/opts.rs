@@ -1184,7 +1184,7 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> Option<[u8; 32]> {
 
 fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above); reading the available size.
     let avail = unsafe { *optvallen };
@@ -1201,7 +1201,7 @@ fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_in
 
 fn write_i64(optval: *mut libc::c_void, optvallen: *mut usize, val: i64) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
@@ -1218,14 +1218,16 @@ fn write_i64(optval: *mut libc::c_void, optvallen: *mut usize, val: i64) -> c_in
 
 fn write_bytes(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
-    let copy_len = data.len().min(avail);
-    // SAFETY: optval is non-null with at least copy_len bytes available.
+    if avail < data.len() {
+        return crate::error::fail(libc::EINVAL);
+    }
+    // SAFETY: optval is non-null with at least data.len() bytes available.
     unsafe {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), copy_len);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), data.len());
         *optvallen = data.len();
     }
     0
@@ -1233,7 +1235,7 @@ fn write_bytes(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) ->
 
 fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
@@ -1252,7 +1254,7 @@ fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -
 
 fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };

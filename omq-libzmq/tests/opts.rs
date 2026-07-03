@@ -157,6 +157,47 @@ fn identity_roundtrip() {
 }
 
 #[test]
+fn getsockopt_identity_small_buffer_returns_einval() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_DEALER);
+
+    assert_eq!(set_bytes(s, ZMQ_IDENTITY, b"my-dealer"), 0);
+
+    let mut buf = [0u8; 4];
+    let mut len = buf.len();
+    let rc = zmq_getsockopt(s, ZMQ_IDENTITY, buf.as_mut_ptr().cast(), &mut len);
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn getsockopt_null_output_returns_efault() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    let mut len = size_of::<i32>();
+    let rc = zmq_getsockopt(s, ZMQ_TYPE, std::ptr::null_mut(), &mut len);
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    let mut ty = 0i32;
+    let rc = zmq_getsockopt(
+        s,
+        ZMQ_TYPE,
+        (&mut ty as *mut i32).cast(),
+        std::ptr::null_mut(),
+    );
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn type_query() {
     let ctx = zmq_ctx_new();
 
