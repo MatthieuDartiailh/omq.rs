@@ -194,7 +194,7 @@ impl Connection {
             && self.in_buf.len() >= hdr.header_len + hdr.payload_len
         {
             if let Some(max) = self.config.max_message_size
-                && hdr.payload_len > max
+                && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
             {
                 return Err(Error::MessageTooLarge {
                     size: hdr.payload_len,
@@ -670,9 +670,18 @@ impl Connection {
             [0; 4]
         };
 
-        self.in_buf.advance(header_len);
-
         let zmtp_payload_len = ws_payload_len - 1;
+
+        if let Some(max) = self.config.max_message_size
+            && zmtp_payload_len.saturating_add(size_of::<Payload>()) > max
+        {
+            return Err(Error::MessageTooLarge {
+                size: zmtp_payload_len,
+                max,
+            });
+        }
+
+        self.in_buf.advance(header_len);
 
         let mut data = [0u8; crate::message::MAX_INLINE_MESSAGE];
 
