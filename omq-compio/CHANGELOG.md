@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-07-03
+
+### Fixed
+
+- Direct receive cancellation now returns ownership to the driver safely.
+- PUB fan-out fallback preserves delivery when direct write cannot accept more data.
+- Multi-peer PUSH uses per-peer round-robin direct encode.
+- Fan-out soak regression now tracks steady-state subscriber lag.
+
+### Performance
+
+- Direct send coalesces per-message driver wakeups.
+- PUB fan-out and PUSH fan-out reduce redundant locks, borrows, and fallback work.
+- Multi-peer round-robin send caches direct I/O targets and inlines the hot path.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.19.0, `blume` to 0.4.3, `yring` to 0.3.4.
+
 ## [0.12.5] - 2026-06-27
 
 ### Fixed
