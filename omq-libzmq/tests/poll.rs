@@ -47,6 +47,12 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
 }
 
 #[test]
+fn poll_null_items_zero_count_is_valid() {
+    let rc = zmq_poll(std::ptr::null_mut(), 0, 0);
+    assert_eq!(rc, 0);
+}
+
+#[test]
 fn poll_timeout_no_events() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);

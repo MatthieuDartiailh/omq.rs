@@ -265,6 +265,9 @@ pub extern "C" fn zmq_send(
     {
         return fail(ETERM);
     }
+    if buf.is_null() && len > 0 {
+        return fail(libc::EFAULT);
+    }
 
     let data = if buf.is_null() || len == 0 {
         &[]
@@ -304,6 +307,9 @@ pub extern "C" fn zmq_recv(
         .load(std::sync::atomic::Ordering::Acquire)
     {
         return fail(ETERM);
+    }
+    if buf.is_null() && buf_len > 0 {
+        return fail(libc::EFAULT);
     }
 
     zmq_recv_impl(sock, buf, buf_len, flags)

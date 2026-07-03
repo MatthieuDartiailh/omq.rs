@@ -1164,19 +1164,22 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> Option<[u8; 32]> {
         // SAFETY: optval is non-null (checked above) and optvallen == 32.
         let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 32) };
         key.copy_from_slice(slice);
-    } else if optvallen >= 40 {
+        return Some(key);
+    }
+    if optvallen >= 40 {
         // SAFETY: optval is non-null (checked above) and optvallen >= 40.
         let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 40) };
         let Ok(s) = std::str::from_utf8(slice) else {
-            return Some(key);
+            return None;
         };
         if let Ok(decoded) = omq_tokio::proto::z85::decode(s)
             && decoded.len() == 32
         {
             key.copy_from_slice(&decoded);
+            return Some(key);
         }
     }
-    Some(key)
+    None
 }
 
 fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_int {

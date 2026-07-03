@@ -69,6 +69,28 @@ fn msg_init_size() {
 }
 
 #[test]
+fn msg_init_data_and_buffer_reject_null_nonzero_payload() {
+    let mut m = ZmqMsg([0u8; 64]);
+    assert_eq!(
+        zmq_msg_init_data(
+            m.0.as_mut_ptr().cast(),
+            std::ptr::null_mut(),
+            1,
+            None,
+            std::ptr::null_mut()
+        ),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    assert_eq!(
+        zmq_msg_init_buffer(m.0.as_mut_ptr().cast(), std::ptr::null(), 1),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+}
+
+#[test]
 fn msg_move_and_copy_self_alias_are_noops() {
     let payload = b"alias";
     let mut m = ZmqMsg([0u8; 64]);
