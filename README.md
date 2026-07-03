@@ -1,56 +1,90 @@
 # ØMQ.rs
 
-> **~3x** libzmq TCP throughput | **2x** lower TCP latency
+> Modern ZeroMQ for the hard parts: reconnection, back-pressure, churn, soak tests, and real benchmarks.
 
-Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
+Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. OMQ gives you socket-level messaging patterns that work the same way in-process, between processes, and over the network.
 
 - Two async backends: **tokio** (default, Linux/macOS/Windows) and **compio** (io_uring, Linux)
-- 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`)
+- 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and DGRAM
+- 9 transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `lz4+ws://`, and `lz4+wss://`
 - 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
-- No C compiler, no vendored C, no libzmq, no libsodium
+- No C compiler, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
 
-### vs libzmq and other implementations
+### The hard parts
+
+OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput. In one repo you get:
+
+- Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
+- Reconnecting sockets that survive connect-before-bind, peer churn, bind-side restarts, and reconnect storms.
+- HWM back-pressure and routing fairness under load, not only in empty-queue examples.
+- Soak tests for connection churn, peer churn, reconnect storms, RSS growth, and FD leaks.
+- Loom coverage for lock-free inproc queue behavior.
+- Miri coverage for crates with `unsafe` code.
+- `cargo-semver-checks` in the release flow.
+- Comparison benchmarks with CPU accounting, multi-peer fan-in/fan-out panels, fairness whiskers, and generated charts.
+
+### Benchmarks
 
 [How to beat libzmq](doc/performance.md) | [Full comparison charts](COMPARISONS.md)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_tcp.svg" alt="PUSH/PULL throughput: TCP, all implementations" width="950">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_classic_tcp.svg" alt="PUSH/PULL throughput: classic TCP implementations" width="950">
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_iouring_tcp.svg" alt="PUSH/PULL throughput: io_uring TCP implementations" width="950">
 </p>
 
 <details>
-<summary>omq backends: compio, tokio, tokio-mt</summary>
+<summary>PUSH/PULL by transport</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/classic_tcp.svg" alt="PUSH/PULL throughput: classic TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/omq_tcp.svg" alt="REQ/REP latency: TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/iouring_tcp.svg" alt="PUSH/PULL throughput: io_uring TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/classic_ipc.svg" alt="PUSH/PULL throughput: classic IPC" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/classic_inproc.svg" alt="PUSH/PULL throughput: classic inproc" width="850">
+</p>
+</details>
+
+<details>
+<summary>REQ/REP latency</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/classic_tcp.svg" alt="REQ/REP latency: classic TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/iouring_tcp.svg" alt="REQ/REP latency: io_uring TCP" width="850">
 </p>
 </details>
 
 <details>
 <summary>Fan-out and fan-in</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout_tcp.svg" alt="PUSH fan-out: TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/classic_tcp.svg" alt="PUSH fan-out: classic TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin_tcp.svg" alt="PUSH fan-in: TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/iouring_tcp.svg" alt="PUSH fan-out: io_uring TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/classic_tcp.svg" alt="PUSH fan-in: classic TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/iouring_tcp.svg" alt="PUSH fan-in: io_uring TCP" width="850">
 </p>
 </details>
 
 <details>
 <summary>PUB/SUB throughput</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/omq_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/classic_tcp.svg" alt="PUB/SUB throughput: classic TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/omq_ipc.svg" alt="PUB/SUB throughput: IPC" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/iouring_tcp.svg" alt="PUB/SUB throughput: io_uring TCP" width="850">
 </p>
 </details>
 
@@ -77,7 +111,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 > **Experimental.** The API is unstable and may change without notice. Not yet battle-tested in production. Bug reports and testing in real workloads are very welcome.
 
 ```sh
-cargo add omq-tokio               # default: multi-thread tokio (Linux/macOS)
+cargo add omq-tokio
 ```
 
 Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `interop_compio` test suites:
@@ -154,20 +188,18 @@ Seven crates, one repo.
 Every socket type, transport, mechanism, and feature combination is
 covered by integration tests on both backends. The full suite:
 
-- **750+ integration tests** across omq-compio and omq-tokio (every
+- **850+ integration tests** across omq-compio and omq-tokio (every
   socket-type x transport x mechanism cell).
 - **Protocol fuzzing** (~10M iterations per suite): hand-rolled fuzz of
   the wire parser and the socket-action state machine.
-- **29 soak test scenarios** (18 omq-tokio, 11 omq-compio): peer churn,
-  reconnect storms, PUB/SUB churn, XPUB/XSUB churn, ROUTER/DEALER
-  churn, HWM reconnect, cancel safety, compression (lz4), PLAIN /
-  CURVE / BLAKE3ZMQ auth, mechanism reconnect, large-message
+- **29 soak test scenarios**: peer churn, reconnect storms, PUB/SUB
+  churn, ROUTER/DEALER churn, HWM reconnect, cancel safety, compression
+  (lz4), PLAIN / CURVE / BLAKE3ZMQ auth, mechanism reconnect, large-message
   throughput, multi-socket, inproc cross-thread, WebSocket throughput
-  and reconnect. 10 min per scenario. Each scenario samples RSS and
-  file-descriptor counts to detect leaks.
+  and reconnect. Each scenario samples RSS and FD counts to detect leaks.
 - **Miri** on all crates with `unsafe` code (`yring`).
 - **Cross-runtime interop**: omq-compio <-> omq-tokio over TCP.
-- **Wire interop** with libzmq (C) and pyzmq.
+- **Wire interop** with libzmq and pyzmq.
 
 ```sh
 ./scripts/test-all.sh          # full sweep, both backends
