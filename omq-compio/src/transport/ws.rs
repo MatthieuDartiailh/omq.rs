@@ -41,13 +41,13 @@ fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
     }
 }
 
-fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
+fn resolve_connect(host: &Host, port: u16) -> Result<Vec<SocketAddr>> {
     match host {
         Host::Wildcard => Err(Error::InvalidEndpoint(
             "cannot connect to wildcard host".into(),
         )),
-        Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(name) => super::tcp::resolve_name(name, port),
+        Host::Ip(ip) => Ok(vec![SocketAddr::new(*ip, port)]),
+        Host::Name(name) => super::tcp::resolve_name_all(name, port),
         _ => unreachable!(),
     }
 }
@@ -292,9 +292,7 @@ pub(crate) async fn connect(
             )));
         }
     };
-    let addr = resolve_connect(host, port)?;
-    let stream = TcpStream::connect(addr).await.map_err(Error::Io)?;
-    let _ = stream.set_nodelay(true);
+    let stream = super::tcp::connect_any_resolved(resolve_connect(host, port)?).await?;
 
     let subprotocol = mechanism_subprotocol(mechanism);
 

@@ -282,6 +282,8 @@ const ZMQ_NULL: c_int = 0;
 const ZMQ_PLAIN: c_int = 1;
 const ZMQ_CURVE: c_int = 2;
 
+const DEFAULT_HANDSHAKE_IVL_MS: i32 = 30_000;
+
 #[expect(clippy::too_many_lines)]
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_setsockopt(
@@ -400,7 +402,7 @@ pub extern "C" fn zmq_setsockopt(
             lock_overlay!(sock_arc).handshake_ivl = if v <= 0 {
                 None
             } else {
-                Some(Duration::from_secs(v as u64))
+                Some(Duration::from_millis(v as u64))
             };
         }
         ZMQ_MAXMSGSIZE => {
@@ -902,7 +904,7 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_HANDSHAKE_IVL => {
             let v = lock_overlay!(sock_arc)
                 .handshake_ivl
-                .map_or(30, |d| d.as_secs() as i32);
+                .map_or(DEFAULT_HANDSHAKE_IVL_MS, |d| d.as_millis() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_MAXMSGSIZE => {
@@ -1278,4 +1280,36 @@ fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -
         return 0;
     }
     crate::error::fail(libc::EINVAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_ivl_is_milliseconds_in_options() {
+        let overlay = SocketOverlay {
+            handshake_ivl: Some(Duration::from_millis(10)),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            overlay.to_options().handshake_timeout,
+            Some(Duration::from_millis(10))
+        );
+    }
+
+    #[test]
+    fn connect_timeout_caps_handshake_ivl_in_milliseconds() {
+        let overlay = SocketOverlay {
+            handshake_ivl: Some(Duration::from_secs(30)),
+            connect_timeout: 10,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            overlay.to_options().handshake_timeout,
+            Some(Duration::from_millis(10))
+        );
+    }
 }

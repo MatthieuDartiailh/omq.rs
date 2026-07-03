@@ -51,10 +51,7 @@ impl Transport for TcpTransport {
                 "TCP transport got non-TCP endpoint: {endpoint}"
             )));
         };
-        let addr = resolve_connect(host, *port).await?;
-        let stream = TcpStream::connect(addr).await?;
-        stream.set_nodelay(true)?;
-        Ok(stream)
+        connect_any_resolved(resolve_connect(host, *port).await?).await
     }
 }
 
@@ -104,21 +101,47 @@ async fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
     }
 }
 
-async fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
+async fn resolve_connect(host: &Host, port: u16) -> Result<Vec<SocketAddr>> {
     match host {
         Host::Wildcard => Err(Error::InvalidEndpoint(
             "cannot connect to wildcard host".into(),
         )),
-        Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(name) => resolve_first(&format!("{name}:{port}")).await,
+        Host::Ip(ip) => Ok(vec![SocketAddr::new(*ip, port)]),
+        Host::Name(name) => resolve_all(&format!("{name}:{port}")).await,
         _ => unreachable!(),
     }
 }
 
 async fn resolve_first(s: &str) -> Result<SocketAddr> {
-    let mut it = tokio::net::lookup_host(s).await?;
-    it.next()
+    resolve_all(s)
+        .await?
+        .into_iter()
+        .next()
         .ok_or_else(|| Error::Io(io::Error::other(format!("no addresses for {s}"))))
+}
+
+async fn resolve_all(s: &str) -> Result<Vec<SocketAddr>> {
+    let addrs: Vec<_> = tokio::net::lookup_host(s).await?.collect();
+    if addrs.is_empty() {
+        return Err(Error::Io(io::Error::other(format!("no addresses for {s}"))));
+    }
+    Ok(addrs)
+}
+
+async fn connect_any_resolved(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
+    let mut last_err = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                stream.set_nodelay(true)?;
+                return Ok(stream);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(Error::Io(last_err.unwrap_or_else(|| {
+        io::Error::other("no addresses to connect")
+    })))
 }
 
 #[cfg(test)]
@@ -173,5 +196,22 @@ mod tests {
             TcpTransport::connect(&ep).await,
             Err(Error::InvalidEndpoint(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn connect_tries_later_resolved_address() {
+        let bad = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let bad_addr = bad.local_addr().unwrap();
+        let listener = TokioTcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let good_addr = listener.local_addr().unwrap();
+        drop(bad);
+
+        let connect = tokio::spawn(connect_any_resolved(vec![bad_addr, good_addr]));
+        let (_accepted, _) = listener.accept().await.unwrap();
+        let stream = connect.await.unwrap().unwrap();
+
+        assert_eq!(stream.peer_addr().unwrap(), good_addr);
     }
 }
