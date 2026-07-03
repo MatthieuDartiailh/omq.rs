@@ -29,6 +29,13 @@ cargo test  -p omq-compio --features blake3zmq --test blake3zmq
 cargo test  -p omq-tokio  --features lz4       --test lz4_tcp
 ```
 
+Miri targets for unsafe internals:
+
+```sh
+cargo +nightly miri test -p yring
+cargo +nightly miri test -p omq-compio unsafe_cell --lib
+```
+
 Full sweep (all features, both backends):
 
 ```sh
@@ -180,7 +187,7 @@ Each binary speaks a subcommand protocol:
 
 Results go to `~/.cache/omq/comparisons.jsonl`. Charts are generated
 by `scripts/gen_comparison_chart.py` into
-`doc/charts/{pushpull,pubsub,reqrep}/{omq,alt}_*.svg`.
+`doc/charts/{pushpull,pubsub,reqrep}/{classic,iouring}_*.svg`.
 
 Per-backend benches (separate from comparisons) live in
 `omq-tokio/benches/` and `omq-compio/benches/` with shared scaffolding
@@ -205,8 +212,9 @@ All `gen_*_chart.py` scripts read this file automatically via
 
 ### Cross-library comparison charts
 
-Produces `doc/charts/{pushpull,pubsub,reqrep}/{omq,alt}_*.svg`,
-`doc/charts/pushpull/fan{out,in}_tcp.svg`, `doc/charts/main_tcp.svg`:
+Produces `doc/charts/{pushpull,pubsub,reqrep}/{classic,iouring}_*.svg`,
+`doc/charts/pushpull/fan{out,in}/{classic,iouring}_tcp.svg`, and
+`doc/charts/main_{classic,iouring}_tcp.svg`:
 
 ```sh
 python3 scripts/run_comparisons.py --impl omq-compio --impl omq-tokio   # omq only, reuse existing libzmq/zmq.rs baselines

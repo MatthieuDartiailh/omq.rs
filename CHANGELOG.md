@@ -437,7 +437,7 @@ semantics, conflate restricted to FanOut patterns.
 
 ### Performance
 
-See [BENCHMARKS.md](BENCHMARKS.md).
+See [COMPARISONS.md](COMPARISONS.md).
 
 ### Conventions
 

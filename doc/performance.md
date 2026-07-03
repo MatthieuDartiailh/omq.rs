@@ -1,7 +1,7 @@
 # How to beat libzmq
 
 Design choices and dead ends behind the throughput/latency numbers in
-the [`../BENCHMARKS.md`](../BENCHMARKS.md)
+the [`../COMPARISONS.md`](../COMPARISONS.md) charts.
 
 For structure, see [`architecture.md`](architecture.md),
 [`compio.md`](compio.md), [`tokio.md`](tokio.md).
