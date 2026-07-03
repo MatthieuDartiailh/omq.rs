@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 352" font-family="system-ui, -apple-system, sans-serif">
   <rect width="850" height="352" fill="white"/>
   <text x="425.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Linux VM on a 2018 Mac Mini, Intel Core i7-8700B @ 3.20GHz, 6 cores, performance governor, turbo off</text>
-  <text x="425.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">REQ/REP latency: inproc (p50 µs)</text>
+  <text x="425.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">REQ/REP latency: io_uring, inproc (p50 µs)</text>
   <line x1="90.0" y1="206.5" x2="760.0" y2="206.5" stroke="#e5e7eb" stroke-width="1"/>
   <text x="82.0" y="206.5" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">5</text>
   <line x1="90.0" y1="184.0" x2="760.0" y2="184.0" stroke="#e5e7eb" stroke-width="1"/>

@@ -1445,6 +1445,8 @@ def main():
         if not data["sizes"]:
             continue
         label = label_for[transport]
+        if league == "iouring":
+            label = f"io_uring, {label}"
 
         svg = generate_chart_cpu(data, impls, label,
                                  fixed_gbs_max=None if log else FIXED_GBS_MAX,
@@ -1481,13 +1483,14 @@ def main():
         ("classic", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides),
         ("iouring", ["omq-compio", "rzmq-iouring"], iouring_overrides),
     ]:
+        transport_label = "TCP loopback" if league == "classic" else "io_uring, TCP loopback"
         panels = [
             (p, load_pubsub_data("tcp", impls, p))
             for p in pubsub_peer_counts
         ]
         if any(d["sizes"] for _, d in panels):
             svg = generate_multi_panel_cpu_chart(
-                panels, impls, "TCP loopback",
+                panels, impls, transport_label,
                 hw_label=hw, title_fn=pubsub_title,
                 label_overrides=overrides, show_st_mt=True,
             )
@@ -1515,6 +1518,7 @@ def main():
         ("fan_in", fanin_title, "fanin"),
     ]:
         for league, impls, overrides in fanio_leagues:
+            transport_label = "TCP loopback" if league == "classic" else "io_uring, TCP loopback"
             panels = [
                 (p, load_fanio_data("tcp", impls, p, kind))
                 for p in fanio_peers
@@ -1522,7 +1526,7 @@ def main():
             if not any(d["sizes"] for _, d in panels):
                 continue
             svg = generate_multi_panel_cpu_chart(
-                panels, impls, "TCP loopback",
+                panels, impls, transport_label,
                 hw_label=hw,
                 title_fn=tfn,
                 label_overrides=overrides,

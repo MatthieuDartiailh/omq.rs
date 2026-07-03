@@ -42,9 +42,6 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/classic_tcp.svg" alt="PUSH/PULL throughput: classic TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/iouring_tcp.svg" alt="PUSH/PULL throughput: io_uring TCP" width="850">
-</p>
-<p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/classic_ipc.svg" alt="PUSH/PULL throughput: classic IPC" width="850">
 </p>
 <p align="center">
@@ -57,9 +54,6 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/classic_tcp.svg" alt="REQ/REP latency: classic TCP" width="850">
 </p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/iouring_tcp.svg" alt="REQ/REP latency: io_uring TCP" width="850">
-</p>
 </details>
 
 <details>
@@ -68,13 +62,7 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/classic_tcp.svg" alt="PUSH fan-out: classic TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/iouring_tcp.svg" alt="PUSH fan-out: io_uring TCP" width="850">
-</p>
-<p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/classic_tcp.svg" alt="PUSH fan-in: classic TCP" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/iouring_tcp.svg" alt="PUSH fan-in: io_uring TCP" width="850">
 </p>
 </details>
 
@@ -82,9 +70,6 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 <summary>PUB/SUB throughput</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/classic_tcp.svg" alt="PUB/SUB throughput: classic TCP" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/iouring_tcp.svg" alt="PUB/SUB throughput: io_uring TCP" width="850">
 </p>
 </details>
 
@@ -105,6 +90,25 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 </p>
 </details>
 
+<details>
+<summary>io_uring backend details</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/iouring_tcp.svg" alt="PUSH/PULL throughput: io_uring TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/iouring_tcp.svg" alt="REQ/REP latency: io_uring TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/iouring_tcp.svg" alt="PUSH fan-out: io_uring TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/iouring_tcp.svg" alt="PUSH fan-in: io_uring TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/iouring_tcp.svg" alt="PUB/SUB throughput: io_uring TCP" width="850">
+</p>
+</details>
+
 ## Install
 
 > [!CAUTION]
@@ -116,7 +120,7 @@ cargo add omq-tokio
 
 Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `interop_compio` test suites:
 
-- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS/Windows). Recommended backend.
+- [`omq-tokio`](omq-tokio/): tokio + mio backend (Linux/macOS/Windows). Works on single-thread and multi-thread tokio runtimes. Recommended backend.
 - [`omq-compio`](omq-compio/): single-thread io_uring/IOCP (Linux; not yet on crates.io). **Experimental.**
 
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
