@@ -253,6 +253,13 @@ fn ws_default_path() {
 
 #[test]
 #[cfg(feature = "ws")]
+fn ws_rejects_header_injection_path() {
+    assert!("ws://host:8080/ok\r\nX-Bad: 1".parse::<Endpoint>().is_err());
+    assert!("wss://host:443/ok\nX-Bad: 1".parse::<Endpoint>().is_err());
+}
+
+#[test]
+#[cfg(feature = "ws")]
 fn ws_wildcard_port() {
     let ep = parse("ws://*:*");
     assert!(matches!(

@@ -29,6 +29,15 @@ pub fn validate_ws_accept(key: &str, accept: &str) -> bool {
     compute_ws_accept(key) == accept
 }
 
+fn valid_ws_key(key: &str) -> bool {
+    key.len() == 24
+        && key.bytes().enumerate().all(|(i, b)| {
+            matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/')
+                || (i >= 22 && b == b'=')
+        })
+        && key.ends_with("==")
+}
+
 /// Format a client HTTP upgrade request.
 pub fn format_client_upgrade(host: &str, path: &str, key: &str, subprotocol: &str) -> Vec<u8> {
     let mut req = Vec::with_capacity(256);
@@ -137,6 +146,9 @@ pub fn parse_client_upgrade(request: &[u8]) -> Result<UpgradeRequest> {
         ));
     }
     let key = key.ok_or_else(|| Error::HandshakeFailed("missing Sec-WebSocket-Key".into()))?;
+    if !valid_ws_key(&key) {
+        return Err(Error::HandshakeFailed("invalid Sec-WebSocket-Key".into()));
+    }
 
     Ok(UpgradeRequest {
         key,
@@ -369,6 +381,18 @@ mod tests {
         assert_eq!(parsed.key, "dGhlIHNhbXBsZSBub25jZQ==");
         assert_eq!(parsed.path, "/zmtp");
         assert_eq!(parsed.subprotocols, vec!["ZWS2.0/NULL", "ZWS2.0"]);
+    }
+
+    #[test]
+    fn parse_client_upgrade_rejects_invalid_key() {
+        let req = b"GET /zmtp HTTP/1.1\r\n\
+            Host: localhost:9000\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Key: not-a-valid-key\r\n\
+            Sec-WebSocket-Version: 13\r\n\
+            \r\n";
+        assert!(parse_client_upgrade(req).is_err());
     }
 
     #[test]

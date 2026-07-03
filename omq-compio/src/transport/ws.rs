@@ -57,7 +57,6 @@ fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
 pub(crate) type TlsStream = compio_tls::TlsStream<TcpStream>;
 pub(crate) type SharedTls = std::sync::Arc<async_lock::Mutex<TlsStream>>;
 
-#[expect(clippy::unnecessary_wraps)]
 pub(crate) fn build_tls_connector(accept_invalid_certs: bool) -> Result<compio_tls::TlsConnector> {
     use std::sync::Arc;
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -69,7 +68,14 @@ pub(crate) fn build_tls_connector(accept_invalid_certs: bool) -> Result<compio_t
         cfg
     } else {
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().expect("load system certs") {
+        let cert_result = rustls_native_certs::load_native_certs();
+        if cert_result.certs.is_empty() && !cert_result.errors.is_empty() {
+            return Err(Error::Io(std::io::Error::other(format!(
+                "failed to load system certificates: {:?}",
+                cert_result.errors
+            ))));
+        }
+        for cert in cert_result.certs {
             let _ = roots.add(cert);
         }
         rustls::ClientConfig::builder()
