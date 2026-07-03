@@ -50,24 +50,21 @@ impl<T> Sender<T> {
     /// Used by socket teardown when the receiver task may still be alive but
     /// its queued payloads are no longer deliverable.
     pub fn close(&self) {
-        let mut inner = self
-            .shared
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        inner.closed_recv = true;
-        let drained = inner.queue.len();
-        inner.queue.clear();
-        self.shared.queued.fetch_sub(drained, Ordering::Release);
-        drop(inner);
+        let queue = self.shared.close_recv();
         self.shared.send_event.notify(usize::MAX);
         self.shared.recv_event.notify(usize::MAX);
+        drop(queue);
     }
 }
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
+        self.shared
+            .sender_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_add(1)
+            })
+            .expect("blume: sender count overflow");
         Self {
             shared: Arc::clone(&self.shared),
         }
@@ -80,12 +77,7 @@ impl<T> Drop for Sender<T> {
             // Lock+drop synchronizes with try_drain: guarantees that any
             // in-flight send() has completed and its items are visible
             // before we notify the receiver of channel closure.
-            drop(
-                self.shared
-                    .inner
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            drop(self.shared.lock_inner());
             self.shared.recv_event.notify(usize::MAX);
         }
     }
@@ -94,5 +86,35 @@ impl<T> Drop for Sender<T> {
 impl<T> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Mutex};
+
+    use event_listener::Event;
+
+    use super::*;
+    use crate::shared::{Inner, Shared};
+
+    #[test]
+    #[should_panic(expected = "blume: sender count overflow")]
+    fn clone_panics_on_sender_count_overflow() {
+        let sender = Sender::<()>::new(Arc::new(Shared {
+            inner: Mutex::new(Inner {
+                queue: VecDeque::new(),
+                closed_recv: false,
+            }),
+            capacity: 1,
+            queued: AtomicUsize::new(0),
+            sender_count: AtomicUsize::new(usize::MAX),
+            recv_event: Event::new(),
+            send_event: Event::new(),
+        }));
+
+        let _ = sender.clone();
     }
 }

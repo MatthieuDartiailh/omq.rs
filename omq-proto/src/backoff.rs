@@ -29,16 +29,27 @@ pub fn next_delay(policy: &ReconnectPolicy, attempt: u32) -> Option<Duration> {
     }
 }
 
-/// Apply ±10% jitter to a duration. Zero stays zero.
+/// Apply ±10% jitter to a duration, rounded to whole milliseconds. Zero stays
+/// zero; any non-zero sub-millisecond delay is treated as 1 ms.
 pub fn jitter(d: Duration) -> Duration {
     if d.is_zero() {
         return d;
     }
     let mut rng = rand::rng();
-    let ns = d.as_nanos() as u64;
-    let delta = ns / 10;
+    let ms = d.as_millis().max(1);
+    let delta = ms / 10;
     let offset = rng.random_range(0..=2 * delta).saturating_sub(delta);
-    Duration::from_nanos(ns.saturating_add(offset))
+    duration_from_millis(ms.saturating_add(offset))
+}
+
+fn duration_from_millis(ms: u128) -> Duration {
+    const MILLIS_PER_SEC: u128 = 1_000;
+    let secs = ms / MILLIS_PER_SEC;
+    let millis = (ms % MILLIS_PER_SEC) as u32;
+    if secs > u128::from(u64::MAX) {
+        return Duration::new(u64::MAX, 999_000_000);
+    }
+    Duration::new(secs as u64, millis * 1_000_000)
 }
 
 #[cfg(test)]
@@ -88,5 +99,19 @@ mod tests {
     #[test]
     fn zero_duration_has_no_jitter() {
         assert_eq!(jitter(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn huge_duration_jitter_does_not_truncate_to_u64_nanos() {
+        let base = Duration::from_secs(u64::MAX / 1_000_000_000 + 1);
+        for _ in 0..10 {
+            let d = jitter(base);
+            assert!(d >= base * 9 / 10, "jittered duration truncated: {d:?}");
+        }
+    }
+
+    #[test]
+    fn sub_millisecond_jitter_rounds_up_to_one_millisecond() {
+        assert_eq!(jitter(Duration::from_micros(500)), Duration::from_millis(1));
     }
 }

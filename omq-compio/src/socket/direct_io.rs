@@ -27,7 +27,7 @@ pub(crate) struct DirectIoState {
     pub(crate) recv_state_changed: Event,
     pub(crate) recv_codec_ready: Event,
     pub(crate) eof_signal: Event,
-    pub(crate) last_input_nanos: AtomicU64,
+    pub(crate) last_input_millis: AtomicU64,
     pub(crate) hb_epoch: Instant,
     pub(crate) handshake_done: Cell<bool>,
     pub(crate) has_transform: bool,
@@ -150,10 +150,7 @@ async fn one_shot_with_prefix(
         }
         restore.buf.take().unwrap().freeze()
     };
-    state.last_input_nanos.store(
-        state.hb_epoch.elapsed().as_nanos() as u64,
-        Ordering::Relaxed,
-    );
+    state.mark_input();
     state.large_recv_pending.store(0, Ordering::Release);
     {
         let Ok(mut io) = state.peer_io.lock() else {
@@ -182,10 +179,7 @@ pub(crate) async fn one_shot_recv_and_feed(
         Ok(b) => b,
         Err(e) => return OneShotLargeRecvOutcome::IoErr(e),
     };
-    state.last_input_nanos.store(
-        state.hb_epoch.elapsed().as_nanos() as u64,
-        Ordering::Relaxed,
-    );
+    state.mark_input();
     {
         let Ok(mut io) = state.peer_io.lock() else {
             return OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
@@ -205,10 +199,7 @@ pub(crate) async fn one_shot_recv_and_feed(
                 if bytes.is_empty() {
                     break OneShotLargeRecvOutcome::IoErr(std::io::Error::other("eof"));
                 }
-                state.last_input_nanos.store(
-                    state.hb_epoch.elapsed().as_nanos() as u64,
-                    Ordering::Relaxed,
-                );
+                state.mark_input();
                 let Ok(mut io) = state.peer_io.lock() else {
                     break OneShotLargeRecvOutcome::IoErr(std::io::Error::other("peer_io"));
                 };
@@ -237,6 +228,16 @@ pub(crate) async fn one_shot_recv_and_feed(
 }
 
 impl DirectIoState {
+    pub(crate) fn hb_elapsed_millis(&self) -> u64 {
+        let ms = self.hb_epoch.elapsed().as_millis();
+        ms.min(u128::from(u64::MAX)) as u64
+    }
+
+    pub(crate) fn mark_input(&self) {
+        self.last_input_millis
+            .store(self.hb_elapsed_millis(), Ordering::Relaxed);
+    }
+
     /// Bump the direct-encode message counter and wake the driver if it
     /// is parked in `select_biased!`. Called after every successful
     /// direct-encode (flat, gather, prefixed, transform, or WebSocket).
@@ -292,7 +293,7 @@ impl DirectIoState {
             recv_state_changed: Event::new(),
             recv_codec_ready: Event::new(),
             eof_signal: Event::new(),
-            last_input_nanos: AtomicU64::new(0),
+            last_input_millis: AtomicU64::new(0),
             hb_epoch: Instant::now(),
             handshake_done: Cell::new(false),
             has_transform,

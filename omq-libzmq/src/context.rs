@@ -207,6 +207,9 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
             // io threads already running; setting this is a no-op
         }
         ZMQ_MAX_SOCKETS => {
+            if value < 0 {
+                return crate::error::fail(libc::EINVAL);
+            }
             ctx.max_sockets.store(value, Ordering::Relaxed);
         }
         ZMQ_MAX_MSGSZ => {

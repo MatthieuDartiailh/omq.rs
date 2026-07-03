@@ -10,13 +10,22 @@ use omq_proto::error::{Error, Result};
 pub use crate::transport::driver::DriverCommand as TcpDriverCommand;
 
 pub(crate) fn resolve_name(name: &str, port: u16) -> Result<SocketAddr> {
-    use std::net::ToSocketAddrs;
-    let mut addrs = (name, port)
-        .to_socket_addrs()
-        .map_err(|e| Error::InvalidEndpoint(format!("{name}: {e}")))?;
-    addrs
+    resolve_name_all(name, port)?
+        .into_iter()
         .next()
         .ok_or_else(|| Error::InvalidEndpoint(format!("no addresses for {name}")))
+}
+
+pub(crate) fn resolve_name_all(name: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (name, port)
+        .to_socket_addrs()
+        .map_err(|e| Error::InvalidEndpoint(format!("{name}: {e}")))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(Error::InvalidEndpoint(format!("no addresses for {name}")));
+    }
+    Ok(addrs)
 }
 
 fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
@@ -29,13 +38,13 @@ fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
     }
 }
 
-fn resolve_connect(host: &Host, port: u16) -> Result<SocketAddr> {
+fn resolve_connect(host: &Host, port: u16) -> Result<Vec<SocketAddr>> {
     match host {
         Host::Wildcard => Err(Error::InvalidEndpoint(
             "cannot connect to wildcard host".into(),
         )),
-        Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(name) => resolve_name(name, port),
+        Host::Ip(ip) => Ok(vec![SocketAddr::new(*ip, port)]),
+        Host::Name(name) => resolve_name_all(name, port),
         _ => unreachable!(),
     }
 }
@@ -74,8 +83,21 @@ pub async fn connect(endpoint: &Endpoint) -> Result<TcpStream> {
             "tcp transport got non-tcp endpoint: {endpoint}"
         )));
     };
-    let addr = resolve_connect(host, *port)?;
-    let stream = TcpStream::connect(addr).await.map_err(Error::Io)?;
-    stream.set_nodelay(true).map_err(Error::Io)?;
-    Ok(stream)
+    connect_any_resolved(resolve_connect(host, *port)?).await
+}
+
+pub(crate) async fn connect_any_resolved(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
+    let mut last_err = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                stream.set_nodelay(true).map_err(Error::Io)?;
+                return Ok(stream);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(Error::Io(last_err.unwrap_or_else(|| {
+        std::io::Error::other("no addresses to connect")
+    })))
 }

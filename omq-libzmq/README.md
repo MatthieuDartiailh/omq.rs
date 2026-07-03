@@ -1,6 +1,6 @@
 # omq-libzmq
 
-libzmq-compatible C interface backed by [omq-compio](https://crates.io/crates/omq-compio).
+libzmq-compatible C interface backed by [omq-tokio](https://crates.io/crates/omq-tokio).
 
 Exposes `zmq_socket`, `zmq_bind`, `zmq_connect`, `zmq_send`, `zmq_recv`, and
 friends with the same ABI as libzmq, allowing C/C++ programs (and FFI bindings

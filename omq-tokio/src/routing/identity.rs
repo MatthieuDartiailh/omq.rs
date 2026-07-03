@@ -19,6 +19,7 @@ use rustc_hash::FxHashMap;
 use bytes::Bytes;
 
 use crate::engine::DriverHandle;
+use crate::engine::wire_slot::TryEncodeResult;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -62,12 +63,21 @@ impl Submitter {
         &self,
         mut msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        let retry = msg.clone();
         let target = self
             .resolve_target(&mut msg)
             .map_err(omq_proto::error::TrySendError::Error)?;
 
         if let Some(t) = target {
-            let _ = t.try_encode(&msg);
+            match t.try_encode(&msg) {
+                TryEncodeResult::Ok => {}
+                TryEncodeResult::Full | TryEncodeResult::Ineligible => {
+                    return Err(omq_proto::error::TrySendError::Full(retry));
+                }
+                TryEncodeResult::Dead => {
+                    return Err(omq_proto::error::TrySendError::Closed);
+                }
+            }
         }
         Ok(())
     }
@@ -192,5 +202,57 @@ impl IdentityRecv {
             g.get(&peer_id).cloned().unwrap_or_default()
         };
         Message::with_prefix(identity, msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::engine::DriverCommand;
+
+    #[test]
+    fn try_send_reports_full_and_preserves_routing_frame() {
+        let mut send = IdentitySend::new(&Options::default());
+        let submitter = send.submitter();
+        let (tx, mut rx) = mpsc::channel(1);
+        send.connection_added(
+            1,
+            DriverHandle {
+                inbox: tx,
+                cancel: CancellationToken::new(),
+                wire_slot: None,
+                send_pipe: None,
+            },
+            Bytes::from_static(b"id"),
+        );
+
+        submitter
+            .try_send(Message::multipart([
+                Bytes::from_static(b"id"),
+                Bytes::from_static(b"one"),
+            ]))
+            .unwrap();
+
+        let returned = match submitter.try_send(Message::multipart([
+            Bytes::from_static(b"id"),
+            Bytes::from_static(b"two"),
+        ])) {
+            Err(omq_proto::error::TrySendError::Full(msg)) => msg,
+            other => panic!("expected Full, got {other:?}"),
+        };
+
+        assert_eq!(returned.part_bytes(0).unwrap(), &b"id"[..]);
+        assert_eq!(returned.part_bytes(1).unwrap(), &b"two"[..]);
+
+        match rx.try_recv().unwrap() {
+            DriverCommand::SendMessage(msg) => {
+                assert_eq!(msg.part_bytes(0).unwrap(), &b"one"[..]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

@@ -434,6 +434,9 @@ fn parse_ws(rest: &str, tls: bool) -> Result<Endpoint> {
         None => (rest, "/"),
     };
     let (host, port) = parse_host_port(hp)?;
+    if path.bytes().any(|b| matches!(b, b'\r' | b'\n')) {
+        return Err(Error::InvalidEndpoint("invalid ws path".into()));
+    }
     let path = path.to_string();
     if tls {
         Ok(Endpoint::Wss { host, port, path })

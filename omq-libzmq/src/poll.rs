@@ -113,8 +113,12 @@ pub extern "C" fn zmq_poll(
         return crate::error::fail(libc::EFAULT);
     }
     let n = nitems as usize;
-    // SAFETY: items is non-null (checked above) with nitems elements.
-    let items_slice = unsafe { std::slice::from_raw_parts_mut(items, n) };
+    let items_slice = if n == 0 {
+        &mut []
+    } else {
+        // SAFETY: items is non-null (checked above) with nitems elements.
+        unsafe { std::slice::from_raw_parts_mut(items, n) }
+    };
 
     let ready = check_immediate(items_slice);
     if ready > 0 || timeout_ms == 0 {

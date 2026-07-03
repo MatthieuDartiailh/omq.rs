@@ -240,21 +240,28 @@ pub(crate) async fn connect(
     accept_invalid_certs: bool,
     mechanism: &omq_proto::MechanismSetup,
 ) -> Result<WsConnected> {
-    let addr = match host {
+    let addrs = match host {
         omq_proto::endpoint::Host::Wildcard => {
             return Err(Error::InvalidEndpoint(
                 "cannot connect to wildcard host".into(),
             ));
         }
-        omq_proto::endpoint::Host::Ip(ip) => SocketAddr::new(*ip, port),
-        omq_proto::endpoint::Host::Name(name) => tokio::net::lookup_host(format!("{name}:{port}"))
-            .await
-            .map_err(Error::Io)?
-            .next()
-            .ok_or_else(|| Error::InvalidEndpoint(format!("DNS lookup failed for {name}")))?,
+        omq_proto::endpoint::Host::Ip(ip) => vec![SocketAddr::new(*ip, port)],
+        omq_proto::endpoint::Host::Name(name) => {
+            let addrs: Vec<_> = tokio::net::lookup_host(format!("{name}:{port}"))
+                .await
+                .map_err(Error::Io)?
+                .collect();
+            if addrs.is_empty() {
+                return Err(Error::InvalidEndpoint(format!(
+                    "DNS lookup failed for {name}"
+                )));
+            }
+            addrs
+        }
         _ => unreachable!(),
     };
-    let stream = TcpStream::connect(addr).await.map_err(Error::Io)?;
+    let stream = connect_any_resolved(addrs).await?;
     let _ = stream.set_nodelay(true);
 
     let mut transport = if tls {
@@ -314,6 +321,19 @@ pub(crate) async fn connect(
         transport,
         leftover,
     })
+}
+
+async fn connect_any_resolved(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
+    let mut last_err = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(Error::Io(last_err.unwrap_or_else(|| {
+        std::io::Error::other("no addresses to connect")
+    })))
 }
 
 fn build_tls_connector(accept_invalid_certs: bool) -> Result<tokio_rustls::TlsConnector> {

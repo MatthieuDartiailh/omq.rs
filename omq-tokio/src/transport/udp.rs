@@ -49,7 +49,7 @@ pub fn decode_datagram(data: &[u8]) -> Option<(Bytes, Bytes)> {
     if data.len() < 2 {
         return None;
     }
-    if data[0] & FLAG_DATA == 0 {
+    if data[0] != FLAG_DATA {
         return None;
     }
     let glen = data[1] as usize;
@@ -164,9 +164,9 @@ mod tests {
 
     #[test]
     fn decode_rejects_wrong_flag() {
-        // flags=0 isn't a data datagram.
-        let bytes = [0x00, 0x00];
-        assert!(decode_datagram(&bytes).is_none());
+        for bytes in [[0x00, 0x00], [0x03, 0x00], [0x81, 0x00]] {
+            assert!(decode_datagram(&bytes).is_none());
+        }
     }
 
     #[tokio::test]

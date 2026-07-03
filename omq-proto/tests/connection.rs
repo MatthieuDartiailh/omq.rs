@@ -7,7 +7,7 @@
 use bytes::Bytes;
 
 use omq_proto::error::Error;
-use omq_proto::message::Message;
+use omq_proto::message::{Message, Payload};
 use omq_proto::proto::SocketType;
 use omq_proto::proto::command::Command;
 use omq_proto::proto::connection::{Connection, ConnectionConfig, Event, Role};
@@ -172,6 +172,24 @@ fn oversized_message_rejected() {
     while b.poll_event().is_some() {}
 
     b.send_message(&Message::single("too-big-payload")).unwrap();
+    let bytes = b.poll_transmit();
+    b.advance_transmit(bytes.len());
+    let err = a.handle_input(bytes).unwrap_err();
+    assert!(matches!(err, Error::MessageTooLarge { .. }));
+}
+
+#[test]
+fn single_frame_fast_path_enforces_message_overhead_limit() {
+    let max = std::mem::size_of::<Payload>();
+    let mut a = Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Pair).max_message_size(max),
+    );
+    let mut b = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair));
+    pump(&mut a, &mut b);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+
+    b.send_message(&Message::single("x")).unwrap();
     let bytes = b.poll_transmit();
     b.advance_transmit(bytes.len());
     let err = a.handle_input(bytes).unwrap_err();
@@ -742,6 +760,29 @@ mod ws {
         pump_ws(&mut push, &mut pull);
         let msg = pull.poll_message().unwrap();
         assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
+    }
+
+    #[test]
+    fn ws_fast_path_enforces_message_overhead_limit() {
+        let max = std::mem::size_of::<Payload>();
+        let mut push = Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push)
+                .identity(Bytes::from_static(b"p"))
+                .ws_role(WsRole::Client),
+        );
+        let mut pull = Connection::new(
+            ConnectionConfig::new(Role::Server, SocketType::Pull)
+                .max_message_size(max)
+                .ws_role(WsRole::Server),
+        );
+        pump_ws(&mut push, &mut pull);
+        assert!(push.is_ready());
+        assert!(pull.is_ready());
+
+        push.send_message(&Message::single("x")).unwrap();
+        let bytes = push.poll_transmit();
+        let err = pull.handle_input(bytes).unwrap_err();
+        assert!(matches!(err, Error::MessageTooLarge { .. }));
     }
 
     #[test]

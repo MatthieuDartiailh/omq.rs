@@ -54,6 +54,26 @@ fn caddr(s: &str) -> CString {
 }
 
 #[test]
+fn send_recv_null_nonzero_buffer_returns_efault() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    assert!(!push.is_null() && !pull.is_null());
+
+    let rc = zmq_send(push, std::ptr::null(), 1, 0);
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    let rc = zmq_recv(pull, std::ptr::null_mut(), 1, ZMQ_DONTWAIT);
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn push_pull_inproc() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);

@@ -108,6 +108,9 @@ pub extern "C" fn zmq_msg_init_data(
     if msg.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
+    if data.is_null() && size > 0 {
+        return crate::error::fail(libc::EFAULT);
+    }
     // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
     r.kind = KIND_EXTERNAL;
@@ -130,6 +133,9 @@ pub extern "C" fn zmq_msg_init_buffer(
     buf: *const libc::c_void,
     size: usize,
 ) -> c_int {
+    if buf.is_null() && size > 0 {
+        return crate::error::fail(libc::EFAULT);
+    }
     if zmq_msg_init_size(msg, size) != 0 {
         return -1;
     }
@@ -261,6 +267,9 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
         KIND_HEAP | KIND_EXTERNAL => {
             // Deep copy into a new heap allocation.
             let size = s.size as usize;
+            if size > 0 && s.ptr.is_null() {
+                return crate::error::fail(libc::EFAULT);
+            }
             // SAFETY: libc::malloc is always safe to call.
             let new_ptr = unsafe { libc::malloc(size).cast::<u8>() };
             if size > 0 && new_ptr.is_null() {
@@ -308,8 +317,23 @@ pub extern "C" fn zmq_msg_get(msg: *const OmqMsgRepr, property: c_int) -> c_int 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn zmq_msg_set(_msg: *mut OmqMsgRepr, _property: c_int, _val: c_int) -> c_int {
-    0
+pub extern "C" fn zmq_msg_set(msg: *mut OmqMsgRepr, property: c_int, val: c_int) -> c_int {
+    if msg.is_null() {
+        return crate::error::fail(libc::EFAULT);
+    }
+    // SAFETY: msg is non-null (checked above).
+    let r = unsafe { repr(msg) };
+    match property {
+        1 => {
+            r.more = u8::from(val != 0);
+            0
+        }
+        5 => {
+            r.reserved[0..4].copy_from_slice(&(val as u32).to_le_bytes());
+            0
+        }
+        _ => crate::error::fail(libc::EINVAL),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -415,6 +439,8 @@ pub extern "C" fn zmq_msg_send(
     let bytes = if r.kind == KIND_BYTES && !r.boxed.is_null() {
         // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv; non-null.
         unsafe { &*(r.boxed.cast::<Bytes>()) }.clone()
+    } else if r.ptr.is_null() && r.size > 0 {
+        return crate::error::fail(libc::EFAULT);
     } else {
         extract_bytes(msg)
     };

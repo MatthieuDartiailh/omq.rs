@@ -100,10 +100,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
                 state.signal_eof();
                 return Err(Error::Closed);
             }
-            state.last_input_nanos.store(
-                state.hb_epoch.elapsed().as_nanos() as u64,
-                Ordering::Relaxed,
-            );
+            state.mark_input();
             let payload = restore.buf.take().unwrap().freeze();
             state.large_recv_pending.store(0, Ordering::Release);
             let mut io = state.lock_io();
@@ -141,10 +138,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
                     drop(buf);
                     Some(e)
                 };
-                state.last_input_nanos.store(
-                    state.hb_epoch.elapsed().as_nanos() as u64,
-                    Ordering::Relaxed,
-                );
+                state.mark_input();
                 if acc.len() >= payload_len {
                     let payload = acc_guard.take().unwrap().freeze();
                     drop(acc_guard);
@@ -238,10 +232,7 @@ async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
                     if handle_result.is_err() {
                         PullOutcome::ProtoErr
                     } else {
-                        state.last_input_nanos.store(
-                            state.hb_epoch.elapsed().as_nanos() as u64,
-                            Ordering::Relaxed,
-                        );
+                        state.mark_input();
                         crate::socket::try_one_shot_large_recv(state, &mut sguard)
                             .await
                             .into()

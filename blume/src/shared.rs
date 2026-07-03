@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use event_listener::{Event, Listener};
 
@@ -37,8 +37,12 @@ impl<T> Shared<T> {
         })
     }
 
+    pub(crate) fn lock_inner(&self) -> MutexGuard<'_, Inner<T>> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub(crate) fn try_send(&self, val: T) -> Result<(), TrySendError<T>> {
-        let mut inner = self.inner.lock().expect("blume: poisoned");
+        let mut inner = self.lock_inner();
         if inner.closed_recv {
             return Err(TrySendError::Disconnected(val));
         }
@@ -53,6 +57,15 @@ impl<T> Shared<T> {
             self.recv_event.notify(1);
         }
         Ok(())
+    }
+
+    pub(crate) fn close_recv(&self) -> VecDeque<T> {
+        let mut inner = self.lock_inner();
+        inner.closed_recv = true;
+        let drained = inner.queue.len();
+        let queue = std::mem::take(&mut inner.queue);
+        self.queued.fetch_sub(drained, Ordering::Release);
+        queue
     }
 
     pub(crate) async fn send_async(&self, val: T) -> Result<(), SendError<T>> {
@@ -93,9 +106,9 @@ impl<T> Shared<T> {
     }
 
     pub(crate) fn try_drain(&self, cache: &mut VecDeque<T>) -> Result<bool, RecvError> {
-        let mut inner = self.inner.lock().expect("blume: poisoned");
+        let mut inner = self.lock_inner();
         if inner.queue.is_empty() {
-            return if self.all_senders_dropped() {
+            return if inner.closed_recv || self.all_senders_dropped() {
                 Err(RecvError)
             } else {
                 Ok(false)
@@ -136,7 +149,7 @@ impl<T> Shared<T> {
     }
 
     pub(crate) fn is_recv_disconnected(&self) -> bool {
-        let inner = self.inner.lock().expect("blume: poisoned");
+        let inner = self.lock_inner();
         inner.closed_recv
     }
 }

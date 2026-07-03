@@ -282,6 +282,8 @@ const ZMQ_NULL: c_int = 0;
 const ZMQ_PLAIN: c_int = 1;
 const ZMQ_CURVE: c_int = 2;
 
+const DEFAULT_HANDSHAKE_IVL_MS: i32 = 30_000;
+
 #[expect(clippy::too_many_lines)]
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_setsockopt(
@@ -400,7 +402,7 @@ pub extern "C" fn zmq_setsockopt(
             lock_overlay!(sock_arc).handshake_ivl = if v <= 0 {
                 None
             } else {
-                Some(Duration::from_secs(v as u64))
+                Some(Duration::from_millis(v as u64))
             };
         }
         ZMQ_MAXMSGSIZE => {
@@ -902,7 +904,7 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_HANDSHAKE_IVL => {
             let v = lock_overlay!(sock_arc)
                 .handshake_ivl
-                .map_or(30, |d| d.as_secs() as i32);
+                .map_or(DEFAULT_HANDSHAKE_IVL_MS, |d| d.as_millis() as i32);
             write_i32(optval, optvallen, v)
         }
         ZMQ_MAXMSGSIZE => {
@@ -1164,24 +1166,27 @@ fn read_key(optval: *const libc::c_void, optvallen: usize) -> Option<[u8; 32]> {
         // SAFETY: optval is non-null (checked above) and optvallen == 32.
         let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 32) };
         key.copy_from_slice(slice);
-    } else if optvallen >= 40 {
+        return Some(key);
+    }
+    if optvallen >= 40 {
         // SAFETY: optval is non-null (checked above) and optvallen >= 40.
         let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), 40) };
         let Ok(s) = std::str::from_utf8(slice) else {
-            return Some(key);
+            return None;
         };
         if let Ok(decoded) = omq_tokio::proto::z85::decode(s)
             && decoded.len() == 32
         {
             key.copy_from_slice(&decoded);
+            return Some(key);
         }
     }
-    Some(key)
+    None
 }
 
 fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above); reading the available size.
     let avail = unsafe { *optvallen };
@@ -1198,7 +1203,7 @@ fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_in
 
 fn write_i64(optval: *mut libc::c_void, optvallen: *mut usize, val: i64) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
@@ -1215,14 +1220,16 @@ fn write_i64(optval: *mut libc::c_void, optvallen: *mut usize, val: i64) -> c_in
 
 fn write_bytes(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
-    let copy_len = data.len().min(avail);
-    // SAFETY: optval is non-null with at least copy_len bytes available.
+    if avail < data.len() {
+        return crate::error::fail(libc::EINVAL);
+    }
+    // SAFETY: optval is non-null with at least data.len() bytes available.
     unsafe {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), copy_len);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), optval.cast::<u8>(), data.len());
         *optvallen = data.len();
     }
     0
@@ -1230,7 +1237,7 @@ fn write_bytes(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) ->
 
 fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
@@ -1249,7 +1256,7 @@ fn write_string(optval: *mut libc::c_void, optvallen: *mut usize, data: &[u8]) -
 
 fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -> c_int {
     if optval.is_null() || optvallen.is_null() {
-        return 0;
+        return crate::error::fail(libc::EFAULT);
     }
     // SAFETY: optvallen is non-null (checked above).
     let avail = unsafe { *optvallen };
@@ -1273,4 +1280,36 @@ fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -
         return 0;
     }
     crate::error::fail(libc::EINVAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_ivl_is_milliseconds_in_options() {
+        let overlay = SocketOverlay {
+            handshake_ivl: Some(Duration::from_millis(10)),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            overlay.to_options().handshake_timeout,
+            Some(Duration::from_millis(10))
+        );
+    }
+
+    #[test]
+    fn connect_timeout_caps_handshake_ivl_in_milliseconds() {
+        let overlay = SocketOverlay {
+            handshake_ivl: Some(Duration::from_secs(30)),
+            connect_timeout: 10,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            overlay.to_options().handshake_timeout,
+            Some(Duration::from_millis(10))
+        );
+    }
 }

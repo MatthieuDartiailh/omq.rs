@@ -157,6 +157,47 @@ fn identity_roundtrip() {
 }
 
 #[test]
+fn getsockopt_identity_small_buffer_returns_einval() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_DEALER);
+
+    assert_eq!(set_bytes(s, ZMQ_IDENTITY, b"my-dealer"), 0);
+
+    let mut buf = [0u8; 4];
+    let mut len = buf.len();
+    let rc = zmq_getsockopt(s, ZMQ_IDENTITY, buf.as_mut_ptr().cast(), &mut len);
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn getsockopt_null_output_returns_efault() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    let mut len = size_of::<i32>();
+    let rc = zmq_getsockopt(s, ZMQ_TYPE, std::ptr::null_mut(), &mut len);
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    let mut ty = 0i32;
+    let rc = zmq_getsockopt(
+        s,
+        ZMQ_TYPE,
+        (&mut ty as *mut i32).cast(),
+        std::ptr::null_mut(),
+    );
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn type_query() {
     let ctx = zmq_ctx_new();
 
@@ -222,7 +263,7 @@ fn handshake_ivl_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);
 
-    assert_eq!(get_i32(s, ZMQ_HANDSHAKE_IVL), 30);
+    assert_eq!(get_i32(s, ZMQ_HANDSHAKE_IVL), 30_000);
 
     set_i32(s, ZMQ_HANDSHAKE_IVL, 10);
     assert_eq!(get_i32(s, ZMQ_HANDSHAKE_IVL), 10);
@@ -649,26 +690,41 @@ fn ipv6_req_rep() {
     zmq_ctx_term(ctx);
 }
 
-/// Non-UTF-8 bytes in a Z85 key slot must not cause UB.
-///
-/// Before the fix, `read_key` called `from_utf8_unchecked` on the raw
-/// C input, which is undefined behavior if the bytes are not valid UTF-8.
-/// The fix uses `from_utf8`, returning a zeroed key on invalid input.
+/// Non-UTF-8 bytes in a Z85 key slot must not cause UB or install a zero key.
 #[test]
-fn curve_key_non_utf8_does_not_crash() {
+fn curve_key_non_utf8_returns_einval() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_REQ);
 
     // 40 bytes with invalid UTF-8 (0xFF is never valid).
     let bad_z85 = [0xFFu8; 40];
-    set_bytes(s, ZMQ_CURVE_SERVERKEY, &bad_z85);
+    let rc = zmq_setsockopt(
+        s,
+        ZMQ_CURVE_SERVERKEY,
+        bad_z85.as_ptr().cast(),
+        bad_z85.len(),
+    );
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 
-    // The key should remain zeroed (Z85 decode fails on non-UTF-8).
-    let mut out = [0xAA_u8; 32];
-    let mut sz = 32usize;
-    zmq_getsockopt(s, ZMQ_CURVE_SERVERKEY, out.as_mut_ptr().cast(), &mut sz);
-    assert_eq!(sz, 32);
-    assert_eq!(out, [0u8; 32]);
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn curve_key_short_z85_returns_einval() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_REQ);
+
+    let short_z85 = [b'0'; 39];
+    let rc = zmq_setsockopt(
+        s,
+        ZMQ_CURVE_SERVERKEY,
+        short_z85.as_ptr().cast(),
+        short_z85.len(),
+    );
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 
     zmq_close(s);
     zmq_ctx_term(ctx);
