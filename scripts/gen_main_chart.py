@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the 3-panel main chart: doc/charts/main_tcp.svg.
+"""Generate the main hero charts, one per backend league:
+doc/charts/main_classic_tcp.svg and doc/charts/main_iouring_tcp.svg.
 
-Panel 1: PUSH/PULL throughput (MB/s + msg/s dashed), small messages (8 B .. 128 B)
-Panel 2: PUSH/PULL throughput (MB/s), medium/large messages (512 B .. 32 KiB)
-Panel 3: REQ/REP latency (p50 µs), 8 B .. 8 KiB
+Panel 1: PUSH/PULL throughput (MB/s + msg/s dashed), small messages (8 B .. 256 B)
+Panel 2: PUSH/PULL throughput (MB/s), medium/large messages (256 B .. 32 KiB)
 
-All 6 implementations, one line per impl, TCP only.
+One line per impl, TCP only. League membership is defined by FAMILIES.
 """
 
 import json
@@ -21,7 +21,9 @@ JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
 sys.path.insert(0, str(REPO / "scripts"))
 from chart_hw import detect_hardware
 
-IMPLS = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"]
+# Union of all impls plotted in either hero; used only as a load filter.
+IMPLS = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt", "zmq.rs",
+         "rzmq", "rzmq-iouring"]
 
 COLORS = {
     "libzmq": "#eab308",
@@ -30,18 +32,33 @@ COLORS = {
     "omq-tokio-mt": "#dc2626",
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
+    "rzmq-iouring": "#16a34a",
 }
 
 LABELS = {
     "libzmq": "libzmq v4.3.5",
-    "omq-compio": "omq-compio",
+    "omq-compio": "omq-compio (ST)",
     "omq-tokio": "omq-tokio (ST)",
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0 (MT)",
-    "rzmq": "rzmq v0.5.18 (MT)",
+    "rzmq": "rzmq v0.5.22 (MT)",
+    "rzmq-iouring": "rzmq v0.5.22 (io_uring, MT)",
 }
 
-DRAW_ORDER = ["rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio", "omq-compio"]
+# Two backend leagues, each rendered as its own hero chart. draw_order is
+# back-to-front (last listed is drawn on top).
+FAMILIES = {
+    "classic": {
+        "impls": ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"],
+        "draw_order": ["rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio"],
+        "title": "PUSH/PULL throughput, classic (epoll/mio), TCP loopback, 2-process",
+    },
+    "iouring": {
+        "impls": ["omq-compio", "rzmq-iouring"],
+        "draw_order": ["rzmq-iouring", "omq-compio"],
+        "title": "PUSH/PULL throughput, io_uring, TCP loopback, 2-process",
+    },
+}
 
 
 def fmt_size(b: int) -> str:
@@ -160,6 +177,15 @@ def svg_dots(points: list[tuple[float, float]], color: str) -> list[str]:
     ]
 
 
+def svg_x_marks(points: list[tuple[float, float]], color: str) -> list[str]:
+    return [
+        f'  <path d="M {x - 3:.1f},{y - 3:.1f} L {x + 3:.1f},{y + 3:.1f}'
+        f' M {x + 3:.1f},{y - 3:.1f} L {x - 3:.1f},{y + 3:.1f}"'
+        f' stroke="{color}" stroke-width="1.6" stroke-linecap="round" fill="none"/>'
+        for x, y in points
+    ]
+
+
 # ── panel drawing ────────────────────────────────────────────────
 
 def fmt_msgs(v: float) -> str:
@@ -175,15 +201,17 @@ def fmt_msgs(v: float) -> str:
 def draw_throughput_panel(
     L: list[str], sizes: list[int], xs: list[float], tput: dict,
     x_left: float, x_right: float, y_top: float, y_bot: float,
-    title: str, msgs: dict | None = None,
+    title: str, impls: list[str], draw_order: list[str],
+    msgs: dict | None = None,
 ):
     h = y_bot - y_top
 
     all_vals = [
         tput[s][name]
-        for s in sizes for name in IMPLS if name in tput.get(s, {})
+        for s in sizes for name in impls if name in tput.get(s, {})
     ]
     mbps_max = max(all_vals) * 1.15 if all_vals else 1000.0
+    mbps_max = max(mbps_max, 1.0)
 
     def y_mbps(v):
         return y_bot - (v / mbps_max) * h
@@ -194,9 +222,10 @@ def draw_throughput_panel(
     if msgs is not None:
         all_msgs = [
             msgs[s][name]
-            for s in sizes for name in IMPLS if name in msgs.get(s, {})
+            for s in sizes for name in impls if name in msgs.get(s, {})
         ]
         msgs_max = max(all_msgs) * 1.15 if all_msgs else 1e6
+        msgs_max = max(msgs_max, 1.0)
 
         def y_msgs(v):
             return y_bot - (v / msgs_max) * h
@@ -234,22 +263,39 @@ def draw_throughput_panel(
     L.append(svg_line(x_left, y_bot, x_right, y_bot, stroke="#9ca3af", width=1.5))
 
     if msgs is not None:
-        for name in DRAW_ORDER:
+        for name in draw_order:
             pts = [
                 (xs[i], y_msgs(msgs[sizes[i]][name]))
                 for i in range(len(sizes)) if name in msgs.get(sizes[i], {})
             ]
             if pts:
                 L.append(svg_polyline(pts, COLORS[name], width=2.5, dash="6,3"))
+                zero_pts = [
+                    (xs[i], y_msgs(msgs[sizes[i]][name]))
+                    for i in range(len(sizes))
+                    if name in msgs.get(sizes[i], {}) and msgs[sizes[i]][name] == 0
+                ]
+                L.extend(svg_x_marks(zero_pts, COLORS[name]))
     else:
-        for name in DRAW_ORDER:
+        for name in draw_order:
             pts = [
                 (xs[i], y_mbps(tput[sizes[i]][name]))
                 for i in range(len(sizes)) if name in tput.get(sizes[i], {})
             ]
             if pts:
                 L.append(svg_polyline(pts, COLORS[name]))
-                L.extend(svg_dots(pts, COLORS[name]))
+                zero_pts = []
+                nonzero_pts = []
+                for i in range(len(sizes)):
+                    if name not in tput.get(sizes[i], {}):
+                        continue
+                    pt = (xs[i], y_mbps(tput[sizes[i]][name]))
+                    if tput[sizes[i]][name] == 0:
+                        zero_pts.append(pt)
+                    else:
+                        nonzero_pts.append(pt)
+                L.extend(svg_dots(nonzero_pts, COLORS[name]))
+                L.extend(svg_x_marks(zero_pts, COLORS[name]))
 
     for i, s in enumerate(sizes):
         L.append(svg_text(xs[i], y_bot + 13, fmt_size(s), size=8))
@@ -313,7 +359,8 @@ def draw_latency_panel(
 
 # ── main chart generation ────────────────────────────────────────
 
-def generate_main_chart(tput: dict, lat: dict, msgs: dict,
+def generate_main_chart(tput: dict, msgs: dict, impls: list[str],
+                        draw_order: list[str], title: str,
                         hw_label: str | None) -> str:
     small_sizes = [8, 16, 32, 64, 128, 256]
     large_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
@@ -323,7 +370,7 @@ def generate_main_chart(tput: dict, lat: dict, msgs: dict,
     x_pad_left = 70
     panel_gap_x = 40
     x_pad_right = 70
-    legend_h = 60
+    legend_h = 80
 
     svg_w = 950
     total_w = svg_w - x_pad_left - x_pad_right - panel_gap_x
@@ -345,7 +392,7 @@ def generate_main_chart(tput: dict, lat: dict, msgs: dict,
     mid_x = svg_w / 2
 
     title_y = header_y
-    L.append(svg_text(mid_x, title_y, "PUSH/PULL throughput, TCP loopback, 2-process",
+    L.append(svg_text(mid_x, title_y, title,
                        size=14, weight="700", fill="#111827"))
     if hw_label:
         L.append(svg_text(mid_x, title_y + 14, hw_label, size=9, fill="#9ca3af"))
@@ -358,36 +405,51 @@ def generate_main_chart(tput: dict, lat: dict, msgs: dict,
     p1_xr = p1_xl + p1_w
     draw_throughput_panel(L, small_sizes, make_xs(small_sizes, p1_xl, p1_xr),
                           tput, p1_xl, p1_xr, row_top, row_bot,
-                          "small messages (higher is better)", msgs=msgs)
+                          "small messages (higher is better)", impls, draw_order,
+                          msgs=msgs)
 
     p2_xl = p1_xr + panel_gap_x
     p2_xr = p2_xl + p2_w
     draw_throughput_panel(L, large_sizes, make_xs(large_sizes, p2_xl, p2_xr),
                           tput, p2_xl, p2_xr, row_top, row_bot,
-                          "medium/large messages (higher is better)")
+                          "medium/large messages (higher is better)", impls, draw_order)
 
-    # Legend
+    # Legend (two rows when > 4 items, only impls with data)
+    all_sizes = small_sizes + large_sizes
+    has_data = {name for s in all_sizes for name in tput.get(s, {})} | \
+               {name for s in all_sizes for name in msgs.get(s, {})}
     leg_y = row_bot + 30
-    legend_items = [(k, LABELS[k]) for k in IMPLS if k in COLORS]
-    item_w = (svg_w - 40) / len(legend_items)
-    start_x = 20
+    legend_items = [(k, LABELS[k]) for k in impls if k in COLORS and k in has_data]
+    row_gap = 20
+    item_w = 190
 
-    for i, (key, label) in enumerate(legend_items):
-        lx = start_x + i * item_w
-        c = COLORS[key]
-        L.append(
-            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
-            f' stroke="{c}" stroke-width="2.5" stroke-linecap="round"/>'
-        )
-        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
-        L.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
-            f' font-size="10" font-weight="500">{label}</text>'
-        )
+    if len(legend_items) > 4:
+        mid_leg = (len(legend_items) + 1) // 2
+        rows = [legend_items[:mid_leg], legend_items[mid_leg:]]
+    else:
+        rows = [legend_items]
 
-    abbr_y = leg_y + 18
+    for row_idx, row in enumerate(rows):
+        ry = leg_y + row_idx * row_gap
+        total_w = len(row) * item_w
+        row_start_x = mid_x - total_w / 2
+        for i, (key, label) in enumerate(row):
+            lx = row_start_x + i * item_w
+            c = COLORS[key]
+            L.append(
+                f'  <line x1="{lx:.0f}" y1="{ry}" x2="{lx + 14:.0f}" y2="{ry}"'
+                f' stroke="{c}" stroke-width="2.5" stroke-linecap="round"/>'
+            )
+            L.append(f'  <circle cx="{lx + 7:.0f}" cy="{ry}" r="2.5" fill="{c}"/>')
+            L.append(
+                f'  <text x="{lx + 20:.0f}" y="{ry + 4}" fill="#374151"'
+                f' font-size="10" font-weight="500">{label}</text>'
+            )
+
+    leg_extra = (len(rows) - 1) * row_gap
+    abbr_y = leg_y + leg_extra + 18
     L.append(svg_text(mid_x, abbr_y,
-                       "ST = single-threaded   MT = multi-threaded",
+                       "ST = single-threaded   MT = multi-threaded",
                        size=9, fill="#9ca3af"))
 
     L.append("</svg>")
@@ -396,12 +458,15 @@ def generate_main_chart(tput: dict, lat: dict, msgs: dict,
 
 def main():
     hw = detect_hardware()
-    tput, lat, msgs = load_data()
-    svg = generate_main_chart(tput, lat, msgs, hw)
-    out = REPO / "doc" / "charts" / "main_tcp.svg"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(svg)
-    print(f"Written: {out}", file=sys.stderr)
+    tput, _lat, msgs = load_data()
+    out_dir = REPO / "doc" / "charts"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for family, cfg in FAMILIES.items():
+        svg = generate_main_chart(tput, msgs, cfg["impls"], cfg["draw_order"],
+                                  cfg["title"], hw)
+        out = out_dir / f"main_{family}_tcp.svg"
+        out.write_text(svg)
+        print(f"Written: {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":

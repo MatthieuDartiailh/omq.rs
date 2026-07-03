@@ -59,10 +59,21 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
 }
 
 fn main() {
-    let rt = if std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "multi_thread") {
+    let args: Vec<String> = std::env::args().collect();
+    let pull_current_thread = args.get(1).is_some_and(|arg| arg == "pull")
+        && std::env::var("OMQ_BENCH_PULL_CURRENT_THREAD").is_ok_and(|v| v == "1");
+    let rt = if !pull_current_thread
+        && std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "multi_thread")
+    {
         #[cfg(feature = "rt-multi-thread")]
         {
-            let workers = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+            let workers = std::env::var("OMQ_BENCH_WORKERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or_else(|| {
+                    std::thread::available_parallelism().map_or(2, std::num::NonZero::get)
+                });
             eprintln!("runtime: multi_thread ({workers} workers)");
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(workers)
@@ -79,11 +90,11 @@ fn main() {
             .build()
             .expect("tokio runtime")
     };
-    rt.block_on(async_main());
+    rt.block_on(async_main(args));
 }
 
 #[expect(clippy::too_many_lines)]
-async fn async_main() {
+async fn async_main(args: Vec<String>) {
     unsafe {
         libc::signal(
             libc::SIGTERM,
@@ -94,12 +105,17 @@ async fn async_main() {
             exit_on_signal as *const () as libc::sighandler_t,
         );
     }
-    let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("push") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             run_push(ep, size).await;
+        }
+        Some("push-fanout") => {
+            let ep = parse_ep(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let peers: usize = args[4].parse().expect("peers");
+            run_push_fanout(ep, size, peers).await;
         }
         Some("pull") => {
             let ep = parse_ep(&args[2]);
@@ -176,6 +192,7 @@ async fn async_main() {
         }
         _ => {
             eprintln!("usage: bench_peer_tokio push <addr> <size>");
+            eprintln!("       bench_peer_tokio push-fanout <addr> <size> <peers>");
             eprintln!("       bench_peer_tokio pull <addr> <size> <duration_secs>");
             eprintln!("       bench_peer_tokio inproc <name> <size> <duration_secs>");
             eprintln!("       bench_peer_tokio rep <addr> <size>");
@@ -200,18 +217,108 @@ async fn run_pub(ep: Endpoint, size: usize) {
     }
 }
 
+async fn wait_for_start_barrier() {
+    let Some(start_at) = std::env::var("OMQ_BENCH_START_AT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    if start_at > now {
+        tokio::time::sleep(Duration::from_secs_f64(start_at - now)).await;
+    }
+}
+
+async fn wait_for_handshakes(sock: &Socket, mut monitor: omq_tokio::MonitorStream, peers: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let connected = sock
+            .connections()
+            .await
+            .expect("connection snapshot")
+            .into_iter()
+            .filter(|c| c.peer_info.is_some())
+            .count();
+        if connected >= peers {
+            return;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for {peers} handshaked peers"
+        );
+        let _ = tokio::time::timeout(deadline - now, monitor.recv()).await;
+    }
+}
+
+async fn run_push_fanout(ep: Endpoint, size: usize, peers: usize) {
+    let push = Socket::new(SocketType::Push, bench_options(size));
+    let monitor = push.monitor();
+    let bound = push.bind(ep).await.expect("push bind");
+    print_bound_port(&bound);
+    wait_for_handshakes(&push, monitor, peers).await;
+    wait_for_start_barrier().await;
+
+    let payload = bench_payload(size);
+    run_push_loop(&push, &payload).await;
+}
+
+async fn send_fast(sock: &Socket, msg: Message) {
+    match sock.try_send(msg) {
+        Ok(()) => {}
+        Err(omq_tokio::TrySendError::Full(msg)) => sock.send(msg).await.unwrap(),
+        Err(e) => panic!("try_send failed: {e}"),
+    }
+}
+
+async fn run_push_loop(sock: &Socket, payload: &Bytes) {
+    if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
+        loop {
+            send_fast(sock, Message::from_slice(payload)).await;
+        }
+    } else {
+        let msg = Message::single(payload.clone());
+        loop {
+            send_fast(sock, msg.clone()).await;
+        }
+    }
+}
+
+/// Deadline-bounded blocking recv. Returns `true` when a message arrived,
+/// `false` if the deadline elapsed first or the socket closed. Bounding the
+/// blocking recv keeps a measured loop from hanging forever when a peer
+/// delivers zero messages; the hot drain still uses `try_recv` so throughput
+/// is unaffected.
+async fn recv_before_deadline(sock: &Socket, deadline: Instant) -> bool {
+    let now = Instant::now();
+    if now >= deadline {
+        return false;
+    }
+    matches!(
+        tokio::time::timeout(deadline - now, sock.recv()).await,
+        Ok(Ok(_))
+    )
+}
+
 async fn run_sub(ep: Endpoint, size: usize, duration: Duration) {
     let sub = Socket::new(SocketType::Sub, bench_options(size));
     sub.connect(ep.clone()).await.expect("sub connect");
     sub.subscribe(Bytes::new()).await.expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_start_barrier().await;
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
     loop {
-        sub.recv().await.unwrap();
+        if !recv_before_deadline(&sub, deadline).await {
+            break;
+        }
         count += 1;
         while sub.try_recv().is_ok() {
             count += 1;
@@ -221,7 +328,8 @@ async fn run_sub(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("{count} {elapsed:.6} {size}");
+    let cpu = cpu_time_secs() - cpu_before;
+    println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);
 }
 
@@ -376,18 +484,14 @@ async fn run_push(ep: Endpoint, size: usize) {
     let bound = push.bind(ep).await.expect("push bind");
     print_bound_port(&bound);
     let payload = bench_payload(size);
-    loop {
-        push.send(Message::single(payload.clone())).await.unwrap();
-    }
+    run_push_loop(&push, &payload).await;
 }
 
 async fn run_push_connect(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options_client(size));
     push.connect(ep).await.expect("push connect");
     let payload = bench_payload(size);
-    loop {
-        push.send(Message::single(payload.clone())).await.unwrap();
-    }
+    run_push_loop(&push, &payload).await;
 }
 
 async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
@@ -396,12 +500,16 @@ async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
     print_bound_port(&bound);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
+    drain_pending(&pull);
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
     loop {
-        pull.recv().await.unwrap();
+        if !recv_before_deadline(&pull, deadline).await {
+            break;
+        }
         count += 1;
         while pull.try_recv().is_ok() {
             count += 1;
@@ -411,7 +519,8 @@ async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
         }
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("{count} {elapsed:.6} {size}");
+    let cpu = cpu_time_secs() - cpu_before;
+    println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);
 }
 
@@ -437,7 +546,9 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
     let deadline = t0 + duration;
     let mut count: u64 = 0;
     loop {
-        pull.recv().await.unwrap();
+        if !recv_before_deadline(&pull, deadline).await {
+            break;
+        }
         count += 1;
         while pull.try_recv().is_ok() {
             count += 1;
@@ -455,13 +566,17 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
     pull.connect(ep.clone()).await.expect("pull connect");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
+    drain_pending(&pull);
+    wait_for_start_barrier().await;
 
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
     loop {
-        pull.recv().await.unwrap();
+        if !recv_before_deadline(&pull, deadline).await {
+            break;
+        }
         count += 1;
         while pull.try_recv().is_ok() {
             count += 1;
@@ -474,6 +589,10 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
     let cpu = cpu_time_secs() - cpu_before;
     println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);
+}
+
+fn drain_pending(sock: &Socket) {
+    while sock.try_recv().is_ok() {}
 }
 
 #[expect(clippy::cast_precision_loss)]
