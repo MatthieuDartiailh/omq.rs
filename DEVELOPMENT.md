@@ -182,11 +182,10 @@ Results go to `~/.cache/omq/comparisons.jsonl`. Charts are generated
 by `scripts/gen_comparison_chart.py` into
 `doc/charts/{pushpull,pubsub,reqrep}/{omq,alt}_*.svg`.
 
-Per-backend criterion-style benches (separate from comparisons) live in
+Per-backend benches (separate from comparisons) live in
 `omq-tokio/benches/` and `omq-compio/benches/` with shared scaffolding
 in `benches/common/mod.rs`. Custom harness (`harness = false`), no
-external framework. Results go to
-`~/.cache/omq/results_{tokio,compio}.jsonl`.
+external framework.
 
 ## Updating charts
 

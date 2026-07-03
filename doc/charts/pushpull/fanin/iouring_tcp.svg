@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 875 1077" font-family="system-ui, -apple-system, sans-serif">
   <rect width="875" height="1077" fill="white"/>
   <text x="395.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Linux VM on a 2018 Mac Mini, Intel Core i7-8700B @ 3.20GHz, 6 cores, performance governor, turbo off</text>
-  <text x="395.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH fan-in (2 PUSH → 1 PULL): TCP loopback</text>
+  <text x="395.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH fan-in (2 PUSH → 1 PULL): io_uring, TCP loopback</text>
   <line x1="90.0" y1="276.5" x2="700.0" y2="276.5" stroke="#e5e7eb" stroke-width="1"/>
   <text x="82.0" y="276.5" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">100%</text>
   <line x1="90.0" y1="244.0" x2="700.0" y2="244.0" stroke="#e5e7eb" stroke-width="1"/>
@@ -91,7 +91,7 @@
   <text x="598.3" y="323.0" text-anchor="middle" fill="#374151" font-size="8.5">8 KiB</text>
   <text x="649.2" y="323.0" text-anchor="middle" fill="#374151" font-size="8.5">16 KiB</text>
   <text x="700.0" y="323.0" text-anchor="middle" fill="#374151" font-size="8.5">32 KiB</text>
-  <text x="395.0" y="362.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH fan-in (4 PUSH → 1 PULL): TCP loopback</text>
+  <text x="395.0" y="362.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH fan-in (4 PUSH → 1 PULL): io_uring, TCP loopback</text>
   <line x1="90.0" y1="606.5" x2="700.0" y2="606.5" stroke="#e5e7eb" stroke-width="1"/>
   <text x="82.0" y="606.5" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">100%</text>
   <line x1="90.0" y1="574.0" x2="700.0" y2="574.0" stroke="#e5e7eb" stroke-width="1"/>
@@ -182,7 +182,7 @@
   <text x="598.3" y="653.0" text-anchor="middle" fill="#374151" font-size="8.5">8 KiB</text>
   <text x="649.2" y="653.0" text-anchor="middle" fill="#374151" font-size="8.5">16 KiB</text>
   <text x="700.0" y="653.0" text-anchor="middle" fill="#374151" font-size="8.5">32 KiB</text>
-  <text x="395.0" y="692.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH fan-in (8 PUSH → 1 PULL): TCP loopback</text>
+  <text x="395.0" y="692.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH fan-in (8 PUSH → 1 PULL): io_uring, TCP loopback</text>
   <line x1="90.0" y1="943.0" x2="700.0" y2="943.0" stroke="#e5e7eb" stroke-width="1"/>
   <text x="82.0" y="943.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">100%</text>
   <line x1="90.0" y1="917.0" x2="700.0" y2="917.0" stroke="#e5e7eb" stroke-width="1"/>

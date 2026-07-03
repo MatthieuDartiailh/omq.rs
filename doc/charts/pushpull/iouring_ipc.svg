@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 875 552" font-family="system-ui, -apple-system, sans-serif">
   <rect width="875" height="552" fill="white"/>
-  <text x="395.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH/PULL throughput: IPC, 2-process</text>
+  <text x="395.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH/PULL throughput: io_uring, IPC, 2-process</text>
   <line x1="90.0" y1="368.4" x2="700.0" y2="368.4" stroke="#e5e7eb" stroke-width="1"/>
   <text x="82.0" y="368.4" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">50%</text>
   <line x1="90.0" y1="322.8" x2="700.0" y2="322.8" stroke="#e5e7eb" stroke-width="1"/>

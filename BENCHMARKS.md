@@ -84,10 +84,6 @@ cargo bench -p omq-compio --bench push_pull
 cargo bench -p omq-tokio  --bench req_rep
 cargo bench -p omq-compio --bench req_rep
 
-# Convenience:
-./scripts/bench_run.rb [--all-features] [--all-sizes]    # adds results to JSONL
-./scripts/bench_run.rb --chart-sizes                     # dense ×2 sweep for charts
-
 # WebSocket transport (requires ws feature):
 OMQ_BENCH_TRANSPORTS=ws cargo bench -p omq-tokio  --features ws --bench push_pull
 OMQ_BENCH_TRANSPORTS=ws cargo bench -p omq-compio --features ws --bench push_pull

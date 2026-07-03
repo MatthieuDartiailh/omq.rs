@@ -14,6 +14,20 @@ The charts are split by I/O backend:
 - `rzmq v0.5.22`
 - OMQ from this repository
 
+## Methodology
+
+TCP and IPC charts use one benchmark process per peer, not multiple
+threads inside one process.
+
+- Two-peer charts use two processes.
+- PUB/SUB and PUSH/PULL fan-in/fan-out charts use one process for each
+  publisher, subscriber, pusher, or puller.
+- `inproc` charts stay inside one process by definition.
+
+Multi-peer charts report total throughput. PUSH fan-out charts also show
+peer fairness: whiskers mark the slowest and fastest puller in a measured
+round.
+
 Transport coverage differs by implementation. Missing lines mean that implementation does not expose a usable peer for that transport and pattern in this benchmark suite.
 
 ## Main TCP Charts
@@ -98,7 +112,8 @@ Transport coverage differs by implementation. Missing lines mean that implementa
 
 ## Fan-Out And Fan-In
 
-These charts show 1-to-N and N-to-1 PUSH/PULL over TCP. Whiskers show the slowest and fastest peer in a measured round.
+These charts show 1-to-N and N-to-1 PUSH/PULL over TCP. Fan-out whiskers
+show the slowest and fastest puller in a measured round.
 
 <p align="center">
   <img src="doc/charts/pushpull/fanout/classic_tcp.svg" alt="PUSH fan-out: classic TCP" width="850">
