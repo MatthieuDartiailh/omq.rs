@@ -57,7 +57,9 @@ unsafe impl<T: Send> Sync for Ring<T> {}
 impl<T> Ring<T> {
     pub(crate) fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "capacity must be > 0");
-        let cap = capacity.next_power_of_two();
+        let cap = capacity
+            .checked_next_power_of_two()
+            .expect("capacity must fit in the next power of two");
         let buf: Vec<UnsafeCell<MaybeUninit<T>>> = (0..cap)
             .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
             .collect();
@@ -518,6 +520,12 @@ mod tests {
         assert_eq!(p.capacity(), 8);
         let (p, _c) = spsc::<u8>(1);
         assert_eq!(p.capacity(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must fit in the next power of two")]
+    fn capacity_overflow_panics_with_message() {
+        let _ = spsc::<u8>(usize::MAX);
     }
 
     #[test]
