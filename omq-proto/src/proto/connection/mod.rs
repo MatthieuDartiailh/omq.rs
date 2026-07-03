@@ -533,6 +533,34 @@ mod tests {
     }
 
     #[test]
+    fn begin_supplied_payload_refuses_oversized_header() {
+        let mut c = ready_connection(Some(500));
+        // Stage only the frame header directly; public handle_input rejects
+        // this earlier, before begin_supplied_payload is reachable.
+        let mut wire = BytesMut::new();
+        wire.put_u8(frame::FLAG_LONG);
+        wire.put_u64(1_000_000);
+        c.in_buf.push(wire.freeze());
+
+        assert!(c.begin_supplied_payload().is_none());
+        assert!(matches!(c.state, State::Ready));
+    }
+
+    #[test]
+    fn begin_supplied_payload_with_prefix_refuses_oversized_header() {
+        let mut c = ready_connection(Some(500));
+        // Include one buffered payload byte to exercise the prefix variant.
+        let mut wire = BytesMut::new();
+        wire.put_u8(frame::FLAG_LONG);
+        wire.put_u64(1_000_000);
+        wire.put_u8(0);
+        c.in_buf.push(wire.freeze());
+
+        assert!(c.begin_supplied_payload_with_prefix().is_none());
+        assert!(matches!(c.state, State::Ready));
+    }
+
+    #[test]
     fn peer_minor_downgrades_to_zero() {
         // Peer announces 3.0; we speak 3.1; effective minor should be 0.
         let mut c = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));

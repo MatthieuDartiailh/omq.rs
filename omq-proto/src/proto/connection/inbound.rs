@@ -433,6 +433,11 @@ impl Connection {
             return None;
         }
         let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
+        if let Some(max) = self.config.max_message_size
+            && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
+        {
+            return None;
+        }
         if self.in_buf.len() != hdr.header_len {
             return None;
         }
@@ -462,6 +467,11 @@ impl Connection {
             return None;
         }
         let hdr = frame::peek_frame_header(&self.in_buf).ok().flatten()?;
+        if let Some(max) = self.config.max_message_size
+            && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
+        {
+            return None;
+        }
         if self.in_buf.len() < hdr.header_len {
             return None;
         }
