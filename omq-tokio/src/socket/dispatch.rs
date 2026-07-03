@@ -288,6 +288,7 @@ pub(super) async fn connect_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv_notify: &std::sync::Arc<tokio::sync::Notify>,
+    max_message_size: Option<usize>,
     #[cfg(feature = "ws")] accept_invalid_certs: bool,
     #[cfg(feature = "ws")] mechanism: &omq_proto::MechanismSetup,
 ) -> Result<AnyConn> {
@@ -330,8 +331,13 @@ pub(super) async fn connect_any(
     }
     match endpoint {
         Endpoint::Inproc { name } => {
-            let conn =
-                inproc_transport::connect(name, snapshot.clone(), recv_notify.clone()).await?;
+            let conn = inproc_transport::connect(
+                name,
+                snapshot.clone(),
+                recv_notify.clone(),
+                max_message_size,
+            )
+            .await?;
             Ok(AnyConn::Inproc {
                 conn,
                 peer_ident: PeerIdent::Inproc(name.clone()),

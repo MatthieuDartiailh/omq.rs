@@ -91,6 +91,28 @@ async fn max_message_size_rejects_oversize() {
 }
 
 #[tokio::test]
+async fn max_message_size_rejects_oversize_when_receiver_connects_inproc() {
+    let ep = inproc_ep("opt-mms-connect-recv");
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.bind(ep.clone()).await.unwrap();
+
+    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
+    pull.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    push.send(Message::single("12345678")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_millis(500), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().len(), 8);
+
+    push.send(Message::single("123456789")).await.unwrap();
+    let r = tokio::time::timeout(Duration::from_millis(200), pull.recv()).await;
+    assert!(r.is_err(), "oversize must not be delivered");
+}
+
+#[tokio::test]
 async fn drop_newest_silently_discards_overflow() {
     // HWM=1, DropNewest. Sender pushes 3 messages; only the first survives.
     let ep = inproc_ep("opt-drop-new");

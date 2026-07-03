@@ -93,6 +93,7 @@ struct InprocConnectRequest {
     connector_to_listener_rx: mpsc::Receiver<InboundFrame>,
     listener_to_connector_tx: mpsc::Sender<InboundFrame>,
     connector_recv_notify: Arc<tokio::sync::Notify>,
+    connector_max_message_size: Option<usize>,
     accept_ack: oneshot::Sender<(InprocPeerSnapshot, Option<Arc<InprocSpsc>>)>,
 }
 
@@ -141,6 +142,7 @@ pub async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,
     recv_notify: Arc<tokio::sync::Notify>,
+    max_message_size: Option<usize>,
 ) -> Result<InprocConn> {
     let req_tx = {
         let reg = REGISTRY.lock().expect("inproc registry poisoned");
@@ -158,6 +160,7 @@ pub async fn connect(
         connector_to_listener_rx: c2l_rx,
         listener_to_connector_tx: l2c_tx,
         connector_recv_notify: recv_notify,
+        connector_max_message_size: max_message_size,
         accept_ack: ack_tx,
     };
 
@@ -208,6 +211,7 @@ impl InprocListener {
             connector_to_listener_rx,
             listener_to_connector_tx,
             connector_recv_notify,
+            connector_max_message_size,
             accept_ack,
         } = req;
         let spsc = if is_spsc_eligible(self.snapshot.socket_type, connector.socket_type) {
@@ -221,7 +225,7 @@ impl InprocListener {
             let mms = if listener_is_recv {
                 self.max_message_size
             } else {
-                None
+                connector_max_message_size
             };
             Some(Arc::new(InprocSpsc {
                 producer: Mutex::new(p),
@@ -273,7 +277,7 @@ mod tests {
         let mut l = bind("test-bca", snap(SocketType::Pull), notify(), None).unwrap();
         let n = notify();
         let connector =
-            tokio::spawn(async move { connect("test-bca", snap(SocketType::Push), n).await });
+            tokio::spawn(async move { connect("test-bca", snap(SocketType::Push), n, None).await });
         let server_side = l.accept().await.unwrap();
         let client_side = connector.await.unwrap().unwrap();
 
@@ -312,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn connect_without_bind_fails() {
         assert!(matches!(
-            connect("test-unbound", snap(SocketType::Push), notify()).await,
+            connect("test-unbound", snap(SocketType::Push), notify(), None).await,
             Err(Error::InvalidEndpoint(_))
         ));
     }
