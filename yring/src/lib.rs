@@ -79,15 +79,20 @@ impl<T> Ring<T> {
     }
 
     #[inline]
+    fn distance(from: usize, to: usize) -> usize {
+        from.wrapping_sub(to)
+    }
+
+    #[inline]
     pub(crate) fn push(
         &self,
         cursor: &mut usize,
         cached_head: &mut usize,
         val: T,
     ) -> Result<(), T> {
-        if *cursor - *cached_head >= self.capacity() {
+        if Self::distance(*cursor, *cached_head) >= self.capacity() {
             *cached_head = self.head.0.load(Ordering::Acquire);
-            if *cursor - *cached_head >= self.capacity() {
+            if Self::distance(*cursor, *cached_head) >= self.capacity() {
                 return Err(val);
             }
         }
@@ -96,7 +101,7 @@ impl<T> Ring<T> {
         self.buf[*cursor & self.mask].with_mut(|ptr| unsafe {
             (*ptr).write(val);
         });
-        *cursor += 1;
+        *cursor = cursor.wrapping_add(1);
         Ok(())
     }
 
@@ -106,7 +111,7 @@ impl<T> Ring<T> {
         if cursor == prev_tail {
             return FlushResult::NothingToFlush;
         }
-        let count = cursor - prev_tail;
+        let count = Self::distance(cursor, prev_tail);
         *cached_head = self.head.0.load(Ordering::Acquire);
         let was_empty = prev_tail == *cached_head;
         self.tail.0.store(cursor, Ordering::Release);
@@ -115,9 +120,9 @@ impl<T> Ring<T> {
 
     #[inline]
     pub(crate) fn is_full(&self, cursor: usize, cached_head: &mut usize) -> bool {
-        if cursor - *cached_head >= self.capacity() {
+        if Self::distance(cursor, *cached_head) >= self.capacity() {
             *cached_head = self.head.0.load(Ordering::Acquire);
-            cursor - *cached_head >= self.capacity()
+            Self::distance(cursor, *cached_head) >= self.capacity()
         } else {
             false
         }
@@ -141,7 +146,7 @@ impl<T> Ring<T> {
         // SAFETY: head < cached_tail, so this slot was written by the
         // producer and made visible via flush (Release store).
         let val = self.buf[*head & self.mask].with_mut(|ptr| unsafe { (*ptr).assume_init_read() });
-        *head += 1;
+        *head = head.wrapping_add(1);
         Some(val)
     }
 
@@ -183,12 +188,14 @@ impl<T> Ring<T> {
         // Advance head before the loop so a panicking T::drop cannot
         // cause a second call to re-drop the same items.
         self.head.0.store(tail, Ordering::Relaxed);
-        for i in head..tail {
+        let mut i = head;
+        while i != tail {
             // SAFETY: &mut self guarantees exclusive access. Slots
             // [head..tail] were written by the producer and flushed.
             self.buf[i & self.mask].with_mut(|ptr| unsafe {
                 (*ptr).assume_init_drop();
             });
+            i = i.wrapping_add(1);
         }
     }
 }
@@ -529,6 +536,36 @@ mod tests {
     }
 
     #[test]
+    fn counters_wrap_without_panicking() {
+        let (mut p, mut c) = spsc::<u32>(4);
+        p.cursor = usize::MAX - 1;
+        p.cached_head = usize::MAX - 1;
+        c.head = usize::MAX - 1;
+        c.cached_tail = usize::MAX - 1;
+        p.ring.head.0.store(usize::MAX - 1, Ordering::Relaxed);
+        p.ring.tail.0.store(usize::MAX - 1, Ordering::Relaxed);
+
+        p.push(1).unwrap();
+        p.push(2).unwrap();
+        p.push(3).unwrap();
+        assert_eq!(
+            p.flush_and_check(),
+            FlushResult::Flushed {
+                count: 3,
+                was_empty: true
+            }
+        );
+
+        assert_eq!(c.prefetch(), 3);
+        assert_eq!(c.pop(), Some(1));
+        assert_eq!(c.pop(), Some(2));
+        assert_eq!(c.pop(), Some(3));
+        assert_eq!(c.pop(), None);
+        c.release();
+        assert!(p.is_empty());
+    }
+
+    #[test]
     fn drop_remaining() {
         use std::sync::atomic::AtomicUsize;
         static DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -541,6 +578,36 @@ mod tests {
         }
         DROPS.store(0, Ordering::Relaxed);
         let (mut p, c) = spsc::<Counted>(4);
+        p.push(Counted).unwrap();
+        p.push(Counted).unwrap();
+        p.push(Counted).unwrap();
+        p.flush();
+        drop(p);
+        drop(c);
+        assert_eq!(DROPS.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn drop_remaining_handles_wrapped_counters() {
+        use std::sync::atomic::AtomicUsize;
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        #[derive(Debug)]
+        struct Counted;
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        DROPS.store(0, Ordering::Relaxed);
+        let (mut p, mut c) = spsc::<Counted>(4);
+        p.cursor = usize::MAX - 1;
+        p.cached_head = usize::MAX - 1;
+        c.head = usize::MAX - 1;
+        c.cached_tail = usize::MAX - 1;
+        p.ring.head.0.store(usize::MAX - 1, Ordering::Relaxed);
+        p.ring.tail.0.store(usize::MAX - 1, Ordering::Relaxed);
+
         p.push(Counted).unwrap();
         p.push(Counted).unwrap();
         p.push(Counted).unwrap();
