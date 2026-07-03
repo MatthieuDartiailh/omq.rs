@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-03
+
+### Added
+
+- `Payload` and `Message` now implement `PartialEq` and `Eq`.
+- `Endpoint`, `Host`, and `IpcPath` now implement `Hash`.
+- Shared `flow` and `direct_encode` modules for backend send-path policy.
+
+### Fixed
+
+- Cap pre-auth handshake and WebSocket frame input sizes.
+- Reject LZ4M decompression bombs before allocation.
+
+### Removed
+
+- `InboundFrame::message()` constructor.
+
 ## [0.18.1] - 2026-06-27
 
 ### Fixed

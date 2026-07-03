@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-03
+
+### Fixed
+
+- Multi-peer PUSH uses per-peer round-robin wire slots.
+- `wait_for_targets_space` enables the `Notify` future before polling.
+- Test sender lifetimes in `req_rep` and random-size coverage.
+
+### Performance
+
+- Rework send path and teardown cleanup.
+- Route PUB through `dispatch_to_targets` and remove the dead fan-out pump.
+- Extract recv mux, peer lifecycle, and wire-slot cache helpers from socket actor code.
+
+### Changed
+
+- Soak tests can select the tokio runtime flavor.
+- *(deps)* Bump `omq-proto` to 0.19.0, `blume` to 0.4.3, `yring` to 0.3.4.
+
 ## [0.14.6] - 2026-06-27
 
 ### Fixed

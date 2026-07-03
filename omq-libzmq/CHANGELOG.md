@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-07-03
+
+### Fixed
+
+- `zmq_msg_send` clones borrowed message data instead of stealing it.
+- Clamp proxy control-frame slices to the received byte count.
+- `zmq_sleep` rejects negative seconds.
+- Fan-out send errors propagate correctly through the C API.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.15.0 and `yring` to 0.3.4.
+
 ## [0.4.9] - 2026-06-27
 
 ### Fixed

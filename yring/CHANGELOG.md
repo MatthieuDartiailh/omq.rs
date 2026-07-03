@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-03
+
+### Fixed
+
+- `drop_remaining` is panic-safe and idempotent during async teardown.
+
+### Changed
+
+- Widen cache-line padding to 128 bytes.
+- Reject 32-bit targets at compile time.
+- Rename internal ring cursor fields for clarity.
+
+### Benchmarks
+
+- Add `flume` to the SPSC comparison chart.
+
 ## [0.3.3] - 2026-06-27
 
 ### Changed
