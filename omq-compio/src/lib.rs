@@ -33,11 +33,13 @@ pub use omq_proto::message;
 pub use omq_proto::options;
 pub use omq_proto::proto;
 
-pub(crate) mod local_cell;
+pub(crate) mod local_stream;
 pub mod monitor;
 pub mod runtime;
 pub mod socket;
+pub(crate) mod sys;
 pub mod transport;
+pub(crate) mod unsafe_cell;
 
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
