@@ -13,20 +13,19 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 
 ## The hard parts
 
-OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput. In one repo you get:
+OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput. You get:
 
-- Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
-- Reconnecting sockets that survive connect-before-bind, peer churn, bind-side restarts, and reconnect storms.
+- ZeroMQ semantics without extra tuning: no topology-specific socket types, no user-visible batching API, no manual reconnection loop.
+- Transport failures are normal: reconnect, connect-before-bind, peer churn, and bind-side restarts are part of the design.
+- Peer failures do not become user errors: `send()` and `recv()` keep working through disconnects, reconnects, slow consumers, and bind-side restarts.
 - HWM back-pressure and routing fairness under load, not only in empty-queue examples.
-- Soak tests for connection churn, peer churn, reconnect storms, RSS growth, and FD leaks.
-- Loom coverage for lock-free inproc queue behavior.
-- Miri coverage for crates with `unsafe` code.
-- `cargo-semver-checks` in the release flow.
-- Comparison benchmarks with CPU accounting, multi-peer fan-in/fan-out panels, fairness whiskers, and generated charts.
+- The hot paths are size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
+- Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
+- Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences (see charts below).
 
 ### Benchmarks
 
-[How to beat libzmq](doc/performance.md) | [Full comparison charts](COMPARISONS.md)
+[Full comparison charts](COMPARISONS.md)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_classic_tcp.svg" alt="PUSH/PULL throughput: classic TCP implementations" width="950">
@@ -177,15 +176,15 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 Seven crates, one repo.
 
-| Crate | What it does |
-|-------|-------------|
-| [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions. `#![forbid(unsafe_code)]` |
-| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows). `#![forbid(unsafe_code)]` |
-| [`omq-compio`](omq-compio/) | Single-thread io_uring / IOCP backend (Linux) |
-| [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
-| [`blume`](blume/) | Batching MPSC channel with swap-drain consumer. `#![forbid(unsafe_code)]` |
-| [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch. Miri-tested |
-| [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) |
+| Crate | What it does | Unsafe policy |
+|-------|--------------|---------------|
+| [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions | `#![forbid(unsafe_code)]` |
+| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows) | `#![forbid(unsafe_code)]` |
+| [`omq-compio`](omq-compio/) | Single-thread io_uring / IOCP backend (Linux) | Small unsafe wrappers for single-thread runtime internals |
+| [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) | Unsafe C ABI boundary |
+| [`blume`](blume/) | Batching MPSC channel with swap-drain consumer | `#![forbid(unsafe_code)]` |
+| [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch | Unsafe ring core, Miri-tested |
+| [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) | PyO3 FFI boundary |
 
 ## Testing
 
@@ -201,28 +200,27 @@ covered by integration tests on both backends. The full suite:
   (lz4), PLAIN / CURVE / BLAKE3ZMQ auth, mechanism reconnect, large-message
   throughput, multi-socket, inproc cross-thread, WebSocket throughput
   and reconnect. Each scenario samples RSS and FD counts to detect leaks.
-- **Miri** on all crates with `unsafe` code (`yring`).
+- **Loom** coverage for lock-free inproc queue behavior.
+- **Miri** on `yring` and `omq-compio`'s pure unsafe wrappers.
+- **Strict SemVer** because it matters.
 - **Cross-runtime interop**: omq-compio <-> omq-tokio over TCP.
 - **Wire interop** with libzmq and pyzmq.
 
 ```sh
-./scripts/test-all.sh          # full sweep, both backends
-OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
+./scripts/test-all.sh             # full sweep, both backends
+OMQ_FUZZ=1 ./scripts/test-all.sh  # include fuzz suites
 ```
 
 ## Further reading
 
-- [COMPARISONS.md](COMPARISONS.md): cross-implementation comparison
-  charts (libzmq, zmq.rs, rzmq) across all transports.
-- [BENCHMARKS.md](BENCHMARKS.md): throughput / latency tables across
-  message patterns, transports, message sizes, and backends.
+- [COMPARISONS.md](COMPARISONS.md): cross-implementation comparison charts.
 - [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp
-  throughput on bandwidth-limited links with structured JSON payloads.
-- [doc/architecture.md](doc/architecture.md): three-layer split, two-queue
-  socket model, backend comparison.
+  throughput on bandwidth-limited links.
+- [doc/architecture.md](doc/architecture.md): three-layer split, backend
+  comparison.
 - [doc/compio.md](doc/compio.md): compio backend internals.
 - [doc/tokio.md](doc/tokio.md): tokio backend internals.
-- [doc/performance.md](doc/performance.md): how omq beat libzmq.
+- [doc/performance.md](doc/performance.md): historical performance journal.
 
 ## Platform and requirements
 

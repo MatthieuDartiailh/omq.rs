@@ -11,9 +11,10 @@ use event_listener::Event;
 use omq_proto::proto::transform::MessageEncoder;
 
 use crate::transport::peer_io::{CancellableRecvStream, PeerIo, SharedPeerIo, WireWriter};
+use crate::unsafe_cell::EncodedQueueCell;
 
-use super::inner::{LocalStream, RecvStreamState};
-use omq_proto::encoded_queue::EncodedQueue;
+use super::inner::RecvStreamState;
+use crate::local_stream::LocalStream;
 
 pub(crate) const DIRECT_ARENA_THRESHOLD_DEFAULT: usize = 1024;
 
@@ -288,7 +289,7 @@ impl DirectIoState {
             peer_io,
             writer: async_lock::Mutex::new(writer),
             transmit_ready: Event::new(),
-            recv_stream: LocalStream(async_lock::Mutex::new(initial_recv_state)),
+            recv_stream: LocalStream::new(initial_recv_state),
             recv_claim: AtomicU8::new(0),
             recv_state_changed: Event::new(),
             recv_codec_ready: Event::new(),
@@ -315,80 +316,5 @@ impl DirectIoState {
             #[cfg(feature = "ws")]
             ws_masked,
         })
-    }
-}
-
-/// Non-atomic interior-mutable wrapper for `EncodedQueue`.
-///
-/// Sound only on a single thread (compio's cooperative runtime).
-/// Replaces `Mutex<EncodedQueue>` to avoid atomic CAS on every
-/// lock/unlock in the send hot path.
-pub(crate) struct EncodedQueueCell {
-    borrowed: Cell<bool>,
-    inner: std::cell::UnsafeCell<EncodedQueue>,
-}
-
-impl EncodedQueueCell {
-    fn with_arena_threshold(arena_threshold: usize) -> Self {
-        Self {
-            borrowed: Cell::new(false),
-            inner: std::cell::UnsafeCell::new(EncodedQueue::with_arena_threshold(arena_threshold)),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn try_borrow_mut(&self) -> Option<EncodedQueueGuard<'_>> {
-        if self.borrowed.get() {
-            return None;
-        }
-        self.borrowed.set(true);
-        Some(EncodedQueueGuard { cell: self })
-    }
-
-    #[inline]
-    pub(crate) fn borrow_mut(&self) -> EncodedQueueGuard<'_> {
-        assert!(!self.borrowed.get(), "EncodedQueueCell: already borrowed");
-        self.borrowed.set(true);
-        EncodedQueueGuard { cell: self }
-    }
-}
-
-pub(crate) struct EncodedQueueGuard<'a> {
-    cell: &'a EncodedQueueCell,
-}
-
-impl std::ops::Deref for EncodedQueueGuard<'_> {
-    type Target = EncodedQueue;
-    #[inline]
-    fn deref(&self) -> &EncodedQueue {
-        // SAFETY: the borrow flag prevents concurrent access. The
-        // guard's lifetime is bounded by the cell's, so the pointer
-        // remains valid.
-        unsafe { &*self.cell.inner.get() }
-    }
-}
-
-impl std::ops::DerefMut for EncodedQueueGuard<'_> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut EncodedQueue {
-        // SAFETY: &mut self guarantees exclusive guard access. The
-        // borrow flag prevents a second guard from being created.
-        unsafe { &mut *self.cell.inner.get() }
-    }
-}
-
-impl Drop for EncodedQueueGuard<'_> {
-    #[inline]
-    fn drop(&mut self) {
-        self.cell.borrowed.set(false);
-    }
-}
-
-#[expect(clippy::missing_fields_in_debug)]
-impl std::fmt::Debug for EncodedQueueCell {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EncodedQueueCell")
-            .field("borrowed", &self.borrowed.get())
-            .finish()
     }
 }

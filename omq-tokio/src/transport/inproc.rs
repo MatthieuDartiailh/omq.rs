@@ -142,6 +142,14 @@ pub async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,
     recv_notify: Arc<tokio::sync::Notify>,
+) -> Result<InprocConn> {
+    connect_with_max_message_size(name, snapshot, recv_notify, None).await
+}
+
+pub(crate) async fn connect_with_max_message_size(
+    name: &str,
+    snapshot: InprocPeerSnapshot,
+    recv_notify: Arc<tokio::sync::Notify>,
     max_message_size: Option<usize>,
 ) -> Result<InprocConn> {
     let req_tx = {
@@ -277,7 +285,7 @@ mod tests {
         let mut l = bind("test-bca", snap(SocketType::Pull), notify(), None).unwrap();
         let n = notify();
         let connector =
-            tokio::spawn(async move { connect("test-bca", snap(SocketType::Push), n, None).await });
+            tokio::spawn(async move { connect("test-bca", snap(SocketType::Push), n).await });
         let server_side = l.accept().await.unwrap();
         let client_side = connector.await.unwrap().unwrap();
 
@@ -316,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn connect_without_bind_fails() {
         assert!(matches!(
-            connect("test-unbound", snap(SocketType::Push), notify(), None).await,
+            connect("test-unbound", snap(SocketType::Push), notify()).await,
             Err(Error::InvalidEndpoint(_))
         ));
     }

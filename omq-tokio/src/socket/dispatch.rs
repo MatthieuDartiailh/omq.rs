@@ -319,7 +319,7 @@ pub(super) async fn connect_any(
     }
     match endpoint {
         Endpoint::Inproc { name } => {
-            let conn = inproc_transport::connect(
+            let conn = inproc_transport::connect_with_max_message_size(
                 name,
                 snapshot.clone(),
                 recv_notify.clone(),

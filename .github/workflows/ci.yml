@@ -73,9 +73,7 @@ jobs:
       # The skipped tests pass 100% on stable but fail/hang on nightly due to
       # spawned-task starvation in compio's executor on 2-vCPU CI runners.
       - run: cargo test -p omq-compio --no-fail-fast -- --skip pub_direct_write_tight_loop --skip pub_fan_out_content_integrity_mixed_sizes
-      - run: cargo test -p omq-compio --features curve
-      - run: cargo test -p omq-compio --features blake3zmq
-      - run: cargo test -p omq-compio --features lz4
+      - run: cargo test -p omq-compio --features curve,blake3zmq,lz4 --no-fail-fast
       - run: cargo clippy -p omq-compio --all-targets --all-features
 
   encryption:

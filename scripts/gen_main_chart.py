@@ -84,11 +84,15 @@ def load_jsonl() -> list[dict]:
         print(f"ERROR: {JSONL_PATH} not found", file=sys.stderr)
         sys.exit(1)
     rows = []
-    for line in JSONL_PATH.read_text().splitlines():
+    for seq, line in enumerate(JSONL_PATH.read_text().splitlines()):
         line = line.strip()
         if line:
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
+                if str(row.get("run_id", "")).startswith("debug-"):
+                    continue
+                row["_seq"] = seq
+                rows.append(row)
             except json.JSONDecodeError:
                 continue
     return rows
@@ -107,28 +111,28 @@ def load_data() -> tuple[dict, dict, dict]:
     tput: dict[int, dict[str, float]] = {}
     lat: dict[int, dict[str, float]] = {}
     msgs: dict[int, dict[str, float]] = {}
-    seen_tput: dict[tuple, str] = {}
-    seen_lat: dict[tuple, str] = {}
+    seen_tput: dict[tuple, int] = {}
+    seen_lat: dict[tuple, int] = {}
 
     for r in tcp:
         impl_name = r.get("impl")
         if impl_name not in IMPLS:
             continue
-        run_id = r.get("run_id", "")
+        seq = r.get("_seq", 0)
         size = r.get("msg_size")
         kind = r.get("kind")
 
         if kind == "throughput":
             key = (impl_name, size)
-            if key not in seen_tput or run_id >= seen_tput[key]:
-                seen_tput[key] = run_id
+            if key not in seen_tput or seq >= seen_tput[key]:
+                seen_tput[key] = seq
                 tput.setdefault(size, {})[impl_name] = r.get("mbps", 0)
                 msgs.setdefault(size, {})[impl_name] = r.get("msgs_s", 0)
 
         elif kind == "latency":
             key = (impl_name, size)
-            if key not in seen_lat or run_id >= seen_lat[key]:
-                seen_lat[key] = run_id
+            if key not in seen_lat or seq >= seen_lat[key]:
+                seen_lat[key] = seq
                 lat.setdefault(size, {})[impl_name] = r.get("p50_us", 0)
 
     return tput, lat, msgs

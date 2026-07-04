@@ -2,8 +2,9 @@
 
 A high-level tour of the codebase: which crate does what, how a message
 travels from `Socket::send` to the wire and back, and where the two
-runtime backends differ. Detail lives in [`compio.md`](compio.md),
-[`tokio.md`](tokio.md), and [`performance.md`](performance.md).
+runtime backends differ. Detail lives in [`compio.md`](compio.md) and
+[`tokio.md`](tokio.md). The optimization history lives in
+[`performance.md`](performance.md).
 
 ## Three-layer split
 

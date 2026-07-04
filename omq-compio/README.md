@@ -16,7 +16,7 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 | Large-message recv | Payloads above 128 KiB accumulated into a pre-allocated `BytesMut`. Frames above pool capacity fall back to one-shot read. |
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_iouring_tcp.svg" alt="PUSH/PULL throughput: io_uring TCP implementations" width="850">
 </p>
 
 ## Usage

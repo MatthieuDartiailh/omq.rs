@@ -17,7 +17,7 @@
 //! `AsyncRead` + `AsyncWrite`. TCP and IPC each provide bind/connect
 //! glue and call `run_connection`.
 //!
-//! [`EncodedQueueCell`]: crate::socket::direct_io::EncodedQueueCell
+//! [`EncodedQueueCell`]: crate::unsafe_cell::EncodedQueueCell
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -675,7 +675,7 @@ impl DriverLoopState {
                     return Ok(true);
                 }
                 if accumulating {
-                    let mut sguard = state.recv_stream.0.lock().await;
+                    let mut sguard = state.recv_stream.lock().await;
                     *sguard = Some(crate::socket::RecvStreamState::OneShot);
                 } else if state.recv_stream.rearm(peer_io).await.is_err() {
                     return Ok(true);

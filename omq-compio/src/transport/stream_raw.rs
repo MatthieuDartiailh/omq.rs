@@ -101,8 +101,7 @@ pub(crate) async fn run(
     stop.listen().await;
 
     // Force-close the TCP connection so both tasks see EOF/error and exit.
-    // SAFETY: the fd is valid while the TcpStream clone exists.
-    unsafe { libc::shutdown(shutdown_handle.as_raw_fd(), libc::SHUT_RDWR) };
+    let _ = crate::sys::shutdown_socket(shutdown_handle.as_raw_fd());
 
     // Disconnect notification.
     let _ = in_tx.send_async(notification(connection_id)).await;

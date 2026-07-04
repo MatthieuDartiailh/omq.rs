@@ -1,9 +1,3 @@
-// Safety: all `UnsafeCell` dereferences in this module (`direct_recv_io`,
-// `inproc_recv`, `recv_cache`) rely on compio's cooperative single-threaded
-// runtime. Every access happens on the runtime thread that created the
-// socket. The `Socket` API contract requires no concurrent send/recv on
-// the same handle, so there is no data race.
-
 use std::sync::{Arc, atomic::Ordering};
 
 use bytes::Bytes;
@@ -85,7 +79,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
         }
 
         let is_one_shot = {
-            let sg = state.recv_stream.0.lock().await;
+            let sg = state.recv_stream.lock().await;
             matches!(sg.as_ref(), Some(crate::socket::RecvStreamState::OneShot))
         };
 
@@ -112,7 +106,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
         }
 
         let stream_result = {
-            let mut sguard = state.recv_stream.0.lock().await;
+            let mut sguard = state.recv_stream.lock().await;
             let Some(crate::socket::RecvStreamState::MultiShot(cs)) = sguard.as_mut() else {
                 state.signal_eof();
                 return Err(Error::Closed);
@@ -160,7 +154,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
                 if e.raw_os_error() == Some(libc::ENOBUFS)
                     || e.raw_os_error() == Some(libc::ECANCELED) =>
             {
-                let mut sguard = state.recv_stream.0.lock().await;
+                let mut sguard = state.recv_stream.lock().await;
                 let io = state.lock_io();
                 let new_stream = io.reader.build_recv_stream();
                 drop(io);
@@ -168,7 +162,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
                 state.multishot_rearms.fetch_add(1, Ordering::Relaxed);
             }
             None => {
-                let mut sguard = state.recv_stream.0.lock().await;
+                let mut sguard = state.recv_stream.lock().await;
                 let io = state.lock_io();
                 let new_stream = io.reader.build_recv_stream();
                 drop(io);
@@ -185,7 +179,7 @@ async fn accumulate_large_recv(state: &Arc<DirectIoState>) -> Result<RecvAction>
 }
 
 async fn pull_and_feed(state: &Arc<DirectIoState>) -> PullOutcome {
-    let mut sguard = state.recv_stream.0.lock().await;
+    let mut sguard = state.recv_stream.lock().await;
     match sguard.as_mut() {
         None => PullOutcome::Eof,
         Some(crate::socket::RecvStreamState::OneShot) => {

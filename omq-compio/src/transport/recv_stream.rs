@@ -34,7 +34,7 @@ async fn pull_stream_accumulating(
     state: &Arc<DirectIoState>,
     peer_io: &SharedPeerIo,
 ) -> StreamArmOutcome {
-    let mut sguard = state.recv_stream.0.lock().await;
+    let mut sguard = state.recv_stream.lock().await;
     if state.recv_claim.load(Ordering::Acquire) == 1 {
         drop(sguard);
         state.recv_state_changed.listen().await;
@@ -103,7 +103,7 @@ pub(super) async fn pull_stream(
     if accumulating {
         return pull_stream_accumulating(state, peer_io).await;
     }
-    let mut sguard = state.recv_stream.0.lock().await;
+    let mut sguard = state.recv_stream.lock().await;
     if state.recv_claim.load(Ordering::Acquire) == 1 {
         drop(sguard);
         state.recv_state_changed.listen().await;
