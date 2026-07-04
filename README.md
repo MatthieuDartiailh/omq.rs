@@ -25,7 +25,7 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 
 ### Benchmarks
 
-[How to beat libzmq](doc/performance.md) | [Full comparison charts](COMPARISONS.md)
+[Full comparison charts](COMPARISONS.md)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_classic_tcp.svg" alt="PUSH/PULL throughput: classic TCP implementations" width="950">
@@ -220,7 +220,7 @@ OMQ_FUZZ=1 ./scripts/test-all.sh  # include fuzz suites
   comparison.
 - [doc/compio.md](doc/compio.md): compio backend internals.
 - [doc/tokio.md](doc/tokio.md): tokio backend internals.
-- [doc/performance.md](doc/performance.md): how omq beat libzmq.
+- [doc/performance.md](doc/performance.md): historical performance journal.
 
 ## Platform and requirements
 

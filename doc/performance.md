@@ -1,7 +1,12 @@
-# How to beat libzmq
+# Performance journal
 
-Design choices and dead ends behind the throughput/latency numbers in
-the [`../COMPARISONS.md`](../COMPARISONS.md) charts.
+This is a historical optimization journal: design choices, dead ends,
+profiles, and one-off measurements captured while improving omq.rs
+throughput and latency.
+
+Treat [`../COMPARISONS.md`](../COMPARISONS.md) and the README charts as
+the current performance story. Numbers below are useful for context, but
+many are point-in-time measurements from specific optimization rounds.
 
 For structure, see [`architecture.md`](architecture.md),
 [`compio.md`](compio.md), [`tokio.md`](tokio.md).
