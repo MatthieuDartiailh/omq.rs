@@ -14,9 +14,8 @@
 //!
 //! The encode and decode state are disjoint: `MessageEncoder` owns the
 //! outbound compressor, `MessageDecoder` owns the inbound decompressor.
-//! This split lets the compio backend hold the encoder under its own
-//! async mutex (separate from the read-loop lock) so dict-compressed
-//! sends no longer contend with the reader.
+//! This split lets runtime code hold encoder and decoder state
+//! independently so dict-compressed sends do not contend with reads.
 
 #[cfg(feature = "lz4")]
 mod common;

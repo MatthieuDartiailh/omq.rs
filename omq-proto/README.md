@@ -2,8 +2,9 @@
 
 Sans-I/O ZMTP 3.x core. Codec, message types, routing logic. No async runtime, no I/O.
 
-Backend-agnostic foundation for `omq-compio` and `omq-tokio`. Use this crate directly only
-when building a custom backend or embedding the ZMTP codec into a non-standard transport.
+Backend-agnostic foundation for `omq-tokio`. Use this crate directly
+only when building a custom backend or embedding the ZMTP codec into a
+non-standard transport.
 
 ## What's inside
 

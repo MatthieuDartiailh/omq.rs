@@ -1,4 +1,4 @@
-# CLAUDE.md — bindings/pyomq
+# CLAUDE.md: bindings/pyomq
 
 ## Purpose
 
@@ -6,13 +6,9 @@ PyO3 binding for `omq-tokio`. Drop-in pyzmq API for Python: sync
 (`pyomq`) and async (`pyomq.asyncio`). Single stable-ABI wheel
 (`abi3-py39`, Python 3.9+) via maturin. Linux and macOS.
 
-See [`doc/architecture.md`](doc/architecture.md) for internals:
+See [`doc/architecture.md`](../../doc/architecture.md) for internals:
 threading model, queue relay, send/recv paths, zero-copy conversions,
 proxy, authentication, error mapping, and known limitations.
-
-See [`doc/performance.md`](doc/performance.md) for the performance
-journey: dead ends, profiling results, and the decisions behind the
-current design. Read it before changing hot paths.
 
 ## Build / test / lint
 

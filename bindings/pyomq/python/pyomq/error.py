@@ -29,7 +29,7 @@ class ZMQBindError(ZMQBaseError):
 
 
 class InterruptedSystemCall(ZMQError):
-    """Interrupted system call (``EINTR``). Never raised by pyomq (io_uring handles EINTR internally)."""
+    """Interrupted system call (``EINTR``). Never raised by pyomq."""
 
 
 class ZMQVersionError(builtins.NotImplementedError, ZMQBaseError):

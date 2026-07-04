@@ -14,7 +14,7 @@
 #
 # Examples:
 #   ./scripts/flamegraph.sh
-#   ./scripts/flamegraph.sh -p omq-compio -b push_pull -t tcp -s 128,512
+#   ./scripts/flamegraph.sh -p omq-tokio -b push_pull -t tcp -s 128,512
 #   ./scripts/flamegraph.sh -b req_rep -t inproc,ipc,tcp
 #   ./scripts/flamegraph.sh -b latency -t tcp -s 256,1024
 set -euo pipefail

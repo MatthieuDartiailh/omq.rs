@@ -224,7 +224,7 @@ def generate_svg(
     panels: dict[str, dict],
     tput_ranges: dict[str, tuple[float, float]] | None = None,
     dict_size_label: str | None = None,
-    backend: str = "compio",
+    backend: str = "tokio",
     hw_label: str | None = None,
 ) -> str:
     links = [label for label, _ in LINK_SPEEDS if label in panels]
@@ -499,7 +499,6 @@ def generate_svg(
 
 
 THREAD_MODELS = {
-    "compio": "2-process",
     "tokio": "2-process",
 }
 
@@ -512,8 +511,8 @@ def detect_hardware() -> str | None:
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=["compio", "tokio"], default="compio",
-                        help="which backend's results to chart (default: compio)")
+    parser.add_argument("--backend", choices=["tokio"], default="tokio",
+                        help="which backend's results to chart (default: tokio)")
     parser.add_argument("--dict-size", type=int, default=None,
                         help="filter dict rows to this dict_size (bytes)")
     parser.add_argument("--tput-10g", type=str, default=None,

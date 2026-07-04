@@ -4,7 +4,7 @@
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. OMQ gives you socket-level messaging patterns that work the same way in-process, between processes, and over the network.
 
-- Two async backends: **tokio** (default, Linux/macOS/Windows) and **compio** (io_uring, Linux)
+- Tokio backend for Linux, macOS, and Windows
 - 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and DGRAM
 - 9 transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `lz4+ws://`, and `lz4+wss://`
 - 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
@@ -28,47 +28,43 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 [Full comparison charts](COMPARISONS.md)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_classic_tcp.svg" alt="PUSH/PULL throughput: classic TCP implementations" width="950">
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_iouring_tcp.svg" alt="PUSH/PULL throughput: io_uring TCP implementations" width="950">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
 </p>
 
 <details>
 <summary>PUSH/PULL by transport</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/classic_tcp.svg" alt="PUSH/PULL throughput: classic TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/classic_ipc.svg" alt="PUSH/PULL throughput: classic IPC" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/classic_inproc.svg" alt="PUSH/PULL throughput: classic inproc" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
 </p>
 </details>
 
 <details>
 <summary>REQ/REP latency</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/classic_tcp.svg" alt="REQ/REP latency: classic TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/tcp.svg" alt="REQ/REP latency: TCP" width="850">
 </p>
 </details>
 
 <details>
 <summary>Fan-out and fan-in</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/classic_tcp.svg" alt="PUSH fan-out: classic TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/tcp.svg" alt="PUSH fan-out: TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/classic_tcp.svg" alt="PUSH fan-in: classic TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/tcp.svg" alt="PUSH fan-in: TCP" width="850">
 </p>
 </details>
 
 <details>
 <summary>PUB/SUB throughput</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/classic_tcp.svg" alt="PUB/SUB throughput: classic TCP" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
 </p>
 </details>
 
@@ -84,28 +80,6 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/tokio.svg" alt="Mechanisms: omq-tokio" width="850">
 </p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/compio.svg" alt="Mechanisms: omq-compio" width="850">
-</p>
-</details>
-
-<details>
-<summary>io_uring backend details</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/iouring_tcp.svg" alt="PUSH/PULL throughput: io_uring TCP" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/iouring_tcp.svg" alt="REQ/REP latency: io_uring TCP" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/iouring_tcp.svg" alt="PUSH fan-out: io_uring TCP" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/iouring_tcp.svg" alt="PUSH fan-in: io_uring TCP" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/iouring_tcp.svg" alt="PUB/SUB throughput: io_uring TCP" width="850">
-</p>
 </details>
 
 ## Install
@@ -117,10 +91,9 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 cargo add omq-tokio
 ```
 
-Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `interop_compio` test suites:
-
-- [`omq-tokio`](omq-tokio/): tokio + mio backend (Linux/macOS/Windows). Works on single-thread and multi-thread tokio runtimes. Recommended backend.
-- [`omq-compio`](omq-compio/): single-thread io_uring/IOCP (Linux; not yet on crates.io). **Experimental.**
+The Rust backend is [`omq-tokio`](omq-tokio/): tokio + mio on Linux,
+macOS, and Windows. It works on single-thread and multi-thread tokio
+runtimes.
 
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
 
@@ -144,8 +117,6 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 | feature           | what it adds                                      | extra deps                       |
 |-------------------|---------------------------------------------------|----------------------------------|
-| `tokio-backend`   | (default) tokio multi-thread backend              | -                                |
-| `compio-backend`  | compio io_uring/IOCP backend                      | -                                |
 | `plain`           | PLAIN username/password auth (RFC 24)             | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
 | `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
@@ -174,13 +145,12 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 ## Workspace
 
-Seven crates, one repo.
+Six crates, one repo.
 
 | Crate | What it does | Unsafe policy |
 |-------|--------------|---------------|
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions | `#![forbid(unsafe_code)]` |
 | [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows) | `#![forbid(unsafe_code)]` |
-| [`omq-compio`](omq-compio/) | Single-thread io_uring / IOCP backend (Linux) | Small unsafe wrappers for single-thread runtime internals |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) | Unsafe C ABI boundary |
 | [`blume`](blume/) | Batching MPSC channel with swap-drain consumer | `#![forbid(unsafe_code)]` |
 | [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch | Unsafe ring core, Miri-tested |
@@ -189,10 +159,9 @@ Seven crates, one repo.
 ## Testing
 
 Every socket type, transport, mechanism, and feature combination is
-covered by integration tests on both backends. The full suite:
+covered by integration tests. The full suite:
 
-- **850+ integration tests** across omq-compio and omq-tokio (every
-  socket-type x transport x mechanism cell).
+- **700+ integration tests** across socket types, transports, and mechanisms.
 - **Protocol fuzzing** (~10M iterations per suite): hand-rolled fuzz of
   the wire parser and the socket-action state machine.
 - **29 soak test scenarios**: peer churn, reconnect storms, PUB/SUB
@@ -201,13 +170,12 @@ covered by integration tests on both backends. The full suite:
   throughput, multi-socket, inproc cross-thread, WebSocket throughput
   and reconnect. Each scenario samples RSS and FD counts to detect leaks.
 - **Loom** coverage for lock-free inproc queue behavior.
-- **Miri** on `yring` and `omq-compio`'s pure unsafe wrappers.
+- **Miri** on `yring`.
 - **Strict SemVer** because it matters.
-- **Cross-runtime interop**: omq-compio <-> omq-tokio over TCP.
 - **Wire interop** with libzmq and pyzmq.
 
 ```sh
-./scripts/test-all.sh             # full sweep, both backends
+./scripts/test-all.sh             # full sweep
 OMQ_FUZZ=1 ./scripts/test-all.sh  # include fuzz suites
 ```
 
@@ -216,11 +184,8 @@ OMQ_FUZZ=1 ./scripts/test-all.sh  # include fuzz suites
 - [COMPARISONS.md](COMPARISONS.md): cross-implementation comparison charts.
 - [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp
   throughput on bandwidth-limited links.
-- [doc/architecture.md](doc/architecture.md): three-layer split, backend
-  comparison.
-- [doc/compio.md](doc/compio.md): compio backend internals.
-- [doc/tokio.md](doc/tokio.md): tokio backend internals.
-- [doc/performance.md](doc/performance.md): historical performance journal.
+- [doc/architecture.md](doc/architecture.md): architecture and tokio
+  backend internals.
 
 ## Platform and requirements
 
@@ -237,13 +202,9 @@ transports. Windows CI is required for merge. Known limitations:
 - `omq-libzmq` is excluded (Unix-only C API surface).
 - Some tests are flaky (timer-sensitive assertions).
 
-`omq-compio` uses io_uring and is Linux-only (6.0+).
-
 Requirements:
 
 - Rust 1.93 or newer (edition 2024).
-- `omq-compio`: Linux 6.0 or newer (io_uring multi-shot recv with
-  provided buffers).
 
 ## Contributing
 

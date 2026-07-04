@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""2-process mechanism benchmark for omq-tokio and omq-compio.
+"""2-process mechanism benchmark for omq-tokio.
 
 Spawns separate PUSH (bind) and PULL (connect) processes per cell,
 each configured via OMQ_BENCH_MECHANISM env var. Results go to
@@ -7,7 +7,7 @@ each configured via OMQ_BENCH_MECHANISM env var. Results go to
 
 Usage:
   scripts/bench_mechanism.py tokio                  # default 3 sizes
-  scripts/bench_mechanism.py compio --chart-sizes    # all 16 chart sizes
+  scripts/bench_mechanism.py tokio --chart-sizes     # all 16 chart sizes
   OMQ_BENCH_SIZES=128,2048 scripts/bench_mechanism.py tokio
 """
 
@@ -183,12 +183,12 @@ def append_jsonl(jsonl_path: Path, rid: str, mechanism: str, size: int, result: 
 def main():
     backends = [a for a in sys.argv[1:] if not a.startswith("-")]
     if not backends:
-        print("usage: bench_mechanism.py <tokio|compio> [--chart-sizes]",
+        print("usage: bench_mechanism.py tokio [--chart-sizes]",
               file=sys.stderr)
         sys.exit(1)
 
     for backend in backends:
-        if backend not in ("tokio", "compio"):
+        if backend != "tokio":
             print(f"unknown backend: {backend}", file=sys.stderr)
             sys.exit(1)
 

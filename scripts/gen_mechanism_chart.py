@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate doc/charts/mechanism/{compio,tokio}.svg from bench JSONL data."""
+"""Generate doc/charts/mechanism/tokio.svg from bench JSONL data."""
 
 import json
 import math
@@ -305,7 +305,7 @@ def main():
     out_dir = repo / "doc" / "charts" / "mechanism"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    backends = sys.argv[1:] if len(sys.argv) > 1 else ["compio", "tokio"]
+    backends = sys.argv[1:] if len(sys.argv) > 1 else ["tokio"]
 
     all_data = {}
     for backend in backends:

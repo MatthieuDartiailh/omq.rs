@@ -3,9 +3,7 @@
 //! ZMTP codec, message + payload types, frame parsing, mechanism
 //! handshakes (NULL / CURVE / BLAKE3ZMQ), compression transforms
 //! (lz4), endpoint parsing, options, and the prefix-
-//! subscription matcher. None of this depends on a runtime -
-//! `omq-tokio` and `omq-compio` (and any future backend) embed it
-//! directly.
+//! subscription matcher. None of this depends on a runtime.
 #![forbid(unsafe_code)]
 
 pub mod backoff;

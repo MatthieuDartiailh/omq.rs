@@ -2,14 +2,14 @@
 """Consolidated benchmark comparison runner.
 
 Runs PUSH/PULL throughput and REQ/REP latency benchmarks across
-implementations (omq-compio, omq-tokio, libzmq, zmq.rs) and writes
+implementations (omq-tokio, libzmq, zmq.rs, rzmq) and writes
 results to benchmarks/comparisons.jsonl.
 
 Usage:
   scripts/run_comparisons.py                        # all impls, tcp+inproc+ipc, latency on
   scripts/run_comparisons.py --quick-run            # 3 sizes only
   scripts/run_comparisons.py --impl rzmq            # single impl
-  scripts/run_comparisons.py --impl omq-compio --impl libzmq  # subset
+  scripts/run_comparisons.py --impl omq-tokio --impl libzmq  # subset
   scripts/run_comparisons.py --transport tcp         # TCP only
   scripts/run_comparisons.py --no-latency           # skip REQ/REP latency
 """
@@ -122,7 +122,7 @@ QUICK_SIZES = [32, 1024, 4096]
 # measurement glitch, not a result. Per-stream (not aggregate), so legit
 # fan-out aggregate bandwidth (pub/sub counts bytes per subscriber) is safe.
 SINGLE_STREAM_MBPS = 12000
-DEFAULT_DURATION = float(os.environ.get("OMQ_BENCH_DURATION", "2.0"))
+DEFAULT_DURATION = float(os.environ.get("OMQ_BENCH_DURATION", "3.0"))
 QUICK_DURATION = 1.5
 DEFAULT_ROUNDS = int(os.environ.get("OMQ_BENCH_ROUNDS", "3"))
 QUICK_ROUNDS = 1
@@ -421,10 +421,7 @@ def run_throughput_cell(
     impl: str = "?",
 ) -> dict | None:
     best = None
-    # Extra retries for inproc: compio cross-thread waker bug causes
-    # intermittent hangs. With 5s timeout per attempt, retries are cheap.
-    effective_rounds = max(rounds, 5) if transport == "inproc" else rounds
-    for _ in range(effective_rounds):
+    for _ in range(rounds):
         result = _run_throughput_once(binary, transport, addr, size,
                                       inproc_subcmd, duration, env=env, impl=impl)
         if result and (best is None or result["msgs_s"] > best["msgs_s"]):
@@ -447,12 +444,13 @@ def _run_throughput_once(
 ) -> dict | None:
     dur = str(duration)
     issues: list = []
+    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
         timeout_s = max(int(duration) + 5, 8)
         output, cpu = capture_with_cpu(binary, inproc_subcmd, fresh_name,
                                        str(size), dur,
-                                       timeout=timeout_s, env=env)
+                                       timeout=timeout_s, env=cell_env)
         result = parse_throughput(output, size)
         if result:
             if _note(issues, cpu > 0, impl, "throughput", transport, size, 1,
@@ -463,7 +461,7 @@ def _run_throughput_once(
 
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
-    push = spawn_process(binary, "push", addr, str(size), env=env)
+    push = spawn_process(binary, "push", addr, str(size), env=cell_env)
     if transport in ("ipc", "ws"):
         time.sleep(0.2)
         connect_addr = addr
@@ -475,7 +473,7 @@ def _run_throughput_once(
         connect_addr = str(port)
     try:
         output = capture_process(binary, "pull", connect_addr, str(size), dur,
-                                 env=env)
+                                 env=cell_env)
         push_cpu = read_proc_cpu(push.pid)
     finally:
         _hard_kill(push)
@@ -495,6 +493,7 @@ def _run_throughput_once(
 def run_pubsub_cell(
     binary: str, transport: str, addr: str, size: int, peers: int,
     inproc_subcmd: str = "inproc-pubsub",
+    pub_needs_peers: bool = False,
     duration: float = DEFAULT_DURATION,
     rounds: int = DEFAULT_ROUNDS,
     env: dict | None = None,
@@ -503,7 +502,8 @@ def run_pubsub_cell(
     best = None
     for _ in range(rounds):
         result = _run_pubsub_once(binary, transport, addr, size, peers,
-                                  inproc_subcmd, duration, env=env, impl=impl)
+                                  inproc_subcmd, pub_needs_peers, duration,
+                                  env=env, impl=impl)
         if result and (best is None or result["msgs_s"] > best["msgs_s"]):
             best = result
     _flush_issues(best)
@@ -512,17 +512,18 @@ def run_pubsub_cell(
 
 def _run_pubsub_once(
     binary: str, transport: str, addr: str, size: int, peers: int,
-    inproc_subcmd: str, duration: float, env: dict | None = None,
-    impl: str = "?",
+    inproc_subcmd: str, pub_needs_peers: bool, duration: float,
+    env: dict | None = None, impl: str = "?",
 ) -> dict | None:
     dur = str(duration)
     issues: list = []
+    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
         timeout_s = max(int(duration) + 5, 8)
         output, cpu = capture_with_cpu(binary, inproc_subcmd, fresh_name,
                                        str(size), dur, str(peers),
-                                       timeout=timeout_s, env=env)
+                                       timeout=timeout_s, env=cell_env)
         result = parse_throughput(output, size)
         if result:
             if _note(issues, cpu > 0, impl, "pubsub", transport, size, peers,
@@ -531,7 +532,10 @@ def _run_pubsub_once(
     else:
         addr = _fresh_addr(addr)
         cleanup_ipc_socket(addr)
-        pub_ = spawn_process(binary, "pub", addr, str(size), str(peers), env=env)
+        pub_args = [binary, "pub", addr, str(size)]
+        if pub_needs_peers:
+            pub_args.append(str(peers))
+        pub_ = spawn_process(*pub_args, env=cell_env)
         if transport in ("ipc", "ws"):
             time.sleep(0.2)
             connect_addr = addr
@@ -546,7 +550,7 @@ def _run_pubsub_once(
         try:
             for _ in range(peers):
                 subs.append(spawn_process(binary, "sub", connect_addr,
-                                          str(size), dur, env=env))
+                                          str(size), dur, env=cell_env))
             time.sleep(0.05)
             timeout_s = max(int(duration) + 5, 8)
             for s in subs:
@@ -629,9 +633,8 @@ def _run_fanout_once(
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
     issues: list = []
-    cell_env = env
+    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
     if push_subcmd == "push-fanout":
-        cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
         if impl == "omq-tokio-mt":
             cell_env["OMQ_BENCH_PULL_CURRENT_THREAD"] = "1"
     # Some peers need the worker count up front to
@@ -762,11 +765,12 @@ def _run_fanin_once(
     cleanup_ipc_socket(addr)
     dur = str(duration)
     issues: list = []
+    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
     # Some peers need the worker count to accept exactly N pushers.
     pull_args = [binary, pull_subcmd, addr, str(size), dur]
     if pull_needs_peers:
         pull_args.append(str(peers))
-    pull = spawn_process(*pull_args, env=env)
+    pull = spawn_process(*pull_args, env=cell_env)
     if transport in ("ipc", "ws"):
         time.sleep(0.2)
         connect_addr = addr
@@ -780,7 +784,7 @@ def _run_fanin_once(
     try:
         for _ in range(peers):
             pushers.append(spawn_process(binary, "push-connect", connect_addr,
-                                         str(size), env=env))
+                                         str(size), env=cell_env))
         stdout, _ = pull.communicate(timeout=max(int(duration) + 10, 15))
         _deregister_proc(pull)
         pusher_cpus = [read_proc_cpu(p.pid) for p in pushers]
@@ -929,27 +933,6 @@ def append_zero_tput_row(
 # ── impl definitions ─────────────────────────────────────────────
 
 IMPLS = {
-    "omq-compio": {
-        "crate": "omq-compio",
-        "bin": "bench_peer_compio",
-        "prefix": "c",
-        "class": "iouring",
-        "transports": ["tcp", "inproc", "ipc", "ws"],
-        "inproc_tput_subcmd": "inproc",
-        "inproc_lat_subcmd": "inproc-latency",
-        "inproc_pubsub_subcmd": "inproc-pubsub",
-        "fanout_push_subcmd": "push-fanout",
-        "fanio_needs_peer_count": True,
-        "supports_pubsub": True,
-    },
-    "omq-compio-st": {
-        "binary_from": "omq-compio",
-        "prefix": "s",
-        "class": "iouring",
-        "transports": ["inproc"],
-        "inproc_tput_subcmd": "inproc-st",
-        "inproc_lat_subcmd": "inproc-st-latency",
-    },
     "omq-tokio": {
         "crate": "omq-tokio",
         "bin": "bench_peer_tokio",
@@ -959,6 +942,7 @@ IMPLS = {
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
         "inproc_pubsub_subcmd": "inproc-pubsub",
+        "pub_needs_peer_count": True,
         "supports_pubsub": True,
     },
     "omq-tokio-mt": {
@@ -969,6 +953,7 @@ IMPLS = {
         "inproc_tput_subcmd": "inproc",
         "inproc_lat_subcmd": "inproc-latency",
         "inproc_pubsub_subcmd": "inproc-pubsub",
+        "pub_needs_peer_count": True,
         "fanout_push_subcmd": "push-fanout",
         "fanio_needs_peer_count": True,
         "supports_pubsub": True,
@@ -1003,7 +988,9 @@ IMPLS = {
         "binary_from": "rzmq",
         "prefix": "R",
         "class": "iouring",
-        "transports": ["tcp", "inproc"],
+        "transports": ["tcp", "inproc", "ipc"],
+        "inproc_tput_subcmd": "inproc",
+        "inproc_lat_subcmd": "inproc-latency",
         "supports_pubsub": True,
         "env": {"RZMQ_IO_URING": "1"},
     },
@@ -1026,15 +1013,6 @@ FANIN_PEER_COUNTS = [2, 4, 8]
 def build_peers(impl_names: set[str], ws_needed: bool):
     binaries = {}
     features = ["ws"] if ws_needed else []
-
-    if "omq-compio" in impl_names or "omq-compio-st" in impl_names:
-        print("==> building omq-compio bench_peer...", file=sys.stderr)
-        cargo_build("omq-compio", "bench_peer_compio", features=features or None)
-        compio_bin = str(ROOT / "target" / "release" / "bench_peer_compio")
-        if "omq-compio" in impl_names:
-            binaries["omq-compio"] = compio_bin
-        if "omq-compio-st" in impl_names:
-            binaries["omq-compio-st"] = compio_bin
 
     if impl_names & {"omq-tokio", "omq-tokio-mt"}:
         print("==> building omq-tokio bench_peer...", file=sys.stderr)
@@ -1254,6 +1232,7 @@ def run_benchmarks(
                         result = run_pubsub_cell(
                             binary, transport, addr, size, peers,
                             inproc_subcmd=subcmd,
+                            pub_needs_peers=impl_def.get("pub_needs_peer_count", False),
                             duration=duration, rounds=rounds,
                             env=impl_def.get("env"), impl=name,
                         )
@@ -1419,8 +1398,8 @@ def main():
     )
     parser.add_argument(
         "--omq", action="store_true",
-        help="rebench only this project's backends (omq-compio, omq-tokio, "
-             "omq-tokio-mt). Competitor data is external and stable, so it is "
+        help="rebench only this project's backends (omq-tokio, omq-tokio-mt). "
+             "Competitor data is external and stable, so it is "
              "reused from the JSONL cache. The fast iteration path.",
     )
     parser.add_argument(
@@ -1520,15 +1499,15 @@ def main():
 
     impl_names = set(args.impls) if args.impls else set()
     if args.omq:
-        impl_names |= {"omq-compio", "omq-tokio", "omq-tokio-mt"}
+        impl_names |= {"omq-tokio", "omq-tokio-mt"}
     if not impl_names:
         impl_names = set(IMPLS.keys())
 
     binaries = build_peers(impl_names, ws_needed)
 
     versions = []
-    if impl_names & {"omq-compio", "omq-compio-st", "omq-tokio"}:
-        versions.append(f"omq {cargo_version('omq-compio')}")
+    if impl_names & {"omq-tokio", "omq-tokio-mt"}:
+        versions.append(f"omq {cargo_version('omq-tokio')}")
     if "libzmq" in impl_names:
         versions.append(f"libzmq {libzmq_version()}")
     if "zmq.rs" in impl_names:
