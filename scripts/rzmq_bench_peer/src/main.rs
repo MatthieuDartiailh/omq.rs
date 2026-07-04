@@ -41,23 +41,6 @@ fn cpu_time_secs() -> f64 {
     u + s
 }
 
-fn print_latency(rtts: &[u64], iterations: usize) {
-    let percentile = |sorted: &[u64], p: f64| -> f64 {
-        let n = sorted.len();
-        let mut idx = (n as f64 * p / 100.0) as usize;
-        if idx >= n {
-            idx = n - 1;
-        }
-        sorted[idx] as f64 / 1000.0
-    };
-
-    let p50 = percentile(rtts, 50.0);
-    let p99 = percentile(rtts, 99.0);
-    let p999 = percentile(rtts, 99.9);
-    let max = rtts[iterations - 1] as f64 / 1000.0;
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
-}
-
 fn print_latency_cpu(rtts: &[u64], iterations: usize, cpu: f64, elapsed: f64) {
     let percentile = |sorted: &[u64], p: f64| -> f64 {
         let n = sorted.len();
@@ -260,13 +243,15 @@ async fn run_pull_bind(addr: &str, size: usize, duration: Duration) {
         }
     });
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     tokio::time::sleep(duration).await;
     let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     let final_count = count.load(Ordering::Relaxed);
     recv_handle.abort();
 
-    println!("{final_count} {elapsed:.6} {size}");
+    println!("{final_count} {elapsed:.6} {size} {cpu:.6}");
     std::process::exit(0);
 }
 
@@ -301,13 +286,15 @@ async fn run_sub(addr: &str, size: usize, duration: Duration) {
         }
     });
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     tokio::time::sleep(duration).await;
     let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     let final_count = count.load(Ordering::Relaxed);
     recv_handle.abort();
 
-    println!("{final_count} {elapsed:.6} {size}");
+    println!("{final_count} {elapsed:.6} {size} {cpu:.6}");
     std::process::exit(0);
 }
 
@@ -329,13 +316,15 @@ async fn run_pull(addr: &str, size: usize, duration: Duration) {
         }
     });
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     tokio::time::sleep(duration).await;
     let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     let final_count = count.load(Ordering::Relaxed);
     recv_handle.abort();
 
-    println!("{final_count} {elapsed:.6} {size}");
+    println!("{final_count} {elapsed:.6} {size} {cpu:.6}");
     std::process::exit(0);
 }
 
@@ -372,15 +361,17 @@ async fn run_inproc_throughput(addr: &str, size: usize, duration: Duration) {
     tokio::time::sleep(Duration::from_millis(500)).await;
     count.store(0, Ordering::Relaxed);
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     tokio::time::sleep(duration).await;
     let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     let final_count = count.load(Ordering::Relaxed);
 
     push_handle.abort();
     recv_handle.abort();
 
-    println!("{final_count} {elapsed:.6} {size}");
+    println!("{final_count} {elapsed:.6} {size} {cpu:.6}");
     std::process::exit(0);
 }
 

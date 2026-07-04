@@ -129,6 +129,7 @@ QUICK_ROUNDS = 1
 LATENCY_ITERATIONS = 5_000
 LATENCY_WARMUP = 500
 LATENCY_TIMEOUT = 15
+RUN_ID_TS_LEN = len("YYYY-MM-DDTHH:MM:SS")
 
 
 # ── formatting ────────────────────────────────────────────────────
@@ -139,6 +140,19 @@ def size_label(n: int) -> str:
     if n >= 1024:
         return f"{n // 1024} KiB"
     return f"{n} B"
+
+
+def make_run_id(name: str | None) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    if not name:
+        return ts
+    if len(name) >= RUN_ID_TS_LEN:
+        try:
+            datetime.strptime(name[:RUN_ID_TS_LEN], "%Y-%m-%dT%H:%M:%S")
+            return name
+        except ValueError:
+            pass
+    return f"{ts}-{name}"
 
 
 # ── build ─────────────────────────────────────────────────────────
@@ -1481,7 +1495,7 @@ def main():
     )
     parser.add_argument(
         "--id", type=str, default=None,
-        help="override run_id (default: ISO timestamp)",
+        help="run name suffix; non-ISO values are prefixed with an ISO timestamp",
     )
     args = parser.parse_args()
 
@@ -1495,7 +1509,7 @@ def main():
     else:
         duration = args.duration if args.duration is not None else DEFAULT_DURATION
         rounds = args.rounds if args.rounds is not None else DEFAULT_ROUNDS
-    run_id = args.id or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    run_id = make_run_id(args.id)
     run_latency = not args.no_latency
     run_pubsub = not args.no_pubsub
     pubsub_peers = (
