@@ -12,7 +12,7 @@
 //! Push: binds, sends <msg_size> byte messages forever.
 //! Pull: connects, warms up for 500 ms, then counts messages for <duration>
 //!       seconds and prints one line to stdout:
-//!         <count> <elapsed_secs> <msg_size>
+//!         <count> <elapsed_secs> <msg_size> <cpu_secs>
 //! Rep:  binds, echoes received messages back forever.
 //! Req:  connects, runs warmup + measured round-trips, prints latency
 //!       percentiles (p50 p99 p999 max iterations) in microseconds.
@@ -124,6 +124,7 @@ async fn main() {
 async fn run_push(addr: &str, size: usize) {
     let mut socket = PushSocket::new();
     socket.bind(addr).await.expect("push bind");
+    wait_for_start_barrier().await;
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
         if socket
@@ -133,6 +134,21 @@ async fn run_push(addr: &str, size: usize) {
         {
             tokio::task::yield_now().await;
         }
+    }
+}
+
+async fn wait_for_start_barrier() {
+    let Some(start_at) = std::env::var("OMQ_BENCH_START_AT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    if start_at > now {
+        tokio::time::sleep(Duration::from_secs_f64(start_at - now)).await;
     }
 }
 
@@ -210,6 +226,7 @@ async fn run_pull_bind(addr: &str, size: usize, duration: Duration) {
     let mut socket = PullSocket::new();
     socket.bind(addr).await.expect("pull bind");
 
+    wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let count = Arc::new(AtomicU64::new(0));
@@ -223,19 +240,22 @@ async fn run_pull_bind(addr: &str, size: usize, duration: Duration) {
         }
     });
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     tokio::time::sleep(duration).await;
     let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     let final_count = count.load(Ordering::Relaxed);
     recv_handle.abort();
 
-    println!("{final_count} {elapsed:.6} {size}");
+    println!("{final_count} {elapsed:.6} {size} {cpu:.6}");
     std::process::exit(0);
 }
 
 async fn run_pub(addr: &str, size: usize) {
     let mut socket = PubSocket::new();
     socket.bind(addr).await.expect("pub bind");
+    wait_for_start_barrier().await;
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
         if socket
@@ -253,6 +273,7 @@ async fn run_sub(addr: &str, size: usize, duration: Duration) {
     socket.connect(addr).await.expect("sub connect");
     socket.subscribe("").await.expect("subscribe");
 
+    wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let count = Arc::new(AtomicU64::new(0));
@@ -266,13 +287,15 @@ async fn run_sub(addr: &str, size: usize, duration: Duration) {
         }
     });
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     tokio::time::sleep(duration).await;
     let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     let final_count = count.load(Ordering::Relaxed);
     recv_handle.abort();
 
-    println!("{final_count} {elapsed:.6} {size}");
+    println!("{final_count} {elapsed:.6} {size} {cpu:.6}");
     std::process::exit(0);
 }
 
@@ -280,6 +303,7 @@ async fn run_pull(addr: &str, size: usize, duration: Duration) {
     let mut socket = PullSocket::new();
     socket.connect(addr).await.expect("pull connect");
 
+    wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // zeromq 0.6's PullSocket::recv stalls within a few thousand messages when
@@ -297,13 +321,15 @@ async fn run_pull(addr: &str, size: usize, duration: Duration) {
         }
     });
 
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
     tokio::time::sleep(duration).await;
     let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     let final_count = count.load(Ordering::Relaxed);
     recv_handle.abort();
 
-    println!("{final_count} {elapsed:.6} {size}");
+    println!("{final_count} {elapsed:.6} {size} {cpu:.6}");
     // zeromq spawns background tokio tasks that don't shut down cleanly on
     // socket drop; without this the runtime blocks in sigsuspend indefinitely,
     // keeping the pipe open and stalling the caller's command substitution.

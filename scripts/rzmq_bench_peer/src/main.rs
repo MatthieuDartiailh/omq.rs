@@ -14,24 +14,32 @@
 //! Push: binds, sends <msg_size> byte messages forever.
 //! Pull: connects, warms up for 500 ms, then counts messages for <duration>
 //!       seconds and prints one line to stdout:
-//!         <count> <elapsed_secs> <msg_size>
+//!         <count> <elapsed_secs> <msg_size> <cpu_secs>
 //! Rep:  binds, echoes received messages back forever.
 //! Req:  connects, runs warmup + measured round-trips, prints latency
 //!       percentiles (p50 p99 p999 max iterations) in microseconds.
 //! Inproc: single-process PUSH/PULL throughput.
 //! Inproc-latency: single-process REQ/REP latency.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rzmq::{Context, Msg, SocketType};
-
+use rzmq::socket::options::{
+    IO_URING_RCVMULTISHOT, IO_URING_SESSION_ENABLED, IO_URING_SNDZEROCOPY,
+};
+use rzmq::{Context, Msg, Socket, SocketType};
 
 fn cpu_time_secs() -> f64 {
     let mut usage = libc::rusage {
-        ru_utime: libc::timeval { tv_sec: 0, tv_usec: 0 },
-        ru_stime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ru_utime: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        ru_stime: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
         ..unsafe { std::mem::zeroed() }
     };
     // SAFETY: passing a valid pointer to a zeroed rusage struct.
@@ -80,6 +88,44 @@ fn resolve_bind_addr(s: &str) -> String {
 
 fn leaked_payload(size: usize) -> &'static [u8] {
     Box::leak(vec![b'x'; size].into_boxed_slice())
+}
+
+fn use_io_uring() -> bool {
+    std::env::var_os("RZMQ_IO_URING").is_some_and(|v| v != "0")
+}
+
+async fn configure_socket(socket: &Socket) {
+    if !use_io_uring() {
+        return;
+    }
+
+    socket
+        .set_option_raw(IO_URING_SESSION_ENABLED, &(1i32).to_ne_bytes())
+        .await
+        .expect("enable io_uring session");
+    socket
+        .set_option_raw(IO_URING_SNDZEROCOPY, &(1i32).to_ne_bytes())
+        .await
+        .expect("enable io_uring zerocopy send");
+    socket
+        .set_option_raw(IO_URING_RCVMULTISHOT, &(1i32).to_ne_bytes())
+        .await
+        .expect("enable io_uring multishot recv");
+}
+
+async fn wait_for_start_barrier() {
+    let Some(start_at) = std::env::var("OMQ_BENCH_START_AT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    if start_at > now {
+        tokio::time::sleep(Duration::from_secs_f64(start_at - now)).await;
+    }
 }
 
 #[tokio::main]
@@ -158,7 +204,9 @@ async fn main() {
 async fn run_push(addr: &str, size: usize) {
     let ctx = Context::new().expect("context");
     let push = ctx.socket(SocketType::Push).expect("push socket");
+    configure_socket(&push).await;
     push.bind(addr).await.expect("push bind");
+    wait_for_start_barrier().await;
     let payload = leaked_payload(size);
     loop {
         if push.send(Msg::from_static(payload)).await.is_err() {
@@ -170,15 +218,11 @@ async fn run_push(addr: &str, size: usize) {
 async fn run_rep(addr: &str) {
     let ctx = Context::new().expect("context");
     let rep = ctx.socket(SocketType::Rep).expect("rep socket");
+    configure_socket(&rep).await;
     rep.bind(addr).await.expect("rep bind");
-    loop {
-        match rep.recv().await {
-            Ok(msg) => {
-                if rep.send(msg).await.is_err() {
-                    break;
-                }
-            }
-            Err(_) => break,
+    while let Ok(msg) = rep.recv().await {
+        if rep.send(msg).await.is_err() {
+            break;
         }
     }
 }
@@ -186,6 +230,7 @@ async fn run_rep(addr: &str) {
 async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
     let ctx = Context::new().expect("context");
     let req = ctx.socket(SocketType::Req).expect("req socket");
+    configure_socket(&req).await;
     req.connect(addr).await.expect("req connect");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -216,7 +261,9 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
 async fn run_push_connect(addr: &str, size: usize) {
     let ctx = Context::new().expect("context");
     let push = ctx.socket(SocketType::Push).expect("push socket");
+    configure_socket(&push).await;
     push.connect(addr).await.expect("push connect");
+    wait_for_start_barrier().await;
     let payload = leaked_payload(size);
     loop {
         if push.send(Msg::from_static(payload)).await.is_err() {
@@ -228,8 +275,10 @@ async fn run_push_connect(addr: &str, size: usize) {
 async fn run_pull_bind(addr: &str, size: usize, duration: Duration) {
     let ctx = Context::new().expect("context");
     let pull = ctx.socket(SocketType::Pull).expect("pull socket");
+    configure_socket(&pull).await;
     pull.bind(addr).await.expect("pull bind");
 
+    wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let count = Arc::new(AtomicU64::new(0));
@@ -258,7 +307,9 @@ async fn run_pull_bind(addr: &str, size: usize, duration: Duration) {
 async fn run_pub(addr: &str, size: usize) {
     let ctx = Context::new().expect("context");
     let pub_ = ctx.socket(SocketType::Pub).expect("pub socket");
+    configure_socket(&pub_).await;
     pub_.bind(addr).await.expect("pub bind");
+    wait_for_start_barrier().await;
     let payload = leaked_payload(size);
     loop {
         if pub_.send(Msg::from_static(payload)).await.is_err() {
@@ -270,9 +321,11 @@ async fn run_pub(addr: &str, size: usize) {
 async fn run_sub(addr: &str, size: usize, duration: Duration) {
     let ctx = Context::new().expect("context");
     let sub = ctx.socket(SocketType::Sub).expect("sub socket");
+    configure_socket(&sub).await;
     sub.set_option(6, b"").await.expect("subscribe");
     sub.connect(addr).await.expect("sub connect");
 
+    wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let count = Arc::new(AtomicU64::new(0));
@@ -301,8 +354,10 @@ async fn run_sub(addr: &str, size: usize, duration: Duration) {
 async fn run_pull(addr: &str, size: usize, duration: Duration) {
     let ctx = Context::new().expect("context");
     let pull = ctx.socket(SocketType::Pull).expect("pull socket");
+    configure_socket(&pull).await;
     pull.connect(addr).await.expect("pull connect");
 
+    wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let count = Arc::new(AtomicU64::new(0));
@@ -385,14 +440,9 @@ async fn run_inproc_latency(addr: &str, size: usize, iterations: usize, warmup: 
     req.connect(addr).await.expect("req connect");
 
     let rep_handle = tokio::spawn(async move {
-        loop {
-            match rep.recv().await {
-                Ok(msg) => {
-                    if rep.send(msg).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(msg) = rep.recv().await {
+            if rep.send(msg).await.is_err() {
+                break;
             }
         }
     });

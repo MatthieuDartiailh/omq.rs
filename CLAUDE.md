@@ -2,7 +2,7 @@
 
 ## Workspace layout
 
-Six-crate Cargo workspace; `bindings/` is excluded and built
+Five-crate Cargo workspace; `bindings/` is excluded and built
 out-of-tree (maturin etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
@@ -12,9 +12,7 @@ out-of-tree (maturin etc.).
   No async, no I/O. Mirrors `rustls::ConnectionCommon` / `quinn-proto`.
 - **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
   Works on Linux and macOS (and likely other mio targets).
-- **`omq-compio`** -- single-threaded compio backend (io_uring on
-  Linux, IOCP on Windows). Not available on macOS.
-- **`blume`** -- batching MPSC channel for `omq-compio` inbound delivery.
+- **`blume`** -- batching MPSC channel for same-thread inproc delivery.
 - **`yring`** -- bounded SPSC ring buffer for inproc transport.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq.so` /
   `.a`). Drop-in replacement: ships `zmq.h`, implements the `zmq_*`
@@ -22,9 +20,8 @@ out-of-tree (maturin etc.).
 - **`bindings/pyomq`** -- PyO3 wrapper over `omq-tokio`. Own `Cargo.lock`.
   Build: `cd bindings/pyomq && maturin develop --release`.
 
-Both backends re-export `omq-proto`'s public API and share an identical
-public `Socket` API. Verified by `tests/coverage_matrix.rs` (both) and
-`tests/interop/` (cross-runtime TCP and WS tests).
+`omq-tokio` re-exports `omq-proto`'s public API. Its public `Socket` API
+is covered by `tests/coverage_matrix.rs`.
 
 ## Build / test / bench
 
@@ -37,7 +34,7 @@ Quick reference:
 cargo build --workspace
 cargo fmt                                # pre-commit hook checks this
 cargo clippy --workspace --all-targets   # pre-commit hook checks this
-./scripts/test-all.sh                    # full sweep, both backends
+./scripts/test-all.sh                    # full sweep
 ```
 
 **HARD RULE:** Clippy must pass under all three configurations before
@@ -61,10 +58,6 @@ Lints: `missing_debug_implementations` = **deny**,
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for comparison benchmark infra,
 chart generation, and release process.
-
-**interop dep constraint:** `tests/interop/Cargo.toml`'s compio
-dep must use the same version as `omq-compio`'s dep. Different
-versions link two `compio-runtime` instances -> TLS mismatch panic.
 
 ## Cargo features
 
@@ -133,14 +126,11 @@ wire bytes genuinely differ per peer (e.g. per-peer encryption keys).
 
 ## Architecture summary
 
-Three-layer split: `omq-proto` (sans-I/O ZMTP codec) -> backend
-(`omq-tokio` or `omq-compio`) -> user `Socket` API. Two queues per
-socket: one inbound, one outbound. Per-connection driver tasks bridge
-queues and wire. Full detail in `doc/`:
+Three-layer split: `omq-proto` (sans-I/O ZMTP codec) -> `omq-tokio`
+backend -> user `Socket` API. Two queues per socket: one inbound,
+one outbound. Per-connection driver tasks bridge queues and wire.
+Full detail in `doc/`:
 [`architecture.md`](doc/architecture.md),
-[`tokio.md`](doc/tokio.md),
-[`compio.md`](doc/compio.md),
-[`performance.md`](doc/performance.md),
 [`libzmq/`](doc/libzmq/).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
@@ -161,13 +151,6 @@ encodes, driver flushes via `data_ready` select arm. `PeerSend` enum
 slots without pump tasks. Recv bypass: `ConnectionDriver` pushes
 straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER go
 through actor for identity routing.
-
-**omq-compio hot path.** Single-threaded, cooperative. `DirectIoState`
-per wire peer: `EncodedQueueCell` (Cell-based borrow, no atomics) for
-send bypass. `recv_claim: AtomicU8` arbitrates driver vs user owning
-the read path (direct-recv). Multi-shot recv from io_uring `BUF_RING`
-pool. Cell fields (`driver_in_select`, `handshake_done`) avoid atomic
-overhead on the single-thread runtime.
 
 **Inproc.** No ZMTP, no driver. Cross-thread SPSC via `yring`
 (lock-free ring buffer, 64 B `Message` by value). Same-thread via

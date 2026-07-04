@@ -16,7 +16,7 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 | Shared-queue work stealing | Round-robin types (PUSH/DEALER) share one `flume` queue. Each connection driver polls it in a `select!` arm, draining up to 256 messages per wakeup. |
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_classic_tcp.svg" alt="PUSH/PULL throughput: classic TCP implementations" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_classic_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="850">
 </p>
 
 ## Usage
@@ -38,8 +38,8 @@ let msg = pull.recv().await?;
 
 ## Internals
 
-[`doc/tokio.md`](../doc/tokio.md) covers the actor shape, send/recv bypass, routing
-strategies, and arena encoding threshold.
+[`doc/architecture.md`](../doc/architecture.md) covers the actor shape,
+send/recv bypass, routing strategies, and arena encoding threshold.
 
 ## License
 

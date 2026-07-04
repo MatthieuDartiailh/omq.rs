@@ -61,11 +61,9 @@ is unreliable on loopback due to kernel buffering.
 
 ```sh
 cargo bench -p omq-tokio  --features lz4 --bench compression
-cargo bench -p omq-compio --features lz4 --bench compression
 
 # Generate charts
 python3 scripts/gen_compression_chart.py --backend tokio
-python3 scripts/gen_compression_chart.py --backend compio
 ```
 
 Environment variables:

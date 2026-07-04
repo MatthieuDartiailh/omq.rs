@@ -2,8 +2,7 @@
 """Generate comparison SVG charts from benchmarks/comparisons.jsonl.
 
 Produces:
-  doc/charts/pushpull/classic_tcp.svg  — TCP throughput + CPU%, classic backends
-  doc/charts/pushpull/iouring_tcp.svg  — TCP throughput + CPU%, io_uring backends
+  doc/charts/pushpull/tcp.svg  - TCP throughput + CPU%
 """
 
 import json
@@ -14,23 +13,20 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
+CHART_SIZES = {16, 64, 256, 1024, 4096, 16384}
 
 COLORS = {
     "libzmq": "#eab308",
-    "omq-compio": "#7c3aed",
-    "omq-compio-st": "#ff69b4",
     "omq-tokio": "#f97316",
     "omq-tokio-mt": "#dc2626",
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
-    "rzmq-iouring": "#16a34a",
+    "rzmq-iouring": "#15803d",
     "omq-libzmq": "#06b6d4",
 }
 
 LABELS = {
     "libzmq": "libzmq v4.3.5",
-    "omq-compio": "omq-compio (ST)",
-    "omq-compio-st": "omq-compio (ST)",
     "omq-tokio": "omq-tokio (ST)",
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0",
@@ -112,7 +108,7 @@ def load_data(transport: str, impls: list[str]) -> dict:
                 if elapsed > 0 and cpu_time > 0:
                     lat_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
-    sizes = sorted(s for s in tput if s <= 32768)
+    sizes = sorted(s for s in tput if s in CHART_SIZES)
     return {"sizes": sizes, "tput": tput, "tput_cpu": tput_cpu,
             "lat": lat, "lat_cpu": lat_cpu}
 
@@ -331,8 +327,7 @@ def draw_throughput_panel(
 
     # dashed msg/s lines
     draw_order = [name for name in
-                  ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio",
-                   "omq-compio-st", "omq-compio"]
+                  ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -409,8 +404,7 @@ def draw_latency_panel(
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["rzmq-iouring", "libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs",
-                   "omq-compio-st", "omq-compio"]
+                  ["rzmq-iouring", "libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -571,8 +565,7 @@ def draw_throughput_cpu_panel(
     L.append(svg_text(40, mid_y, "CPU %", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["rzmq-iouring", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
-                   "omq-compio-st", "omq-compio", "rzmq", "zmq.rs"]
+                  ["rzmq-iouring", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs"]
                   if name in impls]
 
     # dotted CPU% lines
@@ -702,7 +695,7 @@ def draw_latency_cpu_panel(
 
     draw_order = [name for name in
                   ["rzmq-iouring", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
-                   "rzmq", "zmq.rs", "omq-compio-st", "omq-compio"]
+                   "rzmq", "zmq.rs"]
                   if name in impls]
 
     # dotted CPU% lines (right axis)
@@ -1153,7 +1146,7 @@ def load_pubsub_data(transport: str, impls: list[str], peers: int) -> dict:
             if elapsed > 0 and cpu_time > 0:
                 tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
-    sizes = sorted(s for s in tput if s <= 32768)
+    sizes = sorted(s for s in tput if s in CHART_SIZES)
     return {"sizes": sizes, "tput": tput, "tput_cpu": tput_cpu}
 
 
@@ -1297,7 +1290,7 @@ def load_fanio_data(transport: str, impls: list[str], peers: int,
             if elapsed > 0 and cpu_time > 0:
                 tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
-    sizes = sorted(s for s in tput if s <= 32768)
+    sizes = sorted(s for s in tput if s in CHART_SIZES)
     return {"sizes": sizes, "tput": tput, "tput_cpu": tput_cpu}
 
 
@@ -1412,16 +1405,11 @@ def main():
     FIXED_INPROC_LAT_MAX = 40.0
     hw = detect_hardware()
 
-    # ── Cross-impl charts, split by I/O backend league ────────
-    # classic = epoll/mio impls; iouring = io_uring impls. omq's own line is
-    # omq-tokio in the classic league, omq-compio in the io_uring league.
-    classic_overrides = {
+    # ── Cross-impl charts ──────────────────────────────────────
+    label_overrides = {
         "omq-tokio": "omq-tokio (ST)",
         "zmq.rs": "zmq.rs v0.6.0 (MT)",
         "rzmq": "rzmq v0.5.22 (MT)",
-    }
-    iouring_overrides = {
-        "omq-compio": "omq-compio (ST)",
         "rzmq-iouring": "rzmq v0.5.22 (io_uring, MT)",
     }
     label_for = {
@@ -1430,32 +1418,31 @@ def main():
         "inproc": "inproc",
     }
 
-    # (league, transport, impls, overrides, log).
+    tcp_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
+    ipc_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
+    inproc_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "rzmq", "rzmq-iouring"]
+
+    # (transport, impls, log).
     cross_charts = [
-        ("classic", "tcp", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides, False),
-        ("classic", "ipc", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides, False),
-        ("classic", "inproc", ["libzmq", "omq-tokio", "omq-tokio-mt", "rzmq"], classic_overrides, True),
-        ("iouring", "tcp", ["omq-compio", "rzmq-iouring"], iouring_overrides, False),
-        ("iouring", "ipc", ["omq-compio"], iouring_overrides, False),
-        ("iouring", "inproc", ["omq-compio", "rzmq-iouring"], iouring_overrides, True),
+        ("tcp", tcp_impls, False),
+        ("ipc", ipc_impls, False),
+        ("inproc", inproc_impls, True),
     ]
 
-    for league, transport, impls, overrides, log in cross_charts:
+    for transport, impls, log in cross_charts:
         data = load_data(transport, impls)
         if not data["sizes"]:
             continue
         label = label_for[transport]
-        if league == "iouring":
-            label = f"io_uring, {label}"
 
         svg = generate_chart_cpu(data, impls, label,
                                  fixed_gbs_max=None if log else FIXED_GBS_MAX,
                                  log_gbs=log,
                                  hw_label=hw,
-                                 label_overrides=overrides,
+                                 label_overrides=label_overrides,
                                  show_st_mt=True)
         if svg:
-            out = REPO / "doc" / "charts" / "pushpull" / f"{league}_{transport}.svg"
+            out = REPO / "doc" / "charts" / "pushpull" / f"{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
@@ -1463,43 +1450,37 @@ def main():
         lat_max = FIXED_INPROC_LAT_MAX if transport == "inproc" else FIXED_LAT_MAX
         svg = generate_latency_chart_cpu(data, impls, label,
                                          fixed_lat_max=lat_max, hw_label=hw,
-                                         label_overrides=overrides,
+                                         label_overrides=label_overrides,
                                          show_st_mt=True)
         if svg:
-            out = REPO / "doc" / "charts" / "reqrep" / f"{league}_{transport}.svg"
+            out = REPO / "doc" / "charts" / "reqrep" / f"{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
 
     # ── PUB/SUB charts ──────────────────────────────────────────
-    pubsub_peer_counts = [1, 8, 64]
+    pubsub_peer_counts = [1, 8, 32]
 
     def pubsub_title(peers, tl):
         sub_label = "1 subscriber" if peers == 1 else f"{peers} subscribers"
         return f"PUB/SUB throughput, {sub_label}: {tl}"
 
-    # PUB/SUB cross-impl charts, split by league (TCP only)
-    for league, impls, overrides in [
-        ("classic", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides),
-        ("iouring", ["omq-compio", "rzmq-iouring"], iouring_overrides),
-    ]:
-        transport_label = "TCP loopback" if league == "classic" else "io_uring, TCP loopback"
-        panels = [
-            (p, load_pubsub_data("tcp", impls, p))
-            for p in pubsub_peer_counts
-        ]
-        if any(d["sizes"] for _, d in panels):
-            svg = generate_multi_panel_cpu_chart(
-                panels, impls, transport_label,
-                hw_label=hw, title_fn=pubsub_title,
-                label_overrides=overrides, show_st_mt=True,
-            )
-            if svg:
-                out = REPO / "doc" / "charts" / "pubsub" / f"{league}_tcp.svg"
-                out.write_text(svg)
-                print(f"Written: {out}", file=sys.stderr)
+    panels = [
+        (p, load_pubsub_data("tcp", tcp_impls, p))
+        for p in pubsub_peer_counts
+    ]
+    if any(d["sizes"] for _, d in panels):
+        svg = generate_multi_panel_cpu_chart(
+            panels, tcp_impls, "TCP loopback",
+            hw_label=hw, title_fn=pubsub_title,
+            label_overrides=label_overrides, show_st_mt=True,
+        )
+        if svg:
+            out = REPO / "doc" / "charts" / "pubsub" / "tcp.svg"
+            out.write_text(svg)
+            print(f"Written: {out}", file=sys.stderr)
 
-    # ── Fan-out / fan-in charts (TCP only), split by backend league ─────
+    # ── Fan-out / fan-in charts (TCP only) ──────────────────────
     fanio_peers = [2, 4, 8]
 
     def fanout_title(peers, tl):
@@ -1508,49 +1489,42 @@ def main():
     def fanin_title(peers, tl):
         return f"PUSH fan-in ({peers} PUSH → 1 PULL): {tl}"
 
-    fanio_leagues = [
-        ("classic", ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"], classic_overrides),
-        ("iouring", ["omq-compio", "rzmq-iouring"], iouring_overrides),
-    ]
-
     for kind, tfn, dir_name in [
         ("fan_out", fanout_title, "fanout"),
         ("fan_in", fanin_title, "fanin"),
     ]:
-        for league, impls, overrides in fanio_leagues:
-            transport_label = "TCP loopback" if league == "classic" else "io_uring, TCP loopback"
-            panels = [
-                (p, load_fanio_data("tcp", impls, p, kind))
-                for p in fanio_peers
-            ]
-            if not any(d["sizes"] for _, d in panels):
-                continue
-            svg = generate_multi_panel_cpu_chart(
-                panels, impls, transport_label,
-                hw_label=hw,
-                title_fn=tfn,
-                label_overrides=overrides,
-                show_st_mt=True,
-            )
-            if svg:
-                out = REPO / "doc" / "charts" / "pushpull" / dir_name / f"{league}_tcp.svg"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(svg)
-                print(f"Written: {out}", file=sys.stderr)
-
-
-    # ── Main hero charts, one per backend league ─────────────────
-    from gen_main_chart import (generate_main_chart, load_data as load_main_data,
-                                FAMILIES)
-    tput, _lat, msgs = load_main_data()
-    for family, cfg in FAMILIES.items():
-        svg = generate_main_chart(tput, msgs, cfg["impls"], cfg["draw_order"],
-                                  cfg["title"], hw)
+        panels = [
+            (p, load_fanio_data("tcp", tcp_impls, p, kind))
+            for p in fanio_peers
+        ]
+        if not any(d["sizes"] for _, d in panels):
+            continue
+        svg = generate_multi_panel_cpu_chart(
+            panels, tcp_impls, "TCP loopback",
+            hw_label=hw,
+            title_fn=tfn,
+            label_overrides=label_overrides,
+            show_st_mt=True,
+        )
         if svg:
-            out = REPO / "doc" / "charts" / f"main_{family}_tcp.svg"
+            out = REPO / "doc" / "charts" / "pushpull" / dir_name / "tcp.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
+
+
+    # ── Main hero charts ────────────────────────────────────────
+    from gen_main_chart import (MAIN_DRAW_ORDER, MAIN_IMPLS, MAIN_TITLE,
+                                generate_main_chart,
+                                load_data as load_main_data)
+    tput, _lat, msgs = load_main_data()
+    svg = generate_main_chart(tput, msgs, MAIN_IMPLS, MAIN_DRAW_ORDER,
+                              MAIN_TITLE, hw)
+    if svg:
+        out = REPO / "doc" / "charts" / "main_tcp.svg"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(svg)
+        print(f"Written: {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":

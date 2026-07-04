@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run every test in the workspace + bindings against every supported
-# Cargo feature combination on both backends. Used as the "test
+# Cargo feature combination. Used as the "test
 # everything" entry point. Exits non-zero on the first failing step.
 #
 # Knobs:
@@ -94,8 +94,7 @@ par_wait() {
 # 1) Default workspace: NULL mechanism + tcp/ipc/inproc/udp,
 #    no compression. Smallest deploy shape.
 #    No --workspace: uses default-members, which excludes the example
-#    crates. zguide-compio and zguide-tokio depend on mutually
-#    exclusive omq features and cannot be built in one invocation.
+#    crates.
 # ---------------------------------------------------------------- #
 run cargo build --all-targets
 run cargo clippy --all-targets --no-deps -- -D warnings
@@ -111,15 +110,10 @@ run cargo test
 # ---------------------------------------------------------------- #
 for feature in plain curve blake3zmq; do
     par run cargo test -p omq-tokio  --features "$feature" --test "$feature"
-    par run cargo test -p omq-compio --features "$feature" --test "$feature"
 done
 par run cargo test -p omq-tokio  --features lz4 --test lz4_tcp --test lz4_pub_sub
-par run cargo test -p omq-compio --features lz4 --test lz4_tcp
 par run cargo test -p omq-tokio  --features plain --test interop_pyzmq_plain
 par run cargo test -p omq-tokio  --features curve --test interop_pyzmq_curve
-par run cargo test -p omq-compio --features curve --test interop_pyzmq_curve
-par run cargo test -p omq-interop-tests --test tcp
-par run cargo test -p omq-interop-tests --test ws --features ws
 par_wait
 
 # ---------------------------------------------------------------- #
@@ -130,7 +124,6 @@ par_wait
 all_features='plain curve blake3zmq lz4'
 par run cargo test -p omq-proto  --features "$all_features"
 par run cargo test -p omq-tokio  --features "$all_features"
-par run cargo test -p omq-compio --features "$all_features"
 par_wait
 
 # ---------------------------------------------------------------- #
@@ -139,7 +132,6 @@ par_wait
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
     par run cargo test -p omq-tokio  --features fuzz --release
-    par run cargo test -p omq-compio --features fuzz --release
     par_wait
 fi
 

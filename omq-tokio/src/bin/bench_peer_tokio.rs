@@ -144,7 +144,8 @@ async fn async_main(args: Vec<String>) {
         Some("pub") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
-            run_pub(ep, size).await;
+            let peers: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            run_pub(ep, size, peers).await;
         }
         Some("sub") => {
             let ep = parse_ep(&args[2]);
@@ -204,13 +205,18 @@ async fn async_main(args: Vec<String>) {
     }
 }
 
-async fn run_pub(ep: Endpoint, size: usize) {
+async fn run_pub(ep: Endpoint, size: usize, peers: usize) {
     let pub_ = Socket::new(
         SocketType::Pub,
         bench_options(size).on_mute(omq_tokio::OnMute::Block),
     );
+    let monitor = pub_.monitor();
     let bound = pub_.bind(ep).await.expect("pub bind");
     print_bound_port(&bound);
+    if peers > 0 {
+        wait_for_handshakes(&pub_, monitor, peers).await;
+    }
+    wait_for_start_barrier().await;
     let payload = bench_payload(size);
     loop {
         pub_.send(Message::single(payload.clone())).await.unwrap();
@@ -308,8 +314,8 @@ async fn run_sub(ep: Endpoint, size: usize, duration: Duration) {
     sub.connect(ep.clone()).await.expect("sub connect");
     sub.subscribe(Bytes::new()).await.expect("subscribe");
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
     wait_for_start_barrier().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
@@ -483,6 +489,7 @@ async fn run_push(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options_server(size));
     let bound = push.bind(ep).await.expect("push bind");
     print_bound_port(&bound);
+    wait_for_start_barrier().await;
     let payload = bench_payload(size);
     run_push_loop(&push, &payload).await;
 }
@@ -499,6 +506,7 @@ async fn run_pull_bind(ep: Endpoint, size: usize, duration: Duration) {
     let bound = pull.bind(ep.clone()).await.expect("pull bind");
     print_bound_port(&bound);
 
+    wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     drain_pending(&pull);
 
@@ -565,9 +573,9 @@ async fn run_pull(ep: Endpoint, size: usize, duration: Duration) {
     let pull = Socket::new(SocketType::Pull, bench_options_client(size));
     pull.connect(ep.clone()).await.expect("pull connect");
 
+    wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     drain_pending(&pull);
-    wait_for_start_barrier().await;
 
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();

@@ -134,21 +134,7 @@ pub struct Options {
     /// Switch the recv path to a sized one-shot read for any inbound
     /// frame whose wire payload is at least this many bytes.
     ///
-    /// On `omq-compio` the default recv path uses an io_uring multi-shot
-    /// SQE with a `BUF_RING` pool; each CQE delivers a borrowed pool
-    /// slot that the driver memcpys into an owned `Bytes` so the slot
-    /// can be returned to the pool immediately. For frames much larger
-    /// than the slot size that memcpy dominates the recv cost. With
-    /// `Some(n)` set, the driver detects a large frame from its header
-    /// and recvs the payload directly into one sized `BytesMut` of
-    /// exactly `payload_len` bytes — no pool, no userspace copy.
-    ///
-    /// `None` disables the optimization (multi-shot path always).
-    /// Default: `Some(128 * 1024)` — small enough to skip the memcpy on
-    /// any frame past four 32 KiB pool slots, large enough that the
-    /// per-frame SQE-rebuild cost is amortised.
-    ///
-    /// On `omq-tokio` the same threshold triggers a `read_exact` fast
+    /// On `omq-tokio` this threshold triggers a `read_exact` fast
     /// path that reads large payloads into a single pre-sized buffer
     /// instead of accumulating fixed-size reads through the codec.
     pub large_message_threshold: Option<usize>,
@@ -703,9 +689,9 @@ impl Options {
 }
 
 impl KeepAlive {
-    /// Apply this keepalive policy to a connected TCP socket. Used by
-    /// both `omq-tokio` and `omq-compio` after `connect`/`accept` so the
-    /// option is in effect for the connection's lifetime.
+    /// Apply this keepalive policy to a connected TCP socket after
+    /// `connect`/`accept` so the option is in effect for the
+    /// connection's lifetime.
     pub fn apply<S: SocketRef>(&self, sock: &S) -> std::io::Result<()> {
         let sref = sock.as_socket_ref();
         match self {

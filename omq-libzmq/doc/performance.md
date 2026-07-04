@@ -16,23 +16,22 @@ lock-free SPSC pipe (ypipe). A dedicated I/O thread pops from the pipe
 and writes to TCP. One queue crossing per message, lock-free on both
 sides.
 
-## omq-compio baseline: broken
+## Old single-thread runtime baseline: broken
 
-omq-libzmq started on omq-compio. The compio runtime ran on a
-background thread (`rt.block_on(job_loop)`). A flume channel relayed
-messages between the C thread and send/recv pump tasks on the compio
-thread.
+omq-libzmq started on the old single-thread runtime backend. That
+runtime ran on a background thread (`rt.block_on(job_loop)`). A flume
+channel relayed messages between the C thread and send/recv pump tasks
+on the runtime thread.
 
-TCP handshakes were structurally broken: compio's `block_on` loop
-(`tick() -> io_uring_enter -> tick()`) couldn't drive multi-step ZMTP
-handshakes promptly. Each handshake step required a full loop
-iteration. Result: 87ms-946ms handshake latency in 2-process TCP
-benchmarks, 40% failure rate. Root cause is in compio's runtime
-scheduling, not fixable from the FFI layer.
+TCP handshakes were structurally broken: the backend `block_on` loop
+could not drive multi-step ZMTP handshakes promptly. Each handshake
+step required a full loop iteration. Result: 87ms-946ms handshake
+latency in 2-process TCP benchmarks, 40% failure rate. Root cause was
+runtime scheduling, not fixable from the FFI layer.
 
 ## Port to omq-tokio + yring relay (both sides): 808k msg/s, 60 us
 
-Replaced compio with a tokio multi-thread runtime. Replaced flume
+Replaced that backend with a tokio multi-thread runtime. Replaced flume
 channels with yring SPSC rings for both send and recv paths. The send
 pump drained the ring via `AsyncConsumer` stream, called
 `socket.send().await` per message, and yielded every 256 messages. The

@@ -19,7 +19,7 @@
  * Compile: gcc -O2 -o libzmq_bench_peer libzmq_bench_peer.c -lzmq
  *
  * Output (pull only, one line to stdout):
- *   <count> <elapsed_secs> <msg_size>
+ *   <count> <elapsed_secs> <msg_size> <cpu_secs>
  */
 
 #include <zmq.h>
@@ -35,6 +35,26 @@ static double now_secs(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+static double wall_secs(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+static void wait_for_start_barrier(void) {
+    const char *s = getenv("OMQ_BENCH_START_AT");
+    if (!s || !*s) return;
+    double start_at = atof(s);
+    for (;;) {
+        double remaining = start_at - wall_secs();
+        if (remaining <= 0) return;
+        struct timespec ts;
+        ts.tv_sec = (time_t)remaining;
+        ts.tv_nsec = (long)((remaining - ts.tv_sec) * 1e9);
+        nanosleep(&ts, NULL);
+    }
 }
 
 static double cpu_time_secs(void) {
@@ -110,6 +130,7 @@ int main(int argc, char **argv) {
         if (!sock) die("zmq_socket PUSH");
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
         print_bound_port(sock);
+        wait_for_start_barrier();
 
         char *buf = calloc(1, size);
         if (!buf) { perror("calloc"); exit(1); }
@@ -128,6 +149,7 @@ int main(int argc, char **argv) {
         void *sock = zmq_socket(ctx, ZMQ_PULL);
         if (!sock) die("zmq_socket PULL");
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
+        wait_for_start_barrier();
 
         zmq_msg_t msg;
         zmq_msg_init(&msg);
@@ -177,6 +199,7 @@ done:;
         void *sock = zmq_socket(ctx, ZMQ_PUSH);
         if (!sock) die("zmq_socket PUSH");
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
+        wait_for_start_barrier();
 
         char *buf = calloc(1, size);
         if (!buf) { perror("calloc"); exit(1); }
@@ -196,6 +219,7 @@ done:;
         if (!sock) die("zmq_socket PULL");
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
         print_bound_port(sock);
+        wait_for_start_barrier();
 
         zmq_msg_t msg;
         zmq_msg_init(&msg);
@@ -210,6 +234,7 @@ done:;
         }
 
         long long count = 0;
+        double cpu_before = cpu_time_secs();
         double t0 = now_secs();
         double deadline = t0 + duration;
 
@@ -234,7 +259,8 @@ done:;
         }
 done_pull_bind:;
         double elapsed = now_secs() - t0;
-        printf("%lld %.6f %d\n", count, elapsed, size);
+        double cpu = cpu_time_secs() - cpu_before;
+        printf("%lld %.6f %d %.6f\n", count, elapsed, size, cpu);
 
         zmq_msg_close(&msg);
         zmq_close(sock);
@@ -306,6 +332,7 @@ done_inproc:;
         zmq_setsockopt(sock, ZMQ_XPUB_NODROP, &block, sizeof(block));
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
         print_bound_port(sock);
+        wait_for_start_barrier();
 
         char *buf = calloc(1, size);
         if (!buf) { perror("calloc"); exit(1); }
@@ -325,6 +352,7 @@ done_inproc:;
         if (!sock) die("zmq_socket SUB");
         zmq_setsockopt(sock, ZMQ_SUBSCRIBE, "", 0);
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
+        wait_for_start_barrier();
 
         zmq_msg_t msg;
         zmq_msg_init(&msg);
@@ -339,6 +367,7 @@ done_inproc:;
         }
 
         long long count = 0;
+        double cpu_before = cpu_time_secs();
         double t0 = now_secs();
         double deadline = t0 + duration;
 
@@ -363,7 +392,8 @@ done_inproc:;
         }
 done_sub:;
         double elapsed = now_secs() - t0;
-        printf("%lld %.6f %d\n", count, elapsed, size);
+        double cpu = cpu_time_secs() - cpu_before;
+        printf("%lld %.6f %d %.6f\n", count, elapsed, size, cpu);
 
         zmq_msg_close(&msg);
         zmq_close(sock);

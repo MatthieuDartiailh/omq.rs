@@ -1,10 +1,7 @@
 //! Connection-lifecycle event types.
 //!
-//! `MonitorEvent` and friends are pure data - both runtime backends
-//! (`omq-tokio`, `omq-compio`) emit the same types via their own
-//! broadcast / fan-out implementations. The transport that delivers
-//! events (`tokio::sync::broadcast` vs flume fan-out) lives in each
-//! backend; the events themselves are shared here.
+//! `MonitorEvent` and friends are pure data. The runtime backend emits
+//! these types via its own broadcast / fan-out implementation.
 
 use std::fmt;
 use std::net::SocketAddr;

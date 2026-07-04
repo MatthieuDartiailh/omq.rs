@@ -264,8 +264,7 @@ impl ResourceReport {
             .max()
             .unwrap_or(baseline);
         // 5% of peak or 4 MiB, whichever is larger. Covers runtime
-        // overhead (compio io_uring buffers, tokio internals) that
-        // persists until the runtime itself is dropped.
+        // overhead that persists until the runtime itself is dropped.
         let threshold = (peak / 20).max(8 * 1024 * 1024);
 
         let growth = current.saturating_sub(baseline);

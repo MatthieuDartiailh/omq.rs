@@ -1,4 +1,4 @@
-# libzmq v4.3.5 vs omq.rs — Error Handling Gap Analysis
+# libzmq v4.3.5 vs omq.rs: Error Handling Gap Analysis
 
 Compares error/edge-case handling in libzmq v4.3.5 against what omq.rs
 implements today. See `errors.md` for the full libzmq catalog.
@@ -17,15 +17,15 @@ implements today. See `errors.md` for the full libzmq catalog.
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
 | EAGAIN/EWOULDBLOCK/EINTR | Explicit normalize + return 0 | Implicit via async runtime | **~** runtime handles it |
-| ECONNRESET/EPIPE/ETIMEDOUT | Return -1 (peer failure) | Fatal, driver exits → reconnect | **=** |
+| ECONNRESET/EPIPE/ETIMEDOUT | Return -1 (peer failure) | Fatal, driver exits -> reconnect | **=** |
 | Partial writes | Advance pointer, retry on POLLOUT | `put_back_unwritten` re-queues | **=** |
 | Clean close (read=0) | Set `errno=EPIPE`, return -1 | `UnexpectedEof`, driver exits | **=** |
 | WSAENOBUFS on send (Windows) | Return 0 (transient, KB201213) | Not handled | **X** |
 | FreeBSD close() ECONNRESET | Silently accepted in destructor | Not handled | **X** |
 | iOS EBADF excluded from assert | Platform-specific carve-out | Not handled | **X** |
-| Write error asymmetry | Write fail ≠ teardown; wait for read-side error | Write fail = driver exit | **~** different design; omq.rs reconnects instead |
+| Write error asymmetry | Write fail != teardown; wait for read-side error | Write fail = driver exit | **~** different design; omq.rs reconnects instead |
 
-omq.rs delegates low-level errno wrangling to tokio/compio. The Windows
+omq.rs delegates low-level errno wrangling to tokio. The Windows
 `WSAENOBUFS` and FreeBSD close quirks are platform bugs that could bite on
 those platforms. The write-error asymmetry is a deliberate design
 difference: libzmq keeps the engine alive to drain inbound; omq.rs tears
@@ -40,7 +40,7 @@ down and reconnects.
 | Async connect + SO_ERROR | Manual non-blocking + getsockopt | Runtime-native `TcpStream::connect` | **=** equivalent |
 | EINTR during connect | Normalize to EINPROGRESS | Runtime handles | **~** |
 | Connect timeout | Separate timer (`connect_timeout`) | Handshake timeout (30s default) covers it | **~** combined timeout |
-| ECONNREFUSED + stop flag | `RECONNECT_STOP_CONN_REFUSED` → no retry | No equivalent flag; always retries | **X** |
+| ECONNREFUSED + stop flag | `RECONNECT_STOP_CONN_REFUSED` -> no retry | No equivalent flag; always retries | **X** |
 | Solaris ENOPROTOOPT compat | Treat as errno=0 | Not handled | **X** niche |
 
 ---
@@ -49,12 +49,12 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| Accept error classification | Per-platform acceptable errno lists; abort on unknown | `while let Ok(...)` — all errors break loop | **~** less granular but safe |
-| EMFILE/ENFILE | In acceptable list (but TODO: no special handling) | Loop exits, listener task dies | **X** no retry on fd exhaustion |
-| Post-accept tune failure | Emit EVENT_ACCEPT_FAILED, skip engine | `let _ = set_nodelay()` — silently ignored | **~** silent vs event |
+| Accept error classification | Per-platform acceptable errno lists; abort on unknown | Any accept error backs off 50 ms and retries | **~** less granular; no event |
+| EMFILE/ENFILE | In acceptable list (but TODO: no special handling) | Backoff and retry through generic accept error path | **=** |
+| Post-accept tune failure | Emit EVENT_ACCEPT_FAILED, skip engine | Accepted connection is dropped; accept loop retries | **~** no event |
 | accept4(SOCK_CLOEXEC) | Used where available | Not explicitly set | **X** |
 | SO_EXCLUSIVEADDRUSE (Windows) | Yes (not SO_REUSEADDR) | Not set, OS default | **X** |
-| SO_REUSEADDR (POSIX) | Explicit | Not explicitly set | **X** |
+| SO_REUSEADDR (POSIX) | Explicit | Set before bind via socket2 | **=** |
 | TCP accept filters (allowlist) | Address-based accept filtering | Not implemented | **X** |
 
 ---
@@ -81,8 +81,8 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| Path length validation | `>= sizeof(sun_path)` → ENAMETOOLONG | Delegated to OS bind/connect | **~** |
-| Abstract sockets (Linux) | `@` prefix → `\0` in sun_path | Yes, via `from_abstract_name()` | **=** |
+| Path length validation | `>= sizeof(sun_path)` -> ENAMETOOLONG | Delegated to OS bind/connect | **~** |
+| Abstract sockets (Linux) | `@` prefix -> `\0` in sun_path | Yes, via `from_abstract_name()` | **=** |
 | Peer credential filtering | SO_PEERCRED, UID/GID/PID checks | Not implemented | **X** |
 | Socket file cleanup on close | unlink + rmdir, EVENT_CLOSE_FAILED on error | Drop handler removes file | **=** |
 | Wildcard IPC address | Temp dir + generated path | Not implemented | **X** |
@@ -93,13 +93,13 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| Exponential backoff | Double each attempt, cap at max | Exponential with ±10% jitter | **=** better (jitter) |
-| Fixed interval + jitter (no max) | base + random % base | `Fixed(d)` with ±10% jitter | **=** |
+| Exponential backoff | Double each attempt, cap at max | Exponential with +/-10% jitter | **=** better (jitter) |
+| Fixed interval + jitter (no max) | base + random % base | `Fixed(d)` with +/-10% jitter | **=** |
 | Overflow guard | INT_MAX cap | Duration arithmetic; no overflow risk | **=** |
 | RECONNECT_STOP_CONN_REFUSED | Stop on ECONNREFUSED | Not implemented | **X** |
 | RECONNECT_STOP_HANDSHAKE_FAILED | Reclassify as protocol_error | Protocol errors don't retry; timeout/IO do | **~** similar effect |
 | RECONNECT_STOP_AFTER_DISCONNECT | Stop after zmq_disconnect() | CancellationToken on disconnect | **=** equivalent |
-| Resubscription on reconnect | Hiccup pipe → SUB/XSUB/DISH resend subs | Subscriptions re-sent on new connection | **=** |
+| Resubscription on reconnect | Hiccup pipe -> SUB/XSUB/DISH resend subs | Subscriptions re-sent on new connection | **=** |
 
 ---
 
@@ -107,11 +107,10 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| Write error ≠ teardown | Disable POLLOUT, wait for read error | Driver exits, reconnect | **~** different design |
+| Write error != teardown | Disable POLLOUT, wait for read error | Driver exits, reconnect | **~** different design |
 | Backpressure (input_stopped) | reset_pollin, restart_input | Bounded channel back-pressure | **=** equivalent |
 | Speculative write | out_event() called immediately on restart_output | Async runtime schedules writes | **~** |
 | Recv throttling | Tick counter limits command processing | No equivalent; async runtime schedules | **~** |
-| ENOBUFS on multi-shot recv (compio) | N/A | Re-arm recv ring | **=** compio-specific |
 
 ---
 
@@ -123,7 +122,7 @@ down and reconnects.
 | LWM re-activation at half | (hwm+1)/2 triggers activate_write | Channel internal (flume/async_channel) | **~** |
 | On HWM exceeded | Only blocks (EAGAIN to user) | Block / DropNewest / DropOldest | **=** superset |
 | Pipe termination FSM | 6-state machine with delimiter protocol | Channel close + CancellationToken | **~** simpler |
-| Multi-part rollback on pipe death | unwrite() loop, _dropping mode in lb | Shared queue: msg survives for next peer. Priority: lost. | **~** |
+| Multi-part rollback on pipe death | unwrite() loop, _dropping mode in lb | Whole messages are queued; no mid-message rollback | **N/A** |
 | Conflate mode | HWM=-1 (unlimited) | capacity=1, DropOldest | **=** equivalent semantics |
 | Lock-free queue | ypipe (SPSC, CAS flush) | blume (MPSC, swap-drain) | **=** different design |
 
@@ -133,8 +132,8 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| LB round-robin (PUSH/DEALER) | Index-based, skip full pipes | Shared queue, runtime-fair | **~** |
-| FQ round-robin (PULL/ROUTER recv) | Index-based, assert on mid-msg pipe death | Shared async_channel | **~** |
+| LB round-robin (PUSH/DEALER) | Index-based, skip full pipes | Active per-peer pipes plus shared fallback | **~** |
+| FQ round-robin (PULL/ROUTER recv) | Index-based, assert on mid-msg pipe death | Per-peer drivers feed bounded recv queue | **~** |
 | PUB fan-out: slow sub blocks all | Unless ZMQ_XPUB_NODROP | Per-sub independent queues | **=** better |
 | PUB fan-out: ref counting | Manual rm_refs on failure | Bytes Arc clone | **=** equivalent |
 | ROUTER mandatory | EHOSTUNREACH | Error::Unroutable | **=** |
@@ -155,7 +154,7 @@ down and reconnects.
 | ZAP protocol | Separate inproc socket | Not implemented; inline callback | **~** deliberate |
 | Socket type compat check | 18-type matrix | 18-type matrix | **=** |
 | Mechanism mismatch | EVENT + protocol_error | Error::HandshakeFailed | **=** |
-| CURVE nonce replay check | nonce ≤ previous → INVALID_SEQUENCE | Nonce exhaustion check; replay? | **~** verify |
+| CURVE nonce replay check | nonce <= previous -> INVALID_SEQUENCE | Nonce exhaustion check; replay? | **~** verify |
 | ZAP "300" silent disconnect | No ERROR sent to peer | N/A (no ZAP) | **N/A** |
 
 ---
@@ -195,7 +194,7 @@ down and reconnects.
 | HANDSHAKE_SUCCEEDED | `HandshakeSucceeded` (with full PeerInfo) | **=** better |
 | HANDSHAKE_FAILED_PROTOCOL | `HandshakeFailed` (unified) | **~** no separate code |
 | HANDSHAKE_FAILED_AUTH | `HandshakeFailed` | **~** no separate code |
-| — | `PeerCommand` (ERROR + unknown cmds) | **=** omq-only |
+| none | `PeerCommand` (ERROR + unknown cmds) | **=** omq-only |
 
 ---
 
@@ -206,7 +205,7 @@ down and reconnects.
 | PING/PONG | ZMTP 3.1, auto-answer | ZMTP 3.1, auto-answer | **=** |
 | heartbeat_ivl | Timer to send PING | heartbeat_interval | **=** |
 | heartbeat_ttl | Advertised to peer | heartbeat_ttl (advisory) | **=** |
-| heartbeat_timeout | No PONG → timeout_error | No bytes received → Timeout | **~** byte-level vs PONG |
+| heartbeat_timeout | No PONG -> timeout_error | No bytes received -> Timeout | **~** byte-level vs PONG |
 | Handshake timeout | Separate timer | handshake_timeout (30s default) | **=** |
 
 ---
@@ -231,18 +230,14 @@ down and reconnects.
 
 ### Resilience
 
-- **EMFILE/ENFILE on accept:** Listener task dies. Should back off and
-  retry instead of giving up permanently.
+- **Accept failure observability:** Per-accept failures back off and
+  retry, but no `ACCEPT_FAILED` monitor event exposes them to users.
 - **RECONNECT_STOP_CONN_REFUSED:** No way to tell omq.rs "stop retrying
   if the peer actively refuses." Always retries until socket close.
-- **ACCEPT_FAILED monitor event:** Not emitted. Users cannot observe
-  accept failures.
-- **SO_REUSEADDR on POSIX listeners:** Not explicitly set. Most runtimes
-  set this by default, but not guaranteed.
 
 ### Features
 
-- **ZAP:** Not implemented. Deliberate — inline authenticator callback
+- **ZAP:** Not implemented. Deliberate: inline authenticator callback
   serves the same purpose without the inproc socket complexity.
 - **IPC peer credential filtering (SO_PEERCRED):** Cannot restrict IPC
   connections by UID/GID/PID.

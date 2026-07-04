@@ -98,9 +98,8 @@ fn soak_reconnect_storm() {
         // The shared DropQueue lets dying drivers pop a message and
         // write it to a half-closed TCP socket before reading the FIN.
         // The kernel accepts the write (send buffer) but the peer never
-        // reads it. This is inherent to multi-threaded scheduling —
-        // compio's cooperative model sidesteps it. Typical delivery is
-        // 88–100%; 80% gives headroom for loaded CI machines.
+        // reads it. This is inherent to multi-threaded scheduling.
+        // Typical delivery is 88-100%; 80% gives headroom for loaded CI.
         assert!(
             pct >= 80.0,
             "reconnect storm delivery rate too low: {pct:.1}%"

@@ -310,7 +310,7 @@ impl Connection {
     /// Owned counterpart to [`transmit_chunks`]: refcount-bumps each
     /// pending `Bytes` and slices the first by `front_consumed`. Lets
     /// callers hand the chunks to APIs that demand `'static` ownership
-    /// (io_uring `writev`, etc.) without a coalescing memcpy.
+    /// without a coalescing memcpy.
     pub fn clone_transmit_chunks(&self) -> Vec<Bytes> {
         let mut out = Vec::with_capacity(self.out_chunks.len());
         for (i, chunk) in self.out_chunks.iter().enumerate() {

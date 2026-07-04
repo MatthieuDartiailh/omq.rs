@@ -1,6 +1,6 @@
 //! Shared outbound flow-control knobs.
 //!
-//! Both backends drain a shared outbound queue in batches and flush via
+//! The backend drains shared outbound queues in batches and flushes via
 //! a single writev. Two caps bound each batch so one busy consumer can
 //! never starve its siblings:
 //!
@@ -13,8 +13,7 @@
 //!   send buffer.
 //!
 //! Per-peer yield intervals and direct-encode admission caps stay in the
-//! backends: those are tuned to each runtime (multi-thread tokio vs.
-//! single-thread compio) and don't share a formula.
+//! backend because they are runtime-specific.
 
 use std::sync::OnceLock;
 

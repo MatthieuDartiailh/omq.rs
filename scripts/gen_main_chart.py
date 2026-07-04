@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the main hero charts, one per backend league:
-doc/charts/main_classic_tcp.svg and doc/charts/main_iouring_tcp.svg.
+"""Generate the main hero chart:
+doc/charts/main_tcp.svg.
 
-Panel 1: PUSH/PULL throughput (MB/s + msg/s dashed), small messages (8 B .. 256 B)
-Panel 2: PUSH/PULL throughput (MB/s), medium/large messages (256 B .. 32 KiB)
+Panel 1: PUSH/PULL throughput (MB/s + msg/s dashed), small messages.
+Panel 2: PUSH/PULL throughput (MB/s), medium/large messages.
 
-One line per impl, TCP only. League membership is defined by FAMILIES.
+One line per impl, TCP only.
 """
 
 import json
@@ -17,27 +17,27 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
+SMALL_SIZES = [16, 64, 256]
+LARGE_SIZES = [256, 1024, 4096, 16384]
 
 sys.path.insert(0, str(REPO / "scripts"))
 from chart_hw import detect_hardware
 
 # Union of all impls plotted in either hero; used only as a load filter.
-IMPLS = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt", "zmq.rs",
-         "rzmq", "rzmq-iouring"]
+IMPLS = ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq",
+         "rzmq-iouring"]
 
 COLORS = {
     "libzmq": "#eab308",
-    "omq-compio": "#7c3aed",
     "omq-tokio": "#f97316",
     "omq-tokio-mt": "#dc2626",
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
-    "rzmq-iouring": "#16a34a",
+    "rzmq-iouring": "#15803d",
 }
 
 LABELS = {
     "libzmq": "libzmq v4.3.5",
-    "omq-compio": "omq-compio (ST)",
     "omq-tokio": "omq-tokio (ST)",
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0 (MT)",
@@ -45,20 +45,11 @@ LABELS = {
     "rzmq-iouring": "rzmq v0.5.22 (io_uring, MT)",
 }
 
-# Two backend leagues, each rendered as its own hero chart. draw_order is
-# back-to-front (last listed is drawn on top).
-FAMILIES = {
-    "classic": {
-        "impls": ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"],
-        "draw_order": ["rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio"],
-        "title": "PUSH/PULL throughput, classic (epoll/mio), TCP loopback, 2-process",
-    },
-    "iouring": {
-        "impls": ["omq-compio", "rzmq-iouring"],
-        "draw_order": ["rzmq-iouring", "omq-compio"],
-        "title": "PUSH/PULL throughput, io_uring, TCP loopback, 2-process",
-    },
-}
+MAIN_IMPLS = ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs",
+              "rzmq", "rzmq-iouring"]
+MAIN_DRAW_ORDER = ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq",
+                   "omq-tokio-mt", "omq-tokio"]
+MAIN_TITLE = "PUSH/PULL throughput, TCP loopback, 2-process"
 
 
 def fmt_size(b: int) -> str:
@@ -347,7 +338,7 @@ def draw_latency_panel(
     L.append(svg_line(x_left, y_bot, x_right, y_bot, stroke="#9ca3af", width=1.5))
 
     lat_draw_order = ["libzmq", "omq-tokio-mt", "omq-tokio", "rzmq",
-                      "zmq.rs", "omq-compio"]
+                      "rzmq-iouring", "zmq.rs"]
     for name in lat_draw_order:
         pts = [
             (xs[i], y_lat(lat[sizes[i]][name]))
@@ -366,8 +357,8 @@ def draw_latency_panel(
 def generate_main_chart(tput: dict, msgs: dict, impls: list[str],
                         draw_order: list[str], title: str,
                         hw_label: str | None) -> str:
-    small_sizes = [8, 16, 32, 64, 128, 256]
-    large_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+    small_sizes = SMALL_SIZES
+    large_sizes = LARGE_SIZES
 
     hw_offset = 14 if hw_label else 0
     panel_h = 260
@@ -465,12 +456,11 @@ def main():
     tput, _lat, msgs = load_data()
     out_dir = REPO / "doc" / "charts"
     out_dir.mkdir(parents=True, exist_ok=True)
-    for family, cfg in FAMILIES.items():
-        svg = generate_main_chart(tput, msgs, cfg["impls"], cfg["draw_order"],
-                                  cfg["title"], hw)
-        out = out_dir / f"main_{family}_tcp.svg"
-        out.write_text(svg)
-        print(f"Written: {out}", file=sys.stderr)
+    svg = generate_main_chart(tput, msgs, MAIN_IMPLS, MAIN_DRAW_ORDER,
+                              MAIN_TITLE, hw)
+    out = out_dir / "main_tcp.svg"
+    out.write_text(svg)
+    print(f"Written: {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":

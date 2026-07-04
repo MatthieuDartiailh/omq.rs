@@ -11,10 +11,11 @@ MSRV is Rust 1.93, edition 2024. See [DEVELOPMENT.md](DEVELOPMENT.md) for build,
 
 ## Making changes
 
-Both backends (`omq-compio` and `omq-tokio`) share the same public `Socket`
-API. Changes to one usually need a matching change in the other.
+`omq-tokio` owns the async `Socket` API. `omq-libzmq` and `pyomq`
+build on top of it.
 
-New socket types, transports, and mechanisms must be added to both backends.
+New socket types, transports, and mechanisms must be added to
+`omq-proto` and wired through `omq-tokio`.
 See the Architecture section below for where each piece lives.
 
 Before committing:
@@ -33,13 +34,11 @@ cargo fmt                                # rustfmt.toml: edition 2024, max_width
 
 ## Architecture
 
-The codebase uses a three-layer split: a sans-I/O codec (`omq-proto`), and
-two async I/O backends (`omq-compio`, `omq-tokio`).
+The codebase uses a three-layer split: a sans-I/O codec (`omq-proto`),
+the `omq-tokio` async I/O backend, and user-facing bindings.
 
 - [`doc/architecture.md`](doc/architecture.md) -- diagrams, two-queue model,
-  transport and mechanism tables
-- [`doc/compio.md`](doc/compio.md) -- compio backend internals
-- [`doc/tokio.md`](doc/tokio.md) -- tokio backend internals
+  transport and mechanism tables, tokio backend internals
 
 ## License
 

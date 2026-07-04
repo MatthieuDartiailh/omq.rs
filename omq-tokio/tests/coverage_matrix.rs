@@ -1,6 +1,4 @@
-//! Socket-type x transport coverage matrix for omq-tokio. Mirrors
-//! `omq-compio/tests/coverage_matrix.rs` to keep the two backends
-//! verified-in-lockstep.
+//! Socket-type x transport coverage matrix for omq-tokio.
 
 mod test_support;
 

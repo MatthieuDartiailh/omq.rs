@@ -32,7 +32,7 @@ pub(crate) struct SendBuffer {
     pub parts: Vec<Bytes>,
 }
 
-/// Notification primitive for the recv path: compio pump signals Python
+/// Notification primitive for the recv path: tokio pump signals Python
 /// thread via eventfd when a message is pushed into the yring.
 ///
 /// The `parking` flag avoids syscalls on the hot path. The consumer
