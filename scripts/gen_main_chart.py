@@ -2,8 +2,8 @@
 """Generate the main hero chart:
 doc/charts/main_tcp.svg.
 
-Panel 1: PUSH/PULL throughput (MB/s + msg/s dashed), small messages (8 B .. 256 B)
-Panel 2: PUSH/PULL throughput (MB/s), medium/large messages (256 B .. 32 KiB)
+Panel 1: PUSH/PULL throughput (MB/s + msg/s dashed), small messages.
+Panel 2: PUSH/PULL throughput (MB/s), medium/large messages.
 
 One line per impl, TCP only.
 """
@@ -17,8 +17,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
-SMALL_SIZES = [8, 16, 32, 64, 128, 256]
-LARGE_SIZES = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+SMALL_SIZES = [16, 64, 256]
+LARGE_SIZES = [256, 1024, 4096, 16384]
 
 sys.path.insert(0, str(REPO / "scripts"))
 from chart_hw import detect_hardware

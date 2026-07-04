@@ -114,7 +114,7 @@ def _cleanup_ipc_sockets():
             pass
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
-FULL_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+FULL_SIZES = [16, 64, 256, 1024, 4096, 16384]
 QUICK_SIZES = [32, 1024, 4096]
 
 # Physical sanity ceiling for a single TCP loopback stream (MB/s). Measured
@@ -1005,7 +1005,7 @@ IMPLS = {
     },
 }
 
-PUBSUB_PEER_COUNTS = [1, 8, 64]
+PUBSUB_PEER_COUNTS = [1, 8, 32]
 FANOUT_PEER_COUNTS = [2, 4, 8]
 FANIN_PEER_COUNTS = [2, 4, 8]
 
@@ -1405,7 +1405,7 @@ def main():
     parser.add_argument(
         "--sizes", type=str, default=None,
         help="comma-separated message sizes (overrides the default sweep), "
-             "e.g. --sizes 64,1024,32768 for a coarse, fast sweep",
+             "e.g. --sizes 16,256,4096 for a coarse, fast sweep",
     )
     parser.add_argument(
         "--transport", action="append",
