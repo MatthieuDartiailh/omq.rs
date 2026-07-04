@@ -3,7 +3,7 @@
 
 Runs PUSH/PULL throughput and REQ/REP latency benchmarks across
 implementations (omq-tokio, libzmq, zmq.rs, rzmq) and writes
-results to benchmarks/comparisons.jsonl.
+results to ~/.cache/omq/comparisons.jsonl.
 
 Usage:
   scripts/run_comparisons.py                        # all impls, tcp+inproc+ipc, latency on
@@ -114,8 +114,8 @@ def _cleanup_ipc_sockets():
             pass
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
-FULL_SIZES = [16, 64, 256, 1024, 4096, 16384]
-QUICK_SIZES = [32, 1024, 4096]
+COMPARISON_CHART_SIZES = [16, 64, 256, 1024, 4096, 16384]
+QUICK_SIZES = [64, 1024, 4096]
 
 # Physical sanity ceiling for a single TCP loopback stream (MB/s). Measured
 # loopback peaks around 6-7 GB/s here; anything above this for ONE peer is a
@@ -1404,8 +1404,12 @@ def main():
     )
     parser.add_argument(
         "--sizes", type=str, default=None,
-        help="comma-separated message sizes (overrides the default sweep), "
-             "e.g. --sizes 16,256,4096 for a coarse, fast sweep",
+        help="comma-separated message sizes; must be comparison chart sizes "
+             "unless --allow-non-chart-sizes is set",
+    )
+    parser.add_argument(
+        "--allow-non-chart-sizes", action="store_true",
+        help="allow --sizes values outside the comparison chart size set",
     )
     parser.add_argument(
         "--transport", action="append",
@@ -1479,9 +1483,16 @@ def main():
     args = parser.parse_args()
 
     transports = args.transport or ["tcp", "inproc", "ipc"]
-    sizes = QUICK_SIZES if args.quick_run else FULL_SIZES
+    sizes = QUICK_SIZES if args.quick_run else COMPARISON_CHART_SIZES
     if args.sizes:
         sizes = [int(x) for x in args.sizes.split(",")]
+        non_chart = sorted(set(sizes) - set(COMPARISON_CHART_SIZES))
+        if non_chart and not args.allow_non_chart_sizes:
+            parser.error(
+                "--sizes includes non-chart sizes "
+                f"{','.join(str(s) for s in non_chart)}; "
+                "pass --allow-non-chart-sizes for exploratory sweeps"
+            )
     if args.quick_run:
         duration = args.duration if args.duration is not None else QUICK_DURATION
         rounds = args.rounds if args.rounds is not None else QUICK_ROUNDS

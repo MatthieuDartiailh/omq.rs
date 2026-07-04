@@ -65,7 +65,7 @@ mod inner {
         if let Ok(s) = std::env::var("OMQ_BENCH_SIZES") {
             return s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
         }
-        common::CHART_SIZES.to_vec()
+        common::DENSE_SIZES.to_vec()
     }
 
     pub(super) fn tokio_main() {

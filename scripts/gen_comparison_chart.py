@@ -13,7 +13,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
-CHART_SIZES = {16, 64, 256, 1024, 4096, 16384}
+COMPARISON_CHART_SIZES = {16, 64, 256, 1024, 4096, 16384}
 
 COLORS = {
     "libzmq": "#eab308",
@@ -108,7 +108,7 @@ def load_data(transport: str, impls: list[str]) -> dict:
                 if elapsed > 0 and cpu_time > 0:
                     lat_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
-    sizes = sorted(s for s in tput if s in CHART_SIZES)
+    sizes = sorted(s for s in tput if s in COMPARISON_CHART_SIZES)
     return {"sizes": sizes, "tput": tput, "tput_cpu": tput_cpu,
             "lat": lat, "lat_cpu": lat_cpu}
 
@@ -1146,7 +1146,7 @@ def load_pubsub_data(transport: str, impls: list[str], peers: int) -> dict:
             if elapsed > 0 and cpu_time > 0:
                 tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
-    sizes = sorted(s for s in tput if s in CHART_SIZES)
+    sizes = sorted(s for s in tput if s in COMPARISON_CHART_SIZES)
     return {"sizes": sizes, "tput": tput, "tput_cpu": tput_cpu}
 
 
@@ -1290,7 +1290,7 @@ def load_fanio_data(transport: str, impls: list[str], peers: int,
             if elapsed > 0 and cpu_time > 0:
                 tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
-    sizes = sorted(s for s in tput if s in CHART_SIZES)
+    sizes = sorted(s for s in tput if s in COMPARISON_CHART_SIZES)
     return {"sizes": sizes, "tput": tput, "tput_cpu": tput_cpu}
 
 
