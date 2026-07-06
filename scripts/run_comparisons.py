@@ -532,6 +532,8 @@ def _run_pubsub_once(
     else:
         addr = _fresh_addr(addr)
         cleanup_ipc_socket(addr)
+        if impl == "omq-tokio-mt":
+            cell_env["OMQ_BENCH_SUB_CURRENT_THREAD"] = "1"
         pub_args = [binary, "pub", addr, str(size)]
         if pub_needs_peers:
             pub_args.append(str(peers))

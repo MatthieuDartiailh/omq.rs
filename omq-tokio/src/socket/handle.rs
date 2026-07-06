@@ -261,10 +261,10 @@ impl Socket {
                     Ok(()) => return Ok(()),
                     Err(msg) => msg,
                 };
-                if self.try_send_wire(&msg) {
+                if !self.is_fan_out_send() && self.try_send_wire(&msg) {
                     return Ok(());
                 }
-                if self.inner.wire_slots.single_exists() {
+                if !self.is_fan_out_send() && self.inner.wire_slots.single_exists() {
                     self.send_wire_slow(msg).await
                 } else {
                     self.inner.send_submitter.send(msg).await
@@ -325,7 +325,7 @@ impl Socket {
                     Ok(()) => return Ok(()),
                     Err(msg) => msg,
                 };
-                if self.try_send_single_wire(&msg)? {
+                if !self.is_fan_out_send() && self.try_send_single_wire(&msg)? {
                     return Ok(());
                 }
                 self.inner.send_submitter.try_send(msg)
@@ -609,6 +609,13 @@ impl Socket {
 
     fn try_send_single_wire(&self, msg: &Message) -> core::result::Result<bool, TrySendError> {
         self.inner.wire_slots.try_send_single(msg)
+    }
+
+    fn is_fan_out_send(&self) -> bool {
+        matches!(
+            self.inner.socket_type,
+            SocketType::Pub | SocketType::XPub | SocketType::Radio
+        )
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {

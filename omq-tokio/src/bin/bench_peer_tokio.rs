@@ -60,9 +60,11 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let pull_current_thread = args.get(1).is_some_and(|arg| arg == "pull")
-        && std::env::var("OMQ_BENCH_PULL_CURRENT_THREAD").is_ok_and(|v| v == "1");
-    let rt = if !pull_current_thread
+    let force_current_thread = matches!(args.get(1).map(String::as_str), Some("pull"))
+        && std::env::var("OMQ_BENCH_PULL_CURRENT_THREAD").is_ok_and(|v| v == "1")
+        || matches!(args.get(1).map(String::as_str), Some("sub"))
+            && std::env::var("OMQ_BENCH_SUB_CURRENT_THREAD").is_ok_and(|v| v == "1");
+    let rt = if !force_current_thread
         && std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "multi_thread")
     {
         #[cfg(feature = "rt-multi-thread")]
@@ -71,9 +73,7 @@ fn main() {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|&v| v > 0)
-                .unwrap_or_else(|| {
-                    std::thread::available_parallelism().map_or(2, std::num::NonZero::get)
-                });
+                .unwrap_or(4);
             eprintln!("runtime: multi_thread ({workers} workers)");
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(workers)
@@ -218,8 +218,15 @@ async fn run_pub(ep: Endpoint, size: usize, peers: usize) {
     }
     wait_for_start_barrier().await;
     let payload = bench_payload(size);
-    loop {
-        pub_.send(Message::single(payload.clone())).await.unwrap();
+    if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
+        loop {
+            pub_.send(Message::from_slice(&payload)).await.unwrap();
+        }
+    } else {
+        let msg = Message::single(payload.clone());
+        loop {
+            pub_.send(msg.clone()).await.unwrap();
+        }
     }
 }
 

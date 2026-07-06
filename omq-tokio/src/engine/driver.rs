@@ -844,13 +844,15 @@ async fn drain_wire_slot<W: AsyncWrite + Unpin>(
     let mut batch_bytes = 0usize;
     loop {
         drain_buf.clear();
-        slot.drain_into_vec(drain_buf, 1024);
+        let drain = slot.drain_into_vec(drain_buf, 1024);
         if drain_buf.is_empty() {
             break;
         }
         batch_bytes += drain_buf.iter().map(Bytes::len).sum::<usize>();
         write_chunks(writer, drain_buf).await?;
-        slot.space_available.notify_one();
+        if drain.space_available {
+            slot.space_available.notify_waiters();
+        }
         if batch_bytes >= max_batch_bytes() {
             slot.data_ready.notify_one();
             break;
