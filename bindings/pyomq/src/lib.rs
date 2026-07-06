@@ -1,20 +1,6 @@
 //! pyomq native module. The Python-facing surface is in `python/pyomq/`;
 //! this module exposes the native classes that re-export it imports.
 
-// PyO3 0.22's procedural macros emit code that triggers the Rust 2024
-// `unsafe_op_in_unsafe_fn` warning at the call sites it generates.
-// User code is unaffected. Silence the noise here; revisit when we
-// bump to a pyo3 release whose macros wrap their own unsafe calls.
-#![allow(unsafe_op_in_unsafe_fn)]
-// Also suppress the `gil-refs` cfg-condition warnings — pyo3 0.22's
-// abi3 feature path checks for that cfg key, which Rust 1.80+ flags
-// because nothing actually defines it.
-#![allow(unexpected_cfgs)]
-// PyO3 0.22's `#[pymethods]` macro wraps every `-> PyResult<T>` return
-// in `.into()`, which clippy flags as `useless_conversion` when T is
-// already the right type. 45 instances, all macro-generated.
-#![allow(clippy::useless_conversion)]
-
 #[cfg(feature = "curve")]
 mod auth;
 #[cfg(feature = "blake3zmq")]
@@ -39,12 +25,14 @@ use pyo3::prelude::*;
 /// yielding the shared `SocketInner`.
 struct AnySocket(Arc<socket::SocketInner>);
 
-impl<'py> FromPyObject<'py> for AnySocket {
-    fn extract_bound(obj: &Bound<'py, PyAny>) -> PyResult<Self> {
-        if let Ok(s) = obj.downcast::<socket::Socket>() {
+impl<'py> FromPyObject<'py, 'py> for AnySocket {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok(s) = obj.cast::<socket::Socket>() {
             return Ok(Self(s.borrow().inner.clone()));
         }
-        if let Ok(s) = obj.downcast::<socket_async::AsyncSocket>() {
+        if let Ok(s) = obj.cast::<socket_async::AsyncSocket>() {
             return Ok(Self(s.borrow().inner.clone()));
         }
         Err(pyo3::exceptions::PyTypeError::new_err(
@@ -86,15 +74,16 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pyo3(signature = (sockets, timeout_ms=None))]
 fn wait_any(
     py: Python<'_>,
-    sockets: Vec<AnySocket>,
+    sockets: &Bound<'_, pyo3::types::PySequence>,
     timeout_ms: Option<u64>,
 ) -> PyResult<Vec<u64>> {
-    let mut entries = Vec::with_capacity(sockets.len());
-    for s in &sockets {
+    let mut entries = Vec::with_capacity(sockets.len()?);
+    for item in sockets.try_iter()? {
+        let s = item?.extract::<AnySocket>()?;
         let id = s.0.ensure_id()?;
         entries.push((id, s.0.clone()));
     }
-    Ok(py.allow_threads(|| runtime::wait_any(entries, timeout_ms)))
+    Ok(py.detach(|| runtime::wait_any(entries, timeout_ms)))
 }
 
 #[pyfunction]
@@ -127,24 +116,24 @@ fn native_proxy(
         None => None,
     };
     let ctx = fe.ctx.clone();
-    py.allow_threads(|| runtime::proxy(&ctx, fe, be, cap, ctrl));
+    py.detach(|| runtime::proxy(&ctx, fe, be, cap, ctrl));
     Ok(())
 }
 
 #[cfg(feature = "curve")]
 #[pyfunction]
-fn curve_keypair(py: Python<'_>) -> PyResult<(PyObject, PyObject)> {
+fn curve_keypair(py: Python<'_>) -> PyResult<(Bound<'_, PyAny>, Bound<'_, PyAny>)> {
     let kp = omq_proto::CurveKeypair::generate();
     let pub_z85 = kp.public.to_z85();
     let sec_z85 = kp.secret.to_z85();
-    let pub_bytes = pyo3::types::PyBytes::new_bound(py, pub_z85.as_bytes());
-    let sec_bytes = pyo3::types::PyBytes::new_bound(py, sec_z85.as_bytes());
-    Ok((pub_bytes.into(), sec_bytes.into()))
+    let pub_bytes = pyo3::types::PyBytes::new(py, pub_z85.as_bytes());
+    let sec_bytes = pyo3::types::PyBytes::new(py, sec_z85.as_bytes());
+    Ok((pub_bytes.into_any(), sec_bytes.into_any()))
 }
 
 #[cfg(feature = "curve")]
 #[pyfunction]
-fn curve_public(py: Python<'_>, secret_z85: &[u8]) -> PyResult<PyObject> {
+fn curve_public<'py>(py: Python<'py>, secret_z85: &[u8]) -> PyResult<Bound<'py, PyAny>> {
     let secret_str = std::str::from_utf8(secret_z85).map_err(|_| {
         pyo3::exceptions::PyValueError::new_err("secret key must be valid UTF-8 Z85")
     })?;
@@ -152,16 +141,16 @@ fn curve_public(py: Python<'_>, secret_z85: &[u8]) -> PyResult<PyObject> {
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     let pk = sk.derive_public();
     let pub_z85 = pk.to_z85();
-    Ok(pyo3::types::PyBytes::new_bound(py, pub_z85.as_bytes()).into())
+    Ok(pyo3::types::PyBytes::new(py, pub_z85.as_bytes()).into_any())
 }
 
 #[cfg(feature = "blake3zmq")]
 #[pyfunction]
-fn blake3zmq_keypair(py: Python<'_>) -> PyResult<(PyObject, PyObject)> {
+fn blake3zmq_keypair(py: Python<'_>) -> PyResult<(Bound<'_, PyAny>, Bound<'_, PyAny>)> {
     let kp = omq_proto::Blake3ZmqKeypair::generate();
-    let pub_bytes = pyo3::types::PyBytes::new_bound(py, &kp.public.0);
-    let sec_bytes = pyo3::types::PyBytes::new_bound(py, &kp.secret.0);
-    Ok((pub_bytes.into(), sec_bytes.into()))
+    let pub_bytes = pyo3::types::PyBytes::new(py, &kp.public.0);
+    let sec_bytes = pyo3::types::PyBytes::new(py, &kp.secret.0);
+    Ok((pub_bytes.into_any(), sec_bytes.into_any()))
 }
 
 #[pyfunction]

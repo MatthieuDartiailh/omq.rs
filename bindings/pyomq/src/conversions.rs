@@ -50,7 +50,7 @@ impl AsRef<[u8]> for PyBytesOwner {
 /// `memoryview` / other buffer-protocol types whose backing storage
 /// might be mutable or transient.
 pub fn bytes_from_pyany(b: &Bound<'_, PyAny>) -> PyResult<Bytes> {
-    if let Ok(pb) = b.downcast::<PyBytes>() {
+    if let Ok(pb) = b.cast::<PyBytes>() {
         return Ok(Bytes::from_owner(PyBytesOwner::from_pybytes(pb)));
     }
     let view: &[u8] = b.extract()?;
@@ -59,7 +59,7 @@ pub fn bytes_from_pyany(b: &Bound<'_, PyAny>) -> PyResult<Bytes> {
 
 /// Build a multipart `Message` from a Python list/tuple of bytes-like.
 pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
-    let it = parts.iter()?;
+    let it = parts.try_iter()?;
     let collected: Vec<Bytes> = it
         .map(|part| bytes_from_pyany(&part?))
         .collect::<PyResult<_>>()?;
@@ -67,7 +67,6 @@ pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
 }
 
 /// Return a Python list of bytes - one per message frame.
-pub fn parts_to_pylist<'py>(py: Python<'py>, msg: Message) -> Bound<'py, PyList> {
-    let items: Vec<Bound<'py, PyBytes>> = msg.iter().map(|b| PyBytes::new_bound(py, &b)).collect();
-    PyList::new_bound(py, items)
+pub fn parts_to_pylist<'py>(py: Python<'py>, msg: Message) -> PyResult<Bound<'py, PyList>> {
+    PyList::new(py, msg.iter().map(|b| PyBytes::new(py, &b)))
 }

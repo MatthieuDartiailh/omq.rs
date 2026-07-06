@@ -21,14 +21,14 @@ impl PeerInfo {
         let pk = omq_proto::CurvePublicKey::from_bytes(*raw);
         let z85 = pk.to_z85();
         Self {
-            public_key: PyBytes::new_bound(py, z85.as_bytes()).unbind(),
+            public_key: PyBytes::new(py, z85.as_bytes()).unbind(),
         }
     }
 
     #[cfg(feature = "blake3zmq")]
     pub(crate) fn from_raw_bytes(py: Python<'_>, raw: &[u8; 32]) -> Self {
         Self {
-            public_key: PyBytes::new_bound(py, raw).unbind(),
+            public_key: PyBytes::new(py, raw).unbind(),
         }
     }
 }

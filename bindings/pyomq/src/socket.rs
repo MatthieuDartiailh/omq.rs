@@ -348,8 +348,8 @@ impl Monitor {
     }
 }
 
-fn monitor_event_to_dict(py: Python<'_>, ev: &MonitorEvent) -> PyResult<PyObject> {
-    let d = PyDict::new_bound(py);
+fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bound<'py, PyAny>> {
+    let d = PyDict::new(py);
     match ev {
         MonitorEvent::Listening { endpoint } => {
             d.set_item("event", "listening")?;
@@ -378,7 +378,7 @@ fn monitor_event_to_dict(py: Python<'_>, ev: &MonitorEvent) -> PyResult<PyObject
             d.set_item("endpoint", endpoint.to_string())?;
             d.set_item("connection_id", peer.connection_id)?;
             if let Some(id) = &peer.peer_identity {
-                d.set_item("peer_identity", PyBytes::new_bound(py, id))?;
+                d.set_item("peer_identity", PyBytes::new(py, id))?
             }
         }
         MonitorEvent::HandshakeFailed {
@@ -412,7 +412,7 @@ fn monitor_event_to_dict(py: Python<'_>, ev: &MonitorEvent) -> PyResult<PyObject
             d.set_item("event", "unknown")?;
         }
     }
-    Ok(d.into())
+    Ok(d.into_any())
 }
 
 #[pymethods]
@@ -423,15 +423,15 @@ impl Monitor {
     /// Returns a dict with at minimum `{"event": "<name>"}` plus
     /// event-specific keys (`endpoint`, `connection_id`, etc.).
     #[pyo3(signature = (timeout_ms = -1))]
-    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<PyObject> {
+    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<Bound<'py, PyAny>> {
         let n = self.lagged.swap(0, Ordering::Relaxed);
         if n > 0 {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("event", "lagged")?;
             d.set_item("count", n)?;
-            return Ok(d.into());
+            return Ok(d.into_any());
         }
-        let ev = py.allow_threads(|| {
+        let ev = py.detach(|| {
             if timeout_ms < 0 {
                 self.rx.recv().map_err(|_| ())
             } else {
@@ -448,13 +448,13 @@ impl Monitor {
 
     /// Try to receive without blocking. Raises `zmq.Again` if no event
     /// is available.
-    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let n = self.lagged.swap(0, Ordering::Relaxed);
         if n > 0 {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("event", "lagged")?;
             d.set_item("count", n)?;
-            return Ok(d.into());
+            return Ok(d.into_any());
         }
         match self.rx.try_recv() {
             Ok(ev) => monitor_event_to_dict(py, &ev),
@@ -463,15 +463,15 @@ impl Monitor {
     }
 }
 
-pub(crate) fn connection_status_to_dict(
-    py: Python<'_>,
+pub(crate) fn connection_status_to_dict<'py>(
+    py: Python<'py>,
     cs: &omq_tokio::ConnectionStatus,
-) -> PyResult<PyObject> {
-    let d = PyDict::new_bound(py);
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
     d.set_item("connection_id", cs.connection_id)?;
     d.set_item("endpoint", cs.endpoint.to_string())?;
-    d.set_item("identity", PyBytes::new_bound(py, &cs.identity))?;
-    Ok(d.into())
+    d.set_item("identity", PyBytes::new(py, &cs.identity))?;
+    Ok(d)
 }
 
 #[pyclass(module = "pyomq._native")]
@@ -538,7 +538,7 @@ impl Socket {
     #[pyo3(signature = (flags = 0))]
     fn recv<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, PyBytes>> {
         if let Some(head) = self.inner.pop_rxbuf_head() {
-            return Ok(PyBytes::new_bound(py, &head));
+            return Ok(PyBytes::new(py, &head));
         }
         let msg = if flags & crate::constants::NOBLOCK != 0 {
             self.try_recv_message()?
@@ -554,25 +554,24 @@ impl Socket {
         if !parts.is_empty() {
             self.inner.store_rxbuf(parts);
         }
-        Ok(PyBytes::new_bound(py, &head))
+        Ok(PyBytes::new(py, &head))
     }
 
     #[pyo3(signature = (flags = 0))]
     fn recv_multipart<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, PyList>> {
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
-            let parts: Vec<Bound<'py, PyBytes>> = leftover
-                .into_iter()
-                .map(|b| PyBytes::new_bound(py, &b))
-                .collect();
-            return Ok(PyList::new_bound(py, parts));
+            return Ok(PyList::new(
+                py,
+                leftover.into_iter().map(|b| PyBytes::new(py, &b)),
+            )?);
         }
         let msg = if flags & crate::constants::NOBLOCK != 0 {
             self.try_recv_message()?
         } else {
             self.recv_message(py)?
         };
-        Ok(conversions::parts_to_pylist(py, msg))
+        Ok(conversions::parts_to_pylist(py, msg)?)
     }
 
     fn subscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -603,31 +602,36 @@ impl Socket {
     fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let sock = self.inner.ensure_socket()?;
         let ctx = self.inner.ctx.clone();
-        let statuses: Vec<omq_tokio::ConnectionStatus> = py.allow_threads(|| {
+        let statuses: Vec<omq_tokio::ConnectionStatus> = py.detach(|| {
             ctx.with_socket(&sock, |s| async move {
                 s.connections().await.unwrap_or_default()
             })
         });
-        let dicts: Vec<PyObject> = statuses
+        // Temporary allocation to be able to propagate errors
+        let temp = statuses
             .iter()
-            .map(|cs| connection_status_to_dict(py, cs))
-            .collect::<PyResult<_>>()?;
-        Ok(PyList::new_bound(py, dicts))
+            .map(|cs| crate::socket::connection_status_to_dict(py, cs))
+            .collect::<PyResult<Vec<Bound<'py, PyDict>>>>()?;
+        Ok(PyList::new(py, temp)?)
     }
 
     /// Return a dict for the peer with the given `connection_id`, or
     /// `None` if no such peer is currently connected.
-    fn connection_info<'py>(&self, py: Python<'py>, connection_id: u64) -> PyResult<PyObject> {
+    fn connection_info<'py>(
+        &self,
+        py: Python<'py>,
+        connection_id: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let sock = self.inner.ensure_socket()?;
         let ctx = self.inner.ctx.clone();
-        let status: Option<omq_tokio::ConnectionStatus> = py.allow_threads(|| {
+        let status: Option<omq_tokio::ConnectionStatus> = py.detach(|| {
             ctx.with_socket(&sock, move |s| async move {
                 s.connection_info(connection_id).await.ok().flatten()
             })
         });
         match status {
-            Some(cs) => connection_status_to_dict(py, &cs),
-            None => Ok(py.None()),
+            Some(cs) => connection_status_to_dict(py, &cs).map(|d| d.into_any()),
+            None => Ok(py.None().bind(py).clone()),
         }
     }
 
@@ -636,7 +640,7 @@ impl Socket {
     fn monitor(&self, py: Python<'_>) -> PyResult<Monitor> {
         let sock = self.inner.ensure_socket()?;
         let ctx = self.inner.ctx.clone();
-        let stream = py.allow_threads(|| ctx.with_socket(&sock, |s| async move { s.monitor() }));
+        let stream = py.detach(|| ctx.with_socket(&sock, |s| async move { s.monitor() }));
         Ok(Monitor::from_stream(&self.inner.ctx, stream))
     }
 
@@ -665,7 +669,7 @@ impl Socket {
             return Ok(());
         };
         let ctx = self.inner.ctx.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump);
         });
         Ok(())
@@ -706,7 +710,7 @@ impl Socket {
                     mat_guard.as_ref().unwrap().send_notify.clone()
                 };
                 let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
-                py.allow_threads(|| {
+                py.detach(|| {
                     let deadline = timeout.map(|t| Instant::now() + t);
                     send_notify.park_begin();
                     loop {
@@ -753,7 +757,7 @@ impl Socket {
             (mat.recv_notify.clone(), mat.recv_space.clone())
         };
         let timeout = self.inner.overlay.lock().unwrap().rcvtimeo;
-        py.allow_threads(|| {
+        py.detach(|| {
             let deadline = timeout.map(|t| Instant::now() + t);
 
             recv_notify.park_begin();

@@ -21,7 +21,7 @@ where
 {
     let sock = inner.ensure_socket()?;
     let ctx = inner.ctx.clone();
-    py.allow_threads(|| ctx.with_socket(&sock, op))
+    py.detach(|| ctx.with_socket(&sock, op))
         .map_err(map_err)
 }
 
@@ -37,7 +37,7 @@ where
 {
     let sock = inner.ensure_socket()?;
     let ctx = inner.ctx.clone();
-    py.allow_threads(|| ctx.with_socket(&sock, op))
+    py.detach(|| ctx.with_socket(&sock, op))
         .map_err(map_err)
 }
 
@@ -56,7 +56,7 @@ where
     let ctx = inner.ctx.clone();
     ctx.tokio_future_into_py(py, async move {
         op(sock).await.map_err(map_err)?;
-        Python::with_gil(|py| Ok(py.None()))
+        Python::attach(|py| Ok(py.None()))
     })
 }
 
@@ -75,6 +75,6 @@ where
     let ctx = inner.ctx.clone();
     ctx.tokio_future_into_py(py, async move {
         let s = op(sock).await.map_err(map_err)?;
-        Python::with_gil(|py| Ok(s.to_object(py)))
+        Python::attach(|py| Ok(s.into_pyobject(py)?.into_any().unbind()))
     })
 }

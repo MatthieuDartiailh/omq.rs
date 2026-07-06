@@ -14,8 +14,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 /// Helper: turn an `i64` into a `Bound<PyAny>` for `getsockopt` returns.
-fn int_to_bound<T: pyo3::IntoPy<PyObject>>(py: Python<'_>, v: T) -> Bound<'_, PyAny> {
-    v.into_py(py).into_bound(py)
+fn int_to_bound(py: Python<'_>, v: i64) -> Bound<'_, PyAny> {
+    // This conversion cannot fail,
+    // since `v` is a valid `i64` and `PyLong` can represent any `i64`.
+    v.into_pyobject(py).unwrap().into_any()
 }
 
 use crate::constants;
@@ -350,9 +352,8 @@ pub fn setsockopt(
             let ctx = sock.ctx.clone();
             drop(ov);
             let s = sock.ensure_socket()?;
-            let r = py.allow_threads(|| {
-                ctx.with_socket(&s, move |s| async move { s.subscribe(bytes).await })
-            });
+            let r =
+                py.detach(|| ctx.with_socket(&s, move |s| async move { s.subscribe(bytes).await }));
             return r.map_err(map_err);
         }
         constants::UNSUBSCRIBE => {
@@ -361,9 +362,8 @@ pub fn setsockopt(
             let ctx = sock.ctx.clone();
             drop(ov);
             let s = sock.ensure_socket()?;
-            let r = py.allow_threads(|| {
-                ctx.with_socket(&s, move |s| async move { s.unsubscribe(bytes).await })
-            });
+            let r = py
+                .detach(|| ctx.with_socket(&s, move |s| async move { s.unsubscribe(bytes).await }));
             return r.map_err(map_err);
         }
         constants::RCVTIMEO => {
@@ -583,7 +583,7 @@ pub fn getsockopt<'py>(
                 backend::SocketType::Channel => constants::CHANNEL,
                 _ => -1,
             };
-            Ok(int_to_bound(py, v))
+            Ok(int_to_bound(py, v as i64))
         }
         constants::RCVMORE => {
             let more = !sock.rxbuf.lock().unwrap().is_empty();
@@ -591,7 +591,7 @@ pub fn getsockopt<'py>(
         }
         constants::IDENTITY => {
             let id = sock.overlay.lock().unwrap().identity.clone();
-            Ok(PyBytes::new_bound(py, &id).into_any())
+            Ok(PyBytes::new(py, &id).into_any())
             // Cast to PyAny via `into_any()` keeps the type uniform with the
             // numeric branches above.
         }
@@ -707,7 +707,7 @@ pub fn getsockopt<'py>(
                 .plain_username
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, v.as_bytes()).into_any())
+            Ok(PyBytes::new(py, v.as_bytes()).into_any())
         }
         constants::PLAIN_PASSWORD => {
             let v = sock
@@ -717,7 +717,7 @@ pub fn getsockopt<'py>(
                 .plain_password
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, v.as_bytes()).into_any())
+            Ok(PyBytes::new(py, v.as_bytes()).into_any())
         }
         constants::CURVE_SERVER => {
             let v = sock.overlay.lock().unwrap().curve_server as i64;
@@ -731,7 +731,7 @@ pub fn getsockopt<'py>(
                 .curve_publickey
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, &v).into_any())
+            Ok(PyBytes::new(py, &v).into_any())
         }
         constants::CURVE_SECRETKEY => {
             let v = sock
@@ -741,7 +741,7 @@ pub fn getsockopt<'py>(
                 .curve_secretkey
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, &v).into_any())
+            Ok(PyBytes::new(py, &v).into_any())
         }
         constants::CURVE_SERVERKEY => {
             let v = sock
@@ -751,7 +751,7 @@ pub fn getsockopt<'py>(
                 .curve_serverkey
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, &v).into_any())
+            Ok(PyBytes::new(py, &v).into_any())
         }
         constants::BLAKE3ZMQ_SERVER => {
             let v = sock.overlay.lock().unwrap().blake3zmq_server as i64;
@@ -765,7 +765,7 @@ pub fn getsockopt<'py>(
                 .blake3zmq_publickey
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, &v).into_any())
+            Ok(PyBytes::new(py, &v).into_any())
         }
         constants::BLAKE3ZMQ_SECRETKEY => {
             let v = sock
@@ -775,7 +775,7 @@ pub fn getsockopt<'py>(
                 .blake3zmq_secretkey
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, &v).into_any())
+            Ok(PyBytes::new(py, &v).into_any())
         }
         constants::BLAKE3ZMQ_SERVERKEY => {
             let v = sock
@@ -785,7 +785,7 @@ pub fn getsockopt<'py>(
                 .blake3zmq_serverkey
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, &v).into_any())
+            Ok(PyBytes::new(py, &v).into_any())
         }
         constants::OMQ_ON_MUTE => {
             let v: i64 = match sock.overlay.lock().unwrap().on_mute {
@@ -804,7 +804,7 @@ pub fn getsockopt<'py>(
                 .compression_dict
                 .clone()
                 .unwrap_or_default();
-            Ok(PyBytes::new_bound(py, &v).into_any())
+            Ok(PyBytes::new(py, &v).into_any())
         }
         constants::OMQ_COMPRESSION_AUTO_TRAIN => {
             let v = sock.overlay.lock().unwrap().compression_auto_train as i64;
@@ -842,7 +842,7 @@ pub fn getsockopt<'py>(
             Ok(int_to_bound(py, flags))
         }
         constants::ZAP_DOMAIN | constants::TCP_ACCEPT_FILTER | constants::LAST_ENDPOINT => {
-            Ok(PyBytes::new_bound(py, b"").into_any())
+            Ok(PyBytes::new(py, b"").into_any())
         }
         other => Err(not_implemented(&format!(
             "getsockopt for option id {other}"

@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use omq_tokio::Socket as InnerSocket;
+use pyo3::prelude::*;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
@@ -74,7 +75,7 @@ impl ContextInner {
         })
     }
 
-    fn ensure_runtime(&self) -> pyo3::PyResult<(Handle, flume::Sender<Job>)> {
+    fn ensure_runtime(&self) -> PyResult<(Handle, flume::Sender<Job>)> {
         if self.terminated.load(Ordering::Acquire) {
             return Err(crate::error::map_err(omq_proto::error::Error::Closed));
         }
@@ -120,11 +121,11 @@ impl ContextInner {
         Ok((handle, tx))
     }
 
-    pub fn runtime_handle(&self) -> pyo3::PyResult<Handle> {
+    pub fn runtime_handle(&self) -> PyResult<Handle> {
         Ok(self.ensure_runtime()?.0)
     }
 
-    fn submit_tx(&self) -> pyo3::PyResult<flume::Sender<Job>> {
+    fn submit_tx(&self) -> PyResult<flume::Sender<Job>> {
         Ok(self.ensure_runtime()?.1)
     }
 
@@ -140,9 +141,7 @@ impl ContextInner {
             let out = fut.await;
             let _ = otx.send(out);
         });
-        pyo3::Python::with_gil(|py| {
-            py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result"))
-        })
+        Python::attach(|py| py.detach(|| orx.recv().expect("pyomq: runtime dropped result")))
     }
 
     /// Build a socket on the tokio thread, spawn per-socket send/recv pumps,
@@ -157,7 +156,7 @@ impl ContextInner {
         recv_notify: Arc<crate::socket::RecvNotify>,
         send_notify: Arc<crate::socket::RecvNotify>,
         recv_space: Arc<tokio::sync::Notify>,
-    ) -> pyo3::PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
+    ) -> PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
         let (otx, orx) = flume::bounded(1);
         let grr = global_recv_ready();
         let job: Job = Box::new(move || {
@@ -221,9 +220,9 @@ impl ContextInner {
         self.submit_tx()?
             .send(job)
             .expect("pyomq: tokio runtime gone");
-        pyo3::Python::with_gil(|py| {
-            Ok(py.allow_threads(|| orx.recv().expect("pyomq: runtime dropped result")))
-        })
+        Ok(Python::attach(|py| {
+            py.detach(|| orx.recv().expect("pyomq: runtime dropped result"))
+        }))
     }
 
     /// Close a socket: drain the send yring, then close with linger.
@@ -279,23 +278,23 @@ impl ContextInner {
     /// Bridge a Rust future to a Python `asyncio.Future`.
     pub fn tokio_future_into_py<'py, F>(
         &self,
-        py: pyo3::Python<'py>,
+        py: Python<'py>,
         fut: F,
-    ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>>
+    ) -> PyResult<Bound<'py, PyAny>>
     where
-        F: Future<Output = pyo3::PyResult<pyo3::PyObject>> + Send + 'static,
+        F: Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
     {
         use pyo3::prelude::*;
 
-        let asyncio = py.import_bound("asyncio")?;
+        let asyncio = py.import("asyncio")?;
         let event_loop = asyncio.call_method0("get_running_loop")?;
         let py_future = event_loop.call_method0("create_future")?;
-        let loop_handle: PyObject = event_loop.clone().unbind().into_any();
-        let future_handle: PyObject = py_future.clone().unbind().into_any();
+        let loop_handle: Py<PyAny> = event_loop.clone().unbind().into_any();
+        let future_handle: Py<PyAny> = py_future.clone().unbind().into_any();
 
         self.runtime_handle()?.spawn(async move {
             let result = fut.await;
-            Python::with_gil(|gil| {
+            Python::attach(|gil| {
                 let loop_obj = loop_handle.bind(gil);
                 let fut_obj = future_handle.bind(gil);
                 let _ = match result {
