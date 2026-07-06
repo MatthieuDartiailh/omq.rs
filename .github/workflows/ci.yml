@@ -16,7 +16,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -48,7 +48,7 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -66,7 +66,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p omq-tokio --features curve
@@ -82,7 +82,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p omq-tokio --features lz4
@@ -97,7 +97,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with: { components: rustfmt, clippy }
       - uses: Swatinem/rust-cache@v2
@@ -115,21 +115,23 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.13" }
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.14" }
       - name: create virtualenv and install python deps
+        working-directory: bindings/pyomq
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin pytest pytest-asyncio pyzmq
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install --group test
       - name: build pyomq
         working-directory: bindings/pyomq
-        run: ../../.venv/bin/maturin develop --release
+        run: .venv/bin/pip install .
       - name: pytest
         working-directory: bindings/pyomq
-        run: ../../.venv/bin/pytest -v -k "not test_perf"
+        run: .venv/bin/pytest -v -k "not test_perf"
 
   ci-success:
     name: CI success
