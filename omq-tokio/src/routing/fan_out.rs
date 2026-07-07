@@ -259,7 +259,24 @@ impl FanOutShards {
             .map_or(0, |(idx, _)| idx)
     }
 
-    fn push_control(endpoint: &mut ShardEndpoint, mut cmd: ShardCommand) {
+    fn push_control(endpoint: &mut ShardEndpoint, cmd: ShardCommand) {
+        #[cfg(feature = "rt-multi-thread")]
+        if let Ok(handle) = tokio::runtime::Handle::try_current()
+            && matches!(
+                handle.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            )
+        {
+            // A full shard ring is drained by another Tokio task. If a socket
+            // actor spins here on a runtime worker, it can starve that drain.
+            tokio::task::block_in_place(|| Self::push_control_spinning(endpoint, cmd));
+            return;
+        }
+
+        Self::push_control_spinning(endpoint, cmd);
+    }
+
+    fn push_control_spinning(endpoint: &mut ShardEndpoint, mut cmd: ShardCommand) {
         loop {
             match endpoint.tx.push(cmd) {
                 Ok(()) => {
