@@ -14,6 +14,13 @@ REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
 COMPARISON_CHART_SIZES = {16, 64, 256, 1024, 4096, 16384}
+SMALL_MESSAGE_SIZES = [16, 64, 256]
+LARGE_MESSAGE_SIZES = [256, 1024, 4096, 16384]
+METRIC_LINE_WIDTH = 2.5
+CPU_LINE_WIDTH = 1.6
+MARKER_RADIUS = 3.0
+MSG_LINE_DASH = "6,3"
+CPU_LINE_DASH = "2,5"
 
 COLORS = {
     "libzmq": "#eab308",
@@ -440,6 +447,249 @@ def _cpu_ticks(data_max):
     step = 50 if ceil <= 400 else 100
     ticks = list(range(step, int(ceil) + 1, step))
     return ceil, ticks
+
+
+def _panel_sizes(available_sizes: list[int], wanted_sizes: list[int]) -> list[int]:
+    available = set(available_sizes)
+    return [size for size in wanted_sizes if size in available]
+
+
+def _throughput_draw_order(impls: list[str]) -> list[str]:
+    order = [
+        "rzmq-iouring",
+        "libzmq",
+        "libzmq-mt",
+        "omq-libzmq",
+        "omq-tokio-mt",
+        "omq-tokio",
+        "rzmq",
+        "zmq.rs",
+    ]
+    return [name for name in order if name in impls]
+
+
+def _fmt_msg_tick(v: float) -> str:
+    if v >= 1e6:
+        n = v / 1e6
+        return f"{n:.1f}M" if n < 10 and n != int(n) else f"{n:.0f}M"
+    if v >= 1e3:
+        return f"{v / 1e3:.0f}k"
+    return f"{v:.0f}"
+
+
+def _fmt_gbs_tick(v: float) -> str:
+    if v >= 10:
+        return f"{v:.0f}"
+    if v >= 1:
+        return f"{v:.1f}" if v != int(v) else f"{v:.0f}"
+    return f"{v:.2g}"
+
+
+def draw_split_throughput_cpu_panel(
+    L: list[str],
+    sizes: list[int],
+    xs: list[float],
+    tput: dict,
+    tput_cpu: dict,
+    impls: list[str],
+    x_left: float,
+    x_right: float,
+    y_top: float,
+    y_bot: float,
+    title: str,
+    metric: str,
+    fixed_metric_max: float | None = None,
+    log_metric: bool = False,
+):
+    """Two-axis split panel: CPU% on the left, one throughput metric right."""
+    import math
+
+    if not sizes:
+        return
+
+    metric_idx = 0 if metric == "msgs" else 1
+    h = y_bot - y_top
+    mid_x = (x_left + x_right) / 2
+
+    all_cpu = [
+        tput_cpu[size][name]
+        for size in sizes
+        for name in impls
+        if name in tput_cpu.get(size, {})
+    ]
+    cpu_ceil, cpu_ticks = _cpu_ticks(max(all_cpu) * 1.1 if all_cpu else 200)
+
+    all_metric = [
+        tput[size][name][metric_idx]
+        for size in sizes
+        for name in impls
+        if name in tput.get(size, {})
+    ]
+
+    if log_metric:
+        positive = [v for v in all_metric if v > 0]
+        metric_min = min(positive) if positive else 0.01
+        metric_ref = max(fixed_metric_max or max(positive or [0.01]), 0.01)
+        log_lo = math.floor(math.log10(metric_min * 0.8))
+        log_hi = math.ceil(math.log10(metric_ref * 1.15))
+        if log_hi <= log_lo:
+            log_hi = log_lo + 1
+    else:
+        metric_max = (
+            fixed_metric_max
+            if fixed_metric_max
+            else (max(all_metric) * 1.15 if all_metric else 1.0)
+        )
+        metric_max = max(metric_max, 1.0 if metric == "msgs" else 0.001)
+
+    def y_cpu(v):
+        frac = max(0, min(1, v / cpu_ceil))
+        return y_bot - frac * h
+
+    def y_metric(v):
+        if log_metric:
+            if v <= 0:
+                return y_bot
+            frac = (math.log10(v) - log_lo) / (log_hi - log_lo)
+            frac = max(0, min(1, frac))
+            return y_bot - frac * h
+        return y_bot - (v / metric_max) * h
+
+    L.append(
+        svg_text(mid_x, y_top - 13, title, size=11.5,
+                 weight="700", fill="#111827")
+    )
+
+    for val in cpu_ticks:
+        yy = y_cpu(val)
+        L.append(svg_line(x_left, yy, x_right, yy))
+        L.append(svg_text(x_left - 8, yy, f"{val:g}%",
+                          anchor="end", baseline="middle", size=8.5))
+
+    if log_metric:
+        for decade in range(log_lo, log_hi + 1):
+            base = 10 ** decade
+            for mult in [1, 2, 5]:
+                v = base * mult
+                if v < 10 ** log_lo or v > 10 ** log_hi:
+                    continue
+                yy = y_metric(v)
+                if mult == 1:
+                    label = f"{_fmt_gbs_tick(v)} GB/s"
+                    L.append(svg_line(x_right, yy, x_right + 4, yy,
+                                      stroke="#9ca3af"))
+                    L.append(svg_text(x_right + 8, yy, label,
+                                      anchor="start", baseline="middle",
+                                      size=8.5, fill="#6b7280"))
+    else:
+        step = nice_step(metric_max, 6)
+        v = step
+        while v <= metric_max:
+            yy = y_metric(v)
+            label = (
+                f"{_fmt_msg_tick(v)}/s"
+                if metric == "msgs"
+                else f"{_fmt_gbs_tick(v)} GB/s"
+            )
+            L.append(svg_line(x_right, yy, x_right + 4, yy,
+                              stroke="#9ca3af"))
+            L.append(svg_text(x_right + 8, yy, label,
+                              anchor="start", baseline="middle",
+                              size=8.5, fill="#6b7280"))
+            v += step
+
+    for x in xs:
+        L.append(svg_line(x, y_top, x, y_bot))
+
+    L.append(svg_line(x_left, y_top, x_left, y_bot,
+                      stroke="#9ca3af", width=1.5))
+    L.append(svg_line(x_right, y_top, x_right, y_bot,
+                      stroke="#9ca3af", width=1.5))
+    L.append(svg_line(x_left, y_bot, x_right, y_bot,
+                      stroke="#9ca3af", width=1.5))
+
+    mid_y = (y_top + y_bot) / 2
+    L.append(svg_text(x_left - 48, mid_y, "CPU %",
+                      weight="600", rotate=-90))
+
+    draw_order = _throughput_draw_order(impls)
+
+    for name in draw_order:
+        pts = [
+            (xs[i], y_cpu(tput_cpu[sizes[i]][name]))
+            for i in range(len(sizes))
+            if name in tput_cpu.get(sizes[i], {})
+        ]
+        if pts:
+            L.append(svg_polyline(pts, COLORS[name],
+                                  width=CPU_LINE_WIDTH,
+                                  dash=CPU_LINE_DASH, opacity=0.85))
+
+    for name in draw_order:
+        pts = [
+            (xs[i], y_metric(tput[sizes[i]][name][metric_idx]))
+            for i in range(len(sizes))
+            if name in tput.get(sizes[i], {})
+        ]
+        if not pts:
+            continue
+
+        if metric == "msgs":
+            for i, size in enumerate(sizes):
+                val = tput.get(size, {}).get(name)
+                if val and len(val) >= 4 and val[2] > 0 and val[3] > 0:
+                    x = xs[i]
+                    y1 = y_metric(val[2])
+                    y2 = y_metric(val[3])
+                    L.append(
+                        f'  <line x1="{x:.1f}" y1="{y1:.1f}"'
+                        f' x2="{x:.1f}" y2="{y2:.1f}"'
+                        f' stroke="{COLORS[name]}" stroke-width="1.0"'
+                        f' opacity="0.45"/>'
+                    )
+                    L.append(
+                        f'  <line x1="{x - 3:.1f}" y1="{y1:.1f}"'
+                        f' x2="{x + 3:.1f}" y2="{y1:.1f}"'
+                        f' stroke="{COLORS[name]}" stroke-width="1.0"'
+                        f' opacity="0.45"/>'
+                    )
+                    L.append(
+                        f'  <line x1="{x - 3:.1f}" y1="{y2:.1f}"'
+                        f' x2="{x + 3:.1f}" y2="{y2:.1f}"'
+                        f' stroke="{COLORS[name]}" stroke-width="1.0"'
+                        f' opacity="0.45"/>'
+                    )
+            L.append(svg_polyline(pts, COLORS[name],
+                                  width=METRIC_LINE_WIDTH,
+                                  dash=MSG_LINE_DASH))
+            zero_pts = [
+                (xs[i], y_metric(tput[sizes[i]][name][metric_idx]))
+                for i in range(len(sizes))
+                if name in tput.get(sizes[i], {})
+                and tput[sizes[i]][name][0] == 0
+            ]
+            L.extend(svg_x_marks(zero_pts, COLORS[name],
+                                 radius=MARKER_RADIUS))
+        else:
+            L.append(svg_polyline(pts, COLORS[name],
+                                  width=METRIC_LINE_WIDTH))
+            zero_pts = []
+            nonzero_pts = []
+            for i in range(len(sizes)):
+                if name not in tput.get(sizes[i], {}):
+                    continue
+                pt = (xs[i], y_metric(tput[sizes[i]][name][metric_idx]))
+                if tput[sizes[i]][name][0] == 0:
+                    zero_pts.append(pt)
+                else:
+                    nonzero_pts.append(pt)
+            L.extend(svg_dots(nonzero_pts, COLORS[name],
+                              radius=MARKER_RADIUS))
+            L.extend(svg_x_marks(zero_pts, COLORS[name],
+                                 radius=MARKER_RADIUS))
+
+    for i, size in enumerate(sizes):
+        L.append(svg_text(xs[i], y_bot + 14, fmt_size(size), size=8.5))
 
 
 def draw_throughput_cpu_panel(
@@ -940,34 +1190,41 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
                        hw_label: str | None = None,
                        label_overrides: dict | None = None,
                        show_st_mt: bool = False) -> str:
-    """Throughput chart with three axes: CPU% (left), GB/s (inner right),
-    msg/s (outer right)."""
+    """Throughput chart split into msg/s and GB/s panels, both with CPU%."""
     sizes = data["sizes"]
     tput = data["tput"]
     tput_cpu = data.get("tput_cpu", {})
     has_data = {name for s in sizes for name in tput.get(s, {})}
     impls = [i for i in impls if i in has_data]
-    n = len(sizes)
-    if n < 2:
-        print(f"WARNING: only {n} data points for {transport_label}", file=sys.stderr)
-        if n == 0:
-            return ""
+    small_sizes = _panel_sizes(sizes, SMALL_MESSAGE_SIZES)
+    large_sizes = _panel_sizes(sizes, LARGE_MESSAGE_SIZES)
+    if not small_sizes and not large_sizes:
+        print(f"WARNING: no throughput data for {transport_label}",
+              file=sys.stderr)
+        return ""
 
     hw_offset = 14 if hw_label else 0
-    x_left = 90
-    x_right = 700
-    x_right2 = 780
-    plot_w = x_right - x_left
-    mid_x = (x_left + x_right) / 2
-    right_pad = 15
-    svg_w = x_right2 + 80 + right_pad
+    panel_h = 280
+    x_pad_left = 78
+    panel_gap_x = 98
+    x_pad_right = 78
+    legend_h = 86
+    svg_w = 980
+    total_w = svg_w - x_pad_left - x_pad_right - panel_gap_x
+    p1_w = total_w * 0.4
+    p2_w = total_w - p1_w
+    mid_x = svg_w / 2
     leg_extra = _legend_extra(len(impls), show_st_mt)
-    svg_h = 520 + hw_offset + leg_extra
+    header_y = 17
+    row_top = hw_offset + header_y + 42
+    row_bot = row_top + panel_h
+    svg_h = row_bot + legend_h + leg_extra
 
-    t1_y_top = 35 + hw_offset
-    t1_y_bot = 400 + hw_offset
-
-    xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
+    def make_xs(panel_sizes, x_left, x_right):
+        return [
+            x_left + i * (x_right - x_left) / max(len(panel_sizes) - 1, 1)
+            for i in range(len(panel_sizes))
+        ]
 
     L = []
     L.append(
@@ -976,33 +1233,46 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     )
     L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
 
-    draw_throughput_cpu_panel(
-        L, sizes, xs, tput, tput_cpu, impls,
-        x_left, x_right, x_right2, t1_y_top, t1_y_bot,
-        f"PUSH/PULL throughput: {transport_label}",
-        fixed_gbs_max=fixed_gbs_max,
-        fixed_msg_max=fixed_msg_max,
-        log_gbs=log_gbs,
-    )
+    L.append(svg_text(mid_x, header_y,
+                      f"PUSH/PULL throughput: {transport_label}",
+                      size=14, weight="700", fill="#111827"))
     if hw_label:
-        L.append(
-            f'  <text x="{mid_x}" y="{t1_y_top - 3}" text-anchor="middle"'
-            f' fill="#9ca3af" font-size="10">{hw_label}</text>'
-        )
+        L.append(svg_text(mid_x, header_y + 14, hw_label,
+                          size=9, fill="#9ca3af"))
 
-    leg_y = t1_y_bot + 40
+    p1_xl = x_pad_left
+    p1_xr = p1_xl + p1_w
+    draw_split_throughput_cpu_panel(
+        L, small_sizes, make_xs(small_sizes, p1_xl, p1_xr),
+        tput, tput_cpu, impls, p1_xl, p1_xr, row_top, row_bot,
+        "small messages: msg/s", "msgs",
+        fixed_metric_max=fixed_msg_max,
+    )
+
+    p2_xl = p1_xr + panel_gap_x
+    p2_xr = p2_xl + p2_w
+    draw_split_throughput_cpu_panel(
+        L, large_sizes, make_xs(large_sizes, p2_xl, p2_xr),
+        tput, tput_cpu, impls, p2_xl, p2_xr, row_top, row_bot,
+        "medium/large messages: GB/s", "gbs",
+        fixed_metric_max=fixed_gbs_max,
+        log_metric=log_gbs,
+    )
+
+    leg_y = row_bot + 38
     extra = _draw_impl_legend(L, impls, mid_x, leg_y,
                               label_overrides=label_overrides,
                               show_st_mt=show_st_mt)
 
     # line-type legend
     lt_y = leg_y + 22 + extra
-    lt_total = 500
+    lt_total = 570
     lt_start = mid_x - lt_total / 2
 
     L.append(
         f'  <line x1="{lt_start:.0f}" y1="{lt_y}" x2="{lt_start + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>'
+        f' stroke="#6b7280" stroke-width="{CPU_LINE_WIDTH}"'
+        f' stroke-dasharray="{CPU_LINE_DASH}" opacity="0.85"/>'
     )
     L.append(
         f'  <text x="{lt_start + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
@@ -1012,22 +1282,26 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     lt_mid = lt_start + 145
     L.append(
         f'  <line x1="{lt_mid:.0f}" y1="{lt_y}" x2="{lt_mid + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2.0"/>'
+        f' stroke="#6b7280" stroke-width="{METRIC_LINE_WIDTH}"'
+        f' stroke-dasharray="{MSG_LINE_DASH}"/>'
     )
-    L.append(f'  <circle cx="{lt_mid + 7:.0f}" cy="{lt_y}" r="1.8" fill="#6b7280"/>')
     L.append(
         f'  <text x="{lt_mid + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
-        f' font-size="10">GB/s (inner right{", log" if log_gbs else ""})</text>'
+        f' font-size="10">msg/s (small panel)</text>'
     )
 
-    lt_right = lt_mid + 165
+    lt_right = lt_mid + 190
     L.append(
         f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2.0" stroke-dasharray="5,3"/>'
+        f' stroke="#6b7280" stroke-width="{METRIC_LINE_WIDTH}"/>'
+    )
+    L.append(
+        f'  <circle cx="{lt_right + 7:.0f}" cy="{lt_y}"'
+        f' r="{MARKER_RADIUS}" fill="#6b7280"/>'
     )
     L.append(
         f'  <text x="{lt_right + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
-        f' font-size="10">msg/s (outer right)</text>'
+        f' font-size="10">GB/s (large panel{", log" if log_gbs else ""})</text>'
     )
 
     L.append("</svg>")
@@ -1310,25 +1584,39 @@ def generate_multi_panel_cpu_chart(
     panels = [(p, d) for p, d in panels if d["sizes"]]
     if not panels:
         return ""
-    sizes = panels[0][1]["sizes"]
-    n = len(sizes)
-    if n < 2:
+
+    has_data = {
+        name
+        for _peers, data in panels
+        for size in data["sizes"]
+        for name in data["tput"].get(size, {})
+    }
+    impls = [i for i in impls if i in has_data]
+    if not impls:
         return ""
 
-    x_left = 90
-    x_right = 700
-    x_right2 = 780
-    plot_w = x_right - x_left
-    panel_h = 260
-    gap = 70
+    panel_h = 235
+    row_gap = 82
+    x_pad_left = 78
+    panel_gap_x = 98
+    x_pad_right = 78
     hw_offset = 14 if hw_label else 0
     leg_extra = _legend_extra(len(impls), show_st_mt)
-    right_pad = 15
-    svg_w = x_right2 + 80 + right_pad
-    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20 + leg_extra
-    mid_x = (x_left + x_right) / 2
+    svg_w = 1020
+    total_w = svg_w - x_pad_left - x_pad_right - panel_gap_x
+    p1_w = total_w * 0.4
+    p2_w = total_w - p1_w
+    row_start = hw_offset + 72
+    row_step = panel_h + row_gap
+    last_bot = row_start + (len(panels) - 1) * row_step + panel_h
+    svg_h = last_bot + 112 + leg_extra
+    mid_x = svg_w / 2
 
-    xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
+    def make_xs(panel_sizes, x_left, x_right):
+        return [
+            x_left + i * (x_right - x_left) / max(len(panel_sizes) - 1, 1)
+            for i in range(len(panel_sizes))
+        ]
 
     L = []
     L.append(
@@ -1338,41 +1626,51 @@ def generate_multi_panel_cpu_chart(
     L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
 
     if hw_label:
-        L.append(
-            f'  <text x="{mid_x}" y="{hw_offset + 32}" text-anchor="middle"'
-            f' fill="#9ca3af" font-size="10">{hw_label}</text>'
-        )
+        L.append(svg_text(mid_x, 32, hw_label, size=9, fill="#9ca3af"))
 
     for idx, (peers, data) in enumerate(panels):
-        p_sizes = data["sizes"]
-        p_xs = [x_left + i * plot_w / max(len(p_sizes) - 1, 1)
-                for i in range(len(p_sizes))]
-        y_top = hw_offset + 35 + idx * (panel_h + gap)
+        small_sizes = _panel_sizes(data["sizes"], SMALL_MESSAGE_SIZES)
+        large_sizes = _panel_sizes(data["sizes"], LARGE_MESSAGE_SIZES)
+        y_top = row_start + idx * row_step
         y_bot = y_top + panel_h
         if title_fn:
-            panel_title = title_fn(peers, transport_label)
+            row_title = title_fn(peers, transport_label)
         else:
-            panel_title = f"throughput, {peers} peers: {transport_label}"
-        draw_throughput_cpu_panel(
-            L, p_sizes, p_xs, data["tput"],
-            data.get("tput_cpu", {}), impls,
-            x_left, x_right, x_right2, y_top, y_bot,
-            panel_title,
+            row_title = f"throughput, {peers} peers: {transport_label}"
+        L.append(svg_text(mid_x, y_top - 35, row_title,
+                          size=13, weight="700", fill="#111827"))
+
+        p1_xl = x_pad_left
+        p1_xr = p1_xl + p1_w
+        draw_split_throughput_cpu_panel(
+            L, small_sizes, make_xs(small_sizes, p1_xl, p1_xr),
+            data["tput"], data.get("tput_cpu", {}), impls,
+            p1_xl, p1_xr, y_top, y_bot,
+            "small messages: msg/s", "msgs",
         )
 
-    last_bot = hw_offset + 35 + (len(panels) - 1) * (panel_h + gap) + panel_h
-    leg_y = last_bot + 30
+        p2_xl = p1_xr + panel_gap_x
+        p2_xr = p2_xl + p2_w
+        draw_split_throughput_cpu_panel(
+            L, large_sizes, make_xs(large_sizes, p2_xl, p2_xr),
+            data["tput"], data.get("tput_cpu", {}), impls,
+            p2_xl, p2_xr, y_top, y_bot,
+            "medium/large messages: GB/s", "gbs",
+        )
+
+    leg_y = last_bot + 34
     extra = _draw_impl_legend(L, impls, mid_x, leg_y,
                               label_overrides=label_overrides,
                               show_st_mt=show_st_mt)
 
     lt_y = leg_y + 22 + extra
-    lt_total = 500
+    lt_total = 570
     lt_start = mid_x - lt_total / 2
 
     L.append(
         f'  <line x1="{lt_start:.0f}" y1="{lt_y}" x2="{lt_start + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>'
+        f' stroke="#6b7280" stroke-width="{CPU_LINE_WIDTH}"'
+        f' stroke-dasharray="{CPU_LINE_DASH}" opacity="0.85"/>'
     )
     L.append(
         f'  <text x="{lt_start + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
@@ -1382,22 +1680,26 @@ def generate_multi_panel_cpu_chart(
     lt_mid = lt_start + 145
     L.append(
         f'  <line x1="{lt_mid:.0f}" y1="{lt_y}" x2="{lt_mid + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2.0"/>'
+        f' stroke="#6b7280" stroke-width="{METRIC_LINE_WIDTH}"'
+        f' stroke-dasharray="{MSG_LINE_DASH}"/>'
     )
-    L.append(f'  <circle cx="{lt_mid + 7:.0f}" cy="{lt_y}" r="1.8" fill="#6b7280"/>')
     L.append(
         f'  <text x="{lt_mid + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
-        f' font-size="10">GB/s (inner right)</text>'
+        f' font-size="10">msg/s (small panel)</text>'
     )
 
-    lt_right = lt_mid + 165
+    lt_right = lt_mid + 190
     L.append(
         f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 14:.0f}" y2="{lt_y}"'
-        f' stroke="#6b7280" stroke-width="2.0" stroke-dasharray="5,3"/>'
+        f' stroke="#6b7280" stroke-width="{METRIC_LINE_WIDTH}"/>'
+    )
+    L.append(
+        f'  <circle cx="{lt_right + 7:.0f}" cy="{lt_y}"'
+        f' r="{MARKER_RADIUS}" fill="#6b7280"/>'
     )
     L.append(
         f'  <text x="{lt_right + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
-        f' font-size="10">msg/s (outer right)</text>'
+        f' font-size="10">GB/s (large panel)</text>'
     )
 
     L.append("</svg>")
