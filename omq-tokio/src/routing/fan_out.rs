@@ -7,7 +7,7 @@
 //! producers and filters/pushes without a producer mutex. `xpub_nodrop`
 //! keeps the direct dispatch path so it can preserve backpressure.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -30,6 +30,8 @@ use omq_proto::proto::transform::MessageEncoder;
 use super::peer_send::PeerSend;
 use super::subscription::SubscriptionSet;
 use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult, WIRE_SLOT_INLINE_CAP, WireSlotItem};
+
+type SharedFanOutEncoder = Arc<Mutex<Option<MessageEncoder>>>;
 
 /// Filter mode for a fan-out send strategy.
 #[derive(Debug, Clone, Copy)]
@@ -58,7 +60,7 @@ enum CachedResult {
     SoleWire(TryEncodeResult),
     Cached {
         targets: Arc<Vec<PeerSend>>,
-        encoder: Option<Arc<Mutex<MessageEncoder>>>,
+        encoder: Option<SharedFanOutEncoder>,
     },
     Miss,
 }
@@ -103,6 +105,7 @@ struct ShardDispatch {
     encoded: EncodedFanOutBatch,
     topic: Bytes,
     group: Option<String>,
+    peer_ids: Option<Arc<[u64]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -186,8 +189,48 @@ struct ShardWorker {
 
 struct ShardDispatchTargets {
     fallback_targets: SmallVec<[PeerSend; 8]>,
-    transform_encoder: Option<Arc<Mutex<MessageEncoder>>>,
+    transform_encoder: Option<SharedFanOutEncoder>,
     sharded_count: usize,
+}
+
+#[derive(Debug)]
+struct DeferredFanOut {
+    tx: blume::Sender<DeferredFanOutMsg>,
+    state: Mutex<DeferredFanOutState>,
+    // Fast-path hint only. `DeferredFanOutState::active` owns transitions.
+    active_hint: AtomicBool,
+    threshold: usize,
+}
+
+#[derive(Debug, Default)]
+struct DeferredFanOutState {
+    active: bool,
+    pending_senders: usize,
+}
+
+#[derive(Debug)]
+struct DeferredFanOutMsg {
+    msg: Message,
+    topic: Bytes,
+    group: Option<String>,
+    fallback_targets: SmallVec<[PeerSend; 8]>,
+    sharded_peer_ids: Arc<[u64]>,
+}
+
+#[derive(Debug)]
+enum DeferredEnqueue {
+    Direct,
+    Enqueued,
+    Dropped,
+}
+
+#[derive(Debug)]
+struct DeferredFanOutWorker {
+    deferred: Arc<DeferredFanOut>,
+    shards: Arc<FanOutShards>,
+    inner: Arc<Mutex<FanOutInner>>,
+    generation: Arc<AtomicU64>,
+    lossy: bool,
 }
 
 #[derive(Debug)]
@@ -199,6 +242,7 @@ pub(crate) struct Submitter {
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
     lossy: bool,
+    deferred: Option<Arc<DeferredFanOut>>,
     cached: Mutex<CachedFanOut>,
 }
 
@@ -207,7 +251,7 @@ struct CachedFanOut {
     generation: u64,
     sole_wire: Option<PeerSend>,
     all_targets: Option<Arc<Vec<PeerSend>>>,
-    encoder: Option<Arc<Mutex<MessageEncoder>>>,
+    encoder: Option<SharedFanOutEncoder>,
     all_wire: bool,
 }
 
@@ -221,6 +265,7 @@ impl Clone for Submitter {
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
             lossy: self.lossy,
+            deferred: self.deferred.clone(),
             cached: Mutex::new(CachedFanOut::default()),
         }
     }
@@ -442,31 +487,49 @@ impl ShardWorker {
     }
 
     fn dispatch(&mut self, dispatch: &ShardDispatch, touched: &mut SmallVec<[u64; 32]>) {
+        if let Some(peer_ids) = dispatch.peer_ids.as_ref() {
+            for &peer_id in peer_ids.iter() {
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    Self::push_dispatch_to_peer(peer_id, peer, dispatch, touched);
+                }
+            }
+            return;
+        }
+
         for (&peer_id, peer) in &mut self.peers {
             if !shard_peer_matches(self.mode, peer, dispatch) {
                 continue;
             }
-            if let Some(dict) = dispatch.encoded.dict.as_ref()
-                && !peer.dict_shipped
-            {
-                if peer
-                    .slot
-                    .try_push_ring_item(&mut peer.producer, dict.to_wire_item())
-                    != TryEncodeResult::Ok
-                {
-                    continue;
-                }
-                peer.dict_shipped = true;
-                peer.slot.mark_fanout_dict_shipped();
-                touched.push(peer_id);
-            }
+            Self::push_dispatch_to_peer(peer_id, peer, dispatch, touched);
+        }
+    }
+
+    fn push_dispatch_to_peer(
+        peer_id: u64,
+        peer: &mut ShardPeer,
+        dispatch: &ShardDispatch,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) {
+        if let Some(dict) = dispatch.encoded.dict.as_ref()
+            && !peer.dict_shipped
+        {
             if peer
                 .slot
-                .try_push_ring_item(&mut peer.producer, dispatch.encoded.payload.to_wire_item())
-                == TryEncodeResult::Ok
+                .try_push_ring_item(&mut peer.producer, dict.to_wire_item())
+                != TryEncodeResult::Ok
             {
-                touched.push(peer_id);
+                return;
             }
+            peer.dict_shipped = true;
+            peer.slot.mark_fanout_dict_shipped();
+            touched.push(peer_id);
+        }
+        if peer
+            .slot
+            .try_push_ring_item(&mut peer.producer, dispatch.encoded.payload.to_wire_item())
+            == TryEncodeResult::Ok
+        {
+            touched.push(peer_id);
         }
     }
 
@@ -478,6 +541,177 @@ impl ShardWorker {
                 peer.slot.flush_ring(&mut peer.producer);
             }
         }
+    }
+}
+
+impl DeferredFanOut {
+    fn new(tx: blume::Sender<DeferredFanOutMsg>, threshold: usize) -> Self {
+        Self {
+            tx,
+            state: Mutex::new(DeferredFanOutState::default()),
+            active_hint: AtomicBool::new(false),
+            threshold,
+        }
+    }
+
+    fn should_defer_fast(&self, msg: &Message) -> bool {
+        self.active_hint.load(Ordering::Acquire) || msg.byte_len() >= self.threshold
+    }
+
+    fn begin_enqueue(&self, msg: &Message) -> DeferredEnqueue {
+        let is_barrier = msg.byte_len() >= self.threshold;
+        let mut state = self.state.lock().expect("deferred fanout state poisoned");
+        if !state.active && !is_barrier {
+            return DeferredEnqueue::Direct;
+        }
+        if !state.active {
+            state.active = true;
+            self.active_hint.store(true, Ordering::Release);
+        }
+        state.pending_senders += 1;
+        DeferredEnqueue::Enqueued
+    }
+
+    fn finish_enqueue(&self, msg: DeferredFanOutMsg) -> DeferredEnqueue {
+        let sent = self.tx.try_send(msg).is_ok();
+        let mut state = self.state.lock().expect("deferred fanout state poisoned");
+        state.pending_senders = state.pending_senders.saturating_sub(1);
+        if sent {
+            DeferredEnqueue::Enqueued
+        } else {
+            if state.pending_senders == 0 && self.tx.is_empty() {
+                state.active = false;
+                self.active_hint.store(false, Ordering::Release);
+            }
+            DeferredEnqueue::Dropped
+        }
+    }
+
+    fn cancel_enqueue(&self) {
+        let mut state = self.state.lock().expect("deferred fanout state poisoned");
+        state.pending_senders = state.pending_senders.saturating_sub(1);
+        if state.pending_senders == 0 && self.tx.is_empty() {
+            state.active = false;
+            self.active_hint.store(false, Ordering::Release);
+        }
+    }
+
+    fn complete_if_idle(&self) -> bool {
+        let mut state = self.state.lock().expect("deferred fanout state poisoned");
+        if state.pending_senders == 0 && self.tx.is_empty() {
+            state.active = false;
+            self.active_hint.store(false, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn close(&self) {
+        self.tx.close();
+        let mut state = self.state.lock().expect("deferred fanout state poisoned");
+        state.active = false;
+        state.pending_senders = 0;
+        self.active_hint.store(false, Ordering::Release);
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.active_hint.load(Ordering::Acquire) && self.tx.is_empty()
+    }
+}
+
+impl DeferredFanOutWorker {
+    async fn run(mut self, mut rx: blume::Receiver<DeferredFanOutMsg>) {
+        let mut batch = Vec::new();
+        loop {
+            batch.clear();
+            if rx.recv_batch_mut(&mut batch).await.is_err() {
+                return;
+            }
+
+            loop {
+                for msg in batch.drain(..) {
+                    let _ = self.dispatch(msg).await;
+                }
+                while let Ok(msg) = rx.try_recv() {
+                    batch.push(msg);
+                }
+                if !batch.is_empty() {
+                    continue;
+                }
+                if self.deferred.complete_if_idle() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    async fn dispatch(&mut self, msg: DeferredFanOutMsg) -> Result<()> {
+        let target_count = msg.fallback_targets.len() + msg.sharded_peer_ids.len();
+        if target_count == 0 {
+            return Ok(());
+        }
+        let encoded = match self.encode_deferred_batch(&msg.msg, target_count).await {
+            Ok(encoded) => encoded,
+            Err(_) => return Ok(()),
+        };
+        if !msg.fallback_targets.is_empty() {
+            let inner = self.inner.clone();
+            let generation = self.generation.clone();
+            let mut deactivate =
+                |target: &PeerSend| deactivate_fanout_target(&inner, &generation, target);
+            let _ = dispatch_encoded_batch(
+                &encoded,
+                &msg.fallback_targets,
+                &msg.msg,
+                self.lossy,
+                &mut deactivate,
+            );
+        }
+        if !msg.sharded_peer_ids.is_empty() {
+            let dispatch = ShardDispatch {
+                encoded,
+                topic: msg.topic,
+                group: msg.group,
+                peer_ids: Some(msg.sharded_peer_ids),
+            };
+            self.shards.dispatch(&dispatch);
+        }
+        Ok(())
+    }
+
+    async fn encode_deferred_batch(
+        &self,
+        msg: &Message,
+        target_count: usize,
+    ) -> Result<EncodedFanOutBatch> {
+        let encoder = {
+            let g = self.inner.lock().expect("fanout inner poisoned");
+            g.fan_out_encoder.clone()
+        };
+        let Some(encoder) = encoder else {
+            return Ok(EncodedFanOutBatch {
+                dict: None,
+                payload: encode_message_for_fanout(msg, target_count),
+            });
+        };
+        let mut enc = {
+            let mut guard = encoder.lock().expect("fan_out_encoder poisoned");
+            guard.take().ok_or_else(|| {
+                Error::Protocol("fan-out encoder unavailable during deferred send".into())
+            })?
+        };
+        let msg = msg.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            let result = enc.encode(&msg);
+            (enc, result)
+        });
+        let (enc, transformed) = handle
+            .await
+            .map_err(|_| Error::Protocol("fan-out compression task panicked".into()))?;
+        *encoder.lock().expect("fan_out_encoder poisoned") = Some(enc);
+        encode_transformed_for_fanout(&self.inner, transformed?, target_count)
     }
 }
 
@@ -507,6 +741,29 @@ fn encode_message_for_fanout(msg: &Message, target_count: usize) -> EncodedFanOu
     encode_messages_for_fanout(std::slice::from_ref(msg), target_count)
 }
 
+fn encode_transformed_for_fanout(
+    inner: &Arc<Mutex<FanOutInner>>,
+    mut transformed: omq_proto::proto::transform::TransformedOut,
+    target_count: usize,
+) -> Result<EncodedFanOutBatch> {
+    let dict_msg = MessageEncoder::take_leading_dict_shipment(&mut transformed);
+    let dict = dict_msg
+        .as_ref()
+        .map(|msg| encode_message_for_fanout(msg, target_count));
+    let payload = encode_messages_for_fanout(&transformed, target_count);
+
+    let mut g = inner.lock().expect("fanout inner poisoned");
+    if let Some(dict) = dict
+        && g.fan_out_dict.is_none()
+    {
+        g.fan_out_dict = Some(dict);
+    }
+    Ok(EncodedFanOutBatch {
+        dict: g.fan_out_dict.clone(),
+        payload,
+    })
+}
+
 fn try_push_encoded_fanout(slot: &PeerWireSlot, encoded: &EncodedFanOut) -> TryEncodeResult {
     match encoded {
         EncodedFanOut::Inline { buf, len } => {
@@ -516,10 +773,40 @@ fn try_push_encoded_fanout(slot: &PeerWireSlot, encoded: &EncodedFanOut) -> TryE
     }
 }
 
+fn deactivate_fanout_target(
+    inner: &Arc<Mutex<FanOutInner>>,
+    generation: &Arc<AtomicU64>,
+    target: &PeerSend,
+) {
+    let PeerSend::Wire { slot, .. } = target else {
+        return;
+    };
+    let peer_id = slot.peer_id;
+    slot.deactivate_fanout();
+    let mut g = inner.lock().expect("fanout inner poisoned");
+    if g.deactivate_fanout_peer(peer_id) {
+        drop(g);
+        generation.fetch_add(1, Ordering::Release);
+    }
+}
+
 fn shard_peer_matches(mode: FanOutMode, peer: &ShardPeer, dispatch: &ShardDispatch) -> bool {
     match (mode, dispatch.group.as_deref()) {
         (FanOutMode::Group, Some(grp)) => peer.any_groups || peer.groups.contains(grp),
         (FanOutMode::SubscriptionPrefix, _) => peer.subscriptions.matches(&dispatch.topic),
+        (FanOutMode::Group, None) => false,
+    }
+}
+
+fn fanout_peer_matches(
+    mode: FanOutMode,
+    peer: &FanOutPeer,
+    msg: &Message,
+    group: Option<&str>,
+) -> bool {
+    match (mode, group) {
+        (FanOutMode::Group, Some(grp)) => peer.any_groups || peer.groups.contains(grp),
+        (FanOutMode::SubscriptionPrefix, _) => peer.subscriptions.matches(&first_frame_bytes(msg)),
         (FanOutMode::Group, None) => false,
     }
 }
@@ -561,16 +848,7 @@ impl Submitter {
     }
 
     fn deactivate_target(&self, target: &PeerSend) {
-        let PeerSend::Wire { slot, .. } = target else {
-            return;
-        };
-        let peer_id = slot.peer_id;
-        slot.deactivate_fanout();
-        let mut g = self.inner.lock().expect("fanout inner poisoned");
-        if g.deactivate_fanout_peer(peer_id) {
-            drop(g);
-            self.generation.fetch_add(1, Ordering::Release);
-        }
+        deactivate_fanout_target(&self.inner, &self.generation, target);
     }
 
     fn try_cached(&self, msg: &Message, group: Option<&str>) -> CachedResult {
@@ -626,33 +904,23 @@ impl Submitter {
         &self,
         msg: &Message,
         target_count: usize,
-        transform_encoder: &Mutex<MessageEncoder>,
+        transform_encoder: &Mutex<Option<MessageEncoder>>,
     ) -> Result<EncodedFanOutBatch> {
-        let mut enc = transform_encoder.lock().expect("fan_out_encoder poisoned");
-        let mut transformed = enc.encode(msg)?;
-        let dict_msg = MessageEncoder::take_leading_dict_shipment(&mut transformed);
-        let dict = dict_msg
-            .as_ref()
-            .map(|msg| encode_message_for_fanout(msg, target_count));
-        let payload = encode_messages_for_fanout(&transformed, target_count);
-
-        let mut g = self.inner.lock().expect("fanout inner poisoned");
-        if let Some(dict) = dict
-            && g.fan_out_dict.is_none()
-        {
-            g.fan_out_dict = Some(dict);
-        }
-        Ok(EncodedFanOutBatch {
-            dict: g.fan_out_dict.clone(),
-            payload,
-        })
+        let transformed = {
+            let mut enc = transform_encoder.lock().expect("fan_out_encoder poisoned");
+            let enc = enc.as_mut().ok_or_else(|| {
+                Error::Protocol("fan-out encoder unavailable during direct send".into())
+            })?;
+            enc.encode(msg)?
+        };
+        encode_transformed_for_fanout(&self.inner, transformed, target_count)
     }
 
     fn dispatch_to_targets(
         &self,
         targets: &[PeerSend],
         msg: &Message,
-        encoder: Option<&Mutex<MessageEncoder>>,
+        encoder: Option<&Mutex<Option<MessageEncoder>>>,
         drop_on_full: bool,
         deactivate: &mut impl FnMut(&PeerSend),
     ) -> Result<DispatchOutcome> {
@@ -664,7 +932,16 @@ impl Submitter {
         }
         #[cfg(feature = "ws")]
         if targets.iter().any(PeerSend::is_ws) {
-            return dispatch_to_targets(targets, msg, Some(encoder), drop_on_full, deactivate);
+            let mut outcome = DispatchOutcome::default();
+            for t in targets {
+                if t.try_encode(msg) == TryEncodeResult::Full {
+                    if drop_on_full {
+                        deactivate(t);
+                    }
+                    outcome.push_full(t);
+                }
+            }
+            return Ok(outcome);
         }
 
         let batch = self.encode_fanout_batch(msg, targets.len(), encoder)?;
@@ -677,12 +954,38 @@ impl Submitter {
         ))
     }
 
+    fn try_defer_to_shards(&self, msg: &Message, group: Option<String>) -> Result<DeferredEnqueue> {
+        let Some(deferred) = self.deferred.as_ref() else {
+            return Ok(DeferredEnqueue::Direct);
+        };
+        if !deferred.should_defer_fast(msg) {
+            return Ok(DeferredEnqueue::Direct);
+        }
+        match deferred.begin_enqueue(msg) {
+            DeferredEnqueue::Direct => return Ok(DeferredEnqueue::Direct),
+            DeferredEnqueue::Dropped => return Ok(DeferredEnqueue::Dropped),
+            DeferredEnqueue::Enqueued => {}
+        }
+
+        let deferred_msg = self.collect_deferred_msg(msg, group);
+        if deferred_msg.fallback_targets.is_empty() && deferred_msg.sharded_peer_ids.is_empty() {
+            deferred.cancel_enqueue();
+            return Ok(DeferredEnqueue::Enqueued);
+        }
+        Ok(deferred.finish_enqueue(deferred_msg))
+    }
+
     fn dispatch_to_shards_and_fallback(
         &self,
         shards: &FanOutShards,
         msg: &Message,
         group: Option<String>,
     ) -> Result<()> {
+        match self.try_defer_to_shards(msg, group.clone())? {
+            DeferredEnqueue::Direct => {}
+            DeferredEnqueue::Enqueued | DeferredEnqueue::Dropped => return Ok(()),
+        }
+
         let targets = self.collect_shard_targets(msg, group.as_deref());
 
         let target_count = targets.fallback_targets.len() + targets.sharded_count;
@@ -729,6 +1032,7 @@ impl Submitter {
             encoded: encoded_dispatch,
             topic: first_frame_bytes(msg),
             group,
+            peer_ids: None,
         };
         shards.dispatch(&dispatch);
         Ok(())
@@ -909,7 +1213,7 @@ impl Submitter {
         &self,
         msg: &Message,
         group: Option<&str>,
-    ) -> (SmallVec<[PeerSend; 8]>, Option<Arc<Mutex<MessageEncoder>>>) {
+    ) -> (SmallVec<[PeerSend; 8]>, Option<SharedFanOutEncoder>) {
         let g = self.inner.lock().expect("fanout inner poisoned");
         let use_active = self.lossy && !self.xpub_nodrop;
         let targets = if g.all_subscribe_all && matches!(self.mode, FanOutMode::SubscriptionPrefix)
@@ -959,6 +1263,33 @@ impl Submitter {
             sharded_count,
         }
     }
+
+    fn collect_deferred_msg(&self, msg: &Message, group: Option<String>) -> DeferredFanOutMsg {
+        let group_ref = group.as_deref();
+        let g = self.inner.lock().expect("fanout inner poisoned");
+        let fallback_targets = g
+            .peers
+            .values()
+            .filter(|p| p.shard.is_none())
+            .filter(|p| fanout_peer_matches(self.mode, p, msg, group_ref))
+            .map(|p| p.target.clone())
+            .collect();
+        let sharded_peer_ids: Arc<[u64]> = g
+            .peers
+            .iter()
+            .filter(|(_, p)| p.shard.is_some())
+            .filter(|(_, p)| fanout_peer_matches(self.mode, p, msg, group_ref))
+            .map(|(&peer_id, _)| peer_id)
+            .collect::<Vec<_>>()
+            .into();
+        DeferredFanOutMsg {
+            msg: msg.clone(),
+            topic: first_frame_bytes(msg),
+            group,
+            fallback_targets,
+            sharded_peer_ids,
+        }
+    }
 }
 
 /// Fan-out send strategy.
@@ -970,6 +1301,7 @@ pub(crate) struct FanOutSend {
     mode: FanOutMode,
     xpub_nodrop: bool,
     lossy: bool,
+    deferred: Option<Arc<DeferredFanOut>>,
 }
 
 struct FanOutInner {
@@ -977,7 +1309,7 @@ struct FanOutInner {
     all_subscribe_all: bool,
     all_targets: SmallVec<[PeerSend; 8]>,
     active_all_targets: SmallVec<[PeerSend; 8]>,
-    fan_out_encoder: Option<Arc<Mutex<MessageEncoder>>>,
+    fan_out_encoder: Option<SharedFanOutEncoder>,
     fan_out_dict: Option<EncodedFanOut>,
     #[allow(dead_code)]
     options: Options,
@@ -1015,7 +1347,7 @@ impl FanOutInner {
                 port: 0,
             };
             if let Some((enc, _dec)) = MessageEncoder::for_endpoint(&dummy, &self.options) {
-                self.fan_out_encoder = Some(Arc::new(Mutex::new(enc)));
+                self.fan_out_encoder = Some(Arc::new(Mutex::new(Some(enc))));
             }
         }
     }
@@ -1077,21 +1409,48 @@ impl FanOutSend {
         } else {
             None
         };
+        let (deferred, deferred_rx) = if use_shards
+            && let Some(threshold) = options.compression_offload_threshold
+            && threshold > 0
+        {
+            let cap = options.send_hwm.unwrap_or(1000).max(1) as usize;
+            let (tx, rx) = blume::bounded(cap);
+            (Some(Arc::new(DeferredFanOut::new(tx, threshold))), Some(rx))
+        } else {
+            (None, None)
+        };
+        let inner = Arc::new(Mutex::new(FanOutInner {
+            peers: FxHashMap::default(),
+            all_subscribe_all: false,
+            all_targets: SmallVec::new(),
+            active_all_targets: SmallVec::new(),
+            fan_out_encoder: None,
+            fan_out_dict: None,
+            options: options.clone(),
+        }));
+        let generation = Arc::new(AtomicU64::new(0));
+        if let (Some(shards), Some(deferred), Some(rx)) =
+            (shards.clone(), deferred.clone(), deferred_rx)
+        {
+            tokio::spawn(
+                DeferredFanOutWorker {
+                    deferred,
+                    shards,
+                    inner: inner.clone(),
+                    generation: generation.clone(),
+                    lossy: !matches!(options.on_mute, OnMute::Block),
+                }
+                .run(rx),
+            );
+        }
         Self {
             shards,
-            inner: Arc::new(Mutex::new(FanOutInner {
-                peers: FxHashMap::default(),
-                all_subscribe_all: false,
-                all_targets: SmallVec::new(),
-                active_all_targets: SmallVec::new(),
-                fan_out_encoder: None,
-                fan_out_dict: None,
-                options: options.clone(),
-            })),
-            generation: Arc::new(AtomicU64::new(0)),
+            inner,
+            generation,
             mode,
             xpub_nodrop: options.xpub_nodrop,
             lossy: !matches!(options.on_mute, OnMute::Block),
+            deferred,
         }
     }
 
@@ -1108,6 +1467,7 @@ impl FanOutSend {
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
             lossy: self.lossy,
+            deferred: self.deferred.clone(),
             cached: Mutex::new(CachedFanOut::default()),
         }
     }
@@ -1304,6 +1664,9 @@ impl FanOutSend {
         if let Some(ref shards) = self.shards {
             shards.shutdown();
         }
+        if let Some(ref deferred) = self.deferred {
+            deferred.close();
+        }
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.clear();
         g.all_subscribe_all = false;
@@ -1317,8 +1680,9 @@ impl FanOutSend {
 
     pub(crate) fn is_drained(&self) -> bool {
         let shards_empty = self.shards.as_ref().is_none_or(|shards| shards.is_empty());
+        let deferred_empty = self.deferred.as_ref().is_none_or(|d| d.is_empty());
         let g = self.inner.lock().expect("fanout inner poisoned");
-        shards_empty && g.peers.values().all(|p| p.target.is_empty())
+        shards_empty && deferred_empty && g.peers.values().all(|p| p.target.is_empty())
     }
 }
 

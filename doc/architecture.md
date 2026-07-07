@@ -312,6 +312,17 @@ payload for that connection. Late subscribers therefore receive the same
 single PUB socket dictionary once after subscribing, without rotating or
 training per-peer dictionaries.
 
+Messages at or above `compression_offload_threshold` activate a temporary
+deferred fan-out gate. The caller snapshots the matched fallback peers and
+sharded peer ids, enqueues a `DeferredFanOutMsg` into a bounded
+`blume::Sender`, and returns. While the gate is active, later messages
+take the same bounded hop so they cannot overtake the large message. The
+single deferred worker drains in FIFO order, moves the socket
+`MessageEncoder` into `spawn_blocking` for each queued message, restores
+it after compression, then pushes the encoded batch to the captured route.
+When the `blume` queue and pending sender count reach zero, the gate
+becomes idle and callers resume the direct shard path.
+
 Each shard worker owns its peers' subscription prefixes or RADIO groups,
 filters locally, pushes matching wire items lock-free into peer rings,
 then flushes and signals touched peers once per batch. This keeps

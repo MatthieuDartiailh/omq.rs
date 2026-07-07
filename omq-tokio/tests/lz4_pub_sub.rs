@@ -232,6 +232,60 @@ async fn pub_sub_lz4_sharded_fan_out_auto_trains_dict_for_late_subscriber() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pub_sub_lz4_sharded_fan_out_deferred_large_message_preserves_order() {
+    use omq_proto::proto::transform::lz4::DictTrainer;
+
+    const N_SUBS: usize = 4;
+    const N_MSGS: usize = 12;
+
+    let sample = r#"{"kind":"quote","venue":"XNAS","symbol":"OMQ","bid":101.25,"ask":101.27,"depth":[10125,10126,10127],"flags":"regular"}"#;
+    let mut trainer = DictTrainer::new(2048);
+    for _ in 0..100 {
+        trainer.add_sample(sample.as_bytes());
+    }
+    let opts = Options::default()
+        .compression_dict(bytes::Bytes::from(trainer.train()))
+        .compression_offload_threshold(Some(1));
+
+    let publisher = Socket::new(SocketType::Pub, opts.clone());
+    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+
+    let mut subs = Vec::with_capacity(N_SUBS);
+    for _ in 0..N_SUBS {
+        let sub = Socket::new(SocketType::Sub, opts.clone());
+        sub.connect(ep.clone()).await.unwrap();
+        sub.subscribe(bytes::Bytes::new()).await.unwrap();
+        subs.push(sub);
+    }
+    wait_for_subscribes(&mut mon, N_SUBS).await;
+
+    let mut expected = Vec::with_capacity(N_MSGS);
+    let first = bytes::Bytes::from(vec![b'A'; 2 * 1024 * 1024]);
+    expected.push(first.clone());
+    publisher.send(Message::single(first)).await.unwrap();
+
+    for i in 1..N_MSGS {
+        let payload = bytes::Bytes::from(format!("{sample} seq={i} {}", "B".repeat(256)));
+        expected.push(payload.clone());
+        publisher.send(Message::single(payload)).await.unwrap();
+    }
+
+    for (sub_idx, sub) in subs.iter().enumerate() {
+        for (msg_idx, expected_payload) in expected.iter().enumerate() {
+            let got = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+                .await
+                .unwrap_or_else(|_| panic!("sub {sub_idx} timed out at msg {msg_idx}"))
+                .unwrap();
+            assert_eq!(
+                got.part_bytes(0).unwrap(),
+                expected_payload,
+                "sub {sub_idx} msg {msg_idx}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn pub_sub_prefix_filter() {
     let publisher = Socket::new(SocketType::Pub, Options::default());
@@ -322,9 +376,8 @@ async fn pub_sub_lz4_fan_out() {
 }
 
 /// Fan-out with a compression dictionary configured. The fan-out
-/// encoder currently falls back to dictless compression (dict
-/// shipment requires the per-connection driver path). Verifies
-/// messages still arrive correctly.
+/// encoder ships the socket dictionary once per connection, then uses
+/// dictionary-compressed payloads for subsequent messages.
 #[tokio::test]
 async fn pub_sub_lz4_fan_out_with_dict() {
     use omq_proto::proto::transform::lz4::DictTrainer;
