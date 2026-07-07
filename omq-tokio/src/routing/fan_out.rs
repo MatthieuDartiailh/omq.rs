@@ -46,6 +46,8 @@ pub(crate) enum FanOutMode {
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `EncodedQueue::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
+const DIRECT_SHARD_PEER_CAP: usize = 4;
+const WORKER_SHARD_PEER_CAP: usize = 4;
 
 /// Yield every N peers to keep latency bounded. Scales down with peer
 /// count: fewer peers per yield when fan-out is wide (more total work).
@@ -167,6 +169,7 @@ struct ShardEndpoint {
 }
 
 struct FanOutShardState {
+    direct_load: usize,
     endpoints: Vec<ShardEndpoint>,
     eligible_peers: usize,
     active_limit: usize,
@@ -180,11 +183,12 @@ impl std::fmt::Debug for FanOutShards {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = self.state.lock().expect("fanout shards poisoned");
         f.debug_struct("FanOutShards")
-            .field("shards", &state.endpoints.len())
+            .field("shards", &(state.endpoints.len() + 1))
             .field("active_limit", &state.active_limit)
             .field("eligible_peers", &state.eligible_peers)
+            .field("direct_load", &state.direct_load)
             .field(
-                "loads",
+                "worker_loads",
                 &state.endpoints.iter().map(|s| s.load).collect::<Vec<_>>(),
             )
             .finish()
@@ -296,13 +300,14 @@ impl Clone for Submitter {
 impl FanOutShards {
     fn spawn(options: &Options, mode: FanOutMode) -> Arc<Self> {
         let pipe_cap = options.send_hwm.unwrap_or(1000).max(1) as usize;
-        let shard_count = tokio::runtime::Handle::current()
+        let max_shards = tokio::runtime::Handle::current()
             .metrics()
             .num_workers()
             .max(1);
         let lossy = !matches!(options.on_mute, OnMute::Block);
-        let mut endpoints = Vec::with_capacity(shard_count);
-        for _ in 0..shard_count {
+        let worker_shards = max_shards;
+        let mut endpoints = Vec::with_capacity(worker_shards);
+        for _ in 0..worker_shards {
             let (shard_tx, shard_rx) = yring::spsc(pipe_cap);
             let notify = Arc::new(Notify::new());
             tokio::spawn(
@@ -323,6 +328,7 @@ impl FanOutShards {
         }
         Arc::new(Self {
             state: Mutex::new(FanOutShardState {
+                direct_load: 0,
                 endpoints,
                 eligible_peers: 0,
                 active_limit: 0,
@@ -334,21 +340,45 @@ impl FanOutShards {
         if eligible_peers == 0 || max_shards == 0 {
             return 0;
         }
-        let mut desired = 1usize;
-        let mut next_growth_at = 4usize;
-        while eligible_peers >= next_growth_at && desired < max_shards {
-            desired += 1;
-            next_growth_at = next_growth_at.saturating_mul(2);
-        }
-        desired.min(max_shards)
+        let worker_peers = eligible_peers.saturating_sub(DIRECT_SHARD_PEER_CAP);
+        let worker_shards =
+            worker_peers.saturating_add(WORKER_SHARD_PEER_CAP - 1) / WORKER_SHARD_PEER_CAP;
+        1usize.saturating_add(worker_shards).min(max_shards)
     }
 
-    fn least_loaded_shard(endpoints: &[ShardEndpoint]) -> usize {
-        endpoints
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, shard)| shard.load)
-            .map_or(0, |(idx, _)| idx)
+    fn max_shards(state: &FanOutShardState) -> usize {
+        state.endpoints.len() + 1
+    }
+
+    fn logical_shard_load(state: &FanOutShardState, shard: usize) -> usize {
+        if shard == 0 {
+            state.direct_load
+        } else {
+            state.endpoints[shard - 1].load
+        }
+    }
+
+    fn increment_logical_shard_load(state: &mut FanOutShardState, shard: usize) {
+        if shard == 0 {
+            state.direct_load += 1;
+        } else {
+            state.endpoints[shard - 1].load += 1;
+        }
+    }
+
+    fn decrement_logical_shard_load(state: &mut FanOutShardState, shard: usize) {
+        if shard == 0 {
+            state.direct_load = state.direct_load.saturating_sub(1);
+        } else if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
+            endpoint.load = endpoint.load.saturating_sub(1);
+        }
+    }
+
+    fn least_loaded_shard(state: &FanOutShardState, active_limit: usize) -> usize {
+        (0..active_limit)
+            .filter(|&shard| shard != 0 || state.direct_load < DIRECT_SHARD_PEER_CAP)
+            .min_by_key(|&shard| Self::logical_shard_load(state, shard))
+            .unwrap_or(0)
     }
 
     fn push_control(endpoint: &mut ShardEndpoint, cmd: ShardCommand) {
@@ -386,21 +416,34 @@ impl FanOutShards {
         }
     }
 
-    fn add_peer(&self, add: ShardPeerAdd) -> usize {
+    fn assign_peer(&self) -> usize {
         let mut state = self.state.lock().expect("fanout shards poisoned");
         state.eligible_peers += 1;
-        let desired = Self::desired_active_shards(state.eligible_peers, state.endpoints.len());
+        let max_shards = Self::max_shards(&state);
+        let desired = Self::desired_active_shards(state.eligible_peers, max_shards);
         state.active_limit = state.active_limit.max(desired);
-        let active_limit = state.active_limit.max(1).min(state.endpoints.len());
-        let shard = Self::least_loaded_shard(&state.endpoints[..active_limit]);
-        state.endpoints[shard].load += 1;
-        Self::push_control(&mut state.endpoints[shard], ShardCommand::AddPeer(add));
+        let active_limit = state.active_limit.max(1).min(max_shards);
+        let shard = Self::least_loaded_shard(&state, active_limit);
+        Self::increment_logical_shard_load(&mut state, shard);
         shard
     }
 
-    fn send_to_shard(&self, shard: usize, cmd: ShardCommand) {
+    fn add_worker_peer(&self, shard: usize, add: ShardPeerAdd) {
+        if shard == 0 {
+            return;
+        }
         let mut state = self.state.lock().expect("fanout shards poisoned");
-        if let Some(endpoint) = state.endpoints.get_mut(shard) {
+        if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
+            Self::push_control(endpoint, ShardCommand::AddPeer(add));
+        }
+    }
+
+    fn send_to_shard(&self, shard: usize, cmd: ShardCommand) {
+        if shard == 0 {
+            return;
+        }
+        let mut state = self.state.lock().expect("fanout shards poisoned");
+        if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
             Self::push_control(endpoint, cmd);
         }
     }
@@ -408,8 +451,10 @@ impl FanOutShards {
     fn remove_peer(&self, shard: usize, peer_id: u64) {
         let mut state = self.state.lock().expect("fanout shards poisoned");
         state.eligible_peers = state.eligible_peers.saturating_sub(1);
-        if let Some(endpoint) = state.endpoints.get_mut(shard) {
-            endpoint.load = endpoint.load.saturating_sub(1);
+        Self::decrement_logical_shard_load(&mut state, shard);
+        if shard > 0
+            && let Some(endpoint) = state.endpoints.get_mut(shard - 1)
+        {
             Self::push_control(endpoint, ShardCommand::RemovePeer { peer_id });
         }
     }
@@ -507,6 +552,7 @@ impl FanOutShards {
             Self::push_control(endpoint, ShardCommand::Shutdown);
             endpoint.load = 0;
         }
+        state.direct_load = 0;
         state.eligible_peers = 0;
         state.active_limit = 0;
     }
@@ -1463,7 +1509,7 @@ impl Submitter {
         let fallback_targets = g
             .peers
             .values()
-            .filter(|p| p.shard.is_none())
+            .filter(|p| p.shard.unwrap_or(0) == 0)
             .filter(|p| match (self.mode, group) {
                 (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
                 (FanOutMode::SubscriptionPrefix, _) => {
@@ -1473,7 +1519,11 @@ impl Submitter {
             })
             .map(|p| p.target.clone())
             .collect();
-        let sharded_count = g.peers.values().filter(|p| p.shard.is_some()).count();
+        let sharded_count = g
+            .peers
+            .values()
+            .filter(|p| p.shard.is_some_and(|shard| shard > 0))
+            .count();
         ShardDispatchTargets {
             fallback_targets,
             transform_encoder: g.fan_out_encoder.clone(),
@@ -1487,14 +1537,14 @@ impl Submitter {
         let fallback_targets = g
             .peers
             .values()
-            .filter(|p| p.shard.is_none())
+            .filter(|p| p.shard.unwrap_or(0) == 0)
             .filter(|p| fanout_peer_matches(self.mode, p, msg, group_ref))
             .map(|p| p.target.clone())
             .collect();
         let sharded_peer_ids: Arc<[u64]> = g
             .peers
             .iter()
-            .filter(|(_, p)| p.shard.is_some())
+            .filter(|(_, p)| p.shard.is_some_and(|shard| shard > 0))
             .filter(|(_, p)| fanout_peer_matches(self.mode, p, msg, group_ref))
             .map(|(&peer_id, _)| peer_id)
             .collect::<Vec<_>>()
@@ -1719,18 +1769,33 @@ impl FanOutSend {
             None
         } else if let (Some(shards), PeerSend::Wire { slot, .. }) = (self.shards.as_ref(), &target)
         {
-            handle
-                .wire_slot_tx
-                .as_ref()
-                .and_then(|tx| tx.lock().expect("wire_slot_tx poisoned").take())
-                .map(|producer| {
-                    shards.add_peer(ShardPeerAdd {
-                        peer_id,
-                        slot: slot.clone(),
-                        producer,
-                        any_groups,
+            let shard = shards.assign_peer();
+            if shard > 0 {
+                let added = handle
+                    .wire_slot_tx
+                    .as_ref()
+                    .and_then(|tx| tx.lock().expect("wire_slot_tx poisoned").take())
+                    .map(|producer| {
+                        shards.add_worker_peer(
+                            shard,
+                            ShardPeerAdd {
+                                peer_id,
+                                slot: slot.clone(),
+                                producer,
+                                any_groups,
+                            },
+                        );
                     })
-                })
+                    .is_some();
+                if !added {
+                    shards.remove_peer(shard, peer_id);
+                    None
+                } else {
+                    Some(shard)
+                }
+            } else {
+                Some(shard)
+            }
         } else {
             None
         };
@@ -1764,7 +1829,7 @@ impl FanOutSend {
                 }
             }));
         }
-        if shard.is_some() {
+        if shard.is_some_and(|shard| shard > 0) {
             self.sharded_peer_count.fetch_add(1, Ordering::Release);
         }
         let mut g = self.inner.lock().expect("fanout inner poisoned");
@@ -1786,7 +1851,7 @@ impl FanOutSend {
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(peer) = g.peers.remove(&peer_id) {
-            if peer.shard.is_some() {
+            if peer.shard.is_some_and(|shard| shard > 0) {
                 self.sharded_peer_count.fetch_sub(1, Ordering::Release);
             }
             g.recompute_subscribe_all();
@@ -2133,27 +2198,85 @@ fn first_frame_bytes(msg: &Message) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use super::FanOutShards;
+    use std::sync::Arc;
+
+    use tokio::sync::Notify;
+
+    use super::{FanOutShardState, FanOutShards, ShardEndpoint};
 
     #[test]
     fn desired_active_shards_ramps_monotonically() {
         assert_eq!(FanOutShards::desired_active_shards(0, 8), 0);
         assert_eq!(FanOutShards::desired_active_shards(1, 8), 1);
-        assert_eq!(FanOutShards::desired_active_shards(3, 8), 1);
-        assert_eq!(FanOutShards::desired_active_shards(4, 8), 2);
-        assert_eq!(FanOutShards::desired_active_shards(7, 8), 2);
-        assert_eq!(FanOutShards::desired_active_shards(8, 8), 3);
-        assert_eq!(FanOutShards::desired_active_shards(15, 8), 3);
+        assert_eq!(FanOutShards::desired_active_shards(4, 8), 1);
+        assert_eq!(FanOutShards::desired_active_shards(5, 8), 2);
+        assert_eq!(FanOutShards::desired_active_shards(8, 8), 2);
+        assert_eq!(FanOutShards::desired_active_shards(9, 8), 3);
+        assert_eq!(FanOutShards::desired_active_shards(12, 8), 3);
+        assert_eq!(FanOutShards::desired_active_shards(13, 8), 4);
         assert_eq!(FanOutShards::desired_active_shards(16, 8), 4);
-        assert_eq!(FanOutShards::desired_active_shards(32, 8), 5);
+        assert_eq!(FanOutShards::desired_active_shards(17, 8), 5);
+        assert_eq!(FanOutShards::desired_active_shards(32, 8), 8);
     }
 
     #[test]
     fn desired_active_shards_is_capped_by_runtime_workers() {
         assert_eq!(FanOutShards::desired_active_shards(0, 2), 0);
         assert_eq!(FanOutShards::desired_active_shards(1, 2), 1);
-        assert_eq!(FanOutShards::desired_active_shards(4, 2), 2);
+        assert_eq!(FanOutShards::desired_active_shards(4, 2), 1);
+        assert_eq!(FanOutShards::desired_active_shards(5, 2), 2);
         assert_eq!(FanOutShards::desired_active_shards(64, 2), 2);
         assert_eq!(FanOutShards::desired_active_shards(64, 1), 1);
+    }
+
+    #[test]
+    fn assign_peer_keeps_first_four_on_direct_shard_and_reuses_it() {
+        let shards = FanOutShards {
+            state: std::sync::Mutex::new(FanOutShardState {
+                direct_load: 0,
+                endpoints: vec![test_endpoint(), test_endpoint()],
+                eligible_peers: 0,
+                active_limit: 0,
+            }),
+        };
+
+        let assigned: Vec<_> = (0..8).map(|_| shards.assign_peer()).collect();
+        assert_eq!(assigned, vec![0, 0, 0, 0, 1, 1, 1, 1]);
+
+        shards.remove_peer(0, 1);
+        assert_eq!(shards.assign_peer(), 0);
+    }
+
+    #[test]
+    fn assign_peer_caps_direct_shard_at_four_peers() {
+        let shards = FanOutShards {
+            state: std::sync::Mutex::new(FanOutShardState {
+                direct_load: 0,
+                endpoints: vec![
+                    test_endpoint(),
+                    test_endpoint(),
+                    test_endpoint(),
+                    test_endpoint(),
+                ],
+                eligible_peers: 0,
+                active_limit: 0,
+            }),
+        };
+
+        let mut loads = [0usize; 5];
+        for _ in 0..32 {
+            loads[shards.assign_peer()] += 1;
+        }
+
+        assert_eq!(loads, [4, 7, 7, 7, 7]);
+    }
+
+    fn test_endpoint() -> ShardEndpoint {
+        let (tx, _rx) = yring::spsc(4);
+        ShardEndpoint {
+            tx,
+            notify: Arc::new(Notify::new()),
+            load: 0,
+        }
     }
 }

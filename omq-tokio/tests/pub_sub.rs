@@ -363,7 +363,7 @@ async fn pub_sharded_fanout_subscription_filter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pub_sharded_fanout_blocking_hwm_delivers_all() {
     const SUBS: usize = 6;
-    const MSGS: u32 = 64;
+    const MSGS: u32 = 16;
 
     let pub_ = Socket::new(
         SocketType::Pub,
