@@ -7,7 +7,7 @@
 //! producers and filters/pushes without a producer mutex. `xpub_nodrop`
 //! keeps the direct dispatch path so it can preserve backpressure.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -236,6 +236,7 @@ struct DeferredFanOutWorker {
 #[derive(Debug)]
 pub(crate) struct Submitter {
     shards: Option<Arc<FanOutShards>>,
+    sharded_peer_count: Arc<AtomicUsize>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
@@ -259,6 +260,7 @@ impl Clone for Submitter {
     fn clone(&self) -> Self {
         Self {
             shards: self.shards.clone(),
+            sharded_peer_count: self.sharded_peer_count.clone(),
             inner: self.inner.clone(),
             generation: self.generation.clone(),
             mode: self.mode,
@@ -851,6 +853,10 @@ impl Submitter {
         deactivate_fanout_target(&self.inner, &self.generation, target);
     }
 
+    fn has_sharded_peers(&self) -> bool {
+        self.sharded_peer_count.load(Ordering::Acquire) > 0
+    }
+
     fn try_cached(&self, msg: &Message, group: Option<&str>) -> CachedResult {
         if group.is_some() {
             return CachedResult::Miss;
@@ -987,10 +993,21 @@ impl Submitter {
         }
 
         let targets = self.collect_shard_targets(msg, group.as_deref());
+        let _ = self.dispatch_shard_targets(shards, msg, group, targets)?;
+        Ok(())
+    }
 
+    fn dispatch_shard_targets(
+        &self,
+        shards: &FanOutShards,
+        msg: &Message,
+        group: Option<String>,
+        targets: ShardDispatchTargets,
+    ) -> Result<DispatchOutcome> {
+        let mut outcome = DispatchOutcome::default();
         let target_count = targets.fallback_targets.len() + targets.sharded_count;
         if target_count == 0 {
-            return Ok(());
+            return Ok(outcome);
         }
 
         let encoded_dispatch = if let Some(encoder) = targets.transform_encoder.as_deref() {
@@ -1001,27 +1018,27 @@ impl Submitter {
 
         if !targets.fallback_targets.is_empty() {
             let mut deactivate = |target: &PeerSend| self.deactivate_target(target);
-            if let Some(encoded) = encoded_dispatch.as_ref() {
-                let _ = dispatch_encoded_batch(
+            outcome = if let Some(encoded) = encoded_dispatch.as_ref() {
+                dispatch_encoded_batch(
                     encoded,
                     &targets.fallback_targets,
                     msg,
                     self.lossy && !self.xpub_nodrop,
                     &mut deactivate,
-                );
+                )
             } else {
-                let _ = dispatch_to_targets(
+                dispatch_to_targets(
                     &targets.fallback_targets,
                     msg,
                     None,
                     self.lossy && !self.xpub_nodrop,
                     &mut deactivate,
-                )?;
-            }
+                )?
+            };
         }
 
         if targets.sharded_count == 0 {
-            return Ok(());
+            return Ok(outcome);
         }
 
         let encoded_dispatch = encoded_dispatch.unwrap_or_else(|| EncodedFanOutBatch {
@@ -1035,7 +1052,7 @@ impl Submitter {
             peer_ids: None,
         };
         shards.dispatch(&dispatch);
-        Ok(())
+        Ok(outcome)
     }
 
     pub(crate) fn try_send(
@@ -1046,7 +1063,9 @@ impl Submitter {
             .prepare(msg)
             .map_err(omq_proto::error::TrySendError::Error)?;
 
-        if let Some(ref shards) = self.shards {
+        if let Some(ref shards) = self.shards
+            && self.has_sharded_peers()
+        {
             return self
                 .dispatch_to_shards_and_fallback(shards, &forwarded, group)
                 .map_err(omq_proto::error::TrySendError::Error);
@@ -1122,8 +1141,24 @@ impl Submitter {
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = self.prepare(msg)?;
 
-        if let Some(ref shards) = self.shards {
-            self.dispatch_to_shards_and_fallback(shards, &forwarded, group)?;
+        if let Some(ref shards) = self.shards
+            && self.has_sharded_peers()
+        {
+            match self.try_defer_to_shards(&forwarded, group.clone())? {
+                DeferredEnqueue::Direct => {}
+                DeferredEnqueue::Enqueued | DeferredEnqueue::Dropped => return Ok(()),
+            }
+
+            let targets = self.collect_shard_targets(&forwarded, group.as_deref());
+            let target_count = targets.fallback_targets.len() + targets.sharded_count;
+            let outcome = self.dispatch_shard_targets(shards, &forwarded, group, targets)?;
+            if !self.lossy && outcome.is_full() {
+                send_to_targets_nodrop(&outcome.full_targets, forwarded.clone()).await?;
+            }
+            let interval = yield_interval(target_count);
+            if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
+                tokio::task::yield_now().await;
+            }
             return Ok(());
         }
 
@@ -1296,6 +1331,7 @@ impl Submitter {
 #[derive(Debug)]
 pub(crate) struct FanOutSend {
     shards: Option<Arc<FanOutShards>>,
+    sharded_peer_count: Arc<AtomicUsize>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
@@ -1429,6 +1465,7 @@ impl FanOutSend {
             options: options.clone(),
         }));
         let generation = Arc::new(AtomicU64::new(0));
+        let sharded_peer_count = Arc::new(AtomicUsize::new(0));
         if let (Some(shards), Some(deferred), Some(rx)) =
             (shards.clone(), deferred.clone(), deferred_rx)
         {
@@ -1445,6 +1482,7 @@ impl FanOutSend {
         }
         Self {
             shards,
+            sharded_peer_count,
             inner,
             generation,
             mode,
@@ -1461,6 +1499,7 @@ impl FanOutSend {
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
             shards: self.shards.clone(),
+            sharded_peer_count: self.sharded_peer_count.clone(),
             inner: self.inner.clone(),
             generation: self.generation.clone(),
             mode: self.mode,
@@ -1548,6 +1587,9 @@ impl FanOutSend {
                 }
             }));
         }
+        if shard.is_some() {
+            self.sharded_peer_count.fetch_add(1, Ordering::Release);
+        }
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.insert(
             peer_id,
@@ -1568,6 +1610,9 @@ impl FanOutSend {
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(peer) = g.peers.remove(&peer_id) {
+            if peer.shard.is_some() {
+                self.sharded_peer_count.fetch_sub(1, Ordering::Release);
+            }
             g.recompute_subscribe_all();
             drop(g);
             if let (Some(shards), Some(shard)) = (self.shards.as_ref(), peer.shard) {
@@ -1675,6 +1720,7 @@ impl FanOutSend {
         g.fan_out_encoder = None;
         g.fan_out_dict = None;
         drop(g);
+        self.sharded_peer_count.store(0, Ordering::Release);
         self.bump_generation();
     }
 

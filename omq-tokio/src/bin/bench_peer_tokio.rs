@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 use std::net::Ipv4Addr;
 
 fn parse_ep(s: &str) -> Endpoint {
@@ -214,7 +214,7 @@ async fn run_pub(ep: Endpoint, size: usize, peers: usize) {
     let bound = pub_.bind(ep).await.expect("pub bind");
     print_bound_port(&bound);
     if peers > 0 {
-        wait_for_handshakes(&pub_, monitor, peers).await;
+        wait_for_subscribes(monitor, peers).await;
     }
     wait_for_start_barrier().await;
     let payload = bench_payload(size);
@@ -264,6 +264,21 @@ async fn wait_for_handshakes(sock: &Socket, mut monitor: omq_tokio::MonitorStrea
             "timed out waiting for {peers} handshaked peers"
         );
         let _ = tokio::time::timeout(deadline - now, monitor.recv()).await;
+    }
+}
+
+async fn wait_for_subscribes(mut monitor: omq_tokio::MonitorStream, peers: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut subscribed = 0;
+    while subscribed < peers {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out waiting for {peers} subscribers");
+        match tokio::time::timeout(deadline - now, monitor.recv()).await {
+            Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => panic!("monitor closed while waiting for subscribers: {e:?}"),
+            Err(_) => panic!("timed out waiting for {peers} subscribers"),
+        }
     }
 }
 
