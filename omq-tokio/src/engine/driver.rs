@@ -18,9 +18,12 @@ use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut
 use omq_proto::proto::{Command, Connection, Event};
 
 use super::compression_pool::CompressionPool;
-use super::wire_slot::PeerWireSlot;
+use super::wire_slot::{PeerWireSlot, WireSlotItem};
 use crate::routing::drop_queue::QueueReceiver;
 use omq_proto::encoded_queue::EncodedQueue;
+
+pub(crate) type WireSlotProducerHandle =
+    Arc<std::sync::Mutex<Option<yring::Producer<WireSlotItem>>>>;
 
 /// Where the driver routes decoded inbound messages.
 ///
@@ -282,8 +285,8 @@ pub enum DriverCommand {
     /// Queue an application message for send.
     SendMessage(Message),
     /// Pre-encoded wire bytes. Pushed directly into the transmit buffer,
-    /// skipping per-message encoding. Used by PUB fan-out when all peers
-    /// share the same wire format (NULL mechanism, no per-peer crypto).
+    /// skipping per-message encoding for callers that already have shared
+    /// wire chunks.
     SendEncoded(std::sync::Arc<smallvec::SmallVec<[bytes::Bytes; 4]>>),
     /// Queue a ZMTP command for send (SUBSCRIBE, CANCEL, JOIN, LEAVE, ...).
     SendCommand(Command),
@@ -298,6 +301,7 @@ pub struct DriverHandle {
     pub inbox: mpsc::Sender<DriverCommand>,
     pub cancel: CancellationToken,
     pub(crate) wire_slot: Option<Arc<PeerWireSlot>>,
+    pub(crate) wire_slot_tx: Option<WireSlotProducerHandle>,
     pub(crate) send_pipe: Option<blume::Sender<Message>>,
 }
 
@@ -1264,6 +1268,7 @@ mod tests {
                 inbox: c_inbox_tx,
                 cancel: c_cancel,
                 wire_slot: None,
+                wire_slot_tx: None,
                 send_pipe: None,
             },
             EventAdapter { rx: c_evt_rx },
@@ -1271,6 +1276,7 @@ mod tests {
                 inbox: s_inbox_tx,
                 cancel: s_cancel,
                 wire_slot: None,
+                wire_slot_tx: None,
                 send_pipe: None,
             },
             EventAdapter { rx: s_evt_rx },

@@ -284,3 +284,78 @@ async fn xpub_nodrop_delivers_all_under_backpressure() {
 
     sender.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pub_sharded_fanout_all_receive() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let port = test_support::bind_loopback(&pub_).await;
+
+    let mut subs = Vec::new();
+    for _ in 0..8 {
+        let s = Socket::new(SocketType::Sub, Options::default());
+        s.subscribe(bytes::Bytes::new()).await.unwrap();
+        s.connect(test_support::tcp_loopback(port)).await.unwrap();
+        subs.push(s);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let msg_count = 100u32;
+    for i in 0..msg_count {
+        pub_.send(Message::single(i.to_le_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+
+    for (si, sub) in subs.iter().enumerate() {
+        let mut count = 0u32;
+        while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(2), sub.recv()).await {
+            count += 1;
+            if count >= msg_count {
+                break;
+            }
+        }
+        assert_eq!(
+            count, msg_count,
+            "subscriber {si} received {count}/{msg_count}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pub_sharded_fanout_subscription_filter() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let port = test_support::bind_loopback(&pub_).await;
+
+    let mut subs = Vec::new();
+    let prefixes = ["a.", "b.", "c.", "d.", "e.", "f."];
+    for &pfx in &prefixes {
+        let s = Socket::new(SocketType::Sub, Options::default());
+        s.subscribe(pfx).await.unwrap();
+        s.connect(test_support::tcp_loopback(port)).await.unwrap();
+        subs.push(s);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    for &pfx in &prefixes {
+        pub_.send(Message::single(format!("{pfx}hello")))
+            .await
+            .unwrap();
+    }
+    pub_.send(Message::single("z.nobody")).await.unwrap();
+
+    for (si, sub) in subs.iter().enumerate() {
+        let m = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+            .await
+            .unwrap_or_else(|_| panic!("subscriber {si} timed out"))
+            .unwrap();
+        let body = m.part_bytes(0).unwrap();
+        assert!(
+            body.starts_with(prefixes[si].as_bytes()),
+            "subscriber {si} got wrong message: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+
+        let extra = tokio::time::timeout(Duration::from_millis(100), sub.recv()).await;
+        assert!(extra.is_err(), "subscriber {si} got extra message");
+    }
+}

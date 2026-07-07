@@ -1,9 +1,11 @@
-//! Fan-out send: per-peer `PeerWireSlot`, filtered by subscription.
+//! Fan-out send: caller-side distribution into shard workers.
 //!
 //! PUB and XPUB filter by SUBSCRIBE-driven prefix set; RADIO filters
-//! by joined groups. On every `send`, the message is encoded once
-//! into the fan-out arena, then the pre-encoded bytes are pushed into
-//! each matching peer's `EncodedQueue`. The driver flushes to the wire.
+//! by joined groups. Normal lossy fan-out sends encode once on the
+//! caller, then take one shard mutex and push the encoded dispatch into
+//! each nonempty shard's yring input. Each shard owns its peers' yring
+//! producers and filters/pushes without a producer mutex. `xpub_nodrop`
+//! keeps the direct dispatch path so it can preserve backpressure.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use bytes::Bytes;
+use tokio::sync::Notify;
 
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::encoded_queue::EncodedQueue;
@@ -26,7 +29,7 @@ use omq_proto::proto::transform::MessageEncoder;
 
 use super::peer_send::PeerSend;
 use super::subscription::SubscriptionSet;
-use crate::engine::wire_slot::TryEncodeResult;
+use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult, WIRE_SLOT_INLINE_CAP, WireSlotItem};
 
 /// Filter mode for a fan-out send strategy.
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +44,7 @@ pub(crate) enum FanOutMode {
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `EncodedQueue::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
+const FAN_OUT_SHARD_THRESHOLD: usize = 4;
 
 /// Yield every N peers to keep latency bounded. Scales down with peer
 /// count: fewer peers per yield when fan-out is wide (more total work).
@@ -75,7 +79,113 @@ impl DispatchOutcome {
 }
 
 #[derive(Debug)]
+enum ShardCommand {
+    AddPeer(ShardPeerAdd),
+    RemovePeer { peer_id: u64 },
+    Subscribe { peer_id: u64, prefix: Bytes },
+    Cancel { peer_id: u64, prefix: Bytes },
+    Join { peer_id: u64, group: Bytes },
+    Leave { peer_id: u64, group: Bytes },
+    Dispatch(ShardDispatch),
+    Shutdown,
+}
+
+#[derive(Debug)]
+struct ShardPeerAdd {
+    peer_id: u64,
+    slot: Arc<PeerWireSlot>,
+    producer: yring::Producer<WireSlotItem>,
+    any_groups: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ShardDispatch {
+    encoded: EncodedFanOut,
+    topic: Bytes,
+    group: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum EncodedFanOut {
+    Inline {
+        buf: [u8; WIRE_SLOT_INLINE_CAP],
+        len: u16,
+    },
+    Shared(Arc<[Bytes]>),
+}
+
+impl EncodedFanOut {
+    fn inline(data: &[u8]) -> Self {
+        debug_assert!(data.len() <= WIRE_SLOT_INLINE_CAP);
+        let mut buf = [0; WIRE_SLOT_INLINE_CAP];
+        buf[..data.len()].copy_from_slice(data);
+        Self::Inline {
+            buf,
+            len: data.len() as u16,
+        }
+    }
+
+    fn shared(chunks: Arc<[Bytes]>) -> Self {
+        Self::Shared(chunks)
+    }
+
+    fn to_wire_item(&self) -> WireSlotItem {
+        match self {
+            Self::Inline { buf, len } => WireSlotItem::inline(&buf[..*len as usize]),
+            Self::Shared(chunks) => WireSlotItem::shared(chunks.clone()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ShardPeer {
+    subscriptions: SubscriptionSet,
+    groups: FxHashSet<String>,
+    any_groups: bool,
+    slot: Arc<PeerWireSlot>,
+    producer: yring::Producer<WireSlotItem>,
+}
+
+struct ShardEndpoint {
+    tx: yring::Producer<ShardCommand>,
+    notify: Arc<Notify>,
+    load: usize,
+}
+
+struct FanOutShards {
+    endpoints: Mutex<Vec<ShardEndpoint>>,
+}
+
+impl std::fmt::Debug for FanOutShards {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let endpoints = self.endpoints.lock().expect("fanout shards poisoned");
+        f.debug_struct("FanOutShards")
+            .field("shards", &endpoints.len())
+            .field(
+                "loads",
+                &endpoints.iter().map(|s| s.load).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+struct ShardWorker {
+    rx: yring::Consumer<ShardCommand>,
+    notify: Arc<Notify>,
+    mode: FanOutMode,
+    peers: FxHashMap<u64, ShardPeer>,
+}
+
+struct ShardDispatchTargets {
+    fallback_targets: SmallVec<[PeerSend; 8]>,
+    transform_encoder: Option<Arc<Mutex<MessageEncoder>>>,
+    sharded_count: usize,
+}
+
+#[derive(Debug)]
 pub(crate) struct Submitter {
+    shards: Option<Arc<FanOutShards>>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
@@ -97,6 +207,7 @@ struct CachedFanOut {
 impl Clone for Submitter {
     fn clone(&self) -> Self {
         Self {
+            shards: self.shards.clone(),
             inner: self.inner.clone(),
             generation: self.generation.clone(),
             mode: self.mode,
@@ -108,8 +219,276 @@ impl Clone for Submitter {
     }
 }
 
+impl FanOutShards {
+    fn spawn(options: &Options, mode: FanOutMode) -> Arc<Self> {
+        let pipe_cap = options.send_hwm.unwrap_or(1000).max(1) as usize;
+        let shard_count = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let mut endpoints = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            let (shard_tx, shard_rx) = yring::spsc(pipe_cap);
+            let notify = Arc::new(Notify::new());
+            tokio::spawn(
+                ShardWorker {
+                    rx: shard_rx,
+                    notify: notify.clone(),
+                    mode,
+                    peers: FxHashMap::default(),
+                }
+                .run(),
+            );
+            endpoints.push(ShardEndpoint {
+                tx: shard_tx,
+                notify,
+                load: 0,
+            });
+        }
+        Arc::new(Self {
+            endpoints: Mutex::new(endpoints),
+        })
+    }
+
+    fn least_loaded_shard(endpoints: &[ShardEndpoint]) -> usize {
+        let total_load = endpoints.iter().map(|shard| shard.load).sum::<usize>();
+        if total_load + 1 < FAN_OUT_SHARD_THRESHOLD {
+            return 0;
+        }
+        endpoints
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, shard)| shard.load)
+            .map_or(0, |(idx, _)| idx)
+    }
+
+    fn push_control(endpoint: &mut ShardEndpoint, mut cmd: ShardCommand) {
+        loop {
+            match endpoint.tx.push(cmd) {
+                Ok(()) => {
+                    endpoint.tx.flush();
+                    endpoint.notify.notify_one();
+                    return;
+                }
+                Err(returned) => {
+                    cmd = returned;
+                    endpoint.tx.flush();
+                    endpoint.notify.notify_one();
+                    std::thread::yield_now();
+                }
+            }
+        }
+    }
+
+    fn add_peer(&self, add: ShardPeerAdd) -> usize {
+        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
+        let shard = Self::least_loaded_shard(&endpoints);
+        endpoints[shard].load += 1;
+        Self::push_control(&mut endpoints[shard], ShardCommand::AddPeer(add));
+        shard
+    }
+
+    fn send_to_shard(&self, shard: usize, cmd: ShardCommand) {
+        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
+        if let Some(endpoint) = endpoints.get_mut(shard) {
+            Self::push_control(endpoint, cmd);
+        }
+    }
+
+    fn remove_peer(&self, shard: usize, peer_id: u64) {
+        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
+        if let Some(endpoint) = endpoints.get_mut(shard) {
+            endpoint.load = endpoint.load.saturating_sub(1);
+            Self::push_control(endpoint, ShardCommand::RemovePeer { peer_id });
+        }
+    }
+
+    fn dispatch(&self, dispatch: &ShardDispatch) {
+        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
+        let mut touched = SmallVec::<[usize; 8]>::new();
+        for (idx, endpoint) in endpoints.iter_mut().enumerate() {
+            if endpoint.load == 0 {
+                continue;
+            }
+            if endpoint
+                .tx
+                .push(ShardCommand::Dispatch(dispatch.clone()))
+                .is_ok()
+            {
+                touched.push(idx);
+            }
+        }
+        for idx in touched {
+            let endpoint = &mut endpoints[idx];
+            endpoint.tx.flush();
+            endpoint.notify.notify_one();
+        }
+    }
+
+    fn shutdown(&self) {
+        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
+        for endpoint in endpoints.iter_mut() {
+            Self::push_control(endpoint, ShardCommand::Shutdown);
+            endpoint.load = 0;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.endpoints
+            .lock()
+            .expect("fanout shards poisoned")
+            .iter()
+            .all(|endpoint| endpoint.tx.is_empty())
+    }
+}
+
+impl ShardWorker {
+    async fn run(mut self) {
+        loop {
+            let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
+            let mut shutdown = false;
+
+            loop {
+                self.rx.prefetch();
+                let mut drained = false;
+                while let Some(cmd) = self.rx.pop() {
+                    drained = true;
+                    if self.handle_command(cmd, &mut touched) {
+                        shutdown = true;
+                    }
+                }
+                self.rx.release();
+                if !drained || shutdown {
+                    break;
+                }
+            }
+
+            self.flush_touched(&mut touched);
+            if shutdown {
+                self.peers.clear();
+                return;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    fn handle_command(&mut self, cmd: ShardCommand, touched: &mut SmallVec<[u64; 32]>) -> bool {
+        match cmd {
+            ShardCommand::AddPeer(add) => {
+                self.peers.insert(
+                    add.peer_id,
+                    ShardPeer {
+                        subscriptions: SubscriptionSet::new(),
+                        groups: FxHashSet::default(),
+                        any_groups: add.any_groups,
+                        slot: add.slot,
+                        producer: add.producer,
+                    },
+                );
+            }
+            ShardCommand::RemovePeer { peer_id } => {
+                self.peers.remove(&peer_id);
+            }
+            ShardCommand::Subscribe { peer_id, prefix } => {
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    peer.subscriptions.add(&prefix);
+                }
+            }
+            ShardCommand::Cancel { peer_id, prefix } => {
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    peer.subscriptions.remove(&prefix);
+                }
+            }
+            ShardCommand::Join { peer_id, group } => {
+                if let Some(peer) = self.peers.get_mut(&peer_id)
+                    && let Ok(s) = std::str::from_utf8(&group)
+                {
+                    peer.groups.insert(s.to_string());
+                }
+            }
+            ShardCommand::Leave { peer_id, group } => {
+                if let Some(peer) = self.peers.get_mut(&peer_id)
+                    && let Ok(s) = std::str::from_utf8(&group)
+                {
+                    peer.groups.remove(s);
+                }
+            }
+            ShardCommand::Dispatch(dispatch) => self.dispatch(&dispatch, touched),
+            ShardCommand::Shutdown => return true,
+        }
+        false
+    }
+
+    fn dispatch(&mut self, dispatch: &ShardDispatch, touched: &mut SmallVec<[u64; 32]>) {
+        for (&peer_id, peer) in &mut self.peers {
+            if !shard_peer_matches(self.mode, peer, dispatch) {
+                continue;
+            }
+            if peer
+                .slot
+                .try_push_ring_item(&mut peer.producer, dispatch.encoded.to_wire_item())
+                == TryEncodeResult::Ok
+            {
+                touched.push(peer_id);
+            }
+        }
+    }
+
+    fn flush_touched(&mut self, touched: &mut SmallVec<[u64; 32]>) {
+        touched.sort_unstable();
+        touched.dedup();
+        for &peer_id in touched.iter() {
+            if let Some(peer) = self.peers.get_mut(&peer_id) {
+                peer.slot.flush_ring(&mut peer.producer);
+            }
+        }
+    }
+}
+
+fn encode_for_shards(
+    msg: &Message,
+    target_count: usize,
+    transform_encoder: Option<&Mutex<MessageEncoder>>,
+) -> Result<EncodedFanOut> {
+    let mut eq = EncodedQueue::one_shot();
+    let mut chunks = Vec::new();
+    if let Some(enc_mtx) = transform_encoder {
+        let transformed = {
+            let mut enc = enc_mtx.lock().expect("fan_out_encoder poisoned");
+            enc.encode(msg)?
+        };
+        for wire_msg in &transformed {
+            encode_fan_out_message(&mut eq, wire_msg, target_count, FAN_OUT_TOTAL_COPY_BUDGET);
+        }
+    } else {
+        encode_fan_out_message(&mut eq, msg, target_count, FAN_OUT_TOTAL_COPY_BUDGET);
+    }
+    let fanout_encoded = match finish_fan_out_batch(
+        &mut eq,
+        &mut chunks,
+        target_count,
+        FAN_OUT_TOTAL_COPY_BUDGET,
+    ) {
+        FanOutBatch::Arena(raw) if raw.len() <= WIRE_SLOT_INLINE_CAP => EncodedFanOut::inline(raw),
+        FanOutBatch::Arena(raw) => {
+            EncodedFanOut::shared(Vec::from([Bytes::copy_from_slice(raw)]).into())
+        }
+        FanOutBatch::Chunks(wire_chunks) => EncodedFanOut::shared(Arc::from(wire_chunks.to_vec())),
+    };
+    clear_fan_out_batch(&mut eq, &mut chunks);
+    Ok(fanout_encoded)
+}
+
+fn shard_peer_matches(mode: FanOutMode, peer: &ShardPeer, dispatch: &ShardDispatch) -> bool {
+    match (mode, dispatch.group.as_deref()) {
+        (FanOutMode::Group, Some(grp)) => peer.any_groups || peer.groups.contains(grp),
+        (FanOutMode::SubscriptionPrefix, _) => peer.subscriptions.matches(&dispatch.topic),
+        (FanOutMode::Group, None) => false,
+    }
+}
+
 impl Submitter {
     pub(crate) fn shutdown(&self) {
+        if let Some(ref shards) = self.shards {
+            shards.shutdown();
+        }
         let mut cached = self.cached.lock().unwrap();
         cached.sole_wire = None;
         cached.all_targets = None;
@@ -203,6 +582,43 @@ impl Submitter {
         CachedResult::Miss
     }
 
+    fn dispatch_to_shards_and_fallback(
+        &self,
+        shards: &FanOutShards,
+        msg: &Message,
+        group: Option<String>,
+    ) -> Result<()> {
+        let targets = self.collect_shard_targets(msg, group.as_deref());
+
+        if !targets.fallback_targets.is_empty() {
+            let mut deactivate = |target: &PeerSend| self.deactivate_target(target);
+            let _ = dispatch_to_targets(
+                &targets.fallback_targets,
+                msg,
+                targets.transform_encoder.as_deref(),
+                self.lossy && !self.xpub_nodrop,
+                &mut deactivate,
+            )?;
+        }
+
+        if targets.sharded_count == 0 {
+            return Ok(());
+        }
+
+        let encoded_dispatch = encode_for_shards(
+            msg,
+            targets.sharded_count,
+            targets.transform_encoder.as_deref(),
+        )?;
+        let dispatch = ShardDispatch {
+            encoded: encoded_dispatch,
+            topic: first_frame_bytes(msg),
+            group,
+        };
+        shards.dispatch(&dispatch);
+        Ok(())
+    }
+
     pub(crate) fn try_send(
         &self,
         msg: Message,
@@ -210,6 +626,12 @@ impl Submitter {
         let (forwarded, group) = self
             .prepare(msg)
             .map_err(omq_proto::error::TrySendError::Error)?;
+
+        if let Some(ref shards) = self.shards {
+            return self
+                .dispatch_to_shards_and_fallback(shards, &forwarded, group)
+                .map_err(omq_proto::error::TrySendError::Error);
+        }
 
         match self.try_cached(&forwarded, group.as_deref()) {
             CachedResult::SoleWire(r) => {
@@ -278,6 +700,11 @@ impl Submitter {
 
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = self.prepare(msg)?;
+
+        if let Some(ref shards) = self.shards {
+            self.dispatch_to_shards_and_fallback(shards, &forwarded, group)?;
+            return Ok(());
+        }
 
         match self.try_cached(&forwarded, group.as_deref()) {
             CachedResult::SoleWire(TryEncodeResult::Full) if self.lossy && !self.xpub_nodrop => {
@@ -392,11 +819,35 @@ impl Submitter {
         let encoder = g.fan_out_encoder.clone();
         (targets, encoder)
     }
+
+    fn collect_shard_targets(&self, msg: &Message, group: Option<&str>) -> ShardDispatchTargets {
+        let g = self.inner.lock().expect("fanout inner poisoned");
+        let fallback_targets = g
+            .peers
+            .values()
+            .filter(|p| p.shard.is_none())
+            .filter(|p| match (self.mode, group) {
+                (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
+                (FanOutMode::SubscriptionPrefix, _) => {
+                    p.subscriptions.matches(&first_frame_bytes(msg))
+                }
+                (FanOutMode::Group, None) => false,
+            })
+            .map(|p| p.target.clone())
+            .collect();
+        let sharded_count = g.peers.values().filter(|p| p.shard.is_some()).count();
+        ShardDispatchTargets {
+            fallback_targets,
+            transform_encoder: g.fan_out_encoder.clone(),
+            sharded_count,
+        }
+    }
 }
 
 /// Fan-out send strategy.
 #[derive(Debug)]
 pub(crate) struct FanOutSend {
+    shards: Option<Arc<FanOutShards>>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
@@ -430,6 +881,8 @@ struct FanOutPeer {
     groups: FxHashSet<String>,
     any_groups: bool,
     target: PeerSend,
+    shard: Option<usize>,
+    shard_eligible: bool,
     fanout_active: bool,
 }
 
@@ -501,7 +954,18 @@ impl FanOutInner {
 
 impl FanOutSend {
     pub(crate) fn new(options: &Options, mode: FanOutMode) -> Self {
+        let use_shards = !options.xpub_nodrop
+            && matches!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            );
+        let shards = if use_shards {
+            Some(FanOutShards::spawn(options, mode))
+        } else {
+            None
+        };
         Self {
+            shards,
             inner: Arc::new(Mutex::new(FanOutInner {
                 peers: FxHashMap::default(),
                 all_subscribe_all: false,
@@ -523,6 +987,7 @@ impl FanOutSend {
 
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
+            shards: self.shards.clone(),
             inner: self.inner.clone(),
             generation: self.generation.clone(),
             mode: self.mode,
@@ -545,6 +1010,56 @@ impl FanOutSend {
     fn add_peer(&mut self, peer_id: u64, handle: DriverHandle, any_groups: bool) {
         let has_transform = handle.wire_slot.as_ref().is_some_and(|s| s.has_transform);
         let target = PeerSend::from_handle(&handle);
+
+        #[cfg(feature = "ws")]
+        let target_is_ws = target.is_ws();
+        #[cfg(not(feature = "ws"))]
+        let target_is_ws = false;
+
+        let shard_eligible = !target_is_ws
+            && self.shards.is_some()
+            && matches!(target, PeerSend::Wire { .. })
+            && handle.wire_slot_tx.is_some();
+        let should_shard = shard_eligible && {
+            let g = self.inner.lock().expect("fanout inner poisoned");
+            g.peers.values().filter(|p| p.shard_eligible).count() + 1 >= FAN_OUT_SHARD_THRESHOLD
+        };
+
+        let shard = if !should_shard {
+            None
+        } else if let (Some(shards), PeerSend::Wire { slot, .. }) = (self.shards.as_ref(), &target)
+        {
+            handle
+                .wire_slot_tx
+                .as_ref()
+                .and_then(|tx| tx.lock().expect("wire_slot_tx poisoned").take())
+                .map(|producer| {
+                    shards.add_peer(ShardPeerAdd {
+                        peer_id,
+                        slot: slot.clone(),
+                        producer,
+                        any_groups,
+                    })
+                })
+        } else {
+            None
+        };
+
+        if has_transform && shard.is_some() {
+            let mut g = self.inner.lock().expect("fanout inner poisoned");
+            if g.fan_out_encoder.is_none() {
+                g.init_fan_out_encoder();
+            }
+        }
+        if shard.is_none() {
+            // Fallback/direct peers use `dispatch_to_targets`, which needs
+            // the direct fan-out encoder initialized from the socket options.
+            let mut g = self.inner.lock().expect("fanout inner poisoned");
+            if has_transform && g.fan_out_encoder.is_none() {
+                g.init_fan_out_encoder();
+            }
+        }
+
         if let PeerSend::Wire { slot, .. } = &target {
             let inner = Arc::downgrade(&self.inner);
             let generation = self.generation.clone();
@@ -567,21 +1082,23 @@ impl FanOutSend {
                 groups: FxHashSet::default(),
                 any_groups,
                 target,
+                shard,
+                shard_eligible,
                 fanout_active: true,
             },
         );
-        if has_transform && g.fan_out_encoder.is_none() {
-            g.init_fan_out_encoder();
-        }
         g.recompute_subscribe_all();
         self.bump_generation();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
-        if g.peers.remove(&peer_id).is_some() {
+        if let Some(peer) = g.peers.remove(&peer_id) {
             g.recompute_subscribe_all();
             drop(g);
+            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), peer.shard) {
+                shards.remove_peer(shard, peer_id);
+            }
             self.bump_generation();
         }
     }
@@ -591,8 +1108,18 @@ impl FanOutSend {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
             p.subscriptions.add(&prefix);
+            let shard = p.shard;
             g.recompute_subscribe_all();
             drop(g);
+            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
+                shards.send_to_shard(
+                    shard,
+                    ShardCommand::Subscribe {
+                        peer_id,
+                        prefix: prefix.clone(),
+                    },
+                );
+            }
             self.bump_generation();
         }
     }
@@ -601,8 +1128,18 @@ impl FanOutSend {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
             p.subscriptions.remove(prefix);
+            let shard = p.shard;
             g.recompute_subscribe_all();
             drop(g);
+            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
+                shards.send_to_shard(
+                    shard,
+                    ShardCommand::Cancel {
+                        peer_id,
+                        prefix: Bytes::copy_from_slice(prefix),
+                    },
+                );
+            }
             self.bump_generation();
         }
     }
@@ -613,7 +1150,17 @@ impl FanOutSend {
             && let Ok(s) = std::str::from_utf8(group)
         {
             p.groups.insert(s.to_string());
+            let shard = p.shard;
             drop(g);
+            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
+                shards.send_to_shard(
+                    shard,
+                    ShardCommand::Join {
+                        peer_id,
+                        group: Bytes::copy_from_slice(group),
+                    },
+                );
+            }
             self.bump_generation();
         }
     }
@@ -624,12 +1171,25 @@ impl FanOutSend {
             && let Ok(s) = std::str::from_utf8(group)
         {
             p.groups.remove(s);
+            let shard = p.shard;
             drop(g);
+            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
+                shards.send_to_shard(
+                    shard,
+                    ShardCommand::Leave {
+                        peer_id,
+                        group: Bytes::copy_from_slice(group),
+                    },
+                );
+            }
             self.bump_generation();
         }
     }
 
     pub(crate) fn shutdown(&self) {
+        if let Some(ref shards) = self.shards {
+            shards.shutdown();
+        }
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.clear();
         g.all_subscribe_all = false;
@@ -641,8 +1201,9 @@ impl FanOutSend {
     }
 
     pub(crate) fn is_drained(&self) -> bool {
+        let shards_empty = self.shards.as_ref().is_none_or(|shards| shards.is_empty());
         let g = self.inner.lock().expect("fanout inner poisoned");
-        g.peers.values().all(|p| p.target.is_empty())
+        shards_empty && g.peers.values().all(|p| p.target.is_empty())
     }
 }
 

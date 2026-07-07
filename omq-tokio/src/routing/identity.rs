@@ -225,6 +225,7 @@ mod tests {
                 inbox: tx,
                 cancel: CancellationToken::new(),
                 wire_slot: None,
+                wire_slot_tx: None,
                 send_pipe: None,
             },
             Bytes::from_static(b"id"),

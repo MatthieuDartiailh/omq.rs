@@ -228,25 +228,30 @@ impl SocketDriver {
             .arena_threshold
             .unwrap_or(omq_proto::encoded_queue::ARENA_THRESHOLD);
         let uses_crypto = self.options.mechanism.has_frame_transform();
-        let slot = if uses_crypto {
-            None
+        let (slot, wire_slot_tx) = if uses_crypto {
+            (None, None)
         } else {
             let wire_slot_cap = self
                 .options
                 .wire_slot_cap
                 .unwrap_or(crate::engine::wire_slot::WIRE_SLOT_CAP_DEFAULT);
-            let s = crate::engine::wire_slot::PeerWireSlot::new(
+            let wire_slot_msg_cap = self.options.send_hwm.unwrap_or(1000).max(1) as usize;
+            let (s, tx) = crate::engine::wire_slot::PeerWireSlot::new(
                 peer_id,
                 has_transform,
                 passthrough_info,
                 arena_threshold,
                 wire_slot_cap,
+                wire_slot_msg_cap,
                 #[cfg(feature = "ws")]
                 is_ws,
                 #[cfg(feature = "ws")]
                 ws_masked,
             );
-            Some(s)
+            (
+                Some(s),
+                Some(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
+            )
         };
         let driver = driver.with_arena_threshold(arena_threshold);
         let driver = match slot {
@@ -299,6 +304,7 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel,
                     wire_slot: slot.clone(),
+                    wire_slot_tx,
                     send_pipe: Some(send_pipe),
                 },
                 identity: bytes::Bytes::new(),
@@ -436,6 +442,7 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
                     wire_slot: None,
+                    wire_slot_tx: None,
                     send_pipe: None,
                 },
                 identity: bytes::Bytes::new(),

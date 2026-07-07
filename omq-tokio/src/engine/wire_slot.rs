@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::sync::Notify;
 
 use omq_proto::direct_encode::{
@@ -18,27 +18,60 @@ use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::message::Message;
 
 pub(crate) const WIRE_SLOT_CAP_DEFAULT: usize = 2 * 1024 * 1024;
-pub(crate) const WIRE_SLOT_MSG_CAP_DEFAULT: usize = crate::routing::SHARED_MAX_BATCH_MSGS;
+#[cfg(test)]
+pub(crate) const WIRE_SLOT_MSG_CAP_DEFAULT: usize = 1000;
+pub(crate) const WIRE_SLOT_INLINE_CAP: usize = 72;
 const WIRE_SLOT_LWM_DIVISOR: usize = 2;
 
 type FanOutReactivation = Arc<dyn Fn(u64) + Send + Sync + 'static>;
 
 #[derive(Debug)]
-enum WireSlotItem {
-    Chunks(Vec<Bytes>),
+pub(crate) enum WireSlotItem {
+    Inline {
+        buf: [u8; WIRE_SLOT_INLINE_CAP],
+        len: u16,
+    },
+    Shared(Arc<[Bytes]>),
 }
 
 impl WireSlotItem {
-    fn byte_len(&self) -> usize {
-        match self {
-            Self::Chunks(chunks) => chunks.iter().map(Bytes::len).sum(),
+    pub(crate) fn inline(data: &[u8]) -> Self {
+        debug_assert!(data.len() <= WIRE_SLOT_INLINE_CAP);
+        let mut buf = [0; WIRE_SLOT_INLINE_CAP];
+        buf[..data.len()].copy_from_slice(data);
+        Self::Inline {
+            buf,
+            len: data.len() as u16,
         }
     }
 
-    fn drain_into(self, out: &mut Vec<Bytes>) {
+    pub(crate) fn shared(chunks: Arc<[Bytes]>) -> Self {
+        Self::Shared(chunks)
+    }
+
+    fn byte_len(&self) -> usize {
         match self {
-            Self::Chunks(chunks) => out.extend(chunks),
+            Self::Inline { len, .. } => *len as usize,
+            Self::Shared(chunks) => chunks.iter().map(Bytes::len).sum(),
         }
+    }
+
+    fn drain_into(self, out: &mut Vec<Bytes>, inline: &mut BytesMut) {
+        match self {
+            Self::Inline { buf, len } => {
+                inline.extend_from_slice(&buf[..len as usize]);
+            }
+            Self::Shared(chunks) => {
+                flush_inline(inline, out);
+                out.extend(chunks.iter().cloned());
+            }
+        }
+    }
+}
+
+fn flush_inline(inline: &mut BytesMut, out: &mut Vec<Bytes>) {
+    if !inline.is_empty() {
+        out.push(inline.split().freeze());
     }
 }
 
@@ -52,9 +85,9 @@ pub(crate) enum TryEncodeResult {
 
 pub(crate) struct PeerWireSlot {
     eq: Mutex<EncodedQueue>,
-    ring_tx: Mutex<yring::Producer<WireSlotItem>>,
     ring_rx: Mutex<yring::Consumer<WireSlotItem>>,
     cap: usize,
+    msg_cap: usize,
     pub(crate) data_ready: Notify,
     pub(crate) space_available: Notify,
     pub(crate) handshake_done: AtomicBool,
@@ -102,15 +135,16 @@ impl PeerWireSlot {
         transform_passthrough: Option<(Bytes, usize)>,
         arena_threshold: usize,
         cap: usize,
+        msg_cap: usize,
         #[cfg(feature = "ws")] is_ws: bool,
         #[cfg(feature = "ws")] ws_masked: bool,
-    ) -> Arc<Self> {
-        let (ring_tx, ring_rx) = yring::spsc(WIRE_SLOT_MSG_CAP_DEFAULT);
-        Arc::new(Self {
+    ) -> (Arc<Self>, yring::Producer<WireSlotItem>) {
+        let (ring_tx, ring_rx) = yring::spsc(msg_cap.max(1));
+        let slot = Arc::new(Self {
             eq: Mutex::new(EncodedQueue::with_arena_threshold(arena_threshold)),
-            ring_tx: Mutex::new(ring_tx),
             ring_rx: Mutex::new(ring_rx),
             cap,
+            msg_cap: msg_cap.max(1),
             data_ready: Notify::new(),
             space_available: Notify::new(),
             handshake_done: AtomicBool::new(false),
@@ -128,7 +162,8 @@ impl PeerWireSlot {
             fanout_active: AtomicBool::new(true),
             above_lwm: AtomicBool::new(false),
             fanout_reactivation: Mutex::new(None),
-        })
+        });
+        (slot, ring_tx)
     }
 
     #[cfg(feature = "ws")]
@@ -161,7 +196,7 @@ impl PeerWireSlot {
             },
             DirectEncodeCaps {
                 byte_cap: self.cap,
-                message_cap: WIRE_SLOT_MSG_CAP_DEFAULT,
+                message_cap: self.msg_cap,
             },
             msg,
         );
@@ -192,8 +227,20 @@ impl PeerWireSlot {
             return TryEncodeResult::Dead;
         }
         let bytes = chunks.iter().map(Bytes::len).sum();
-        let item = WireSlotItem::Chunks(chunks.to_vec());
-        self.try_push_item(item, bytes, true)
+        let mut eq = self.eq.lock().expect("wire_slot eq poisoned");
+        if self.is_full(&eq) || eq.total_bytes().saturating_add(bytes) >= self.cap {
+            self.above_lwm.store(true, Ordering::Relaxed);
+            return TryEncodeResult::Full;
+        }
+        eq.push_shared_chunks(chunks);
+        self.queued_msgs.fetch_add(1, Ordering::Relaxed);
+        self.mark_above_lwm_if_needed(
+            eq.total_bytes() + self.queued_ring_bytes.load(Ordering::Relaxed),
+            self.queued_msgs.load(Ordering::Relaxed),
+        );
+        drop(eq);
+        self.signal_encoded();
+        TryEncodeResult::Ok
     }
 
     pub(crate) fn try_push_pre_encoded_no_signal(&self, data: &[u8]) -> TryEncodeResult {
@@ -214,24 +261,24 @@ impl PeerWireSlot {
         TryEncodeResult::Ok
     }
 
-    fn try_push_item(&self, item: WireSlotItem, bytes: usize, signal: bool) -> TryEncodeResult {
-        if self
-            .queued_ring_bytes
-            .load(Ordering::Relaxed)
-            .saturating_add(bytes)
-            >= self.cap
-            || self.queued_msgs.load(Ordering::Relaxed) >= WIRE_SLOT_MSG_CAP_DEFAULT
-        {
-            self.above_lwm.store(true, Ordering::Relaxed);
-            return TryEncodeResult::Full;
+    pub(crate) fn try_push_ring_item(
+        &self,
+        tx: &mut yring::Producer<WireSlotItem>,
+        item: WireSlotItem,
+    ) -> TryEncodeResult {
+        if self.dead.load(Ordering::Acquire) {
+            return TryEncodeResult::Dead;
         }
-        let mut tx = self.ring_tx.lock().expect("wire_slot ring_tx poisoned");
+        if !self.handshake_done.load(Ordering::Acquire) {
+            return TryEncodeResult::Ineligible;
+        }
+        let bytes = item.byte_len();
         if self
             .queued_ring_bytes
             .load(Ordering::Relaxed)
             .saturating_add(bytes)
             >= self.cap
-            || self.queued_msgs.load(Ordering::Relaxed) >= WIRE_SLOT_MSG_CAP_DEFAULT
+            || self.queued_msgs.load(Ordering::Relaxed) >= self.msg_cap
         {
             self.above_lwm.store(true, Ordering::Relaxed);
             return TryEncodeResult::Full;
@@ -244,18 +291,18 @@ impl PeerWireSlot {
             self.above_lwm.store(true, Ordering::Relaxed);
             return TryEncodeResult::Full;
         }
-        tx.flush();
         self.queued_ring_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.queued_msgs.fetch_add(1, Ordering::Relaxed);
         self.mark_above_lwm_if_needed(
             self.queued_ring_bytes.load(Ordering::Relaxed),
             self.queued_msgs.load(Ordering::Relaxed),
         );
-        drop(tx);
-        if signal {
-            self.signal_encoded();
-        }
         TryEncodeResult::Ok
+    }
+
+    pub(crate) fn flush_ring(&self, tx: &mut yring::Producer<WireSlotItem>) {
+        tx.flush();
+        self.signal_encoded();
     }
 
     pub(crate) fn signal_encoded(&self) {
@@ -297,14 +344,16 @@ impl PeerWireSlot {
         if buf.len() < max_chunks {
             let mut rx = self.ring_rx.lock().expect("wire_slot ring_rx poisoned");
             rx.prefetch();
+            let mut inline = BytesMut::with_capacity(WIRE_SLOT_INLINE_CAP * 4);
             while buf.len() < max_chunks {
                 let Some(item) = rx.pop() else {
                     break;
                 };
                 popped_items += 1;
                 popped_bytes += item.byte_len();
-                item.drain_into(buf);
+                item.drain_into(buf, &mut inline);
             }
+            flush_inline(&mut inline, buf);
             if popped_items > 0 {
                 rx.release();
             }
@@ -361,11 +410,7 @@ impl PeerWireSlot {
             return false;
         }
         let eq = self.eq.lock().expect("wire_slot eq poisoned");
-        let ring_has_space = {
-            let mut tx = self.ring_tx.lock().expect("wire_slot ring_tx poisoned");
-            !tx.is_full()
-        };
-        let has_space = !self.is_full(&eq) && ring_has_space;
+        let has_space = !self.is_full(&eq);
         if has_space {
             self.fanout_active.store(true, Ordering::Release);
         }
@@ -400,7 +445,7 @@ impl PeerWireSlot {
 
     fn is_full(&self, eq: &EncodedQueue) -> bool {
         eq.total_bytes() + self.queued_ring_bytes.load(Ordering::Relaxed) >= self.cap
-            || self.queued_msgs.load(Ordering::Relaxed) >= WIRE_SLOT_MSG_CAP_DEFAULT
+            || self.queued_msgs.load(Ordering::Relaxed) >= self.msg_cap
     }
 
     fn mark_above_lwm_if_needed(&self, queued_bytes: usize, queued_messages: usize) {
@@ -411,7 +456,7 @@ impl PeerWireSlot {
 
     fn is_below_lwm(&self, queued_bytes: usize, queued_messages: usize) -> bool {
         queued_bytes <= self.cap / WIRE_SLOT_LWM_DIVISOR
-            && queued_messages <= WIRE_SLOT_MSG_CAP_DEFAULT / WIRE_SLOT_LWM_DIVISOR
+            && queued_messages <= self.msg_cap / WIRE_SLOT_LWM_DIVISOR
     }
 
     fn ring_is_empty(&self) -> bool {
@@ -428,12 +473,13 @@ mod tests {
 
     #[test]
     fn wire_slot_caps_queued_messages_independent_of_bytes() {
-        let slot = PeerWireSlot::new(
+        let (slot, _tx) = PeerWireSlot::new(
             1,
             false,
             None,
             omq_proto::encoded_queue::ARENA_THRESHOLD,
             WIRE_SLOT_CAP_DEFAULT,
+            WIRE_SLOT_MSG_CAP_DEFAULT,
             #[cfg(feature = "ws")]
             false,
             #[cfg(feature = "ws")]
