@@ -46,7 +46,6 @@ pub(crate) enum FanOutMode {
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `EncodedQueue::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
-const FAN_OUT_SHARD_THRESHOLD: usize = 4;
 
 /// Yield every N peers to keep latency bounded. Scales down with peer
 /// count: fewer peers per yield when fan-out is wide (more total work).
@@ -68,15 +67,20 @@ enum CachedResult {
 #[derive(Debug, Default)]
 struct DispatchOutcome {
     full_targets: SmallVec<[PeerSend; 8]>,
+    shard_full: bool,
 }
 
 impl DispatchOutcome {
     fn is_full(&self) -> bool {
-        !self.full_targets.is_empty()
+        self.shard_full || !self.full_targets.is_empty()
     }
 
     fn push_full(&mut self, target: &PeerSend) {
         self.full_targets.push(target.clone());
+    }
+
+    fn mark_shard_full(&mut self) {
+        self.shard_full = true;
     }
 }
 
@@ -162,18 +166,26 @@ struct ShardEndpoint {
     load: usize,
 }
 
+struct FanOutShardState {
+    endpoints: Vec<ShardEndpoint>,
+    eligible_peers: usize,
+    active_limit: usize,
+}
+
 struct FanOutShards {
-    endpoints: Mutex<Vec<ShardEndpoint>>,
+    state: Mutex<FanOutShardState>,
 }
 
 impl std::fmt::Debug for FanOutShards {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let endpoints = self.endpoints.lock().expect("fanout shards poisoned");
+        let state = self.state.lock().expect("fanout shards poisoned");
         f.debug_struct("FanOutShards")
-            .field("shards", &endpoints.len())
+            .field("shards", &state.endpoints.len())
+            .field("active_limit", &state.active_limit)
+            .field("eligible_peers", &state.eligible_peers)
             .field(
                 "loads",
-                &endpoints.iter().map(|s| s.load).collect::<Vec<_>>(),
+                &state.endpoints.iter().map(|s| s.load).collect::<Vec<_>>(),
             )
             .finish()
     }
@@ -184,6 +196,7 @@ struct ShardWorker {
     rx: yring::Consumer<ShardCommand>,
     notify: Arc<Notify>,
     mode: FanOutMode,
+    lossy: bool,
     peers: FxHashMap<u64, ShardPeer>,
 }
 
@@ -191,6 +204,13 @@ struct ShardDispatchTargets {
     fallback_targets: SmallVec<[PeerSend; 8]>,
     transform_encoder: Option<SharedFanOutEncoder>,
     sharded_count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ShardDispatchMode {
+    Lossy,
+    TryAll,
+    Block,
 }
 
 #[derive(Debug)]
@@ -276,7 +296,11 @@ impl Clone for Submitter {
 impl FanOutShards {
     fn spawn(options: &Options, mode: FanOutMode) -> Arc<Self> {
         let pipe_cap = options.send_hwm.unwrap_or(1000).max(1) as usize;
-        let shard_count = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let shard_count = tokio::runtime::Handle::current()
+            .metrics()
+            .num_workers()
+            .max(1);
+        let lossy = !matches!(options.on_mute, OnMute::Block);
         let mut endpoints = Vec::with_capacity(shard_count);
         for _ in 0..shard_count {
             let (shard_tx, shard_rx) = yring::spsc(pipe_cap);
@@ -286,6 +310,7 @@ impl FanOutShards {
                     rx: shard_rx,
                     notify: notify.clone(),
                     mode,
+                    lossy,
                     peers: FxHashMap::default(),
                 }
                 .run(),
@@ -297,15 +322,28 @@ impl FanOutShards {
             });
         }
         Arc::new(Self {
-            endpoints: Mutex::new(endpoints),
+            state: Mutex::new(FanOutShardState {
+                endpoints,
+                eligible_peers: 0,
+                active_limit: 0,
+            }),
         })
     }
 
-    fn least_loaded_shard(endpoints: &[ShardEndpoint]) -> usize {
-        let total_load = endpoints.iter().map(|shard| shard.load).sum::<usize>();
-        if total_load + 1 < FAN_OUT_SHARD_THRESHOLD {
+    fn desired_active_shards(eligible_peers: usize, max_shards: usize) -> usize {
+        if eligible_peers == 0 || max_shards == 0 {
             return 0;
         }
+        let mut desired = 1usize;
+        let mut next_growth_at = 4usize;
+        while eligible_peers >= next_growth_at && desired < max_shards {
+            desired += 1;
+            next_growth_at = next_growth_at.saturating_mul(2);
+        }
+        desired.min(max_shards)
+    }
+
+    fn least_loaded_shard(endpoints: &[ShardEndpoint]) -> usize {
         endpoints
             .iter()
             .enumerate()
@@ -349,32 +387,37 @@ impl FanOutShards {
     }
 
     fn add_peer(&self, add: ShardPeerAdd) -> usize {
-        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
-        let shard = Self::least_loaded_shard(&endpoints);
-        endpoints[shard].load += 1;
-        Self::push_control(&mut endpoints[shard], ShardCommand::AddPeer(add));
+        let mut state = self.state.lock().expect("fanout shards poisoned");
+        state.eligible_peers += 1;
+        let desired = Self::desired_active_shards(state.eligible_peers, state.endpoints.len());
+        state.active_limit = state.active_limit.max(desired);
+        let active_limit = state.active_limit.max(1).min(state.endpoints.len());
+        let shard = Self::least_loaded_shard(&state.endpoints[..active_limit]);
+        state.endpoints[shard].load += 1;
+        Self::push_control(&mut state.endpoints[shard], ShardCommand::AddPeer(add));
         shard
     }
 
     fn send_to_shard(&self, shard: usize, cmd: ShardCommand) {
-        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
-        if let Some(endpoint) = endpoints.get_mut(shard) {
+        let mut state = self.state.lock().expect("fanout shards poisoned");
+        if let Some(endpoint) = state.endpoints.get_mut(shard) {
             Self::push_control(endpoint, cmd);
         }
     }
 
     fn remove_peer(&self, shard: usize, peer_id: u64) {
-        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
-        if let Some(endpoint) = endpoints.get_mut(shard) {
+        let mut state = self.state.lock().expect("fanout shards poisoned");
+        state.eligible_peers = state.eligible_peers.saturating_sub(1);
+        if let Some(endpoint) = state.endpoints.get_mut(shard) {
             endpoint.load = endpoint.load.saturating_sub(1);
             Self::push_control(endpoint, ShardCommand::RemovePeer { peer_id });
         }
     }
 
     fn dispatch(&self, dispatch: &ShardDispatch) {
-        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
+        let mut state = self.state.lock().expect("fanout shards poisoned");
         let mut touched = SmallVec::<[usize; 8]>::new();
-        for (idx, endpoint) in endpoints.iter_mut().enumerate() {
+        for (idx, endpoint) in state.endpoints.iter_mut().enumerate() {
             if endpoint.load == 0 {
                 continue;
             }
@@ -387,24 +430,92 @@ impl FanOutShards {
             }
         }
         for idx in touched {
-            let endpoint = &mut endpoints[idx];
+            let endpoint = &mut state.endpoints[idx];
             endpoint.tx.flush();
             endpoint.notify.notify_one();
         }
     }
 
-    fn shutdown(&self) {
-        let mut endpoints = self.endpoints.lock().expect("fanout shards poisoned");
-        for endpoint in endpoints.iter_mut() {
-            Self::push_control(endpoint, ShardCommand::Shutdown);
-            endpoint.load = 0;
+    fn try_dispatch_all(&self, dispatch: &ShardDispatch) -> bool {
+        let mut state = self.state.lock().expect("fanout shards poisoned");
+        for endpoint in state
+            .endpoints
+            .iter_mut()
+            .filter(|endpoint| endpoint.load > 0)
+        {
+            if endpoint.tx.is_full() {
+                endpoint.tx.flush();
+                endpoint.notify.notify_one();
+                return false;
+            }
+        }
+
+        let mut touched = SmallVec::<[usize; 8]>::new();
+        for (idx, endpoint) in state.endpoints.iter_mut().enumerate() {
+            if endpoint.load == 0 {
+                continue;
+            }
+            if endpoint
+                .tx
+                .push(ShardCommand::Dispatch(dispatch.clone()))
+                .is_err()
+            {
+                endpoint.tx.flush();
+                endpoint.notify.notify_one();
+                return false;
+            }
+            touched.push(idx);
+        }
+        for idx in touched {
+            let endpoint = &mut state.endpoints[idx];
+            endpoint.tx.flush();
+            endpoint.notify.notify_one();
+        }
+        true
+    }
+
+    fn loaded_shards_have_space(&self) -> bool {
+        let mut state = self.state.lock().expect("fanout shards poisoned");
+        for endpoint in state
+            .endpoints
+            .iter_mut()
+            .filter(|endpoint| endpoint.load > 0)
+        {
+            if endpoint.tx.is_full() {
+                endpoint.tx.flush();
+                endpoint.notify.notify_one();
+                return false;
+            }
+        }
+        true
+    }
+
+    fn dispatch_blocking(&self, dispatch: &ShardDispatch) {
+        let mut state = self.state.lock().expect("fanout shards poisoned");
+        for endpoint in state
+            .endpoints
+            .iter_mut()
+            .filter(|endpoint| endpoint.load > 0)
+        {
+            Self::push_control(endpoint, ShardCommand::Dispatch(dispatch.clone()));
         }
     }
 
+    fn shutdown(&self) {
+        let mut state = self.state.lock().expect("fanout shards poisoned");
+        for endpoint in state.endpoints.iter_mut() {
+            Self::push_control(endpoint, ShardCommand::Shutdown);
+            endpoint.load = 0;
+        }
+        state.eligible_peers = 0;
+        state.active_limit = 0;
+    }
+
     fn is_empty(&self) -> bool {
-        self.endpoints
+        self.state
             .lock()
             .expect("fanout shards poisoned")
+            .endpoints
             .iter()
             .all(|endpoint| endpoint.tx.is_empty())
     }
@@ -421,7 +532,7 @@ impl ShardWorker {
                 let mut drained = false;
                 while let Some(cmd) = self.rx.pop() {
                     drained = true;
-                    if self.handle_command(cmd, &mut touched) {
+                    if self.handle_command(cmd, &mut touched).await {
                         shutdown = true;
                     }
                 }
@@ -440,7 +551,11 @@ impl ShardWorker {
         }
     }
 
-    fn handle_command(&mut self, cmd: ShardCommand, touched: &mut SmallVec<[u64; 32]>) -> bool {
+    async fn handle_command(
+        &mut self,
+        cmd: ShardCommand,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
         match cmd {
             ShardCommand::AddPeer(add) => {
                 self.peers.insert(
@@ -482,31 +597,37 @@ impl ShardWorker {
                     peer.groups.remove(s);
                 }
             }
-            ShardCommand::Dispatch(dispatch) => self.dispatch(&dispatch, touched),
+            ShardCommand::Dispatch(dispatch) => self.dispatch(&dispatch, touched).await,
             ShardCommand::Shutdown => return true,
         }
         false
     }
 
-    fn dispatch(&mut self, dispatch: &ShardDispatch, touched: &mut SmallVec<[u64; 32]>) {
+    async fn dispatch(&mut self, dispatch: &ShardDispatch, touched: &mut SmallVec<[u64; 32]>) {
         if let Some(peer_ids) = dispatch.peer_ids.as_ref() {
             for &peer_id in peer_ids.iter() {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    Self::push_dispatch_to_peer(peer_id, peer, dispatch, touched);
+                    Self::push_dispatch_to_peer(self.lossy, peer_id, peer, dispatch, touched).await;
                 }
             }
             return;
         }
 
-        for (&peer_id, peer) in &mut self.peers {
-            if !shard_peer_matches(self.mode, peer, dispatch) {
-                continue;
+        let mut peer_ids = SmallVec::<[u64; 32]>::new();
+        for (&peer_id, peer) in &self.peers {
+            if shard_peer_matches(self.mode, peer, dispatch) {
+                peer_ids.push(peer_id);
             }
-            Self::push_dispatch_to_peer(peer_id, peer, dispatch, touched);
+        }
+        for peer_id in peer_ids {
+            if let Some(peer) = self.peers.get_mut(&peer_id) {
+                Self::push_dispatch_to_peer(self.lossy, peer_id, peer, dispatch, touched).await;
+            }
         }
     }
 
-    fn push_dispatch_to_peer(
+    async fn push_dispatch_to_peer(
+        lossy: bool,
         peer_id: u64,
         peer: &mut ShardPeer,
         dispatch: &ShardDispatch,
@@ -515,23 +636,48 @@ impl ShardWorker {
         if let Some(dict) = dispatch.encoded.dict.as_ref()
             && !peer.dict_shipped
         {
-            if peer
-                .slot
-                .try_push_ring_item(&mut peer.producer, dict.to_wire_item())
-                != TryEncodeResult::Ok
-            {
+            if !Self::push_encoded_to_peer(lossy, peer_id, peer, dict, touched).await {
                 return;
             }
             peer.dict_shipped = true;
             peer.slot.mark_fanout_dict_shipped();
-            touched.push(peer_id);
         }
-        if peer
-            .slot
-            .try_push_ring_item(&mut peer.producer, dispatch.encoded.payload.to_wire_item())
-            == TryEncodeResult::Ok
-        {
-            touched.push(peer_id);
+        let _ =
+            Self::push_encoded_to_peer(lossy, peer_id, peer, &dispatch.encoded.payload, touched)
+                .await;
+    }
+
+    async fn push_encoded_to_peer(
+        lossy: bool,
+        peer_id: u64,
+        peer: &mut ShardPeer,
+        encoded: &EncodedFanOut,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
+        loop {
+            match peer
+                .slot
+                .try_push_ring_item(&mut peer.producer, encoded.to_wire_item())
+            {
+                TryEncodeResult::Ok => {
+                    touched.push(peer_id);
+                    return true;
+                }
+                TryEncodeResult::Dead => return false,
+                TryEncodeResult::Full | TryEncodeResult::Ineligible if lossy => return false,
+                TryEncodeResult::Full => {
+                    peer.slot.flush_ring(&mut peer.producer);
+                    let notified = peer.slot.space_available.notified();
+                    tokio::select! {
+                        biased;
+                        () = notified => {}
+                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    }
+                }
+                TryEncodeResult::Ineligible => {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            }
         }
     }
 
@@ -678,7 +824,11 @@ impl DeferredFanOutWorker {
                 group: msg.group,
                 peer_ids: Some(msg.sharded_peer_ids),
             };
-            self.shards.dispatch(&dispatch);
+            if self.lossy {
+                self.shards.dispatch(&dispatch);
+            } else {
+                self.shards.dispatch_blocking(&dispatch);
+            }
         }
         Ok(())
     }
@@ -986,15 +1136,17 @@ impl Submitter {
         shards: &FanOutShards,
         msg: &Message,
         group: Option<String>,
-    ) -> Result<()> {
+        mode: ShardDispatchMode,
+    ) -> Result<DispatchOutcome> {
         match self.try_defer_to_shards(msg, group.clone())? {
             DeferredEnqueue::Direct => {}
-            DeferredEnqueue::Enqueued | DeferredEnqueue::Dropped => return Ok(()),
+            DeferredEnqueue::Enqueued | DeferredEnqueue::Dropped => {
+                return Ok(DispatchOutcome::default());
+            }
         }
 
         let targets = self.collect_shard_targets(msg, group.as_deref());
-        let _ = self.dispatch_shard_targets(shards, msg, group, targets)?;
-        Ok(())
+        self.dispatch_shard_targets(shards, msg, group, targets, mode)
     }
 
     fn dispatch_shard_targets(
@@ -1003,10 +1155,18 @@ impl Submitter {
         msg: &Message,
         group: Option<String>,
         targets: ShardDispatchTargets,
+        mode: ShardDispatchMode,
     ) -> Result<DispatchOutcome> {
         let mut outcome = DispatchOutcome::default();
         let target_count = targets.fallback_targets.len() + targets.sharded_count;
         if target_count == 0 {
+            return Ok(outcome);
+        }
+        if matches!(mode, ShardDispatchMode::TryAll)
+            && targets.sharded_count > 0
+            && !shards.loaded_shards_have_space()
+        {
+            outcome.mark_shard_full();
             return Ok(outcome);
         }
 
@@ -1051,7 +1211,15 @@ impl Submitter {
             group,
             peer_ids: None,
         };
-        shards.dispatch(&dispatch);
+        match mode {
+            ShardDispatchMode::Lossy => shards.dispatch(&dispatch),
+            ShardDispatchMode::TryAll => {
+                if !shards.try_dispatch_all(&dispatch) {
+                    outcome.mark_shard_full();
+                }
+            }
+            ShardDispatchMode::Block => shards.dispatch_blocking(&dispatch),
+        }
         Ok(outcome)
     }
 
@@ -1066,9 +1234,18 @@ impl Submitter {
         if let Some(ref shards) = self.shards
             && self.has_sharded_peers()
         {
-            return self
-                .dispatch_to_shards_and_fallback(shards, &forwarded, group)
-                .map_err(omq_proto::error::TrySendError::Error);
+            let mode = if self.lossy && !self.xpub_nodrop {
+                ShardDispatchMode::Lossy
+            } else {
+                ShardDispatchMode::TryAll
+            };
+            let outcome = self
+                .dispatch_to_shards_and_fallback(shards, &forwarded, group, mode)
+                .map_err(omq_proto::error::TrySendError::Error)?;
+            if outcome.is_full() && (!self.lossy || self.xpub_nodrop) {
+                return Err(omq_proto::error::TrySendError::Full(forwarded));
+            }
+            return Ok(());
         }
 
         match self.try_cached(&forwarded, group.as_deref()) {
@@ -1151,7 +1328,12 @@ impl Submitter {
 
             let targets = self.collect_shard_targets(&forwarded, group.as_deref());
             let target_count = targets.fallback_targets.len() + targets.sharded_count;
-            let outcome = self.dispatch_shard_targets(shards, &forwarded, group, targets)?;
+            let mode = if self.lossy && !self.xpub_nodrop {
+                ShardDispatchMode::Lossy
+            } else {
+                ShardDispatchMode::Block
+            };
+            let outcome = self.dispatch_shard_targets(shards, &forwarded, group, targets, mode)?;
             if !self.lossy && outcome.is_full() {
                 send_to_targets_nodrop(&outcome.full_targets, forwarded.clone()).await?;
             }
@@ -1368,7 +1550,6 @@ struct FanOutPeer {
     any_groups: bool,
     target: PeerSend,
     shard: Option<usize>,
-    shard_eligible: bool,
     fanout_active: bool,
 }
 
@@ -1533,12 +1714,8 @@ impl FanOutSend {
             && self.shards.is_some()
             && matches!(target, PeerSend::Wire { .. })
             && handle.wire_slot_tx.is_some();
-        let should_shard = shard_eligible && {
-            let g = self.inner.lock().expect("fanout inner poisoned");
-            g.peers.values().filter(|p| p.shard_eligible).count() + 1 >= FAN_OUT_SHARD_THRESHOLD
-        };
 
-        let shard = if !should_shard {
+        let shard = if !shard_eligible {
             None
         } else if let (Some(shards), PeerSend::Wire { slot, .. }) = (self.shards.as_ref(), &target)
         {
@@ -1599,7 +1776,6 @@ impl FanOutSend {
                 any_groups,
                 target,
                 shard,
-                shard_eligible,
                 fanout_active: true,
             },
         );
@@ -1953,4 +2129,31 @@ fn dispatch_to_targets(
 
 fn first_frame_bytes(msg: &Message) -> Bytes {
     msg.part_bytes(0).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FanOutShards;
+
+    #[test]
+    fn desired_active_shards_ramps_monotonically() {
+        assert_eq!(FanOutShards::desired_active_shards(0, 8), 0);
+        assert_eq!(FanOutShards::desired_active_shards(1, 8), 1);
+        assert_eq!(FanOutShards::desired_active_shards(3, 8), 1);
+        assert_eq!(FanOutShards::desired_active_shards(4, 8), 2);
+        assert_eq!(FanOutShards::desired_active_shards(7, 8), 2);
+        assert_eq!(FanOutShards::desired_active_shards(8, 8), 3);
+        assert_eq!(FanOutShards::desired_active_shards(15, 8), 3);
+        assert_eq!(FanOutShards::desired_active_shards(16, 8), 4);
+        assert_eq!(FanOutShards::desired_active_shards(32, 8), 5);
+    }
+
+    #[test]
+    fn desired_active_shards_is_capped_by_runtime_workers() {
+        assert_eq!(FanOutShards::desired_active_shards(0, 2), 0);
+        assert_eq!(FanOutShards::desired_active_shards(1, 2), 1);
+        assert_eq!(FanOutShards::desired_active_shards(4, 2), 2);
+        assert_eq!(FanOutShards::desired_active_shards(64, 2), 2);
+        assert_eq!(FanOutShards::desired_active_shards(64, 1), 1);
+    }
 }
