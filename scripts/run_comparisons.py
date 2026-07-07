@@ -970,6 +970,14 @@ IMPLS = {
         "inproc_pubsub_subcmd": "inproc-pubsub",
         "supports_pubsub": True,
     },
+    "libzmq-mt": {
+        "binary_from": "libzmq",
+        "prefix": "Z",
+        "class": "classic",
+        "transports": ["tcp", "ipc", "ws"],
+        "supports_pubsub": True,
+        "env": {"ZMQ_IO_THREADS": "4"},
+    },
     "zmq.rs": {
         "prefix": "q",
         "class": "classic",
@@ -1027,12 +1035,15 @@ def build_peers(impl_names: set[str], ws_needed: bool):
         if "omq-tokio-mt" in impl_names:
             binaries["omq-tokio-mt"] = tokio_bin
 
-    if "libzmq" in impl_names:
+    if impl_names & {"libzmq", "libzmq-mt"}:
         print("==> building libzmq bench_peer...", file=sys.stderr)
         src = ROOT / "scripts" / "libzmq_bench_peer.c"
         out = ROOT / "scripts" / "libzmq_bench_peer"
         gcc_build(src, out)
-        binaries["libzmq"] = str(out)
+        if "libzmq" in impl_names:
+            binaries["libzmq"] = str(out)
+        if "libzmq-mt" in impl_names:
+            binaries["libzmq-mt"] = str(out)
 
     if "zmq.rs" in impl_names:
         print("==> building zmq.rs bench_peer...", file=sys.stderr)

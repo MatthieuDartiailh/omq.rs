@@ -17,6 +17,7 @@ COMPARISON_CHART_SIZES = {16, 64, 256, 1024, 4096, 16384}
 
 COLORS = {
     "libzmq": "#eab308",
+    "libzmq-mt": "#a16207",
     "omq-tokio": "#f97316",
     "omq-tokio-mt": "#dc2626",
     "zmq.rs": "#2563eb",
@@ -27,6 +28,7 @@ COLORS = {
 
 LABELS = {
     "libzmq": "libzmq v4.3.5",
+    "libzmq-mt": "libzmq v4.3.5 (4 IO threads)",
     "omq-tokio": "omq-tokio (ST)",
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0",
@@ -327,7 +329,8 @@ def draw_throughput_panel(
 
     # dashed msg/s lines
     draw_order = [name for name in
-                  ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio"]
+                  ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq", "libzmq-mt",
+                   "omq-tokio-mt", "omq-tokio"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -404,7 +407,8 @@ def draw_latency_panel(
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["rzmq-iouring", "libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs"]
+                  ["rzmq-iouring", "libzmq", "libzmq-mt", "omq-tokio-mt", "omq-tokio",
+                   "rzmq", "zmq.rs"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -565,7 +569,8 @@ def draw_throughput_cpu_panel(
     L.append(svg_text(40, mid_y, "CPU %", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["rzmq-iouring", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs"]
+                  ["rzmq-iouring", "libzmq", "libzmq-mt", "omq-libzmq",
+                   "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs"]
                   if name in impls]
 
     # dotted CPU% lines
@@ -694,8 +699,8 @@ def draw_latency_cpu_panel(
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["rzmq-iouring", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
-                   "rzmq", "zmq.rs"]
+                  ["rzmq-iouring", "libzmq", "libzmq-mt", "omq-libzmq",
+                   "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs"]
                   if name in impls]
 
     # dotted CPU% lines (right axis)
@@ -1418,8 +1423,8 @@ def main():
         "inproc": "inproc",
     }
 
-    tcp_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
-    ipc_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
+    tcp_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
+    ipc_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
     inproc_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "rzmq", "rzmq-iouring"]
 
     # (transport, impls, log).
