@@ -48,6 +48,7 @@ pub(crate) enum FanOutMode {
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
 const DIRECT_SHARD_PEER_CAP: usize = 4;
 const WORKER_SHARD_PEER_CAP: usize = 4;
+const MAX_FAN_OUT_WORKER_SHARDS: usize = 8;
 
 /// Yield every N peers to keep latency bounded. Scales down with peer
 /// count: fewer peers per yield when fan-out is wide (more total work).
@@ -300,12 +301,12 @@ impl Clone for Submitter {
 impl FanOutShards {
     fn spawn(options: &Options, mode: FanOutMode) -> Arc<Self> {
         let pipe_cap = options.send_hwm.unwrap_or(1000).max(1) as usize;
-        let max_shards = tokio::runtime::Handle::current()
+        let runtime_workers = tokio::runtime::Handle::current()
             .metrics()
             .num_workers()
             .max(1);
         let lossy = !matches!(options.on_mute, OnMute::Block);
-        let worker_shards = max_shards;
+        let worker_shards = Self::worker_shard_count(runtime_workers);
         let mut endpoints = Vec::with_capacity(worker_shards);
         for _ in 0..worker_shards {
             let (shard_tx, shard_rx) = yring::spsc(pipe_cap);
@@ -344,6 +345,10 @@ impl FanOutShards {
         let worker_shards =
             worker_peers.saturating_add(WORKER_SHARD_PEER_CAP - 1) / WORKER_SHARD_PEER_CAP;
         1usize.saturating_add(worker_shards).min(max_shards)
+    }
+
+    fn worker_shard_count(runtime_workers: usize) -> usize {
+        runtime_workers.max(1).min(MAX_FAN_OUT_WORKER_SHARDS)
     }
 
     fn max_shards(state: &FanOutShardState) -> usize {
@@ -2202,31 +2207,94 @@ mod tests {
 
     use tokio::sync::Notify;
 
-    use super::{FanOutShardState, FanOutShards, ShardEndpoint};
+    use super::{
+        DIRECT_SHARD_PEER_CAP, FanOutShardState, FanOutShards, MAX_FAN_OUT_WORKER_SHARDS,
+        ShardEndpoint, WORKER_SHARD_PEER_CAP,
+    };
+
+    const TEST_MAX_LOGICAL_SHARDS: usize = MAX_FAN_OUT_WORKER_SHARDS + 1;
+    const TEST_SINGLE_LOGICAL_SHARD: usize = 1;
+    const TEST_LOW_WORKER_COUNT: usize = 2;
+    const TEST_HIGH_WORKER_COUNT: usize = 64;
+    const TEST_WIDE_PEER_COUNT: usize = 32;
 
     #[test]
     fn desired_active_shards_ramps_monotonically() {
-        assert_eq!(FanOutShards::desired_active_shards(0, 8), 0);
-        assert_eq!(FanOutShards::desired_active_shards(1, 8), 1);
-        assert_eq!(FanOutShards::desired_active_shards(4, 8), 1);
-        assert_eq!(FanOutShards::desired_active_shards(5, 8), 2);
-        assert_eq!(FanOutShards::desired_active_shards(8, 8), 2);
-        assert_eq!(FanOutShards::desired_active_shards(9, 8), 3);
-        assert_eq!(FanOutShards::desired_active_shards(12, 8), 3);
-        assert_eq!(FanOutShards::desired_active_shards(13, 8), 4);
-        assert_eq!(FanOutShards::desired_active_shards(16, 8), 4);
-        assert_eq!(FanOutShards::desired_active_shards(17, 8), 5);
-        assert_eq!(FanOutShards::desired_active_shards(32, 8), 8);
+        assert_eq!(
+            FanOutShards::desired_active_shards(0, TEST_MAX_LOGICAL_SHARDS),
+            0
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(1, TEST_MAX_LOGICAL_SHARDS),
+            1
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(DIRECT_SHARD_PEER_CAP, TEST_MAX_LOGICAL_SHARDS),
+            1
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(DIRECT_SHARD_PEER_CAP + 1, TEST_MAX_LOGICAL_SHARDS),
+            2
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(
+                DIRECT_SHARD_PEER_CAP + WORKER_SHARD_PEER_CAP,
+                TEST_MAX_LOGICAL_SHARDS
+            ),
+            2
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(
+                DIRECT_SHARD_PEER_CAP + WORKER_SHARD_PEER_CAP + 1,
+                TEST_MAX_LOGICAL_SHARDS
+            ),
+            3
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(TEST_WIDE_PEER_COUNT, TEST_MAX_LOGICAL_SHARDS),
+            8
+        );
     }
 
     #[test]
     fn desired_active_shards_is_capped_by_runtime_workers() {
-        assert_eq!(FanOutShards::desired_active_shards(0, 2), 0);
-        assert_eq!(FanOutShards::desired_active_shards(1, 2), 1);
-        assert_eq!(FanOutShards::desired_active_shards(4, 2), 1);
-        assert_eq!(FanOutShards::desired_active_shards(5, 2), 2);
-        assert_eq!(FanOutShards::desired_active_shards(64, 2), 2);
-        assert_eq!(FanOutShards::desired_active_shards(64, 1), 1);
+        assert_eq!(
+            FanOutShards::desired_active_shards(0, TEST_LOW_WORKER_COUNT),
+            0
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(1, TEST_LOW_WORKER_COUNT),
+            1
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(DIRECT_SHARD_PEER_CAP, TEST_LOW_WORKER_COUNT),
+            1
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(DIRECT_SHARD_PEER_CAP + 1, TEST_LOW_WORKER_COUNT),
+            2
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(TEST_HIGH_WORKER_COUNT, TEST_LOW_WORKER_COUNT),
+            TEST_LOW_WORKER_COUNT
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(TEST_HIGH_WORKER_COUNT, TEST_SINGLE_LOGICAL_SHARD),
+            TEST_SINGLE_LOGICAL_SHARD
+        );
+    }
+
+    #[test]
+    fn worker_shard_count_is_capped() {
+        assert_eq!(FanOutShards::worker_shard_count(0), 1);
+        assert_eq!(
+            FanOutShards::worker_shard_count(TEST_LOW_WORKER_COUNT),
+            TEST_LOW_WORKER_COUNT
+        );
+        assert_eq!(
+            FanOutShards::worker_shard_count(TEST_HIGH_WORKER_COUNT),
+            MAX_FAN_OUT_WORKER_SHARDS
+        );
     }
 
     #[test]
@@ -2234,13 +2302,15 @@ mod tests {
         let shards = FanOutShards {
             state: std::sync::Mutex::new(FanOutShardState {
                 direct_load: 0,
-                endpoints: vec![test_endpoint(), test_endpoint()],
+                endpoints: test_endpoints(TEST_LOW_WORKER_COUNT),
                 eligible_peers: 0,
                 active_limit: 0,
             }),
         };
 
-        let assigned: Vec<_> = (0..8).map(|_| shards.assign_peer()).collect();
+        let assigned: Vec<_> = (0..(DIRECT_SHARD_PEER_CAP * 2))
+            .map(|_| shards.assign_peer())
+            .collect();
         assert_eq!(assigned, vec![0, 0, 0, 0, 1, 1, 1, 1]);
 
         shards.remove_peer(0, 1);
@@ -2252,23 +2322,22 @@ mod tests {
         let shards = FanOutShards {
             state: std::sync::Mutex::new(FanOutShardState {
                 direct_load: 0,
-                endpoints: vec![
-                    test_endpoint(),
-                    test_endpoint(),
-                    test_endpoint(),
-                    test_endpoint(),
-                ],
+                endpoints: test_endpoints(WORKER_SHARD_PEER_CAP),
                 eligible_peers: 0,
                 active_limit: 0,
             }),
         };
 
-        let mut loads = [0usize; 5];
-        for _ in 0..32 {
+        let mut loads = [0usize; WORKER_SHARD_PEER_CAP + 1];
+        for _ in 0..TEST_WIDE_PEER_COUNT {
             loads[shards.assign_peer()] += 1;
         }
 
         assert_eq!(loads, [4, 7, 7, 7, 7]);
+    }
+
+    fn test_endpoints(count: usize) -> Vec<ShardEndpoint> {
+        (0..count).map(|_| test_endpoint()).collect()
     }
 
     fn test_endpoint() -> ShardEndpoint {
