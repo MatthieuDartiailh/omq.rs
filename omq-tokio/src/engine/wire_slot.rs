@@ -105,6 +105,7 @@ pub(crate) struct PeerWireSlot {
     pub(crate) peer_id: u64,
     queued_msgs: AtomicUsize,
     queued_ring_bytes: AtomicUsize,
+    fanout_dict_shipped: AtomicBool,
     fanout_active: AtomicBool,
     above_lwm: AtomicBool,
     fanout_reactivation: Mutex<Option<FanOutReactivation>>,
@@ -159,6 +160,7 @@ impl PeerWireSlot {
             peer_id,
             queued_msgs: AtomicUsize::new(0),
             queued_ring_bytes: AtomicUsize::new(0),
+            fanout_dict_shipped: AtomicBool::new(false),
             fanout_active: AtomicBool::new(true),
             above_lwm: AtomicBool::new(false),
             fanout_reactivation: Mutex::new(None),
@@ -309,6 +311,16 @@ impl PeerWireSlot {
         if !self.pending.swap(true, Ordering::Release) {
             self.data_ready.notify_one();
         }
+    }
+
+    #[inline]
+    pub(crate) fn fanout_dict_shipped(&self) -> bool {
+        self.fanout_dict_shipped.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn mark_fanout_dict_shipped(&self) {
+        self.fanout_dict_shipped.store(true, Ordering::Release);
     }
 
     #[inline]

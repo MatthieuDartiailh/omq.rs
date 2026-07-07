@@ -66,6 +66,13 @@ pub const MAX_DICT_BYTES: usize = 8192;
 /// Default auto-train dictionary capacity in bytes.
 const DEFAULT_DICT_CAPACITY: usize = 2048;
 
+pub(crate) fn is_dict_shipment(msg: &Message) -> bool {
+    msg.len() == 1
+        && msg
+            .part_bytes(0)
+            .is_some_and(|part| part.starts_with(&SENTINEL_LZ4D))
+}
+
 /// Send-side per-connection LZ4 state.
 pub struct Lz4Encoder {
     /// Outbound dict, validated at construction. Shipped on the first

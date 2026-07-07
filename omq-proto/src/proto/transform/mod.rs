@@ -128,6 +128,16 @@ impl MessageEncoder {
         }
     }
 
+    /// Remove and return a leading dictionary-shipment message, when a
+    /// transform emitted one ahead of user payload frames.
+    pub fn take_leading_dict_shipment(out: &mut TransformedOut) -> Option<Message> {
+        #[cfg(feature = "lz4")]
+        if out.first().is_some_and(lz4::is_dict_shipment) {
+            return Some(out.remove(0));
+        }
+        None
+    }
+
     /// True when no dict shipment is pending and offloading is safe.
     pub fn can_offload(&self) -> bool {
         match self {

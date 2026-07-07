@@ -276,6 +276,48 @@ does all I/O. A coalescing `pending: AtomicBool` gates
 and identity routes. Inproc peers have no slot and use the
 `PeerSend::Inbox` variant.
 
+### PUB/RADIO Fan-Out Shards
+
+Normal lossy `PUB`, `XPUB`, and `RADIO` sends bypass the actor. On a
+multi-thread Tokio runtime, `FanOutSend` creates shard workers for wide
+wire fan-out; the shard count follows `available_parallelism`, matching
+Tokio's default worker count. Sharding activates at four wire peers.
+Earlier peers, inproc peers, and `xpub_nodrop` sockets stay on the
+direct `PeerWireSlot` path; `xpub_nodrop` keeps direct dispatch so it can
+preserve send backpressure.
+
+When a wire peer becomes sharded, `PeerWireSlot::new` returns the slot
+and its `yring::Producer<WireSlotItem>` separately. The shard worker owns
+that producer, so per-peer fan-out pushes do not take the slot mutex.
+New sharded peers are assigned to the shard with the smallest live-peer
+load. Shard ring capacity is `send_hwm`.
+
+The hot send path encodes each outbound `Message` once in the caller
+thread, then takes one mutex over shard endpoints and pushes a
+`Dispatch` command into each nonempty shard ring. Small encoded messages
+use inline `WireSlotItem`s; larger or chunked messages use shared
+`Arc<[Bytes]>` chunks. A full shard dispatch ring drops that message for
+that shard, matching lossy PUB semantics. Control commands
+(`AddPeer`, `RemovePeer`, `Subscribe`, `Cancel`, `Join`, `Leave`, and
+`Shutdown`) are enqueued reliably and may wait for ring space.
+
+For `lz4+tcp://`, the fan-out path owns one socket-level
+`MessageEncoder`. Static dictionaries and auto-trained dictionaries are
+installed on that encoder, so each outbound user message is compressed
+once for the socket fan-out. The first emitted `LZ4D` dictionary shipment
+is stored beside the fan-out encoder. Each `PeerWireSlot` tracks a
+per-connection `fanout_dict_shipped` bit; direct fallback peers and shard
+workers push the stored dictionary before the first dictionary-compressed
+payload for that connection. Late subscribers therefore receive the same
+single PUB socket dictionary once after subscribing, without rotating or
+training per-peer dictionaries.
+
+Each shard worker owns its peers' subscription prefixes or RADIO groups,
+filters locally, pushes matching wire items lock-free into peer rings,
+then flushes and signals touched peers once per batch. This keeps
+per-subscriber ordering on one path and moves wide fan-out work off the
+caller after the single encoded dispatch.
+
 ### Reconnect, Monitor, And Concurrency
 
 Dial supervisor tasks own handles that are `None` while reconnect is in

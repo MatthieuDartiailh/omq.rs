@@ -16,6 +16,16 @@ fn lz4_loopback() -> Endpoint {
     }
 }
 
+fn tcp_from_lz4(ep: &Endpoint) -> Endpoint {
+    match ep {
+        Endpoint::Lz4Tcp { host, port } => Endpoint::Tcp {
+            host: host.clone(),
+            port: *port,
+        },
+        other => panic!("expected lz4+tcp endpoint, got {other:?}"),
+    }
+}
+
 async fn bind_lz4_loopback(sock: &Socket) -> (Endpoint, omq_tokio::MonitorStream) {
     let mut mon = sock.monitor();
     sock.bind(lz4_loopback()).await.unwrap();
@@ -50,6 +60,176 @@ async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
     tokio::time::timeout(Duration::from_secs(5), fut)
         .await
         .expect("subscribes did not propagate within 5s");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pub_sub_lz4_sharded_fan_out_ships_dict_to_late_subscriber() {
+    use omq_proto::proto::transform::lz4::DictTrainer;
+
+    const N_DECODED_SUBS: usize = 4;
+
+    let sample = r#"{"kind":"quote","venue":"XNAS","symbol":"OMQ","bid":101.25,"ask":101.27,"depth":[10125,10126,10127],"flags":"regular"}"#;
+    let mut trainer = DictTrainer::new(2048);
+    for _ in 0..100 {
+        trainer.add_sample(sample.as_bytes());
+    }
+    let dict = bytes::Bytes::from(trainer.train());
+    let opts = Options::default().compression_dict(dict);
+
+    let publisher = Socket::new(SocketType::Pub, opts.clone());
+    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+
+    let mut decoded_subs = Vec::with_capacity(N_DECODED_SUBS);
+    for _ in 0..N_DECODED_SUBS {
+        let sub = Socket::new(SocketType::Sub, opts.clone());
+        sub.connect(ep.clone()).await.unwrap();
+        sub.subscribe(bytes::Bytes::new()).await.unwrap();
+        decoded_subs.push(sub);
+    }
+    wait_for_subscribes(&mut mon, N_DECODED_SUBS).await;
+
+    let raw_sub = Socket::new(SocketType::Sub, Options::default());
+    raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
+    raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    wait_for_subscribes(&mut mon, 1).await;
+
+    let payload1 = bytes::Bytes::from(format!("{sample}{}", " ".repeat(256)));
+    let payload2 = bytes::Bytes::from(format!("{sample}{}", " ".repeat(300)));
+    publisher
+        .send(Message::single(payload1.clone()))
+        .await
+        .unwrap();
+    publisher
+        .send(Message::single(payload2.clone()))
+        .await
+        .unwrap();
+
+    let dict_msg = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
+        .await
+        .expect("raw subscriber did not receive dictionary shipment")
+        .unwrap();
+    let dict_part = dict_msg.part_bytes(0).unwrap();
+    assert!(
+        dict_part.starts_with(b"LZ4D"),
+        "first raw message must be the LZ4 dictionary shipment, got prefix {:?}",
+        &dict_part[..dict_part.len().min(4)]
+    );
+
+    let raw_payload1 = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
+        .await
+        .expect("raw subscriber did not receive first compressed payload")
+        .unwrap();
+    let raw_part1 = raw_payload1.part_bytes(0).unwrap();
+    assert!(
+        raw_part1.starts_with(b"LZ4B"),
+        "first payload should use the shipped dictionary, got prefix {:?}",
+        &raw_part1[..raw_part1.len().min(4)]
+    );
+
+    let raw_payload2 = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
+        .await
+        .expect("raw subscriber did not receive second compressed payload")
+        .unwrap();
+    let raw_part2 = raw_payload2.part_bytes(0).unwrap();
+    assert!(
+        raw_part2.starts_with(b"LZ4B"),
+        "second payload should remain dictionary-compressed, got prefix {:?}",
+        &raw_part2[..raw_part2.len().min(4)]
+    );
+
+    for (idx, sub) in decoded_subs.iter().enumerate() {
+        let got1 = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .unwrap_or_else(|_| panic!("decoded sub {idx} missed first payload"))
+            .unwrap();
+        assert_eq!(got1.part_bytes(0).unwrap(), payload1);
+
+        let got2 = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .unwrap_or_else(|_| panic!("decoded sub {idx} missed second payload"))
+            .unwrap();
+        assert_eq!(got2.part_bytes(0).unwrap(), payload2);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pub_sub_lz4_sharded_fan_out_auto_trains_dict_for_late_subscriber() {
+    const N_DECODED_SUBS: usize = 4;
+    const N_TRAINING_MSGS: usize = 100;
+
+    let opts = Options::default().compression_auto_train(true);
+    let publisher = Socket::new(SocketType::Pub, opts.clone());
+    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+
+    let mut decoded_subs = Vec::with_capacity(N_DECODED_SUBS);
+    for _ in 0..N_DECODED_SUBS {
+        let sub = Socket::new(SocketType::Sub, opts.clone());
+        sub.connect(ep.clone()).await.unwrap();
+        sub.subscribe(bytes::Bytes::new()).await.unwrap();
+        decoded_subs.push(sub);
+    }
+    wait_for_subscribes(&mut mon, N_DECODED_SUBS).await;
+
+    for i in 0..N_TRAINING_MSGS {
+        let payload = bytes::Bytes::from(format!(
+            "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":{i},\"bid\":101.25,\"ask\":101.27,\"depth\":[10125,10126,10127],\"pad\":\"{}\"}}",
+            "A".repeat(160)
+        ));
+        publisher.send(Message::single(payload)).await.unwrap();
+    }
+
+    for (idx, sub) in decoded_subs.iter().enumerate() {
+        for i in 0..N_TRAINING_MSGS {
+            tokio::time::timeout(Duration::from_secs(5), sub.recv())
+                .await
+                .unwrap_or_else(|_| panic!("decoded sub {idx} missed training payload {i}"))
+                .unwrap();
+        }
+    }
+
+    let raw_sub = Socket::new(SocketType::Sub, Options::default());
+    raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
+    raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    wait_for_subscribes(&mut mon, 1).await;
+
+    let late_payload = bytes::Bytes::from(format!(
+        "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":1000,\"bid\":101.25,\"ask\":101.27,\"depth\":[10125,10126,10127],\"pad\":\"{}\"}}",
+        "A".repeat(192)
+    ));
+    publisher
+        .send(Message::single(late_payload.clone()))
+        .await
+        .unwrap();
+
+    let dict_msg = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
+        .await
+        .expect("raw subscriber did not receive auto-trained dictionary shipment")
+        .unwrap();
+    let dict_part = dict_msg.part_bytes(0).unwrap();
+    assert!(
+        dict_part.starts_with(b"LZ4D"),
+        "first raw late message must be the auto-trained LZ4 dictionary, got prefix {:?}",
+        &dict_part[..dict_part.len().min(4)]
+    );
+
+    let compressed = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
+        .await
+        .expect("raw subscriber did not receive dictionary-compressed late payload")
+        .unwrap();
+    let compressed_part = compressed.part_bytes(0).unwrap();
+    assert!(
+        compressed_part.starts_with(b"LZ4B"),
+        "late payload should use the auto-trained dictionary, got prefix {:?}",
+        &compressed_part[..compressed_part.len().min(4)]
+    );
+
+    for (idx, sub) in decoded_subs.iter().enumerate() {
+        let got = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .unwrap_or_else(|_| panic!("decoded sub {idx} missed late payload"))
+            .unwrap();
+        assert_eq!(got.part_bytes(0).unwrap(), late_payload);
+    }
 }
 
 #[tokio::test]
