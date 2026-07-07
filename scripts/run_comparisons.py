@@ -363,7 +363,7 @@ def parse_throughput(output: str, size: int) -> dict | None:
         return None
     count = float(parts[0])
     elapsed = float(parts[1])
-    if elapsed <= 0:
+    if count <= 0 or elapsed <= 0:
         return None
     msgs_s = count / elapsed
     mbps = (count * size) / elapsed / 1e6
