@@ -135,6 +135,8 @@ impl MessageEncoder {
         if out.first().is_some_and(lz4::is_dict_shipment) {
             return Some(out.remove(0));
         }
+        #[cfg(not(feature = "lz4"))]
+        let _ = out;
         None
     }
 
