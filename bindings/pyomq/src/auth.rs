@@ -20,7 +20,7 @@ impl Clone for CurveAuthenticator {
     fn clone(&self) -> Self {
         match self {
             Self::AllowedKeys(keys) => Self::AllowedKeys(keys.clone()),
-            Self::Callback(cb) => Python::with_gil(|py| Self::Callback(cb.clone_ref(py))),
+            Self::Callback(cb) => Python::attach(|py| Self::Callback(cb.clone_ref(py))),
         }
     }
 }
@@ -47,9 +47,9 @@ pub(crate) fn build_authenticator(
             })
         }
         CurveAuthenticator::Callback(cb) => {
-            let cb = Python::with_gil(|py| cb.clone_ref(py));
+            let cb = Python::attach(|py| cb.clone_ref(py));
             omq_proto::proto::mechanism::Authenticator::new(move |peer| {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     let info = Py::new(py, PeerInfo::from_raw(py, &peer.public_key));
                     let info = match info {
                         Ok(i) => i,
@@ -80,9 +80,9 @@ pub(crate) fn set_curve_auth_impl(inner: &SocketInner, auth: &Bound<'_, PyAny>) 
         ov.curve_authenticator = Some(CurveAuthenticator::Callback(auth.clone().unbind()));
         return Ok(());
     }
-    let iter = auth.iter().map_err(|_| {
+    let iter = auth.try_iter().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(
-            "set_curve_auth expects a list/set of Z85 keys, a callable, or None",
+            "set_curve_auth expects an iterable of Z85 keys, a callable, or None",
         )
     })?;
     let mut keys = HashSet::new();

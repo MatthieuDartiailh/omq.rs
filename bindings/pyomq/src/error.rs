@@ -36,8 +36,8 @@ pub fn map_err(e: Error) -> PyErr {
         _ => (libc::EIO, "internal error".into()),
     };
     let py_err = ZMQError::new_err(msg);
-    Python::with_gil(|py| {
-        let inst = py_err.value_bound(py);
+    Python::attach(|py| {
+        let inst = py_err.value(py);
         let _ = inst.setattr("errno", errno);
     });
     py_err
@@ -45,8 +45,8 @@ pub fn map_err(e: Error) -> PyErr {
 
 pub fn timeout_err() -> PyErr {
     let e = ZMQError::new_err("operation would block");
-    Python::with_gil(|py| {
-        let inst = e.value_bound(py);
+    Python::attach(|py| {
+        let inst = e.value(py);
         let _ = inst.setattr("errno", libc::EAGAIN);
     });
     e
@@ -54,15 +54,15 @@ pub fn timeout_err() -> PyErr {
 
 pub fn not_implemented(name: &str) -> PyErr {
     let e = ZMQError::new_err(format!("option {name} is not implemented in pyomq v0.1"));
-    Python::with_gil(|py| {
-        let inst = e.value_bound(py);
+    Python::attach(|py| {
+        let inst = e.value(py);
         let _ = inst.setattr("errno", libc::ENOSYS);
     });
     e
 }
 
 pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("ZMQBaseError", py.get_type_bound::<ZMQBaseError>())?;
-    m.add("ZMQError", py.get_type_bound::<ZMQError>())?;
+    m.add("ZMQBaseError", py.get_type::<ZMQBaseError>())?;
+    m.add("ZMQError", py.get_type::<ZMQError>())?;
     Ok(())
 }

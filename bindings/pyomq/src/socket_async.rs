@@ -20,7 +20,7 @@ use omq_proto::error::Error as PError;
 
 use crate::error::timeout_err;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyType};
+use pyo3::types::{PyBytes, PyDict, PyList, PyType};
 
 use crate::conversions;
 use crate::dispatch;
@@ -108,9 +108,9 @@ impl AsyncSocket {
     // ── Recv (try-poll + eventfd for async notification) ─────────────
 
     #[pyo3(name = "_try_recv")]
-    fn try_recv<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+    fn try_recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(head) = self.inner.pop_rxbuf_head() {
-            return Ok(PyBytes::new_bound(py, &head).into_any().unbind());
+            return Ok(PyBytes::new(py, &head).into_any());
         }
         self.inner.materialize()?;
         let mat_guard = self.inner.materialized.read().unwrap();
@@ -127,21 +127,19 @@ impl AsyncSocket {
             if !parts.is_empty() {
                 self.inner.store_rxbuf(parts);
             }
-            Ok(PyBytes::new_bound(py, &head).into_any().unbind())
+            Ok(PyBytes::new(py, &head).into_any())
         } else {
-            Ok(py.None())
+            Ok(py.None().bind(py).clone())
         }
     }
 
     #[pyo3(name = "_try_recv_multipart")]
-    fn try_recv_multipart<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+    fn try_recv_multipart<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
-            let parts: Vec<Bound<'_, PyBytes>> = leftover
-                .into_iter()
-                .map(|b| PyBytes::new_bound(py, &b))
-                .collect();
-            return Ok(PyList::new_bound(py, parts).into_any().unbind());
+            return Ok(
+                PyList::new(py, leftover.into_iter().map(|b| PyBytes::new(py, &b)))?.into_any(),
+            );
         }
         self.inner.materialize()?;
         let mat_guard = self.inner.materialized.read().unwrap();
@@ -149,9 +147,9 @@ impl AsyncSocket {
         let mut cons = mat.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
             mat.recv_space.notify_one();
-            Ok(conversions::parts_to_pylist(py, msg).into_any().unbind())
+            Ok(conversions::parts_to_pylist(py, msg)?.into_any())
         } else {
-            Ok(py.None())
+            Ok(py.None().bind(py).clone())
         }
     }
 
@@ -159,9 +157,13 @@ impl AsyncSocket {
     fn recv_fd(&self) -> PyResult<i32> {
         self.inner.materialize()?;
         let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+        let mat = mat_guard
+            .as_ref()
+            .ok_or_else(|| crate::error::map_err(PError::Closed))?;
         let recv_notify = mat.recv_notify.clone();
-        let owned_fd = recv_notify.dup_fd().map_err(|e| map_err(PError::Io(e)))?;
+        let owned_fd = recv_notify
+            .dup_fd()
+            .map_err(|e| crate::error::map_err(PError::Io(e)))?;
         recv_notify.park_begin();
         use std::os::fd::IntoRawFd;
         Ok(owned_fd.into_raw_fd())
@@ -171,9 +173,13 @@ impl AsyncSocket {
     fn send_fd(&self) -> PyResult<i32> {
         self.inner.materialize()?;
         let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+        let mat = mat_guard
+            .as_ref()
+            .ok_or_else(|| crate::error::map_err(PError::Closed))?;
         let send_notify = mat.send_notify.clone();
-        let owned_fd = send_notify.dup_fd().map_err(|e| map_err(PError::Io(e)))?;
+        let owned_fd = send_notify
+            .dup_fd()
+            .map_err(|e| crate::error::map_err(PError::Io(e)))?;
         send_notify.park_begin();
         use std::os::fd::IntoRawFd;
         Ok(owned_fd.into_raw_fd())
@@ -210,36 +216,41 @@ impl AsyncSocket {
     fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let sock = self.inner.ensure_socket()?;
         let ctx = self.inner.ctx.clone();
-        let statuses: Vec<omq_tokio::ConnectionStatus> = py.allow_threads(|| {
+        let statuses: Vec<omq_tokio::ConnectionStatus> = py.detach(|| {
             ctx.with_socket(&sock, |s| async move {
                 s.connections().await.unwrap_or_default()
             })
         });
-        let dicts: Vec<PyObject> = statuses
+        // Temporary allocation to be able to propagate errors
+        let temp = statuses
             .iter()
             .map(|cs| crate::socket::connection_status_to_dict(py, cs))
-            .collect::<PyResult<_>>()?;
-        Ok(PyList::new_bound(py, dicts))
+            .collect::<PyResult<Vec<Bound<'py, PyDict>>>>()?;
+        Ok(PyList::new(py, temp)?)
     }
 
-    fn connection_info<'py>(&self, py: Python<'py>, connection_id: u64) -> PyResult<PyObject> {
+    fn connection_info<'py>(
+        &self,
+        py: Python<'py>,
+        connection_id: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let sock = self.inner.ensure_socket()?;
         let ctx = self.inner.ctx.clone();
-        let status: Option<omq_tokio::ConnectionStatus> = py.allow_threads(|| {
+        let status: Option<omq_tokio::ConnectionStatus> = py.detach(|| {
             ctx.with_socket(&sock, move |s| async move {
                 s.connection_info(connection_id).await.ok().flatten()
             })
         });
         match status {
-            Some(cs) => crate::socket::connection_status_to_dict(py, &cs),
-            None => Ok(py.None()),
+            Some(cs) => crate::socket::connection_status_to_dict(py, &cs).map(|d| d.into_any()),
+            None => Ok(py.None().bind(py).clone()),
         }
     }
 
     fn monitor(&self, py: Python<'_>) -> PyResult<crate::socket::Monitor> {
         let sock = self.inner.ensure_socket()?;
         let ctx = self.inner.ctx.clone();
-        let stream = py.allow_threads(|| ctx.with_socket(&sock, |s| async move { s.monitor() }));
+        let stream = py.detach(|| ctx.with_socket(&sock, |s| async move { s.monitor() }));
         Ok(crate::socket::Monitor::from_stream(&self.inner.ctx, stream))
     }
 
@@ -272,7 +283,7 @@ impl AsyncSocket {
             return Ok(());
         };
         let ctx = self.inner.ctx.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump);
         });
         Ok(())
