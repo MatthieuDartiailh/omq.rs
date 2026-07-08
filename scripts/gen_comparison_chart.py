@@ -34,14 +34,14 @@ COLORS = {
 }
 
 LABELS = {
-    "libzmq": "libzmq v4.3.5",
-    "libzmq-mt": "libzmq v4.3.5 (4 IO threads)",
-    "omq-tokio": "omq-tokio (ST)",
-    "omq-tokio-mt": "omq-tokio (MT)",
-    "zmq.rs": "zmq.rs v0.6.0",
-    "rzmq": "rzmq v0.5.24 (MT)",
-    "rzmq-iouring": "rzmq v0.5.24 (io_uring, MT)",
-    "omq-libzmq": "omq-libzmq",
+    "libzmq": "libzmq v4.3.5 [1T]",
+    "libzmq-mt": "libzmq v4.3.5 (4T)",
+    "omq-tokio": "omq-tokio (1T)",
+    "omq-tokio-mt": "omq-tokio (4T)",
+    "zmq.rs": "zmq.rs v0.6.0 [6T]",
+    "rzmq": "rzmq v0.5.24 [6T]",
+    "rzmq-iouring": "rzmq v0.5.24 (io_uring) [6T]",
+    "omq-libzmq": "omq-libzmq [1T]",
 }
 
 
@@ -1043,7 +1043,8 @@ def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float
         L.append(
             f'  <text x="{mid_x}" y="{st_y}" text-anchor="middle"'
             f' fill="#9ca3af" font-size="9">'
-            f'ST = single-threaded   MT = multi-threaded</text>'
+            f'(nT) = user-chosen'
+            f'   [nT] = fixed by implementation</text>'
         )
         extra += 18
     return extra
@@ -1719,10 +1720,10 @@ def main():
 
     # ── Cross-impl charts ──────────────────────────────────────
     label_overrides = {
-        "omq-tokio": "omq-tokio (ST)",
-        "zmq.rs": "zmq.rs v0.6.0 (MT)",
-        "rzmq": "rzmq v0.5.24 (MT)",
-        "rzmq-iouring": "rzmq v0.5.24 (io_uring, MT)",
+        "omq-tokio": "omq-tokio (1T)",
+        "zmq.rs": "zmq.rs v0.6.0 [6T]",
+        "rzmq": "rzmq v0.5.24 [6T]",
+        "rzmq-iouring": "rzmq v0.5.24 (io_uring) [6T]",
     }
     label_for = {
         "tcp": "TCP loopback, 2-process",
