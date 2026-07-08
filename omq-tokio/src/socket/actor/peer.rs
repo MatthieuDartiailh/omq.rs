@@ -174,8 +174,8 @@ impl SocketDriver {
             return;
         }
 
-        // Per-connection driver inbox: bounded so a stuck TCP write
-        // back-pressures into the pump, not into the shared send queue.
+        // Per-connection driver inbox: bounded so control traffic cannot
+        // grow without limit behind a stuck TCP write.
         let inbox_cap = 64usize;
         let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
         let child_cancel = self.cancel.child_token();
@@ -259,7 +259,7 @@ impl SocketDriver {
             None => driver,
         };
         let pipe_cap = self.options.send_hwm.unwrap_or(1024).max(16) as usize;
-        let (send_pipe, send_pipe_rx) = blume::bounded(pipe_cap);
+        let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
         let driver = driver.with_send_pipe(send_pipe_rx);
 
         // Recv bypass: for socket types whose recv path is a plain fair-queue
@@ -305,7 +305,7 @@ impl SocketDriver {
                     cancel: child_cancel,
                     wire_slot: slot.clone(),
                     wire_slot_tx,
-                    send_pipe: Some(send_pipe),
+                    send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -370,7 +370,7 @@ impl SocketDriver {
     /// Inproc fast path: skip the ZMTP codec entirely. The peer's
     /// snapshot (socket type + identity) was exchanged during inproc
     /// connect, so we synthesise `HandshakeSucceeded` immediately and
-    /// run a tiny driver that pumps `Message`/`Command` through a
+    /// run a small peer task that forwards `Message`/`Command` through a
     /// pair of `mpsc` channels - no greeting, no frame headers, no
     /// state machine.
     fn spawn_inproc_peer(
@@ -402,6 +402,8 @@ impl SocketDriver {
         let inbox_cap = 64usize;
         let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
         let child_cancel = self.cancel.child_token();
+        let pipe_cap = self.options.send_hwm.unwrap_or(1024).max(16) as usize;
+        let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
 
         // Pre-build the synthesised PeerProperties from the
         // connect-time snapshot. The handshake-replay code in
@@ -443,7 +445,7 @@ impl SocketDriver {
                     cancel: child_cancel.clone(),
                     wire_slot: None,
                     wire_slot_tx: None,
-                    send_pipe: None,
+                    send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -480,6 +482,8 @@ impl SocketDriver {
                 recv_direct,
                 spsc,
                 recv_sink,
+                shared_rx: self.send_strategy.shared_rx(),
+                send_pipe_rx,
             },
         ));
         if let Some(peer) = self.peers.get_mut(&peer_id) {
@@ -718,6 +722,8 @@ struct InprocDriverCtx {
     recv_direct: Option<async_channel::Sender<omq_proto::message::Message>>,
     spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
     recv_sink: Option<crate::engine::RecvSink>,
+    shared_rx: Option<crate::routing::drop_queue::QueueReceiver>,
+    send_pipe_rx: crate::engine::SendPipeConsumer,
 }
 
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
@@ -742,7 +748,11 @@ async fn inproc_peer_driver(
         recv_direct,
         spsc,
         mut recv_sink,
+        shared_rx,
+        mut send_pipe_rx,
     } = ctx;
+    let mut shared_batch = Vec::with_capacity(crate::routing::SHARED_MAX_BATCH_MSGS);
+    let mut send_pipe_batch = Vec::with_capacity(crate::routing::SHARED_MAX_BATCH_MSGS);
 
     #[expect(clippy::items_after_statements)]
     async fn emit_event(
@@ -790,6 +800,64 @@ async fn inproc_peer_driver(
                         }
                     }
                     Some(DriverCommand::Close) | None => return,
+                },
+                msg = async {
+                    if let Some(ref rx) = shared_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    let Some(first) = msg else { return; };
+                    shared_batch.push(first);
+                    let batch_limit = shared_rx
+                        .as_ref()
+                        .map_or(
+                            crate::routing::SHARED_MAX_BATCH_MSGS,
+                            crate::routing::drop_queue::QueueReceiver::batch_limit,
+                        );
+                    let mut popped = 1usize;
+                    while popped < batch_limit {
+                        let Some(next) = shared_rx
+                            .as_ref()
+                            .and_then(crate::routing::drop_queue::QueueReceiver::try_pop)
+                        else {
+                            break;
+                        };
+                        shared_batch.push(next);
+                        popped += 1;
+                    }
+                    for msg in shared_batch.drain(..) {
+                        if out.send(InboundFrame::Message(msg)).await.is_err() {
+                            if let Some(ref rx) = shared_rx {
+                                rx.release_permits(popped);
+                            }
+                            return;
+                        }
+                    }
+                    if let Some(ref rx) = shared_rx {
+                        rx.release_permits(popped);
+                    }
+                },
+                () = send_pipe_rx.notified() => {
+                    let drained = send_pipe_rx.drain_into(
+                        &mut send_pipe_batch,
+                        crate::routing::SHARED_MAX_BATCH_MSGS,
+                    );
+                    if drained == 0 {
+                        if send_pipe_rx.is_disconnected() {
+                            return;
+                        }
+                        continue;
+                    }
+                    for msg in send_pipe_batch.drain(..) {
+                        if out.send(InboundFrame::Message(msg)).await.is_err() {
+                            return;
+                        }
+                    }
+                    if send_pipe_rx.is_disconnected() {
+                        return;
+                    }
                 },
                 frame = in_rx.recv() => match frame {
                     Some(InboundFrame::Message(m)) => {

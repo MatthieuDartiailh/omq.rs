@@ -21,7 +21,6 @@ pub(crate) mod fair_queue;
 pub(crate) mod fan_out;
 pub(crate) mod identity;
 pub(crate) mod peer_send;
-pub(crate) mod pump;
 pub(crate) mod round_robin;
 // subscription matcher lives in omq-proto now.
 pub(crate) use omq_proto::subscription;
@@ -137,7 +136,7 @@ impl SendStrategy {
     ) {
         match self {
             Self::None => {}
-            Self::RoundRobin(s) => s.connection_added(peer_id, handle, is_inproc),
+            Self::RoundRobin(s) => s.connection_added(peer_id, &handle, is_inproc),
             Self::Exclusive(s) => s.connection_added(peer_id, handle),
             Self::FanOut(s) => s.connection_added(peer_id, handle),
             Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity),
@@ -201,7 +200,7 @@ impl SendStrategy {
     /// Returns a clone of the round-robin shared receive queue, if this
     /// socket type uses round-robin send. `None` for fan-out, identity,
     /// and no-send strategies. The connection driver polls this directly
-    /// after handshake instead of going through a pump task.
+    /// after handshake for messages queued before any peer was available.
     pub(crate) fn shared_rx(&self) -> Option<drop_queue::QueueReceiver> {
         match self {
             Self::RoundRobin(s) => Some(s.shared_rx()),

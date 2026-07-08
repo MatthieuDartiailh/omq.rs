@@ -277,7 +277,7 @@ async fn wait_for_subscribes(mut monitor: omq_tokio::MonitorStream, peers: usize
             Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
             Ok(Ok(_)) => {}
             Ok(Err(e)) => panic!("monitor closed while waiting for subscribers: {e:?}"),
-            Err(_) => panic!("timed out waiting for {peers} subscribers"),
+            Err(e) => panic!("timed out waiting for {peers} subscribers: {e:?}"),
         }
     }
 }

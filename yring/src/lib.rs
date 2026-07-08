@@ -39,10 +39,8 @@ pub(crate) struct Ring<T> {
     /// Set by `Producer::drop`. Lets the consumer detect that no more
     /// data will ever arrive.
     pub(crate) producer_dropped: AtomicBool,
-    /// Set by `AsyncConsumer::drop`. Lets the producer detect that
-    /// the consumer is gone. Not used by the sync side (sync `Consumer`
-    /// has no analogous signal; the producer detects it via `is_full`).
-    #[cfg(feature = "async")]
+    /// Set by `Consumer::drop` / `AsyncConsumer::drop`. Lets the producer
+    /// detect that the consumer is gone.
     pub(crate) consumer_dropped: AtomicBool,
 }
 
@@ -69,7 +67,6 @@ impl<T> Ring<T> {
             head: Padded(AtomicUsize::new(0)),
             tail: Padded(AtomicUsize::new(0)),
             producer_dropped: AtomicBool::new(false),
-            #[cfg(feature = "async")]
             consumer_dropped: AtomicBool::new(false),
         }
     }
@@ -234,8 +231,7 @@ impl<T> Producer<T> {
 
 impl<T> Drop for Producer<T> {
     fn drop(&mut self) {
-        self.ring.tail.0.store(self.cursor, Ordering::Release);
-        self.ring.producer_dropped.store(true, Ordering::Release);
+        self.close();
     }
 }
 
@@ -333,6 +329,27 @@ impl<T> Producer<T> {
     pub fn is_empty(&self) -> bool {
         self.ring.producer_is_empty(self.cursor)
     }
+
+    /// The consumer half has been dropped or explicitly closed.
+    ///
+    /// `push` does not check this flag so the zero-atomic hot path stays
+    /// unchanged. Callers that need disconnect detection can check this
+    /// before retrying a full ring or before blocking for space.
+    #[inline]
+    pub fn is_consumer_dropped(&self) -> bool {
+        self.ring.consumer_dropped.load(Ordering::Acquire)
+    }
+
+    /// Mark the producer side closed after publishing pending writes.
+    ///
+    /// This is normally called by `Drop`. Calling it explicitly is useful
+    /// for wrappers that need to wake a consumer after marking the producer
+    /// as gone. After calling this, the producer should not be used again.
+    #[inline]
+    pub fn close(&mut self) {
+        self.flush();
+        self.ring.producer_dropped.store(true, Ordering::Release);
+    }
 }
 
 impl<T> Consumer<T> {
@@ -396,11 +413,22 @@ impl<T> Consumer<T> {
     pub fn len(&self) -> usize {
         self.ring.consumer_len(self.head)
     }
+
+    /// Mark the consumer side closed and release consumed slots.
+    ///
+    /// This is normally called by `Drop`. Calling it explicitly is useful
+    /// for wrappers that need to wake a producer after marking the consumer
+    /// as gone. After calling this, the consumer should not be used again.
+    #[inline]
+    pub fn close(&mut self) {
+        self.release();
+        self.ring.consumer_dropped.store(true, Ordering::Release);
+    }
 }
 
 impl<T> Drop for Consumer<T> {
     fn drop(&mut self) {
-        self.release();
+        self.close();
     }
 }
 
@@ -443,6 +471,22 @@ mod tests {
         let (mut p, mut c) = spsc::<u32>(4);
         p.push_and_flush(42).unwrap();
         assert_eq!(c.prefetch_and_pop(), Some(42));
+    }
+
+    #[test]
+    fn producer_observes_consumer_close() {
+        let (p, mut c) = spsc::<u32>(4);
+        assert!(!p.is_consumer_dropped());
+        c.close();
+        assert!(p.is_consumer_dropped());
+    }
+
+    #[test]
+    fn producer_observes_consumer_drop() {
+        let (p, c) = spsc::<u32>(4);
+        assert!(!p.is_consumer_dropped());
+        drop(c);
+        assert!(p.is_consumer_dropped());
     }
 
     #[test]

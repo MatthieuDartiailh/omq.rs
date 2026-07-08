@@ -1,7 +1,7 @@
 //! Shared wire-slot cache between the socket handle and actor.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwapOption;
 use omq_proto::error::Result;
@@ -16,16 +16,19 @@ use crate::routing::SendSubmitter;
 #[derive(Clone, Debug)]
 pub(crate) struct WireSlotCache {
     single: Arc<ArcSwapOption<PeerWireSlot>>,
+    single_available: Arc<AtomicBool>,
 }
 
 impl WireSlotCache {
     pub(crate) fn new() -> Self {
         Self {
             single: Arc::new(ArcSwapOption::empty()),
+            single_available: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(crate) fn clear_single(&self) {
+        self.single_available.store(false, Ordering::Release);
         self.single.store(None);
     }
 
@@ -44,10 +47,11 @@ impl WireSlotCache {
             && slot.handshake_done.load(Ordering::Acquire)
         {
             self.single.store(Some(slot.clone()));
+            self.single_available.store(true, Ordering::Release);
             return;
         }
 
-        self.single.store(None);
+        self.clear_single();
     }
 
     /// Synchronous single-peer wire encode fast path. Returns true if
@@ -61,10 +65,13 @@ impl WireSlotCache {
     }
 
     pub(crate) fn single_exists(&self) -> bool {
-        self.single.load().is_some()
+        self.single_available.load(Ordering::Acquire)
     }
 
     pub(crate) fn single_dead(&self) -> bool {
+        if !self.single_exists() {
+            return false;
+        }
         self.single
             .load()
             .as_ref()
@@ -112,6 +119,9 @@ impl WireSlotCache {
     }
 
     fn single_slot(&self) -> Option<Arc<PeerWireSlot>> {
+        if !self.single_exists() {
+            return None;
+        }
         self.single.load_full()
     }
 }

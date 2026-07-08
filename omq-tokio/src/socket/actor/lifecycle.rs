@@ -51,7 +51,15 @@ impl<'a> PeerLifecycle<'a> {
         if count == 1 && self.driver.peers.len() == 1 {
             let s = sole_spsc.unwrap();
             self.driver.spsc.send_ring.store(Some(s.clone()));
+            self.driver
+                .spsc
+                .send_ring_available
+                .store(true, Ordering::Release);
         } else {
+            self.driver
+                .spsc
+                .send_ring_available
+                .store(false, Ordering::Release);
             self.driver.spsc.send_ring.store(None);
         }
     }
@@ -123,6 +131,7 @@ impl<'a> PeerLifecycle<'a> {
             && let Some(ref removed_spsc) = peer.spsc
         {
             removed_spsc.recv_ready.store(false, Ordering::Release);
+            removed_spsc.space_notify.notify_waiters();
         }
     }
 

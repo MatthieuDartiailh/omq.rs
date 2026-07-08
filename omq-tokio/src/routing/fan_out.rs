@@ -300,12 +300,12 @@ impl Clone for Submitter {
 
 impl FanOutShards {
     fn spawn(options: &Options, mode: FanOutMode) -> Arc<Self> {
-        let pipe_cap = options.send_hwm.unwrap_or(1000).max(1) as usize;
+        let pipe_cap = options.send_hwm.unwrap_or(1000).max(16) as usize;
         let runtime_workers = tokio::runtime::Handle::current()
             .metrics()
             .num_workers()
             .max(1);
-        let lossy = !matches!(options.on_mute, OnMute::Block);
+        let lossy = fan_out_is_lossy(options);
         let worker_shards = Self::worker_shard_count(runtime_workers);
         let mut endpoints = Vec::with_capacity(worker_shards);
         for _ in 0..worker_shards {
@@ -348,7 +348,7 @@ impl FanOutShards {
     }
 
     fn worker_shard_count(runtime_workers: usize) -> usize {
-        runtime_workers.max(1).min(MAX_FAN_OUT_WORKER_SHARDS)
+        runtime_workers.clamp(1, MAX_FAN_OUT_WORKER_SHARDS)
     }
 
     fn max_shards(state: &FanOutShardState) -> usize {
@@ -553,7 +553,7 @@ impl FanOutShards {
 
     fn shutdown(&self) {
         let mut state = self.state.lock().expect("fanout shards poisoned");
-        for endpoint in state.endpoints.iter_mut() {
+        for endpoint in &mut state.endpoints {
             Self::push_control(endpoint, ShardCommand::Shutdown);
             endpoint.load = 0;
         }
@@ -570,6 +570,10 @@ impl FanOutShards {
             .iter()
             .all(|endpoint| endpoint.tx.is_empty())
     }
+}
+
+fn fan_out_is_lossy(options: &Options) -> bool {
+    options.conflate || !matches!(options.on_mute, OnMute::Block)
 }
 
 impl ShardWorker {
@@ -851,9 +855,8 @@ impl DeferredFanOutWorker {
         if target_count == 0 {
             return Ok(());
         }
-        let encoded = match self.encode_deferred_batch(&msg.msg, target_count).await {
-            Ok(encoded) => encoded,
-            Err(_) => return Ok(()),
+        let Ok(encoded) = self.encode_deferred_batch(&msg.msg, target_count).await else {
+            return Ok(());
         };
         if !msg.fallback_targets.is_empty() {
             let inner = self.inner.clone();
@@ -914,7 +917,11 @@ impl DeferredFanOutWorker {
             .await
             .map_err(|_| Error::Protocol("fan-out compression task panicked".into()))?;
         *encoder.lock().expect("fan_out_encoder poisoned") = Some(enc);
-        encode_transformed_for_fanout(&self.inner, transformed?, target_count)
+        Ok(encode_transformed_for_fanout(
+            &self.inner,
+            transformed?,
+            target_count,
+        ))
     }
 }
 
@@ -948,7 +955,7 @@ fn encode_transformed_for_fanout(
     inner: &Arc<Mutex<FanOutInner>>,
     mut transformed: omq_proto::proto::transform::TransformedOut,
     target_count: usize,
-) -> Result<EncodedFanOutBatch> {
+) -> EncodedFanOutBatch {
     let dict_msg = MessageEncoder::take_leading_dict_shipment(&mut transformed);
     let dict = dict_msg
         .as_ref()
@@ -961,10 +968,10 @@ fn encode_transformed_for_fanout(
     {
         g.fan_out_dict = Some(dict);
     }
-    Ok(EncodedFanOutBatch {
+    EncodedFanOutBatch {
         dict: g.fan_out_dict.clone(),
         payload,
-    })
+    }
 }
 
 fn try_push_encoded_fanout(slot: &PeerWireSlot, encoded: &EncodedFanOut) -> TryEncodeResult {
@@ -1120,7 +1127,11 @@ impl Submitter {
             })?;
             enc.encode(msg)?
         };
-        encode_transformed_for_fanout(&self.inner, transformed, target_count)
+        Ok(encode_transformed_for_fanout(
+            &self.inner,
+            transformed,
+            target_count,
+        ))
     }
 
     fn dispatch_to_targets(
@@ -1161,25 +1172,25 @@ impl Submitter {
         ))
     }
 
-    fn try_defer_to_shards(&self, msg: &Message, group: Option<String>) -> Result<DeferredEnqueue> {
+    fn try_defer_to_shards(&self, msg: &Message, group: Option<String>) -> DeferredEnqueue {
         let Some(deferred) = self.deferred.as_ref() else {
-            return Ok(DeferredEnqueue::Direct);
+            return DeferredEnqueue::Direct;
         };
         if !deferred.should_defer_fast(msg) {
-            return Ok(DeferredEnqueue::Direct);
+            return DeferredEnqueue::Direct;
         }
         match deferred.begin_enqueue(msg) {
-            DeferredEnqueue::Direct => return Ok(DeferredEnqueue::Direct),
-            DeferredEnqueue::Dropped => return Ok(DeferredEnqueue::Dropped),
+            DeferredEnqueue::Direct => return DeferredEnqueue::Direct,
+            DeferredEnqueue::Dropped => return DeferredEnqueue::Dropped,
             DeferredEnqueue::Enqueued => {}
         }
 
         let deferred_msg = self.collect_deferred_msg(msg, group);
         if deferred_msg.fallback_targets.is_empty() && deferred_msg.sharded_peer_ids.is_empty() {
             deferred.cancel_enqueue();
-            return Ok(DeferredEnqueue::Enqueued);
+            return DeferredEnqueue::Enqueued;
         }
-        Ok(deferred.finish_enqueue(deferred_msg))
+        deferred.finish_enqueue(deferred_msg)
     }
 
     fn dispatch_to_shards_and_fallback(
@@ -1189,7 +1200,7 @@ impl Submitter {
         group: Option<String>,
         mode: ShardDispatchMode,
     ) -> Result<DispatchOutcome> {
-        match self.try_defer_to_shards(msg, group.clone())? {
+        match self.try_defer_to_shards(msg, group.clone()) {
             DeferredEnqueue::Direct => {}
             DeferredEnqueue::Enqueued | DeferredEnqueue::Dropped => {
                 return Ok(DispatchOutcome::default());
@@ -1197,7 +1208,7 @@ impl Submitter {
         }
 
         let targets = self.collect_shard_targets(msg, group.as_deref());
-        self.dispatch_shard_targets(shards, msg, group, targets, mode)
+        self.dispatch_shard_targets(shards, msg, group, &targets, mode)
     }
 
     fn dispatch_shard_targets(
@@ -1205,7 +1216,7 @@ impl Submitter {
         shards: &FanOutShards,
         msg: &Message,
         group: Option<String>,
-        targets: ShardDispatchTargets,
+        targets: &ShardDispatchTargets,
         mode: ShardDispatchMode,
     ) -> Result<DispatchOutcome> {
         let mut outcome = DispatchOutcome::default();
@@ -1372,7 +1383,7 @@ impl Submitter {
         if let Some(ref shards) = self.shards
             && self.has_sharded_peers()
         {
-            match self.try_defer_to_shards(&forwarded, group.clone())? {
+            match self.try_defer_to_shards(&forwarded, group.clone()) {
                 DeferredEnqueue::Direct => {}
                 DeferredEnqueue::Enqueued | DeferredEnqueue::Dropped => return Ok(()),
             }
@@ -1384,7 +1395,7 @@ impl Submitter {
             } else {
                 ShardDispatchMode::Block
             };
-            let outcome = self.dispatch_shard_targets(shards, &forwarded, group, targets, mode)?;
+            let outcome = self.dispatch_shard_targets(shards, &forwarded, group, &targets, mode)?;
             if !self.lossy && outcome.is_full() {
                 send_to_targets_nodrop(&outcome.full_targets, forwarded.clone()).await?;
             }
@@ -1711,7 +1722,7 @@ impl FanOutSend {
                     shards,
                     inner: inner.clone(),
                     generation: generation.clone(),
-                    lossy: !matches!(options.on_mute, OnMute::Block),
+                    lossy: fan_out_is_lossy(options),
                 }
                 .run(rx),
             );
@@ -1723,7 +1734,7 @@ impl FanOutSend {
             generation,
             mode,
             xpub_nodrop: options.xpub_nodrop,
-            lossy: !matches!(options.on_mute, OnMute::Block),
+            lossy: fan_out_is_lossy(options),
             deferred,
         }
     }
@@ -1792,11 +1803,11 @@ impl FanOutSend {
                         );
                     })
                     .is_some();
-                if !added {
+                if added {
+                    Some(shard)
+                } else {
                     shards.remove_peer(shard, peer_id);
                     None
-                } else {
-                    Some(shard)
                 }
             } else {
                 Some(shard)

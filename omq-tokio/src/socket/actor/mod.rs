@@ -413,7 +413,7 @@ impl SocketDriver {
                 slot.mark_dead();
             }
             if let Some(ref pipe) = p.handle.send_pipe {
-                pipe.close();
+                let _ = pipe.lock().expect("send pipe poisoned").take();
             }
             p.handle.cancel.cancel();
         }

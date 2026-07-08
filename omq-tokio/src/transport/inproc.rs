@@ -40,6 +40,8 @@ pub struct InprocSpsc {
     /// Receiver's max message size. The send fast path checks this
     /// before pushing (the driver checks separately). `None` = no limit.
     pub max_message_size: Option<usize>,
+    /// Wakes async senders waiting for the receiver to drain this ring.
+    pub space_notify: Arc<tokio::sync::Notify>,
 }
 
 fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
@@ -241,6 +243,7 @@ impl InprocListener {
                 recv_notify: notify,
                 recv_ready: std::sync::atomic::AtomicBool::new(false),
                 max_message_size: mms,
+                space_notify: Arc::new(tokio::sync::Notify::new()),
             }))
         } else {
             None

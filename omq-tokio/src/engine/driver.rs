@@ -18,6 +18,7 @@ use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut
 use omq_proto::proto::{Command, Connection, Event};
 
 use super::compression_pool::CompressionPool;
+use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
 use super::wire_slot::{PeerWireSlot, WireSlotItem};
 use crate::routing::drop_queue::QueueReceiver;
 use omq_proto::encoded_queue::EncodedQueue;
@@ -302,7 +303,7 @@ pub struct DriverHandle {
     pub cancel: CancellationToken,
     pub(crate) wire_slot: Option<Arc<PeerWireSlot>>,
     pub(crate) wire_slot_tx: Option<WireSlotProducerHandle>,
-    pub(crate) send_pipe: Option<blume::Sender<Message>>,
+    pub(crate) send_pipe: Option<SendPipeProducerHandle>,
 }
 
 /// What a [`ConnectionDriver`] writes to its shared peer-event
@@ -357,7 +358,7 @@ where
     /// wire. Replaces the `DirectIo` pattern where the handle locked the
     /// writer directly.
     wire_slot: Option<Arc<PeerWireSlot>>,
-    send_pipe_rx: Option<blume::Receiver<Message>>,
+    send_pipe_rx: Option<SendPipeConsumer>,
     arena_threshold: usize,
 }
 
@@ -478,7 +479,7 @@ where
     /// Install a per-peer send pipe. The public socket handle pushes raw
     /// messages into the sender; this driver drains and encodes locally.
     #[must_use]
-    pub(crate) fn with_send_pipe(mut self, rx: blume::Receiver<Message>) -> Self {
+    pub(crate) fn with_send_pipe(mut self, rx: SendPipeConsumer) -> Self {
         self.send_pipe_rx = Some(rx);
         self
     }
@@ -771,12 +772,19 @@ where
 
                 // Per-peer send pipe: active round-robin pushes raw
                 // messages to this driver, which encodes and writes locally.
-                n = async {
-                    send_pipe_rx.as_mut().unwrap().recv_batch_mut(&mut pipe_batch).await
+                () = async {
+                    send_pipe_rx.as_ref().unwrap().notified().await;
                 }, if send_pipe_rx.is_some() && codec.is_ready() => {
-                    if n.is_err() {
-                        drain_writes(&mut writer, &mut codec).await.ok();
-                        return Ok(());
+                    let drained = send_pipe_rx
+                        .as_mut()
+                        .unwrap()
+                        .drain_into(&mut pipe_batch, SHARED_MAX_BATCH_MSGS);
+                    if drained == 0 {
+                        if send_pipe_rx.as_ref().unwrap().is_disconnected() {
+                            drain_writes(&mut writer, &mut codec).await.ok();
+                            return Ok(());
+                        }
+                        continue;
                     }
                     drain_send_pipe_batch(
                         &mut pipe_batch,
@@ -785,6 +793,10 @@ where
                         offload_threshold, &mut offload_pipeline,
                         &mut drain_buf, &mut writer,
                     ).await?;
+                    if send_pipe_rx.as_ref().unwrap().is_disconnected() {
+                        drain_writes(&mut writer, &mut codec).await.ok();
+                        return Ok(());
+                    }
                 },
 
                 // Heartbeat tick: enabled only post-handshake when

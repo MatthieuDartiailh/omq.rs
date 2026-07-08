@@ -17,7 +17,7 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
-use super::recv::{SpscAwareRecv, SpscHandles};
+use super::recv::{SpscAwareRecv, SpscHandles, SpscPush};
 use super::wire_slot_cache::WireSlotCache;
 use crate::routing::{SendStrategy, SendSubmitter};
 
@@ -257,9 +257,8 @@ impl Socket {
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                let msg = match self.try_push_spsc(msg) {
-                    Ok(()) => return Ok(()),
-                    Err(msg) => msg,
+                let Some(msg) = self.send_spsc_or_return(msg).await? else {
+                    return Ok(());
                 };
                 if !self.is_fan_out_send() && self.try_send_wire(&msg) {
                     return Ok(());
@@ -589,6 +588,37 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
 }
 
 impl Socket {
+    async fn send_spsc_or_return(&self, mut msg: Message) -> Result<Option<Message>> {
+        loop {
+            match self.inner.recv_rx.try_push_spsc_or_full(msg) {
+                SpscPush::Sent => return Ok(None),
+                SpscPush::Unavailable(returned) => return Ok(Some(returned)),
+                SpscPush::Full {
+                    msg: returned,
+                    space,
+                } => {
+                    msg = returned;
+                    let notified = space.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    match self.inner.recv_rx.try_push_spsc_or_full(msg) {
+                        SpscPush::Sent => return Ok(None),
+                        SpscPush::Unavailable(returned) => return Ok(Some(returned)),
+                        SpscPush::Full { msg: returned, .. } => {
+                            tokio::select! {
+                                biased;
+                                () = notified => {
+                                    msg = returned;
+                                }
+                                () = tokio::task::yield_now() => return Ok(Some(returned)),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// SPSC send fast path: push directly into the peer's yring.
     /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
     /// unavailable or the ring is full.
