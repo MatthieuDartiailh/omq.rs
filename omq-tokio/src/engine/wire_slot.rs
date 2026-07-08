@@ -18,7 +18,7 @@ use omq_proto::direct_encode::{
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::message::Message;
 
-pub(crate) const WIRE_SLOT_CAP_DEFAULT: usize = 2 * 1024 * 1024;
+pub(crate) const WIRE_SLOT_CAP_DEFAULT: usize = 512 * 1024;
 #[cfg(test)]
 pub(crate) const WIRE_SLOT_MSG_CAP_DEFAULT: usize = 1000;
 pub(crate) const WIRE_SLOT_INLINE_CAP: usize = 72;

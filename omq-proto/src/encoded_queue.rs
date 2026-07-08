@@ -5,7 +5,7 @@ use bytes::{Bytes, BytesMut};
 use crate::message::Message;
 use crate::proto::frame;
 
-pub const ARENA_THRESHOLD: usize = 96 * 1024;
+pub const ARENA_THRESHOLD: usize = 8 * 1024;
 
 /// An entry in the encoded output sequence: either a range within the
 /// arena buffer or an external zero-copy `Bytes` (large payload).
@@ -27,6 +27,13 @@ pub struct EncodedQueue {
     /// `arena[arena_mark..]` has been accounted for in `total_bytes`
     /// but not yet pushed as an `Entry::Arena`.
     arena_mark: u32,
+    /// High-water mark of arena capacity. After `split().freeze()`, the
+    /// arena loses its allocation (frozen `Bytes` holds the Arc). On the
+    /// next encode, `BytesMut::reserve` allocates fresh. Without this
+    /// hint it starts small and cascades (256K→512K→1M→2M), copying all
+    /// existing data at each step. Pre-reserving to the peak eliminates
+    /// the cascade: one allocation at full size, zero data copies.
+    arena_peak_cap: usize,
 }
 
 impl std::fmt::Debug for EncodedQueue {
@@ -44,12 +51,14 @@ impl EncodedQueue {
     }
 
     pub fn with_arena_threshold(arena_threshold: usize) -> Self {
+        let cap = 256 * 1024;
         Self {
             entries: VecDeque::with_capacity(32),
             total_bytes: 0,
-            arena: BytesMut::with_capacity(256 * 1024),
+            arena: BytesMut::with_capacity(cap),
             arena_threshold,
             arena_mark: 0,
+            arena_peak_cap: cap,
         }
     }
 
@@ -60,6 +69,7 @@ impl EncodedQueue {
             arena: BytesMut::new(),
             arena_threshold: ARENA_THRESHOLD,
             arena_mark: 0,
+            arena_peak_cap: 0,
         }
     }
 
@@ -225,7 +235,15 @@ impl EncodedQueue {
         let frozen = if self.arena.is_empty() {
             None
         } else {
-            Some(self.arena.split().freeze())
+            let cap = self.arena.capacity();
+            if cap > self.arena_peak_cap {
+                self.arena_peak_cap = cap;
+            }
+            let frozen = self.arena.split().freeze();
+            if self.arena.capacity() < self.arena_peak_cap {
+                self.arena.reserve(self.arena_peak_cap);
+            }
+            Some(frozen)
         };
 
         let take = max_chunks.min(self.entries.len());
