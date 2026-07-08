@@ -43,8 +43,8 @@ LABELS = {
     "omq-tokio": "omq-tokio (ST)",
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0 (MT)",
-    "rzmq": "rzmq v0.5.22 (MT)",
-    "rzmq-iouring": "rzmq v0.5.22 (io_uring, MT)",
+    "rzmq": "rzmq v0.5.24 (MT)",
+    "rzmq-iouring": "rzmq v0.5.24 (io_uring, MT)",
 }
 
 MAIN_IMPLS = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt",

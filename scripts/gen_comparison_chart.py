@@ -39,8 +39,8 @@ LABELS = {
     "omq-tokio": "omq-tokio (ST)",
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0",
-    "rzmq": "rzmq v0.5.22 (MT)",
-    "rzmq-iouring": "rzmq v0.5.22 (io_uring, MT)",
+    "rzmq": "rzmq v0.5.24 (MT)",
+    "rzmq-iouring": "rzmq v0.5.24 (io_uring, MT)",
     "omq-libzmq": "omq-libzmq",
 }
 
@@ -1564,7 +1564,12 @@ def load_fanio_data(transport: str, impls: list[str], peers: int,
                 r.get("peer_min", 0),
                 r.get("peer_max", 0),
             )
-            cpu_time = r.get("cpu_time", 0)
+            if kind == "fan_out":
+                # Fan-out CPU is producer-side only. Older rows stored
+                # producer+puller CPU in cpu_time, so ignore them here.
+                cpu_time = r.get("push_cpu_time", 0)
+            else:
+                cpu_time = r.get("cpu_time", 0)
             elapsed = r.get("elapsed", 0)
             if elapsed > 0 and cpu_time > 0:
                 tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
@@ -1716,8 +1721,8 @@ def main():
     label_overrides = {
         "omq-tokio": "omq-tokio (ST)",
         "zmq.rs": "zmq.rs v0.6.0 (MT)",
-        "rzmq": "rzmq v0.5.22 (MT)",
-        "rzmq-iouring": "rzmq v0.5.22 (io_uring, MT)",
+        "rzmq": "rzmq v0.5.24 (MT)",
+        "rzmq-iouring": "rzmq v0.5.24 (io_uring, MT)",
     }
     label_for = {
         "tcp": "TCP loopback, 2-process",

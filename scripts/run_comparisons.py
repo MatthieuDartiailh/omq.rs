@@ -126,6 +126,7 @@ DEFAULT_DURATION = float(os.environ.get("OMQ_BENCH_DURATION", "3.0"))
 QUICK_DURATION = 1.5
 DEFAULT_ROUNDS = int(os.environ.get("OMQ_BENCH_ROUNDS", "3"))
 QUICK_ROUNDS = 1
+PEER_WARMUP_SECS = 0.5
 LATENCY_ITERATIONS = 5_000
 LATENCY_WARMUP = 500
 LATENCY_TIMEOUT = 15
@@ -635,7 +636,8 @@ def _run_fanout_once(
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
     issues: list = []
-    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
+    start_at = time.time() + 2.0
+    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{start_at:.6f}"}
     if push_subcmd == "push-fanout":
         if impl == "omq-tokio-mt":
             cell_env["OMQ_BENCH_PULL_CURRENT_THREAD"] = "1"
@@ -666,6 +668,8 @@ def _run_fanout_once(
             pulls.append(spawn_process(binary, "pull", connect_addr,
                                        str(size), str(duration), env=cell_env))
         time.sleep(0.05)
+        time.sleep(max(0.0, start_at + PEER_WARMUP_SECS - time.time()))
+        push_cpu_before = read_proc_cpu(push.pid)
         # A starved puller (e.g. rzmq's load-balancer skipping one of N peers)
         # blocks in recv() past its own deadline and never prints. Keep the
         # timeout tight so a dead round is cheap: best-of-N only needs one
@@ -678,7 +682,7 @@ def _run_fanout_once(
                 _hard_kill(p)
                 out = ""
             outputs.append(out)
-        push_cpu = read_proc_cpu(push.pid)
+        push_cpu = max(0.0, read_proc_cpu(push.pid) - push_cpu_before)
     finally:
         _hard_kill(push)
         for p in pulls:
@@ -726,12 +730,12 @@ def _run_fanout_once(
     }
     push_ok = _note(issues, push_cpu > 0, impl, "fan_out", transport, size, peers,
                           "push CPU (/proc)")
-    pull_ok = _note(issues, n_with_cpu == len(parsed), impl, "fan_out", transport,
-                          size, peers,
-                          f"CPU from {len(parsed) - n_with_cpu} of "
-                          f"{len(parsed)} pullers (peer stdout)")
-    if push_ok and pull_ok:
-        result["cpu_time"] = push_cpu + pull_cpu
+    if push_ok:
+        # Fan-out CPU is producer-side cost. Pullers are measurement sinks.
+        result["cpu_time"] = push_cpu
+        result["push_cpu_time"] = push_cpu
+    if n_with_cpu == len(parsed):
+        result["pull_cpu_time"] = pull_cpu
     result["_issues"] = issues
     return result
 
@@ -1320,6 +1324,12 @@ def run_benchmarks(
                                 row["elapsed"] = round(result["elapsed"], 6)
                             if "cpu_time" in result:
                                 row["cpu_time"] = round(result["cpu_time"], 6)
+                            if "push_cpu_time" in result:
+                                row["push_cpu_time"] = round(
+                                    result["push_cpu_time"], 6)
+                            if "pull_cpu_time" in result:
+                                row["pull_cpu_time"] = round(
+                                    result["pull_cpu_time"], 6)
                             if "peer_min" in result:
                                 row["peer_min"] = round(result["peer_min"], 1)
                                 row["peer_max"] = round(result["peer_max"], 1)
