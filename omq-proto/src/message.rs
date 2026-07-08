@@ -283,10 +283,11 @@ impl Frame {
 }
 
 /// Maximum bytes stored inline in a `Message` (no heap, no refcount).
-/// 55 is the largest value that keeps `Message` at 64 bytes (one cache line).
-pub const MAX_INLINE_MESSAGE: usize = 55;
+/// 71 is the largest value that keeps `Message` at 80 bytes.
+pub const MAX_INLINE_MESSAGE: usize = 71;
 
-const _: () = assert!(std::mem::size_of::<Message>() == 64);
+const _: () = assert!(MAX_INLINE_MESSAGE >= 64);
+const _: () = assert!(std::mem::size_of::<Message>() == 80);
 
 pub(crate) enum MessageInner {
     Empty,
@@ -323,7 +324,7 @@ impl Message {
     }
 
     /// Create a single-part message from a byte slice. Avoids heap
-    /// allocation for payloads up to 55 bytes.
+    /// allocation for payloads up to [`MAX_INLINE_MESSAGE`] bytes.
     #[inline]
     pub fn from_slice(data: &[u8]) -> Self {
         if data.len() <= MAX_INLINE_MESSAGE {
