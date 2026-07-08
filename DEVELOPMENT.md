@@ -7,6 +7,14 @@ cargo build --workspace
 cargo clippy --workspace --all-targets
 ```
 
+Release, soak, and benchmark builds use the local CPU:
+
+```toml
+# .cargo/config.toml
+[build]
+rustflags = ["-C", "target-cpu=native"]
+```
+
 Lints: `missing_debug_implementations` = **deny**,
 `unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
 
@@ -144,7 +152,17 @@ python3 scripts/gen_comparison_chart.py
 ```
 
 Omit `--impl` to rebench all implementations when external baselines
-are stale.
+are stale. Full refresh after omq/rzmq changes:
+
+```sh
+test -f .chart_hw
+python3 scripts/run_comparisons.py --transport tcp --transport ipc --transport inproc \
+  --fanout --fanin --pubsub-peers 1,8,32
+python3 scripts/gen_comparison_chart.py
+```
+
+Stop if `run_comparisons.py` prints any warning or timeout. Fix the
+bench peer or script first, then rerun before charting.
 
 ### Mechanism Chart
 
@@ -160,10 +178,18 @@ python3 scripts/bench_pubsub_lz4.py --chart
 python3 scripts/gen_pubsub_lz4_chart.py
 ```
 
+### Compression Chart
+
+```sh
+python3 scripts/bench_compression_tokio.py --chart
+python3 scripts/gen_compression_chart.py --backend tokio
+```
+
 ### pyomq Bindings Charts
 
 ```sh
 cd bindings/pyomq
+export OMQ_HW_EXTRAS="performance governor, turbo off"
 maturin develop --release
 python scripts/update_perf.py --impl pyomq
 python scripts/update_perf.py --chart-only

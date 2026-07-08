@@ -208,7 +208,7 @@ async fn async_main(args: Vec<String>) {
 async fn run_pub(ep: Endpoint, size: usize, peers: usize) {
     let pub_ = Socket::new(
         SocketType::Pub,
-        bench_options(size).on_mute(omq_tokio::OnMute::Block),
+        bench_options(size).on_mute(omq_tokio::OnMute::DropNewest),
     );
     let monitor = pub_.monitor();
     let bound = pub_.bind(ep).await.expect("pub bind");
@@ -268,6 +268,9 @@ async fn wait_for_handshakes(sock: &Socket, mut monitor: omq_tokio::MonitorStrea
 }
 
 async fn wait_for_subscribes(mut monitor: omq_tokio::MonitorStream, peers: usize) {
+    // TODO: Bench readiness should not depend only on monitor delivery. Use
+    // connection snapshots plus a data-plane subscription probe so monitor lag
+    // cannot invalidate a run.
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut subscribed = 0;
     while subscribed < peers {
@@ -365,7 +368,7 @@ async fn run_inproc_pubsub(name: String, size: usize, duration: Duration, peers:
     let ep = Endpoint::Inproc { name };
     let pub_ = Socket::new(
         SocketType::Pub,
-        bench_options(size).on_mute(omq_tokio::OnMute::Block),
+        bench_options(size).on_mute(omq_tokio::OnMute::DropNewest),
     );
     pub_.bind(ep.clone()).await.expect("pub bind");
 

@@ -97,8 +97,10 @@ convenience. Core guarantees:
   heartbeat will resolve a slow-consumer backpressure situation.
 - **Messages are atomic.** Delivered in full or not at all.
 - **HWM back-pressure, not errors.** When the outbound queue is
-  full, the socket either drops (PUB default) or blocks (PUSH
-  default, configurable via OnMute). It does not return an error.
+  full, fan-out sockets (`PUB`, `XPUB`, `RADIO`) drop on mute
+  unless `xpub_nodrop` is set. Round-robin/exclusive sockets
+  default to blocking, configurable via `OnMute`. It does not
+  return an error.
 - **No peer starvation.** A slow peer must never be permanently
   starved. Round-robin (PUSH) waits for a full peer's slot to
   drain rather than skipping it indefinitely. A slow peer must
@@ -139,8 +141,8 @@ Full detail in `doc/`:
 backends. Frame headers are always written into the arena. Small
 messages (<96 KiB `ARENA_THRESHOLD`) go contiguously into the arena
 (1 iovec per batch). Large payloads are tracked as external `Bytes`
-entries (zero-copy gather-write). `Message`/`Payload`: 64 B
-each (one cache line), inline variants (55 B / 62 B).
+entries (zero-copy gather-write). `Message`: 80 B, inline up to 71 B.
+`Payload`: 64 B, inline up to 62 B.
 
 **omq-tokio hot path.** `SocketDriver` actor owns peer table and
 type state. Send bypass: `Socket::send` skips actor for non-REQ/REP
@@ -152,9 +154,14 @@ slots without pump tasks. Recv bypass: `ConnectionDriver` pushes
 straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER go
 through actor for identity routing.
 
-**Inproc.** No ZMTP, no driver. Cross-thread SPSC via `yring`
-(lock-free ring buffer, 64 B `Message` by value). Same-thread via
-`blume` (batching MPSC, swap-drain consumer).
+**Inproc.** No ZMTP. Inproc and byte-stream round-robin peers both
+register `yring` send pipes. Byte-stream consumers drain in
+`ConnectionDriver`; inproc consumers drain in `inproc_peer_driver` and
+forward to the socket inbound queue. Same-thread delivery still uses
+`blume` where applicable. `DropQueue` is only the no-peer/pre-connect
+fallback; peer tasks drain it before newer pipe-fed sends.
+
+Local builds use `.cargo/config.toml` with `-C target-cpu=native`.
 
 ## Conventions
 

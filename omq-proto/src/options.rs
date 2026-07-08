@@ -67,6 +67,10 @@ pub struct Options {
     pub router_mandatory: bool,
 
     /// Behaviour when the socket's send HWM is reached.
+    ///
+    /// Fan-out sockets (`PUB`, `XPUB`, `RADIO`) are always lossy on mute:
+    /// this setting is ignored and they drop newest unless `xpub_nodrop`
+    /// is set.
     pub on_mute: OnMute,
 
     /// TCP keepalive policy. Applied to every accepted / dialed TCP
@@ -644,6 +648,9 @@ impl Default for ReconnectPolicy {
 #[non_exhaustive]
 pub enum OnMute {
     /// Block the sender until room is available.
+    ///
+    /// Ignored by fan-out sockets (`PUB`, `XPUB`, `RADIO`), which drop on
+    /// mute unless `xpub_nodrop` is set.
     #[default]
     Block,
     /// Drop the incoming message silently.

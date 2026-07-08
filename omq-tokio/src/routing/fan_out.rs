@@ -24,7 +24,7 @@ use omq_proto::fan_out_batch::{
     FanOutBatch, clear_fan_out_batch, encode_fan_out_message, finish_fan_out_batch,
 };
 use omq_proto::message::Message;
-use omq_proto::options::{OnMute, Options};
+use omq_proto::options::Options;
 use omq_proto::proto::transform::MessageEncoder;
 
 use super::peer_send::PeerSend;
@@ -49,6 +49,8 @@ const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
 const DIRECT_SHARD_PEER_CAP: usize = 4;
 const WORKER_SHARD_PEER_CAP: usize = 4;
 const MAX_FAN_OUT_WORKER_SHARDS: usize = 8;
+const SHARD_WORKER_MAX_DRAIN_MSGS: usize = 256;
+const SHARD_WORKER_MAX_DRAIN_BYTES: usize = 2 * 1024 * 1024;
 
 /// Yield every N peers to keep latency bounded. Scales down with peer
 /// count: fewer peers per yield when fan-out is wide (more total work).
@@ -70,20 +72,15 @@ enum CachedResult {
 #[derive(Debug, Default)]
 struct DispatchOutcome {
     full_targets: SmallVec<[PeerSend; 8]>,
-    shard_full: bool,
 }
 
 impl DispatchOutcome {
     fn is_full(&self) -> bool {
-        self.shard_full || !self.full_targets.is_empty()
+        !self.full_targets.is_empty()
     }
 
     fn push_full(&mut self, target: &PeerSend) {
         self.full_targets.push(target.clone());
-    }
-
-    fn mark_shard_full(&mut self) {
-        self.shard_full = true;
     }
 }
 
@@ -97,6 +94,17 @@ enum ShardCommand {
     Leave { peer_id: u64, group: Bytes },
     Dispatch(ShardDispatch),
     Shutdown,
+}
+
+impl ShardCommand {
+    fn work_bytes(&self) -> usize {
+        match self {
+            Self::Dispatch(dispatch) => dispatch.encoded.byte_len(),
+            Self::Subscribe { prefix, .. } | Self::Cancel { prefix, .. } => prefix.len(),
+            Self::Join { group, .. } | Self::Leave { group, .. } => group.len(),
+            Self::AddPeer(_) | Self::RemovePeer { .. } | Self::Shutdown => 0,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -119,6 +127,12 @@ struct ShardDispatch {
 struct EncodedFanOutBatch {
     dict: Option<EncodedFanOut>,
     payload: EncodedFanOut,
+}
+
+impl EncodedFanOutBatch {
+    fn byte_len(&self) -> usize {
+        self.dict.as_ref().map_or(0, EncodedFanOut::byte_len) + self.payload.byte_len()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +163,13 @@ impl EncodedFanOut {
         match self {
             Self::Inline { buf, len } => WireSlotItem::inline(&buf[..*len as usize]),
             Self::Shared(chunks) => WireSlotItem::shared(chunks.clone()),
+        }
+    }
+
+    fn byte_len(&self) -> usize {
+        match self {
+            Self::Inline { len, .. } => *len as usize,
+            Self::Shared(chunks) => chunks.iter().map(Bytes::len).sum(),
         }
     }
 }
@@ -211,13 +232,6 @@ struct ShardDispatchTargets {
     sharded_count: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ShardDispatchMode {
-    Lossy,
-    TryAll,
-    Block,
-}
-
 #[derive(Debug)]
 struct DeferredFanOut {
     tx: blume::Sender<DeferredFanOutMsg>,
@@ -255,7 +269,6 @@ struct DeferredFanOutWorker {
     shards: Arc<FanOutShards>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
-    lossy: bool,
 }
 
 #[derive(Debug)]
@@ -486,71 +499,6 @@ impl FanOutShards {
         }
     }
 
-    fn try_dispatch_all(&self, dispatch: &ShardDispatch) -> bool {
-        let mut state = self.state.lock().expect("fanout shards poisoned");
-        for endpoint in state
-            .endpoints
-            .iter_mut()
-            .filter(|endpoint| endpoint.load > 0)
-        {
-            if endpoint.tx.is_full() {
-                endpoint.tx.flush();
-                endpoint.notify.notify_one();
-                return false;
-            }
-        }
-
-        let mut touched = SmallVec::<[usize; 8]>::new();
-        for (idx, endpoint) in state.endpoints.iter_mut().enumerate() {
-            if endpoint.load == 0 {
-                continue;
-            }
-            if endpoint
-                .tx
-                .push(ShardCommand::Dispatch(dispatch.clone()))
-                .is_err()
-            {
-                endpoint.tx.flush();
-                endpoint.notify.notify_one();
-                return false;
-            }
-            touched.push(idx);
-        }
-        for idx in touched {
-            let endpoint = &mut state.endpoints[idx];
-            endpoint.tx.flush();
-            endpoint.notify.notify_one();
-        }
-        true
-    }
-
-    fn loaded_shards_have_space(&self) -> bool {
-        let mut state = self.state.lock().expect("fanout shards poisoned");
-        for endpoint in state
-            .endpoints
-            .iter_mut()
-            .filter(|endpoint| endpoint.load > 0)
-        {
-            if endpoint.tx.is_full() {
-                endpoint.tx.flush();
-                endpoint.notify.notify_one();
-                return false;
-            }
-        }
-        true
-    }
-
-    fn dispatch_blocking(&self, dispatch: &ShardDispatch) {
-        let mut state = self.state.lock().expect("fanout shards poisoned");
-        for endpoint in state
-            .endpoints
-            .iter_mut()
-            .filter(|endpoint| endpoint.load > 0)
-        {
-            Self::push_control(endpoint, ShardCommand::Dispatch(dispatch.clone()));
-        }
-    }
-
     fn shutdown(&self) {
         let mut state = self.state.lock().expect("fanout shards poisoned");
         for endpoint in &mut state.endpoints {
@@ -573,7 +521,9 @@ impl FanOutShards {
 }
 
 fn fan_out_is_lossy(options: &Options) -> bool {
-    options.conflate || !matches!(options.on_mute, OnMute::Block)
+    // TODO: Fan-out mute currently drops newest. Supporting DropOldest needs
+    // per-peer oldest eviction in PeerWireSlot or a fan-out-specific queue.
+    !options.xpub_nodrop
 }
 
 impl ShardWorker {
@@ -581,26 +531,35 @@ impl ShardWorker {
         loop {
             let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
             let mut shutdown = false;
+            let mut drained = false;
+            let mut drain_msgs = 0usize;
+            let mut drain_bytes = 0usize;
 
-            loop {
-                self.rx.prefetch();
-                let mut drained = false;
-                while let Some(cmd) = self.rx.pop() {
-                    drained = true;
-                    if self.handle_command(cmd, &mut touched).await {
-                        shutdown = true;
-                    }
+            self.rx.prefetch();
+            while let Some(cmd) = self.rx.pop() {
+                drained = true;
+                drain_msgs += 1;
+                drain_bytes = drain_bytes.saturating_add(cmd.work_bytes());
+                if self.handle_command(cmd, &mut touched).await {
+                    shutdown = true;
                 }
-                self.rx.release();
-                if !drained || shutdown {
+                if shutdown
+                    || drain_msgs >= SHARD_WORKER_MAX_DRAIN_MSGS
+                    || drain_bytes >= SHARD_WORKER_MAX_DRAIN_BYTES
+                {
                     break;
                 }
             }
+            self.rx.release();
 
             self.flush_touched(&mut touched);
             if shutdown {
                 self.peers.clear();
                 return;
+            }
+            if drained {
+                tokio::task::yield_now().await;
+                continue;
             }
             self.notify.notified().await;
         }
@@ -661,7 +620,9 @@ impl ShardWorker {
     async fn dispatch(&mut self, dispatch: &ShardDispatch, touched: &mut SmallVec<[u64; 32]>) {
         if let Some(peer_ids) = dispatch.peer_ids.as_ref() {
             for &peer_id in peer_ids.iter() {
-                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                if let Some(peer) = self.peers.get_mut(&peer_id)
+                    && peer.slot.fanout_active()
+                {
                     Self::push_dispatch_to_peer(self.lossy, peer_id, peer, dispatch, touched).await;
                 }
             }
@@ -670,7 +631,7 @@ impl ShardWorker {
 
         let mut peer_ids = SmallVec::<[u64; 32]>::new();
         for (&peer_id, peer) in &self.peers {
-            if shard_peer_matches(self.mode, peer, dispatch) {
+            if peer.slot.fanout_active() && shard_peer_matches(self.mode, peer, dispatch) {
                 peer_ids.push(peer_id);
             }
         }
@@ -719,7 +680,10 @@ impl ShardWorker {
                     return true;
                 }
                 TryEncodeResult::Dead => return false,
-                TryEncodeResult::Full | TryEncodeResult::Ineligible if lossy => return false,
+                TryEncodeResult::Full if lossy => {
+                    peer.slot.deactivate_fanout();
+                    return false;
+                }
                 TryEncodeResult::Full => {
                     peer.slot.flush_ring(&mut peer.producer);
                     let notified = peer.slot.space_available.notified();
@@ -729,6 +693,7 @@ impl ShardWorker {
                         () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
                     }
                 }
+                TryEncodeResult::Ineligible if lossy => return false,
                 TryEncodeResult::Ineligible => {
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
@@ -867,7 +832,7 @@ impl DeferredFanOutWorker {
                 &encoded,
                 &msg.fallback_targets,
                 &msg.msg,
-                self.lossy,
+                true,
                 &mut deactivate,
             );
         }
@@ -878,11 +843,7 @@ impl DeferredFanOutWorker {
                 group: msg.group,
                 peer_ids: Some(msg.sharded_peer_ids),
             };
-            if self.lossy {
-                self.shards.dispatch(&dispatch);
-            } else {
-                self.shards.dispatch_blocking(&dispatch);
-            }
+            self.shards.dispatch(&dispatch);
         }
         Ok(())
     }
@@ -1198,7 +1159,6 @@ impl Submitter {
         shards: &FanOutShards,
         msg: &Message,
         group: Option<String>,
-        mode: ShardDispatchMode,
     ) -> Result<DispatchOutcome> {
         match self.try_defer_to_shards(msg, group.clone()) {
             DeferredEnqueue::Direct => {}
@@ -1208,7 +1168,7 @@ impl Submitter {
         }
 
         let targets = self.collect_shard_targets(msg, group.as_deref());
-        self.dispatch_shard_targets(shards, msg, group, &targets, mode)
+        self.dispatch_shard_targets(shards, msg, group, &targets)
     }
 
     fn dispatch_shard_targets(
@@ -1217,18 +1177,10 @@ impl Submitter {
         msg: &Message,
         group: Option<String>,
         targets: &ShardDispatchTargets,
-        mode: ShardDispatchMode,
     ) -> Result<DispatchOutcome> {
         let mut outcome = DispatchOutcome::default();
         let target_count = targets.fallback_targets.len() + targets.sharded_count;
         if target_count == 0 {
-            return Ok(outcome);
-        }
-        if matches!(mode, ShardDispatchMode::TryAll)
-            && targets.sharded_count > 0
-            && !shards.loaded_shards_have_space()
-        {
-            outcome.mark_shard_full();
             return Ok(outcome);
         }
 
@@ -1245,17 +1197,11 @@ impl Submitter {
                     encoded,
                     &targets.fallback_targets,
                     msg,
-                    self.lossy && !self.xpub_nodrop,
+                    true,
                     &mut deactivate,
                 )
             } else {
-                dispatch_to_targets(
-                    &targets.fallback_targets,
-                    msg,
-                    None,
-                    self.lossy && !self.xpub_nodrop,
-                    &mut deactivate,
-                )?
+                dispatch_to_targets(&targets.fallback_targets, msg, None, true, &mut deactivate)?
             };
         }
 
@@ -1273,15 +1219,7 @@ impl Submitter {
             group,
             peer_ids: None,
         };
-        match mode {
-            ShardDispatchMode::Lossy => shards.dispatch(&dispatch),
-            ShardDispatchMode::TryAll => {
-                if !shards.try_dispatch_all(&dispatch) {
-                    outcome.mark_shard_full();
-                }
-            }
-            ShardDispatchMode::Block => shards.dispatch_blocking(&dispatch),
-        }
+        shards.dispatch(&dispatch);
         Ok(outcome)
     }
 
@@ -1296,17 +1234,8 @@ impl Submitter {
         if let Some(ref shards) = self.shards
             && self.has_sharded_peers()
         {
-            let mode = if self.lossy && !self.xpub_nodrop {
-                ShardDispatchMode::Lossy
-            } else {
-                ShardDispatchMode::TryAll
-            };
-            let outcome = self
-                .dispatch_to_shards_and_fallback(shards, &forwarded, group, mode)
+            self.dispatch_to_shards_and_fallback(shards, &forwarded, group)
                 .map_err(omq_proto::error::TrySendError::Error)?;
-            if outcome.is_full() && (!self.lossy || self.xpub_nodrop) {
-                return Err(omq_proto::error::TrySendError::Full(forwarded));
-            }
             return Ok(());
         }
 
@@ -1390,15 +1319,7 @@ impl Submitter {
 
             let targets = self.collect_shard_targets(&forwarded, group.as_deref());
             let target_count = targets.fallback_targets.len() + targets.sharded_count;
-            let mode = if self.lossy && !self.xpub_nodrop {
-                ShardDispatchMode::Lossy
-            } else {
-                ShardDispatchMode::Block
-            };
-            let outcome = self.dispatch_shard_targets(shards, &forwarded, group, &targets, mode)?;
-            if !self.lossy && outcome.is_full() {
-                send_to_targets_nodrop(&outcome.full_targets, forwarded.clone()).await?;
-            }
+            self.dispatch_shard_targets(shards, &forwarded, group, &targets)?;
             let interval = yield_interval(target_count);
             if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
                 tokio::task::yield_now().await;
@@ -1526,6 +1447,7 @@ impl Submitter {
             .peers
             .values()
             .filter(|p| p.shard.unwrap_or(0) == 0)
+            .filter(|p| p.fanout_active)
             .filter(|p| match (self.mode, group) {
                 (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
                 (FanOutMode::SubscriptionPrefix, _) => {
@@ -1554,6 +1476,7 @@ impl Submitter {
             .peers
             .values()
             .filter(|p| p.shard.unwrap_or(0) == 0)
+            .filter(|p| p.fanout_active)
             .filter(|p| fanout_peer_matches(self.mode, p, msg, group_ref))
             .map(|p| p.target.clone())
             .collect();
@@ -1561,6 +1484,7 @@ impl Submitter {
             .peers
             .iter()
             .filter(|(_, p)| p.shard.is_some_and(|shard| shard > 0))
+            .filter(|(_, p)| p.fanout_active)
             .filter(|(_, p)| fanout_peer_matches(self.mode, p, msg, group_ref))
             .map(|(&peer_id, _)| peer_id)
             .collect::<Vec<_>>()
@@ -1722,7 +1646,6 @@ impl FanOutSend {
                     shards,
                     inner: inner.clone(),
                     generation: generation.clone(),
-                    lossy: fan_out_is_lossy(options),
                 }
                 .run(rx),
             );

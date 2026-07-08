@@ -657,6 +657,10 @@ where
 
                 cmd = inbox.recv() => match cmd {
                     Some(DriverCommand::SendMessage(first)) => {
+                        // TODO: Give driver control commands an explicit
+                        // msg/byte/time budget. Current mixed inbox batches
+                        // data first, then handles controls found after the
+                        // batch.
                         let mut closing = false;
                         let mut deferred: SmallVec<[DriverCommand; 4]> =
                             SmallVec::new();

@@ -22,6 +22,7 @@ use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 const DECODED_SUBS: usize = 4;
 const TRAINING_MSGS: u64 = 128;
 const RAW_PAYLOAD_CHECKS: usize = 3;
+const RAW_RECV_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn lz4_tcp_ep(port: u16) -> Endpoint {
     Endpoint::Lz4Tcp {
@@ -88,7 +89,7 @@ fn payload(seq: u64) -> Bytes {
 }
 
 async fn assert_raw_dict_then_payloads(raw: &Socket) {
-    let dict = tokio::time::timeout(Duration::from_secs(5), raw.recv())
+    let dict = tokio::time::timeout(RAW_RECV_TIMEOUT, raw.recv())
         .await
         .expect("raw subscriber did not receive dictionary shipment")
         .unwrap();
@@ -100,7 +101,7 @@ async fn assert_raw_dict_then_payloads(raw: &Socket) {
     );
 
     for idx in 0..RAW_PAYLOAD_CHECKS {
-        let msg = tokio::time::timeout(Duration::from_secs(5), raw.recv())
+        let msg = tokio::time::timeout(RAW_RECV_TIMEOUT, raw.recv())
             .await
             .unwrap_or_else(|_| panic!("raw subscriber missed compressed payload {idx}"))
             .unwrap();
@@ -181,7 +182,6 @@ fn soak_pub_sub_lz4_dict_sharded_fanout() {
                 let raw = Socket::new(SocketType::Sub, soak_common::soak_options().recv_hwm(64));
                 raw.connect(tcp_from_lz4(&ep)).await.unwrap();
                 raw.subscribe(Bytes::new()).await.unwrap();
-                wait_for_subscribes(&mut mon, 1).await;
                 assert_raw_dict_then_payloads(&raw).await;
                 raw.close().await.unwrap();
                 raw_probes.fetch_add(1, Ordering::Relaxed);

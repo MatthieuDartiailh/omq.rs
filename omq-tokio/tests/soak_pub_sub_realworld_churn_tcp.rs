@@ -32,7 +32,7 @@ fn pub_options() -> Options {
     soak_common::soak_options()
         .send_hwm(65_536)
         .recv_hwm(65_536)
-        .on_mute(OnMute::Block)
+        .on_mute(OnMute::DropNewest)
 }
 
 fn sub_options() -> Options {

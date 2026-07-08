@@ -4,10 +4,26 @@ mod test_support;
 
 use std::time::Duration;
 
-use omq_tokio::{Endpoint, Message, OnMute, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, MonitorEvent, OnMute, Options, Socket, SocketType};
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
+}
+
+async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
+    let fut = async {
+        let mut count = 0;
+        while count < n {
+            match mon.recv().await {
+                Ok(MonitorEvent::SubscribeReceived { .. }) => count += 1,
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before subscriptions: {e:?}"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), fut)
+        .await
+        .expect("subscriptions did not propagate within 5s");
 }
 
 #[tokio::test]
@@ -361,50 +377,36 @@ async fn pub_sharded_fanout_subscription_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pub_sharded_fanout_blocking_hwm_delivers_all() {
+async fn pub_sharded_fanout_block_on_mute_does_not_block_slow_sub() {
     const SUBS: usize = 6;
-    const MSGS: u32 = 16;
+    const MSGS: u32 = 256;
 
     let pub_ = Socket::new(
         SocketType::Pub,
         Options::default().send_hwm(1).on_mute(OnMute::Block),
     );
     let port = test_support::bind_loopback(&pub_).await;
+    let mut mon = pub_.monitor();
 
-    let mut recv_tasks = Vec::with_capacity(SUBS);
-    for sub_idx in 0..SUBS {
+    let mut subs = Vec::with_capacity(SUBS);
+    for _ in 0..SUBS {
         let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(1));
         sub.subscribe(bytes::Bytes::new()).await.unwrap();
         sub.connect(test_support::tcp_loopback(port)).await.unwrap();
-        recv_tasks.push(tokio::spawn(async move {
-            for expected in 0..MSGS {
-                let msg = tokio::time::timeout(Duration::from_secs(5), sub.recv())
-                    .await
-                    .unwrap_or_else(|_| panic!("subscriber {sub_idx} timed out at {expected}"))
-                    .unwrap();
-                let body = msg.part_bytes(0).unwrap();
-                let got = u32::from_le_bytes(body[..4].try_into().unwrap());
-                assert_eq!(got, expected, "subscriber {sub_idx}");
-            }
-        }));
+        subs.push(sub);
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_subscribes(&mut mon, SUBS).await;
 
-    let sender = tokio::spawn({
-        let pub_ = pub_.clone();
-        async move {
-            for i in 0..MSGS {
-                pub_.send(Message::single(i.to_le_bytes().to_vec()))
-                    .await
-                    .unwrap();
-            }
+    let _keep_subs = subs;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for i in 0..MSGS {
+            pub_.send(Message::single(i.to_le_bytes().to_vec()))
+                .await
+                .unwrap();
         }
-    });
-
-    sender.await.unwrap();
-    for task in recv_tasks {
-        task.await.unwrap();
-    }
+    })
+    .await
+    .expect("PUB blocked even though PUB/XPUB mute policy is lossy");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
