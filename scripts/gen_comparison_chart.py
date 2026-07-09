@@ -34,7 +34,7 @@ COLORS = {
 }
 
 LABELS = {
-    "libzmq": "libzmq v4.3.5 [1T]",
+    "libzmq": "libzmq v4.3.5 (1T)",
     "libzmq-mt": "libzmq v4.3.5 (4T)",
     "omq-tokio": "omq-tokio (1T)",
     "omq-tokio-mt": "omq-tokio (4T)",
@@ -1007,7 +1007,7 @@ def _legend_extra(n_items: int, show_st_mt: bool = False) -> float:
     n_rows = 2 if n_items > 4 else 1
     extra = (n_rows - 1) * row_gap
     if show_st_mt:
-        extra += 18
+        extra += 31
     return extra
 
 
@@ -1026,10 +1026,13 @@ def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float
         rows = [legend_items]
 
     extra = 0
+    left_x = mid_x
     for row_idx, row in enumerate(rows):
         ry = leg_y + row_idx * row_gap
         total_w = len(row) * item_w
         start_x = mid_x - total_w / 2
+        if row_idx == 0:
+            left_x = start_x
         for i, (key, label) in enumerate(row):
             lx = start_x + i * item_w
             c = COLORS[key]
@@ -1047,11 +1050,16 @@ def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float
     if show_st_mt:
         st_y = leg_y + extra + 18
         L.append(
-            f'  <text x="{mid_x}" y="{st_y}" text-anchor="middle"'
+            f'  <text x="{left_x:.0f}" y="{st_y}"'
             f' fill="#9ca3af" font-size="9">'
-            f'(nT) = user-chosen   ·   [nT] = fixed by implementation</text>'
+            f'(nT) = configurable IO threads</text>'
         )
-        extra += 18
+        L.append(
+            f'  <text x="{left_x:.0f}" y="{st_y + 13}"'
+            f' fill="#9ca3af" font-size="9">'
+            f'[nT] = fixed IO threads</text>'
+        )
+        extra += 31
     return extra
 
 

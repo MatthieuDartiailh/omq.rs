@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 372" font-family="system-ui, -apple-system, sans-serif">
-  <rect width="850" height="372" fill="white"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 385" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="850" height="385" fill="white"/>
   <text x="425.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Linux VM on a 2018 Mac Mini, Intel Core i7-8700B @ 3.20GHz, 6 cores, performance governor, turbo off</text>
   <text x="425.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">REQ/REP latency: IPC, 2-process (p50 µs)</text>
   <line x1="90.0" y1="205.0" x2="760.0" y2="205.0" stroke="#e5e7eb" stroke-width="1"/>
@@ -98,7 +98,7 @@
   <text x="760.0" y="243.0" text-anchor="middle" fill="#374151" font-size="8.5">16 KiB</text>
   <line x1="45" y1="269" x2="59" y2="269" stroke="#eab308" stroke-width="2.5"/>
   <circle cx="52" cy="269" r="2.5" fill="#eab308"/>
-  <text x="65" y="273" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5 [1T]</text>
+  <text x="65" y="273" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5 (1T)</text>
   <line x1="235" y1="269" x2="249" y2="269" stroke="#a16207" stroke-width="2.5"/>
   <circle cx="242" cy="269" r="2.5" fill="#a16207"/>
   <text x="255" y="273" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5 (4T)</text>
@@ -117,10 +117,11 @@
   <line x1="520" y1="289" x2="534" y2="289" stroke="#15803d" stroke-width="2.5"/>
   <circle cx="527" cy="289" r="2.5" fill="#15803d"/>
   <text x="540" y="293" fill="#374151" font-size="11" font-weight="500">rzmq v0.5.24 (io_uring) [6T]</text>
-  <text x="425.0" y="307" text-anchor="middle" fill="#9ca3af" font-size="9">(nT) = user-chosen   ·   [nT] = fixed by implementation</text>
-  <line x1="265" y1="329" x2="279" y2="329" stroke="#6b7280" stroke-width="2.5"/>
-  <circle cx="272" cy="329" r="2" fill="#6b7280"/>
-  <text x="285" y="333" fill="#6b7280" font-size="10">p50 latency (left)</text>
-  <line x1="435" y1="329" x2="449" y2="329" stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>
-  <text x="455" y="333" fill="#6b7280" font-size="10">CPU % (right)</text>
+  <text x="45" y="307" fill="#9ca3af" font-size="9">(nT) = configurable IO threads</text>
+  <text x="45" y="320" fill="#9ca3af" font-size="9">[nT] = fixed IO threads</text>
+  <line x1="265" y1="342" x2="279" y2="342" stroke="#6b7280" stroke-width="2.5"/>
+  <circle cx="272" cy="342" r="2" fill="#6b7280"/>
+  <text x="285" y="346" fill="#6b7280" font-size="10">p50 latency (left)</text>
+  <line x1="435" y1="342" x2="449" y2="342" stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>
+  <text x="455" y="346" fill="#6b7280" font-size="10">CPU % (right)</text>
 </svg>
