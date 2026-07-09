@@ -59,6 +59,7 @@ pub(crate) struct SocketOverlay {
     pub req_correlate: bool,
     pub req_relaxed: bool,
     pub xpub_nodrop: bool,
+    pub reconnect_stop: i32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -153,6 +154,7 @@ impl SocketOverlay {
             recv_buffer_size: self.rcvbuf,
             mechanism,
             xpub_nodrop: self.xpub_nodrop,
+            reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
             ..Default::default()
         }
     }
@@ -641,6 +643,12 @@ pub extern "C" fn zmq_setsockopt(
             };
             lock_overlay!(sock_arc).xpub_nodrop = v != 0;
         }
+        ZMQ_RECONNECT_STOP => {
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).reconnect_stop = v;
+        }
         #[expect(clippy::match_same_arms)]
         ZMQ_AFFINITY
         | ZMQ_RATE
@@ -698,7 +706,6 @@ pub extern "C" fn zmq_setsockopt(
         | ZMQ_WSS_HOSTNAME
         | ZMQ_WSS_TRUST_SYSTEM
         | ZMQ_ONLY_FIRST_SUBSCRIBE
-        | ZMQ_RECONNECT_STOP
         | ZMQ_HELLO_MSG
         | ZMQ_DISCONNECT_MSG
         | ZMQ_PRIORITY
@@ -1061,6 +1068,7 @@ pub extern "C" fn zmq_getsockopt(
             optvallen,
             i32::from(lock_overlay!(sock_arc).xpub_nodrop),
         ),
+        ZMQ_RECONNECT_STOP => write_i32(optval, optvallen, lock_overlay!(sock_arc).reconnect_stop),
         ZMQ_IPV4ONLY => write_i32(optval, optvallen, i32::from(!lock_overlay!(sock_arc).ipv6)),
         ZMQ_MULTICAST_MAXTPDU => write_i32(optval, optvallen, 1500),
         ZMQ_USE_FD => write_i32(optval, optvallen, -1),
@@ -1095,7 +1103,6 @@ pub extern "C" fn zmq_getsockopt(
         | ZMQ_OUT_BATCH_SIZE
         | ZMQ_WSS_TRUST_SYSTEM
         | ZMQ_ONLY_FIRST_SUBSCRIBE
-        | ZMQ_RECONNECT_STOP
         | ZMQ_PRIORITY
         | ZMQ_BUSY_POLL
         | ZMQ_XSUB_VERBOSE_UNSUBSCRIBE

@@ -338,6 +338,7 @@ impl SocketDriver {
         let tx = self.internal_tx.clone();
         let child_cancel = cancel.clone();
         let policy = self.options.reconnect;
+        let stop_conn_refused = self.options.reconnect_stop_conn_refused;
         let dialer_ep = endpoint.clone();
         let monitor_ep = endpoint.clone();
         let tx_for_delay = tx.clone();
@@ -364,6 +365,7 @@ impl SocketDriver {
                     )
                 },
                 policy,
+                stop_conn_refused,
                 &child_cancel,
                 |delay, attempt| {
                     let ep = monitor_ep.clone();
@@ -389,7 +391,7 @@ impl SocketDriver {
                         })
                         .await;
                 }
-                Err(Canceled::Token | Canceled::PolicyDisabled) => {
+                Err(Canceled::Token | Canceled::PolicyDisabled | Canceled::StoppedConnRefused) => {
                     let _ = tx.send(InternalEvent::ConnectGaveUp).await;
                 }
             }
