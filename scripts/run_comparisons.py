@@ -3,7 +3,7 @@
 
 Runs PUSH/PULL throughput and REQ/REP latency benchmarks across
 implementations (omq-tokio, libzmq, zmq.rs, rzmq) and writes
-results to benchmarks/comparisons.jsonl.
+results to ~/.cache/omq/comparisons.jsonl.
 
 Usage:
   scripts/run_comparisons.py                        # all impls, tcp+inproc+ipc, latency on
@@ -114,8 +114,8 @@ def _cleanup_ipc_sockets():
             pass
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
-FULL_SIZES = [16, 64, 256, 1024, 4096, 16384]
-QUICK_SIZES = [32, 1024, 4096]
+COMPARISON_CHART_SIZES = [16, 64, 256, 1024, 4096, 16384]
+QUICK_SIZES = [64, 1024, 4096]
 
 # Physical sanity ceiling for a single TCP loopback stream (MB/s). Measured
 # loopback peaks around 6-7 GB/s here; anything above this for ONE peer is a
@@ -124,8 +124,9 @@ QUICK_SIZES = [32, 1024, 4096]
 SINGLE_STREAM_MBPS = 12000
 DEFAULT_DURATION = float(os.environ.get("OMQ_BENCH_DURATION", "3.0"))
 QUICK_DURATION = 1.5
-DEFAULT_ROUNDS = int(os.environ.get("OMQ_BENCH_ROUNDS", "3"))
+DEFAULT_ROUNDS = int(os.environ.get("OMQ_BENCH_ROUNDS", "2"))
 QUICK_ROUNDS = 1
+PEER_WARMUP_SECS = 0.5
 LATENCY_ITERATIONS = 5_000
 LATENCY_WARMUP = 500
 LATENCY_TIMEOUT = 15
@@ -363,7 +364,7 @@ def parse_throughput(output: str, size: int) -> dict | None:
         return None
     count = float(parts[0])
     elapsed = float(parts[1])
-    if elapsed <= 0:
+    if count <= 0 or elapsed <= 0:
         return None
     msgs_s = count / elapsed
     mbps = (count * size) / elapsed / 1e6
@@ -532,6 +533,8 @@ def _run_pubsub_once(
     else:
         addr = _fresh_addr(addr)
         cleanup_ipc_socket(addr)
+        if impl == "omq-tokio-mt":
+            cell_env["OMQ_BENCH_SUB_CURRENT_THREAD"] = "1"
         pub_args = [binary, "pub", addr, str(size)]
         if pub_needs_peers:
             pub_args.append(str(peers))
@@ -633,7 +636,8 @@ def _run_fanout_once(
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
     issues: list = []
-    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
+    start_at = time.time() + 2.0
+    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{start_at:.6f}"}
     if push_subcmd == "push-fanout":
         if impl == "omq-tokio-mt":
             cell_env["OMQ_BENCH_PULL_CURRENT_THREAD"] = "1"
@@ -664,6 +668,8 @@ def _run_fanout_once(
             pulls.append(spawn_process(binary, "pull", connect_addr,
                                        str(size), str(duration), env=cell_env))
         time.sleep(0.05)
+        time.sleep(max(0.0, start_at + PEER_WARMUP_SECS - time.time()))
+        push_cpu_before = read_proc_cpu(push.pid)
         # A starved puller (e.g. rzmq's load-balancer skipping one of N peers)
         # blocks in recv() past its own deadline and never prints. Keep the
         # timeout tight so a dead round is cheap: best-of-N only needs one
@@ -676,7 +682,7 @@ def _run_fanout_once(
                 _hard_kill(p)
                 out = ""
             outputs.append(out)
-        push_cpu = read_proc_cpu(push.pid)
+        push_cpu = max(0.0, read_proc_cpu(push.pid) - push_cpu_before)
     finally:
         _hard_kill(push)
         for p in pulls:
@@ -724,12 +730,12 @@ def _run_fanout_once(
     }
     push_ok = _note(issues, push_cpu > 0, impl, "fan_out", transport, size, peers,
                           "push CPU (/proc)")
-    pull_ok = _note(issues, n_with_cpu == len(parsed), impl, "fan_out", transport,
-                          size, peers,
-                          f"CPU from {len(parsed) - n_with_cpu} of "
-                          f"{len(parsed)} pullers (peer stdout)")
-    if push_ok and pull_ok:
-        result["cpu_time"] = push_cpu + pull_cpu
+    if push_ok:
+        # Fan-out CPU is producer-side cost. Pullers are measurement sinks.
+        result["cpu_time"] = push_cpu
+        result["push_cpu_time"] = push_cpu
+    if n_with_cpu == len(parsed):
+        result["pull_cpu_time"] = pull_cpu
     result["_issues"] = issues
     return result
 
@@ -968,6 +974,14 @@ IMPLS = {
         "inproc_pubsub_subcmd": "inproc-pubsub",
         "supports_pubsub": True,
     },
+    "libzmq-mt": {
+        "binary_from": "libzmq",
+        "prefix": "Z",
+        "class": "classic",
+        "transports": ["tcp", "ipc", "ws"],
+        "supports_pubsub": True,
+        "env": {"ZMQ_IO_THREADS": "4"},
+    },
     "zmq.rs": {
         "prefix": "q",
         "class": "classic",
@@ -1025,12 +1039,15 @@ def build_peers(impl_names: set[str], ws_needed: bool):
         if "omq-tokio-mt" in impl_names:
             binaries["omq-tokio-mt"] = tokio_bin
 
-    if "libzmq" in impl_names:
+    if impl_names & {"libzmq", "libzmq-mt"}:
         print("==> building libzmq bench_peer...", file=sys.stderr)
         src = ROOT / "scripts" / "libzmq_bench_peer.c"
         out = ROOT / "scripts" / "libzmq_bench_peer"
         gcc_build(src, out)
-        binaries["libzmq"] = str(out)
+        if "libzmq" in impl_names:
+            binaries["libzmq"] = str(out)
+        if "libzmq-mt" in impl_names:
+            binaries["libzmq-mt"] = str(out)
 
     if "zmq.rs" in impl_names:
         print("==> building zmq.rs bench_peer...", file=sys.stderr)
@@ -1307,6 +1324,12 @@ def run_benchmarks(
                                 row["elapsed"] = round(result["elapsed"], 6)
                             if "cpu_time" in result:
                                 row["cpu_time"] = round(result["cpu_time"], 6)
+                            if "push_cpu_time" in result:
+                                row["push_cpu_time"] = round(
+                                    result["push_cpu_time"], 6)
+                            if "pull_cpu_time" in result:
+                                row["pull_cpu_time"] = round(
+                                    result["pull_cpu_time"], 6)
                             if "peer_min" in result:
                                 row["peer_min"] = round(result["peer_min"], 1)
                                 row["peer_max"] = round(result["peer_max"], 1)
@@ -1404,8 +1427,12 @@ def main():
     )
     parser.add_argument(
         "--sizes", type=str, default=None,
-        help="comma-separated message sizes (overrides the default sweep), "
-             "e.g. --sizes 16,256,4096 for a coarse, fast sweep",
+        help="comma-separated message sizes; must be comparison chart sizes "
+             "unless --allow-non-chart-sizes is set",
+    )
+    parser.add_argument(
+        "--allow-non-chart-sizes", action="store_true",
+        help="allow --sizes values outside the comparison chart size set",
     )
     parser.add_argument(
         "--transport", action="append",
@@ -1479,9 +1506,16 @@ def main():
     args = parser.parse_args()
 
     transports = args.transport or ["tcp", "inproc", "ipc"]
-    sizes = QUICK_SIZES if args.quick_run else FULL_SIZES
+    sizes = QUICK_SIZES if args.quick_run else COMPARISON_CHART_SIZES
     if args.sizes:
         sizes = [int(x) for x in args.sizes.split(",")]
+        non_chart = sorted(set(sizes) - set(COMPARISON_CHART_SIZES))
+        if non_chart and not args.allow_non_chart_sizes:
+            parser.error(
+                "--sizes includes non-chart sizes "
+                f"{','.join(str(s) for s in non_chart)}; "
+                "pass --allow-non-chart-sizes for exploratory sweeps"
+            )
     if args.quick_run:
         duration = args.duration if args.duration is not None else QUICK_DURATION
         rounds = args.rounds if args.rounds is not None else QUICK_ROUNDS

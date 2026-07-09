@@ -67,6 +67,10 @@ pub struct Options {
     pub router_mandatory: bool,
 
     /// Behaviour when the socket's send HWM is reached.
+    ///
+    /// Fan-out sockets (`PUB`, `XPUB`, `RADIO`) are always lossy on mute:
+    /// this setting is ignored and they drop newest unless `xpub_nodrop`
+    /// is set.
     pub on_mute: OnMute,
 
     /// TCP keepalive policy. Applied to every accepted / dialed TCP
@@ -145,21 +149,21 @@ pub struct Options {
     /// larger messages produce per-frame iovecs referencing the original
     /// `Bytes` payload.
     ///
-    /// `None` uses the default (`ARENA_THRESHOLD`, 96 KiB). Raise this
+    /// `None` uses the default (`ARENA_THRESHOLD`, 8 KiB). Raise this
     /// when payloads are owned by an external runtime (e.g. Python
     /// refcounted objects) where the gather path's per-chunk refcount
     /// traffic is more expensive than a flat memcpy.
     pub arena_threshold: Option<usize>,
 
-    /// Maximum encoded bytes buffered in a per-peer wire slot before
+    /// Maximum encoded bytes buffered in a per-peer transmit slot before
     /// `try_encode` returns `Full` and the message falls back to the
     /// actor inbox. `None` uses the default (2 MiB). Larger values
     /// allow more batching at the cost of memory per peer.
-    pub wire_slot_cap: Option<usize>,
+    pub transmit_slot_cap: Option<usize>,
 
     /// `XPUB_NODROP`: when true, PUB/XPUB `try_send` returns `Full`
     /// instead of silently dropping the message when any subscriber's
-    /// wire slot is at capacity.
+    /// transmit slot is at capacity.
     pub xpub_nodrop: bool,
 
     /// TLS configuration for `wss://` endpoints. Ignored for non-WSS
@@ -211,7 +215,7 @@ impl Default for Options {
             compression_offload_threshold: Some(8192),
             large_message_threshold: Some(128 * 1024),
             arena_threshold: None,
-            wire_slot_cap: None,
+            transmit_slot_cap: None,
             xpub_nodrop: false,
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
@@ -408,19 +412,19 @@ impl Options {
         self
     }
 
-    /// Set the per-`EncodedQueue` arena threshold. Messages smaller than
+    /// Set the per-`FrameBuffer` arena threshold. Messages smaller than
     /// this are copied into a contiguous arena buffer; larger ones use
-    /// zero-copy gather-write. Default: 96 KiB.
+    /// zero-copy gather-write. Default: 8 KiB.
     #[must_use]
     pub fn arena_threshold(mut self, bytes: usize) -> Self {
         self.arena_threshold = Some(bytes);
         self
     }
 
-    /// Set the per-peer wire-slot capacity in bytes. Default: 2 MiB.
+    /// Set the per-peer transmit-slot capacity in bytes. Default: 2 MiB.
     #[must_use]
-    pub fn wire_slot_cap(mut self, bytes: usize) -> Self {
-        self.wire_slot_cap = Some(bytes);
+    pub fn transmit_slot_cap(mut self, bytes: usize) -> Self {
+        self.transmit_slot_cap = Some(bytes);
         self
     }
 
@@ -644,6 +648,9 @@ impl Default for ReconnectPolicy {
 #[non_exhaustive]
 pub enum OnMute {
     /// Block the sender until room is available.
+    ///
+    /// Ignored by fan-out sockets (`PUB`, `XPUB`, `RADIO`), which drop on
+    /// mute unless `xpub_nodrop` is set.
     #[default]
     Block,
     /// Drop the incoming message silently.

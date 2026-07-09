@@ -120,7 +120,8 @@ down and reconnects.
 |------|--------|--------|------|
 | HWM enforcement | msgs_written - peers_msgs_read >= hwm | Bounded channel capacity | **=** |
 | LWM re-activation at half | (hwm+1)/2 triggers activate_write | Channel internal (flume/async_channel) | **~** |
-| On HWM exceeded | Only blocks (EAGAIN to user) | Block / DropNewest / DropOldest | **=** superset |
+| Round-robin HWM exceeded | Blocks / EAGAIN to user | Block / DropNewest / DropOldest | **=** superset |
+| PUB/XPUB mute | Drop on HWM (`XPUB_NODROP` excepted) | Drop on HWM (`xpub_nodrop` excepted) | **=** |
 | Pipe termination FSM | 6-state machine with delimiter protocol | Channel close + CancellationToken | **~** simpler |
 | Multi-part rollback on pipe death | unwrite() loop, _dropping mode in lb | Whole messages are queued; no mid-message rollback | **N/A** |
 | Conflate mode | HWM=-1 (unlimited) | capacity=1, DropOldest | **=** equivalent semantics |
@@ -134,7 +135,7 @@ down and reconnects.
 |------|--------|--------|------|
 | LB round-robin (PUSH/DEALER) | Index-based, skip full pipes | Active per-peer pipes plus shared fallback | **~** |
 | FQ round-robin (PULL/ROUTER recv) | Index-based, assert on mid-msg pipe death | Per-peer drivers feed bounded recv queue | **~** |
-| PUB fan-out: slow sub blocks all | Unless ZMQ_XPUB_NODROP | Per-sub independent queues | **=** better |
+| PUB fan-out: slow sub blocks all | No; slow sub mutes and drops | Per-sub independent queues; slow sub drops | **=** |
 | PUB fan-out: ref counting | Manual rm_refs on failure | Bytes Arc clone | **=** equivalent |
 | ROUTER mandatory | EHOSTUNREACH | Error::Unroutable | **=** |
 | ROUTER handover | Reassign old conn integral ID | Always-on; evict old peer, `Disconnected(Handover)` | **=** better (no opt-in needed) |

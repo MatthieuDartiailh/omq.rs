@@ -1,87 +1,56 @@
 # Architecture
 
-A high-level tour of the codebase: which crate does what, how a message
-travels from `Socket::send` to the wire and back, and where protocol
-logic stops and runtime code starts.
-
-## Three-layer Split
+`omq.rs` is split into a sans-I/O protocol crate, an async backend, and
+compatibility layers. The protocol crate owns ZMTP correctness. The backend
+owns tasks, transports, queues, reconnect, and socket semantics.
 
 ```text
-+------------------------------------------------------------------+
-| user code                                                        |
-| depends on omq-tokio, omq-libzmq, or pyomq                       |
-+------------------------------------------------------------------+
-        | Socket::send / Socket::recv / connect / bind / monitor
+user API: omq-tokio, omq-libzmq, pyomq
+        |
         v
-+------------------------------------------------------------------+
-| omq-tokio runtime backend                                        |
-| SocketDriver actor, routing strategies, connection drivers        |
-| transports: TCP / IPC / inproc / UDP / WS / WSS                  |
-| monitor: lifecycle event Stream                                  |
-+------------------------------------------------------------------+
-        | Connection::handle_input(bytes)        (in)
-        | Connection::poll_event() -> Event      (out)
-        | Connection::send_message(msg)          (in)
-        | Connection::poll_transmit / advance    (out)
+omq-tokio backend: SocketDriver, ConnectionDriver, transports, routing
+        |
         v
-+------------------------------------------------------------------+
-| omq-proto sans-I/O ZMTP core                                     |
-| Connection, greeting, mechanisms, transforms, endpoints, messages |
-+------------------------------------------------------------------+
+omq-proto core: Connection, frames, mechanisms, messages, options
 ```
 
-`omq-proto` never touches a file descriptor. Bytes go in via
-`handle_input`, events come out via `poll_event`, outbound frames
-accumulate via `send_message`/`send_command` and are read via
-`poll_transmit`/`advance_transmit`. `omq-tokio` owns the I/O loop and
-calls those methods.
+## Crates
 
-The shape mirrors `rustls::ConnectionCommon` and `quinn-proto`: codec
-state is isolated from runtime code.
+`omq-proto` is pure protocol code. It has no file descriptors and no async
+runtime. `Connection::handle_input` consumes bytes, `poll_event` emits decoded
+events, `send_message` queues frames, and `poll_transmit` exposes wire bytes.
 
-## Two-queue Socket Model
+`omq-tokio` is the default runtime backend. It owns TCP, IPC, inproc, UDP,
+WS/WSS, reconnect supervisors, monitor events, socket actors, connection
+drivers, and hot-path send/recv shortcuts.
 
-Each socket has exactly two logical queues, regardless of how many peers
-are connected:
+`omq-libzmq` exposes a libzmq-compatible C ABI. `bindings/pyomq` exposes sync
+and asyncio Python APIs through PyO3. `yring` and `blume` provide hot-path
+queues used by inproc and routing.
+
+## Socket Model
+
+Every socket has one logical inbound queue and one logical outbound routing
+surface. Connected peers attach driver tasks to those surfaces.
 
 ```text
-                    Socket::recv
-                         ^
-                         |
-              +----------+-----------+
-              | socket-wide inbound  |
-              | queue / recv channel |
-              +----------------------+
-                  ^       ^       ^
-                  |       |       |
-        +---------+--+ +--+----+ +-+-----+
-        | driver A   | | drv B | | drv C |   per-connection tasks
-        +----+-------+ +-+-----+ +-+-----+
-             |           |         |
-             v           v         v
-            TCP / IPC / inproc / UDP / WS
-             ^           ^         ^
-             |           |         |
-        +----+-----------+---------+----+
-        | socket-wide outbound routing  |
-        | strategy, bounded by send_hwm |
-        +----------------+--------------+
-                         ^
-                         |
-                    Socket::send
+Socket::send -> SendSubmitter / SocketDriver -> per-peer send pipe
+per-peer driver -> recv_tx / SocketDriver -> Socket::recv
 ```
 
-Round-robin patterns (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`)
-use active per-peer pipes plus a shared fallback queue. Exclusive
-patterns (`PAIR`, `CHANNEL`) have at most one peer. Fan-out patterns
-(`PUB`, `XPUB`, `RADIO`) fan from one outbound message into matching
-per-peer targets. Identity-routed patterns (`ROUTER`, `REP`, `SERVER`,
-`PEER`) look up the destination identity and target that peer.
+`SocketDriver` owns state that must be serialized: peer table, bind/connect
+lifecycles, reconnect timers, monitor events, ROUTER identities, XPUB
+subscriptions, DISH groups, and REQ/REP type state. It is not on every hot
+message path.
 
-## Message And Payload Types
+Stateless sends bypass the actor through `SendSubmitter`. REQ/REP still check
+shared type state before submit. Plain recv paths bypass the actor when no
+identity, group, or subscription post-processing is needed.
 
-`Payload` and `Message` are custom enums tuned for the common decode
-path. Each is exactly 64 bytes:
+## Messages
+
+`Payload` and `Message` are small-value enums optimized for common single-part
+traffic.
 
 ```rust
 enum PayloadInner {
@@ -92,284 +61,101 @@ enum PayloadInner {
 
 enum MessageInner {
     Empty,
-    Inline { len: u8, data: [u8; 55] },
+    Inline { len: u8, data: [u8; 71] },
     Single(Payload),
     Multi(Vec<Payload>),
 }
 ```
 
-Inline variants cover payloads up to 62 bytes and single-frame messages
-up to 55 bytes with no heap allocation. Larger payloads are `Bytes`
-chunks. Layers prepend static prefixes by pushing extra chunks, not by
-copying the payload itself.
+`Payload` is 64 B and stores up to 62 B inline. `Message` is 80 B and stores up
+to 71 B inline, so 64 B user messages avoid heap allocation and refcount
+traffic. Larger single-part messages use `Bytes`; multipart messages use
+`Vec<Payload>`.
+
+## Encoding
+
+`FrameBuffer` is the outbound framing buffer: a 256 KiB arena plus an entry list.
+Frame headers always go into the arena. Small messages below `ARENA_THRESHOLD`
+encode header and payload contiguously into the arena. Large messages write
+the header into the arena and keep payload `Bytes` as external entries for
+gather write.
+
+`PeerTransmitSlot` wraps `FrameBuffer` in a short-held `std::sync::Mutex`, capped
+at 512 KiB (close to the kernel TCP send buffer). Socket handles encode into
+the slot. `ConnectionDriver` owns the writer and flushes from its `data_ready`
+select branch. Producer-to-consumer signaling uses `DataSignal`: an atomic
+flag plus `Notify` that coalesces wakes so only the `false`-to-`true`
+transition fires `notify_one`. The consumer clears the flag before draining,
+then calls `rearm_if_nonempty` to self-wake if data remains. For
+budget-interrupted drains, `reschedule` fires unconditionally.
+
+CURVE and BLAKE3ZMQ keep per-connection nonce state, so encrypted traffic uses
+per-connection ordered transforms. LZ4 fan-out may encode once at socket level
+when wire bytes are identical for all matched subscribers.
+
+## Routing
+
+Round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`) use per-peer
+`yring` send pipes for both byte-stream and inproc peers. The submitter scans
+active pipes from a moving cursor. If every active pipe is full, async send
+waits on a rotating peer and `try_send` reports HWM backpressure.
+
+`FallbackQueue` remains only as the no-peer/pre-connect fallback. Peer tasks drain
+it before newer pipe-fed sends, so messages queued before handshake are not
+overtaken.
+
+Fan-out sockets (`PUB`, `XPUB`, `RADIO`) encode once and distribute matching
+wire bytes. Wide multi-thread fan-out may use shard workers. Each shard owns
+its peer filter state, pushes encoded items into peer rings, then signals
+touched peers once per batch. Fan-out sockets drop on mute; `OnMute::Block`
+does not make `PUB` or `XPUB` wait. `xpub_nodrop` stays on the direct
+backpressure path.
+
+Identity-routed sockets (`ROUTER`, `REP`, `SERVER`, `PEER`) route by peer
+identity. Exclusive sockets (`PAIR`, `CHANNEL`) target one peer. Fair-queue
+recv preserves per-peer ordering while rotating across peers.
+
+## Inproc
+
+Inproc bypasses ZMTP framing and kernel I/O. Cross-thread peers use `yring`
+send pipes and deliver `InboundFrame::Message` through `inproc_peer_driver`.
+Same-thread paths use `blume` batching where applicable. Public semantics
+remain the same: HWM backpressure, round-robin fairness, and
+connect-before-bind.
 
 ## Transports
 
-| URI scheme | Transport |
-|---|---|
-| `tcp://host:port` | TCP, `TCP_NODELAY` set on accept/connect |
-| `ipc:///path` | Unix domain stream on Unix, named pipes on Windows |
-| `inproc://name` | In-process channel; bypasses ZMTP codec entirely |
-| `udp://host:port` | UDP datagram (`RADIO` / `DISH` only) |
-| `lz4+tcp://host:port` | TCP + LZ4 transform, feature `lz4` |
-| `ws://host:port/path` | ZeroMQ over WebSocket, feature `ws` |
-| `wss://host:port/path` | ZeroMQ over WebSocket with TLS, feature `ws` |
+| URI | implementation |
+| --- | --- |
+| `tcp://host:port` | TCP with `TCP_NODELAY` |
+| `ipc:///path` | Unix stream or Windows named pipe |
+| `inproc://name` | in-process channel |
+| `udp://host:port` | datagrams for RADIO/DISH |
+| `lz4+tcp://host:port` | TCP plus LZ4 transform |
+| `ws://...`, `wss://...` | ZWS over WebSocket, optional TLS |
 
-Compression-style schemes are runtime layers stacked on top of TCP, not
-separate transports. The encoder/decoder live in `omq-proto` and are
-wired in by `omq-tokio` after the ZMTP handshake.
+Reconnect supervisors replay subscriptions and groups after reconnect. Handles
+with no active peer fall back to bounded pre-connect queues.
 
-## Transport Type Dispatch
+## Mechanisms And Monitoring
 
-`omq-tokio` uses closed enums instead of `Box<dyn Trait>` for hot
-transport operations:
+Mechanisms live under `omq-proto/src/proto/mechanism/`: NULL is always on;
+PLAIN, CURVE, LZ4, WS, and BLAKE3ZMQ are feature-gated.
 
-```rust
-enum WireReader { Tcp(AsyncReadHalf<TcpStream>), Ipc(OwnedReadHalf) }
-enum WireWriter { Tcp(OwnedWriteHalf<TcpStream>), Ipc(OwnedWriteHalf) }
-```
+`Socket::monitor()` returns a `Stream<Item = MonitorEvent>`. Events carry owned
+`PeerInfo` snapshots for listening, accept/connect, delayed connect,
+handshake, disconnect, peer command, and close.
 
-The enum erases the transport type without a vtable. The compiler
-resolves the match statically and inlines through each arm.
+## Source Map
 
-## Tokio Runtime Backend
+Protocol: `omq-proto/src/message.rs`, `frame_buffer.rs`, `flow.rs`,
+`routing.rs`, `subscription.rs`, `proto/connection/`, `proto/frame.rs`.
 
-`omq-tokio` is the runtime backend. Tokio is preemptive and
-work-stealing across cores. Per-connection driver tasks push into one
-socket-wide inbound queue. Send-side routing depends on socket type:
-single-peer round-robin uses a direct wire slot, multi-peer round-robin
-uses active per-peer pipes, fan-out, identity, and exclusive routes use
-per-peer targets, and a shared fallback queue remains for no-peer and
-inproc paths.
+Backend: `omq-tokio/src/socket/actor/`, `socket/handle.rs`,
+`engine/driver.rs`, `engine/send_pipe.rs`, `engine/transmit_slot.rs`,
+`engine/signal.rs`, `routing/`, and `transport/`.
 
-```text
-                    Socket::recv
-                         ^
-                         |    (recv_tx is async_channel; bounded by recv_hwm)
-                         |
-              +----------+-----------+
-              |   user-facing        |
-              |   recv channel       |
-              +----------------------+
-                  ^       ^       ^
-                  | direct push    |
-        +---------+--+ +--+----+ +-+-----+
-        | conn drv A | | drv B | | inproc|   ConnectionDriver tasks
-        | TCP/IPC    | | TCP   | | peer  |   one per peer
-        +----+-------+ +-+-----+ +-+-----+
-             ^           ^         |
-             | wire      | wire    |    PeerWireSlot: handle encodes,
-             | slot A    | slot B  |    driver flushes via data_ready
-        +----+-----------+---------+----+
-        |     SocketDriver actor        |   <- owns peer table, type
-        |   (cmd_tx in, peer_out in)    |      state, routing strategy
-        +----------------+--------------+
-                         ^
-                         |    Socket::send routes here only when actor
-                         |    state must mutate. Other sends bypass to
-                         |    SendSubmitter.
-                         |
-                    Socket::send
-```
-
-### SocketDriver Actor
-
-`SocketDriver` owns mutable state that must be serialized:
-
-- `HashMap<PeerId, PeerInfo>` for connected TCP, IPC, inproc, UDP, WS,
-  and WSS peers.
-- `TypeState` for REQ/REP alternation, ROUTER identity prefixes, DISH
-  groups, XPUB subscriptions, and conflate state.
-- `SendStrategy` and `RecvStrategy` for round-robin, fan-out,
-  identity-route, exclusive, and fair-queue policy.
-- Bind, connect, disconnect, listener, dialer, and reconnect timers.
-
-The actor receives user commands through `cmd_tx` and driver events
-through `peer_out`. REQ and REP sends still go through actor-owned
-state because `pre_send` mutates the alternation state. ROUTER, REP,
-SERVER, PEER, DISH, and XPUB recv paths also go through the actor
-because they need identity, group, or subscription post-processing.
-
-This actor is the serialization point for rare stateful events. It is
-not the hot path for message flow when no actor state changes.
-
-### Send Bypass
-
-`Inner` holds a cloneable `SendSubmitter` built from `SendStrategy`
-before the driver starts. `Socket::send` validates frame counts and
-pushes directly into the submitter for PUSH, DEALER, PUB, PAIR, CLIENT,
-SCATTER, CHANNEL, and similar stateless send paths.
-
-REQ and REP lock a shared `Arc<Mutex<TypeState>>`, call `pre_send`
-inline, then push the transformed message through the submitter. The
-actor uses the same `TypeState` for `post_recv` and peer disconnect
-handling. REQ/REP alternation prevents normal send/recv contention.
-
-### Recv Bypass
-
-For socket types whose recv path is plain fair-queue delivery, each
-`ConnectionDriver` pushes `Event::Message` straight into
-`recv_tx: async_channel::Sender<Message>`. This skips `peer_out` and
-the actor loop.
-
-Per-peer ordering is preserved because a single driver task delivers in
-TCP order. Backpressure still works because `recv_tx` is bounded by
-`recv_hwm`; a full channel blocks the driver read loop and halts reads.
-
-| Bypassed recv | Actor recv | Reason |
-|---|---|---|
-| PULL, DEALER, REQ, SUB, XSUB, PAIR, CLIENT, CHANNEL, GATHER | REP, ROUTER, SERVER, PEER | Identity-prefix prepending |
-| | DISH | Group membership filter |
-| | XPUB | Subscribe-as-message parsing |
-
-REQ is special: the driver pushes raw envelope-wrapped messages through
-the direct path, and `Socket::recv` strips the empty delimiter inline.
-
-### Round-robin Active Pipes
-
-Round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`) have
-two hot paths:
-
-- Single byte-stream peer: `Socket::send` encodes directly into that
-  peer's `PeerWireSlot`. The driver owns the writer and flushes the
-  encoded chunks from its `data_ready` select arm.
-- Multiple byte-stream peers: each peer registers an active `blume`
-  pipe. The socket-side submitter scans active pipes from a moving
-  cursor and `try_send`s into the first pipe with capacity. If every
-  active pipe is full, async `send` waits on one rotating pipe and
-  `try_send` reports HWM backpressure.
-
-The shared `DropQueue` is the fallback for no connected peer yet, inproc
-peers, and mixed byte-stream plus inproc round-robin sets. Byte-stream
-drivers still poll the shared queue so messages queued before a peer
-becomes active drain in order before new pipe traffic.
-
-### Arena Encoding
-
-The send path uses `EncodedQueue` with a contiguous `arena: BytesMut`
-and an `entries: VecDeque<Entry>`. Frame headers are always written into
-the arena. Messages below `ARENA_THRESHOLD` are encoded contiguously:
-header and payload land in one arena range, so a batch of small messages
-produces one iovec instead of two per message. Larger messages use the
-gather path: the header goes into the arena, and payload `Bytes` chunks
-are tracked as external entries for zero-copy gather-write.
-
-The arena path is disabled when CURVE or BLAKE3ZMQ is active because the
-per-connection transform owns nonce state and must encrypt frames in
-strict wire order. LZ4 does not have this constraint: its
-`MessageEncoder` lives outside the codec, holds no per-frame sequence
-state, and produces wire-ready bytes independently.
-
-### PeerWireSlot
-
-Each wire peer gets a `PeerWireSlot` containing an `EncodedQueue` behind
-a short-held `std::sync::Mutex`. `Socket::send` encodes ZMTP frames into
-the slot. The driver flushes them through a dedicated `data_ready`
-select arm and retains exclusive ownership of the write half.
-
-The slot replaces the old direct writer lock pattern. The handle never
-touches the writer, the mutex hold time is encode-only, and the driver
-does all I/O. A coalescing `pending: AtomicBool` gates
-`data_ready.notify_one()`, so many rapid encodes produce one wake.
-
-`PeerWireSlot` is used by round-robin single-peer, exclusive, fan-out,
-and identity routes. Inproc peers have no slot and use the
-`PeerSend::Inbox` variant.
-
-### Reconnect, Monitor, And Concurrency
-
-Dial supervisor tasks own handles that are `None` while reconnect is in
-flight. Round-robin sends fall back to the shared queue bounded by
-`send_hwm` while no active peer pipe exists and drain through the new
-driver after handshake. Subscriptions and group joins are replayed.
-
-Within a tokio runtime, multiple `Socket` clones can call `send` and
-`recv` concurrently from different worker threads. The round-robin
-active-pipe table is protected by a short `std::sync::Mutex` around the
-peer vector and cursor. The recv-side `async_channel::Sender` is
-multi-producer. The actor remains the serialization point for state that
-must be observed atomically.
-
-### Windows IPC
-
-On Windows, IPC uses named pipes instead of Unix domain sockets. The
-application still uses `ipc://` endpoints; `ipc:///my-pipe` maps to
-`\\.\pipe\my-pipe` internally.
-
-| Aspect | Unix | Windows |
-|--------|------|---------|
-| Bind path syntax | `/tmp/socket.sock` or `@abstract-ns` | `my-pipe` |
-| Connection type | Stream socket | Named pipe |
-| Buffer management | `SO_SNDBUF`/`SO_RCVBUF` tuning | Windows pipe defaults |
-| Type dispatch | `type IpcStream = UnixStream` | `enum IpcStream { Server, Client }` |
-
-## Mechanisms
-
-| Name | Cargo feature | Notes |
-|---|---|---|
-| `NULL` | always available | RFC 23 |
-| `PLAIN` | `plain` | RFC 24, username/password authenticator |
-| `CURVE` | `curve` | RFC 26, X25519 + ChaCha20Poly1305 |
-| `BLAKE3ZMQ` | `blake3zmq` | OMQ-native, Noise XX + BLAKE3 + ChaCha20-BLAKE3, unaudited |
-
-All mechanisms are sans-I/O state machines under
-`omq-proto/src/proto/mechanism/`.
-
-## Monitor
-
-`Socket::monitor()` returns a `Stream<Item = MonitorEvent>`. Each event
-carries an owned `PeerInfo` snapshot. Events include `Listening`,
-`Accepted`, `Connected`, `ConnectDelayed`, `HandshakeSucceeded`,
-`Disconnected`, `PeerCommand`, and `Closed`.
-
-## Source File Map
-
-### omq-proto
-
-| file | what |
-|------|------|
-| `src/message.rs` | `Payload` + `Message` enums |
-| `src/proto/connection/` | sans-I/O ZMTP codec + state machine |
-| `src/proto/frame.rs` | ZMTP frame encoding/decoding |
-| `src/proto/greeting.rs` | ZMTP greeting state machine |
-| `src/proto/command.rs` | ZMTP commands |
-| `src/proto/chunked_buf.rs` | zero-copy multi-chunk input buffer |
-| `src/proto/mechanism/` | NULL / PLAIN / CURVE / BLAKE3ZMQ |
-| `src/proto/transform/` | LZ4 per-part encoder/decoder |
-| `src/proto/zws.rs` | ZWS/2.0 frame codec |
-| `src/endpoint.rs` | URI parsing |
-| `src/options.rs` | `Options` builder |
-| `src/encoded_queue.rs` | arena + entry-based gather-write encoder |
-| `src/routing.rs` | socket-type-to-routing-strategy categorization |
-| `src/subscription.rs` | Patricia-trie prefix matcher |
-
-### omq-tokio
-
-| file | what |
-|------|------|
-| `src/socket/actor/` | `SocketDriver` actor: peer table, type state, lifecycle |
-| `src/socket/handle.rs` | public `Socket` handle |
-| `src/socket/dispatch.rs` | send-side dispatch and actor bypass |
-| `src/engine/driver.rs` | per-connection `ConnectionDriver` |
-| `src/engine/wire_slot.rs` | per-peer encoded send slot |
-| `src/routing/` | round-robin, fan-out, identity, exclusive, fair-queue |
-| `src/transport/tcp.rs` | TCP bind/connect with reconnect |
-| `src/transport/ipc.rs` | IPC bind/connect |
-| `src/transport/inproc.rs` | in-process transport |
-| `src/transport/udp.rs` | UDP datagram transport |
-| `src/transport/ws.rs` | WS/WSS transport |
-
-## Adding A New Socket Type / Transport / Mechanism
-
-**Socket type.** Add the variant to `omq_proto::proto::SocketType` and
-`is_compatible`. Add it to `send_category` and `recv_category` in
-`omq-proto/src/routing.rs`. Wire send/recv strategy in
-`omq-tokio/src/routing/` and add integration tests.
-
-**Transport.** Add an `Endpoint` variant and parser in
-`omq-proto/src/endpoint.rs`. Add a `transport/<name>.rs` module in
-`omq-tokio`.
-
-**Mechanism.** Add a module under `omq-proto/src/proto/mechanism/`,
-feature-gate it, register it with the greeting/handshake state machine,
-and add integration tests.
+To add a socket type, extend `omq_proto::proto::SocketType`, compatibility
+checks, protocol routing, and the matching backend strategy. To add a
+transport or mechanism, extend endpoint/mechanism parsing first, then add the
+backend module and integration tests.

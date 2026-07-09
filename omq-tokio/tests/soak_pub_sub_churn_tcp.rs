@@ -18,7 +18,7 @@ use bytes::Bytes;
 use rand::RngExt;
 use rand::rngs::StdRng;
 
-use omq_tokio::{Message, Options, ReconnectPolicy, Socket, SocketType};
+use omq_tokio::{Message, MonitorEvent, OnMute, Options, ReconnectPolicy, Socket, SocketType};
 
 const TOPICS: &[&str] = &["fast.", "slow.", "all.", "rare."];
 
@@ -29,6 +29,25 @@ fn no_reconnect() -> Options {
     }
 }
 
+fn pub_options() -> Options {
+    soak_common::soak_options().on_mute(OnMute::DropNewest)
+}
+
+async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut subscribed = 0;
+    while subscribed < n {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out waiting for {n} subscriptions");
+        match tokio::time::timeout(deadline - now, mon.recv()).await {
+            Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => panic!("monitor failed while waiting for subscriptions: {e:?}"),
+            Err(e) => panic!("timed out waiting for {n} subscriptions: {e}"),
+        }
+    }
+}
+
 #[test]
 fn soak_pub_sub_churn_tcp() {
     let duration = soak_common::soak_duration();
@@ -36,8 +55,14 @@ fn soak_pub_sub_churn_tcp() {
 
     let rt = soak_common::tokio_runtime();
     rt.block_on(async {
-        let publisher = Socket::new(SocketType::Pub, soak_common::soak_options());
+        let publisher = Socket::new(SocketType::Pub, pub_options());
+        let mut mon = publisher.monitor();
         let ep = publisher.bind(soak_common::tcp_ep(0)).await.unwrap();
+
+        let slow_sub = Socket::new(SocketType::Sub, no_reconnect().recv_hwm(1));
+        slow_sub.connect(ep.clone()).await.unwrap();
+        slow_sub.subscribe(Bytes::new()).await.unwrap();
+        wait_for_subscribes(&mut mon, 1).await;
 
         let mut rng = rand::make_rng::<StdRng>();
         let mut subs: Vec<Socket> = Vec::new();
@@ -45,6 +70,7 @@ fn soak_pub_sub_churn_tcp() {
         let start = Instant::now();
         let mut last_churn = start;
         let mut last_log = start;
+        let mut last_log_pub_count = 0u64;
 
         while start.elapsed() < duration {
             for _ in 0..1_000 {
@@ -85,18 +111,24 @@ fn soak_pub_sub_churn_tcp() {
             }
 
             if last_log.elapsed() >= Duration::from_secs(30) {
+                assert!(
+                    pub_count > last_log_pub_count,
+                    "PUB made no progress while a slow SUB was connected"
+                );
                 eprintln!(
                     "[pub_sub_churn_tcp] {:.0}s, pub_count {pub_count}, subs {}",
                     start.elapsed().as_secs_f64(),
                     subs.len(),
                 );
                 last_log = Instant::now();
+                last_log_pub_count = pub_count;
             }
         }
 
         for sub in subs {
             sub.close().await.unwrap();
         }
+        slow_sub.close().await.unwrap();
         publisher.close().await.unwrap();
 
         eprintln!(

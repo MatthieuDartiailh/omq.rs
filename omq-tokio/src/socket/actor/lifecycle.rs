@@ -22,8 +22,8 @@ impl<'a> PeerLifecycle<'a> {
         self.publish_disconnect(peer.as_ref(), reason);
         Self::invalidate_spsc(peer.as_ref());
         self.update_send_ring();
-        self.invalidate_wire_slot(peer.as_ref());
-        self.update_wire_slot();
+        self.invalidate_transmit_slot(peer.as_ref());
+        self.update_transmit_slot();
         self.refill_recv_sink();
         self.reset_type_state_if_last_peer();
         peer
@@ -32,7 +32,7 @@ impl<'a> PeerLifecycle<'a> {
     pub(super) fn after_peer_inserted(&mut self) {
         if self.driver.peers.len() > 1 {
             self.update_send_ring();
-            self.driver.wire_slots.clear_single();
+            self.driver.transmit_slots.clear_single();
         }
     }
 
@@ -51,19 +51,27 @@ impl<'a> PeerLifecycle<'a> {
         if count == 1 && self.driver.peers.len() == 1 {
             let s = sole_spsc.unwrap();
             self.driver.spsc.send_ring.store(Some(s.clone()));
+            self.driver
+                .spsc
+                .send_ring_available
+                .store(true, Ordering::Release);
         } else {
+            self.driver
+                .spsc
+                .send_ring_available
+                .store(false, Ordering::Release);
             self.driver.spsc.send_ring.store(None);
         }
     }
 
-    pub(super) fn update_wire_slot(&mut self) {
-        self.driver.wire_slots.rebuild(
+    pub(super) fn update_transmit_slot(&mut self) {
+        self.driver.transmit_slots.rebuild(
             self.driver.socket_type,
             self.driver.peers.len(),
             self.driver
                 .peers
                 .values()
-                .map(|peer| peer.handle.wire_slot.clone()),
+                .map(|peer| peer.handle.transmit_slot.clone()),
         );
     }
 
@@ -123,16 +131,17 @@ impl<'a> PeerLifecycle<'a> {
             && let Some(ref removed_spsc) = peer.spsc
         {
             removed_spsc.recv_ready.store(false, Ordering::Release);
+            removed_spsc.space_notify.notify_waiters();
         }
     }
 
-    fn invalidate_wire_slot(&self, peer: Option<&PeerEntry>) {
+    fn invalidate_transmit_slot(&self, peer: Option<&PeerEntry>) {
         if let Some(peer) = peer
-            && let Some(ref slot) = peer.handle.wire_slot
+            && let Some(ref slot) = peer.handle.transmit_slot
         {
             slot.mark_dead();
         }
-        self.driver.wire_slots.clear_single();
+        self.driver.transmit_slots.clear_single();
     }
 
     fn refill_recv_sink(&self) {

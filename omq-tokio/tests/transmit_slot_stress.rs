@@ -1,4 +1,4 @@
-//! Stress tests for `PeerWireSlot` refactor edge cases.
+//! Stress tests for `PeerTransmitSlot` refactor edge cases.
 use bytes::Bytes;
 use omq_proto::error::TrySendError;
 use omq_proto::message::Message;
@@ -46,9 +46,9 @@ async fn push_pull_burst_single_peer() {
 }
 
 #[tokio::test]
-async fn try_send_single_peer_full_wire_slot_preserves_fifo() {
+async fn try_send_single_peer_full_transmit_slot_preserves_fifo() {
     let ep = tcp_ep(free_port());
-    let push = Socket::new(SocketType::Push, Options::default().wire_slot_cap(1));
+    let push = Socket::new(SocketType::Push, Options::default().transmit_slot_cap(1));
     let pull = Socket::new(SocketType::Pull, opts());
     pull.bind(ep.clone()).await.unwrap();
     push.connect(ep).await.unwrap();
@@ -74,9 +74,9 @@ async fn try_send_single_peer_full_wire_slot_preserves_fifo() {
 }
 
 #[tokio::test]
-async fn req_try_send_uses_single_peer_wire_slot() {
+async fn req_try_send_uses_single_peer_transmit_slot() {
     let ep = tcp_ep(free_port());
-    let req = Socket::new(SocketType::Req, Options::default().wire_slot_cap(1));
+    let req = Socket::new(SocketType::Req, Options::default().transmit_slot_cap(1));
     let rep = Socket::new(SocketType::Rep, opts());
     rep.bind(ep.clone()).await.unwrap();
     req.connect(ep).await.unwrap();
@@ -93,7 +93,7 @@ async fn req_try_send_uses_single_peer_wire_slot() {
 
 /// PUSH/PULL: peer churn. Encode slot must re-enable after 2->1.
 #[tokio::test]
-async fn push_pull_peer_churn_wire_slot() {
+async fn push_pull_peer_churn_transmit_slot() {
     let ep = tcp_ep(free_port());
     let push = Socket::new(SocketType::Push, opts());
     let pull1 = Socket::new(SocketType::Pull, opts());
@@ -168,9 +168,9 @@ async fn pub_sub_fanout_8_peers() {
     }
 }
 
-/// ROUTER/DEALER: identity routing through `PeerWireSlot`.
+/// ROUTER/DEALER: identity routing through `PeerTransmitSlot`.
 #[tokio::test]
-async fn router_dealer_identity_wire_slot() {
+async fn router_dealer_identity_transmit_slot() {
     let ep = tcp_ep(free_port());
     let router = Socket::new(SocketType::Router, opts());
     let dealer1 = Socket::new(

@@ -197,7 +197,7 @@ impl SocketDriver {
             let _ = p
                 .handle
                 .inbox
-                .send(crate::engine::DriverCommand::SendCommand(cmd.clone()))
+                .send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()))
                 .await;
         }
         Ok(())
@@ -239,7 +239,7 @@ impl SocketDriver {
             let _ = p
                 .handle
                 .inbox
-                .send(crate::engine::DriverCommand::SendCommand(cmd.clone()))
+                .send(crate::engine::PeerDriverCommand::SendCommand(cmd.clone()))
                 .await;
         }
         Ok(())

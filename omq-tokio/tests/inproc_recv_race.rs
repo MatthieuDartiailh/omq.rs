@@ -4,7 +4,7 @@
 //! Bug 1: `recv_notify.notified()` created after `try_drain_consumers()`
 //! returned empty. A `notify_one()` firing in that gap was lost.
 //!
-//! Bug 2: inproc peer driver exit sent `PeerOut::Closed` to the actor,
+//! Bug 2: inproc peer driver exit sent `PeerEvent::Closed` to the actor,
 //! but the receiver was stuck on `recv_notify.notified()` (biased first
 //! in select) and never polled `self.rx`. Messages arriving via the
 //! actor path (from other peers) were invisible until a new inproc

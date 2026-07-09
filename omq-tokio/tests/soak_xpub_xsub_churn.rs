@@ -18,7 +18,7 @@ use bytes::Bytes;
 use rand::RngExt;
 use rand::rngs::StdRng;
 
-use omq_tokio::{Message, Options, ReconnectPolicy, Socket, SocketType};
+use omq_tokio::{Message, OnMute, Options, ReconnectPolicy, Socket, SocketType};
 
 const TOPICS: &[&str] = &["alpha.", "beta.", "gamma.", "delta."];
 
@@ -29,6 +29,10 @@ fn no_reconnect() -> Options {
     }
 }
 
+fn xpub_options() -> Options {
+    soak_common::soak_options().on_mute(OnMute::DropNewest)
+}
+
 #[test]
 fn soak_xpub_xsub_churn() {
     let duration = soak_common::soak_duration();
@@ -36,7 +40,7 @@ fn soak_xpub_xsub_churn() {
 
     let rt = soak_common::tokio_runtime();
     rt.block_on(async {
-        let xpub = Socket::new(SocketType::XPub, soak_common::soak_options());
+        let xpub = Socket::new(SocketType::XPub, xpub_options());
         let ep = xpub.bind(soak_common::tcp_ep(0)).await.unwrap();
 
         let mut rng = rand::make_rng::<StdRng>();

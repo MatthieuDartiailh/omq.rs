@@ -45,7 +45,7 @@ use omq_proto::proto::connection::{ConnectionConfig, Role};
 use omq_proto::proto::transform::MessageEncoder;
 use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
 
-use crate::engine::{ConnectionDriver, DriverConfig, DriverHandle};
+use crate::engine::{ConnectionDriver, PeerDriverConfig, PeerDriverHandle};
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP and IPC).
 /// Inproc does NOT go through this - it skips the ZMTP codec entirely
@@ -129,7 +129,7 @@ enum InternalEvent {
 
 struct PeerEntry {
     ident: PeerIdent,
-    handle: DriverHandle,
+    handle: PeerDriverHandle,
     /// Set on `HandshakeSucceeded` (the peer's READY property or server-
     /// generated default). Stays empty if the peer sent no identity.
     identity: bytes::Bytes,
@@ -169,11 +169,11 @@ pub(crate) struct SocketDriver {
     internal_tx: mpsc::Sender<InternalEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
     /// Multi-producer channel feeding peer-side events from every
-    /// connection driver. Each entry is `(peer_id, PeerOut)`. This
+    /// connection driver. Each entry is `(peer_id, PeerEvent)`. This
     /// replaces the per-connection shim task that used to wrap
     /// `Event` values into `InternalEvent::PeerEvent`.
-    peer_out_tx: mpsc::Sender<(u64, crate::engine::PeerOut)>,
-    peer_out_rx: mpsc::Receiver<(u64, crate::engine::PeerOut)>,
+    peer_out_tx: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+    peer_out_rx: mpsc::Receiver<(u64, crate::engine::PeerEvent)>,
     next_peer_id: u64,
     peers: FxHashMap<u64, PeerEntry>,
     listeners: Vec<ListenerEntry>,
@@ -203,7 +203,7 @@ pub(crate) struct SocketDriver {
     close_deadline: Option<Instant>,
     close_ack: Option<oneshot::Sender<Result<()>>>,
     spsc: super::recv::SpscHandles,
-    wire_slots: super::wire_slot_cache::WireSlotCache,
+    transmit_slots: super::transmit_slot_cache::TransmitSlotCache,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
 }
@@ -221,7 +221,7 @@ impl SocketDriver {
         spsc: super::recv::SpscHandles,
         type_state: Arc<Mutex<TypeState>>,
         req_awaiting_reply: Arc<AtomicBool>,
-        wire_slots: super::wire_slot_cache::WireSlotCache,
+        transmit_slots: super::transmit_slot_cache::TransmitSlotCache,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
@@ -254,7 +254,7 @@ impl SocketDriver {
             close_deadline: None,
             close_ack: None,
             spsc,
-            wire_slots,
+            transmit_slots,
             compression_pool: None,
             recv_sink_config,
         }
@@ -292,10 +292,10 @@ impl SocketDriver {
                     self.handle_internal_event(evt).await;
                 }
                 Some((peer_id, peer_out)) = self.peer_out_rx.recv() => {
-                    use crate::engine::PeerOut;
+                    use crate::engine::PeerEvent;
                     let evt = match peer_out {
-                        PeerOut::Event(e) => InternalEvent::PeerEvent { peer_id, event: e },
-                        PeerOut::Closed => InternalEvent::PeerClosed {
+                        PeerEvent::Event(e) => InternalEvent::PeerEvent { peer_id, event: e },
+                        PeerEvent::Closed => InternalEvent::PeerClosed {
                             peer_id,
                             reason: DisconnectReason::PeerClosed,
                         },
@@ -409,11 +409,11 @@ impl SocketDriver {
         self.send_strategy.shutdown();
         let mut peer_tasks = Vec::new();
         for p in self.peers.values() {
-            if let Some(ref slot) = p.handle.wire_slot {
+            if let Some(ref slot) = p.handle.transmit_slot {
                 slot.mark_dead();
             }
             if let Some(ref pipe) = p.handle.send_pipe {
-                pipe.close();
+                let _ = pipe.lock().expect("send pipe poisoned").take();
             }
             p.handle.cancel.cancel();
         }

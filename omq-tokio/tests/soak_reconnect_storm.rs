@@ -95,7 +95,7 @@ fn soak_reconnect_storm() {
             "[reconnect_storm] done: {delivered}/{cycles} delivered ({pct:.1}%) in {:.1}s",
             start.elapsed().as_secs_f64(),
         );
-        // The shared DropQueue lets dying drivers pop a message and
+        // The shared FallbackQueue lets dying drivers pop a message and
         // write it to a half-closed TCP socket before reading the FIN.
         // The kernel accepts the write (send buffer) but the peer never
         // reads it. This is inherent to multi-threaded scheduling.

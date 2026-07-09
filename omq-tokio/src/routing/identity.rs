@@ -18,13 +18,13 @@ use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 
-use crate::engine::DriverHandle;
-use crate::engine::wire_slot::TryEncodeResult;
+use crate::engine::PeerDriverHandle;
+use crate::engine::transmit_slot::TryFrameResult;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 
-use super::peer_send::PeerSend;
+use super::peer_outbound::PeerOutbound;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
@@ -39,13 +39,13 @@ impl Submitter {
         g.identity_to_peer.clear();
     }
 
-    fn resolve_target(&self, msg: &mut Message) -> Result<Option<PeerSend>> {
+    fn resolve_target(&self, msg: &mut Message) -> Result<Option<PeerOutbound>> {
         if msg.is_empty() {
             return Err(Error::Unroutable);
         }
         let identity = msg.pop_front().unwrap();
 
-        let target: Option<PeerSend> = {
+        let target: Option<PeerOutbound> = {
             let g = self.inner.lock().expect("identity inner poisoned");
             g.identity_to_peer
                 .get(&identity)
@@ -70,11 +70,11 @@ impl Submitter {
 
         if let Some(t) = target {
             match t.try_encode(&msg) {
-                TryEncodeResult::Ok => {}
-                TryEncodeResult::Full | TryEncodeResult::Ineligible => {
+                TryFrameResult::Ok => {}
+                TryFrameResult::Full | TryFrameResult::Ineligible => {
                     return Err(omq_proto::error::TrySendError::Full(retry));
                 }
-                TryEncodeResult::Dead => {
+                TryFrameResult::Dead => {
                     return Err(omq_proto::error::TrySendError::Closed);
                 }
             }
@@ -105,7 +105,7 @@ struct IdentityInner {
 #[derive(Debug)]
 struct IdentityPeer {
     identity: Bytes,
-    target: PeerSend,
+    target: PeerOutbound,
 }
 
 impl IdentitySend {
@@ -127,8 +127,13 @@ impl IdentitySend {
     }
 
     #[expect(clippy::needless_pass_by_value)]
-    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle, identity: Bytes) {
-        let target = PeerSend::from_handle(&handle);
+    pub(crate) fn connection_added(
+        &mut self,
+        peer_id: u64,
+        handle: PeerDriverHandle,
+        identity: Bytes,
+    ) {
+        let target = PeerOutbound::from_handle(&handle);
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.peers.insert(
             peer_id,
@@ -212,7 +217,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::engine::DriverCommand;
+    use crate::engine::PeerDriverCommand;
 
     #[test]
     fn try_send_reports_full_and_preserves_routing_frame() {
@@ -221,10 +226,11 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         send.connection_added(
             1,
-            DriverHandle {
+            PeerDriverHandle {
                 inbox: tx,
                 cancel: CancellationToken::new(),
-                wire_slot: None,
+                transmit_slot: None,
+                transmit_slot_tx: None,
                 send_pipe: None,
             },
             Bytes::from_static(b"id"),
@@ -249,7 +255,7 @@ mod tests {
         assert_eq!(returned.part_bytes(1).unwrap(), &b"two"[..]);
 
         match rx.try_recv().unwrap() {
-            DriverCommand::SendMessage(msg) => {
+            PeerDriverCommand::SendMessage(msg) => {
                 assert_eq!(msg.part_bytes(0).unwrap(), &b"one"[..]);
             }
             other => panic!("unexpected command: {other:?}"),

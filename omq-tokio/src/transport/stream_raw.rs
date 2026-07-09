@@ -13,23 +13,23 @@ use tokio_util::sync::CancellationToken;
 use omq_proto::message::Message;
 use omq_proto::proto::Event as ZmtpEvent;
 
-use crate::engine::{DriverCommand, DriverHandle, PeerOut};
+use crate::engine::{PeerDriverCommand, PeerDriverHandle, PeerEvent};
 use crate::socket::dispatch::AnyStream;
 
 pub(crate) fn spawn(
     mut stream: AnyStream,
     peer_id: u64,
-    peer_out_tx: mpsc::Sender<(u64, PeerOut)>,
+    peer_out_tx: mpsc::Sender<(u64, PeerEvent)>,
     cancel: &CancellationToken,
-) -> DriverHandle {
-    let (inbox_tx, mut inbox_rx) = mpsc::channel::<DriverCommand>(64);
+) -> PeerDriverHandle {
+    let (inbox_tx, mut inbox_rx) = mpsc::channel::<PeerDriverCommand>(64);
     let child_cancel = cancel.child_token();
     let handle_cancel = child_cancel.clone();
     tokio::spawn(async move {
         // Connect notification.
         let notif = ZmtpEvent::Message(Message::single(Bytes::new()));
         if peer_out_tx
-            .send((peer_id, PeerOut::Event(notif)))
+            .send((peer_id, PeerEvent::Event(notif)))
             .await
             .is_err()
         {
@@ -47,7 +47,7 @@ pub(crate) fn spawn(
                         Ok(n) => {
                             let data = Bytes::copy_from_slice(&buf[..n]);
                             let msg = Message::single(data);
-                            let evt = PeerOut::Event(ZmtpEvent::Message(msg));
+                            let evt = PeerEvent::Event(ZmtpEvent::Message(msg));
                             if peer_out_tx.send((peer_id, evt)).await.is_err() {
                                 break;
                             }
@@ -56,7 +56,7 @@ pub(crate) fn spawn(
                 }
                 cmd = inbox_rx.recv() => {
                     match cmd {
-                        Some(DriverCommand::SendMessage(msg)) => {
+                        Some(PeerDriverCommand::SendMessage(msg)) => {
                             let data = msg.part_bytes(0).unwrap_or_default();
                             if data.is_empty() {
                                 break;
@@ -65,9 +65,9 @@ pub(crate) fn spawn(
                                 break;
                             }
                         }
-                        Some(DriverCommand::Close) | None => break,
+                        Some(PeerDriverCommand::Close) | None => break,
                         Some(
-                            DriverCommand::SendEncoded(_) | DriverCommand::SendCommand(_),
+                            PeerDriverCommand::SendEncoded(_) | PeerDriverCommand::SendCommand(_),
                         ) => {}
                     }
                 }
@@ -76,14 +76,15 @@ pub(crate) fn spawn(
 
         // Disconnect notification.
         let notif = ZmtpEvent::Message(Message::single(Bytes::new()));
-        let _ = peer_out_tx.send((peer_id, PeerOut::Event(notif))).await;
-        let _ = peer_out_tx.try_send((peer_id, PeerOut::Closed));
+        let _ = peer_out_tx.send((peer_id, PeerEvent::Event(notif))).await;
+        let _ = peer_out_tx.try_send((peer_id, PeerEvent::Closed));
     });
 
-    DriverHandle {
+    PeerDriverHandle {
         inbox: inbox_tx,
         cancel: handle_cancel,
-        wire_slot: None,
+        transmit_slot: None,
+        transmit_slot_tx: None,
         send_pipe: None,
     }
 }

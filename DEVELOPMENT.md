@@ -7,6 +7,14 @@ cargo build --workspace
 cargo clippy --workspace --all-targets
 ```
 
+Release, soak, and benchmark builds use the local CPU:
+
+```toml
+# .cargo/config.toml
+[build]
+rustflags = ["-C", "target-cpu=native"]
+```
+
 Lints: `missing_debug_implementations` = **deny**,
 `unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
 
@@ -97,6 +105,9 @@ Env knobs: `OMQ_BENCH_TRANSPORTS`, `OMQ_BENCH_SIZES`,
 Results append to `$XDG_CACHE_HOME/omq/` (default `~/.cache/omq/`)
 unless `OMQ_BENCH_NO_WRITE=1`.
 
+Unless stated otherwise, user ensures system is NOT noisy during benchmarks. So
+when a measured cell looks bad, don't hand-wave it as noise.
+
 ### Cross-implementation Comparison Benchmarks
 
 `scripts/run_comparisons.py` drives standalone `bench_peer` binaries:
@@ -116,7 +127,7 @@ Each binary speaks a subcommand protocol:
 - `inproc <name> <size> <duration>`: in-process PUSH/PULL.
 - `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>`: latency.
 
-Results go to `~/.cache/omq/comparisons.jsonl`.
+Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
 ## Updating Charts
 
@@ -144,7 +155,17 @@ python3 scripts/gen_comparison_chart.py
 ```
 
 Omit `--impl` to rebench all implementations when external baselines
-are stale.
+are stale. Full refresh after omq/rzmq changes:
+
+```sh
+test -f .chart_hw
+python3 scripts/run_comparisons.py --transport tcp --transport ipc --transport inproc \
+  --fanout --fanin --pubsub-peers 1,8,32
+python3 scripts/gen_comparison_chart.py
+```
+
+Stop if `run_comparisons.py` prints any warning or timeout. Fix the
+bench peer or script first, then rerun before charting.
 
 ### Mechanism Chart
 
@@ -160,24 +181,24 @@ python3 scripts/bench_pubsub_lz4.py --chart
 python3 scripts/gen_pubsub_lz4_chart.py
 ```
 
+### Compression Chart
+
+```sh
+python3 scripts/bench_compression_tokio.py --chart
+python3 scripts/gen_compression_chart.py --backend tokio
+```
+
 ### pyomq Bindings Charts
 
 ```sh
 cd bindings/pyomq
+export OMQ_HW_EXTRAS="performance governor, turbo off"
 maturin develop --release
 python scripts/update_perf.py --impl pyomq
 python scripts/update_perf.py --chart-only
 ```
 
 ## Releasing
-
-### Dependency Graph
-
-```text
-omq-proto ───────┬─ omq-tokio ──┬─ omq-libzmq
-blume ───────────┤              └─ pyomq (maturin, not cargo)
-yring ───────────┘
-```
 
 ### Automation
 

@@ -17,8 +17,8 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
-use super::recv::{SpscAwareRecv, SpscHandles};
-use super::wire_slot_cache::WireSlotCache;
+use super::recv::{SpscAwareRecv, SpscHandles, SpscPush};
+use super::transmit_slot_cache::TransmitSlotCache;
 use crate::routing::{SendStrategy, SendSubmitter};
 
 pub use omq_proto::error::TrySendError;
@@ -55,7 +55,7 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
-    wire_slots: WireSlotCache,
+    transmit_slots: TransmitSlotCache,
     /// Cooperative yield counter. Every `SEND_YIELD_INTERVAL` successful
     /// synchronous sends, `send()` yields to the runtime so driver tasks
     /// on the same worker thread can drain and flush.
@@ -114,7 +114,7 @@ impl Socket {
         let spsc = SpscHandles::default();
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
-        let wire_slots = WireSlotCache::new();
+        let transmit_slots = TransmitSlotCache::new();
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -126,7 +126,7 @@ impl Socket {
             spsc.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
-            wire_slots.clone(),
+            transmit_slots.clone(),
             recv_sink_config,
         );
         let actor_task = spawn_driver(driver);
@@ -140,7 +140,7 @@ impl Socket {
                 send_submitter,
                 type_state,
                 req_awaiting_reply,
-                wire_slots,
+                transmit_slots,
                 send_ops: AtomicU32::new(0),
                 last_bound_endpoint: RwLock::new(None),
                 actor_task: Mutex::new(Some(actor_task)),
@@ -220,7 +220,7 @@ impl Socket {
                         break;
                     }
                     tokio::task::yield_now().await;
-                    if self.inner.wire_slots.single_dead() {
+                    if self.inner.transmit_slots.single_dead() {
                         self.inner
                             .req_awaiting_reply
                             .store(false, Ordering::Release);
@@ -257,14 +257,13 @@ impl Socket {
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                let msg = match self.try_push_spsc(msg) {
-                    Ok(()) => return Ok(()),
-                    Err(msg) => msg,
+                let Some(msg) = self.send_spsc_or_return(msg).await? else {
+                    return Ok(());
                 };
-                if self.try_send_wire(&msg) {
+                if !self.is_fan_out_send() && self.try_send_wire(&msg) {
                     return Ok(());
                 }
-                if self.inner.wire_slots.single_exists() {
+                if !self.is_fan_out_send() && self.inner.transmit_slots.single_exists() {
                     self.send_wire_slow(msg).await
                 } else {
                     self.inner.send_submitter.send(msg).await
@@ -325,7 +324,7 @@ impl Socket {
                     Ok(()) => return Ok(()),
                     Err(msg) => msg,
                 };
-                if self.try_send_single_wire(&msg)? {
+                if !self.is_fan_out_send() && self.try_send_single_wire(&msg)? {
                     return Ok(());
                 }
                 self.inner.send_submitter.try_send(msg)
@@ -505,7 +504,7 @@ impl Socket {
             Err(_) => Ok(()),
         };
         self.inner.send_submitter.shutdown();
-        self.inner.wire_slots.clear_single();
+        self.inner.transmit_slots.clear_single();
         self.inner.recv_rx.shutdown();
         let actor_task = self.inner.actor_task.lock().unwrap().take();
         if let Some(task) = actor_task {
@@ -589,6 +588,37 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
 }
 
 impl Socket {
+    async fn send_spsc_or_return(&self, mut msg: Message) -> Result<Option<Message>> {
+        loop {
+            match self.inner.recv_rx.try_push_spsc_or_full(msg) {
+                SpscPush::Sent => return Ok(None),
+                SpscPush::Unavailable(returned) => return Ok(Some(returned)),
+                SpscPush::Full {
+                    msg: returned,
+                    space,
+                } => {
+                    msg = returned;
+                    let notified = space.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    match self.inner.recv_rx.try_push_spsc_or_full(msg) {
+                        SpscPush::Sent => return Ok(None),
+                        SpscPush::Unavailable(returned) => return Ok(Some(returned)),
+                        SpscPush::Full { msg: returned, .. } => {
+                            tokio::select! {
+                                biased;
+                                () = notified => {
+                                    msg = returned;
+                                }
+                                () = tokio::task::yield_now() => return Ok(Some(returned)),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// SPSC send fast path: push directly into the peer's yring.
     /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
     /// unavailable or the ring is full.
@@ -597,18 +627,25 @@ impl Socket {
     }
 
     fn try_send_wire(&self, msg: &Message) -> bool {
-        self.inner.wire_slots.try_send(msg)
+        self.inner.transmit_slots.try_send(msg)
     }
 
     async fn send_wire_slow(&self, msg: Message) -> Result<()> {
         self.inner
-            .wire_slots
+            .transmit_slots
             .send_single_slow(msg, &self.inner.send_submitter)
             .await
     }
 
     fn try_send_single_wire(&self, msg: &Message) -> core::result::Result<bool, TrySendError> {
-        self.inner.wire_slots.try_send_single(msg)
+        self.inner.transmit_slots.try_send_single(msg)
+    }
+
+    fn is_fan_out_send(&self) -> bool {
+        matches!(
+            self.inner.socket_type,
+            SocketType::Pub | SocketType::XPub | SocketType::Radio
+        )
     }
 
     async fn send_identity_routed(&self, msg: Message) -> Result<()> {
@@ -622,7 +659,7 @@ impl Drop for Inner {
         // without waiting for linger since there's no one to await it.
         self.root_cancel.cancel();
         self.send_submitter.shutdown();
-        self.wire_slots.clear_single();
+        self.transmit_slots.clear_single();
         self.recv_rx.shutdown();
     }
 }

@@ -43,7 +43,10 @@ fn tcp_ep() -> Endpoint {
 }
 
 async fn check_subside_handshake(ep: Endpoint) {
-    let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
+    let pub_ = Socket::new(
+        SocketType::Pub,
+        Options::default().on_mute(OnMute::DropNewest),
+    );
     pub_.bind(ep.clone()).await.unwrap();
 
     let s1 = Socket::new(SocketType::Sub, Options::default());

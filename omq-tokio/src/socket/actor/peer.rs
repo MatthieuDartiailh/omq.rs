@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use super::{
-    AnyConn, AnyStream, ConnectionConfig, ConnectionDriver, DisconnectReason, DriverConfig,
-    DriverHandle, Duration, Endpoint, InboundFrame, InprocConn, InprocPeerSnapshot, InternalEvent,
-    Message, MessageEncoder, MonitorEvent, PeerCommandKind, PeerEntry, PeerIdent, PeerInfo,
-    ReconnectPolicy, Result, Role, SocketDriver, SocketType, ZmtpConnection, ZmtpEvent,
+    AnyConn, AnyStream, ConnectionConfig, ConnectionDriver, DisconnectReason, Duration, Endpoint,
+    InboundFrame, InprocConn, InprocPeerSnapshot, InternalEvent, Message, MessageEncoder,
+    MonitorEvent, PeerCommandKind, PeerDriverConfig, PeerDriverHandle, PeerEntry, PeerIdent,
+    PeerInfo, ReconnectPolicy, Result, Role, SocketDriver, SocketType, ZmtpConnection, ZmtpEvent,
     generated_identity, max_peer_count, mpsc, peer_ident_socket_addr, supports_groups,
     supports_subscribe,
 };
@@ -174,13 +174,13 @@ impl SocketDriver {
             return;
         }
 
-        // Per-connection driver inbox: bounded so a stuck TCP write
-        // back-pressures into the pump, not into the shared send queue.
+        // Per-connection driver inbox: bounded so control traffic cannot
+        // grow without limit behind a stuck TCP write.
         let inbox_cap = 64usize;
         let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
         let child_cancel = self.cancel.child_token();
 
-        let driver_cfg = DriverConfig {
+        let driver_cfg = PeerDriverConfig {
             handshake_timeout: self.options.handshake_timeout,
             heartbeat_interval: self.options.heartbeat_interval,
             heartbeat_timeout: self.options.heartbeat_timeout,
@@ -226,35 +226,40 @@ impl SocketDriver {
         let arena_threshold = self
             .options
             .arena_threshold
-            .unwrap_or(omq_proto::encoded_queue::ARENA_THRESHOLD);
+            .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
         let uses_crypto = self.options.mechanism.has_frame_transform();
-        let slot = if uses_crypto {
-            None
+        let (slot, transmit_slot_tx) = if uses_crypto {
+            (None, None)
         } else {
-            let wire_slot_cap = self
+            let transmit_slot_cap = self
                 .options
-                .wire_slot_cap
-                .unwrap_or(crate::engine::wire_slot::WIRE_SLOT_CAP_DEFAULT);
-            let s = crate::engine::wire_slot::PeerWireSlot::new(
+                .transmit_slot_cap
+                .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
+            let transmit_slot_msg_cap = self.options.send_hwm.unwrap_or(1000).max(1) as usize;
+            let (s, tx) = crate::engine::transmit_slot::PeerTransmitSlot::new(
                 peer_id,
                 has_transform,
                 passthrough_info,
                 arena_threshold,
-                wire_slot_cap,
+                transmit_slot_cap,
+                transmit_slot_msg_cap,
                 #[cfg(feature = "ws")]
                 is_ws,
                 #[cfg(feature = "ws")]
                 ws_masked,
             );
-            Some(s)
+            (
+                Some(s),
+                Some(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
+            )
         };
         let driver = driver.with_arena_threshold(arena_threshold);
         let driver = match slot {
-            Some(ref s) => driver.with_wire_slot(s.clone()),
+            Some(ref s) => driver.with_transmit_slot(s.clone()),
             None => driver,
         };
         let pipe_cap = self.options.send_hwm.unwrap_or(1024).max(16) as usize;
-        let (send_pipe, send_pipe_rx) = blume::bounded(pipe_cap);
+        let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
         let driver = driver.with_send_pipe(send_pipe_rx);
 
         // Recv bypass: for socket types whose recv path is a plain fair-queue
@@ -295,11 +300,12 @@ impl SocketDriver {
             peer_id,
             PeerEntry {
                 ident: peer_ident,
-                handle: DriverHandle {
+                handle: PeerDriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel,
-                    wire_slot: slot.clone(),
-                    send_pipe: Some(send_pipe),
+                    transmit_slot: slot.clone(),
+                    transmit_slot_tx,
+                    send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -364,7 +370,7 @@ impl SocketDriver {
     /// Inproc fast path: skip the ZMTP codec entirely. The peer's
     /// snapshot (socket type + identity) was exchanged during inproc
     /// connect, so we synthesise `HandshakeSucceeded` immediately and
-    /// run a tiny driver that pumps `Message`/`Command` through a
+    /// run a small peer task that forwards `Message`/`Command` through a
     /// pair of `mpsc` channels - no greeting, no frame headers, no
     /// state machine.
     fn spawn_inproc_peer(
@@ -396,6 +402,8 @@ impl SocketDriver {
         let inbox_cap = 64usize;
         let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
         let child_cancel = self.cancel.child_token();
+        let pipe_cap = self.options.send_hwm.unwrap_or(1024).max(16) as usize;
+        let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
 
         // Pre-build the synthesised PeerProperties from the
         // connect-time snapshot. The handshake-replay code in
@@ -432,11 +440,12 @@ impl SocketDriver {
             peer_id,
             PeerEntry {
                 ident: peer_ident,
-                handle: DriverHandle {
+                handle: PeerDriverHandle {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
-                    wire_slot: None,
-                    send_pipe: None,
+                    transmit_slot: None,
+                    transmit_slot_tx: None,
+                    send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -473,6 +482,8 @@ impl SocketDriver {
                 recv_direct,
                 spsc,
                 recv_sink,
+                shared_rx: self.send_strategy.shared_rx(),
+                send_pipe_rx,
             },
         ));
         if let Some(peer) = self.peers.get_mut(&peer_id) {
@@ -563,7 +574,7 @@ impl SocketDriver {
         );
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;
-        PeerLifecycle::new(self).update_wire_slot();
+        PeerLifecycle::new(self).update_transmit_slot();
     }
 
     async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
@@ -635,14 +646,14 @@ impl SocketDriver {
 
     async fn replay_state_to_peer(
         &self,
-        handle: &crate::engine::DriverHandle,
+        handle: &crate::engine::PeerDriverHandle,
         subs_replay: Vec<bytes::Bytes>,
     ) {
         if supports_subscribe(self.socket_type) {
             for prefix in subs_replay {
                 let _ = handle
                     .inbox
-                    .send(crate::engine::DriverCommand::SendCommand(
+                    .send(crate::engine::PeerDriverCommand::SendCommand(
                         omq_proto::proto::Command::Subscribe(prefix),
                     ))
                     .await;
@@ -659,7 +670,7 @@ impl SocketDriver {
             for group in groups {
                 let _ = handle
                     .inbox
-                    .send(crate::engine::DriverCommand::SendCommand(
+                    .send(crate::engine::PeerDriverCommand::SendCommand(
                         omq_proto::proto::Command::Join(group),
                     ))
                     .await;
@@ -703,7 +714,7 @@ fn can_bypass_actor_recv(t: SocketType) -> bool {
 /// Inproc fast path connection driver context. Replaces the
 /// `engine::ConnectionDriver` / ZMTP codec stack for in-process peers.
 struct InprocDriverCtx {
-    peer_out: mpsc::Sender<(u64, crate::engine::PeerOut)>,
+    peer_out: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
     peer_id: u64,
     cancel: tokio_util::sync::CancellationToken,
     peer_props: omq_proto::proto::command::PeerProperties,
@@ -711,6 +722,8 @@ struct InprocDriverCtx {
     recv_direct: Option<async_channel::Sender<omq_proto::message::Message>>,
     spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
     recv_sink: Option<crate::engine::RecvSink>,
+    shared_rx: Option<crate::routing::fallback_queue::FallbackReceiver>,
+    send_pipe_rx: crate::engine::SendPipeConsumer,
 }
 
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
@@ -718,12 +731,12 @@ struct InprocDriverCtx {
 /// inbox and the partner's channels until either side drops.
 #[expect(clippy::too_many_lines)]
 async fn inproc_peer_driver(
-    mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
+    mut inbox: mpsc::Receiver<crate::engine::PeerDriverCommand>,
     mut in_rx: mpsc::Receiver<InboundFrame>,
     out: mpsc::Sender<InboundFrame>,
     ctx: InprocDriverCtx,
 ) {
-    use crate::engine::{DriverCommand, PeerOut};
+    use crate::engine::{PeerDriverCommand, PeerEvent};
     use omq_proto::proto::greeting::ZMTP_MINOR;
 
     let InprocDriverCtx {
@@ -735,16 +748,20 @@ async fn inproc_peer_driver(
         recv_direct,
         spsc,
         mut recv_sink,
+        shared_rx,
+        mut send_pipe_rx,
     } = ctx;
+    let mut shared_batch = Vec::with_capacity(crate::routing::SHARED_MAX_BATCH_MSGS);
+    let mut send_pipe_batch = Vec::with_capacity(crate::routing::SHARED_MAX_BATCH_MSGS);
 
     #[expect(clippy::items_after_statements)]
     async fn emit_event(
-        peer_out: &mpsc::Sender<(u64, crate::engine::PeerOut)>,
+        peer_out: &mpsc::Sender<(u64, crate::engine::PeerEvent)>,
         peer_id: u64,
         ev: ZmtpEvent,
     ) -> Result<(), ()> {
         peer_out
-            .send((peer_id, PeerOut::Event(ev)))
+            .send((peer_id, PeerEvent::Event(ev)))
             .await
             .map_err(|_| ())
     }
@@ -771,18 +788,77 @@ async fn inproc_peer_driver(
                 biased;
                 () = cancel.cancelled() => return,
                 cmd = inbox.recv() => match cmd {
-                    Some(DriverCommand::SendMessage(m)) => {
+                    Some(PeerDriverCommand::SendMessage(m)) => {
                         if out.send(InboundFrame::Message(m)).await.is_err() {
                             return;
                         }
                     }
-                    Some(DriverCommand::SendEncoded(_)) => {}
-                    Some(DriverCommand::SendCommand(c)) => {
+                    Some(PeerDriverCommand::SendEncoded(_)) => {}
+                    Some(PeerDriverCommand::SendCommand(c)) => {
                         if out.send(InboundFrame::Command(Box::new(c))).await.is_err() {
                             return;
                         }
                     }
-                    Some(DriverCommand::Close) | None => return,
+                    Some(PeerDriverCommand::Close) | None => return,
+                },
+                msg = async {
+                    if let Some(ref rx) = shared_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    let Some(first) = msg else { return; };
+                    shared_batch.push(first);
+                    let batch_limit = shared_rx
+                        .as_ref()
+                        .map_or(
+                            crate::routing::SHARED_MAX_BATCH_MSGS,
+                            crate::routing::fallback_queue::FallbackReceiver::batch_limit,
+                        );
+                    let mut popped = 1usize;
+                    while popped < batch_limit {
+                        let Some(next) = shared_rx
+                            .as_ref()
+                            .and_then(crate::routing::fallback_queue::FallbackReceiver::try_pop)
+                        else {
+                            break;
+                        };
+                        shared_batch.push(next);
+                        popped += 1;
+                    }
+                    for msg in shared_batch.drain(..) {
+                        if out.send(InboundFrame::Message(msg)).await.is_err() {
+                            if let Some(ref rx) = shared_rx {
+                                rx.release_permits(popped);
+                            }
+                            return;
+                        }
+                    }
+                    if let Some(ref rx) = shared_rx {
+                        rx.release_permits(popped);
+                    }
+                },
+                () = send_pipe_rx.notified() => {
+                    let drained = send_pipe_rx.drain_into(
+                        &mut send_pipe_batch,
+                        crate::routing::SHARED_MAX_BATCH_MSGS,
+                        omq_proto::flow::max_batch_bytes(),
+                    );
+                    if drained == 0 {
+                        if send_pipe_rx.is_disconnected() {
+                            return;
+                        }
+                        continue;
+                    }
+                    for msg in send_pipe_batch.drain(..) {
+                        if out.send(InboundFrame::Message(msg)).await.is_err() {
+                            return;
+                        }
+                    }
+                    if send_pipe_rx.is_disconnected() {
+                        return;
+                    }
                 },
                 frame = in_rx.recv() => match frame {
                     Some(InboundFrame::Message(m)) => {
@@ -848,7 +924,7 @@ async fn inproc_peer_driver(
     if let Some(ref ring) = spsc {
         ring.recv_notify.notify_one();
     }
-    let _ = peer_out.try_send((peer_id, PeerOut::Closed));
+    let _ = peer_out.try_send((peer_id, PeerEvent::Closed));
 }
 
 /// Try to push a message into the SPSC ring. Returns `None` if pushed
@@ -876,14 +952,14 @@ fn try_push_spsc(
 async fn route_inproc_message(
     m: Message,
     recv_direct: Option<&async_channel::Sender<Message>>,
-    peer_out: &mpsc::Sender<(u64, crate::engine::PeerOut)>,
+    peer_out: &mpsc::Sender<(u64, crate::engine::PeerEvent)>,
     peer_id: u64,
 ) -> bool {
-    use crate::engine::PeerOut;
+    use crate::engine::PeerEvent;
     match recv_direct {
         Some(tx) => tx.send(m).await.is_ok(),
         None => peer_out
-            .send((peer_id, PeerOut::Event(ZmtpEvent::Message(m))))
+            .send((peer_id, PeerEvent::Event(ZmtpEvent::Message(m))))
             .await
             .is_ok(),
     }

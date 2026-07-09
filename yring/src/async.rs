@@ -145,6 +145,12 @@ impl<T> AsyncProducer<T> {
     pub fn is_empty(&self) -> bool {
         self.ring.ring.producer_is_empty(self.cursor)
     }
+
+    /// The consumer half has been dropped.
+    #[inline]
+    pub fn is_consumer_dropped(&self) -> bool {
+        self.ring.ring.consumer_dropped.load(Ordering::Acquire)
+    }
 }
 
 /// Future returned by [`AsyncProducer::push_async`].

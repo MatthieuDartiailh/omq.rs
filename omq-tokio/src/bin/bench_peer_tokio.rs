@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 use std::net::Ipv4Addr;
 
 fn parse_ep(s: &str) -> Endpoint {
@@ -60,9 +60,11 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let pull_current_thread = args.get(1).is_some_and(|arg| arg == "pull")
-        && std::env::var("OMQ_BENCH_PULL_CURRENT_THREAD").is_ok_and(|v| v == "1");
-    let rt = if !pull_current_thread
+    let force_current_thread = matches!(args.get(1).map(String::as_str), Some("pull"))
+        && std::env::var("OMQ_BENCH_PULL_CURRENT_THREAD").is_ok_and(|v| v == "1")
+        || matches!(args.get(1).map(String::as_str), Some("sub"))
+            && std::env::var("OMQ_BENCH_SUB_CURRENT_THREAD").is_ok_and(|v| v == "1");
+    let rt = if !force_current_thread
         && std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "multi_thread")
     {
         #[cfg(feature = "rt-multi-thread")]
@@ -71,9 +73,7 @@ fn main() {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|&v| v > 0)
-                .unwrap_or_else(|| {
-                    std::thread::available_parallelism().map_or(2, std::num::NonZero::get)
-                });
+                .unwrap_or(4);
             eprintln!("runtime: multi_thread ({workers} workers)");
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(workers)
@@ -208,18 +208,25 @@ async fn async_main(args: Vec<String>) {
 async fn run_pub(ep: Endpoint, size: usize, peers: usize) {
     let pub_ = Socket::new(
         SocketType::Pub,
-        bench_options(size).on_mute(omq_tokio::OnMute::Block),
+        bench_options(size).on_mute(omq_tokio::OnMute::DropNewest),
     );
     let monitor = pub_.monitor();
     let bound = pub_.bind(ep).await.expect("pub bind");
     print_bound_port(&bound);
     if peers > 0 {
-        wait_for_handshakes(&pub_, monitor, peers).await;
+        wait_for_subscribes(monitor, peers).await;
     }
     wait_for_start_barrier().await;
     let payload = bench_payload(size);
-    loop {
-        pub_.send(Message::single(payload.clone())).await.unwrap();
+    if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
+        loop {
+            pub_.send(Message::from_slice(&payload)).await.unwrap();
+        }
+    } else {
+        let msg = Message::single(payload.clone());
+        loop {
+            pub_.send(msg.clone()).await.unwrap();
+        }
     }
 }
 
@@ -257,6 +264,24 @@ async fn wait_for_handshakes(sock: &Socket, mut monitor: omq_tokio::MonitorStrea
             "timed out waiting for {peers} handshaked peers"
         );
         let _ = tokio::time::timeout(deadline - now, monitor.recv()).await;
+    }
+}
+
+async fn wait_for_subscribes(mut monitor: omq_tokio::MonitorStream, peers: usize) {
+    // TODO: Bench readiness should not depend only on monitor delivery. Use
+    // connection snapshots plus a data-plane subscription probe so monitor lag
+    // cannot invalidate a run.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut subscribed = 0;
+    while subscribed < peers {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out waiting for {peers} subscribers");
+        match tokio::time::timeout(deadline - now, monitor.recv()).await {
+            Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => panic!("monitor closed while waiting for subscribers: {e:?}"),
+            Err(e) => panic!("timed out waiting for {peers} subscribers: {e:?}"),
+        }
     }
 }
 
@@ -343,7 +368,7 @@ async fn run_inproc_pubsub(name: String, size: usize, duration: Duration, peers:
     let ep = Endpoint::Inproc { name };
     let pub_ = Socket::new(
         SocketType::Pub,
-        bench_options(size).on_mute(omq_tokio::OnMute::Block),
+        bench_options(size).on_mute(omq_tokio::OnMute::DropNewest),
     );
     pub_.bind(ep.clone()).await.expect("pub bind");
 

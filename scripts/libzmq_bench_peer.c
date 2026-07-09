@@ -125,6 +125,13 @@ int main(int argc, char **argv) {
     void *ctx = zmq_ctx_new();
     if (!ctx) die("zmq_ctx_new");
 
+    const char *io_threads_env = getenv("ZMQ_IO_THREADS");
+    if (io_threads_env) {
+        int n = atoi(io_threads_env);
+        if (n > 0)
+            zmq_ctx_set(ctx, ZMQ_IO_THREADS, n);
+    }
+
     if (strcmp(role, "push") == 0) {
         void *sock = zmq_socket(ctx, ZMQ_PUSH);
         if (!sock) die("zmq_socket PUSH");

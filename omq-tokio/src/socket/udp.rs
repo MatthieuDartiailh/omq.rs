@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{DriverCommand, DriverHandle};
+use crate::engine::{PeerDriverCommand, PeerDriverHandle};
 use crate::transport::udp;
 use omq_proto::endpoint::Endpoint;
 use omq_proto::message::Message;
@@ -92,13 +92,13 @@ pub(crate) fn spawn_dish_listener(
     })
 }
 
-/// Spawn a RADIO sender task. Drains [`DriverCommand`]s from `inbox_rx`
+/// Spawn a RADIO sender task. Drains [`PeerDriverCommand`]s from `inbox_rx`
 /// and emits each message as one UDP datagram. Skips messages that
 /// don't match the RADIO `[group, body]` shape (any other shape is a
 /// programming error; drop silently).
 pub(crate) fn spawn_radio_sender(
     sock: UdpSocket,
-    mut inbox_rx: mpsc::Receiver<DriverCommand>,
+    mut inbox_rx: mpsc::Receiver<PeerDriverCommand>,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -106,7 +106,7 @@ pub(crate) fn spawn_radio_sender(
             tokio::select! {
                 () = cancel.cancelled() => break,
                 cmd = inbox_rx.recv() => match cmd {
-                    Some(DriverCommand::SendMessage(m)) => {
+                    Some(PeerDriverCommand::SendMessage(m)) => {
                         if m.len() != 2 {
                             continue;
                         }
@@ -119,25 +119,26 @@ pub(crate) fn spawn_radio_sender(
                             let _ = sock.send(&dgram).await;
                         }
                     }
-                    Some(DriverCommand::SendEncoded(_) | DriverCommand::SendCommand(_)) => {},
-                    Some(DriverCommand::Close) | None => break,
+                    Some(PeerDriverCommand::SendEncoded(_) | PeerDriverCommand::SendCommand(_)) => {},
+                    Some(PeerDriverCommand::Close) | None => break,
                 }
             }
         }
     })
 }
 
-/// Build a [`DriverHandle`] for a synthetic UDP RADIO peer. The handle's
+/// Build a [`PeerDriverHandle`] for a synthetic UDP RADIO peer. The handle's
 /// inbox feeds the sender task; its cancellation token tears the task
 /// down on `disconnect` / socket close.
 pub(crate) fn fake_handle(
-    inbox: mpsc::Sender<DriverCommand>,
+    inbox: mpsc::Sender<PeerDriverCommand>,
     cancel: CancellationToken,
-) -> DriverHandle {
-    DriverHandle {
+) -> PeerDriverHandle {
+    PeerDriverHandle {
         inbox,
         cancel,
-        wire_slot: None,
+        transmit_slot: None,
+        transmit_slot_tx: None,
         send_pipe: None,
     }
 }

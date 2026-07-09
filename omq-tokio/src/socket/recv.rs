@@ -1,7 +1,7 @@
 //! Socket recv mux for async-channel plus per-peer yring fast paths.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwapOption;
@@ -27,6 +27,15 @@ pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
 /// `SpscAwareRecv` skip re-cloning the Vec when nothing changed.
 pub(crate) type SpscConsumerGeneration = Arc<AtomicU64>;
 
+pub(crate) enum SpscPush {
+    Sent,
+    Unavailable(Message),
+    Full {
+        msg: Message,
+        space: Arc<tokio::sync::Notify>,
+    },
+}
+
 /// Per-TCP-peer yring consumer entry. The driver pushes decoded messages
 /// into its yring producer; the recv side drains the consumer here.
 pub(crate) struct TcpYringConsumer {
@@ -50,6 +59,7 @@ pub(crate) struct SpscHandles {
     pub consumers: SpscConsumers,
     pub consumer_generation: SpscConsumerGeneration,
     pub send_ring: SpscSendRing,
+    pub send_ring_available: Arc<AtomicBool>,
     pub recv_notify: SpscRecvNotify,
     pub activated: SpscActivated,
     pub tcp_consumers: TcpConsumers,
@@ -61,6 +71,7 @@ impl Default for SpscHandles {
             consumers: Arc::new(RwLock::new(Vec::new())),
             consumer_generation: Arc::new(AtomicU64::new(0)),
             send_ring: Arc::new(ArcSwapOption::empty()),
+            send_ring_available: Arc::new(AtomicBool::new(false)),
             recv_notify: Arc::new(tokio::sync::Notify::new()),
             activated: Arc::new(tokio::sync::Notify::new()),
             tcp_consumers: Arc::new(RwLock::new(Vec::new())),
@@ -87,6 +98,9 @@ pub(crate) struct SpscAwareRecv {
     activated: SpscActivated,
     /// Single-peer send fast path ring (None when sender has >1 peer).
     send_ring: SpscSendRing,
+    /// Cheap guard for the send fast path. Avoids an `ArcSwap` load on the
+    /// common TCP/no-inproc path.
+    send_ring_available: Arc<AtomicBool>,
     /// Batched messages drained from consumers (inproc + TCP).
     inproc_cache: Mutex<VecDeque<Message>>,
     /// Cached clone of consumers Vecs, refreshed when generation changes.
@@ -110,6 +124,7 @@ impl SpscAwareRecv {
             recv_notify: handles.recv_notify,
             activated: handles.activated,
             send_ring: handles.send_ring,
+            send_ring_available: handles.send_ring_available,
             inproc_cache: Mutex::new(VecDeque::new()),
             cached_consumers: Mutex::new(CachedConsumers {
                 generation: u64::MAX,
@@ -149,6 +164,7 @@ impl SpscAwareRecv {
                         cache.push_back(msg);
                     }
                     consumer.release();
+                    p.space_notify.notify_waiters();
                 } else if consumer.is_disconnected() {
                     has_disconnected = true;
                 }
@@ -243,33 +259,53 @@ impl SpscAwareRecv {
         }
         self.consumers.write().unwrap().clear();
         self.tcp_consumers.write().unwrap().clear();
+        if let Some(pair) = self.send_ring.load_full() {
+            pair.space_notify.notify_waiters();
+        }
+        self.send_ring_available.store(false, Ordering::Release);
         self.send_ring.store(None);
         while self.rx.try_recv().is_ok() {}
     }
 
-    /// SPSC send fast path: push directly into the peer's yring.
-    /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
-    /// unavailable or the ring is full.
-    pub(crate) fn try_push_spsc(&self, msg: Message) -> core::result::Result<(), Message> {
+    pub(crate) fn try_push_spsc_or_full(&self, msg: Message) -> SpscPush {
+        if !self.send_ring_available.load(Ordering::Acquire) {
+            return SpscPush::Unavailable(msg);
+        }
         let Some(pair) = self.send_ring.load_full() else {
-            return Err(msg);
+            return SpscPush::Unavailable(msg);
         };
         if !pair.recv_ready.load(Ordering::Acquire)
             || pair
                 .max_message_size
                 .is_some_and(|max| msg.byte_len() > max)
         {
-            return Err(msg);
+            return SpscPush::Unavailable(msg);
         }
         let Ok(mut producer) = pair.producer.try_lock() else {
-            return Err(msg);
+            return SpscPush::Unavailable(msg);
         };
+        if producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
+            return SpscPush::Unavailable(msg);
+        }
         if producer.is_full() {
-            return Err(msg);
+            return SpscPush::Full {
+                msg,
+                space: pair.space_notify.clone(),
+            };
         }
         let _ = producer.push(msg);
         producer.flush();
         pair.recv_notify.notify_one();
-        Ok(())
+        SpscPush::Sent
+    }
+
+    /// SPSC send fast path: push directly into the peer's yring.
+    /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
+    /// unavailable or the ring is full.
+    pub(crate) fn try_push_spsc(&self, msg: Message) -> core::result::Result<(), Message> {
+        match self.try_push_spsc_or_full(msg) {
+            SpscPush::Sent => Ok(()),
+            SpscPush::Unavailable(msg) | SpscPush::Full { msg, .. } => Err(msg),
+        }
     }
 }

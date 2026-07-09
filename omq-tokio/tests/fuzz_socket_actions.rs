@@ -93,7 +93,10 @@ async fn fuzz_pub_sub_action_sequences() {
     for it in 0..iters() {
         let ep = random_ipc_or_tcp(&mut rng);
 
-        let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
+        let pub_ = Socket::new(
+            SocketType::Pub,
+            Options::default().on_mute(OnMute::DropNewest),
+        );
         pub_.bind(ep.clone()).await.unwrap();
 
         let n_subs = rng.random_range(1..=4);

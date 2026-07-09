@@ -203,7 +203,7 @@ pub fn encode_message_prefixed_flat(prefix: &[u8], msg: &Message, buf: &mut Byte
     });
 }
 
-// Message-level gather encoding moved to `EncodedQueue` methods, which
+// Message-level gather encoding moved to `FrameBuffer` methods, which
 // write frame headers directly into the arena and track payloads as
 // external entries. Single-frame gather encoding (`encode_frame_into`)
 // remains here for mechanism handshake command frames.
