@@ -200,25 +200,16 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
 
     match inner.try_send(msg) {
-        Ok(()) => {
-            // SAFETY: zmq contract guarantees single-threaded access per socket.
-            let (count, bytes) = sock.send_yield.get();
-            *count += 1;
-            *bytes += len;
-            if *count >= 64 || *bytes >= 1_024 * 1_024 {
-                *count = 0;
-                *bytes = 0;
-                std::thread::yield_now();
-            }
-            ret_len
-        }
+        Ok(()) => ret_len,
         Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => fail(ETERM),
         Err(omq_tokio::TrySendError::Full(_)) if dontwait => fail(libc::EAGAIN),
         Err(omq_tokio::TrySendError::Full(mut msg)) => {
-            // Queue full: spin-yield to let the tokio driver drain,
-            // then fall back to block_on if still full.
-            for _ in 0..64 {
-                std::thread::yield_now();
+            for i in 0..8 {
+                if i < 4 {
+                    std::hint::spin_loop();
+                } else {
+                    std::thread::yield_now();
+                }
                 match inner.try_send(msg) {
                     Ok(()) => return ret_len,
                     Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => {
@@ -316,6 +307,8 @@ pub extern "C" fn zmq_recv(
 }
 
 fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags: c_int) -> c_int {
+    use std::sync::atomic::Ordering;
+
     // Inproc bypass fast path: copy from byte ring directly into user
     // buffer. Zero intermediate Bytes allocation.
     // SAFETY: zmq contract guarantees single-threaded access per socket.
@@ -326,6 +319,67 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
             Err(e) => return fail(e),
         }
     }
+
+    // Multipart drain: leftover frames use the Bytes-returning path.
+    if sock.drain_nonempty.load(Ordering::Relaxed) {
+        return zmq_recv_via_frame(sock, buf, buf_len, flags);
+    }
+
+    // Fast path: pop Message from yring, borrow first frame directly.
+    // Avoids the Bytes::copy_from_slice that pop_recv_frame/decompose_message
+    // would do for inline messages.
+    // SAFETY: zmq contract guarantees single-threaded access per socket.
+    let Some(cons) = sock.recv_cons.get() else {
+        return fail(ETERM);
+    };
+
+    if let Some(m) = try_pop_dual(cons, sock) {
+        signal_recv_space(sock);
+        return recv_msg_to_buf(sock, &m, buf, buf_len);
+    }
+
+    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
+    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
+    if dontwait {
+        return fail(libc::EAGAIN);
+    }
+
+    match block_recv(sock, rcvtimeo, || {
+        let m = try_pop_dual(cons, sock)?;
+        signal_recv_space(sock);
+        Some(m)
+    }) {
+        Ok(m) => recv_msg_to_buf(sock, &m, buf, buf_len),
+        Err(e) => fail(e),
+    }
+}
+
+/// Borrow the first frame of a Message and copy into the user buffer.
+/// Zero heap allocation for inline messages.
+#[inline]
+fn recv_msg_to_buf(
+    sock: &OmqSocket,
+    m: &omq_tokio::Message,
+    buf: *mut libc::c_void,
+    buf_len: usize,
+) -> c_int {
+    let start = msg_start_index(sock, m);
+    let data = m.get(start).unwrap_or(&[]);
+    copy_to_buf(buf, buf_len, data);
+    stash_remaining_parts(sock, m, start);
+    match checked_c_int_len(data.len()) {
+        Ok(n) => n,
+        Err(e) => fail(e),
+    }
+}
+
+/// Fallback for `zmq_recv` when multipart drain is non-empty.
+fn zmq_recv_via_frame(
+    sock: &OmqSocket,
+    buf: *mut libc::c_void,
+    buf_len: usize,
+    flags: c_int,
+) -> c_int {
     match pop_recv_frame(sock, flags) {
         Ok((frame, _more)) => {
             let frame_len = frame.len();
@@ -455,11 +509,10 @@ fn recv_bypass_direct(
         && let Some(m) = try_pop_dual(cons, sock)
     {
         signal_recv_space(sock);
-        let (frame, _more) = decompose_message(sock, &m).map_err(|_| ETERM)?;
-        let frame_len = frame.len();
-        copy_to_buf(buf, buf_len, &frame);
-        #[expect(clippy::cast_possible_wrap)]
-        return Ok(frame_len as c_int);
+        let data = m.get(0).unwrap_or(&[]);
+        copy_to_buf(buf, buf_len, data);
+        stash_remaining_parts(sock, &m, 0);
+        return checked_c_int_len(data.len());
     }
 
     let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
@@ -503,13 +556,10 @@ fn try_recv_bypass_or_yring(
         && let Some(m) = try_pop_dual(cons, sock)
     {
         signal_recv_space(sock);
-        let frame = m.part_bytes(0).unwrap_or_default();
-        let frame_len = frame.len();
-        // Handle multipart: stash remaining parts.
-        if m.len() > 1 {
-            let _ = decompose_message(sock, &m);
-        }
-        copy_to_buf(buf, buf_len, &frame);
+        let data = m.get(0).unwrap_or(&[]);
+        let frame_len = data.len();
+        copy_to_buf(buf, buf_len, data);
+        stash_remaining_parts(sock, &m, 0);
         return checked_c_int_len(frame_len).map(Some);
     }
     Ok(None)
@@ -529,6 +579,27 @@ fn try_pop_dual(
     cons.fast
         .prefetch_and_pop()
         .or_else(|| cons.pump.prefetch_and_pop())
+}
+
+#[inline]
+fn msg_start_index(sock: &OmqSocket, msg: &omq_tokio::Message) -> usize {
+    usize::from(sock.socket_type == omq_tokio::SocketType::Dish && msg.len() >= 2)
+}
+
+fn stash_remaining_parts(sock: &OmqSocket, msg: &omq_tokio::Message, start: usize) {
+    let nparts = msg.len();
+    let next = start + 1;
+    if next < nparts {
+        sock.drain_nonempty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut drain) = sock.recv_drain.lock() {
+            for i in next..nparts {
+                if let Some(b) = msg.part_bytes(i) {
+                    drain.push_back(b);
+                }
+            }
+        }
+    }
 }
 
 fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Bytes, bool), c_int> {
