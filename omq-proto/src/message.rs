@@ -341,7 +341,14 @@ impl Message {
     {
         let payloads: Vec<Payload> = parts
             .into_iter()
-            .map(|p| Payload::from_bytes(p.into()))
+            .map(|p| {
+                let b = p.into();
+                if b.len() <= MAX_INLINE_PAYLOAD {
+                    Payload::from_slice(&b)
+                } else {
+                    Payload::from_bytes(b)
+                }
+            })
             .collect();
         match payloads.len() {
             0 => Self::new(),
@@ -966,6 +973,21 @@ mod tests {
         assert_eq!(m.len(), 3);
         assert_eq!(m.byte_len(), 6);
         assert_eq!(m.part_bytes(1).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn message_multipart_inlines_small_parts() {
+        let m = Message::multipart([
+            Bytes::from_static(b"a"),
+            Bytes::copy_from_slice(&[b'b'; MAX_INLINE_PAYLOAD]),
+            Bytes::copy_from_slice(&[b'c'; MAX_INLINE_PAYLOAD + 1]),
+        ]);
+        let MessageInner::Multi(parts) = &m.inner else {
+            panic!("expected multipart");
+        };
+        assert!(matches!(parts[0].inner, PayloadInner::Inline { .. }));
+        assert!(matches!(parts[1].inner, PayloadInner::Inline { .. }));
+        assert!(matches!(parts[2].inner, PayloadInner::Single(_)));
     }
 
     #[test]

@@ -829,9 +829,10 @@ pub fn getsockopt<'py>(
         | constants::TCP_MAXRT
         | constants::MULTICAST_HOPS
         | constants::RECOVERY_IVL => Ok(int_to_bound(py, 0_i64)),
-        constants::RECONNECT_STOP => {
-            Ok(int_to_bound(py, i64::from(sock.overlay.lock().unwrap().reconnect_stop)))
-        }
+        constants::RECONNECT_STOP => Ok(int_to_bound(
+            py,
+            i64::from(sock.overlay.lock().unwrap().reconnect_stop),
+        )),
         constants::FD => {
             sock.materialize()?;
             let mat = sock.materialized.read().unwrap();

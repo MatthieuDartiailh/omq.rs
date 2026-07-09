@@ -244,6 +244,7 @@ impl ContextInner {
         };
         let (otx, orx) = flume::bounded(1);
         handle.spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(1), recv_pump).await;
             let _ = tokio::time::timeout(Duration::from_secs(1), send_pump).await;
             let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone());
             let _ = tokio::time::timeout(Duration::from_secs(1), s.close()).await;

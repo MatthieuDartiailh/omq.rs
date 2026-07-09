@@ -226,7 +226,7 @@ impl AsyncSocket {
             .iter()
             .map(|cs| crate::socket::connection_status_to_dict(py, cs))
             .collect::<PyResult<Vec<Bound<'py, PyDict>>>>()?;
-        Ok(PyList::new(py, temp)?)
+        PyList::new(py, temp)
     }
 
     fn connection_info<'py>(
