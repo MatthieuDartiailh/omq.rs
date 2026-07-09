@@ -149,7 +149,7 @@ pub struct Options {
     /// larger messages produce per-frame iovecs referencing the original
     /// `Bytes` payload.
     ///
-    /// `None` uses the default (`ARENA_THRESHOLD`, 8 KiB). Raise this
+    /// `None` uses the default (`ARENA_THRESHOLD`, 4 KiB). Raise this
     /// when payloads are owned by an external runtime (e.g. Python
     /// refcounted objects) where the gather path's per-chunk refcount
     /// traffic is more expensive than a flat memcpy.
@@ -424,7 +424,7 @@ impl Options {
 
     /// Set the per-`FrameBuffer` arena threshold. Messages smaller than
     /// this are copied into a contiguous arena buffer; larger ones use
-    /// zero-copy gather-write. Default: 8 KiB.
+    /// zero-copy gather-write. Default: 4 KiB.
     #[must_use]
     pub fn arena_threshold(mut self, bytes: usize) -> Self {
         self.arena_threshold = Some(bytes);
