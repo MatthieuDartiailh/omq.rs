@@ -474,6 +474,34 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)
     }
 
+    /// Wait until at least `min_peers` peers are connected, or `timeout`
+    /// expires. Returns the peer count at the time the threshold was met,
+    /// or `Error::Timeout` if the deadline is reached first.
+    ///
+    /// This is a data-plane readiness check. It polls `connections()`
+    /// rather than relying on `MonitorStream` events, which are
+    /// diagnostic and may lag under load.
+    pub async fn wait_connected(
+        &self,
+        min_peers: usize,
+        timeout: std::time::Duration,
+    ) -> Result<usize> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let conns = self.connections().await?;
+            if conns.len() >= min_peers {
+                return Ok(conns.len());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(5)),
+            )
+            .await;
+        }
+    }
+
     /// Snapshot every currently-connected peer. Empty vec when no peers
     /// are live. Useful for introspection / health checks.
     pub async fn connections(&self) -> Result<Vec<ConnectionStatus>> {
