@@ -54,29 +54,24 @@ fn print_bound_port(ep: &Endpoint) {
     }
 }
 
+#[cfg(unix)]
 extern "C" fn exit_on_signal(_sig: libc::c_int) {
     unsafe { libc::_exit(0) };
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let force_current_thread = matches!(args.get(1).map(String::as_str), Some("pull"))
-        && std::env::var("OMQ_BENCH_PULL_CURRENT_THREAD").is_ok_and(|v| v == "1")
-        || matches!(args.get(1).map(String::as_str), Some("sub"))
-            && std::env::var("OMQ_BENCH_SUB_CURRENT_THREAD").is_ok_and(|v| v == "1");
-    let rt = if !force_current_thread
-        && std::env::var("OMQ_BENCH_RUNTIME").is_ok_and(|v| v == "multi_thread")
-    {
+    let threads: usize = std::env::var("OMQ_BENCH_TOKIO_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1);
+    let rt = if threads > 1 {
         #[cfg(feature = "rt-multi-thread")]
         {
-            let workers = std::env::var("OMQ_BENCH_WORKERS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&v| v > 0)
-                .unwrap_or(4);
-            eprintln!("runtime: multi_thread ({workers} workers)");
+            eprintln!("runtime: multi_thread ({threads} workers)");
             tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(workers)
+                .worker_threads(threads)
                 .enable_all()
                 .build()
                 .expect("tokio runtime")
@@ -95,6 +90,7 @@ fn main() {
 
 #[expect(clippy::too_many_lines)]
 async fn async_main(args: Vec<String>) {
+    #[cfg(unix)]
     unsafe {
         libc::signal(
             libc::SIGTERM,
@@ -104,6 +100,11 @@ async fn async_main(args: Vec<String>) {
             libc::SIGINT,
             exit_on_signal as *const () as libc::sighandler_t,
         );
+        libc::signal(
+            libc::SIGALRM,
+            exit_on_signal as *const () as libc::sighandler_t,
+        );
+        libc::alarm(60);
     }
     match args.get(1).map(String::as_str) {
         Some("push") => {
@@ -440,6 +441,9 @@ fn bench_options(msg_size: usize) -> Options {
     if let Ok(path) = std::env::var("OMQ_BENCH_DICT_FILE") {
         let dict = Bytes::from(std::fs::read(&path).expect("read dict file"));
         o = o.compression_dict(dict);
+    }
+    if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
+        o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
     }
     o
 }

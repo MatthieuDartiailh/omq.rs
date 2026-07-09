@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the main hero chart:
+"""Generate the main chart:
 doc/charts/main_tcp.svg.
 
 Panel 1: PUSH/PULL throughput (MB/s + msg/s dashed), small messages.
@@ -17,13 +17,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
-SMALL_SIZES = [16, 64, 256]
-LARGE_SIZES = [256, 1024, 4096, 16384]
+SMALL_SIZES = [16, 32, 64, 128, 256, 1024]
+LARGE_SIZES = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262144, 4194304]
 
 sys.path.insert(0, str(REPO / "scripts"))
 from chart_hw import detect_hardware
 
-# Union of all impls plotted in either hero; used only as a load filter.
+# Union of all impls plotted in the main chart; used only as a load filter.
 IMPLS = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs",
          "rzmq", "rzmq-iouring"]
 
@@ -55,6 +55,8 @@ MAIN_TITLE = "PUSH/PULL throughput, TCP loopback, 2-process"
 
 
 def fmt_size(b: int) -> str:
+    if b >= 1024 * 1024:
+        return f"{b // (1024 * 1024)} MiB"
     if b >= 1024:
         return f"{b // 1024} KiB"
     return f"{b} B"
@@ -267,11 +269,17 @@ def draw_throughput_panel(
             ]
             if pts:
                 L.append(svg_polyline(pts, COLORS[name], width=2.5, dash="6,3"))
-                zero_pts = [
-                    (xs[i], y_msgs(msgs[sizes[i]][name]))
-                    for i in range(len(sizes))
-                    if name in msgs.get(sizes[i], {}) and msgs[sizes[i]][name] == 0
-                ]
+                zero_pts = []
+                nonzero_pts = []
+                for i in range(len(sizes)):
+                    if name not in msgs.get(sizes[i], {}):
+                        continue
+                    pt = (xs[i], y_msgs(msgs[sizes[i]][name]))
+                    if msgs[sizes[i]][name] == 0:
+                        zero_pts.append(pt)
+                    else:
+                        nonzero_pts.append(pt)
+                L.extend(svg_dots(nonzero_pts, COLORS[name]))
                 L.extend(svg_x_marks(zero_pts, COLORS[name]))
     else:
         for name in draw_order:
@@ -446,7 +454,7 @@ def generate_main_chart(tput: dict, msgs: dict, impls: list[str],
     leg_extra = (len(rows) - 1) * row_gap
     abbr_y = leg_y + leg_extra + 18
     L.append(svg_text(mid_x, abbr_y,
-                       "(nT) = user-chosen   [nT] = fixed by implementation",
+                       "(nT) = user-chosen   ·   [nT] = fixed by implementation",
                        size=9, fill="#9ca3af"))
 
     L.append("</svg>")

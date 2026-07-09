@@ -226,6 +226,8 @@ def main():
     with open(JSONL, "a") as f:
         for row in all_rows:
             f.write(json.dumps(row) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
     print(f"Appended {len(all_rows)} rows to {JSONL}", file=sys.stderr)
 
     if args.chart:

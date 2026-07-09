@@ -115,6 +115,7 @@ def _cleanup_ipc_sockets():
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
 COMPARISON_CHART_SIZES = [16, 64, 256, 1024, 4096, 16384]
+MAIN_EXTRA_CHART_SIZES = [32, 128, 512, 2048, 8192, 32768, 262144, 4194304]
 QUICK_SIZES = [64, 1024, 4096]
 
 # Physical sanity ceiling for a single TCP loopback stream (MB/s). Measured
@@ -446,6 +447,7 @@ def _run_throughput_once(
     dur = str(duration)
     issues: list = []
     cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
+    recv_env = {**cell_env, "OMQ_BENCH_TOKIO_THREADS": "1"}
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
         timeout_s = max(int(duration) + 5, 8)
@@ -474,7 +476,7 @@ def _run_throughput_once(
         connect_addr = str(port)
     try:
         output = capture_process(binary, "pull", connect_addr, str(size), dur,
-                                 env=cell_env)
+                                 env=recv_env)
         push_cpu = read_proc_cpu(push.pid)
     finally:
         _hard_kill(push)
@@ -487,6 +489,8 @@ def _run_throughput_once(
                         transport, size, 1, "pull CPU (peer stdout)")
         if push_ok and pull_ok:
             result["cpu_time"] = push_cpu + result["pull_cpu"]
+        if push_ok:
+            result["push_cpu_time"] = push_cpu
         result["_issues"] = issues
     return result
 
@@ -533,8 +537,7 @@ def _run_pubsub_once(
     else:
         addr = _fresh_addr(addr)
         cleanup_ipc_socket(addr)
-        if impl == "omq-tokio-mt":
-            cell_env["OMQ_BENCH_SUB_CURRENT_THREAD"] = "1"
+        recv_env = {**cell_env, "OMQ_BENCH_TOKIO_THREADS": "1"}
         pub_args = [binary, "pub", addr, str(size)]
         if pub_needs_peers:
             pub_args.append(str(peers))
@@ -553,7 +556,7 @@ def _run_pubsub_once(
         try:
             for _ in range(peers):
                 subs.append(spawn_process(binary, "sub", connect_addr,
-                                          str(size), dur, env=cell_env))
+                                          str(size), dur, env=recv_env))
             time.sleep(0.05)
             timeout_s = max(int(duration) + 5, 8)
             for s in subs:
@@ -599,6 +602,8 @@ def _run_pubsub_once(
                            f"{len(parsed)} subscribers (peer stdout)")
             if pub_ok and sub_ok:
                 result["cpu_time"] = pub_cpu + pull_cpu
+            if pub_ok:
+                result["pub_cpu_time"] = pub_cpu
     if result:
         result["_issues"] = issues
         if peers > 1 and "peers_measured" not in result:
@@ -638,9 +643,7 @@ def _run_fanout_once(
     issues: list = []
     start_at = time.time() + 2.0
     cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{start_at:.6f}"}
-    if push_subcmd == "push-fanout":
-        if impl == "omq-tokio-mt":
-            cell_env["OMQ_BENCH_PULL_CURRENT_THREAD"] = "1"
+    recv_env = {**cell_env, "OMQ_BENCH_TOKIO_THREADS": "1"}
     # Some peers need the worker count up front to
     # accept exactly N connections; pass it as a trailing arg when required.
     push_args = [binary, push_subcmd, addr, str(size)]
@@ -666,7 +669,7 @@ def _run_fanout_once(
     try:
         for _ in range(peers):
             pulls.append(spawn_process(binary, "pull", connect_addr,
-                                       str(size), str(duration), env=cell_env))
+                                       str(size), str(duration), env=recv_env))
         time.sleep(0.05)
         time.sleep(max(0.0, start_at + PEER_WARMUP_SECS - time.time()))
         push_cpu_before = read_proc_cpu(push.pid)
@@ -814,6 +817,8 @@ def _run_fanin_once(
                               size, peers, "collector CPU (peer stdout)")
         if push_ok and pull_ok:
             result["cpu_time"] = sum(pusher_cpus) + result["pull_cpu"]
+        if pull_ok:
+            result["pull_cpu_time"] = result["pull_cpu"]
         result["_issues"] = issues
     return result
 
@@ -874,6 +879,8 @@ def run_latency_cell(
                        size, 1, "req CPU (peer stdout)")
         if rep_ok and req_ok:
             result["cpu_time"] = rep_cpu + result["req_cpu"]
+        if req_ok:
+            result["req_cpu_time"] = result["req_cpu"]
         result["_issues"] = issues
         _flush_issues(result)
     return result
@@ -911,6 +918,8 @@ def append_jsonl(row: dict):
     JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(JSONL_PATH, "a") as f:
         f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def append_zero_tput_row(
@@ -963,7 +972,7 @@ IMPLS = {
         "fanout_push_subcmd": "push-fanout",
         "fanio_needs_peer_count": True,
         "supports_pubsub": True,
-        "env": {"OMQ_BENCH_RUNTIME": "multi_thread"},
+        "env": {"OMQ_BENCH_TOKIO_THREADS": "4"},
     },
     "libzmq": {
         "prefix": "z",
@@ -1157,6 +1166,8 @@ def run_benchmarks(
                             row["elapsed"] = round(result["elapsed"], 6)
                         if "cpu_time" in result:
                             row["cpu_time"] = round(result["cpu_time"], 6)
+                        if "push_cpu_time" in result:
+                            row["push_cpu_time"] = round(result["push_cpu_time"], 6)
                         if result.get("zero_transport"):
                             row["zero_transport"] = True
                         append_jsonl(row)
@@ -1210,6 +1221,8 @@ def run_benchmarks(
                         }
                         if "cpu_time" in result:
                             row["cpu_time"] = round(result["cpu_time"], 6)
+                        if "req_cpu_time" in result:
+                            row["req_cpu_time"] = round(result["req_cpu_time"], 6)
                         if "elapsed" in result:
                             row["elapsed"] = round(result["elapsed"], 6)
                         append_jsonl(row)
@@ -1269,6 +1282,8 @@ def run_benchmarks(
                                 row["elapsed"] = round(result["elapsed"], 6)
                             if "cpu_time" in result:
                                 row["cpu_time"] = round(result["cpu_time"], 6)
+                            if "pub_cpu_time" in result:
+                                row["pub_cpu_time"] = round(result["pub_cpu_time"], 6)
                             if result.get("zero_transport"):
                                 row["zero_transport"] = True
                             append_jsonl(row)
@@ -1391,6 +1406,8 @@ def run_benchmarks(
                                 row["elapsed"] = round(result["elapsed"], 6)
                             if "cpu_time" in result:
                                 row["cpu_time"] = round(result["cpu_time"], 6)
+                            if "pull_cpu_time" in result:
+                                row["pull_cpu_time"] = round(result["pull_cpu_time"], 6)
                             if result.get("zero_transport"):
                                 row["zero_transport"] = True
                             append_jsonl(row)
@@ -1427,8 +1444,8 @@ def main():
     )
     parser.add_argument(
         "--sizes", type=str, default=None,
-        help="comma-separated message sizes; must be comparison chart sizes "
-             "unless --allow-non-chart-sizes is set",
+        help="comma-separated message sizes; must be comparison or main chart "
+             "sizes unless --allow-non-chart-sizes is set",
     )
     parser.add_argument(
         "--allow-non-chart-sizes", action="store_true",
@@ -1509,7 +1526,8 @@ def main():
     sizes = QUICK_SIZES if args.quick_run else COMPARISON_CHART_SIZES
     if args.sizes:
         sizes = [int(x) for x in args.sizes.split(",")]
-        non_chart = sorted(set(sizes) - set(COMPARISON_CHART_SIZES))
+        chart_sizes = set(COMPARISON_CHART_SIZES) | set(MAIN_EXTRA_CHART_SIZES)
+        non_chart = sorted(set(sizes) - chart_sizes)
         if non_chart and not args.allow_non_chart_sizes:
             parser.error(
                 "--sizes includes non-chart sizes "
