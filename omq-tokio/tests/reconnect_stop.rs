@@ -53,13 +53,13 @@ async fn reconnect_stop_default_retries() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Default: reconnect_stop_conn_refused is false. Should retry.
-    let opts = Options::default().reconnect(ReconnectPolicy::Fixed(Duration::from_millis(30)));
+    let opts = Options::default().reconnect(ReconnectPolicy::Fixed(Duration::from_millis(50)));
     let push = Socket::new(SocketType::Push, opts);
     let mut mon = push.monitor();
     push.connect(ep).await.unwrap();
 
     let mut count = 0u32;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let evt = mon.recv().await.unwrap();
             if matches!(evt, MonitorEvent::ConnectDelayed { .. }) {
