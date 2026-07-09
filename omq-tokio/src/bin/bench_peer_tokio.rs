@@ -54,6 +54,7 @@ fn print_bound_port(ep: &Endpoint) {
     }
 }
 
+#[cfg(unix)]
 extern "C" fn exit_on_signal(_sig: libc::c_int) {
     unsafe { libc::_exit(0) };
 }
@@ -89,6 +90,7 @@ fn main() {
 
 #[expect(clippy::too_many_lines)]
 async fn async_main(args: Vec<String>) {
+    #[cfg(unix)]
     unsafe {
         libc::signal(
             libc::SIGTERM,
