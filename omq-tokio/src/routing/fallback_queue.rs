@@ -108,7 +108,7 @@ impl FallbackQueue {
                     }
                 }
             }
-            _ => unreachable!(),
+            OnMute::Block | _ => unreachable!("callers dispatch Block separately"),
         }
     }
 
