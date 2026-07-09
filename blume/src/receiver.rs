@@ -94,36 +94,36 @@ impl<T> Receiver<T> {
     /// Drain all pending values into `out` through a mutable receiver
     /// reference. This avoids holding `&Receiver` across `.await` in
     /// `Send` futures while preserving the single-consumer contract.
-    pub async fn recv_batch_mut(&mut self, out: &mut Vec<T>) -> Result<usize, RecvError> {
-        let before = out.len();
-        {
-            let cache = self.cache.get_mut();
-            if Self::drain_cache_into(cache, out) > 0 {
-                return Ok(out.len() - before);
+    ///
+    /// Items appear in FIFO order: `out.pop_front()` yields the oldest.
+    pub async fn recv_batch_mut(&mut self, out: &mut VecDeque<T>) -> Result<usize, RecvError> {
+        let cache = self.cache.get_mut();
+        if !cache.is_empty() {
+            let n = cache.len();
+            out.append(cache);
+            return Ok(n);
+        }
+        match self.shared.try_drain(cache) {
+            Ok(true) => {
+                let n = cache.len();
+                out.append(cache);
+                return Ok(n);
             }
-            match self.shared.try_drain(cache) {
-                Ok(true) => {
-                    Self::drain_cache_into(cache, out);
-                    return Ok(out.len() - before);
-                }
-                Ok(false) => {}
-                Err(RecvError) => return Err(RecvError),
-            }
+            Ok(false) => {}
+            Err(RecvError) => return Err(RecvError),
         }
 
         loop {
             let listener = self.shared.recv_event.listen();
 
-            {
-                let cache = self.cache.get_mut();
-                match self.shared.try_drain(cache) {
-                    Ok(true) => {
-                        Self::drain_cache_into(cache, out);
-                        return Ok(out.len() - before);
-                    }
-                    Ok(false) => {}
-                    Err(RecvError) => return Err(RecvError),
+            match self.shared.try_drain(cache) {
+                Ok(true) => {
+                    let n = cache.len();
+                    out.append(cache);
+                    return Ok(n);
                 }
+                Ok(false) => {}
+                Err(RecvError) => return Err(RecvError),
             }
 
             listener.await;

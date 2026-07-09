@@ -7,6 +7,7 @@
 //! producers and filters/pushes without a producer mutex. `xpub_nodrop`
 //! keeps the direct dispatch path so it can preserve backpressure.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -788,7 +789,7 @@ impl DeferredFanOut {
 
 impl DeferredFanOutWorker {
     async fn run(mut self, mut rx: blume::Receiver<DeferredFanOutMsg>) {
-        let mut batch = Vec::new();
+        let mut batch = VecDeque::new();
         let mut budget = DrainBudget::WORKER;
         loop {
             batch.clear();
@@ -798,8 +799,7 @@ impl DeferredFanOutWorker {
 
             loop {
                 budget.reset();
-                batch.reverse();
-                while let Some(msg) = batch.pop() {
+                while let Some(msg) = batch.pop_front() {
                     let len = msg.msg.byte_len();
                     let _ = self.dispatch(msg).await;
                     if !budget.account(len) {
@@ -807,7 +807,7 @@ impl DeferredFanOutWorker {
                     }
                 }
                 while let Ok(msg) = rx.try_recv() {
-                    batch.push(msg);
+                    batch.push_back(msg);
                 }
                 if !batch.is_empty() {
                     tokio::task::yield_now().await;
