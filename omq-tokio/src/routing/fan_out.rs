@@ -56,12 +56,18 @@ const WORKER_SHARD_PEER_CAP: usize = 4;
 const MAX_FAN_OUT_WORKER_SHARDS: usize = 8;
 const SHARD_CTRL_RING_CAP: usize = 64;
 
-/// Yield every N peers to keep latency bounded. Scales down with peer
-/// count: fewer peers per yield when fan-out is wide (more total work).
-/// isqrt gives sub-linear scaling; floor of 16 prevents over-yielding.
-fn yield_interval(peer_count: usize) -> u32 {
+/// Yield every N sends to keep latency bounded. Scales down with peer
+/// count and message size: fewer sends per yield when one send queues
+/// more total work. isqrt gives sub-linear peer scaling; floor of 16
+/// prevents over-yielding.
+fn yield_interval(peer_count: usize, msg_bytes: usize) -> u32 {
+    if peer_count == 0 {
+        return 1;
+    }
     let n = (peer_count as u32).max(1);
-    (512 / n.isqrt()).max(16)
+    let peer_interval = (512 / n.isqrt()).max(16);
+    let byte_interval = (256 * 1024 / msg_bytes.max(1)).clamp(16, 512) as u32;
+    peer_interval.min(byte_interval)
 }
 
 enum CachedResult {
@@ -1235,6 +1241,13 @@ impl Submitter {
         Ok(outcome)
     }
 
+    async fn maybe_yield(&self, target_count: usize, msg_bytes: usize) {
+        let interval = yield_interval(target_count, msg_bytes);
+        if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
+            tokio::task::yield_now().await;
+        }
+    }
+
     pub(crate) fn try_send(
         &self,
         msg: Message,
@@ -1320,6 +1333,7 @@ impl Submitter {
 
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = self.prepare(msg)?;
+        let msg_bytes = forwarded.byte_len();
 
         if let Some(ref shards) = self.shards
             && self.has_sharded_peers()
@@ -1332,10 +1346,7 @@ impl Submitter {
             let targets = self.collect_shard_targets(&forwarded, group.as_deref());
             let target_count = targets.fallback_targets.len() + targets.sharded_count;
             self.dispatch_shard_targets(shards, &forwarded, group, &targets)?;
-            let interval = yield_interval(target_count);
-            if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
-                tokio::task::yield_now().await;
-            }
+            self.maybe_yield(target_count, msg_bytes).await;
             return Ok(());
         }
 
@@ -1348,6 +1359,7 @@ impl Submitter {
                 if let Some(target) = target {
                     self.deactivate_target(&target);
                 }
+                self.maybe_yield(1, msg_bytes).await;
                 return Ok(());
             }
             CachedResult::SoleWire(TryFrameResult::Full) => {
@@ -1357,13 +1369,18 @@ impl Submitter {
                 };
                 if let Some(target) = target {
                     target.send(forwarded).await?;
+                    self.maybe_yield(1, msg_bytes).await;
                     return Ok(());
                 }
             }
             CachedResult::SoleWire(TryFrameResult::Ok) if self.lossy && !self.xpub_nodrop => {
+                self.maybe_yield(1, msg_bytes).await;
                 return Ok(());
             }
-            CachedResult::SoleWire(TryFrameResult::Ok) => return Ok(()),
+            CachedResult::SoleWire(TryFrameResult::Ok) => {
+                self.maybe_yield(1, msg_bytes).await;
+                return Ok(());
+            }
             CachedResult::Cached { targets, encoder } => {
                 // Encode once and distribute synchronously on this task via
                 // the thread-local arena (`dispatch_to_targets`), the same
@@ -1389,10 +1406,7 @@ impl Submitter {
                 if !self.lossy && outcome.is_full() {
                     send_to_targets_nodrop(&outcome.full_targets, forwarded.clone()).await?;
                 }
-                let interval = yield_interval(targets.len());
-                if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
-                    tokio::task::yield_now().await;
-                }
+                self.maybe_yield(targets.len(), msg_bytes).await;
                 return Ok(());
             }
             _ => {}
@@ -1414,10 +1428,7 @@ impl Submitter {
         if !self.lossy && outcome.is_full() {
             send_to_targets_nodrop(&outcome.full_targets, forwarded.clone()).await?;
         }
-        let interval = yield_interval(targets.len());
-        if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
-            tokio::task::yield_now().await;
-        }
+        self.maybe_yield(targets.len(), msg_bytes).await;
         Ok(())
     }
 
@@ -2159,7 +2170,7 @@ mod tests {
 
     use super::{
         DIRECT_SHARD_PEER_CAP, FanOutShardState, FanOutShards, MAX_FAN_OUT_WORKER_SHARDS,
-        ShardEndpoint, WORKER_SHARD_PEER_CAP,
+        ShardEndpoint, WORKER_SHARD_PEER_CAP, yield_interval,
     };
 
     const TEST_MAX_LOGICAL_SHARDS: usize = MAX_FAN_OUT_WORKER_SHARDS + 1;
@@ -2167,6 +2178,21 @@ mod tests {
     const TEST_LOW_WORKER_COUNT: usize = 2;
     const TEST_HIGH_WORKER_COUNT: usize = 64;
     const TEST_WIDE_PEER_COUNT: usize = 32;
+
+    #[test]
+    fn yield_interval_scales_with_message_size() {
+        assert_eq!(yield_interval(1, 16), 512);
+        assert_eq!(yield_interval(1, 256), 512);
+        assert_eq!(yield_interval(1, 1024), 256);
+        assert_eq!(yield_interval(1, 4096), 64);
+        assert_eq!(yield_interval(1, 16 * 1024), 16);
+    }
+
+    #[test]
+    fn yield_interval_yields_every_send_without_active_targets() {
+        assert_eq!(yield_interval(0, 16), 1);
+        assert_eq!(yield_interval(0, 16 * 1024), 1);
+    }
 
     #[test]
     fn desired_active_shards_ramps_monotonically() {
