@@ -5,6 +5,8 @@ use tokio::sync::Notify;
 
 use omq_proto::message::Message;
 
+use super::signal::DataSignal;
+
 pub(crate) type SendPipeProducerHandle = Arc<Mutex<Option<SendPipeProducer>>>;
 
 const SEND_PIPE_LWM_DIVISOR: usize = 2;
@@ -22,9 +24,8 @@ pub(crate) enum SendPipeError {
 #[derive(Debug)]
 pub(crate) struct SendPipeProducer {
     producer: yring::Producer<Message>,
-    data_ready: Arc<Notify>,
+    data_signal: Arc<DataSignal>,
     space_available: Arc<Notify>,
-    data_pending: Arc<AtomicBool>,
     above_lwm: Arc<AtomicBool>,
 }
 
@@ -32,31 +33,27 @@ pub(crate) struct SendPipeProducer {
 #[derive(Debug)]
 pub(crate) struct SendPipeConsumer {
     consumer: yring::Consumer<Message>,
-    data_ready: Arc<Notify>,
+    data_signal: Arc<DataSignal>,
     space_available: Arc<Notify>,
-    data_pending: Arc<AtomicBool>,
     above_lwm: Arc<AtomicBool>,
 }
 
 pub(crate) fn send_pipe(capacity: usize) -> (SendPipeProducer, SendPipeConsumer) {
     let (producer, consumer) = yring::spsc(capacity.max(1));
-    let data_ready = Arc::new(Notify::new());
+    let data_signal = Arc::new(DataSignal::new());
     let space_available = Arc::new(Notify::new());
-    let data_pending = Arc::new(AtomicBool::new(false));
     let above_lwm = Arc::new(AtomicBool::new(false));
     (
         SendPipeProducer {
             producer,
-            data_ready: data_ready.clone(),
+            data_signal: data_signal.clone(),
             space_available: space_available.clone(),
-            data_pending: data_pending.clone(),
             above_lwm: above_lwm.clone(),
         },
         SendPipeConsumer {
             consumer,
-            data_ready,
+            data_signal,
             space_available,
-            data_pending,
             above_lwm,
         },
     )
@@ -70,7 +67,7 @@ impl SendPipeProducer {
         match self.producer.push(msg) {
             Ok(()) => {
                 self.producer.flush();
-                self.signal_data_ready();
+                self.data_signal.mark();
                 Ok(())
             }
             Err(returned) if self.producer.is_consumer_dropped() => {
@@ -94,39 +91,34 @@ impl SendPipeProducer {
     pub(crate) fn space_available(&self) -> Arc<Notify> {
         self.space_available.clone()
     }
-
-    fn signal_data_ready(&self) {
-        if !self.data_pending.load(Ordering::Acquire)
-            && self
-                .data_pending
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            self.data_ready.notify_one();
-        }
-    }
 }
 
 impl Drop for SendPipeProducer {
     fn drop(&mut self) {
         self.producer.close();
-        self.data_pending.store(true, Ordering::Release);
-        self.data_ready.notify_waiters();
+        self.data_signal.wake_all();
     }
 }
 
 impl SendPipeConsumer {
     pub(crate) async fn notified(&self) {
-        self.data_ready.notified().await;
+        self.data_signal.notified().await;
     }
 
-    pub(crate) fn drain_into(&mut self, batch: &mut Vec<Message>, max_msgs: usize) -> usize {
+    pub(crate) fn drain_into(
+        &mut self,
+        batch: &mut Vec<Message>,
+        max_msgs: usize,
+        max_bytes: usize,
+    ) -> usize {
         self.consumer.prefetch();
         let mut count = 0usize;
-        while count < max_msgs {
+        let mut bytes = 0usize;
+        while count < max_msgs && bytes < max_bytes {
             let Some(msg) = self.consumer.pop() else {
                 break;
             };
+            bytes += msg.byte_len();
             batch.push(msg);
             count += 1;
         }
@@ -134,7 +126,8 @@ impl SendPipeConsumer {
             self.consumer.release();
             self.signal_space_if_below_lwm();
         }
-        self.rearm_data_ready();
+        self.data_signal.clear();
+        self.data_signal.rearm_if_nonempty(self.consumer.is_empty());
         count
     }
 
@@ -147,23 +140,6 @@ impl SendPipeConsumer {
             && self.above_lwm.swap(false, Ordering::AcqRel)
         {
             self.space_available.notify_waiters();
-        }
-    }
-
-    fn rearm_data_ready(&self) {
-        if !self.consumer.is_empty() {
-            self.data_ready.notify_one();
-            return;
-        }
-
-        self.data_pending.store(false, Ordering::Release);
-        if !self.consumer.is_empty()
-            && self
-                .data_pending
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            self.data_ready.notify_one();
         }
     }
 }
@@ -192,13 +168,13 @@ mod tests {
             .expect("first send should notify");
 
         let mut batch = Vec::new();
-        assert_eq!(rx.drain_into(&mut batch, 1), 1);
+        assert_eq!(rx.drain_into(&mut batch, 1, usize::MAX), 1);
 
         timeout(Duration::from_secs(1), rx.notified())
             .await
             .expect("partial drain should rearm");
 
-        assert_eq!(rx.drain_into(&mut batch, 4), 1);
+        assert_eq!(rx.drain_into(&mut batch, 4, usize::MAX), 1);
         assert_eq!(batch.len(), 2);
 
         assert!(
@@ -221,10 +197,10 @@ mod tests {
         assert!(tx.above_lwm.load(Ordering::Acquire));
 
         let mut batch = Vec::new();
-        assert_eq!(rx.drain_into(&mut batch, 1), 1);
+        assert_eq!(rx.drain_into(&mut batch, 1, usize::MAX), 1);
         assert!(tx.above_lwm.load(Ordering::Acquire));
 
-        assert_eq!(rx.drain_into(&mut batch, 1), 1);
+        assert_eq!(rx.drain_into(&mut batch, 1, usize::MAX), 1);
         assert!(!tx.above_lwm.load(Ordering::Acquire));
     }
 }

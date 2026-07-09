@@ -843,6 +843,7 @@ async fn inproc_peer_driver(
                     let drained = send_pipe_rx.drain_into(
                         &mut send_pipe_batch,
                         crate::routing::SHARED_MAX_BATCH_MSGS,
+                        omq_proto::flow::max_batch_bytes(),
                     );
                     if drained == 0 {
                         if send_pipe_rx.is_disconnected() {

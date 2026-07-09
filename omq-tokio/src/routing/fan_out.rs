@@ -17,12 +17,14 @@ use smallvec::SmallVec;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use crate::engine::signal::DataSignal;
 use crate::engine::{DriverCommand, DriverHandle};
 use omq_proto::encoded_queue::EncodedQueue;
 use omq_proto::error::{Error, Result};
 use omq_proto::fan_out_batch::{
     FanOutBatch, clear_fan_out_batch, encode_fan_out_message, finish_fan_out_batch,
 };
+use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::transform::MessageEncoder;
@@ -49,8 +51,7 @@ const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
 const DIRECT_SHARD_PEER_CAP: usize = 4;
 const WORKER_SHARD_PEER_CAP: usize = 4;
 const MAX_FAN_OUT_WORKER_SHARDS: usize = 8;
-const SHARD_WORKER_MAX_DRAIN_MSGS: usize = 256;
-const SHARD_WORKER_MAX_DRAIN_BYTES: usize = 2 * 1024 * 1024;
+const SHARD_CTRL_RING_CAP: usize = 64;
 
 /// Yield every N peers to keep latency bounded. Scales down with peer
 /// count: fewer peers per yield when fan-out is wide (more total work).
@@ -85,26 +86,14 @@ impl DispatchOutcome {
 }
 
 #[derive(Debug)]
-enum ShardCommand {
+enum ShardControl {
     AddPeer(ShardPeerAdd),
     RemovePeer { peer_id: u64 },
     Subscribe { peer_id: u64, prefix: Bytes },
     Cancel { peer_id: u64, prefix: Bytes },
     Join { peer_id: u64, group: Bytes },
     Leave { peer_id: u64, group: Bytes },
-    Dispatch(ShardDispatch),
     Shutdown,
-}
-
-impl ShardCommand {
-    fn work_bytes(&self) -> usize {
-        match self {
-            Self::Dispatch(dispatch) => dispatch.encoded.byte_len(),
-            Self::Subscribe { prefix, .. } | Self::Cancel { prefix, .. } => prefix.len(),
-            Self::Join { group, .. } | Self::Leave { group, .. } => group.len(),
-            Self::AddPeer(_) | Self::RemovePeer { .. } | Self::Shutdown => 0,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -185,8 +174,10 @@ struct ShardPeer {
 }
 
 struct ShardEndpoint {
-    tx: yring::Producer<ShardCommand>,
-    notify: Arc<Notify>,
+    data_tx: yring::Producer<ShardDispatch>,
+    ctrl_tx: yring::Producer<ShardControl>,
+    data_signal: Arc<DataSignal>,
+    ctrl_notify: Arc<Notify>,
     load: usize,
 }
 
@@ -219,8 +210,10 @@ impl std::fmt::Debug for FanOutShards {
 
 #[derive(Debug)]
 struct ShardWorker {
-    rx: yring::Consumer<ShardCommand>,
-    notify: Arc<Notify>,
+    data_rx: yring::Consumer<ShardDispatch>,
+    ctrl_rx: yring::Consumer<ShardControl>,
+    data_signal: Arc<DataSignal>,
+    ctrl_notify: Arc<Notify>,
     mode: FanOutMode,
     lossy: bool,
     peers: FxHashMap<u64, ShardPeer>,
@@ -322,12 +315,16 @@ impl FanOutShards {
         let worker_shards = Self::worker_shard_count(runtime_workers);
         let mut endpoints = Vec::with_capacity(worker_shards);
         for _ in 0..worker_shards {
-            let (shard_tx, shard_rx) = yring::spsc(pipe_cap);
-            let notify = Arc::new(Notify::new());
+            let (data_tx, data_rx) = yring::spsc(pipe_cap);
+            let (ctrl_tx, ctrl_rx) = yring::spsc(SHARD_CTRL_RING_CAP);
+            let data_signal = Arc::new(DataSignal::new());
+            let ctrl_notify = Arc::new(Notify::new());
             tokio::spawn(
                 ShardWorker {
-                    rx: shard_rx,
-                    notify: notify.clone(),
+                    data_rx,
+                    ctrl_rx,
+                    data_signal: data_signal.clone(),
+                    ctrl_notify: ctrl_notify.clone(),
                     mode,
                     lossy,
                     peers: FxHashMap::default(),
@@ -335,8 +332,10 @@ impl FanOutShards {
                 .run(),
             );
             endpoints.push(ShardEndpoint {
-                tx: shard_tx,
-                notify,
+                data_tx,
+                ctrl_tx,
+                data_signal,
+                ctrl_notify,
                 load: 0,
             });
         }
@@ -399,7 +398,7 @@ impl FanOutShards {
             .unwrap_or(0)
     }
 
-    fn push_control(endpoint: &mut ShardEndpoint, cmd: ShardCommand) {
+    fn push_control(endpoint: &mut ShardEndpoint, cmd: ShardControl) {
         #[cfg(feature = "rt-multi-thread")]
         if let Ok(handle) = tokio::runtime::Handle::try_current()
             && matches!(
@@ -407,8 +406,6 @@ impl FanOutShards {
                 tokio::runtime::RuntimeFlavor::MultiThread
             )
         {
-            // A full shard ring is drained by another Tokio task. If a socket
-            // actor spins here on a runtime worker, it can starve that drain.
             tokio::task::block_in_place(|| Self::push_control_spinning(endpoint, cmd));
             return;
         }
@@ -416,18 +413,18 @@ impl FanOutShards {
         Self::push_control_spinning(endpoint, cmd);
     }
 
-    fn push_control_spinning(endpoint: &mut ShardEndpoint, mut cmd: ShardCommand) {
+    fn push_control_spinning(endpoint: &mut ShardEndpoint, mut cmd: ShardControl) {
         loop {
-            match endpoint.tx.push(cmd) {
+            match endpoint.ctrl_tx.push(cmd) {
                 Ok(()) => {
-                    endpoint.tx.flush();
-                    endpoint.notify.notify_one();
+                    endpoint.ctrl_tx.flush();
+                    endpoint.ctrl_notify.notify_one();
                     return;
                 }
                 Err(returned) => {
                     cmd = returned;
-                    endpoint.tx.flush();
-                    endpoint.notify.notify_one();
+                    endpoint.ctrl_tx.flush();
+                    endpoint.ctrl_notify.notify_one();
                     std::thread::yield_now();
                 }
             }
@@ -452,11 +449,11 @@ impl FanOutShards {
         }
         let mut state = self.state.lock().expect("fanout shards poisoned");
         if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
-            Self::push_control(endpoint, ShardCommand::AddPeer(add));
+            Self::push_control(endpoint, ShardControl::AddPeer(add));
         }
     }
 
-    fn send_to_shard(&self, shard: usize, cmd: ShardCommand) {
+    fn send_to_shard(&self, shard: usize, cmd: ShardControl) {
         if shard == 0 {
             return;
         }
@@ -473,7 +470,7 @@ impl FanOutShards {
         if shard > 0
             && let Some(endpoint) = state.endpoints.get_mut(shard - 1)
         {
-            Self::push_control(endpoint, ShardCommand::RemovePeer { peer_id });
+            Self::push_control(endpoint, ShardControl::RemovePeer { peer_id });
         }
     }
 
@@ -484,25 +481,21 @@ impl FanOutShards {
             if endpoint.load == 0 {
                 continue;
             }
-            if endpoint
-                .tx
-                .push(ShardCommand::Dispatch(dispatch.clone()))
-                .is_ok()
-            {
+            if endpoint.data_tx.push(dispatch.clone()).is_ok() {
                 touched.push(idx);
             }
         }
         for idx in touched {
             let endpoint = &mut state.endpoints[idx];
-            endpoint.tx.flush();
-            endpoint.notify.notify_one();
+            endpoint.data_tx.flush();
+            endpoint.data_signal.mark();
         }
     }
 
     fn shutdown(&self) {
         let mut state = self.state.lock().expect("fanout shards poisoned");
         for endpoint in &mut state.endpoints {
-            Self::push_control(endpoint, ShardCommand::Shutdown);
+            Self::push_control(endpoint, ShardControl::Shutdown);
             endpoint.load = 0;
         }
         state.direct_load = 0;
@@ -516,7 +509,7 @@ impl FanOutShards {
             .expect("fanout shards poisoned")
             .endpoints
             .iter()
-            .all(|endpoint| endpoint.tx.is_empty())
+            .all(|endpoint| endpoint.data_tx.is_empty() && endpoint.ctrl_tx.is_empty())
     }
 }
 
@@ -528,50 +521,56 @@ fn fan_out_is_lossy(options: &Options) -> bool {
 
 impl ShardWorker {
     async fn run(mut self) {
+        let mut budget = DrainBudget::WORKER;
         loop {
             let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
             let mut shutdown = false;
-            let mut drained = false;
-            let mut drain_msgs = 0usize;
-            let mut drain_bytes = 0usize;
 
-            self.rx.prefetch();
-            while let Some(cmd) = self.rx.pop() {
-                drained = true;
-                drain_msgs += 1;
-                drain_bytes = drain_bytes.saturating_add(cmd.work_bytes());
-                if self.handle_command(cmd, &mut touched).await {
+            // 1. ALL control commands, unconditionally.
+            self.ctrl_rx.prefetch();
+            while let Some(cmd) = self.ctrl_rx.pop() {
+                if self.handle_control(cmd) {
                     shutdown = true;
                 }
-                if shutdown
-                    || drain_msgs >= SHARD_WORKER_MAX_DRAIN_MSGS
-                    || drain_bytes >= SHARD_WORKER_MAX_DRAIN_BYTES
-                {
-                    break;
-                }
             }
-            self.rx.release();
+            self.ctrl_rx.release();
 
-            self.flush_touched(&mut touched);
             if shutdown {
+                self.flush_touched(&mut touched);
                 self.peers.clear();
                 return;
             }
+
+            // 2. Data up to budget.
+            budget.reset();
+            let mut drained = false;
+            self.data_rx.prefetch();
+            while let Some(dispatch) = self.data_rx.pop() {
+                drained = true;
+                self.dispatch(&dispatch, &mut touched).await;
+                if !budget.account(dispatch.encoded.byte_len()) {
+                    break;
+                }
+            }
+            self.data_rx.release();
+
+            self.flush_touched(&mut touched);
             if drained {
+                self.data_signal.clear();
+                self.data_signal.rearm_if_nonempty(self.data_rx.is_empty());
                 tokio::task::yield_now().await;
                 continue;
             }
-            self.notify.notified().await;
+            tokio::select! {
+                () = self.ctrl_notify.notified() => {}
+                () = self.data_signal.notified() => {}
+            }
         }
     }
 
-    async fn handle_command(
-        &mut self,
-        cmd: ShardCommand,
-        touched: &mut SmallVec<[u64; 32]>,
-    ) -> bool {
+    fn handle_control(&mut self, cmd: ShardControl) -> bool {
         match cmd {
-            ShardCommand::AddPeer(add) => {
+            ShardControl::AddPeer(add) => {
                 self.peers.insert(
                     add.peer_id,
                     ShardPeer {
@@ -584,35 +583,34 @@ impl ShardWorker {
                     },
                 );
             }
-            ShardCommand::RemovePeer { peer_id } => {
+            ShardControl::RemovePeer { peer_id } => {
                 self.peers.remove(&peer_id);
             }
-            ShardCommand::Subscribe { peer_id, prefix } => {
+            ShardControl::Subscribe { peer_id, prefix } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.subscriptions.add(&prefix);
                 }
             }
-            ShardCommand::Cancel { peer_id, prefix } => {
+            ShardControl::Cancel { peer_id, prefix } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.subscriptions.remove(&prefix);
                 }
             }
-            ShardCommand::Join { peer_id, group } => {
+            ShardControl::Join { peer_id, group } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
                     && let Ok(s) = std::str::from_utf8(&group)
                 {
                     peer.groups.insert(s.to_string());
                 }
             }
-            ShardCommand::Leave { peer_id, group } => {
+            ShardControl::Leave { peer_id, group } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
                     && let Ok(s) = std::str::from_utf8(&group)
                 {
                     peer.groups.remove(s);
                 }
             }
-            ShardCommand::Dispatch(dispatch) => self.dispatch(&dispatch, touched).await,
-            ShardCommand::Shutdown => return true,
+            ShardControl::Shutdown => return true,
         }
         false
     }
@@ -791,6 +789,7 @@ impl DeferredFanOut {
 impl DeferredFanOutWorker {
     async fn run(mut self, mut rx: blume::Receiver<DeferredFanOutMsg>) {
         let mut batch = Vec::new();
+        let mut budget = DrainBudget::WORKER;
         loop {
             batch.clear();
             if rx.recv_batch_mut(&mut batch).await.is_err() {
@@ -798,13 +797,20 @@ impl DeferredFanOutWorker {
             }
 
             loop {
-                for msg in batch.drain(..) {
+                budget.reset();
+                batch.reverse();
+                while let Some(msg) = batch.pop() {
+                    let len = msg.msg.byte_len();
                     let _ = self.dispatch(msg).await;
+                    if !budget.account(len) {
+                        break;
+                    }
                 }
                 while let Ok(msg) = rx.try_recv() {
                     batch.push(msg);
                 }
                 if !batch.is_empty() {
+                    tokio::task::yield_now().await;
                     continue;
                 }
                 if self.deferred.complete_if_idle() {
@@ -1813,7 +1819,7 @@ impl FanOutSend {
             if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
                 shards.send_to_shard(
                     shard,
-                    ShardCommand::Subscribe {
+                    ShardControl::Subscribe {
                         peer_id,
                         prefix: prefix.clone(),
                     },
@@ -1833,7 +1839,7 @@ impl FanOutSend {
             if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
                 shards.send_to_shard(
                     shard,
-                    ShardCommand::Cancel {
+                    ShardControl::Cancel {
                         peer_id,
                         prefix: Bytes::copy_from_slice(prefix),
                     },
@@ -1854,7 +1860,7 @@ impl FanOutSend {
             if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
                 shards.send_to_shard(
                     shard,
-                    ShardCommand::Join {
+                    ShardControl::Join {
                         peer_id,
                         group: Bytes::copy_from_slice(group),
                     },
@@ -1875,7 +1881,7 @@ impl FanOutSend {
             if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
                 shards.send_to_shard(
                     shard,
-                    ShardCommand::Leave {
+                    ShardControl::Leave {
                         peer_id,
                         group: Bytes::copy_from_slice(group),
                     },
@@ -2275,10 +2281,13 @@ mod tests {
     }
 
     fn test_endpoint() -> ShardEndpoint {
-        let (tx, _rx) = yring::spsc(4);
+        let (data_tx, _data_rx) = yring::spsc(4);
+        let (ctrl_tx, _ctrl_rx) = yring::spsc(4);
         ShardEndpoint {
-            tx,
-            notify: Arc::new(Notify::new()),
+            data_tx,
+            ctrl_tx,
+            data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
+            ctrl_notify: Arc::new(Notify::new()),
             load: 0,
         }
     }

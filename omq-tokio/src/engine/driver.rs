@@ -258,7 +258,7 @@ async fn batch_encode(
 const READ_BUF_SIZE: usize = 128 * 1024;
 
 use crate::routing::SHARED_MAX_BATCH_MSGS;
-use omq_proto::flow::max_batch_bytes;
+use omq_proto::flow::{DrainBudget, max_batch_bytes};
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
@@ -469,7 +469,7 @@ where
 
     /// Install a per-peer encode slot. The socket handle encodes ZMTP
     /// frames into this slot, and the driver flushes them to the wire
-    /// via the `data_ready` select arm.
+    /// via the `data_signal` select arm.
     #[must_use]
     pub(crate) fn with_wire_slot(mut self, slot: Arc<PeerWireSlot>) -> Self {
         self.wire_slot = Some(slot);
@@ -765,7 +765,7 @@ where
                 // into the per-peer PeerWireSlot. Drain and write
                 // directly, bypassing the local EncodedQueue.
                 () = async {
-                    wire_slot.as_ref().unwrap().data_ready.notified().await;
+                    wire_slot.as_ref().unwrap().data_signal.notified().await;
                 }, if wire_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
@@ -782,7 +782,7 @@ where
                     let drained = send_pipe_rx
                         .as_mut()
                         .unwrap()
-                        .drain_into(&mut pipe_batch, SHARED_MAX_BATCH_MSGS);
+                        .drain_into(&mut pipe_batch, SHARED_MAX_BATCH_MSGS, max_batch_bytes());
                     if drained == 0 {
                         if send_pipe_rx.as_ref().unwrap().is_disconnected() {
                             drain_writes(&mut writer, &mut codec).await.ok();
@@ -861,20 +861,20 @@ async fn drain_wire_slot<W: AsyncWrite + Unpin>(
     drain_buf: &mut Vec<Bytes>,
     writer: &mut W,
 ) -> io::Result<()> {
-    let mut batch_bytes = 0usize;
+    let mut budget = DrainBudget::WIRE_DRAIN;
     loop {
         drain_buf.clear();
         let drain = slot.drain_into_vec(drain_buf, 1024);
         if drain_buf.is_empty() {
             break;
         }
-        batch_bytes += drain_buf.iter().map(Bytes::len).sum::<usize>();
+        let chunk_bytes: usize = drain_buf.iter().map(Bytes::len).sum();
         write_chunks(writer, drain_buf).await?;
         if drain.space_available {
             slot.space_available.notify_waiters();
         }
-        if batch_bytes >= max_batch_bytes() {
-            slot.data_ready.notify_one();
+        if !budget.account(chunk_bytes) {
+            slot.data_signal.reschedule();
             break;
         }
     }

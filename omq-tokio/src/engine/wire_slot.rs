@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use bytes::{Bytes, BytesMut};
 use tokio::sync::Notify;
 
+use super::signal::DataSignal;
 use omq_proto::direct_encode::{
     DirectEncodeCaps, DirectEncodeDecision, DirectEncodeState, decide_direct_encode,
 };
@@ -88,13 +89,9 @@ pub(crate) struct PeerWireSlot {
     ring_rx: Mutex<yring::Consumer<WireSlotItem>>,
     cap: usize,
     msg_cap: usize,
-    pub(crate) data_ready: Notify,
+    pub(crate) data_signal: DataSignal,
     pub(crate) space_available: Notify,
     pub(crate) handshake_done: AtomicBool,
-    /// Coalesces `data_ready` notifications: only the first encode since
-    /// the last drain actually calls `notify_one()`, avoiding thundering
-    /// herd on the `Notify` when many messages arrive between drains.
-    pending: AtomicBool,
     pub(crate) has_transform: bool,
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
     #[cfg(feature = "ws")]
@@ -146,10 +143,9 @@ impl PeerWireSlot {
             ring_rx: Mutex::new(ring_rx),
             cap,
             msg_cap: msg_cap.max(1),
-            data_ready: Notify::new(),
+            data_signal: DataSignal::new(),
             space_available: Notify::new(),
             handshake_done: AtomicBool::new(false),
-            pending: AtomicBool::new(false),
             has_transform,
             transform_passthrough,
             #[cfg(feature = "ws")]
@@ -308,9 +304,7 @@ impl PeerWireSlot {
     }
 
     pub(crate) fn signal_encoded(&self) {
-        if !self.pending.swap(true, Ordering::Release) {
-            self.data_ready.notify_one();
-        }
+        self.data_signal.mark();
     }
 
     #[inline]
@@ -393,7 +387,7 @@ impl PeerWireSlot {
         }
 
         if eq_empty && self.ring_is_empty() {
-            self.pending.store(false, Ordering::Relaxed);
+            self.data_signal.clear();
             self.queued_msgs.store(0, Ordering::Relaxed);
             self.queued_ring_bytes.store(0, Ordering::Relaxed);
         }
@@ -446,12 +440,11 @@ impl PeerWireSlot {
             while rx.pop().is_some() {}
             rx.release();
         }
-        self.pending.store(false, Ordering::Relaxed);
         self.queued_msgs.store(0, Ordering::Relaxed);
         self.queued_ring_bytes.store(0, Ordering::Relaxed);
         self.fanout_active.store(false, Ordering::Relaxed);
         self.above_lwm.store(false, Ordering::Relaxed);
-        self.data_ready.notify_waiters();
+        self.data_signal.wake_all();
         self.space_available.notify_waiters();
     }
 
