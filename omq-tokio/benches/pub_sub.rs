@@ -94,8 +94,11 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     let mut best_elapsed = Duration::ZERO;
     let mut best_n = 0usize;
 
+    let mut best_cpu = Duration::ZERO;
+
     for _ in 0..n_rounds {
         recv_count.store(0, Ordering::Relaxed);
+        let cpu0 = common::process_cpu_time();
         let t0 = Instant::now();
         let end = t0 + round_dur;
         let mut sent = 0usize;
@@ -104,11 +107,13 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
             sent += 1;
         }
         let elapsed = t0.elapsed();
+        let cpu = common::process_cpu_time().saturating_sub(cpu0);
         let msgs_s = sent as f64 / elapsed.as_secs_f64();
         if msgs_s > best_msgs_s {
             best_msgs_s = msgs_s;
             best_elapsed = elapsed;
             best_n = sent;
+            best_cpu = cpu;
         }
     }
 
@@ -123,6 +128,6 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
         elapsed: best_elapsed,
         mbps,
         msgs_s: best_msgs_s,
-        cpu_time: Duration::ZERO,
+        cpu_time: best_cpu,
     }
 }

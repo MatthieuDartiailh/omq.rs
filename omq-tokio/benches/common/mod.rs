@@ -348,7 +348,6 @@ pub(crate) fn process_cpu_time() -> Duration {
     }
     #[cfg(not(unix))]
     {
-        // Windows: use wall time as a proxy (less precise but better than nothing)
         Duration::ZERO
     }
 }

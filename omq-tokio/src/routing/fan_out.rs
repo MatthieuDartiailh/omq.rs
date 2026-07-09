@@ -51,7 +51,7 @@ pub(crate) enum FanOutMode {
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `FrameBuffer::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
-const DIRECT_SHARD_PEER_CAP: usize = 4;
+const DIRECT_SHARD_PEER_CAP: usize = 1;
 const WORKER_SHARD_PEER_CAP: usize = 4;
 const MAX_FAN_OUT_WORKER_SHARDS: usize = 8;
 const SHARD_CTRL_RING_CAP: usize = 64;
