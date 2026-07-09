@@ -5,7 +5,7 @@ use bytes::{Bytes, BytesMut};
 use crate::message::Message;
 use crate::proto::frame;
 
-pub const ARENA_THRESHOLD: usize = 8 * 1024;
+pub const ARENA_THRESHOLD: usize = 4 * 1024;
 
 /// An entry in the encoded output sequence: either a range within the
 /// arena buffer or an external zero-copy `Bytes` (large payload).
