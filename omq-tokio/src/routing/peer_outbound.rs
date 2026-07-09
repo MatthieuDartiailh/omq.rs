@@ -53,6 +53,10 @@ impl PeerOutbound {
         match self {
             Self::Wire { slot, inbox } => match slot.try_encode(&msg) {
                 TryFrameResult::Ok => Ok(()),
+                // HWM backpressure: retry until space is available or
+                // the slot dies. Termination: `mark_dead()` fires on
+                // peer disconnect, connection error, heartbeat timeout,
+                // or socket close, causing `try_encode` to return `Dead`.
                 TryFrameResult::Full => loop {
                     let notified = slot.space_available.notified();
                     match slot.try_encode(&msg) {

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
@@ -10,16 +11,21 @@ use omq_proto::message::Message;
 pub(crate) struct Submitter {
     peer: Arc<Mutex<Option<PeerDriverHandle>>>,
     peer_ready: Arc<Notify>,
+    closed: Arc<AtomicBool>,
 }
 
 impl Submitter {
     pub(crate) fn shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
         *self.peer.lock().expect("exclusive peer") = None;
         self.peer_ready.notify_waiters();
     }
 
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         loop {
+            if self.closed.load(Ordering::Acquire) {
+                return Err(Error::Closed);
+            }
             let handle = self.peer.lock().expect("exclusive peer").clone();
             match handle {
                 Some(h) => {
@@ -44,6 +50,9 @@ impl Submitter {
         &self,
         msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(omq_proto::error::TrySendError::Closed);
+        }
         let handle = self.peer.lock().expect("exclusive peer").clone();
         match handle {
             Some(h) => h
@@ -64,6 +73,7 @@ impl Submitter {
 pub(crate) struct ExclusiveSend {
     peer: Arc<Mutex<Option<PeerDriverHandle>>>,
     peer_ready: Arc<Notify>,
+    closed: Arc<AtomicBool>,
 }
 
 impl ExclusiveSend {
@@ -71,6 +81,7 @@ impl ExclusiveSend {
         Self {
             peer: Arc::new(Mutex::new(None)),
             peer_ready: Arc::new(Notify::new()),
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -78,6 +89,7 @@ impl ExclusiveSend {
         Submitter {
             peer: self.peer.clone(),
             peer_ready: self.peer_ready.clone(),
+            closed: self.closed.clone(),
         }
     }
 
@@ -91,6 +103,7 @@ impl ExclusiveSend {
     }
 
     pub(crate) fn shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
         *self.peer.lock().expect("exclusive peer") = None;
         self.peer_ready.notify_waiters();
     }

@@ -86,7 +86,7 @@ impl ActivePipes {
     }
 
     fn should_use_fallback(&self) -> bool {
-        self.active.is_empty() && self.inactive.is_empty() || !self.fallback_peers.is_empty()
+        (self.active.is_empty() && self.inactive.is_empty()) || !self.fallback_peers.is_empty()
     }
 }
 

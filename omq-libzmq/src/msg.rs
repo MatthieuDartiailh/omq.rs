@@ -270,15 +270,18 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
             if size > 0 && s.ptr.is_null() {
                 return crate::error::fail(libc::EFAULT);
             }
-            // SAFETY: libc::malloc is always safe to call.
-            let new_ptr = unsafe { libc::malloc(size).cast::<u8>() };
-            if size > 0 && new_ptr.is_null() {
-                return crate::error::fail(libc::ENOMEM);
-            }
-            if size > 0 {
-                // SAFETY: s.ptr is valid for size bytes; new_ptr was just allocated.
-                unsafe { std::ptr::copy_nonoverlapping(s.ptr, new_ptr, size) };
-            }
+            let new_ptr = if size > 0 {
+                // SAFETY: libc::malloc is always safe to call.
+                let p = unsafe { libc::malloc(size).cast::<u8>() };
+                if p.is_null() {
+                    return crate::error::fail(libc::ENOMEM);
+                }
+                // SAFETY: s.ptr is valid for size bytes; p was just allocated.
+                unsafe { std::ptr::copy_nonoverlapping(s.ptr, p, size) };
+                p
+            } else {
+                std::ptr::null_mut()
+            };
             // SAFETY: dst was closed above and is ready for reinitialization.
             let d = unsafe { repr(dst) };
             d.kind = KIND_HEAP;
@@ -525,17 +528,20 @@ pub extern "C" fn zmq_msg_recv(
             if sz <= 128 {
                 // Small frame: malloc + memcpy (1 alloc) instead of
                 // Box<Bytes> (2 allocs: Bytes::copy_from_slice + Box::new).
-                // SAFETY: libc::malloc is always safe to call.
-                let ptr = unsafe { libc::malloc(sz).cast::<u8>() };
-                if ptr.is_null() && sz > 0 {
-                    return crate::error::fail(libc::ENOMEM);
-                }
-                if sz > 0 {
-                    // SAFETY: frame is valid for sz bytes; ptr was just allocated.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(frame.as_ptr(), ptr, sz);
+                let ptr = if sz > 0 {
+                    // SAFETY: libc::malloc is always safe to call.
+                    let p = unsafe { libc::malloc(sz).cast::<u8>() };
+                    if p.is_null() {
+                        return crate::error::fail(libc::ENOMEM);
                     }
-                }
+                    // SAFETY: frame is valid for sz bytes; p was just allocated.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(frame.as_ptr(), p, sz);
+                    }
+                    p
+                } else {
+                    std::ptr::null_mut()
+                };
                 r.kind = KIND_HEAP;
                 r.more = u8::from(more);
                 r.pad = [0; 6];

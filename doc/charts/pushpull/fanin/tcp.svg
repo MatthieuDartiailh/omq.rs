@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 1105" font-family="system-ui, -apple-system, sans-serif">
-  <rect width="1020" height="1105" fill="white"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 1118" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="1020" height="1118" fill="white"/>
   <text x="510.0" y="32.0" text-anchor="middle" fill="#9ca3af" font-size="9">Linux VM on a 2018 Mac Mini, Intel Core i7-8700B @ 3.20GHz, 6 cores, performance governor, turbo off</text>
   <text x="510.0" y="51.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH fan-in (2 PUSH → 1 PULL): TCP loopback</text>
   <text x="231.2" y="73.0" text-anchor="middle" fill="#111827" font-size="11.5" font-weight="700">small messages: msg/s</text>
@@ -518,7 +518,7 @@
   <text x="942.0" y="969.0" text-anchor="middle" fill="#374151" font-size="8.5">16 KiB</text>
   <line x1="130" y1="989" x2="144" y2="989" stroke="#eab308" stroke-width="2.5"/>
   <circle cx="137" cy="989" r="2.5" fill="#eab308"/>
-  <text x="150" y="993" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5 [1T]</text>
+  <text x="150" y="993" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5 (1T)</text>
   <line x1="320" y1="989" x2="334" y2="989" stroke="#a16207" stroke-width="2.5"/>
   <circle cx="327" cy="989" r="2.5" fill="#a16207"/>
   <text x="340" y="993" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5 (4T)</text>
@@ -540,11 +540,12 @@
   <line x1="700" y1="1009" x2="714" y2="1009" stroke="#15803d" stroke-width="2.5"/>
   <circle cx="707" cy="1009" r="2.5" fill="#15803d"/>
   <text x="720" y="1013" fill="#374151" font-size="11" font-weight="500">rzmq v0.5.24 (io_uring) [6T]</text>
-  <text x="510.0" y="1027" text-anchor="middle" fill="#9ca3af" font-size="9">(nT) = user-chosen   ·   [nT] = fixed by implementation</text>
-  <line x1="225" y1="1049" x2="239" y2="1049" stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>
-  <text x="245" y="1053" fill="#6b7280" font-size="10">CPU % (left)</text>
-  <line x1="370" y1="1049" x2="384" y2="1049" stroke="#6b7280" stroke-width="2.5" stroke-dasharray="6,3"/>
-  <text x="390" y="1053" fill="#6b7280" font-size="10">msg/s (small panel)</text>
-  <line x1="560" y1="1049" x2="574" y2="1049" stroke="#6b7280" stroke-width="2.5"/>
-  <text x="580" y="1053" fill="#6b7280" font-size="10">GB/s (large panel)</text>
+  <text x="130" y="1027" fill="#9ca3af" font-size="9">(nT) = configurable IO threads</text>
+  <text x="130" y="1040" fill="#9ca3af" font-size="9">[nT] = fixed IO threads</text>
+  <line x1="225" y1="1062" x2="239" y2="1062" stroke="#6b7280" stroke-width="1.6" stroke-dasharray="2,5" opacity="0.85"/>
+  <text x="245" y="1066" fill="#6b7280" font-size="10">CPU % (left)</text>
+  <line x1="370" y1="1062" x2="384" y2="1062" stroke="#6b7280" stroke-width="2.5" stroke-dasharray="6,3"/>
+  <text x="390" y="1066" fill="#6b7280" font-size="10">msg/s (small panel)</text>
+  <line x1="560" y1="1062" x2="574" y2="1062" stroke="#6b7280" stroke-width="2.5"/>
+  <text x="580" y="1066" fill="#6b7280" font-size="10">GB/s (large panel)</text>
 </svg>

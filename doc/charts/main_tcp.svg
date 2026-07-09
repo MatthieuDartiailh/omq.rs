@@ -208,7 +208,7 @@
   <text x="880.0" y="333.0" text-anchor="middle" fill="#374151" font-size="8">4 MiB</text>
   <line x1="95" y1="350" x2="109" y2="350" stroke="#eab308" stroke-width="2.5" stroke-linecap="round"/>
   <circle cx="102" cy="350" r="2.5" fill="#eab308"/>
-  <text x="115" y="354" fill="#374151" font-size="10" font-weight="500">libzmq v4.3.5 [1T]</text>
+  <text x="115" y="354" fill="#374151" font-size="10" font-weight="500">libzmq v4.3.5 (1T)</text>
   <line x1="285" y1="350" x2="299" y2="350" stroke="#a16207" stroke-width="2.5" stroke-linecap="round"/>
   <circle cx="292" cy="350" r="2.5" fill="#a16207"/>
   <text x="305" y="354" fill="#374151" font-size="10" font-weight="500">libzmq v4.3.5 (4T)</text>
@@ -230,5 +230,6 @@
   <line x1="665" y1="370" x2="679" y2="370" stroke="#15803d" stroke-width="2.5" stroke-linecap="round"/>
   <circle cx="672" cy="370" r="2.5" fill="#15803d"/>
   <text x="685" y="374" fill="#374151" font-size="10" font-weight="500">rzmq v0.5.24 (io_uring) [6T]</text>
-  <text x="475.0" y="388.0" text-anchor="middle" fill="#9ca3af" font-size="9">(nT) = user-chosen   ·   [nT] = fixed by implementation</text>
+  <text x="70.0" y="388.0" text-anchor="start" fill="#9ca3af" font-size="9">(nT) = configurable IO threads</text>
+  <text x="70.0" y="401.0" text-anchor="start" fill="#9ca3af" font-size="9">[nT] = fixed IO threads</text>
 </svg>

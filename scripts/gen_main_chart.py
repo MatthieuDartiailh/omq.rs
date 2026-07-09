@@ -39,7 +39,7 @@ COLORS = {
 }
 
 LABELS = {
-    "libzmq": "libzmq v4.3.5 [1T]",
+    "libzmq": "libzmq v4.3.5 (1T)",
     "libzmq-mt": "libzmq v4.3.5 (4T)",
     "omq-tokio": "omq-tokio (1T)",
     "omq-tokio-mt": "omq-tokio (4T)",
@@ -454,10 +454,14 @@ def generate_main_chart(tput: dict, msgs: dict, impls: list[str],
             )
 
     leg_extra = (len(rows) - 1) * row_gap
+    abbr_x = x_pad_left
     abbr_y = leg_y + leg_extra + 18
-    L.append(svg_text(mid_x, abbr_y,
-                       "(nT) = user-chosen   ·   [nT] = fixed by implementation",
-                       size=9, fill="#9ca3af"))
+    L.append(svg_text(abbr_x, abbr_y,
+                       "(nT) = configurable IO threads",
+                       size=9, fill="#9ca3af", anchor="start"))
+    L.append(svg_text(abbr_x, abbr_y + 13,
+                       "[nT] = fixed IO threads",
+                       size=9, fill="#9ca3af", anchor="start"))
 
     L.append("</svg>")
     return "\n".join(L) + "\n"

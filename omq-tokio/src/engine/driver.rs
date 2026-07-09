@@ -157,6 +157,9 @@ impl RecvSink {
                         }
                         Err(returned) => {
                             msg = returned;
+                            if sink.producer.is_consumer_dropped() {
+                                return false;
+                            }
                             let notified = sink.space.notified();
                             tokio::pin!(notified);
                             notified.as_mut().enable();
