@@ -1,11 +1,12 @@
-//! Round-robin send.
+//! Round-robin send with swap-to-back deactivation.
 //!
-//! Peers register active per-peer yring pipes. The socket submitter scans
-//! those pipes from a moving cursor, sends to the first pipe with capacity,
-//! and skips full peers. If every pipe is full, async `send` waits for one
-//! selected pipe while `try_send` reports backpressure.
+//! Peers register active per-peer yring pipes. The socket submitter
+//! scans active pipes from a moving cursor and sends to the first pipe
+//! with capacity. Full pipes are swapped to an inactive list and
+//! reactivated when the consumer drains below LWM.
 
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
@@ -25,7 +26,8 @@ struct ActivePipe {
 
 #[derive(Debug, Default)]
 struct ActivePipes {
-    pipes: Vec<ActivePipe>,
+    active: Vec<ActivePipe>,
+    inactive: Vec<ActivePipe>,
     pipe_peers: HashSet<u64>,
     fallback_peers: HashSet<u64>,
     cursor: usize,
@@ -33,36 +35,58 @@ struct ActivePipes {
 
 impl ActivePipes {
     fn clear(&mut self) {
-        for pipe in &self.pipes {
+        for pipe in &self.active {
             pipe.tx.space_available().notify_waiters();
         }
-        self.pipes.clear();
+        for pipe in &self.inactive {
+            pipe.tx.space_available().notify_waiters();
+        }
+        self.active.clear();
+        self.inactive.clear();
         self.pipe_peers.clear();
         self.fallback_peers.clear();
         self.cursor = 0;
     }
 
-    fn remove_at(&mut self, pos: usize) {
-        let peer_id = self.pipes[pos].peer_id;
-        self.pipe_peers.remove(&peer_id);
-        self.pipes.swap_remove(pos);
-        if self.pipes.is_empty() {
+    fn deactivate(&mut self, pos: usize) {
+        let pipe = self.active.swap_remove(pos);
+        self.inactive.push(pipe);
+        if self.active.is_empty() {
             self.cursor = 0;
         } else {
-            self.cursor %= self.pipes.len();
+            self.cursor %= self.active.len();
+        }
+    }
+
+    fn try_reactivate_any(&mut self) {
+        let mut i = 0;
+        while i < self.inactive.len() {
+            if self.inactive[i].tx.above_lwm.load(Ordering::Acquire) {
+                i += 1;
+            } else {
+                let pipe = self.inactive.swap_remove(i);
+                self.active.push(pipe);
+            }
         }
     }
 
     fn remove_peer(&mut self, peer_id: u64) {
         self.pipe_peers.remove(&peer_id);
         self.fallback_peers.remove(&peer_id);
-        if let Some(pos) = self.pipes.iter().position(|pipe| pipe.peer_id == peer_id) {
-            self.remove_at(pos);
+        if let Some(pos) = self.active.iter().position(|p| p.peer_id == peer_id) {
+            self.active.swap_remove(pos);
+            if self.active.is_empty() {
+                self.cursor = 0;
+            } else {
+                self.cursor %= self.active.len();
+            }
+        } else if let Some(pos) = self.inactive.iter().position(|p| p.peer_id == peer_id) {
+            self.inactive.swap_remove(pos);
         }
     }
 
     fn should_use_fallback(&self) -> bool {
-        self.pipes.is_empty() || !self.fallback_peers.is_empty()
+        self.active.is_empty() && self.inactive.is_empty() || !self.fallback_peers.is_empty()
     }
 }
 
@@ -135,19 +159,37 @@ impl Submitter {
                 .map_err(omq_proto::error::TrySendError::Full);
         }
 
+        active.try_reactivate_any();
+
         let mut scanned = 0usize;
-        while scanned < active.pipes.len() {
-            let i = active.cursor % active.pipes.len();
-            active.cursor = (i + 1) % active.pipes.len();
+        while scanned < active.active.len() {
+            let i = active.cursor % active.active.len();
+            active.cursor = (i + 1) % active.active.len();
             scanned += 1;
-            match active.pipes[i].tx.try_send(msg) {
+            match active.active[i].tx.try_send(msg) {
                 Ok(()) => return Ok(()),
                 Err(SendPipeError::Full(returned)) => {
                     msg = returned;
+                    active.deactivate(i);
+                    if active.active.is_empty() {
+                        break;
+                    }
+                    // After deactivate, position i holds a different pipe
+                    // (swapped from the end). Don't increment scanned for
+                    // the new occupant.
+                    scanned = scanned.saturating_sub(1);
                 }
                 Err(SendPipeError::Closed(returned)) => {
-                    active.remove_at(i);
+                    let peer_id = active.active[i].peer_id;
+                    active.pipe_peers.remove(&peer_id);
+                    active.active.swap_remove(i);
                     msg = returned;
+                    if active.active.is_empty() {
+                        active.cursor = 0;
+                        break;
+                    }
+                    active.cursor %= active.active.len();
+                    scanned = scanned.saturating_sub(1);
                 }
             }
         }
@@ -158,20 +200,27 @@ impl Submitter {
 
 impl ActivePipes {
     fn next_space_notify_any(&mut self) -> Option<Arc<Notify>> {
-        if self.pipes.is_empty() {
-            return None;
-        }
-
-        let mut scanned = 0usize;
-        while scanned < self.pipes.len() {
-            let i = self.cursor % self.pipes.len();
-            self.cursor = (i + 1) % self.pipes.len();
-            scanned += 1;
-            if self.pipes[i].tx.is_alive() {
-                return Some(self.pipes[i].tx.space_available());
+        // Prefer inactive pipes: they are the ones we're waiting on.
+        for pipe in &self.inactive {
+            if pipe.tx.is_alive() {
+                return Some(pipe.tx.space_available());
             }
-            self.remove_at(i);
-            if self.pipes.is_empty() {
+        }
+        // Fallback: scan active pipes (rare: all active hit Full this
+        // call but haven't been deactivated yet).
+        let mut scanned = 0usize;
+        while scanned < self.active.len() {
+            let i = self.cursor % self.active.len();
+            self.cursor = (i + 1) % self.active.len();
+            scanned += 1;
+            if self.active[i].tx.is_alive() {
+                return Some(self.active[i].tx.space_available());
+            }
+            let peer_id = self.active[i].peer_id;
+            self.pipe_peers.remove(&peer_id);
+            self.active.swap_remove(i);
+            if self.active.is_empty() {
+                self.cursor = 0;
                 return None;
             }
         }
@@ -224,12 +273,10 @@ impl RoundRobinSend {
         if let Some(tx) = send_pipe {
             active.remove_peer(peer_id);
             active.pipe_peers.insert(peer_id);
-            active.pipes.push(ActivePipe { peer_id, tx });
+            active.active.push(ActivePipe { peer_id, tx });
             return;
         }
         active.fallback_peers.insert(peer_id);
-        // Handles without a pipe fall back to shared_rx directly. Normal
-        // PUSH TCP/IPC/inproc peers all install a yring pipe.
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
@@ -239,7 +286,6 @@ impl RoundRobinSend {
             .lock()
             .expect("round_robin active")
             .remove_peer(peer_id);
-        // Peer tasks self-cancel via their CancellationToken.
     }
 
     /// Cloneable handle for enqueuing from a spawned task. Lets the socket
@@ -259,13 +305,9 @@ impl RoundRobinSend {
     }
 
     pub(crate) fn is_drained(&self) -> bool {
-        let active_empty = self
-            .active
-            .lock()
-            .expect("round_robin active")
-            .pipes
-            .iter()
-            .all(|pipe| pipe.tx.is_empty());
-        self.queue.len() == 0 && active_empty
+        let guard = self.active.lock().expect("round_robin active");
+        let active_empty = guard.active.iter().all(|pipe| pipe.tx.is_empty());
+        let inactive_empty = guard.inactive.iter().all(|pipe| pipe.tx.is_empty());
+        self.queue.len() == 0 && active_empty && inactive_empty
     }
 }

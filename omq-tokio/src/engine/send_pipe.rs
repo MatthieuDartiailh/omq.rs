@@ -26,7 +26,7 @@ pub(crate) struct SendPipeProducer {
     producer: yring::Producer<Message>,
     data_signal: Arc<DataSignal>,
     space_available: Arc<Notify>,
-    above_lwm: Arc<AtomicBool>,
+    pub(crate) above_lwm: Arc<AtomicBool>,
 }
 
 /// Consumer half owned by a peer task.
