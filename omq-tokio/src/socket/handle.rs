@@ -446,10 +446,10 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)?
     }
 
-    /// Tear down a previously-started connect. Cancels the dial loop
-    /// and any in-flight reconnect backoff; existing handshaked peers
-    /// from this dialer remain connected. Returns `Error::Unroutable`
-    /// if no dialer at `endpoint` is registered.
+    /// Tear down a previously-started connect. Cancels the dial loop,
+    /// any in-flight reconnect backoff, and live peers connected through
+    /// `endpoint`. Returns `Error::Unroutable` if no dialer or live peer
+    /// at `endpoint` is registered.
     pub async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
         let (ack, rx) = oneshot::channel();
         self.inner
@@ -472,6 +472,34 @@ impl Socket {
             .await
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)
+    }
+
+    /// Wait until at least `min_peers` peers are connected, or `timeout`
+    /// expires. Returns the peer count at the time the threshold was met,
+    /// or `Error::Timeout` if the deadline is reached first.
+    ///
+    /// This is a data-plane readiness check. It polls `connections()`
+    /// rather than relying on `MonitorStream` events, which are
+    /// diagnostic and may lag under load.
+    pub async fn wait_connected(
+        &self,
+        min_peers: usize,
+        timeout: std::time::Duration,
+    ) -> Result<usize> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let conns = self.connections().await?;
+            if conns.len() >= min_peers {
+                return Ok(conns.len());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(5)),
+            )
+            .await;
+        }
     }
 
     /// Snapshot every currently-connected peer. Empty vec when no peers

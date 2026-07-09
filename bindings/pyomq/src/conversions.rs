@@ -63,7 +63,11 @@ pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
     let collected: Vec<Bytes> = it
         .map(|part| bytes_from_pyany(&part?))
         .collect::<PyResult<_>>()?;
-    Ok(Message::multipart(collected))
+    Ok(match collected.len() {
+        0 => Message::new(),
+        1 => Message::single(collected.into_iter().next().unwrap()),
+        _ => Message::multipart(collected),
+    })
 }
 
 /// Return a Python list of bytes - one per message frame.

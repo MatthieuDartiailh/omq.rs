@@ -50,6 +50,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+impl Error {
+    pub fn is_connection_refused(&self) -> bool {
+        matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::ConnectionRefused)
+    }
+}
+
 /// Error returned by `Socket::try_send`.
 #[derive(Debug)]
 pub enum TrySendError {

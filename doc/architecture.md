@@ -76,9 +76,11 @@ traffic. Larger single-part messages use `Bytes`; multipart messages use
 
 `FrameBuffer` is the outbound framing buffer: a 256 KiB arena plus an entry list.
 Frame headers always go into the arena. Small messages below `ARENA_THRESHOLD`
-encode header and payload contiguously into the arena. Large messages write
-the header into the arena and keep payload `Bytes` as external entries for
-gather write.
+(8 KiB) encode header and payload contiguously into the arena. Large messages
+write the header into the arena and keep payload `Bytes` as external entries
+for gather write. The arena tracks its peak capacity so that after
+`split().freeze()` reclaims the buffer, the next reserve pre-allocates at full
+size instead of cascading through doubling copies.
 
 `PeerTransmitSlot` wraps `FrameBuffer` in a short-held `std::sync::Mutex`, capped
 at 512 KiB (close to the kernel TCP send buffer). Socket handles encode into
@@ -105,11 +107,15 @@ it before newer pipe-fed sends, so messages queued before handshake are not
 overtaken.
 
 Fan-out sockets (`PUB`, `XPUB`, `RADIO`) encode once and distribute matching
-wire bytes. Wide multi-thread fan-out may use shard workers. Each shard owns
-its peer filter state, pushes encoded items into peer rings, then signals
-touched peers once per batch. Fan-out sockets drop on mute; `OnMute::Block`
-does not make `PUB` or `XPUB` wait. `xpub_nodrop` stays on the direct
-backpressure path.
+wire bytes. Wide multi-thread fan-out uses shard workers. Each shard has
+split channels: a `yring` control channel for subscribe, cancel, add-peer,
+remove-peer, and shutdown commands, and a `yring` data channel for encoded
+dispatches. The worker drains all control commands unconditionally every
+iteration, then drains data dispatches up to `DrainBudget::WORKER` (256
+messages / 2 MiB). This separation guarantees control commands are reachable
+within bounded time regardless of data throughput. Fan-out sockets drop on
+mute; `OnMute::Block` does not make `PUB` or `XPUB` wait. `xpub_nodrop`
+stays on the direct backpressure path.
 
 Identity-routed sockets (`ROUTER`, `REP`, `SERVER`, `PEER`) route by peer
 identity. Exclusive sockets (`PAIR`, `CHANNEL`) target one peer. Fair-queue
@@ -122,6 +128,27 @@ send pipes and deliver `InboundFrame::Message` through `inproc_peer_driver`.
 Same-thread paths use `blume` batching where applicable. Public semantics
 remain the same: HWM backpressure, round-robin fairness, and
 connect-before-bind.
+
+## Drain Budgets And Signaling
+
+Every loop that drains a channel or queue is capped by `DrainBudget`: both a
+message count and a byte count. Unbounded drains would starve the tokio runtime
+and other tasks. Standard presets: `DrainBudget::WORKER` (256 messages / 2 MiB)
+for shard workers and deferred fan-out, `DrainBudget::WIRE_DRAIN` (1024 / 1
+MiB) for wire-slot drain.
+
+All producer-to-consumer signaling uses `DataSignal`, an atomic flag plus
+`Notify`. `mark()` fires `notify_one` only on the `false`-to-`true` transition.
+The consumer `clear()`s before draining, then `rearm_if_nonempty()` to self-wake
+if data remains. `reschedule()` fires unconditionally for budget-interrupted
+drains where the consumer already knows data remains. Wire slot, send pipe,
+drop queue, and shard workers all use `DataSignal`.
+
+Control commands (subscribe, cancel, add-peer, remove-peer, shutdown) travel on
+dedicated channels separate from data. Shard workers, for example, drain all
+control commands unconditionally before draining data up to budget. This
+guarantees control latency is bounded by one data budget drain, not by queue
+depth.
 
 ## Transports
 

@@ -271,8 +271,12 @@ impl SocketInner {
             return None;
         }
         let mut buf = self.sndbuf.lock().unwrap();
-        let parts: Vec<Bytes> = buf.parts.drain(..).chain(std::iter::once(bytes)).collect();
-        Some(omq_tokio::Message::multipart(parts))
+        if buf.parts.is_empty() {
+            Some(omq_tokio::Message::single(bytes))
+        } else {
+            let parts: Vec<Bytes> = buf.parts.drain(..).chain(std::iter::once(bytes)).collect();
+            Some(omq_tokio::Message::multipart(parts))
+        }
     }
 
     /// Pop the head of any leftover RCVMORE frames; `Some` when one
@@ -561,17 +565,14 @@ impl Socket {
     fn recv_multipart<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, PyList>> {
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
-            return Ok(PyList::new(
-                py,
-                leftover.into_iter().map(|b| PyBytes::new(py, &b)),
-            )?);
+            return PyList::new(py, leftover.into_iter().map(|b| PyBytes::new(py, &b)));
         }
         let msg = if flags & crate::constants::NOBLOCK != 0 {
             self.try_recv_message()?
         } else {
             self.recv_message(py)?
         };
-        Ok(conversions::parts_to_pylist(py, msg)?)
+        conversions::parts_to_pylist(py, msg)
     }
 
     fn subscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -612,7 +613,7 @@ impl Socket {
             .iter()
             .map(|cs| crate::socket::connection_status_to_dict(py, cs))
             .collect::<PyResult<Vec<Bound<'py, PyDict>>>>()?;
-        Ok(PyList::new(py, temp)?)
+        PyList::new(py, temp)
     }
 
     /// Return a dict for the peer with the given `connection_id`, or

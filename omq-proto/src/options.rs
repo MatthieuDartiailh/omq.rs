@@ -166,6 +166,9 @@ pub struct Options {
     /// transmit slot is at capacity.
     pub xpub_nodrop: bool,
 
+    /// Stop reconnecting on `ECONNREFUSED` (`ZMQ_RECONNECT_STOP`).
+    pub reconnect_stop_conn_refused: bool,
+
     /// TLS configuration for `wss://` endpoints. Ignored for non-WSS
     /// transports. Requires the `ws` feature.
     #[cfg(feature = "ws")]
@@ -217,6 +220,7 @@ impl Default for Options {
             arena_threshold: None,
             transmit_slot_cap: None,
             xpub_nodrop: false,
+            reconnect_stop_conn_refused: false,
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
         }
@@ -323,6 +327,12 @@ impl Options {
     #[must_use]
     pub fn reconnect(mut self, policy: ReconnectPolicy) -> Self {
         self.reconnect = policy;
+        self
+    }
+
+    #[must_use]
+    pub fn reconnect_stop_conn_refused(mut self, stop: bool) -> Self {
+        self.reconnect_stop_conn_refused = stop;
         self
     }
 

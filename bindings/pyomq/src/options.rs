@@ -76,6 +76,7 @@ pub struct Overlay {
     pub on_mute: OnMute,
     pub compression_dict: Option<Bytes>,
     pub compression_auto_train: bool,
+    pub reconnect_stop: i32,
 }
 
 impl Default for Overlay {
@@ -120,6 +121,7 @@ impl Default for Overlay {
             on_mute: OnMute::Block,
             compression_dict: None,
             compression_auto_train: true,
+            reconnect_stop: 0,
         }
     }
 }
@@ -154,6 +156,7 @@ impl Overlay {
             compression_auto_train: self.compression_auto_train,
             arena_threshold: Some(64 * 1024),
             transmit_slot_cap: None,
+            reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
             ..Default::default()
         };
         #[cfg(feature = "plain")]
@@ -301,6 +304,7 @@ impl Overlay {
             on_mute: o.on_mute,
             compression_dict: o.compression_dict.clone(),
             compression_auto_train: o.compression_auto_train,
+            reconnect_stop: i32::from(o.reconnect_stop_conn_refused),
         }
     }
 }
@@ -529,8 +533,11 @@ pub fn setsockopt(
         | constants::TCP_MAXRT
         | constants::MULTICAST_HOPS
         | constants::RECOVERY_IVL
-        | constants::RECONNECT_STOP
         | constants::ZAP_DOMAIN => {}
+        constants::RECONNECT_STOP => {
+            let v: i32 = value.extract()?;
+            sock.overlay.lock().unwrap().reconnect_stop = v;
+        }
         constants::AFFINITY => return Err(not_implemented("AFFINITY")),
         constants::BACKLOG => return Err(not_implemented("BACKLOG")),
         constants::TYPE | constants::RCVMORE => return Err(not_implemented("read-only option")),
@@ -821,8 +828,11 @@ pub fn getsockopt<'py>(
         | constants::ROUTER_HANDOVER
         | constants::TCP_MAXRT
         | constants::MULTICAST_HOPS
-        | constants::RECOVERY_IVL
-        | constants::RECONNECT_STOP => Ok(int_to_bound(py, 0_i64)),
+        | constants::RECOVERY_IVL => Ok(int_to_bound(py, 0_i64)),
+        constants::RECONNECT_STOP => Ok(int_to_bound(
+            py,
+            i64::from(sock.overlay.lock().unwrap().reconnect_stop),
+        )),
         constants::FD => {
             sock.materialize()?;
             let mat = sock.materialized.read().unwrap();

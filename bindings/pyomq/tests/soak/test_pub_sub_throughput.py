@@ -114,10 +114,10 @@ def test_pub_sub_throughput():
     for i, count in enumerate(recv_counts):
         assert count > 0, f"sub[{i}] received nothing"
 
-    report = monitor.stop()
-    report.assert_no_leak("pub_sub_throughput")
-
     for s in subs:
         s.close()
     pub.close()
     ctx.term()
+
+    report = monitor.stop()
+    report.assert_no_leak("pub_sub_throughput")

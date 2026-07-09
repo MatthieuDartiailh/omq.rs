@@ -21,8 +21,7 @@ where
 {
     let sock = inner.ensure_socket()?;
     let ctx = inner.ctx.clone();
-    py.detach(|| ctx.with_socket(&sock, op))
-        .map_err(map_err)
+    py.detach(|| ctx.with_socket(&sock, op)).map_err(map_err)
 }
 
 /// Like `sync_unit` but returns a `String`.
@@ -37,8 +36,7 @@ where
 {
     let sock = inner.ensure_socket()?;
     let ctx = inner.ctx.clone();
-    py.detach(|| ctx.with_socket(&sock, op))
-        .map_err(map_err)
+    py.detach(|| ctx.with_socket(&sock, op)).map_err(map_err)
 }
 
 /// Async version: spawn a `Result<()>`-returning op via an asyncio.Future.

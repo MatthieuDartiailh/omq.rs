@@ -22,6 +22,9 @@ pub enum Canceled {
     /// The policy is [`ReconnectPolicy::Disabled`] and we exhausted the
     /// single attempt.
     PolicyDisabled,
+    /// The dial failed with `ECONNREFUSED` and
+    /// `reconnect_stop_conn_refused` was set.
+    StoppedConnRefused,
 }
 
 /// Keep trying to connect. Returns the established stream on success, or
@@ -37,6 +40,7 @@ pub enum Canceled {
 pub async fn dial_with_backoff<F, Fut, S>(
     mut dial: F,
     policy: ReconnectPolicy,
+    stop_conn_refused: bool,
     cancel: &CancellationToken,
     mut on_delay: impl FnMut(Duration, u32),
 ) -> std::result::Result<S, Canceled>
@@ -51,7 +55,10 @@ where
         }
         match dial().await {
             Ok(stream) => return Ok(stream),
-            Err(_err) => {
+            Err(err) => {
+                if stop_conn_refused && err.is_connection_refused() {
+                    return Err(Canceled::StoppedConnRefused);
+                }
                 attempt = attempt.saturating_add(1);
                 let Some(delay) = next_delay(&policy, attempt) else {
                     return Err(Canceled::PolicyDisabled);
