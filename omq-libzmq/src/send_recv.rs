@@ -592,11 +592,10 @@ fn stash_remaining_parts(sock: &OmqSocket, msg: &omq_tokio::Message, start: usiz
     if next < nparts {
         sock.drain_nonempty
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(mut drain) = sock.recv_drain.lock() {
-            for i in next..nparts {
-                if let Some(b) = msg.part_bytes(i) {
-                    drain.push_back(b);
-                }
+        let mut drain = sock.recv_drain.lock().expect("recv_drain");
+        for i in next..nparts {
+            if let Some(b) = msg.part_bytes(i) {
+                drain.push_back(b);
             }
         }
     }
