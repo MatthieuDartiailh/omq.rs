@@ -31,7 +31,7 @@ jobs:
 
   test:
     name: cargo test (${{ matrix.toolchain }}, ${{ matrix.os }})
-    needs: [changes]
+    needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -58,7 +58,7 @@ jobs:
 
   encryption:
     name: encryption (curve + blake3zmq, ${{ matrix.os }})
-    needs: [changes]
+    needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -74,7 +74,7 @@ jobs:
 
   compression:
     name: compression (${{ matrix.os }})
-    needs: [changes]
+    needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -111,7 +111,7 @@ jobs:
 
   pyomq:
     name: pyomq
-    needs: [changes]
+    needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:

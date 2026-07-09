@@ -52,15 +52,14 @@ async fn bind_lz4_pub(publisher: &Socket) -> (Endpoint, omq_tokio::MonitorStream
     let mut mon = publisher.monitor();
     publisher.bind(lz4_tcp_ep(0)).await.unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(5), mon.recv())
+        if let MonitorEvent::Listening {
+            endpoint: Endpoint::Lz4Tcp { port, .. },
+        } = tokio::time::timeout(Duration::from_secs(5), mon.recv())
             .await
             .expect("publisher did not report listening")
             .unwrap()
         {
-            MonitorEvent::Listening {
-                endpoint: Endpoint::Lz4Tcp { port, .. },
-            } => return (lz4_tcp_ep(port), mon),
-            _ => {}
+            return (lz4_tcp_ep(port), mon);
         }
     }
 }
@@ -173,7 +172,7 @@ fn soak_pub_sub_lz4_dict_sharded_fanout() {
         });
 
         let start = Instant::now();
-        let mut last_probe = Instant::now() - Duration::from_secs(1);
+        let mut last_probe = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         let mut last_log = start;
         while start.elapsed() < duration {
             tokio::time::sleep(Duration::from_millis(50)).await;

@@ -43,7 +43,7 @@ async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
             Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
             Ok(Ok(_)) => {}
             Ok(Err(e)) => panic!("monitor failed while waiting for subscriptions: {e:?}"),
-            Err(_) => panic!("timed out waiting for {n} subscriptions"),
+            Err(e) => panic!("timed out waiting for {n} subscriptions: {e}"),
         }
     }
 }

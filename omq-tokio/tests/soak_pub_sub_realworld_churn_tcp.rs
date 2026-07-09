@@ -87,7 +87,7 @@ async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
             Ok(Ok(MonitorEvent::SubscribeReceived { .. })) => subscribed += 1,
             Ok(Ok(_)) => {}
             Ok(Err(e)) => panic!("monitor failed while waiting for subscriptions: {e:?}"),
-            Err(_) => panic!("timed out waiting for {n} subscriptions"),
+            Err(e) => panic!("timed out waiting for {n} subscriptions: {e}"),
         }
     }
 }
@@ -193,6 +193,7 @@ async fn set_target_subscribers(
 }
 
 #[test]
+#[expect(clippy::too_many_lines)]
 fn soak_pub_sub_realworld_churn_tcp() {
     let duration = soak_common::soak_duration();
     let phase_duration = phase_duration(duration);
