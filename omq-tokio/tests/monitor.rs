@@ -151,8 +151,8 @@ async fn multiple_monitors_each_see_events() {
 #[tokio::test]
 async fn post_handshake_error_command_drops_connection() {
     use bytes::Bytes;
-    use omq_tokio::engine::PeerOut;
-    use omq_tokio::engine::{ConnectionDriver, DriverCommand};
+    use omq_tokio::engine::PeerEvent;
+    use omq_tokio::engine::{ConnectionDriver, PeerDriverCommand};
     use omq_tokio::proto::connection::{ConnectionConfig, Role};
     use omq_tokio::proto::{Command, Connection, Event, SocketType as ProtoSocketType};
     use omq_tokio::transport::{TcpTransport, Transport as _};
@@ -181,7 +181,7 @@ async fn post_handshake_error_command_drops_connection() {
             .identity(Bytes::from_static(b"peer")),
     );
     let (inbox_tx, inbox_rx) = mpsc::channel(8);
-    let (evt_tx, mut evt_rx) = mpsc::channel::<(u64, PeerOut)>(8);
+    let (evt_tx, mut evt_rx) = mpsc::channel::<(u64, PeerEvent)>(8);
     let driver =
         ConnectionDriver::new(stream, codec, inbox_rx, evt_tx, 0, CancellationToken::new());
     tokio::spawn(async move { driver.run().await });
@@ -191,14 +191,14 @@ async fn post_handshake_error_command_drops_connection() {
             .await
             .unwrap()
         {
-            Some((_, PeerOut::Event(Event::HandshakeSucceeded { .. }))) => break,
+            Some((_, PeerEvent::Event(Event::HandshakeSucceeded { .. }))) => break,
             Some(_) => {}
             None => panic!("peer driver exited"),
         }
     }
 
     inbox_tx
-        .send(DriverCommand::SendCommand(Command::Error {
+        .send(PeerDriverCommand::SendCommand(Command::Error {
             reason: "boom".into(),
         }))
         .await

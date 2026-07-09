@@ -18,7 +18,7 @@ use omq_proto::type_state::TypeState;
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
 use super::recv::{SpscAwareRecv, SpscHandles, SpscPush};
-use super::wire_slot_cache::WireSlotCache;
+use super::transmit_slot_cache::TransmitSlotCache;
 use crate::routing::{SendStrategy, SendSubmitter};
 
 pub use omq_proto::error::TrySendError;
@@ -55,7 +55,7 @@ struct Inner {
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
-    wire_slots: WireSlotCache,
+    transmit_slots: TransmitSlotCache,
     /// Cooperative yield counter. Every `SEND_YIELD_INTERVAL` successful
     /// synchronous sends, `send()` yields to the runtime so driver tasks
     /// on the same worker thread can drain and flush.
@@ -114,7 +114,7 @@ impl Socket {
         let spsc = SpscHandles::default();
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
-        let wire_slots = WireSlotCache::new();
+        let transmit_slots = TransmitSlotCache::new();
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -126,7 +126,7 @@ impl Socket {
             spsc.clone(),
             type_state.clone(),
             req_awaiting_reply.clone(),
-            wire_slots.clone(),
+            transmit_slots.clone(),
             recv_sink_config,
         );
         let actor_task = spawn_driver(driver);
@@ -140,7 +140,7 @@ impl Socket {
                 send_submitter,
                 type_state,
                 req_awaiting_reply,
-                wire_slots,
+                transmit_slots,
                 send_ops: AtomicU32::new(0),
                 last_bound_endpoint: RwLock::new(None),
                 actor_task: Mutex::new(Some(actor_task)),
@@ -220,7 +220,7 @@ impl Socket {
                         break;
                     }
                     tokio::task::yield_now().await;
-                    if self.inner.wire_slots.single_dead() {
+                    if self.inner.transmit_slots.single_dead() {
                         self.inner
                             .req_awaiting_reply
                             .store(false, Ordering::Release);
@@ -263,7 +263,7 @@ impl Socket {
                 if !self.is_fan_out_send() && self.try_send_wire(&msg) {
                     return Ok(());
                 }
-                if !self.is_fan_out_send() && self.inner.wire_slots.single_exists() {
+                if !self.is_fan_out_send() && self.inner.transmit_slots.single_exists() {
                     self.send_wire_slow(msg).await
                 } else {
                     self.inner.send_submitter.send(msg).await
@@ -504,7 +504,7 @@ impl Socket {
             Err(_) => Ok(()),
         };
         self.inner.send_submitter.shutdown();
-        self.inner.wire_slots.clear_single();
+        self.inner.transmit_slots.clear_single();
         self.inner.recv_rx.shutdown();
         let actor_task = self.inner.actor_task.lock().unwrap().take();
         if let Some(task) = actor_task {
@@ -627,18 +627,18 @@ impl Socket {
     }
 
     fn try_send_wire(&self, msg: &Message) -> bool {
-        self.inner.wire_slots.try_send(msg)
+        self.inner.transmit_slots.try_send(msg)
     }
 
     async fn send_wire_slow(&self, msg: Message) -> Result<()> {
         self.inner
-            .wire_slots
+            .transmit_slots
             .send_single_slow(msg, &self.inner.send_submitter)
             .await
     }
 
     fn try_send_single_wire(&self, msg: &Message) -> core::result::Result<bool, TrySendError> {
-        self.inner.wire_slots.try_send_single(msg)
+        self.inner.transmit_slots.try_send_single(msg)
     }
 
     fn is_fan_out_send(&self) -> bool {
@@ -659,7 +659,7 @@ impl Drop for Inner {
         // without waiting for linger since there's no one to await it.
         self.root_cancel.cancel();
         self.send_submitter.shutdown();
-        self.wire_slots.clear_single();
+        self.transmit_slots.clear_single();
         self.recv_rx.shutdown();
     }
 }

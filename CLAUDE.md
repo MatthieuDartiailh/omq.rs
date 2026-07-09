@@ -137,29 +137,35 @@ Full detail in `doc/`:
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
-`EncodedQueue`: arena (256 KiB) + entry-based encoder used by both
+`FrameBuffer`: arena (256 KiB) + entry-based framer used by both
 backends. Frame headers are always written into the arena. Small
-messages (<96 KiB `ARENA_THRESHOLD`) go contiguously into the arena
+messages (<8 KiB `ARENA_THRESHOLD`) go contiguously into the arena
 (1 iovec per batch). Large payloads are tracked as external `Bytes`
 entries (zero-copy gather-write). `Message`: 80 B, inline up to 71 B.
 `Payload`: 64 B, inline up to 62 B.
 
 **omq-tokio hot path.** `SocketDriver` actor owns peer table and
 type state. Send bypass: `Socket::send` skips actor for non-REQ/REP
-via `SendSubmitter` (flume MPMC). Per-peer `PeerWireSlot`
-(`EncodedQueue` under `std::sync::Mutex`, nanosecond hold): handle
-encodes, driver flushes via `data_ready` select arm. `PeerSend` enum
-(`Wire`/`Inbox`) dispatches fan-out/identity/exclusive to per-peer
-slots without pump tasks. Recv bypass: `ConnectionDriver` pushes
-straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER go
-through actor for identity routing.
+via `SendSubmitter` (flume MPMC). Per-peer `PeerTransmitSlot`
+(`FrameBuffer` under `std::sync::Mutex`, nanosecond hold): handle
+frames, driver flushes via `DataSignal` select arm. `PeerOutbound`
+enum (`Wire`/`Inbox`) dispatches fan-out/identity/exclusive to
+per-peer slots without pump tasks. Recv bypass: `ConnectionDriver`
+pushes straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER
+go through actor for identity routing. PUB fan-out shard workers
+(`ShardWorker`) use split channels: a `yring` control channel
+(drained unconditionally) and a `yring` data channel (drained up to
+`DrainBudget::WORKER`). All producer-to-consumer signaling uses
+`DataSignal` (transmit slot, send pipe, fallback queue, shard
+workers).
 
 **Inproc.** No ZMTP. Inproc and byte-stream round-robin peers both
 register `yring` send pipes. Byte-stream consumers drain in
 `ConnectionDriver`; inproc consumers drain in `inproc_peer_driver` and
 forward to the socket inbound queue. Same-thread delivery still uses
-`blume` where applicable. `DropQueue` is only the no-peer/pre-connect
-fallback; peer tasks drain it before newer pipe-fed sends.
+`blume` where applicable. `FallbackQueue` is only the
+no-peer/pre-connect fallback; peer tasks drain it before newer
+pipe-fed sends.
 
 Local builds use `.cargo/config.toml` with `-C target-cpu=native`.
 

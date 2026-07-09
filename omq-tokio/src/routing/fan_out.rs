@@ -19,20 +19,22 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use crate::engine::signal::DataSignal;
-use crate::engine::{DriverCommand, DriverHandle};
-use omq_proto::encoded_queue::EncodedQueue;
+use crate::engine::{PeerDriverCommand, PeerDriverHandle};
 use omq_proto::error::{Error, Result};
-use omq_proto::fan_out_batch::{
-    FanOutBatch, clear_fan_out_batch, encode_fan_out_message, finish_fan_out_batch,
+use omq_proto::fan_out_frame::{
+    FanOutFrame, clear_fan_out_frame, encode_fan_out_message, finish_fan_out_frame,
 };
 use omq_proto::flow::DrainBudget;
+use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::transform::MessageEncoder;
 
-use super::peer_send::PeerSend;
+use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
-use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult, WIRE_SLOT_INLINE_CAP, WireSlotItem};
+use crate::engine::transmit_slot::{
+    PeerTransmitSlot, TRANSMIT_SLOT_INLINE_CAP, TransmitChunk, TryFrameResult,
+};
 
 type SharedFanOutEncoder = Arc<Mutex<Option<MessageEncoder>>>;
 
@@ -47,7 +49,7 @@ pub(crate) enum FanOutMode {
 
 /// Total bytes copied into per-peer wire queues before switching to
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
-/// `EncodedQueue::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
+/// `FrameBuffer::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
 const DIRECT_SHARD_PEER_CAP: usize = 4;
 const WORKER_SHARD_PEER_CAP: usize = 4;
@@ -63,9 +65,9 @@ fn yield_interval(peer_count: usize) -> u32 {
 }
 
 enum CachedResult {
-    SoleWire(TryEncodeResult),
+    SoleWire(TryFrameResult),
     Cached {
-        targets: Arc<Vec<PeerSend>>,
+        targets: Arc<Vec<PeerOutbound>>,
         encoder: Option<SharedFanOutEncoder>,
     },
     Miss,
@@ -73,7 +75,7 @@ enum CachedResult {
 
 #[derive(Debug, Default)]
 struct DispatchOutcome {
-    full_targets: SmallVec<[PeerSend; 8]>,
+    full_targets: SmallVec<[PeerOutbound; 8]>,
 }
 
 impl DispatchOutcome {
@@ -81,7 +83,7 @@ impl DispatchOutcome {
         !self.full_targets.is_empty()
     }
 
-    fn push_full(&mut self, target: &PeerSend) {
+    fn push_full(&mut self, target: &PeerOutbound) {
         self.full_targets.push(target.clone());
     }
 }
@@ -100,26 +102,26 @@ enum ShardControl {
 #[derive(Debug)]
 struct ShardPeerAdd {
     peer_id: u64,
-    slot: Arc<PeerWireSlot>,
-    producer: yring::Producer<WireSlotItem>,
+    slot: Arc<PeerTransmitSlot>,
+    producer: yring::Producer<TransmitChunk>,
     any_groups: bool,
 }
 
 #[derive(Clone, Debug)]
 struct ShardDispatch {
-    encoded: EncodedFanOutBatch,
+    encoded: EncodedFanOutFrame,
     topic: Bytes,
     group: Option<String>,
     peer_ids: Option<Arc<[u64]>>,
 }
 
 #[derive(Clone, Debug)]
-struct EncodedFanOutBatch {
+struct EncodedFanOutFrame {
     dict: Option<EncodedFanOut>,
     payload: EncodedFanOut,
 }
 
-impl EncodedFanOutBatch {
+impl EncodedFanOutFrame {
     fn byte_len(&self) -> usize {
         self.dict.as_ref().map_or(0, EncodedFanOut::byte_len) + self.payload.byte_len()
     }
@@ -128,7 +130,7 @@ impl EncodedFanOutBatch {
 #[derive(Clone, Debug)]
 enum EncodedFanOut {
     Inline {
-        buf: [u8; WIRE_SLOT_INLINE_CAP],
+        buf: [u8; TRANSMIT_SLOT_INLINE_CAP],
         len: u16,
     },
     Shared(Arc<[Bytes]>),
@@ -136,8 +138,8 @@ enum EncodedFanOut {
 
 impl EncodedFanOut {
     fn inline(data: &[u8]) -> Self {
-        debug_assert!(data.len() <= WIRE_SLOT_INLINE_CAP);
-        let mut buf = [0; WIRE_SLOT_INLINE_CAP];
+        debug_assert!(data.len() <= TRANSMIT_SLOT_INLINE_CAP);
+        let mut buf = [0; TRANSMIT_SLOT_INLINE_CAP];
         buf[..data.len()].copy_from_slice(data);
         Self::Inline {
             buf,
@@ -149,10 +151,10 @@ impl EncodedFanOut {
         Self::Shared(chunks)
     }
 
-    fn to_wire_item(&self) -> WireSlotItem {
+    fn to_wire_item(&self) -> TransmitChunk {
         match self {
-            Self::Inline { buf, len } => WireSlotItem::inline(&buf[..*len as usize]),
-            Self::Shared(chunks) => WireSlotItem::shared(chunks.clone()),
+            Self::Inline { buf, len } => TransmitChunk::inline(&buf[..*len as usize]),
+            Self::Shared(chunks) => TransmitChunk::shared(chunks.clone()),
         }
     }
 
@@ -169,8 +171,8 @@ struct ShardPeer {
     subscriptions: SubscriptionSet,
     groups: FxHashSet<String>,
     any_groups: bool,
-    slot: Arc<PeerWireSlot>,
-    producer: yring::Producer<WireSlotItem>,
+    slot: Arc<PeerTransmitSlot>,
+    producer: yring::Producer<TransmitChunk>,
     dict_shipped: bool,
 }
 
@@ -221,7 +223,7 @@ struct ShardWorker {
 }
 
 struct ShardDispatchTargets {
-    fallback_targets: SmallVec<[PeerSend; 8]>,
+    fallback_targets: SmallVec<[PeerOutbound; 8]>,
     transform_encoder: Option<SharedFanOutEncoder>,
     sharded_count: usize,
 }
@@ -246,7 +248,7 @@ struct DeferredFanOutMsg {
     msg: Message,
     topic: Bytes,
     group: Option<String>,
-    fallback_targets: SmallVec<[PeerSend; 8]>,
+    fallback_targets: SmallVec<[PeerOutbound; 8]>,
     sharded_peer_ids: Arc<[u64]>,
 }
 
@@ -282,8 +284,8 @@ pub(crate) struct Submitter {
 #[derive(Debug, Default)]
 struct CachedFanOut {
     generation: u64,
-    sole_wire: Option<PeerSend>,
-    all_targets: Option<Arc<Vec<PeerSend>>>,
+    sole_wire: Option<PeerOutbound>,
+    all_targets: Option<Arc<Vec<PeerOutbound>>>,
     encoder: Option<SharedFanOutEncoder>,
     all_wire: bool,
 }
@@ -516,7 +518,7 @@ impl FanOutShards {
 
 fn fan_out_is_lossy(options: &Options) -> bool {
     // TODO: Fan-out mute currently drops newest. Supporting DropOldest needs
-    // per-peer oldest eviction in PeerWireSlot or a fan-out-specific queue.
+    // per-peer oldest eviction in PeerTransmitSlot or a fan-out-specific queue.
     !options.xpub_nodrop
 }
 
@@ -674,16 +676,16 @@ impl ShardWorker {
                 .slot
                 .try_push_ring_item(&mut peer.producer, encoded.to_wire_item())
             {
-                TryEncodeResult::Ok => {
+                TryFrameResult::Ok => {
                     touched.push(peer_id);
                     return true;
                 }
-                TryEncodeResult::Dead => return false,
-                TryEncodeResult::Full if lossy => {
+                TryFrameResult::Dead => return false,
+                TryFrameResult::Full if lossy => {
                     peer.slot.deactivate_fanout();
                     return false;
                 }
-                TryEncodeResult::Full => {
+                TryFrameResult::Full => {
                     peer.slot.flush_ring(&mut peer.producer);
                     let notified = peer.slot.space_available.notified();
                     tokio::select! {
@@ -692,8 +694,8 @@ impl ShardWorker {
                         () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
                     }
                 }
-                TryEncodeResult::Ineligible if lossy => return false,
-                TryEncodeResult::Ineligible => {
+                TryFrameResult::Ineligible if lossy => return false,
+                TryFrameResult::Ineligible => {
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
             }
@@ -833,7 +835,7 @@ impl DeferredFanOutWorker {
             let inner = self.inner.clone();
             let generation = self.generation.clone();
             let mut deactivate =
-                |target: &PeerSend| deactivate_fanout_target(&inner, &generation, target);
+                |target: &PeerOutbound| deactivate_fanout_target(&inner, &generation, target);
             let _ = dispatch_encoded_batch(
                 &encoded,
                 &msg.fallback_targets,
@@ -858,13 +860,13 @@ impl DeferredFanOutWorker {
         &self,
         msg: &Message,
         target_count: usize,
-    ) -> Result<EncodedFanOutBatch> {
+    ) -> Result<EncodedFanOutFrame> {
         let encoder = {
             let g = self.inner.lock().expect("fanout inner poisoned");
             g.fan_out_encoder.clone()
         };
         let Some(encoder) = encoder else {
-            return Ok(EncodedFanOutBatch {
+            return Ok(EncodedFanOutFrame {
                 dict: None,
                 payload: encode_message_for_fanout(msg, target_count),
             });
@@ -893,24 +895,26 @@ impl DeferredFanOutWorker {
 }
 
 fn encode_messages_for_fanout(messages: &[Message], target_count: usize) -> EncodedFanOut {
-    let mut eq = EncodedQueue::one_shot();
+    let mut eq = FrameBuffer::one_shot();
     let mut chunks = Vec::new();
     for wire_msg in messages {
         encode_fan_out_message(&mut eq, wire_msg, target_count, FAN_OUT_TOTAL_COPY_BUDGET);
     }
-    let fanout_encoded = match finish_fan_out_batch(
+    let fanout_encoded = match finish_fan_out_frame(
         &mut eq,
         &mut chunks,
         target_count,
         FAN_OUT_TOTAL_COPY_BUDGET,
     ) {
-        FanOutBatch::Arena(raw) if raw.len() <= WIRE_SLOT_INLINE_CAP => EncodedFanOut::inline(raw),
-        FanOutBatch::Arena(raw) => {
+        FanOutFrame::Arena(raw) if raw.len() <= TRANSMIT_SLOT_INLINE_CAP => {
+            EncodedFanOut::inline(raw)
+        }
+        FanOutFrame::Arena(raw) => {
             EncodedFanOut::shared(Vec::from([Bytes::copy_from_slice(raw)]).into())
         }
-        FanOutBatch::Chunks(wire_chunks) => EncodedFanOut::shared(Arc::from(wire_chunks.to_vec())),
+        FanOutFrame::Chunks(wire_chunks) => EncodedFanOut::shared(Arc::from(wire_chunks.to_vec())),
     };
-    clear_fan_out_batch(&mut eq, &mut chunks);
+    clear_fan_out_frame(&mut eq, &mut chunks);
     fanout_encoded
 }
 
@@ -922,7 +926,7 @@ fn encode_transformed_for_fanout(
     inner: &Arc<Mutex<FanOutInner>>,
     mut transformed: omq_proto::proto::transform::TransformedOut,
     target_count: usize,
-) -> EncodedFanOutBatch {
+) -> EncodedFanOutFrame {
     let dict_msg = MessageEncoder::take_leading_dict_shipment(&mut transformed);
     let dict = dict_msg
         .as_ref()
@@ -935,16 +939,16 @@ fn encode_transformed_for_fanout(
     {
         g.fan_out_dict = Some(dict);
     }
-    EncodedFanOutBatch {
+    EncodedFanOutFrame {
         dict: g.fan_out_dict.clone(),
         payload,
     }
 }
 
-fn try_push_encoded_fanout(slot: &PeerWireSlot, encoded: &EncodedFanOut) -> TryEncodeResult {
+fn try_push_encoded_fanout(slot: &PeerTransmitSlot, encoded: &EncodedFanOut) -> TryFrameResult {
     match encoded {
         EncodedFanOut::Inline { buf, len } => {
-            slot.try_push_pre_encoded_no_signal(&buf[..*len as usize])
+            slot.try_push_pre_framed_no_signal(&buf[..*len as usize])
         }
         EncodedFanOut::Shared(chunks) => slot.try_push_encoded(chunks),
     }
@@ -953,9 +957,9 @@ fn try_push_encoded_fanout(slot: &PeerWireSlot, encoded: &EncodedFanOut) -> TryE
 fn deactivate_fanout_target(
     inner: &Arc<Mutex<FanOutInner>>,
     generation: &Arc<AtomicU64>,
-    target: &PeerSend,
+    target: &PeerOutbound,
 ) {
-    let PeerSend::Wire { slot, .. } = target else {
+    let PeerOutbound::Wire { slot, .. } = target else {
         return;
     };
     let peer_id = slot.peer_id;
@@ -1024,7 +1028,7 @@ impl Submitter {
         }
     }
 
-    fn deactivate_target(&self, target: &PeerSend) {
+    fn deactivate_target(&self, target: &PeerOutbound) {
         deactivate_fanout_target(&self.inner, &self.generation, target);
     }
 
@@ -1053,10 +1057,12 @@ impl Submitter {
                 cached.all_wire = false;
             } else if g.all_subscribe_all && !all_targets.is_empty() {
                 cached.sole_wire = None;
-                let targets: Vec<PeerSend> = all_targets.to_vec();
-                cached.all_wire = targets.iter().all(|t| matches!(t, PeerSend::Wire { .. }));
+                let targets: Vec<PeerOutbound> = all_targets.to_vec();
+                cached.all_wire = targets
+                    .iter()
+                    .all(|t| matches!(t, PeerOutbound::Wire { .. }));
                 #[cfg(feature = "ws")]
-                if cached.all_wire && targets.iter().any(PeerSend::is_ws) {
+                if cached.all_wire && targets.iter().any(PeerOutbound::is_ws) {
                     cached.all_wire = false;
                 }
                 cached.all_targets = Some(Arc::new(targets));
@@ -1086,7 +1092,7 @@ impl Submitter {
         msg: &Message,
         target_count: usize,
         transform_encoder: &Mutex<Option<MessageEncoder>>,
-    ) -> Result<EncodedFanOutBatch> {
+    ) -> Result<EncodedFanOutFrame> {
         let transformed = {
             let mut enc = transform_encoder.lock().expect("fan_out_encoder poisoned");
             let enc = enc.as_mut().ok_or_else(|| {
@@ -1103,11 +1109,11 @@ impl Submitter {
 
     fn dispatch_to_targets(
         &self,
-        targets: &[PeerSend],
+        targets: &[PeerOutbound],
         msg: &Message,
         encoder: Option<&Mutex<Option<MessageEncoder>>>,
         drop_on_full: bool,
-        deactivate: &mut impl FnMut(&PeerSend),
+        deactivate: &mut impl FnMut(&PeerOutbound),
     ) -> Result<DispatchOutcome> {
         let Some(encoder) = encoder else {
             return dispatch_to_targets(targets, msg, None, drop_on_full, deactivate);
@@ -1116,10 +1122,10 @@ impl Submitter {
             return Ok(DispatchOutcome::default());
         }
         #[cfg(feature = "ws")]
-        if targets.iter().any(PeerSend::is_ws) {
+        if targets.iter().any(PeerOutbound::is_ws) {
             let mut outcome = DispatchOutcome::default();
             for t in targets {
-                if t.try_encode(msg) == TryEncodeResult::Full {
+                if t.try_encode(msg) == TryFrameResult::Full {
                     if drop_on_full {
                         deactivate(t);
                     }
@@ -1197,7 +1203,7 @@ impl Submitter {
         };
 
         if !targets.fallback_targets.is_empty() {
-            let mut deactivate = |target: &PeerSend| self.deactivate_target(target);
+            let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
             outcome = if let Some(encoded) = encoded_dispatch.as_ref() {
                 dispatch_encoded_batch(
                     encoded,
@@ -1215,7 +1221,7 @@ impl Submitter {
             return Ok(outcome);
         }
 
-        let encoded_dispatch = encoded_dispatch.unwrap_or_else(|| EncodedFanOutBatch {
+        let encoded_dispatch = encoded_dispatch.unwrap_or_else(|| EncodedFanOutFrame {
             dict: None,
             payload: encode_message_for_fanout(msg, targets.sharded_count),
         });
@@ -1248,13 +1254,13 @@ impl Submitter {
         match self.try_cached(&forwarded, group.as_deref()) {
             CachedResult::SoleWire(r) => {
                 return match r {
-                    TryEncodeResult::Ok | TryEncodeResult::Dead | TryEncodeResult::Ineligible => {
+                    TryFrameResult::Ok | TryFrameResult::Dead | TryFrameResult::Ineligible => {
                         Ok(())
                     }
-                    TryEncodeResult::Full if !self.lossy || self.xpub_nodrop => {
+                    TryFrameResult::Full if !self.lossy || self.xpub_nodrop => {
                         Err(omq_proto::error::TrySendError::Full(forwarded))
                     }
-                    TryEncodeResult::Full => {
+                    TryFrameResult::Full => {
                         let target = {
                             let cached = self.cached.lock().unwrap();
                             cached.sole_wire.clone()
@@ -1270,7 +1276,7 @@ impl Submitter {
                 if (!self.lossy || self.xpub_nodrop) && !targets_have_space(&targets) {
                     return Err(omq_proto::error::TrySendError::Full(forwarded));
                 }
-                let mut deactivate = |target: &PeerSend| self.deactivate_target(target);
+                let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
                 if self
                     .dispatch_to_targets(
                         &targets,
@@ -1294,7 +1300,7 @@ impl Submitter {
         if (!self.lossy || self.xpub_nodrop) && !targets_have_space(&targets) {
             return Err(omq_proto::error::TrySendError::Full(forwarded));
         }
-        let mut deactivate = |target: &PeerSend| self.deactivate_target(target);
+        let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
         if self
             .dispatch_to_targets(
                 &targets,
@@ -1334,7 +1340,7 @@ impl Submitter {
         }
 
         match self.try_cached(&forwarded, group.as_deref()) {
-            CachedResult::SoleWire(TryEncodeResult::Full) if self.lossy && !self.xpub_nodrop => {
+            CachedResult::SoleWire(TryFrameResult::Full) if self.lossy && !self.xpub_nodrop => {
                 let target = {
                     let cached = self.cached.lock().unwrap();
                     cached.sole_wire.clone()
@@ -1344,7 +1350,7 @@ impl Submitter {
                 }
                 return Ok(());
             }
-            CachedResult::SoleWire(TryEncodeResult::Full) => {
+            CachedResult::SoleWire(TryFrameResult::Full) => {
                 let target = {
                     let cached = self.cached.lock().unwrap();
                     cached.sole_wire.clone()
@@ -1354,10 +1360,10 @@ impl Submitter {
                     return Ok(());
                 }
             }
-            CachedResult::SoleWire(TryEncodeResult::Ok) if self.lossy && !self.xpub_nodrop => {
+            CachedResult::SoleWire(TryFrameResult::Ok) if self.lossy && !self.xpub_nodrop => {
                 return Ok(());
             }
-            CachedResult::SoleWire(TryEncodeResult::Ok) => return Ok(()),
+            CachedResult::SoleWire(TryFrameResult::Ok) => return Ok(()),
             CachedResult::Cached { targets, encoder } => {
                 // Encode once and distribute synchronously on this task via
                 // the thread-local arena (`dispatch_to_targets`), the same
@@ -1372,7 +1378,7 @@ impl Submitter {
                     send_to_targets_nodrop(&targets, forwarded.clone()).await?;
                     return Ok(());
                 }
-                let mut deactivate = |target: &PeerSend| self.deactivate_target(target);
+                let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
                 let outcome = self.dispatch_to_targets(
                     &targets,
                     &forwarded,
@@ -1397,7 +1403,7 @@ impl Submitter {
             send_to_targets_nodrop(&targets, forwarded.clone()).await?;
             return Ok(());
         }
-        let mut deactivate = |target: &PeerSend| self.deactivate_target(target);
+        let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
         let outcome = self.dispatch_to_targets(
             &targets,
             &forwarded,
@@ -1419,7 +1425,7 @@ impl Submitter {
         &self,
         msg: &Message,
         group: Option<&str>,
-    ) -> (SmallVec<[PeerSend; 8]>, Option<SharedFanOutEncoder>) {
+    ) -> (SmallVec<[PeerOutbound; 8]>, Option<SharedFanOutEncoder>) {
         let g = self.inner.lock().expect("fanout inner poisoned");
         let use_active = self.lossy && !self.xpub_nodrop;
         let targets = if g.all_subscribe_all && matches!(self.mode, FanOutMode::SubscriptionPrefix)
@@ -1521,8 +1527,8 @@ pub(crate) struct FanOutSend {
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
     all_subscribe_all: bool,
-    all_targets: SmallVec<[PeerSend; 8]>,
-    active_all_targets: SmallVec<[PeerSend; 8]>,
+    all_targets: SmallVec<[PeerOutbound; 8]>,
+    active_all_targets: SmallVec<[PeerOutbound; 8]>,
     fan_out_encoder: Option<SharedFanOutEncoder>,
     fan_out_dict: Option<EncodedFanOut>,
     #[allow(dead_code)]
@@ -1544,7 +1550,7 @@ struct FanOutPeer {
     subscriptions: SubscriptionSet,
     groups: FxHashSet<String>,
     any_groups: bool,
-    target: PeerSend,
+    target: PeerOutbound,
     shard: Option<usize>,
     fanout_active: bool,
 }
@@ -1687,18 +1693,21 @@ impl FanOutSend {
         }
     }
 
-    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle) {
+    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: PeerDriverHandle) {
         self.add_peer(peer_id, handle, false);
     }
 
-    pub(crate) fn connection_added_any_groups(&mut self, peer_id: u64, handle: DriverHandle) {
+    pub(crate) fn connection_added_any_groups(&mut self, peer_id: u64, handle: PeerDriverHandle) {
         self.add_peer(peer_id, handle, true);
     }
 
     #[expect(clippy::needless_pass_by_value)]
-    fn add_peer(&mut self, peer_id: u64, handle: DriverHandle, any_groups: bool) {
-        let has_transform = handle.wire_slot.as_ref().is_some_and(|s| s.has_transform);
-        let target = PeerSend::from_handle(&handle);
+    fn add_peer(&mut self, peer_id: u64, handle: PeerDriverHandle, any_groups: bool) {
+        let has_transform = handle
+            .transmit_slot
+            .as_ref()
+            .is_some_and(|s| s.has_transform);
+        let target = PeerOutbound::from_handle(&handle);
 
         #[cfg(feature = "ws")]
         let target_is_ws = target.is_ws();
@@ -1707,19 +1716,20 @@ impl FanOutSend {
 
         let shard_eligible = !target_is_ws
             && self.shards.is_some()
-            && matches!(target, PeerSend::Wire { .. })
-            && handle.wire_slot_tx.is_some();
+            && matches!(target, PeerOutbound::Wire { .. })
+            && handle.transmit_slot_tx.is_some();
 
         let shard = if !shard_eligible {
             None
-        } else if let (Some(shards), PeerSend::Wire { slot, .. }) = (self.shards.as_ref(), &target)
+        } else if let (Some(shards), PeerOutbound::Wire { slot, .. }) =
+            (self.shards.as_ref(), &target)
         {
             let shard = shards.assign_peer();
             if shard > 0 {
                 let added = handle
-                    .wire_slot_tx
+                    .transmit_slot_tx
                     .as_ref()
-                    .and_then(|tx| tx.lock().expect("wire_slot_tx poisoned").take())
+                    .and_then(|tx| tx.lock().expect("transmit_slot_tx poisoned").take())
                     .map(|producer| {
                         shards.add_worker_peer(
                             shard,
@@ -1760,7 +1770,7 @@ impl FanOutSend {
             }
         }
 
-        if let PeerSend::Wire { slot, .. } = &target {
+        if let PeerOutbound::Wire { slot, .. } = &target {
             let inner = Arc::downgrade(&self.inner);
             let generation = self.generation.clone();
             slot.set_fanout_reactivation(Arc::new(move |peer_id| {
@@ -1918,14 +1928,14 @@ impl FanOutSend {
     }
 }
 
-fn targets_have_space(targets: &[PeerSend]) -> bool {
+fn targets_have_space(targets: &[PeerOutbound]) -> bool {
     targets.iter().all(|t| match t {
-        PeerSend::Wire { slot, .. } => slot.has_space() || slot.dead.load(Ordering::Acquire),
-        PeerSend::Inbox(_) => true,
+        PeerOutbound::Wire { slot, .. } => slot.has_space() || slot.dead.load(Ordering::Acquire),
+        PeerOutbound::Inbox(_) => true,
     })
 }
 
-async fn send_to_targets_nodrop(targets: &[PeerSend], msg: Message) -> Result<()> {
+async fn send_to_targets_nodrop(targets: &[PeerOutbound], msg: Message) -> Result<()> {
     for target in targets {
         target.send(msg.clone()).await?;
     }
@@ -1933,16 +1943,16 @@ async fn send_to_targets_nodrop(targets: &[PeerSend], msg: Message) -> Result<()
 }
 
 fn dispatch_encoded_batch(
-    encoded: &EncodedFanOutBatch,
-    targets: &[PeerSend],
+    encoded: &EncodedFanOutFrame,
+    targets: &[PeerOutbound],
     msg: &Message,
     drop_on_full: bool,
-    deactivate: &mut impl FnMut(&PeerSend),
+    deactivate: &mut impl FnMut(&PeerOutbound),
 ) -> DispatchOutcome {
     let mut outcome = DispatchOutcome::default();
     for t in targets {
         match t {
-            PeerSend::Wire { slot, .. } => {
+            PeerOutbound::Wire { slot, .. } => {
                 if drop_on_full && !slot.fanout_active() {
                     outcome.push_full(t);
                     continue;
@@ -1951,29 +1961,29 @@ fn dispatch_encoded_batch(
                     && !slot.fanout_dict_shipped()
                 {
                     match try_push_encoded_fanout(slot, dict) {
-                        TryEncodeResult::Ok => {
+                        TryFrameResult::Ok => {
                             slot.mark_fanout_dict_shipped();
                         }
-                        TryEncodeResult::Full => {
+                        TryFrameResult::Full => {
                             if drop_on_full {
                                 deactivate(t);
                             }
                             outcome.push_full(t);
                             continue;
                         }
-                        TryEncodeResult::Dead | TryEncodeResult::Ineligible => continue,
+                        TryFrameResult::Dead | TryFrameResult::Ineligible => continue,
                     }
                 }
-                if try_push_encoded_fanout(slot, &encoded.payload) == TryEncodeResult::Full {
+                if try_push_encoded_fanout(slot, &encoded.payload) == TryFrameResult::Full {
                     if drop_on_full {
                         deactivate(t);
                     }
                     outcome.push_full(t);
                 }
             }
-            PeerSend::Inbox(tx) => {
+            PeerOutbound::Inbox(tx) => {
                 if tx
-                    .try_send(DriverCommand::SendMessage(msg.clone()))
+                    .try_send(PeerDriverCommand::SendMessage(msg.clone()))
                     .is_err()
                 {
                     outcome.push_full(t);
@@ -1982,7 +1992,7 @@ fn dispatch_encoded_batch(
         }
     }
     for t in targets {
-        if let PeerSend::Wire { slot, .. } = t {
+        if let PeerOutbound::Wire { slot, .. } = t {
             slot.signal_encoded();
         }
     }
@@ -1990,33 +2000,33 @@ fn dispatch_encoded_batch(
 }
 
 fn dispatch_encoded(
-    eq: &mut EncodedQueue,
-    targets: &[PeerSend],
+    eq: &mut FrameBuffer,
+    targets: &[PeerOutbound],
     msg: &Message,
     chunks: &mut Vec<Bytes>,
     drop_on_full: bool,
-    deactivate: &mut impl FnMut(&PeerSend),
+    deactivate: &mut impl FnMut(&PeerOutbound),
 ) -> DispatchOutcome {
     let mut outcome = DispatchOutcome::default();
-    match finish_fan_out_batch(eq, chunks, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET) {
-        FanOutBatch::Arena(raw) => {
+    match finish_fan_out_frame(eq, chunks, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET) {
+        FanOutFrame::Arena(raw) => {
             for t in targets {
                 match t {
-                    PeerSend::Wire { slot, .. } => {
+                    PeerOutbound::Wire { slot, .. } => {
                         if drop_on_full && !slot.fanout_active() {
                             outcome.push_full(t);
                             continue;
                         }
-                        if slot.try_push_pre_encoded_no_signal(raw) == TryEncodeResult::Full {
+                        if slot.try_push_pre_framed_no_signal(raw) == TryFrameResult::Full {
                             if drop_on_full {
                                 deactivate(t);
                             }
                             outcome.push_full(t);
                         }
                     }
-                    PeerSend::Inbox(tx) => {
+                    PeerOutbound::Inbox(tx) => {
                         if tx
-                            .try_send(DriverCommand::SendMessage(msg.clone()))
+                            .try_send(PeerDriverCommand::SendMessage(msg.clone()))
                             .is_err()
                         {
                             outcome.push_full(t);
@@ -2025,29 +2035,29 @@ fn dispatch_encoded(
                 }
             }
             for t in targets {
-                if let PeerSend::Wire { slot, .. } = t {
+                if let PeerOutbound::Wire { slot, .. } = t {
                     slot.signal_encoded();
                 }
             }
         }
-        FanOutBatch::Chunks(encoded) => {
+        FanOutFrame::Chunks(encoded) => {
             for t in targets {
                 match t {
-                    PeerSend::Wire { slot, .. } => {
+                    PeerOutbound::Wire { slot, .. } => {
                         if drop_on_full && !slot.fanout_active() {
                             outcome.push_full(t);
                             continue;
                         }
-                        if slot.try_push_encoded(encoded) == TryEncodeResult::Full {
+                        if slot.try_push_encoded(encoded) == TryFrameResult::Full {
                             if drop_on_full {
                                 deactivate(t);
                             }
                             outcome.push_full(t);
                         }
                     }
-                    PeerSend::Inbox(tx) => {
+                    PeerOutbound::Inbox(tx) => {
                         if tx
-                            .try_send(DriverCommand::SendMessage(msg.clone()))
+                            .try_send(PeerDriverCommand::SendMessage(msg.clone()))
                             .is_err()
                         {
                             outcome.push_full(t);
@@ -2057,23 +2067,23 @@ fn dispatch_encoded(
             }
         }
     }
-    clear_fan_out_batch(eq, chunks);
+    clear_fan_out_frame(eq, chunks);
     outcome
 }
 
 fn dispatch_to_targets(
-    targets: &[PeerSend],
+    targets: &[PeerOutbound],
     msg: &Message,
     encoder: Option<&Mutex<MessageEncoder>>,
     drop_on_full: bool,
-    deactivate: &mut impl FnMut(&PeerSend),
+    deactivate: &mut impl FnMut(&PeerOutbound),
 ) -> Result<DispatchOutcome> {
     use std::cell::RefCell;
 
     match targets.len() {
         0 => Ok(DispatchOutcome::default()),
         1 => match targets[0].try_encode(msg) {
-            TryEncodeResult::Full => {
+            TryFrameResult::Full => {
                 if drop_on_full {
                     deactivate(&targets[0]);
                 }
@@ -2085,10 +2095,10 @@ fn dispatch_to_targets(
         },
         _ => {
             #[cfg(feature = "ws")]
-            if targets.iter().any(PeerSend::is_ws) {
+            if targets.iter().any(PeerOutbound::is_ws) {
                 let mut outcome = DispatchOutcome::default();
                 for t in targets {
-                    if t.try_encode(msg) == TryEncodeResult::Full {
+                    if t.try_encode(msg) == TryFrameResult::Full {
                         if drop_on_full {
                             deactivate(t);
                         }
@@ -2099,8 +2109,8 @@ fn dispatch_to_targets(
             }
 
             thread_local! {
-                static ARENA: RefCell<EncodedQueue> = RefCell::new(
-                    EncodedQueue::one_shot(),
+                static ARENA: RefCell<FrameBuffer> = RefCell::new(
+                    FrameBuffer::one_shot(),
                 );
                 static CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
             }

@@ -10,12 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
-use crate::engine::{DriverHandle, SendPipeError, SendPipeProducer};
+use crate::engine::{PeerDriverHandle, SendPipeError, SendPipeProducer};
 use omq_proto::error::Result;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 
-use super::drop_queue::{DropQueue, QueueReceiver};
+use super::fallback_queue::{FallbackQueue, FallbackReceiver};
 
 #[derive(Debug)]
 struct ActivePipe {
@@ -69,7 +69,7 @@ impl ActivePipes {
 /// Cloneable handle for submitting messages into a [`RoundRobinSend`].
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
-    queue: DropQueue,
+    queue: FallbackQueue,
     active: Arc<Mutex<ActivePipes>>,
 }
 
@@ -182,8 +182,8 @@ impl ActivePipes {
 /// Round-robin send strategy.
 #[derive(Debug)]
 pub(crate) struct RoundRobinSend {
-    queue: DropQueue,
-    shared_rx: QueueReceiver,
+    queue: FallbackQueue,
+    shared_rx: FallbackReceiver,
     active: Arc<Mutex<ActivePipes>>,
     peer_count: usize,
 }
@@ -191,7 +191,7 @@ pub(crate) struct RoundRobinSend {
 impl RoundRobinSend {
     pub(crate) fn new(options: &Options) -> Self {
         let (cap, policy) = super::effective_queue_params(options);
-        let (queue, shared_rx) = DropQueue::new(cap, policy);
+        let (queue, shared_rx) = FallbackQueue::new(cap, policy);
         Self {
             queue,
             shared_rx,
@@ -202,14 +202,14 @@ impl RoundRobinSend {
 
     /// Returns a clone of the shared receive end. Each connection driver
     /// calls this once and holds the clone for the lifetime of the connection.
-    pub(crate) fn shared_rx(&self) -> QueueReceiver {
+    pub(crate) fn shared_rx(&self) -> FallbackReceiver {
         self.shared_rx.clone()
     }
 
     pub(crate) fn connection_added(
         &mut self,
         peer_id: u64,
-        handle: &DriverHandle,
+        handle: &PeerDriverHandle,
         _is_inproc: bool,
     ) {
         self.peer_count += 1;

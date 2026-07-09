@@ -1,8 +1,8 @@
 //! Coalesced data-available notification.
 //!
 //! Implements the libzmq ypipe signaling discipline: one wake per
-//! batch, not one wake per push. Used by `PeerWireSlot`, `SendPipe`,
-//! `DropQueue`, and fan-out shard workers.
+//! batch, not one wake per push. Used by `PeerTransmitSlot`, `SendPipe`,
+//! `FallbackQueue`, and fan-out shard workers.
 //!
 //! Protocol:
 //! - **Producer** calls [`DataSignal::mark`] after each push. Only the

@@ -35,25 +35,25 @@ impl std::fmt::Debug for Inner {
 /// Bounded, multi-producer multi-consumer send queue with a configurable
 /// drop policy. Clone-able; all clones share the same underlying queue.
 #[derive(Clone, Debug)]
-pub(crate) struct DropQueue {
+pub(crate) struct FallbackQueue {
     inner: Arc<Inner>,
     policy: OnMute,
 }
 
-/// Cloneable receive handle for a [`DropQueue`]. Each clone shares the same
+/// Cloneable receive handle for a [`FallbackQueue`]. Each clone shares the same
 /// underlying queue; any clone can pop the next available message.
 #[derive(Clone, Debug)]
-pub(crate) struct QueueReceiver {
+pub(crate) struct FallbackReceiver {
     inner: Arc<Inner>,
     peer_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl DropQueue {
+impl FallbackQueue {
     /// Create a new queue. Returns `(sender_handle, receiver_handle)`.
     ///
     /// `capacity == usize::MAX` creates an unbounded queue (no `Semaphore`).
     /// Otherwise the queue is bounded to `capacity.max(1)`.
-    pub(crate) fn new(capacity: usize, policy: OnMute) -> (Self, QueueReceiver) {
+    pub(crate) fn new(capacity: usize, policy: OnMute) -> (Self, FallbackReceiver) {
         let (queue, slots) = if capacity == usize::MAX {
             (ConcurrentQueue::unbounded(), None)
         } else {
@@ -65,7 +65,7 @@ impl DropQueue {
             data_signal: DataSignal::new(),
             slots,
         });
-        let receiver = QueueReceiver {
+        let receiver = FallbackReceiver {
             inner: inner.clone(),
             peer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -174,11 +174,11 @@ impl DropQueue {
     }
 }
 
-impl QueueReceiver {
+impl FallbackReceiver {
     /// Non-blocking pop. Returns the next message, or `None` if empty.
     ///
     /// For `Block`-policy queues, also releases one write slot so any sender
-    /// waiting in `DropQueue::send` can proceed.
+    /// waiting in `FallbackQueue::send` can proceed.
     pub(crate) fn try_pop(&self) -> Option<Message> {
         self.inner.queue.pop().ok()
     }
@@ -230,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn block_policy_backpressures() {
-        let (q, rx) = DropQueue::new(1, OnMute::Block);
+        let (q, rx) = FallbackQueue::new(1, OnMute::Block);
         q.send(Message::single("a")).await.unwrap();
         let r = tokio::time::timeout(
             std::time::Duration::from_millis(20),
@@ -244,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn drop_newest_silent() {
-        let (q, rx) = DropQueue::new(1, OnMute::DropNewest);
+        let (q, rx) = FallbackQueue::new(1, OnMute::DropNewest);
         q.send(Message::single("a")).await.unwrap();
         q.send(Message::single("b")).await.unwrap();
         q.send(Message::single("c")).await.unwrap();
@@ -255,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn drop_oldest_keeps_latest() {
-        let (q, rx) = DropQueue::new(2, OnMute::DropOldest);
+        let (q, rx) = FallbackQueue::new(2, OnMute::DropOldest);
         q.send(Message::single("a")).await.unwrap();
         q.send(Message::single("b")).await.unwrap();
         q.send(Message::single("c")).await.unwrap();
@@ -268,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn recv_wakes_on_push() {
-        let (q, rx) = DropQueue::new(4, OnMute::Block);
+        let (q, rx) = FallbackQueue::new(4, OnMute::Block);
         let recv_task = tokio::spawn(async move { rx.recv().await });
         tokio::task::yield_now().await;
         q.send(Message::single("hello")).await.unwrap();
@@ -278,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_unblocks_recv() {
-        let (q, rx) = DropQueue::new(4, OnMute::Block);
+        let (q, rx) = FallbackQueue::new(4, OnMute::Block);
         let recv_task = tokio::spawn(async move { rx.recv().await });
         tokio::task::yield_now().await;
         q.close();
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn try_send_block_succeeds_when_space() {
-        let (q, rx) = DropQueue::new(2, OnMute::Block);
+        let (q, rx) = FallbackQueue::new(2, OnMute::Block);
         q.try_send(Message::single("a")).unwrap();
         q.try_send(Message::single("b")).unwrap();
         let got = rx.try_pop().unwrap();
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn try_send_block_returns_err_when_full() {
-        let (q, _rx) = DropQueue::new(1, OnMute::Block);
+        let (q, _rx) = FallbackQueue::new(1, OnMute::Block);
         q.try_send(Message::single("a")).unwrap();
         let err = q.try_send(Message::single("b")).unwrap_err();
         assert_eq!(err.part_bytes(0).unwrap(), &b"b"[..]);
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn try_send_drop_newest_silent() {
-        let (q, rx) = DropQueue::new(1, OnMute::DropNewest);
+        let (q, rx) = FallbackQueue::new(1, OnMute::DropNewest);
         q.try_send(Message::single("a")).unwrap();
         q.try_send(Message::single("b")).unwrap();
         let got = rx.try_pop().unwrap();
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn try_send_drop_oldest_keeps_latest() {
-        let (q, rx) = DropQueue::new(2, OnMute::DropOldest);
+        let (q, rx) = FallbackQueue::new(2, OnMute::DropOldest);
         q.try_send(Message::single("a")).unwrap();
         q.try_send(Message::single("b")).unwrap();
         q.try_send(Message::single("c")).unwrap();
@@ -328,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_send_wakes_receiver() {
-        let (q, rx) = DropQueue::new(4, OnMute::Block);
+        let (q, rx) = FallbackQueue::new(4, OnMute::Block);
         let recv_task = tokio::spawn(async move { rx.recv().await });
         tokio::task::yield_now().await;
         q.try_send(Message::single("hello")).unwrap();

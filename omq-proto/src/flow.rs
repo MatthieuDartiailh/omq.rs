@@ -41,7 +41,7 @@ impl DrainBudget {
     /// 256 msgs / 2 MiB: shard workers, deferred fan-out.
     pub const WORKER: Self = Self::new(256, 2 * 1024 * 1024);
 
-    /// 1024 iterations / 1 MiB: wire-slot drain path. Each iteration
+    /// 1024 iterations / 1 MiB: transmit-slot drain path. Each iteration
     /// may yield multiple messages, so the "msgs" dimension counts
     /// drain rounds, not individual messages.
     pub const WIRE_DRAIN: Self = Self::new(1024, 1024 * 1024);

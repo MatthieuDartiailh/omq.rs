@@ -18,7 +18,7 @@ enum Entry {
     External(Bytes),
 }
 
-pub struct EncodedQueue {
+pub struct FrameBuffer {
     entries: VecDeque<Entry>,
     total_bytes: usize,
     arena: BytesMut,
@@ -36,16 +36,16 @@ pub struct EncodedQueue {
     arena_peak_cap: usize,
 }
 
-impl std::fmt::Debug for EncodedQueue {
+impl std::fmt::Debug for FrameBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EncodedQueue")
+        f.debug_struct("FrameBuffer")
             .field("entries", &self.entries.len())
             .field("total_bytes", &self.total_bytes)
             .finish_non_exhaustive()
     }
 }
 
-impl EncodedQueue {
+impl FrameBuffer {
     pub fn new() -> Self {
         Self::with_arena_threshold(ARENA_THRESHOLD)
     }
@@ -114,7 +114,7 @@ impl EncodedQueue {
         frozen
     }
 
-    pub fn push_pre_encoded(&mut self, data: &[u8]) {
+    pub fn push_pre_framed(&mut self, data: &[u8]) {
         self.arena.extend_from_slice(data);
         self.total_bytes += data.len();
     }
@@ -135,13 +135,13 @@ impl EncodedQueue {
     }
 
     #[inline]
-    pub fn encode_arena(&mut self, msg: &Message) {
+    pub fn frame_inline(&mut self, msg: &Message) {
         let before = self.arena.len();
         frame::encode_message_flat(msg, &mut self.arena);
         self.total_bytes += self.arena.len() - before;
     }
 
-    pub fn encode_gather(&mut self, msg: &Message) {
+    pub fn frame_gather(&mut self, msg: &Message) {
         let parts = msg.parts_payload();
         let n = parts.len();
         for (i, part) in parts.iter().enumerate() {
@@ -158,7 +158,7 @@ impl EncodedQueue {
     }
 
     #[cfg(feature = "ws")]
-    pub fn encode_ws(&mut self, msg: &Message, masked: bool) {
+    pub fn frame_ws(&mut self, msg: &Message, masked: bool) {
         let before = self.arena.len();
         if masked {
             frame::encode_message_flat_ws_masked(msg, &mut self.arena);
@@ -168,30 +168,30 @@ impl EncodedQueue {
         self.total_bytes += self.arena.len() - before;
     }
 
-    pub fn encode_prefixed_arena(&mut self, prefix: &Bytes, msg: &Message) {
+    pub fn frame_prefixed_inline(&mut self, prefix: &Bytes, msg: &Message) {
         let before = self.arena.len();
         frame::encode_message_prefixed_flat(prefix, msg, &mut self.arena);
         self.total_bytes += self.arena.len() - before;
     }
 
     #[inline]
-    pub fn encode_auto(&mut self, msg: &Message) {
+    pub fn frame(&mut self, msg: &Message) {
         if msg.byte_len() < self.arena_threshold {
-            self.encode_arena(msg);
+            self.frame_inline(msg);
         } else {
-            self.encode_gather(msg);
+            self.frame_gather(msg);
         }
     }
 
-    pub fn encode_prefixed_auto(&mut self, prefix: &Bytes, msg: &Message) {
+    pub fn frame_prefixed(&mut self, prefix: &Bytes, msg: &Message) {
         if msg.byte_len() + prefix.len() * msg.len() < self.arena_threshold {
-            self.encode_prefixed_arena(prefix, msg);
+            self.frame_prefixed_inline(prefix, msg);
         } else {
-            self.encode_prefixed_gather(prefix, msg);
+            self.frame_prefixed_gather(prefix, msg);
         }
     }
 
-    pub fn encode_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
+    pub fn frame_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
         let parts = msg.parts_payload();
         let n = parts.len();
         for (i, part) in parts.iter().enumerate() {
@@ -226,7 +226,7 @@ impl EncodedQueue {
         }
     }
 
-    pub fn drain_into_vec(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
+    pub fn drain(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
         self.commit_arena_range();
         if self.entries.is_empty() {
             return;
@@ -297,7 +297,7 @@ impl EncodedQueue {
     }
 }
 
-impl Default for EncodedQueue {
+impl Default for FrameBuffer {
     fn default() -> Self {
         Self::new()
     }
@@ -309,13 +309,13 @@ mod tests {
 
     #[test]
     fn put_back_partial_write() {
-        let mut eq = EncodedQueue::new();
+        let mut eq = FrameBuffer::new();
         let msg = Message::from(Bytes::from_static(&[0xAB; 100]));
-        eq.encode_gather(&msg);
+        eq.frame_gather(&msg);
         assert!(!eq.is_empty());
 
         let mut buf = Vec::new();
-        eq.drain_into_vec(&mut buf, 1024);
+        eq.drain(&mut buf, 1024);
         let total: usize = buf.iter().map(Bytes::len).sum();
         assert!(total > 0);
 
@@ -323,23 +323,23 @@ mod tests {
         assert!(!eq.is_empty());
 
         let mut buf2 = Vec::new();
-        eq.drain_into_vec(&mut buf2, 1024);
+        eq.drain(&mut buf2, 1024);
         let remaining: usize = buf2.iter().map(Bytes::len).sum();
         assert_eq!(remaining, total - 5);
     }
 
     #[test]
     fn arena_and_gather_ordering() {
-        let mut eq = EncodedQueue::new();
+        let mut eq = FrameBuffer::new();
         let small = Message::from(Bytes::from_static(&[1; 64]));
         let large = Message::from(Bytes::from(vec![2; 128 * 1024]));
 
-        eq.encode_arena(&small);
-        eq.encode_gather(&large);
-        eq.encode_arena(&small);
+        eq.frame_inline(&small);
+        eq.frame_gather(&large);
+        eq.frame_inline(&small);
 
         let mut buf = Vec::new();
-        eq.drain_into_vec(&mut buf, 1024);
+        eq.drain(&mut buf, 1024);
 
         // First chunk: small message frame + large message header (coalesced)
         assert!(buf[0].len() > 64);
@@ -348,14 +348,14 @@ mod tests {
 
     #[test]
     fn gather_headers_share_arena() {
-        let mut eq = EncodedQueue::new();
+        let mut eq = FrameBuffer::new();
         let large = Message::from(Bytes::from(vec![0xCC; 128 * 1024]));
 
-        eq.encode_gather(&large);
-        eq.encode_gather(&large);
+        eq.frame_gather(&large);
+        eq.frame_gather(&large);
 
         let mut buf = Vec::new();
-        eq.drain_into_vec(&mut buf, 1024);
+        eq.drain(&mut buf, 1024);
 
         // 2 messages × (1 header chunk + 1 payload chunk) = 4 chunks
         assert_eq!(buf.len(), 4);
@@ -366,15 +366,15 @@ mod tests {
 
     #[test]
     fn mixed_coalesces_header_with_small() {
-        let mut eq = EncodedQueue::new();
+        let mut eq = FrameBuffer::new();
         let small = Message::from(Bytes::from_static(&[1; 64]));
         let large = Message::from(Bytes::from(vec![2; 128 * 1024]));
 
-        eq.encode_arena(&small);
-        eq.encode_gather(&large);
+        eq.frame_inline(&small);
+        eq.frame_gather(&large);
 
         let mut buf = Vec::new();
-        eq.drain_into_vec(&mut buf, 1024);
+        eq.drain(&mut buf, 1024);
 
         // small frame (2 + 64 = 66 bytes) + large header (9 bytes) = 75 bytes
         // coalesced into one arena chunk
@@ -385,23 +385,23 @@ mod tests {
 
     #[test]
     fn empty_after_drain() {
-        let mut eq = EncodedQueue::new();
+        let mut eq = FrameBuffer::new();
         let msg = Message::from(Bytes::from_static(&[1; 64]));
-        eq.encode_arena(&msg);
+        eq.frame_inline(&msg);
         assert!(!eq.is_empty());
 
         let mut buf = Vec::new();
-        eq.drain_into_vec(&mut buf, 1024);
+        eq.drain(&mut buf, 1024);
         assert!(eq.is_empty());
     }
 
     #[test]
     fn has_arena_only_small_message() {
-        let mut eq = EncodedQueue::one_shot();
+        let mut eq = FrameBuffer::one_shot();
         assert!(!eq.has_arena_only());
 
         let msg = Message::from(Bytes::from_static(&[0xAA; 64]));
-        eq.encode_auto(&msg);
+        eq.frame(&msg);
         assert!(eq.has_arena_only());
 
         let raw = eq.uncommitted_arena();
@@ -411,17 +411,17 @@ mod tests {
 
     #[test]
     fn has_arena_only_false_for_gather() {
-        let mut eq = EncodedQueue::one_shot();
+        let mut eq = FrameBuffer::one_shot();
         let large = Message::from(Bytes::from(vec![0xBB; 128 * 1024]));
-        eq.encode_auto(&large);
+        eq.frame(&large);
         assert!(!eq.has_arena_only());
     }
 
     #[test]
     fn take_arena_bytes_round_trip() {
-        let mut eq = EncodedQueue::one_shot();
+        let mut eq = FrameBuffer::one_shot();
         let msg = Message::from(Bytes::from_static(&[0xCC; 32]));
-        eq.encode_auto(&msg);
+        eq.frame(&msg);
         assert!(eq.has_arena_only());
 
         let frozen = eq.take_arena_bytes();
@@ -429,28 +429,28 @@ mod tests {
         assert!(eq.is_empty());
         assert_eq!(eq.total_bytes(), 0);
 
-        let mut eq2 = EncodedQueue::new();
-        eq2.push_pre_encoded(&frozen);
+        let mut eq2 = FrameBuffer::new();
+        eq2.push_pre_framed(&frozen);
         let mut buf = Vec::new();
-        eq2.drain_into_vec(&mut buf, 1024);
+        eq2.drain(&mut buf, 1024);
         assert_eq!(buf.len(), 1);
         assert_eq!(buf[0], frozen);
     }
 
     #[test]
     fn arena_only_matches_drain_output() {
-        let mut eq1 = EncodedQueue::one_shot();
-        let mut eq2 = EncodedQueue::one_shot();
+        let mut eq1 = FrameBuffer::one_shot();
+        let mut eq2 = FrameBuffer::one_shot();
         let msg = Message::from(Bytes::from_static(&[0xDD; 100]));
 
-        eq1.encode_auto(&msg);
-        eq2.encode_auto(&msg);
+        eq1.frame(&msg);
+        eq2.frame(&msg);
 
         let raw = eq1.uncommitted_arena().to_vec();
         eq1.clear_arena();
 
         let mut chunks = Vec::new();
-        eq2.drain_into_vec(&mut chunks, 1024);
+        eq2.drain(&mut chunks, 1024);
 
         let drained: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
         assert_eq!(raw, drained);

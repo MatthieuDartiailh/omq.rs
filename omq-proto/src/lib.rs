@@ -7,12 +7,12 @@
 #![forbid(unsafe_code)]
 
 pub mod backoff;
-pub mod direct_encode;
-pub mod encoded_queue;
 pub mod endpoint;
 pub mod error;
-pub mod fan_out_batch;
+pub mod fan_out_frame;
 pub mod flow;
+pub mod frame_buffer;
+pub mod handle_frame;
 pub mod inproc;
 pub mod message;
 pub mod monitor;

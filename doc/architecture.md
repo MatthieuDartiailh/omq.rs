@@ -74,16 +74,20 @@ traffic. Larger single-part messages use `Bytes`; multipart messages use
 
 ## Encoding
 
-`EncodedQueue` is the outbound byte queue: a 256 KiB arena plus an entry list.
+`FrameBuffer` is the outbound framing buffer: a 256 KiB arena plus an entry list.
 Frame headers always go into the arena. Small messages below `ARENA_THRESHOLD`
 encode header and payload contiguously into the arena. Large messages write
 the header into the arena and keep payload `Bytes` as external entries for
 gather write.
 
-`PeerWireSlot` wraps `EncodedQueue` in a short-held `std::sync::Mutex`.
-Socket handles encode into the slot. `ConnectionDriver` owns the writer and
-flushes from its `data_ready` select branch. A coalescing atomic flag prevents
-one wake per message when the driver is already scheduled.
+`PeerTransmitSlot` wraps `FrameBuffer` in a short-held `std::sync::Mutex`, capped
+at 512 KiB (close to the kernel TCP send buffer). Socket handles encode into
+the slot. `ConnectionDriver` owns the writer and flushes from its `data_ready`
+select branch. Producer-to-consumer signaling uses `DataSignal`: an atomic
+flag plus `Notify` that coalesces wakes so only the `false`-to-`true`
+transition fires `notify_one`. The consumer clears the flag before draining,
+then calls `rearm_if_nonempty` to self-wake if data remains. For
+budget-interrupted drains, `reschedule` fires unconditionally.
 
 CURVE and BLAKE3ZMQ keep per-connection nonce state, so encrypted traffic uses
 per-connection ordered transforms. LZ4 fan-out may encode once at socket level
@@ -96,7 +100,7 @@ Round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`) use per-peer
 active pipes from a moving cursor. If every active pipe is full, async send
 waits on a rotating peer and `try_send` reports HWM backpressure.
 
-`DropQueue` remains only as the no-peer/pre-connect fallback. Peer tasks drain
+`FallbackQueue` remains only as the no-peer/pre-connect fallback. Peer tasks drain
 it before newer pipe-fed sends, so messages queued before handshake are not
 overtaken.
 
@@ -144,12 +148,12 @@ handshake, disconnect, peer command, and close.
 
 ## Source Map
 
-Protocol: `omq-proto/src/message.rs`, `encoded_queue.rs`, `routing.rs`,
-`subscription.rs`, `proto/connection/`, `proto/frame.rs`.
+Protocol: `omq-proto/src/message.rs`, `frame_buffer.rs`, `flow.rs`,
+`routing.rs`, `subscription.rs`, `proto/connection/`, `proto/frame.rs`.
 
 Backend: `omq-tokio/src/socket/actor/`, `socket/handle.rs`,
-`engine/driver.rs`, `engine/send_pipe.rs`, `engine/wire_slot.rs`,
-`routing/`, and `transport/`.
+`engine/driver.rs`, `engine/send_pipe.rs`, `engine/transmit_slot.rs`,
+`engine/signal.rs`, `routing/`, and `transport/`.
 
 To add a socket type, extend `omq_proto::proto::SocketType`, compatibility
 checks, protocol routing, and the matching backend strategy. To add a

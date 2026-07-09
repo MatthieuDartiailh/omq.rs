@@ -15,19 +15,19 @@
 //! Conflate mode applies to `FanOut` only (PUB/XPUB/RADIO).
 //! REP envelope save/restore lives at the socket-type wiring level.
 
-pub(crate) mod drop_queue;
 pub(crate) mod exclusive;
 pub(crate) mod fair_queue;
+pub(crate) mod fallback_queue;
 pub(crate) mod fan_out;
 pub(crate) mod identity;
-pub(crate) mod peer_send;
+pub(crate) mod peer_outbound;
 pub(crate) mod round_robin;
 // subscription matcher lives in omq-proto now.
 pub(crate) use omq_proto::subscription;
 
 use bytes::Bytes;
 
-use crate::engine::DriverHandle;
+use crate::engine::PeerDriverHandle;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -130,7 +130,7 @@ impl SendStrategy {
     pub(crate) fn connection_added(
         &mut self,
         peer_id: u64,
-        handle: DriverHandle,
+        handle: PeerDriverHandle,
         peer_identity: Bytes,
         is_inproc: bool,
     ) {
@@ -146,7 +146,7 @@ impl SendStrategy {
     /// FanOut-only: register a peer that matches every group / every
     /// subscription. UDP RADIO uses this since DISH never sends JOIN
     /// over the wire. No-op for non-FanOut strategies.
-    pub(crate) fn connection_added_any_groups(&mut self, peer_id: u64, handle: DriverHandle) {
+    pub(crate) fn connection_added_any_groups(&mut self, peer_id: u64, handle: PeerDriverHandle) {
         if let Self::FanOut(s) = self {
             s.connection_added_any_groups(peer_id, handle);
         }
@@ -201,7 +201,7 @@ impl SendStrategy {
     /// socket type uses round-robin send. `None` for fan-out, identity,
     /// and no-send strategies. The connection driver polls this directly
     /// after handshake for messages queued before any peer was available.
-    pub(crate) fn shared_rx(&self) -> Option<drop_queue::QueueReceiver> {
+    pub(crate) fn shared_rx(&self) -> Option<fallback_queue::FallbackReceiver> {
         match self {
             Self::RoundRobin(s) => Some(s.shared_rx()),
             _ => None,

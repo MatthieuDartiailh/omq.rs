@@ -10,16 +10,16 @@ use omq_proto::proto::SocketType;
 use omq_proto::routing::{SendCategory, send_category};
 
 use super::handle::TrySendError;
-use crate::engine::wire_slot::{PeerWireSlot, TryEncodeResult};
+use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::routing::SendSubmitter;
 
 #[derive(Clone, Debug)]
-pub(crate) struct WireSlotCache {
-    single: Arc<ArcSwapOption<PeerWireSlot>>,
+pub(crate) struct TransmitSlotCache {
+    single: Arc<ArcSwapOption<PeerTransmitSlot>>,
     single_available: Arc<AtomicBool>,
 }
 
-impl WireSlotCache {
+impl TransmitSlotCache {
     pub(crate) fn new() -> Self {
         Self {
             single: Arc::new(ArcSwapOption::empty()),
@@ -34,7 +34,7 @@ impl WireSlotCache {
 
     pub(crate) fn rebuild<I>(&self, socket_type: SocketType, peer_count: usize, peer_slots: I)
     where
-        I: IntoIterator<Item = Option<Arc<PeerWireSlot>>>,
+        I: IntoIterator<Item = Option<Arc<PeerTransmitSlot>>>,
     {
         let cat = send_category(socket_type);
         if !matches!(cat, SendCategory::RoundRobin | SendCategory::Exclusive) {
@@ -55,11 +55,11 @@ impl WireSlotCache {
     }
 
     /// Synchronous single-peer wire encode fast path. Returns true if
-    /// the message was encoded into the peer's `EncodedQueue`.
+    /// the message was encoded into the peer's `FrameBuffer`.
     #[inline]
     pub(crate) fn try_send(&self, msg: &Message) -> bool {
         if let Some(ref slot) = self.single_slot() {
-            return slot.try_encode(msg) == TryEncodeResult::Ok;
+            return slot.try_encode(msg) == TryFrameResult::Ok;
         }
         false
     }
@@ -89,11 +89,11 @@ impl WireSlotCache {
         if let Some(ref slot) = slot {
             loop {
                 match slot.try_encode(&msg) {
-                    TryEncodeResult::Ok => return Ok(()),
-                    TryEncodeResult::Dead | TryEncodeResult::Ineligible => break,
-                    TryEncodeResult::Full => {
+                    TryFrameResult::Ok => return Ok(()),
+                    TryFrameResult::Dead | TryFrameResult::Ineligible => break,
+                    TryFrameResult::Full => {
                         let notified = slot.space_available.notified();
-                        if slot.try_encode(&msg) == TryEncodeResult::Ok {
+                        if slot.try_encode(&msg) == TryFrameResult::Ok {
                             return Ok(());
                         }
                         notified.await;
@@ -112,13 +112,13 @@ impl WireSlotCache {
             return Ok(false);
         };
         match slot.try_encode(msg) {
-            TryEncodeResult::Ok => Ok(true),
-            TryEncodeResult::Full => Err(TrySendError::Full(msg.clone())),
-            TryEncodeResult::Dead | TryEncodeResult::Ineligible => Ok(false),
+            TryFrameResult::Ok => Ok(true),
+            TryFrameResult::Full => Err(TrySendError::Full(msg.clone())),
+            TryFrameResult::Dead | TryFrameResult::Ineligible => Ok(false),
         }
     }
 
-    fn single_slot(&self) -> Option<Arc<PeerWireSlot>> {
+    fn single_slot(&self) -> Option<Arc<PeerTransmitSlot>> {
         if !self.single_exists() {
             return None;
         }

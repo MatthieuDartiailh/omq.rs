@@ -2,13 +2,13 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
-use crate::engine::{DriverCommand, DriverHandle};
+use crate::engine::{PeerDriverCommand, PeerDriverHandle};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
-    peer: Arc<Mutex<Option<DriverHandle>>>,
+    peer: Arc<Mutex<Option<PeerDriverHandle>>>,
     peer_ready: Arc<Notify>,
 }
 
@@ -25,7 +25,7 @@ impl Submitter {
                 Some(h) => {
                     return h
                         .inbox
-                        .send(DriverCommand::SendMessage(msg))
+                        .send(PeerDriverCommand::SendMessage(msg))
                         .await
                         .map_err(|_| Error::Closed);
                 }
@@ -48,11 +48,11 @@ impl Submitter {
         match handle {
             Some(h) => h
                 .inbox
-                .try_send(DriverCommand::SendMessage(msg))
+                .try_send(PeerDriverCommand::SendMessage(msg))
                 .map_err(|e| match e {
-                    tokio::sync::mpsc::error::TrySendError::Full(DriverCommand::SendMessage(m)) => {
-                        omq_proto::error::TrySendError::Full(m)
-                    }
+                    tokio::sync::mpsc::error::TrySendError::Full(
+                        PeerDriverCommand::SendMessage(m),
+                    ) => omq_proto::error::TrySendError::Full(m),
                     _ => omq_proto::error::TrySendError::Closed,
                 }),
             None => Err(omq_proto::error::TrySendError::Full(msg)),
@@ -62,7 +62,7 @@ impl Submitter {
 
 #[derive(Debug)]
 pub(crate) struct ExclusiveSend {
-    peer: Arc<Mutex<Option<DriverHandle>>>,
+    peer: Arc<Mutex<Option<PeerDriverHandle>>>,
     peer_ready: Arc<Notify>,
 }
 
@@ -81,7 +81,7 @@ impl ExclusiveSend {
         }
     }
 
-    pub(crate) fn connection_added(&mut self, _peer_id: u64, handle: DriverHandle) {
+    pub(crate) fn connection_added(&mut self, _peer_id: u64, handle: PeerDriverHandle) {
         *self.peer.lock().expect("exclusive peer") = Some(handle);
         self.peer_ready.notify_waiters();
     }

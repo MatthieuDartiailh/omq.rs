@@ -11,10 +11,10 @@ pub mod compression_pool;
 pub mod driver;
 pub(crate) mod send_pipe;
 pub(crate) mod signal;
-pub(crate) mod wire_slot;
+pub(crate) mod transmit_slot;
 
 pub use driver::{
-    ConnectionDriver, DriverCommand, DriverConfig, DriverHandle, PeerOut, RecvSink, RecvSinkConfig,
-    YringSink,
+    ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverHandle, PeerEvent, RecvSink,
+    RecvSinkConfig, YringSink,
 };
 pub(crate) use send_pipe::{SendPipeConsumer, SendPipeError, SendPipeProducer, send_pipe};

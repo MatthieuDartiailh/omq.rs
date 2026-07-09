@@ -19,12 +19,12 @@ use omq_proto::proto::{Command, Connection, Event};
 
 use super::compression_pool::CompressionPool;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
-use super::wire_slot::{PeerWireSlot, WireSlotItem};
-use crate::routing::drop_queue::QueueReceiver;
-use omq_proto::encoded_queue::EncodedQueue;
+use super::transmit_slot::{PeerTransmitSlot, TransmitChunk};
+use crate::routing::fallback_queue::FallbackReceiver;
+use omq_proto::frame_buffer::FrameBuffer;
 
-pub(crate) type WireSlotProducerHandle =
-    Arc<std::sync::Mutex<Option<yring::Producer<WireSlotItem>>>>;
+pub(crate) type TransmitSlotProducerHandle =
+    Arc<std::sync::Mutex<Option<yring::Producer<TransmitChunk>>>>;
 
 /// Where the driver routes decoded inbound messages.
 ///
@@ -189,10 +189,10 @@ impl RecvSink {
     }
 }
 
-/// Batch-encode messages into `EncodedQueue`. Two modes:
+/// Batch-encode messages into `FrameBuffer`. Two modes:
 ///
 /// **Direct** (no encoder or offloading disabled): encode each message
-/// into `EncodedQueue` inline.
+/// into `FrameBuffer` inline.
 ///
 /// **Pipelined** (encoder present, offloading enabled): each message
 /// enters `FuturesOrdered` as either `spawn_blocking` (large) or
@@ -207,7 +207,7 @@ async fn batch_encode(
     max_msgs: usize,
     encoder: &mut Option<MessageEncoder>,
     codec: &mut Connection,
-    eq: &mut EncodedQueue,
+    eq: &mut FrameBuffer,
     passthrough: Option<&(Bytes, usize)>,
     pool: Option<&Arc<CompressionPool>>,
     threshold: usize,
@@ -263,7 +263,7 @@ use omq_proto::flow::{DrainBudget, max_batch_bytes};
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DriverConfig {
+pub struct PeerDriverConfig {
     /// Close the connection if the ZMTP handshake doesn't finish within
     /// this window. `None` = no deadline.
     pub handshake_timeout: Option<Duration>,
@@ -282,7 +282,7 @@ pub struct DriverConfig {
 
 /// Commands accepted by a running [`ConnectionDriver`].
 #[derive(Debug)]
-pub enum DriverCommand {
+pub enum PeerDriverCommand {
     /// Queue an application message for send.
     SendMessage(Message),
     /// Pre-encoded wire bytes. Pushed directly into the transmit buffer,
@@ -298,11 +298,11 @@ pub enum DriverCommand {
 /// Handle returned to callers after spawning a driver. `inbox` delivers
 /// commands into the driver; `cancel` requests early teardown.
 #[derive(Debug, Clone)]
-pub struct DriverHandle {
-    pub inbox: mpsc::Sender<DriverCommand>,
+pub struct PeerDriverHandle {
+    pub inbox: mpsc::Sender<PeerDriverCommand>,
     pub cancel: CancellationToken,
-    pub(crate) wire_slot: Option<Arc<PeerWireSlot>>,
-    pub(crate) wire_slot_tx: Option<WireSlotProducerHandle>,
+    pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
+    pub(crate) transmit_slot_tx: Option<TransmitSlotProducerHandle>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
 }
 
@@ -312,7 +312,7 @@ pub struct DriverHandle {
 /// per-connection shim task that wrapped Events into the
 /// `SocketDriver`'s `InternalEvent::PeerEvent` / `PeerClosed`.
 #[derive(Debug)]
-pub enum PeerOut {
+pub enum PeerEvent {
     Event(Event),
     Closed,
 }
@@ -326,14 +326,14 @@ where
 {
     stream: T,
     codec: Connection,
-    inbox: mpsc::Receiver<DriverCommand>,
+    inbox: mpsc::Receiver<PeerDriverCommand>,
     /// Shared multi-producer channel feeding the `SocketDriver`'s
     /// per-peer event loop. Each entry is tagged with the `peer_id`
     /// this driver was assigned; the receiver dispatches on that.
-    peer_out: mpsc::Sender<(u64, PeerOut)>,
+    peer_out: mpsc::Sender<(u64, PeerEvent)>,
     peer_id: u64,
     cancel: CancellationToken,
-    config: DriverConfig,
+    config: PeerDriverConfig,
     /// Send-side message encoder (`lz4+tcp://`).
     encoder: Option<MessageEncoder>,
     /// Receive-side message decoder. Symmetric to `encoder`.
@@ -341,7 +341,7 @@ where
     /// Shared round-robin send queue. When set, the driver reads outbound
     /// messages directly from this queue (bypassing the pump task
     /// hop through `inbox`). `None` for non-round-robin socket types.
-    shared_msg_rx: Option<QueueReceiver>,
+    shared_msg_rx: Option<FallbackReceiver>,
     /// Direct recv channel. When set, inbound `Event::Message` frames are
     /// pushed straight into the user-facing recv channel without going through
     /// the `SocketDriver` actor's event loop. Only set for socket types where
@@ -354,10 +354,10 @@ where
     /// Minimum message `byte_len` to trigger compression offloading.
     offload_threshold: usize,
     /// Per-peer encode slot: the socket handle encodes ZMTP frames into
-    /// this slot's `EncodedQueue`, and the driver flushes them to the
+    /// this slot's `FrameBuffer`, and the driver flushes them to the
     /// wire. Replaces the `DirectIo` pattern where the handle locked the
     /// writer directly.
-    wire_slot: Option<Arc<PeerWireSlot>>,
+    transmit_slot: Option<Arc<PeerTransmitSlot>>,
     send_pipe_rx: Option<SendPipeConsumer>,
     arena_threshold: usize,
 }
@@ -369,8 +369,8 @@ where
     pub fn new(
         stream: T,
         codec: Connection,
-        inbox: mpsc::Receiver<DriverCommand>,
-        peer_out: mpsc::Sender<(u64, PeerOut)>,
+        inbox: mpsc::Receiver<PeerDriverCommand>,
+        peer_out: mpsc::Sender<(u64, PeerEvent)>,
         peer_id: u64,
         cancel: CancellationToken,
     ) -> Self {
@@ -381,18 +381,18 @@ where
             peer_out,
             peer_id,
             cancel,
-            DriverConfig::default(),
+            PeerDriverConfig::default(),
         )
     }
 
     pub fn with_config(
         stream: T,
         codec: Connection,
-        inbox: mpsc::Receiver<DriverCommand>,
-        peer_out: mpsc::Sender<(u64, PeerOut)>,
+        inbox: mpsc::Receiver<PeerDriverCommand>,
+        peer_out: mpsc::Sender<(u64, PeerEvent)>,
         peer_id: u64,
         cancel: CancellationToken,
-        config: DriverConfig,
+        config: PeerDriverConfig,
     ) -> Self {
         Self {
             stream,
@@ -408,9 +408,9 @@ where
             recv_direct: None,
             compression_pool: None,
             offload_threshold: 0,
-            wire_slot: None,
+            transmit_slot: None,
             send_pipe_rx: None,
-            arena_threshold: omq_proto::encoded_queue::ARENA_THRESHOLD,
+            arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
         }
     }
 
@@ -443,7 +443,7 @@ where
     /// Provide the shared round-robin send queue. The driver polls this
     /// directly after handshake, eliminating the pump-task intermediary.
     #[must_use]
-    pub(crate) fn with_shared_rx(mut self, rx: QueueReceiver) -> Self {
+    pub(crate) fn with_shared_rx(mut self, rx: FallbackReceiver) -> Self {
         self.shared_msg_rx = Some(rx);
         self
     }
@@ -471,8 +471,8 @@ where
     /// frames into this slot, and the driver flushes them to the wire
     /// via the `data_signal` select arm.
     #[must_use]
-    pub(crate) fn with_wire_slot(mut self, slot: Arc<PeerWireSlot>) -> Self {
-        self.wire_slot = Some(slot);
+    pub(crate) fn with_transmit_slot(mut self, slot: Arc<PeerTransmitSlot>) -> Self {
+        self.transmit_slot = Some(slot);
         self
     }
 
@@ -496,7 +496,7 @@ where
     /// - `Err(_)` on protocol violations, I/O errors, or codec errors.
     ///
     /// In every exit path (success or error) the driver sends one final
-    /// `PeerOut::Closed` on the shared peer-event channel so the
+    /// `PeerEvent::Closed` on the shared peer-event channel so the
     /// `SocketDriver` can clean up its peer entry. The notification is
     /// best-effort because actor teardown joins peer tasks while it no
     /// longer drains this channel.
@@ -504,7 +504,7 @@ where
         let peer_out = self.peer_out.clone();
         let peer_id = self.peer_id;
         let result = self.run_inner_body().await;
-        let _ = peer_out.try_send((peer_id, PeerOut::Closed));
+        let _ = peer_out.try_send((peer_id, PeerEvent::Closed));
         result
     }
 
@@ -524,7 +524,7 @@ where
             mut recv_direct,
             compression_pool,
             offload_threshold,
-            wire_slot,
+            transmit_slot,
             mut send_pipe_rx,
             arena_threshold,
         } = self;
@@ -532,7 +532,7 @@ where
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
-        let mut eq = EncodedQueue::with_arena_threshold(arena_threshold);
+        let mut eq = FrameBuffer::with_arena_threshold(arena_threshold);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
         let mut pipe_batch: Vec<Message> = Vec::with_capacity(SHARED_MAX_BATCH_MSGS);
         let mut last_input = Instant::now();
@@ -556,7 +556,11 @@ where
             }
 
             while let Some(ev) = codec.poll_event() {
-                if peer_out.send((peer_id, PeerOut::Event(ev))).await.is_err() {
+                if peer_out
+                    .send((peer_id, PeerEvent::Event(ev)))
+                    .await
+                    .is_err()
+                {
                     return Ok(());
                 }
             }
@@ -576,7 +580,7 @@ where
             // Set handshake_done on the encode slot once the handshake
             // completes and there's no frame transform (CURVE/BLAKE3ZMQ).
             // The slot stays disabled for crypto connections.
-            if let Some(ref slot) = wire_slot
+            if let Some(ref slot) = transmit_slot
                 && codec.is_ready()
                 && !slot.handshake_done.load(Ordering::Relaxed)
                 && !codec.has_frame_transform()
@@ -590,7 +594,7 @@ where
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
-                    if let Some(ref slot) = wire_slot {
+                    if let Some(ref slot) = transmit_slot {
                         slot.mark_dead();
                     }
                     return Ok(());
@@ -605,7 +609,7 @@ where
                     last_input = Instant::now();
                     let n = res?;
                     if n == 0 {
-                        if let Some(ref slot) = wire_slot {
+                        if let Some(ref slot) = transmit_slot {
                             slot.mark_dead();
                         }
                         cancel.cancel();
@@ -629,7 +633,7 @@ where
                     if let Err(e) = codec.handle_input(chunk) {
                         while let Some(ev) = codec.poll_event() {
                             let _ = peer_out
-                                .send((peer_id, PeerOut::Event(ev)))
+                                .send((peer_id, PeerEvent::Event(ev)))
                                 .await;
                         }
                         return Err(e);
@@ -649,25 +653,25 @@ where
                 }
 
                 res = async {
-                    flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
+                    flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf).await?;
                     flush_once(&mut writer, &mut codec).await
                 }, if want_write => {
                     res?;
                 }
 
                 cmd = inbox.recv() => match cmd {
-                    Some(DriverCommand::SendMessage(first)) => {
+                    Some(PeerDriverCommand::SendMessage(first)) => {
                         // TODO: Give driver control commands an explicit
                         // msg/byte/time budget. Current mixed inbox batches
                         // data first, then handles controls found after the
                         // batch.
                         let mut closing = false;
-                        let mut deferred: SmallVec<[DriverCommand; 4]> =
+                        let mut deferred: SmallVec<[PeerDriverCommand; 4]> =
                             SmallVec::new();
                         let _ = batch_encode(
                             &first,
                             || match inbox.try_recv() {
-                                Ok(DriverCommand::SendMessage(m)) => Some(m),
+                                Ok(PeerDriverCommand::SendMessage(m)) => Some(m),
                                 Ok(cmd) => { deferred.push(cmd); None }
                                 Err(_) => None,
                             },
@@ -678,14 +682,14 @@ where
                         ).await?;
                         for cmd in deferred {
                             match cmd {
-                                DriverCommand::SendEncoded(chunks) => {
+                                PeerDriverCommand::SendEncoded(chunks) => {
                                     eq.push_shared_chunks(&chunks);
                                 }
-                                DriverCommand::SendCommand(c) => {
+                                PeerDriverCommand::SendCommand(c) => {
                                     codec.send_command(&c)?;
                                 }
-                                DriverCommand::Close => closing = true,
-                                DriverCommand::SendMessage(_) => unreachable!(),
+                                PeerDriverCommand::Close => closing = true,
+                                PeerDriverCommand::SendMessage(_) => unreachable!(),
                             }
                         }
                         flush_all(
@@ -696,12 +700,12 @@ where
                             return Ok(());
                         }
                     }
-                    Some(DriverCommand::SendEncoded(chunks)) => {
+                    Some(PeerDriverCommand::SendEncoded(chunks)) => {
                         eq.push_shared_chunks(&chunks);
-                        flush_encoded_queue(&mut writer, &mut eq, &mut drain_buf).await?;
+                        flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf).await?;
                     }
-                    Some(DriverCommand::SendCommand(c)) => codec.send_command(&c)?,
-                    Some(DriverCommand::Close) | None => {
+                    Some(PeerDriverCommand::SendCommand(c)) => codec.send_command(&c)?,
+                    Some(PeerDriverCommand::Close) | None => {
                         drain_writes(&mut writer, &mut codec).await.ok();
                         return Ok(());
                     }
@@ -711,8 +715,8 @@ where
                 // SHARED_MAX_BATCH_MSGS messages per wakeup then flushes
                 // them all in one or a few write_vectored calls.
                 //
-                // Higher priority than wire_slot: messages queued before
-                // the wire-slot fast path was enabled (pre-handshake or
+                // Higher priority than transmit_slot: messages queued before
+                // the transmit-slot fast path was enabled (pre-handshake or
                 // post-reconnect) must drain first to preserve ordering.
                 msg = async {
                     if let Some(ref rx) = shared_msg_rx {
@@ -729,13 +733,13 @@ where
                         Some(first) => {
                             let batch_limit = shared_msg_rx
                                 .as_ref()
-                                .map_or(SHARED_MAX_BATCH_MSGS, QueueReceiver::batch_limit);
+                                .map_or(SHARED_MAX_BATCH_MSGS, FallbackReceiver::batch_limit);
                             let mut popped = 1usize;
                             let encode_result = batch_encode(
                                 &first,
                                 || {
                                     let msg = shared_msg_rx.as_ref()
-                                        .and_then(QueueReceiver::try_pop);
+                                        .and_then(FallbackReceiver::try_pop);
                                     if msg.is_some() {
                                         popped += 1;
                                     }
@@ -762,15 +766,15 @@ where
                 },
 
                 // Wire-slot arm: the socket handle encoded ZMTP frames
-                // into the per-peer PeerWireSlot. Drain and write
-                // directly, bypassing the local EncodedQueue.
+                // into the per-peer PeerTransmitSlot. Drain and write
+                // directly, bypassing the local FrameBuffer.
                 () = async {
-                    wire_slot.as_ref().unwrap().data_signal.notified().await;
-                }, if wire_slot.as_ref().is_some_and(|s| {
+                    transmit_slot.as_ref().unwrap().data_signal.notified().await;
+                }, if transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
-                    drain_wire_slot(
-                        wire_slot.as_ref().unwrap(), &mut drain_buf, &mut writer,
+                    drain_transmit_slot(
+                        transmit_slot.as_ref().unwrap(), &mut drain_buf, &mut writer,
                     ).await?;
                 },
 
@@ -840,31 +844,31 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-/// Flush `EncodedQueue` to the writer, then drain any pending codec
+/// Flush `FrameBuffer` to the writer, then drain any pending codec
 /// transmits (command frames queued during encoding).
 async fn flush_all<W: AsyncWrite + Unpin>(
     writer: &mut W,
-    eq: &mut EncodedQueue,
+    eq: &mut FrameBuffer,
     drain_buf: &mut Vec<Bytes>,
     codec: &mut Connection,
 ) -> io::Result<()> {
-    flush_encoded_queue(writer, eq, drain_buf).await?;
+    flush_frame_buffer(writer, eq, drain_buf).await?;
     while codec.has_pending_transmit() {
         flush_once(writer, codec).await?;
     }
     Ok(())
 }
 
-/// Drain the per-peer [`PeerWireSlot`] and write directly to the wire.
-async fn drain_wire_slot<W: AsyncWrite + Unpin>(
-    slot: &PeerWireSlot,
+/// Drain the per-peer [`PeerTransmitSlot`] and write directly to the wire.
+async fn drain_transmit_slot<W: AsyncWrite + Unpin>(
+    slot: &PeerTransmitSlot,
     drain_buf: &mut Vec<Bytes>,
     writer: &mut W,
 ) -> io::Result<()> {
     let mut budget = DrainBudget::WIRE_DRAIN;
     loop {
         drain_buf.clear();
-        let drain = slot.drain_into_vec(drain_buf, 1024);
+        let drain = slot.drain(drain_buf, 1024);
         if drain_buf.is_empty() {
             break;
         }
@@ -886,7 +890,7 @@ async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
     batch: &mut Vec<Message>,
     encoder: &mut Option<MessageEncoder>,
     codec: &mut Connection,
-    eq: &mut EncodedQueue,
+    eq: &mut FrameBuffer,
     passthrough: Option<&(Bytes, usize)>,
     compression_pool: Option<&Arc<CompressionPool>>,
     offload_threshold: usize,
@@ -920,7 +924,7 @@ async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
 async fn handle_large_messages<R: AsyncRead + Unpin>(
     codec: &mut Connection,
     reader: &mut R,
-    config: &DriverConfig,
+    config: &PeerDriverConfig,
     last_input: &mut Instant,
 ) -> Result<()> {
     #[cfg(feature = "ws")]
@@ -992,12 +996,12 @@ fn submit_to_pipeline(
     pipeline.push_back(Box::pin(futures::future::ready((None, result))));
 }
 
-/// Drain all completed futures from the pipeline into `EncodedQueue`.
+/// Drain all completed futures from the pipeline into `FrameBuffer`.
 async fn drain_pipeline(
     pipeline: &mut OffloadPipeline,
     pool: Option<&Arc<CompressionPool>>,
     codec: &Connection,
-    eq: &mut EncodedQueue,
+    eq: &mut FrameBuffer,
 ) -> Result<()> {
     use futures::StreamExt;
     while let Some((pool_enc, frames)) = pipeline.next().await {
@@ -1012,7 +1016,7 @@ fn drain_offload_result(
     frames: Result<TransformedOut>,
     pool: Option<&Arc<CompressionPool>>,
     codec: &Connection,
-    eq: &mut EncodedQueue,
+    eq: &mut FrameBuffer,
 ) -> Result<()> {
     if let (Some(enc), Some(pool)) = (pool_enc, pool) {
         pool.put(enc);
@@ -1027,15 +1031,15 @@ fn drain_offload_result(
     for wire in frames? {
         #[cfg(feature = "ws")]
         if let Some(masked) = ws {
-            eq.encode_ws(&wire, masked);
+            eq.frame_ws(&wire, masked);
             continue;
         }
-        eq.encode_auto(&wire);
+        eq.frame(&wire);
     }
     Ok(())
 }
 
-/// Encode one message into `EncodedQueue`. When a compression encoder
+/// Encode one message into `FrameBuffer`. When a compression encoder
 /// is active, the message is transformed first; the resulting wire
 /// message(s) are then framed into EQ. When no encoder is present the
 /// message is framed directly. Sub-threshold messages on compression
@@ -1049,7 +1053,7 @@ fn encode_msg(
     msg: &Message,
     encoder: &mut Option<MessageEncoder>,
     codec: &mut Connection,
-    eq: &mut EncodedQueue,
+    eq: &mut FrameBuffer,
     passthrough: Option<&(Bytes, usize)>,
 ) -> Result<()> {
     #[cfg(feature = "ws")]
@@ -1060,10 +1064,10 @@ fn encode_msg(
         );
         if let Some(enc) = encoder.as_mut() {
             for wire in enc.encode(msg)? {
-                eq.encode_ws(&wire, masked);
+                eq.frame_ws(&wire, masked);
             }
         } else {
-            eq.encode_ws(msg, masked);
+            eq.frame_ws(msg, masked);
         }
         return Ok(());
     }
@@ -1080,13 +1084,13 @@ fn encode_msg(
     if let Some((sentinel, threshold)) = passthrough
         && msg.iter().all(|b| b.len() < *threshold)
     {
-        eq.encode_prefixed_auto(sentinel, msg);
+        eq.frame_prefixed(sentinel, msg);
     } else if let Some(enc) = encoder.as_mut() {
         for wire in enc.encode(msg)? {
-            eq.encode_auto(&wire);
+            eq.frame(&wire);
         }
     } else {
-        eq.encode_auto(msg);
+        eq.frame(msg);
     }
     Ok(())
 }
@@ -1096,25 +1100,25 @@ fn encode_msg(
 async fn route_message(
     m: Message,
     recv_direct: &mut Option<RecvSink>,
-    peer_out: &mpsc::Sender<(u64, PeerOut)>,
+    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
     peer_id: u64,
 ) -> bool {
     match recv_direct {
         Some(sink) => sink.send(m).await,
         None => peer_out
-            .send((peer_id, PeerOut::Event(Event::Message(m))))
+            .send((peer_id, PeerEvent::Event(Event::Message(m))))
             .await
             .is_ok(),
     }
 }
 
-/// Flush the `EncodedQueue` to the writer. Drains chunks into a
+/// Flush the `FrameBuffer` to the writer. Drains chunks into a
 /// reusable `Vec<Bytes>`, builds `IoSlice` refs, and does one
 /// `write_vectored`. On partial write, unwritten chunks are restored
 /// to the queue front.
-pub(crate) async fn flush_encoded_queue<W>(
+pub(crate) async fn flush_frame_buffer<W>(
     writer: &mut W,
-    eq: &mut EncodedQueue,
+    eq: &mut FrameBuffer,
     drain_buf: &mut Vec<Bytes>,
 ) -> io::Result<()>
 where
@@ -1122,7 +1126,7 @@ where
 {
     loop {
         drain_buf.clear();
-        eq.drain_into_vec(drain_buf, 1024);
+        eq.drain(drain_buf, 1024);
         if drain_buf.is_empty() {
             return Ok(());
         }
@@ -1219,19 +1223,19 @@ mod tests {
     use omq_proto::proto::connection::{ConnectionConfig, Role};
     use omq_proto::proto::{Event, SocketType};
 
-    /// Adapter: pull `(u64, PeerOut::Event)` off the shared peer-out
+    /// Adapter: pull `(u64, PeerEvent::Event)` off the shared peer-out
     /// channel and yield bare `Event` values, matching the older
     /// per-side events channel shape the tests were written
-    /// against. `PeerOut::Closed` ends the stream (returns None).
+    /// against. `PeerEvent::Closed` ends the stream (returns None).
     pub(super) struct EventAdapter {
-        rx: mpsc::Receiver<(u64, PeerOut)>,
+        rx: mpsc::Receiver<(u64, PeerEvent)>,
     }
 
     impl EventAdapter {
         pub(super) async fn recv(&mut self) -> Option<Event> {
             match self.rx.recv().await? {
-                (_, PeerOut::Event(e)) => Some(e),
-                (_, PeerOut::Closed) => None,
+                (_, PeerEvent::Event(e)) => Some(e),
+                (_, PeerEvent::Closed) => None,
             }
         }
     }
@@ -1243,7 +1247,14 @@ mod tests {
     /// transport (which since the inproc fast-path landed bypasses
     /// the codec entirely).
     #[expect(clippy::unused_async)]
-    async fn inproc_pair(_name: &str) -> (DriverHandle, EventAdapter, DriverHandle, EventAdapter) {
+    async fn inproc_pair(
+        _name: &str,
+    ) -> (
+        PeerDriverHandle,
+        EventAdapter,
+        PeerDriverHandle,
+        EventAdapter,
+    ) {
         let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
 
         let server_codec = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
@@ -1280,19 +1291,19 @@ mod tests {
         tokio::spawn(async move { c_driver.run().await });
 
         (
-            DriverHandle {
+            PeerDriverHandle {
                 inbox: c_inbox_tx,
                 cancel: c_cancel,
-                wire_slot: None,
-                wire_slot_tx: None,
+                transmit_slot: None,
+                transmit_slot_tx: None,
                 send_pipe: None,
             },
             EventAdapter { rx: c_evt_rx },
-            DriverHandle {
+            PeerDriverHandle {
                 inbox: s_inbox_tx,
                 cancel: s_cancel,
-                wire_slot: None,
-                wire_slot_tx: None,
+                transmit_slot: None,
+                transmit_slot_tx: None,
                 send_pipe: None,
             },
             EventAdapter { rx: s_evt_rx },
@@ -1318,7 +1329,7 @@ mod tests {
 
         client
             .inbox
-            .send(DriverCommand::SendMessage(Message::single("hello")))
+            .send(PeerDriverCommand::SendMessage(Message::single("hello")))
             .await
             .unwrap();
 
@@ -1338,7 +1349,7 @@ mod tests {
         // The driver should exit; confirm by closing its inbox and checking
         // a subsequent send fails.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let res = client.inbox.send(DriverCommand::Close).await;
+        let res = client.inbox.send(PeerDriverCommand::Close).await;
         assert!(res.is_err(), "inbox should be closed after driver exit");
     }
 
@@ -1422,7 +1433,7 @@ mod tests {
         // Server driver on one end of the duplex.
         let server_codec = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
         let (_s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
-        let (s_evt_tx, mut s_evt_rx) = mpsc::channel::<(u64, PeerOut)>(16);
+        let (s_evt_tx, mut s_evt_rx) = mpsc::channel::<(u64, PeerEvent)>(16);
         let s_driver = ConnectionDriver::new(
             server_stream,
             server_codec,
@@ -1473,7 +1484,7 @@ mod tests {
         // Collect all events from the server driver.
         let mut events = Vec::new();
         while let Some((_, out)) = s_evt_rx.recv().await {
-            let is_closed = matches!(out, PeerOut::Closed);
+            let is_closed = matches!(out, PeerEvent::Closed);
             events.push(out);
             if is_closed {
                 break;
@@ -1483,7 +1494,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, PeerOut::Event(Event::HandshakeSucceeded { .. }))),
+                .any(|e| matches!(e, PeerEvent::Event(Event::HandshakeSucceeded { .. }))),
             "HandshakeSucceeded must not be lost when coalesced with \
              a post-handshake protocol error; got: {events:?}",
         );
