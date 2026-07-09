@@ -8,56 +8,18 @@ out-of-tree (maturin etc.).
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
   message/payload types, greeting + frame state machines, mechanism
   handshakes (NULL / PLAIN / CURVE / BLAKE3ZMQ), compression transforms
-  (lz4), endpoint parsing, options, subscription matcher.
-  No async, no I/O. Mirrors `rustls::ConnectionCommon` / `quinn-proto`.
+  (lz4), endpoint parsing, options, subscription matcher. No async, no I/O.
 - **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
   Works on Linux and macOS (and likely other mio targets).
 - **`blume`** -- batching MPSC channel for same-thread inproc delivery.
-- **`yring`** -- bounded SPSC ring buffer for inproc transport.
+- **`yring`** -- bounded SPSC ring buffer for inproc transport based on
+  libzmq's `ypipe_t`. One atomic per batch.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq.so` /
-  `.a`). Drop-in replacement: ships `zmq.h`, implements the `zmq_*`
-  API. Backed by `omq-tokio`.
-- **`bindings/pyomq`** -- PyO3 wrapper over `omq-tokio`. Own `Cargo.lock`.
-  Build: `cd bindings/pyomq && maturin develop --release`.
+  `.a`). Drop-in replacement: ships `zmq.h`, implements the `zmq_*` API.
+- **`bindings/pyomq`** -- PyO3 wrapper over `omq-tokio`.
 
 `omq-tokio` re-exports `omq-proto`'s public API. Its public `Socket` API
 is covered by `tests/coverage_matrix.rs`.
-
-## Build / test / bench
-
-See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the full command reference
-(unit tests, feature-gated tests, fuzz, soak, stress tests, benchmarks).
-
-Quick reference:
-
-```sh
-cargo build --workspace
-cargo fmt                                # pre-commit hook checks this
-cargo clippy --workspace --all-targets   # pre-commit hook checks this
-./scripts/test-all.sh                    # full sweep
-```
-
-**HARD RULE:** Clippy must pass under all three configurations before
-pushing to GitHub. Never push code that produces clippy warnings or
-errors. Run all three before every `git push`:
-
-```sh
-cargo clippy --workspace --all-targets                # default features
-cargo clippy --workspace --all-targets --all-features # feature-gated paths
-(cd bindings/pyomq && cargo clippy --all-targets)     # separate workspace
-```
-
-`#[allow]` vs `#[expect]`: use `#[expect]` by default. Use `#[allow]`
-only when the lint fires in some feature combinations but not others
-(the expectation would be unfulfilled when the lint is silent).
-
-Lints: `missing_debug_implementations` = **deny**,
-`unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
-
-## Benchmarks, charts, releasing
-
-See [`DEVELOPMENT.md`](DEVELOPMENT.md) for comparison benchmark infra,
-chart generation, and release process.
 
 ## Cargo features
 
@@ -70,61 +32,6 @@ chart generation, and release process.
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |
-
-## ZMQ fundamentals
-
-ZMQ sockets are opaque message queues that abstract away the network.
-The user sends and receives messages. The socket handles connections,
-reconnections, framing, and multiplexing internally. The transport
-(TCP, IPC, inproc, UDP) is chosen by endpoint URI and is transparent
-to the application.
-
-**Reliability is non-negotiable.** Self-healing, silent
-back-pressure, no user-visible errors from peer failures. Never
-propose a fix that weakens self-healing or trades reliability for
-convenience. Core guarantees:
-
-- **Send/recv never fail due to peers.** Peer disconnects,
-  TCP drops, slow consumers: no errors. Reconnects automatically.
-  Only user-visible send errors: protocol violations or socket closed.
-- **Connect-before-bind works.** `connect()` retries until the
-  remote `bind()` appears. Never blame connection ordering.
-- **Automatic reconnection.** Configurable backoff. The
-  application does not manage connection lifecycle.
-- **Heartbeats detect dead peers, not slow ones.** A slow peer
-  that still responds to PINGs is alive. Heartbeat timeout only
-  fires when a peer stops responding entirely. Never assume
-  heartbeat will resolve a slow-consumer backpressure situation.
-- **Messages are atomic.** Delivered in full or not at all.
-- **HWM back-pressure, not errors.** When the outbound queue is
-  full, fan-out sockets (`PUB`, `XPUB`, `RADIO`) drop on mute
-  unless `xpub_nodrop` is set. Round-robin/exclusive sockets
-  default to blocking, configurable via `OnMute`. It does not
-  return an error.
-- **No peer starvation.** A slow peer must never be permanently
-  starved. Round-robin (PUSH) waits for a full peer's slot to
-  drain rather than skipping it indefinitely. A slow peer must
-  also never block fast peers from making progress.
-- **Fair fan-in.** Consumer fair-queues across all connections.
-- **Transport-agnostic.** Bind TCP and IPC simultaneously. Inproc
-  is in-process (no kernel, no serialization).
-- **Subscriptions are prefix-matched.** Empty prefix = all
-  messages. PUB filters per subscriber.
-- **Thread safety.** One socket, one thread. omq-tokio relaxes
-  this for async; omq-libzmq does not.
-
-## Performance invariants
-
-Fan-out sockets (PUB, XPUB, RADIO) send the same message to many
-peers. The wire bytes are identical for all peers on the same
-transport when no per-peer encryption is active. **Encode once,
-distribute the encoded bytes.** Never encode, compress, or frame the
-same message N times for N subscribers. The correct pattern: encode
-into a scratch buffer, then memcpy the pre-encoded bytes into each
-peer's `EncodedQueue` via `push_pre_encoded`. This applies equally
-to ZMTP framing, compression transforms (lz4), and any future
-wire-level transforms. Per-peer encoding is only justified when the
-wire bytes genuinely differ per peer (e.g. per-peer encryption keys).
 
 ## Architecture summary
 
@@ -167,30 +74,154 @@ forward to the socket inbound queue. Same-thread delivery still uses
 no-peer/pre-connect fallback; peer tasks drain it before newer
 pipe-fed sends.
 
-Local builds use `.cargo/config.toml` with `-C target-cpu=native`.
+## Build / test / bench / charts / releasing
+
+See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the full command reference
+(unit tests, feature-gated tests, fuzz, soak, stress tests, benchmarks,
+chart generation, release process).
+Benchmark results are collected append-only in `~/.cache/omq/*.jsonl`.
+
+Quick reference:
+
+```sh
+cargo build --workspace
+cargo fmt                                # pre-commit hook checks this
+cargo clippy --workspace --all-targets   # pre-commit hook checks this
+./scripts/test-all.sh                    # full sweep
+```
+
+**HARD RULE:** Clippy must pass under all three configurations before
+pushing to GitHub. Never push code that produces clippy warnings or
+errors. Run all three before every `git push`:
+
+```sh
+cargo clippy --workspace --all-targets                # default features
+cargo clippy --workspace --all-targets --all-features # feature-gated paths
+(cd bindings/pyomq && cargo clippy --all-targets)     # separate workspace
+```
+
+`#[allow]` vs `#[expect]`: use `#[expect]` by default. Use `#[allow]`
+only when the lint fires in some feature combinations but not others
+(the expectation would be unfulfilled when the lint is silent).
+
+Lints: `missing_debug_implementations` = **deny**,
+`unsafe_op_in_unsafe_fn` = **deny**, clippy `pedantic` = **warn**.
 
 ## Conventions
 
 - Rust 2024 edition, MSRV **1.93**. ASCII-only source.
-- `rustfmt.toml`: `edition = "2024"`, `max_width = 100`.
-- `Cargo.lock` untracked at workspace root (library). `bindings/pyomq`
-  ships its own.
-- Per-crate versioning, tags are `<crate>-v<version>`.
-- `main` is protected. All changes go through PRs.
+- `main` branch is protected. All changes go through PRs.
 
-## Chart generation
+## ZMQ fundamentals
 
-**HARD RULE:** Chart subtitle configuration lives in `.chart_hw`
-(gitignored, repo root). All `scripts/gen_*_chart.py` scripts read
-it automatically via `scripts/chart_hw.py`. Never run chart gen
-scripts without verifying `.chart_hw` exists. See `DEVELOPMENT.md`
-for the exact commands.
+ZMQ sockets are opaque message queues that abstract away the network.
+The user sends and receives messages. The socket handles connections,
+reconnections, framing, and multiplexing internally. The transport
+(TCP, IPC, inproc, UDP) is chosen by endpoint URI and is transparent
+to the application.
 
-## Adding new transport / mechanism
+**Reliability is non-negotiable.** Self-healing, silent
+back-pressure, no user-visible errors from peer failures. Never
+propose a fix that weakens self-healing or trades reliability for
+convenience. Core guarantees:
 
-- **Transport:** `Endpoint` variant + parser in `omq-proto/src/endpoint.rs`,
-  `transport/<name>.rs` in each backend. Compression transports are
-  `transform/` layers on TCP, not separate transports.
-- **Mechanism:** module under `omq-proto/src/proto/mechanism/`,
-  feature-gate, register with greeting state machine, integration
-  test in **both** `tests/<mechanism>.rs`.
+- **Send/recv never fail due to peers.** Peer disconnects,
+  TCP drops, slow consumers: no errors. Reconnects automatically.
+  Only user-visible send errors: protocol violations or socket closed.
+- **Connect-before-bind works.** `connect()` retries until the
+  remote `bind()` appears. Never blame connection ordering.
+- **Automatic reconnection.** Configurable backoff. The
+  application does not manage connection lifecycle.
+- **Heartbeats detect dead peers, not slow ones.** A slow peer
+  that still responds to PINGs is alive. Heartbeat timeout only
+  fires when a peer stops responding entirely. Never assume
+  heartbeat will resolve a slow-consumer backpressure situation.
+- **Messages are atomic.** Delivered in full or not at all.
+- **HWM back-pressure, not errors.** When the outbound queue is
+  full, fan-out sockets (`PUB`, `XPUB`, `RADIO`) drop on mute
+  unless `xpub_nodrop` is set. Round-robin/exclusive sockets
+  default to blocking, configurable via `OnMute`. It does not
+  return an error.
+- **No peer starvation.** Fast peers MUST NOT starve slow peers,
+  and slow peers MUST NOT block fast peers.
+- **Control plane never starves.** Subscribe, cancel, add-peer,
+  remove-peer, and shutdown commands must always be reachable
+  within bounded time, regardless of data throughput. Never mix
+  control commands into a data channel where they can be buried
+  behind an unbounded backlog. Separate channels, drain control
+  unconditionally every iteration.
+- **Fair fan-in.** Consumer fair-queues across all connections.
+- **Transport-agnostic.** Bind TCP and IPC simultaneously. Inproc
+  is in-process (no kernel, no serialization).
+- **Thread safety.** One socket, one thread. omq-tokio relaxes
+  this for async; omq-libzmq does not.
+
+## Socket types
+
+20 types in 10 pairs. Compatibility is checked during ZMTP handshake.
+
+**Pipeline (one-way, round-robin/fair-queue):**
+- **PUSH/PULL** -- load distribution. PUSH round-robins across
+  PULLs. PULL fair-queues from PUSHes.
+- **SCATTER/GATHER** -- Same as PUSH/PULL but single-frame
+  only (rejects multipart).
+
+**Pub/sub (fan-out, topic-filtered):**
+- **PUB/SUB** -- PUB fans out to all SUBs. SUB subscribes by
+  prefix (`subscribe`/`unsubscribe`). PUB filters per subscriber.
+  Mute subs drop by default (`OnMute`/`xpub_nodrop` control this).
+- **XPUB/XSUB** -- raw pub/sub. XPUB surfaces subscribe/
+  unsubscribe as receivable messages. XSUB sends subscribe commands
+  explicitly. Used to build proxies (XSUB-XPUB).
+- **RADIO/DISH** -- group-based pub/sub. RADIO requires a
+  group on every message (`Message::with_group`). DISH joins/leaves
+  groups (`join`/`leave`). UDP transport supported.
+
+**Request/reply (strict alternation):**
+- **REQ/REP** -- synchronous request/reply. REQ enforces
+  send-recv-send-recv. REP enforces recv-send-recv-send. REQ
+  prepends empty delimiter frame. REP strips it, saves envelope,
+  restores on send.
+- **DEALER/ROUTER** -- async request/reply. DEALER is REQ without
+  the FSM (free send/recv). ROUTER prepends identity frame on recv,
+  routes by identity frame on send. `router_mandatory`: error on
+  unknown identity. Handover: new peer with same identity evicts
+  old.
+- **CLIENT/SERVER** CLIENT is DEALER without multipart.
+  SERVER is ROUTER without multipart. Routing via `routing_id`
+  field instead of identity frame.
+
+**Exclusive (1:1):**
+- **PAIR** -- bidirectional 1:1. Exactly one peer. No fan-out, no
+  round-robin, no identity.
+- **CHANNEL** Same as PAIR but single-frame only.
+- **PEER** N:N bidirectional with identity routing (like
+  ROUTER but peers are also PEER, not DEALER).
+
+**Raw TCP:**
+- **STREAM** -- raw TCP bridge. No ZMTP framing between peers.
+  Recv prepends peer identity frame (like ROUTER). Send requires
+  identity frame prefix to select target peer. TCP-only (rejects
+  IPC/inproc). Accepts connections from non-ZMQ clients.
+
+## Performance invariants
+
+Fan-out sockets (PUB, XPUB, RADIO) send the same message to many
+peers. The wire bytes are identical for all peers on the same
+transport when no per-peer encryption is active.
+**Encode/compress/frame once, distribute the encoded bytes.**
+
+**Budget every drain loop.** Every loop that drains a channel or
+queue must be capped by both message count AND byte count
+(`DrainBudget`). Unbounded drains starve the tokio runtime and
+other tasks.
+
+**One wake per batch, not per push.** Producer-to-consumer signaling
+uses `DataSignal` (atomic flag + `Notify`). `mark()` fires
+`notify_one` only on the `false` to `true` transition of the
+pending flag. Consumer `clear()`s the flag before draining, then
+calls `rearm_if_nonempty()` to self-wake if data remains. For
+budget-interrupted drains where the consumer knows data remains,
+`reschedule()` fires `notify_one` unconditionally (bypasses the
+coalescing check). Never replace `DataSignal` with bare
+`Notify::notify_one()` per push.
