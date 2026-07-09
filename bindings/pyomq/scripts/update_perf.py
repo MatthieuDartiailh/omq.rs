@@ -884,7 +884,7 @@ def gen_combined_chart(data, path):
     async_omq_tp = data["async_omq_tp"]
     async_pz_tp = data["async_pz_tp"]
 
-    msg_max = 2_500_000
+    msg_max = 3_000_000
     mbps_max = 6_000
 
     def y_msg(v):
@@ -921,9 +921,8 @@ def gen_combined_chart(data, path):
             f' fill="#9ca3af" font-size="10">{hw_label}</text>'
         )
 
-    n_l_ticks = 5
-    for i in range(n_l_ticks + 1):
-        val = i * msg_max / n_l_ticks
+    msg_tick = 500_000
+    for val in range(msg_tick, msg_max + 1, msg_tick):
         yy = y_msg(val)
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'

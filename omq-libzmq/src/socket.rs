@@ -85,9 +85,6 @@ pub(crate) struct OmqSocket {
     pub notify: Arc<PlatformNotifyHandle>,
     pub bound_or_connected: AtomicBool,
     pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
-    /// Send yield state: (message count, bytes queued). Accessed only
-    /// from the `zmq_send` caller thread (ZMQ single-thread contract).
-    pub send_yield: crate::local_cell::LocalCell<(u32, usize)>,
 }
 
 /// Map ZMQ socket-type integer to `SocketType`.
@@ -277,7 +274,6 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         notify,
         bound_or_connected: AtomicBool::new(false),
         recv_pump: std::sync::OnceLock::new(),
-        send_yield: crate::local_cell::LocalCell::new((0, 0)),
     });
 
     Box::into_raw(Box::new(sock)).cast()

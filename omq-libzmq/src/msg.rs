@@ -520,19 +520,44 @@ pub extern "C" fn zmq_msg_recv(
         Ok((frame, more)) => {
             zmq_msg_close(msg);
             let sz = frame.len();
-            let boxed = Box::new(frame);
-            let data_ptr = boxed.as_ptr().cast_mut();
             // SAFETY: msg was just closed above and is ready for reinitialization.
             let r = unsafe { repr(msg) };
-            r.kind = KIND_BYTES;
-            r.more = u8::from(more);
-            r.pad = [0; 6];
-            r.size = sz as u64;
-            r.ptr = data_ptr;
-            r.free_fn = std::ptr::null_mut();
-            r.hint = std::ptr::null_mut();
-            r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
-            r.reserved = [0; 16];
+            if sz <= 128 {
+                // Small frame: malloc + memcpy (1 alloc) instead of
+                // Box<Bytes> (2 allocs: Bytes::copy_from_slice + Box::new).
+                // SAFETY: libc::malloc is always safe to call.
+                let ptr = unsafe { libc::malloc(sz).cast::<u8>() };
+                if ptr.is_null() && sz > 0 {
+                    return crate::error::fail(libc::ENOMEM);
+                }
+                if sz > 0 {
+                    // SAFETY: frame is valid for sz bytes; ptr was just allocated.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(frame.as_ptr(), ptr, sz);
+                    }
+                }
+                r.kind = KIND_HEAP;
+                r.more = u8::from(more);
+                r.pad = [0; 6];
+                r.size = sz as u64;
+                r.ptr = ptr;
+                r.free_fn = std::ptr::null_mut();
+                r.hint = std::ptr::null_mut();
+                r.boxed = std::ptr::null_mut();
+                r.reserved = [0; 16];
+            } else {
+                let boxed = Box::new(frame);
+                let data_ptr = boxed.as_ptr().cast_mut();
+                r.kind = KIND_BYTES;
+                r.more = u8::from(more);
+                r.pad = [0; 6];
+                r.size = sz as u64;
+                r.ptr = data_ptr;
+                r.free_fn = std::ptr::null_mut();
+                r.hint = std::ptr::null_mut();
+                r.boxed = Box::into_raw(boxed).cast::<libc::c_void>();
+                r.reserved = [0; 16];
+            }
             match c_int::try_from(sz) {
                 Ok(n) => n,
                 Err(_) => crate::error::fail(libc::EMSGSIZE),

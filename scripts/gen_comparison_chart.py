@@ -1724,7 +1724,7 @@ def main():
         "inproc": "inproc",
     }
 
-    tcp_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
+    tcp_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "omq-libzmq", "zmq.rs", "rzmq", "rzmq-iouring"]
     ipc_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
     inproc_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "rzmq", "rzmq-iouring"]
 
