@@ -356,7 +356,7 @@ impl SocketDriver {
                 let _ = ack.send(self.unbind(&endpoint));
             }
             SocketCommand::Disconnect { endpoint, ack } => {
-                let _ = ack.send(self.disconnect(&endpoint));
+                let _ = ack.send(self.disconnect(&endpoint).await);
             }
             SocketCommand::QueryConnection { connection_id, ack } => {
                 let _ = ack.send(self.peer_status(connection_id));

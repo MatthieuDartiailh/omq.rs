@@ -446,10 +446,10 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)?
     }
 
-    /// Tear down a previously-started connect. Cancels the dial loop
-    /// and any in-flight reconnect backoff; existing handshaked peers
-    /// from this dialer remain connected. Returns `Error::Unroutable`
-    /// if no dialer at `endpoint` is registered.
+    /// Tear down a previously-started connect. Cancels the dial loop,
+    /// any in-flight reconnect backoff, and live peers connected through
+    /// `endpoint`. Returns `Error::Unroutable` if no dialer or live peer
+    /// at `endpoint` is registered.
     pub async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
         let (ack, rx) = oneshot::channel();
         self.inner

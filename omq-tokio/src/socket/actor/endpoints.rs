@@ -1,12 +1,13 @@
 #[cfg(feature = "ws")]
 use super::AnyListener;
 use super::{
-    Canceled, ConnectionStatus, DialerEntry, Duration, Endpoint, Error, InternalEvent,
-    ListenerEntry, MonitorEvent, PeerIdent, Result, SocketDriver, SocketType, UdpDialerEntry,
-    UdpListenerEntry, bind_any, connect_any, dial_with_backoff, fake_handle, mpsc,
+    Canceled, ConnectionStatus, DialerEntry, DisconnectReason, Duration, Endpoint, Error,
+    InternalEvent, ListenerEntry, MonitorEvent, PeerIdent, Result, SocketDriver, SocketType,
+    UdpDialerEntry, UdpListenerEntry, bind_any, connect_any, dial_with_backoff, fake_handle, mpsc,
     reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender, supports_groups,
     supports_subscribe,
 };
+use crate::socket::actor::lifecycle::PeerLifecycle;
 
 impl SocketDriver {
     pub(super) fn unbind(&mut self, endpoint: &Endpoint) -> Result<()> {
@@ -34,12 +35,12 @@ impl SocketDriver {
         }
     }
 
-    /// Tear down dialer(s) targeting `endpoint`. The dial loop, including
-    /// any in-flight reconnect backoff, is canceled. Already-handshaked
-    /// peers from this dialer are not closed (they belong to `peers` and
-    /// outlive the dialer). Returns `Error::Unroutable` if no dialer
-    /// matches.
-    pub(super) fn disconnect(&mut self, endpoint: &Endpoint) -> Result<()> {
+    /// Tear down dialer(s) and live outbound peers targeting `endpoint`.
+    ///
+    /// The dial loop, any in-flight reconnect backoff, and already-
+    /// handshaked client-side peer tasks are stopped. Returns
+    /// `Error::Unroutable` if no dialer or live client peer matches.
+    pub(super) async fn disconnect(&mut self, endpoint: &Endpoint) -> Result<()> {
         let before = self.dialers.len() + self.udp_dialers.len();
         self.dialers.retain(|d| {
             if &d.endpoint == endpoint {
@@ -61,10 +62,47 @@ impl SocketDriver {
                 true
             }
         });
+        let removed_udp_peers = removed_peers.len();
         for pid in removed_peers {
             self.send_strategy.connection_removed(pid);
         }
-        if self.dialers.len() + self.udp_dialers.len() < before {
+
+        let peer_ids: Vec<u64> = self
+            .peers
+            .iter()
+            .filter_map(|(id, peer)| {
+                if peer.is_client && &peer.endpoint == endpoint {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let removed_live_peers = peer_ids.len();
+        let mut peer_tasks = Vec::with_capacity(peer_ids.len());
+        for peer_id in peer_ids {
+            if let Some(mut peer) =
+                PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::LocalClose)
+            {
+                peer.handle.cancel.cancel();
+                if let Some(task) = peer.task.take() {
+                    peer_tasks.push(task);
+                }
+            }
+        }
+        for task in &peer_tasks {
+            if !task.is_finished() {
+                task.abort();
+            }
+        }
+        for task in peer_tasks {
+            let _ = task.await;
+        }
+
+        if self.dialers.len() + self.udp_dialers.len() < before
+            || removed_udp_peers > 0
+            || removed_live_peers > 0
+        {
             Ok(())
         } else {
             Err(Error::Unroutable)

@@ -12,6 +12,20 @@ fn tcp_loopback(port: u16) -> Endpoint {
     }
 }
 
+async fn wait_no_connections(sock: &Socket) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if sock.connections().await.unwrap().is_empty() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "socket still has live connections"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn unbind_unregistered_endpoint_errors() {
     let s = Socket::new(SocketType::Pull, Options::default());
@@ -64,6 +78,17 @@ async fn disconnect_after_connect_succeeds() {
     assert_eq!(m.part_bytes(0).unwrap(), &b"hi"[..]);
 
     push.disconnect(tcp_loopback(port)).await.unwrap();
+    wait_no_connections(&push).await;
+    wait_no_connections(&pull).await;
+
     let r = push.disconnect(tcp_loopback(port)).await;
     assert!(matches!(r, Err(Error::Unroutable)), "got {r:?}");
+
+    push.connect(tcp_loopback(port)).await.unwrap();
+    push.send(Message::single("again")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"again"[..]);
 }
