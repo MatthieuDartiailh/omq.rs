@@ -14,7 +14,7 @@ REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
 COMPARISON_CHART_SIZES = {16, 64, 256, 1024, 4096, 16384}
-SMALL_MESSAGE_SIZES = [16, 64, 256]
+SMALL_MESSAGE_SIZES = [16, 64, 256, 1024]
 LARGE_MESSAGE_SIZES = [256, 1024, 4096, 16384]
 METRIC_LINE_WIDTH = 2.5
 CPU_LINE_WIDTH = 1.6
@@ -102,7 +102,7 @@ def load_data(transport: str, impls: list[str]) -> dict:
                 mbps = r.get("mbps", 0)
                 gbs = mbps / 1000.0
                 tput.setdefault(size, {})[impl_name] = (msgs_s, gbs)
-                cpu_time = r.get("cpu_time", 0)
+                cpu_time = r.get("push_cpu_time", r.get("cpu_time", 0))
                 elapsed = r.get("elapsed", 0)
                 if elapsed > 0 and cpu_time > 0:
                     tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
@@ -112,7 +112,7 @@ def load_data(transport: str, impls: list[str]) -> dict:
             if key not in seen_lat or seq >= seen_lat[key]:
                 seen_lat[key] = seq
                 lat.setdefault(size, {})[impl_name] = r.get("p50_us", 0)
-                cpu_time = r.get("cpu_time", 0)
+                cpu_time = r.get("req_cpu_time", r.get("cpu_time", 0))
                 elapsed = r.get("elapsed", 0)
                 if elapsed > 0 and cpu_time > 0:
                     lat_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
@@ -347,7 +347,7 @@ def draw_throughput_panel(
         if pts:
             L.append(svg_polyline(pts, COLORS[name], width=2, dash="6,4"))
 
-    # solid throughput lines with dots
+    # solid throughput lines
     for name in draw_order:
         pts = [
             (xs[i], y_tput(tput[sizes[i]][name][1]))
@@ -662,12 +662,18 @@ def draw_split_throughput_cpu_panel(
             L.append(svg_polyline(pts, COLORS[name],
                                   width=METRIC_LINE_WIDTH,
                                   dash=MSG_LINE_DASH))
-            zero_pts = [
-                (xs[i], y_metric(tput[sizes[i]][name][metric_idx]))
-                for i in range(len(sizes))
-                if name in tput.get(sizes[i], {})
-                and tput[sizes[i]][name][0] == 0
-            ]
+            zero_pts = []
+            nonzero_pts = []
+            for i in range(len(sizes)):
+                if name not in tput.get(sizes[i], {}):
+                    continue
+                pt = (xs[i], y_metric(tput[sizes[i]][name][metric_idx]))
+                if tput[sizes[i]][name][0] == 0:
+                    zero_pts.append(pt)
+                else:
+                    nonzero_pts.append(pt)
+            L.extend(svg_dots(nonzero_pts, COLORS[name],
+                              radius=MARKER_RADIUS))
             L.extend(svg_x_marks(zero_pts, COLORS[name],
                                  radius=MARKER_RADIUS))
         else:
@@ -860,7 +866,7 @@ def draw_throughput_cpu_panel(
                     )
             L.append(svg_polyline(pts, COLORS[name], width=2.0, dash="5,3"))
 
-    # solid GB/s lines with dots (inner right axis)
+    # solid GB/s lines (inner right axis)
     for name in draw_order:
         pts = [
             (xs[i], y_gbs(tput[sizes[i]][name][1]))
@@ -1043,8 +1049,7 @@ def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float
         L.append(
             f'  <text x="{mid_x}" y="{st_y}" text-anchor="middle"'
             f' fill="#9ca3af" font-size="9">'
-            f'(nT) = user-chosen'
-            f'   [nT] = fixed by implementation</text>'
+            f'(nT) = user-chosen   ·   [nT] = fixed by implementation</text>'
         )
         extra += 18
     return extra
@@ -1120,7 +1125,6 @@ def generate_chart(data: dict, impls: list[str], transport_label: str,
         f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 20:.0f}" y2="{lt_y}"'
         f' stroke="#6b7280" stroke-width="2"/>'
     )
-    L.append(f'  <circle cx="{lt_right + 10:.0f}" cy="{lt_y}" r="2" fill="#6b7280"/>')
     gbs_label = "throughput / GB/s (right axis, log)" if log_gbs \
         else "throughput / GB/s (right axis)"
     L.append(
@@ -1297,10 +1301,6 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
         f' stroke="#6b7280" stroke-width="{METRIC_LINE_WIDTH}"/>'
     )
     L.append(
-        f'  <circle cx="{lt_right + 7:.0f}" cy="{lt_y}"'
-        f' r="{MARKER_RADIUS}" fill="#6b7280"/>'
-    )
-    L.append(
         f'  <text x="{lt_right + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
         f' font-size="10">GB/s (large panel{", log" if log_gbs else ""})</text>'
     )
@@ -1409,7 +1409,7 @@ def load_pubsub_data(transport: str, impls: list[str], peers: int) -> dict:
         impl_name = r.get("impl")
         if impl_name not in impls:
             continue
-        cpu_time = r.get("cpu_time", 0)
+        cpu_time = r.get("pub_cpu_time", r.get("cpu_time", 0))
         elapsed = r.get("elapsed", 0)
         if elapsed <= 0 or (cpu_time <= 0 and not r.get("zero_transport")):
             continue
@@ -1523,7 +1523,6 @@ def generate_pubsub_chart(
         f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 20:.0f}" y2="{lt_y}"'
         f' stroke="#6b7280" stroke-width="2"/>'
     )
-    L.append(f'  <circle cx="{lt_right + 10:.0f}" cy="{lt_y}" r="2" fill="#6b7280"/>')
     gbs_label = "throughput / GB/s (right axis, log)" if log_gbs \
         else "throughput / GB/s (right axis)"
     L.append(
@@ -1566,11 +1565,9 @@ def load_fanio_data(transport: str, impls: list[str], peers: int,
                 r.get("peer_max", 0),
             )
             if kind == "fan_out":
-                # Fan-out CPU is producer-side only. Older rows stored
-                # producer+puller CPU in cpu_time, so ignore them here.
                 cpu_time = r.get("push_cpu_time", 0)
             else:
-                cpu_time = r.get("cpu_time", 0)
+                cpu_time = r.get("pull_cpu_time", r.get("cpu_time", 0))
             elapsed = r.get("elapsed", 0)
             if elapsed > 0 and cpu_time > 0:
                 tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
@@ -1700,10 +1697,6 @@ def generate_multi_panel_cpu_chart(
         f' stroke="#6b7280" stroke-width="{METRIC_LINE_WIDTH}"/>'
     )
     L.append(
-        f'  <circle cx="{lt_right + 7:.0f}" cy="{lt_y}"'
-        f' r="{MARKER_RADIUS}" fill="#6b7280"/>'
-    )
-    L.append(
         f'  <text x="{lt_right + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
         f' font-size="10">GB/s (large panel)</text>'
     )
@@ -1826,7 +1819,7 @@ def main():
             print(f"Written: {out}", file=sys.stderr)
 
 
-    # ── Main hero charts ────────────────────────────────────────
+    # ── Main chart ─────────────────────────────────────────────
     from gen_main_chart import (MAIN_DRAW_ORDER, MAIN_IMPLS, MAIN_TITLE,
                                 generate_main_chart,
                                 load_data as load_main_data)

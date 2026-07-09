@@ -151,6 +151,8 @@ Produces `doc/charts/{pushpull,pubsub,reqrep}/*.svg`,
 
 ```sh
 python3 scripts/run_comparisons.py --omq
+python3 scripts/run_comparisons.py --omq --transport tcp --no-latency \
+  --no-pubsub --sizes 32,128,512,2048,8192,32768
 python3 scripts/gen_comparison_chart.py
 ```
 
@@ -166,6 +168,21 @@ python3 scripts/gen_comparison_chart.py
 
 Stop if `run_comparisons.py` prints any warning or timeout. Fix the
 bench peer or script first, then rerun before charting.
+
+**CPU% charting rule.** Charts show only the "interesting" process's
+CPU, not the sum of all processes:
+
+| benchmark | charted process | JSONL field |
+|-----------|----------------|-------------|
+| PUSH/PULL throughput | sender (PUSH) | `push_cpu_time` |
+| PUB/SUB | sender (PUB) | `pub_cpu_time` |
+| fan-out (1 PUSH to N PULL) | sender (PUSH) | `push_cpu_time` |
+| fan-in (N PUSH to 1 PULL) | receiver (PULL) | `pull_cpu_time` |
+| REQ/REP latency | sender (REQ) | `req_cpu_time` |
+
+The combined `cpu_time` field (sum of all processes) is still recorded
+for backwards compatibility. Chart loaders prefer the per-process
+field and fall back to `cpu_time` when it is absent.
 
 ### Mechanism Chart
 

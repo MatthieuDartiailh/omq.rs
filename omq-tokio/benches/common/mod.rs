@@ -444,7 +444,7 @@ fn rustc_version_runtime() -> String {
 }
 
 /// Build the benchmark runtime. Set `OMQ_BENCH_TOKIO_THREADS=N` to
-/// control the thread count: 1 = current_thread, 2+ = multi_thread.
+/// control the thread count: 1 = `current_thread`, 2+ = `multi_thread`.
 /// Defaults to multi-thread with one worker per available CPU.
 pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
     let threads: usize = std::env::var("OMQ_BENCH_TOKIO_THREADS")

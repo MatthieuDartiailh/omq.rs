@@ -440,6 +440,9 @@ fn bench_options(msg_size: usize) -> Options {
         let dict = Bytes::from(std::fs::read(&path).expect("read dict file"));
         o = o.compression_dict(dict);
     }
+    if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
+        o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
+    }
     o
 }
 
