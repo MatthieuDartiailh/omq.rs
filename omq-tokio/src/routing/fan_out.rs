@@ -2228,7 +2228,7 @@ mod tests {
         );
         assert_eq!(
             FanOutShards::desired_active_shards(TEST_WIDE_PEER_COUNT, TEST_MAX_LOGICAL_SHARDS),
-            8
+            9
         );
     }
 
@@ -2274,7 +2274,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_peer_keeps_first_four_on_direct_shard_and_reuses_it() {
+    fn assign_peer_fills_direct_shard_then_workers_and_reuses() {
         let shards = FanOutShards {
             state: std::sync::Mutex::new(FanOutShardState {
                 direct_load: 0,
@@ -2284,17 +2284,16 @@ mod tests {
             }),
         };
 
-        let assigned: Vec<_> = (0..(DIRECT_SHARD_PEER_CAP * 2))
-            .map(|_| shards.assign_peer())
-            .collect();
-        assert_eq!(assigned, vec![0, 0, 0, 0, 1, 1, 1, 1]);
+        let n = DIRECT_SHARD_PEER_CAP + WORKER_SHARD_PEER_CAP;
+        let assigned: Vec<_> = (0..n).map(|_| shards.assign_peer()).collect();
+        assert_eq!(assigned, vec![0, 1, 1, 1, 1]);
 
         shards.remove_peer(0, 1);
         assert_eq!(shards.assign_peer(), 0);
     }
 
     #[test]
-    fn assign_peer_caps_direct_shard_at_four_peers() {
+    fn assign_peer_caps_direct_shard_and_distributes_to_workers() {
         let shards = FanOutShards {
             state: std::sync::Mutex::new(FanOutShardState {
                 direct_load: 0,
@@ -2309,7 +2308,7 @@ mod tests {
             loads[shards.assign_peer()] += 1;
         }
 
-        assert_eq!(loads, [4, 7, 7, 7, 7]);
+        assert_eq!(loads, [1, 8, 8, 8, 7]);
     }
 
     fn test_endpoints(count: usize) -> Vec<ShardEndpoint> {

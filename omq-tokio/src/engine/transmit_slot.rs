@@ -127,6 +127,7 @@ impl std::fmt::Debug for PeerTransmitSlot {
 }
 
 impl PeerTransmitSlot {
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         peer_id: u64,
         has_transform: bool,
