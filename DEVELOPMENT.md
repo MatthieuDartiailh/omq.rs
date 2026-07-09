@@ -105,6 +105,9 @@ Env knobs: `OMQ_BENCH_TRANSPORTS`, `OMQ_BENCH_SIZES`,
 Results append to `$XDG_CACHE_HOME/omq/` (default `~/.cache/omq/`)
 unless `OMQ_BENCH_NO_WRITE=1`.
 
+Unless stated otherwise, user ensures system is NOT noisy during benchmarks. So
+when a measured cell looks bad, don't hand-wave it as noise.
+
 ### Cross-implementation Comparison Benchmarks
 
 `scripts/run_comparisons.py` drives standalone `bench_peer` binaries:
@@ -124,7 +127,7 @@ Each binary speaks a subcommand protocol:
 - `inproc <name> <size> <duration>`: in-process PUSH/PULL.
 - `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>`: latency.
 
-Results go to `~/.cache/omq/comparisons.jsonl`.
+Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
 ## Updating Charts
 
@@ -196,14 +199,6 @@ python scripts/update_perf.py --chart-only
 ```
 
 ## Releasing
-
-### Dependency Graph
-
-```text
-omq-proto ───────┬─ omq-tokio ──┬─ omq-libzmq
-blume ───────────┤              └─ pyomq (maturin, not cargo)
-yring ───────────┘
-```
 
 ### Automation
 
