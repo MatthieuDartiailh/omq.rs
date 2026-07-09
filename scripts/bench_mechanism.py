@@ -178,6 +178,8 @@ def append_jsonl(jsonl_path: Path, rid: str, mechanism: str, size: int, result: 
     })
     with open(jsonl_path, "a") as f:
         f.write(row + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def main():
