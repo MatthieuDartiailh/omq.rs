@@ -8,7 +8,7 @@ fairness where the pattern has multiple peers.
 
 - `libzmq v4.3.5`
 - `zeromq v0.6.0`
-- `rzmq v0.5.22` in its normal and io_uring modes
+- `rzmq v0.5.24` in its normal and io_uring modes
 - OMQ from this repository
 
 ## Methodology
