@@ -98,6 +98,11 @@ async fn async_main(args: Vec<String>) {
             libc::SIGINT,
             exit_on_signal as *const () as libc::sighandler_t,
         );
+        libc::signal(
+            libc::SIGALRM,
+            exit_on_signal as *const () as libc::sighandler_t,
+        );
+        libc::alarm(60);
     }
     match args.get(1).map(String::as_str) {
         Some("push") => {
