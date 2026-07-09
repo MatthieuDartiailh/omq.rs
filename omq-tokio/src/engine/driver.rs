@@ -532,6 +532,7 @@ where
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
+        let mut large_recv_buf = BytesMut::new();
         let mut eq = FrameBuffer::with_arena_threshold(arena_threshold);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
         let mut pipe_batch: Vec<Message> = Vec::with_capacity(SHARED_MAX_BATCH_MSGS);
@@ -640,6 +641,7 @@ where
                     }
                     handle_large_messages(
                         &mut codec, &mut reader, &config, &mut last_input,
+                        &mut large_recv_buf,
                     ).await?;
                 }
 
@@ -921,11 +923,17 @@ async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
 /// After reading bytes from the wire, check for large frames whose
 /// payload exceeds the threshold and read them directly into a
 /// pre-sized buffer (bypasses the fixed `read_buf` -> codec copy path).
+///
+/// `reuse_buf` is kept across calls so the allocation is reused. Once
+/// grown to the largest frame size seen on a connection it stays there,
+/// avoiding per-message mmap/munmap for payloads above glibc's 128 KiB
+/// mmap threshold.
 async fn handle_large_messages<R: AsyncRead + Unpin>(
     codec: &mut Connection,
     reader: &mut R,
     config: &PeerDriverConfig,
     last_input: &mut Instant,
+    reuse_buf: &mut BytesMut,
 ) -> Result<()> {
     #[cfg(feature = "ws")]
     let skip_large = codec.is_ws();
@@ -941,13 +949,14 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
         let Some((plen, prefix)) = codec.begin_supplied_payload_with_prefix() else {
             break;
         };
-        let mut buf = BytesMut::zeroed(plen);
-        buf[..prefix.len()].copy_from_slice(prefix.as_slice());
+        reuse_buf.resize(plen, 0);
+        reuse_buf[..prefix.len()].copy_from_slice(prefix.as_slice());
         if prefix.len() < plen {
-            reader.read_exact(&mut buf[prefix.len()..]).await?;
+            reader.read_exact(&mut reuse_buf[prefix.len()..]).await?;
         }
         *last_input = Instant::now();
-        codec.supply_payload(buf.freeze())?;
+        let payload = reuse_buf.split().freeze();
+        codec.supply_payload(payload)?;
     }
     Ok(())
 }
