@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
+#[cfg(unix)]
 use omq_tokio::endpoint::IpcPath;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -114,12 +115,15 @@ async fn stream_peer_disconnect() {
 async fn stream_non_tcp_rejected() {
     let stream = Socket::new(SocketType::Stream, Options::default());
 
-    let ipc_result = stream
-        .bind(Endpoint::Ipc(IpcPath::Filesystem(
-            "/tmp/omq-stream-test.sock".into(),
-        )))
-        .await;
-    assert!(ipc_result.is_err(), "IPC should be rejected for STREAM");
+    #[cfg(unix)]
+    {
+        let ipc_result = stream
+            .bind(Endpoint::Ipc(IpcPath::Filesystem(
+                "/tmp/omq-stream-test.sock".into(),
+            )))
+            .await;
+        assert!(ipc_result.is_err(), "IPC should be rejected for STREAM");
+    }
 
     let inproc_result = stream
         .bind(Endpoint::Inproc {
@@ -131,15 +135,18 @@ async fn stream_non_tcp_rejected() {
         "inproc should be rejected for STREAM"
     );
 
-    let connect_ipc = stream
-        .connect(Endpoint::Ipc(IpcPath::Filesystem(
-            "/tmp/omq-stream-test2.sock".into(),
-        )))
-        .await;
-    assert!(
-        connect_ipc.is_err(),
-        "IPC connect should be rejected for STREAM"
-    );
+    #[cfg(unix)]
+    {
+        let connect_ipc = stream
+            .connect(Endpoint::Ipc(IpcPath::Filesystem(
+                "/tmp/omq-stream-test2.sock".into(),
+            )))
+            .await;
+        assert!(
+            connect_ipc.is_err(),
+            "IPC connect should be rejected for STREAM"
+        );
+    }
 }
 
 #[tokio::test]
