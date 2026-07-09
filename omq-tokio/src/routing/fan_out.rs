@@ -422,6 +422,15 @@ impl FanOutShards {
         Self::push_control_spinning(endpoint, cmd);
     }
 
+    /// Spin-loop until the shard worker's control ring has space.
+    ///
+    /// libzmq uses an unbounded yqueue for control commands (never fails,
+    /// never blocks). We use a bounded yring (cap 64) to cap memory. If
+    /// the ring is full, we spin with `yield_now()` until the worker
+    /// drains. The ring size is generous relative to typical control
+    /// command rate (subscribe, add/remove peer). On the multi-thread
+    /// runtime, `push_control` wraps this in `block_in_place` so the
+    /// spin does not starve cooperative tasks.
     fn push_control_spinning(endpoint: &mut ShardEndpoint, mut cmd: ShardControl) {
         loop {
             match endpoint.ctrl_tx.push(cmd) {
@@ -483,6 +492,11 @@ impl FanOutShards {
         }
     }
 
+    /// Push an encoded frame to every active shard's data ring. If a
+    /// shard's ring is full, the message is silently dropped for that
+    /// shard's peer set. This acts as a shard-level backpressure
+    /// boundary separate from per-peer HWM. Acceptable because fan-out
+    /// sockets (PUB/XPUB/RADIO) are lossy by design.
     fn dispatch(&self, dispatch: &ShardDispatch) {
         let mut state = self.state.lock().expect("fanout shards poisoned");
         let mut touched = SmallVec::<[usize; 8]>::new();
@@ -1093,6 +1107,13 @@ impl Submitter {
         CachedResult::Miss
     }
 
+    /// Encode a message through the shared transform encoder, then frame
+    /// the result for fan-out distribution. The Mutex serializes
+    /// concurrent callers because fan-out must encode once and distribute
+    /// the encoded bytes to all peers. lz4 block compression is fast, so
+    /// the hold is brief. For large messages above the offload threshold,
+    /// `DeferredFanOutWorker` takes the encoder out of the Mutex and
+    /// uses `spawn_blocking` instead.
     fn encode_fanout_batch(
         &self,
         msg: &Message,
