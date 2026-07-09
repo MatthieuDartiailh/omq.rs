@@ -14,13 +14,19 @@ fn tcp_ep(port: u16) -> Endpoint {
     }
 }
 
+/// Bind a port, then drop the listener so the port is guaranteed unbound.
+/// Uses a raw `std::net::TcpListener` so the port is released synchronously
+/// on drop (no async actor cleanup race).
+fn grab_and_release_port() -> Endpoint {
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    tcp_ep(port)
+}
+
 #[tokio::test]
 async fn reconnect_stop_conn_refused_stops_dial() {
-    // Grab a port, then close the listener so the port is unbound.
-    let probe = Socket::new(SocketType::Pull, Options::default());
-    let ep = probe.bind(tcp_ep(0)).await.unwrap();
-    drop(probe);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let ep = grab_and_release_port();
 
     let opts = Options::default()
         .reconnect(ReconnectPolicy::Fixed(Duration::from_millis(50)))
@@ -47,10 +53,7 @@ async fn reconnect_stop_conn_refused_stops_dial() {
 
 #[tokio::test]
 async fn reconnect_stop_default_retries() {
-    let probe = Socket::new(SocketType::Pull, Options::default());
-    let ep = probe.bind(tcp_ep(0)).await.unwrap();
-    drop(probe);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let ep = grab_and_release_port();
 
     // Default: reconnect_stop_conn_refused is false. Should retry.
     let opts = Options::default().reconnect(ReconnectPolicy::Fixed(Duration::from_millis(50)));
@@ -59,7 +62,8 @@ async fn reconnect_stop_default_retries() {
     push.connect(ep).await.unwrap();
 
     let mut count = 0u32;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // 10 s: Windows CI runners are slower than Linux.
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let evt = mon.recv().await.unwrap();
             if matches!(evt, MonitorEvent::ConnectDelayed { .. }) {
