@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 from chart_hw import detect_hardware
 
 # Union of all impls plotted in the main chart; used only as a load filter.
-IMPLS = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "omq-libzmq",
+IMPLS = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt",
          "zmq.rs", "rzmq", "rzmq-iouring"]
 
 COLORS = {
@@ -32,7 +32,6 @@ COLORS = {
     "libzmq-mt": "#a16207",
     "omq-tokio": "#f97316",
     "omq-tokio-mt": "#dc2626",
-    "omq-libzmq": "#06b6d4",
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
     "rzmq-iouring": "#15803d",
@@ -43,16 +42,15 @@ LABELS = {
     "libzmq-mt": "libzmq v4.3.5 (4T)",
     "omq-tokio": "omq-tokio (1T)",
     "omq-tokio-mt": "omq-tokio (4T)",
-    "omq-libzmq": "omq-libzmq [1T]",
     "zmq.rs": "zmq.rs v0.6.0 [6T]",
     "rzmq": "rzmq v0.5.24 [6T]",
     "rzmq-iouring": "rzmq v0.5.24 (io_uring) [6T]",
 }
 
 MAIN_IMPLS = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt",
-              "omq-libzmq", "zmq.rs", "rzmq", "rzmq-iouring"]
+              "zmq.rs", "rzmq", "rzmq-iouring"]
 MAIN_DRAW_ORDER = ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq",
-                   "libzmq-mt", "omq-libzmq", "omq-tokio-mt", "omq-tokio"]
+                   "libzmq-mt", "omq-tokio-mt", "omq-tokio"]
 MAIN_TITLE = "PUSH/PULL throughput, TCP loopback, 2-process"
 
 
