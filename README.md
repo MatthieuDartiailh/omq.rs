@@ -11,6 +11,12 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - No C compiler, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
+</p>
+
+[Full comparison charts](COMPARISONS.md)
+
 ## The hard parts
 
 OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput. You get:
@@ -24,12 +30,6 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 - Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences (see charts below).
 
 ### Benchmarks
-
-[Full comparison charts](COMPARISONS.md)
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
-</p>
 
 <details>
 <summary>PUSH/PULL by transport</summary>
