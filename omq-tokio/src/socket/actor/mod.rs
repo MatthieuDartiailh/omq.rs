@@ -164,7 +164,7 @@ pub(crate) struct SocketDriver {
     socket_type: SocketType,
     options: Options,
     cmd_rx: mpsc::Receiver<SocketCommand>,
-    recv_tx: async_channel::Sender<Message>,
+    recv_tx: Arc<super::recv::SharedRecvPipe>,
     cancel: CancellationToken,
     internal_tx: mpsc::Sender<InternalEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
@@ -215,7 +215,7 @@ impl SocketDriver {
         socket_type: SocketType,
         options: Options,
         cmd_rx: mpsc::Receiver<SocketCommand>,
-        recv_tx: async_channel::Sender<Message>,
+        recv_tx: Arc<super::recv::SharedRecvPipe>,
         cancel: CancellationToken,
         monitor: MonitorPublisher,
         send_strategy: SendStrategy,
@@ -390,6 +390,7 @@ impl SocketDriver {
         self.close_ack = ack;
         // Close the recv channel so any awaiting recv() returns Closed.
         self.recv_tx.close();
+        // close() sets the closed flag; existing ring data can still be drained.
         // Stop accepting new peers.
         for l in &self.listeners {
             l.cancel.cancel();

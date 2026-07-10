@@ -28,11 +28,12 @@ pub(crate) type TransmitSlotProducerHandle =
 
 /// Where the driver routes decoded inbound messages.
 ///
-/// `Channel`: the existing path via `async_channel` (pure-Rust callers).
-/// `Yring`: direct push to a lock-free SPSC ring + external signal,
-/// used by omq-libzmq to eliminate the recv-pump relay task.
+/// `Channel`: push into the shared recv pipe (yring + Mutex).
+/// `Yring`: direct push to a per-peer lock-free SPSC ring + external
+/// signal, used by omq-libzmq to eliminate the recv-pump relay task.
+#[allow(private_interfaces)]
 pub enum RecvSink {
-    Channel(async_channel::Sender<Message>),
+    Channel(Arc<crate::socket::recv::SharedRecvPipe>),
     Yring(YringSink),
 }
 
@@ -115,7 +116,7 @@ impl RecvSinkConfig {
 impl std::fmt::Debug for RecvSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Channel(tx) => f.debug_tuple("Channel").field(tx).finish(),
+            Self::Channel(pipe) => f.debug_tuple("Channel").field(pipe).finish(),
             Self::Yring(y) => f
                 .debug_struct("Yring")
                 .field("producer", &y.producer)
@@ -146,7 +147,7 @@ impl YringSink {
 impl RecvSink {
     async fn send(&mut self, m: Message) -> bool {
         match self {
-            Self::Channel(tx) => tx.send(m).await.is_ok(),
+            Self::Channel(pipe) => pipe.send(m).await.is_ok(),
             Self::Yring(sink) => {
                 let mut msg = m;
                 loop {
@@ -457,8 +458,11 @@ where
     /// whose recv path is a plain fair-queue delivery with no per-type
     /// post-processing.
     #[must_use]
-    pub fn with_recv_direct(mut self, tx: async_channel::Sender<Message>) -> Self {
-        self.recv_direct = Some(RecvSink::Channel(tx));
+    pub(crate) fn with_recv_direct(
+        mut self,
+        pipe: Arc<crate::socket::recv::SharedRecvPipe>,
+    ) -> Self {
+        self.recv_direct = Some(RecvSink::Channel(pipe));
         self
     }
 

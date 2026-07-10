@@ -721,7 +721,7 @@ struct InprocDriverCtx {
     cancel: tokio_util::sync::CancellationToken,
     peer_props: omq_proto::proto::command::PeerProperties,
     max_message_size: Option<usize>,
-    recv_direct: Option<async_channel::Sender<omq_proto::message::Message>>,
+    recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
     spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
     recv_sink: Option<crate::engine::RecvSink>,
     shared_rx: Option<crate::routing::fallback_queue::FallbackReceiver>,
@@ -953,13 +953,13 @@ fn try_push_spsc(
 /// Returns `true` if sent, `false` if the channel closed.
 async fn route_inproc_message(
     m: Message,
-    recv_direct: Option<&async_channel::Sender<Message>>,
+    recv_direct: Option<&std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
     peer_out: &mpsc::Sender<(u64, crate::engine::PeerEvent)>,
     peer_id: u64,
 ) -> bool {
     use crate::engine::PeerEvent;
     match recv_direct {
-        Some(tx) => tx.send(m).await.is_ok(),
+        Some(pipe) => pipe.send(m).await.is_ok(),
         None => peer_out
             .send((peer_id, PeerEvent::Event(ZmtpEvent::Message(m))))
             .await

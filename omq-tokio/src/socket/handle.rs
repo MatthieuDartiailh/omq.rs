@@ -29,12 +29,12 @@ pub use omq_proto::error::TrySendError;
 ///
 /// # Concurrency
 ///
-/// The tokio backend is multi-threaded. `recv` reads from an
-/// `async_channel` (MPMC), so concurrent `recv` calls from
-/// different tasks are safe. Each message is delivered to exactly
-/// one caller. `send` goes through a per-socket `SendSubmitter`
-/// that serializes internally, so concurrent `send` calls are also
-/// safe.
+/// The tokio backend is multi-threaded. `recv` drains a set of
+/// pre-allocated yring channels (per-peer and shared recv pipe),
+/// so concurrent `recv` calls from different tasks are safe. Each
+/// message is delivered to exactly one caller. `send` goes through
+/// a per-socket `SendSubmitter` that serializes internally, so
+/// concurrent `send` calls are also safe.
 #[derive(Clone, Debug)]
 pub struct Socket {
     inner: Arc<Inner>,
@@ -109,8 +109,9 @@ impl Socket {
         );
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.unwrap_or(1024).max(16) as usize);
-        let (recv_tx, recv_rx) =
-            async_channel::bounded::<Message>(options.recv_hwm.unwrap_or(1024).max(16) as usize);
+        let recv_hwm = options.recv_hwm.unwrap_or(1024).max(16) as usize;
+        let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
+            super::recv::recv_pipe(recv_hwm);
         let monitor = MonitorPublisher::new();
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
         let send_submitter = send_strategy.submitter();
@@ -139,7 +140,7 @@ impl Socket {
             inner: Arc::new(Inner {
                 socket_type,
                 cmd_tx,
-                recv_rx: SpscAwareRecv::new(recv_rx, spsc),
+                recv_rx: SpscAwareRecv::new(recv_consumer, recv_pipe_notify, recv_pipe_space, spsc),
                 monitor,
                 root_cancel: cancel,
                 send_submitter,

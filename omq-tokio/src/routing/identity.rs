@@ -175,11 +175,11 @@ impl IdentitySend {
 #[derive(Debug)]
 pub(crate) struct IdentityRecv {
     peers: Arc<Mutex<FxHashMap<u64, Bytes>>>,
-    recv_tx: async_channel::Sender<Message>,
+    recv_tx: Arc<crate::socket::recv::SharedRecvPipe>,
 }
 
 impl IdentityRecv {
-    pub(crate) fn new(recv_tx: async_channel::Sender<Message>) -> Self {
+    pub(crate) fn new(recv_tx: Arc<crate::socket::recv::SharedRecvPipe>) -> Self {
         Self {
             peers: Arc::new(Mutex::new(FxHashMap::default())),
             recv_tx,
@@ -198,7 +198,7 @@ impl IdentityRecv {
 
     pub(crate) async fn deliver(&self, peer_id: u64, msg: Message) -> Result<()> {
         let wrapped = self.wrap(peer_id, msg);
-        self.recv_tx.send(wrapped).await.map_err(|_| Error::Closed)
+        self.recv_tx.send(wrapped).await
     }
 
     pub(crate) fn wrap(&self, peer_id: u64, msg: Message) -> Message {

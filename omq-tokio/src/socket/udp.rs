@@ -57,7 +57,7 @@ pub(crate) struct UdpDialerEntry {
 /// pushes matching `[group, body]` messages straight onto `recv_tx`.
 pub(crate) fn spawn_dish_listener(
     sock: UdpSocket,
-    recv_tx: async_channel::Sender<Message>,
+    recv_tx: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
     joined: JoinedGroups,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
@@ -71,8 +71,6 @@ pub(crate) fn spawn_dish_listener(
                         let Some((group, body)) = udp::decode_datagram(&buf[..n]) else {
                             continue;
                         };
-                        // Local group filter - UDP DISH owns this; no
-                        // JOIN reaches RADIO over a connectionless link.
                         let joined_now = {
                             let g = joined.lock().expect("joined_groups poisoned");
                             g.contains(&group)
