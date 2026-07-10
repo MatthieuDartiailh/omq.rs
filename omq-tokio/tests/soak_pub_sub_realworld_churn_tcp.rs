@@ -166,6 +166,10 @@ impl SubscriberProbe {
             self.received += 1;
         }
     }
+
+    fn reset_gap_window(&mut self) {
+        self.last_seq_by_topic = [None; 4];
+    }
 }
 
 async fn set_target_subscribers(
@@ -253,6 +257,10 @@ fn soak_pub_sub_realworld_churn_tcp() {
                     sent_at_measure_start = seq;
                     recv_at_measure_start = subs.iter().map(|s| s.received).sum();
                     gaps_at_measure_start = subs.iter().map(|s| s.gaps).sum();
+                    // First post-warmup message starts the in-phase gap window.
+                    for sub in &mut subs {
+                        sub.reset_gap_window();
+                    }
                 }
 
                 if last_log.elapsed() >= Duration::from_secs(30) {
