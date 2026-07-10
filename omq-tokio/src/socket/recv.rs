@@ -101,17 +101,17 @@ pub(crate) struct SpscAwareRecv {
     /// Cheap guard for the send fast path. Avoids an `ArcSwap` load on the
     /// common TCP/no-inproc path.
     send_ring_available: Arc<AtomicBool>,
-    /// Batched messages drained from consumers (inproc + TCP).
-    inproc_cache: Mutex<VecDeque<Message>>,
-    /// Cached clone of consumers Vecs, refreshed when generation changes.
-    cached_consumers: Mutex<CachedConsumers>,
+    /// Drain state: cached consumer snapshots + message batch buffer.
+    /// Single lock covers both to avoid per-drain `Vec::clone`.
+    drain_state: Mutex<DrainState>,
 }
 
 #[derive(Debug)]
-struct CachedConsumers {
+struct DrainState {
     generation: u64,
     inproc: Vec<Arc<InprocSpsc>>,
     tcp: Vec<Arc<TcpYringConsumer>>,
+    batch: VecDeque<Message>,
 }
 
 impl SpscAwareRecv {
@@ -125,11 +125,11 @@ impl SpscAwareRecv {
             activated: handles.activated,
             send_ring: handles.send_ring,
             send_ring_available: handles.send_ring_available,
-            inproc_cache: Mutex::new(VecDeque::new()),
-            cached_consumers: Mutex::new(CachedConsumers {
+            drain_state: Mutex::new(DrainState {
                 generation: u64::MAX,
                 inproc: Vec::new(),
                 tcp: Vec::new(),
+                batch: VecDeque::new(),
             }),
         }
     }
@@ -138,30 +138,24 @@ impl SpscAwareRecv {
         if self.consumer_generation.load(Ordering::Relaxed) == 0 {
             return None;
         }
-        {
-            let mut cache = self.inproc_cache.lock().unwrap();
-            if let Some(msg) = cache.pop_front() {
-                return Some(msg);
-            }
+        let mut guard = self.drain_state.lock().unwrap();
+        if let Some(msg) = guard.batch.pop_front() {
+            return Some(msg);
         }
         let current_gen = self.consumer_generation.load(Ordering::Acquire);
-        let mut cached = self.cached_consumers.lock().unwrap();
-        if cached.generation != current_gen {
-            cached.inproc.clone_from(&self.consumers.read().unwrap());
-            cached.tcp.clone_from(&self.tcp_consumers.read().unwrap());
-            cached.generation = current_gen;
+        if guard.generation != current_gen {
+            guard.inproc.clone_from(&self.consumers.read().unwrap());
+            guard.tcp.clone_from(&self.tcp_consumers.read().unwrap());
+            guard.generation = current_gen;
         }
-        let inproc = cached.inproc.clone();
-        let tcp = cached.tcp.clone();
-        drop(cached);
-        let mut cache = self.inproc_cache.lock().unwrap();
+        let state = &mut *guard;
         let mut has_disconnected = false;
-        for p in &inproc {
+        for p in &state.inproc {
             if let Ok(mut consumer) = p.consumer.try_lock() {
                 let got = consumer.prefetch();
                 if got > 0 {
                     while let Some(msg) = consumer.pop() {
-                        cache.push_back(msg);
+                        state.batch.push_back(msg);
                     }
                     consumer.release();
                     p.space_notify.notify_waiters();
@@ -170,12 +164,12 @@ impl SpscAwareRecv {
                 }
             }
         }
-        for tc in &tcp {
+        for tc in &state.tcp {
             if let Ok(mut consumer) = tc.consumer.try_lock() {
                 let got = consumer.prefetch();
                 if got > 0 {
                     while let Some(msg) = consumer.pop() {
-                        cache.push_back(msg);
+                        state.batch.push_back(msg);
                     }
                     consumer.release();
                     tc.space.notify_one();
@@ -184,8 +178,8 @@ impl SpscAwareRecv {
                 }
             }
         }
-        let result = cache.pop_front();
-        drop(cache);
+        let result = state.batch.pop_front();
+        drop(guard);
         if has_disconnected {
             self.consumers
                 .write()
@@ -197,13 +191,16 @@ impl SpscAwareRecv {
                     .map_or(true, |c| !c.is_disconnected())
             });
             self.consumer_generation.fetch_add(1, Ordering::Release);
-            self.cached_consumers.lock().unwrap().generation = u64::MAX;
+            self.drain_state.lock().unwrap().generation = u64::MAX;
         }
         result
     }
 
     #[expect(clippy::needless_continue)]
     pub(crate) async fn recv(&self) -> Result<Message> {
+        let channel_recv = self.rx.recv();
+        tokio::pin!(channel_recv);
+
         loop {
             if let Some(msg) = self.try_drain_consumers() {
                 return Ok(msg);
@@ -219,7 +216,7 @@ impl SpscAwareRecv {
                 tokio::select! {
                     biased;
                     () = notified => continue,
-                    res = self.rx.recv() => {
+                    res = &mut channel_recv => {
                         return res.map_err(|_| Error::Closed);
                     }
                     () = self.activated.notified() => continue,
@@ -230,7 +227,7 @@ impl SpscAwareRecv {
                 activated.as_mut().enable();
                 tokio::select! {
                     biased;
-                    res = self.rx.recv() => {
+                    res = &mut channel_recv => {
                         return res.map_err(|_| Error::Closed);
                     }
                     () = activated => continue,
@@ -250,12 +247,12 @@ impl SpscAwareRecv {
     }
 
     pub(crate) fn shutdown(&self) {
-        self.inproc_cache.lock().unwrap().clear();
         {
-            let mut cached = self.cached_consumers.lock().unwrap();
-            cached.inproc.clear();
-            cached.tcp.clear();
-            cached.generation = u64::MAX;
+            let mut state = self.drain_state.lock().unwrap();
+            state.batch.clear();
+            state.inproc.clear();
+            state.tcp.clear();
+            state.generation = u64::MAX;
         }
         self.consumers.write().unwrap().clear();
         self.tcp_consumers.write().unwrap().clear();
