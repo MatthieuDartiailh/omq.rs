@@ -46,22 +46,6 @@ pub async fn wait_for_handshake_on(mon: &mut MonitorStream) {
         .expect("handshake did not complete within 5s");
 }
 
-pub async fn wait_for_subscribe(pub_sock: &Socket) {
-    let mut mon = pub_sock.monitor();
-    let fut = async {
-        loop {
-            match mon.recv().await {
-                Ok(MonitorEvent::SubscribeReceived { .. }) => return,
-                Ok(_) => {}
-                Err(e) => panic!("monitor closed before subscribe: {e:?}"),
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), fut)
-        .await
-        .expect("subscribe did not propagate within 5s");
-}
-
 pub async fn wait_for_join(sock: &Socket) {
     let mut mon = sock.monitor();
     let fut = async {

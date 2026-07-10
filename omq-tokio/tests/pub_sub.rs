@@ -4,26 +4,10 @@ mod test_support;
 
 use std::time::Duration;
 
-use omq_tokio::{Endpoint, Message, MonitorEvent, OnMute, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, OnMute, Options, Socket, SocketType};
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
-}
-
-async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
-    let fut = async {
-        let mut count = 0;
-        while count < n {
-            match mon.recv().await {
-                Ok(MonitorEvent::SubscribeReceived { .. }) => count += 1,
-                Ok(_) => {}
-                Err(e) => panic!("monitor closed before subscriptions: {e:?}"),
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), fut)
-        .await
-        .expect("subscriptions did not propagate within 5s");
 }
 
 #[tokio::test]
@@ -208,7 +192,9 @@ async fn pub_tcp_multi_sub_all_receive() {
         s.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(s);
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    pub_.wait_subscribed(4, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     for i in 0u32..20 {
         pub_.send(Message::single(i.to_le_bytes().to_vec()))
@@ -242,7 +228,10 @@ async fn pub_tcp_subscriber_churn() {
         s2.subscribe(bytes::Bytes::new()).await.unwrap();
         s2.connect(test_support::tcp_loopback(port)).await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let expected = (u64::from(round) + 1) * 2;
+        pub_.wait_subscribed(expected, Duration::from_secs(5))
+            .await
+            .expect("subscriptions did not arrive");
 
         let tag = format!("round-{round}");
         pub_.send(Message::single(tag.clone())).await.unwrap();
@@ -275,7 +264,9 @@ async fn xpub_nodrop_delivers_all_under_backpressure() {
     let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(2));
     sub.subscribe(bytes::Bytes::new()).await.unwrap();
     sub.connect(test_support::tcp_loopback(port)).await.unwrap();
-    test_support::wait_for_subscribe(&pub_).await;
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
 
     let count = 10u32;
     let sender = tokio::spawn({
@@ -313,7 +304,9 @@ async fn pub_sharded_fanout_all_receive() {
         s.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(s);
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    pub_.wait_subscribed(8, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     let msg_count = 100u32;
     for i in 0..msg_count {
@@ -350,7 +343,9 @@ async fn pub_sharded_fanout_subscription_filter() {
         s.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(s);
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    pub_.wait_subscribed(prefixes.len() as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     for &pfx in &prefixes {
         pub_.send(Message::single(format!("{pfx}hello")))
@@ -386,7 +381,6 @@ async fn pub_sharded_fanout_block_on_mute_does_not_block_slow_sub() {
         Options::default().send_hwm(1).on_mute(OnMute::Block),
     );
     let port = test_support::bind_loopback(&pub_).await;
-    let mut mon = pub_.monitor();
 
     let mut subs = Vec::with_capacity(SUBS);
     for _ in 0..SUBS {
@@ -395,7 +389,9 @@ async fn pub_sharded_fanout_block_on_mute_does_not_block_slow_sub() {
         sub.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(sub);
     }
-    wait_for_subscribes(&mut mon, SUBS).await;
+    pub_.wait_subscribed(SUBS as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     let _keep_subs = subs;
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -424,7 +420,9 @@ async fn pub_sharded_fanout_two_worker_runtime_all_receive() {
         sub.connect(test_support::tcp_loopback(port)).await.unwrap();
         subs.push(sub);
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    pub_.wait_subscribed(SUBS as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     for i in 0..MSGS {
         pub_.send(Message::single(i.to_le_bytes().to_vec()))
@@ -443,4 +441,57 @@ async fn pub_sharded_fanout_two_worker_runtime_all_receive() {
             assert_eq!(got, expected, "subscriber {sub_idx}");
         }
     }
+}
+
+#[tokio::test]
+async fn wait_subscribed_returns_after_subscribe() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let port = test_support::bind_loopback(&pub_).await;
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe("a.").await.unwrap();
+    sub.connect(test_support::tcp_loopback(port)).await.unwrap();
+
+    let count = pub_
+        .wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("wait_subscribed timed out");
+    assert!(count >= 1);
+
+    sub.subscribe("b.").await.unwrap();
+    let count = pub_
+        .wait_subscribed(2, Duration::from_secs(1))
+        .await
+        .expect("wait_subscribed timed out for second subscribe");
+    assert!(count >= 2);
+}
+
+#[tokio::test]
+async fn wait_subscribed_times_out_with_no_subscribers() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let _port = test_support::bind_loopback(&pub_).await;
+
+    let result = pub_.wait_subscribed(1, Duration::from_millis(50)).await;
+    assert!(result.is_err(), "should time out with no subscribers");
+}
+
+#[tokio::test]
+async fn wait_subscribed_cumulative_across_peers() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let port = test_support::bind_loopback(&pub_).await;
+
+    for i in 0u64..4 {
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.subscribe(bytes::Bytes::new()).await.unwrap();
+        sub.connect(test_support::tcp_loopback(port)).await.unwrap();
+        pub_.wait_subscribed(i + 1, Duration::from_secs(1))
+            .await
+            .expect("wait_subscribed timed out");
+    }
+
+    let count = pub_
+        .wait_subscribed(4, Duration::from_millis(50))
+        .await
+        .expect("should already be at 4");
+    assert_eq!(count, 4);
 }

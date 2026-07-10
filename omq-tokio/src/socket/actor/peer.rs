@@ -582,6 +582,8 @@ impl SocketDriver {
         match cmd {
             Command::Subscribe(prefix) => {
                 self.send_strategy.peer_subscribe(peer_id, prefix.clone());
+                self.subscribe_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
                 self.monitor.publish(MonitorEvent::SubscribeReceived {
                     prefix: prefix.clone(),
                 });
