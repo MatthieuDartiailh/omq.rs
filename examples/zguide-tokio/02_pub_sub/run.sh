@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-trap 'kill $(jobs -p) 2>/dev/null' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
 cargo run --bin zg02_publisher -- ipc://@omq-zguide-02-pubsub 20 &
 sleep 0.3

@@ -7,10 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-10
+
 ### Added
 
-- Windows named pipes support for IPC transport. Named pipes automatically handle Windows-specific requirements (buffer management, connection lifecycle). Socket types work identically to Unix: transparent to application layer.
-- All 20 socket types now available over IPC on Windows (PUSH, PULL, PUB, SUB, REQ, REP, ROUTER, DEALER, PAIR, CLIENT, SERVER, CHANNEL, SCATTER, GATHER, RADIO, DISH, XPUB, XSUB, PEER, STREAM).
+- `Socket::wait_subscribed`: deterministic PUB/SUB subscription readiness check. Atomic counter shared between actor and socket handle, incremented after `peer_subscribe()`. No actor round-trip needed.
+- `Socket::wait_connected`: polls the monitor stream until at least one peer completes the ZMTP handshake, with a configurable timeout.
+- `Socket::disconnect` for live peers, matching libzmq semantics. Previously only worked for pending (not-yet-connected) endpoints.
+- STREAM socket integration tests: bind/connect, raw TCP interop, identity-based routing, send to disconnected peer, multi-peer scenarios.
+- `reconnect_stop_conn_refused` option: a connect endpoint stops reconnecting after a TCP connection-refused error.
+- PUB/SUB churn soak test covering deterministic TCP peer-count phases under sustained load.
+
+### Fixed
+
+- `RecvSink::Yring` livelock on consumer drop: the yring recv-bypass path looped forever with 10 ms sleeps when the consumer was dropped. Check `is_consumer_dropped()` after the first failed push.
+- `Exclusive::Submitter` livelock on shutdown: `send()` looped forever polling for a peer that would never appear. An `AtomicBool` closed flag now short-circuits to `Err(Closed)`.
+- Fan-out shard tests updated for reduced `DIRECT_SHARD_PEER_CAP`.
+- PUB/SUB churn soak gap window: reset per-subscriber sequence baselines when the measured phase starts.
+- Single-thread PUB/SUB fan-out scheduling: correctly detect `current_thread` runtime and use cooperative yielding for shard workers.
+- `blume` receiver ordering for large messages: deferred fan-out throughput collapsed because `blume` delivered in LIFO order when the internal buffer wrapped.
+
+### Performance
+
+- Reuse per-connection `BytesMut` for large-frame receives. `BytesMut::zeroed(plen)` allocated via `mmap` for payloads at or above 128 KiB, causing kernel page zeroing and page faults on every message. PUSH/PULL throughput at 256 KiB recovered from 1.4 GB/s to 4.7 GB/s.
+- Multi-peer PUSH throughput: arena direct-write, round-robin modulo elimination, batch cap raised to 512. +3-9% on 8-peer TCP fan-out for 16 B to 2 KiB messages.
+- Swap-to-back deactivation for round-robin send: eliminates O(n) shifts on peer deactivation/reactivation.
+- Coalesced PUSH send-pipe wakeups: wake once while data is pending, rearm after drain.
+- Sharded PUB fan-out with bounded worker tasks. Gradual shard ramp-up, direct path for first peers, capped at 8 workers per socket. Deferred compression for large sharded LZ4 sends.
+- `DrainBudget` enforcement on transmit slot, send pipe, fallback queue, and deferred fan-out worker drain loops.
+- `DataSignal` coalescing replaces ad-hoc atomic+Notify patterns across all producer-to-consumer signaling.
+
+### Changed
+
+- Route PUSH through `yring` send pipes. Per-peer pipe ownership; the shared fallback queue is only for pre-peer buffered sends.
+- Fan-out sockets (PUB/XPUB/RADIO) ignore `OnMute::Block`, matching libzmq. Sharded fan-out drops muted peers with bounded drain work.
+- Rename internal types (see omq-proto 0.21.0 changelog).
+- *(deps)* Bump `omq-proto` to 0.21.0, `blume` to 0.4.5, `yring` to 0.3.6.
+
+## [0.16.0] - 2026-07-04
+
+### Added
+
+- Windows named pipes support for IPC transport. Named pipes handle Windows-specific buffer management and connection lifecycle. All 20 socket types available over IPC on Windows.
+- `reconnect_stop_conn_refused` option.
+
+### Fixed
+
+- Inproc receiver size limit propagation.
+- Identity `try_send` backpressure reporting.
+- Reject UDP datagrams with reserved flags.
+- Timeout and DNS connect edge case hardening.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.20.0, `blume` to 0.4.4, `yring` to 0.3.5.
+
+### Removed
+
+- `omq-compio` backend references and cross-runtime interop crate.
 
 ## [0.15.0] - 2026-07-03
 

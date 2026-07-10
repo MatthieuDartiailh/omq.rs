@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-10
+
+### Added
+
+- Compile-time rejection of 32-bit targets. `omq-proto` is the root dependency, so the gate fires before crate-specific guards.
+- `DrainBudget` type: caps every drain loop by message count and byte count, preventing unbounded drains from starving the async runtime.
+- `DataSignal` type: coalesces producer-to-consumer wakeups. `mark()` fires `notify_one` only on the `false`-to-`true` transition; `clear()` before draining; `reschedule()` for budget-interrupted drains.
+- `reconnect_stop_conn_refused` option: a connect endpoint stops reconnecting after a TCP connection-refused error instead of retrying indefinitely.
+
+### Fixed
+
+- Fix stale `arena_threshold` doc comments after the threshold was lowered.
+- Suppress dictionary-shipment warning when building without `lz4`.
+
+### Performance
+
+- `Message` inline storage raised to 71 bytes (80-byte value, one cache line). Eliminates heap and refcount work for payloads up to 64 bytes.
+- Arena threshold lowered from 96 KiB to 4 KiB. Messages at or above 4 KiB use zero-copy gather-write instead of copying the full payload into the arena.
+- Arena peak capacity tracking: pre-reserve to the high-water mark after `split().freeze()`, eliminating the 256K/512K/1M/2M reallocation cascade.
+- Wire slot cap lowered from 2 MiB to 512 KiB, closer to the kernel TCP send buffer. Reduces repeated partial `writev` calls.
+- `FrameBuffer` direct-write path for arena-only batches: skip the per-batch `split`/`freeze`/`Bytes::slice`/drop cycle.
+- Round-robin modulo elimination: wrapping comparison replaces integer division in `try_send`, `deactivate`, and `remove_peer`.
+- Encode-once fan-out: distribute shared pre-encoded wire bytes to all PUB/XPUB/RADIO subscribers.
+- Ship LZ4 fan-out dictionaries once per connection from a socket-level encoder.
+
+### Changed
+
+- Fan-out sockets (PUB/XPUB/RADIO) ignore `OnMute::Block`, matching libzmq behavior. `xpub_nodrop` remains direct-path only.
+- Rename internal types: `EncodedQueue` to `FrameBuffer`, `FanOutBatch` to `FanOutFrame`, `DirectEncode` to `HandleFrame`, `WireSlot` to `PeerTransmitSlot`, `DropQueue` to `FallbackQueue`, `PeerSend` to `PeerOutbound`, `WireSlotCache` to `TransmitSlotCache`.
+- Batch cap raised from 256 to 512 messages for small-message workloads.
+
+## [0.20.0] - 2026-07-04
+
+### Added
+
+- IPC endpoint support on Windows (named pipes).
+
+### Fixed
+
+- Reconnect jitter truncation.
+- Direct receive size guard hardening.
+- Enforce message limits on codec fast paths.
+- WebSocket handshake hardening.
+
+### Removed
+
+- `omq-compio` backend references.
+
 ## [0.19.0] - 2026-07-03
 
 ### Added

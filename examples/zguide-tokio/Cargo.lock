@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "blume"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "event-listener",
 ]
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "bytes",
  "patricia_tree",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "loom",
 ]

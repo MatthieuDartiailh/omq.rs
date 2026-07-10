@@ -310,6 +310,7 @@ def draw_latency_panel(
     L: list[str], sizes: list[int], xs: list[float], lat: dict,
     x_left: float, x_right: float, y_top: float, y_bot: float,
     title: str, lat_min: float = 0,
+    lat_max: float | None = None, lat_step: float | None = None,
 ):
     h = y_bot - y_top
 
@@ -317,7 +318,8 @@ def draw_latency_panel(
         lat[s][name]
         for s in sizes for name in IMPLS if name in lat.get(s, {})
     ]
-    lat_max = max(all_vals) * 1.15 if all_vals else 150.0
+    if lat_max is None:
+        lat_max = max(all_vals) * 1.15 if all_vals else 150.0
     lat_range = lat_max - lat_min
 
     def y_lat(v):
@@ -330,7 +332,7 @@ def draw_latency_panel(
         L.append(svg_text(x_left - 8, y_bot, f"{lat_min:.0f} µs", anchor="end",
                           baseline="middle", size=8.5, fill="#9ca3af"))
 
-    step = nice_step(lat_range, 5)
+    step = lat_step if lat_step else nice_step(lat_range, 5)
     v = math.ceil(lat_min / step) * step
     if v <= lat_min:
         v += step
@@ -366,12 +368,15 @@ def draw_latency_panel(
 
 def generate_main_chart(tput: dict, msgs: dict, impls: list[str],
                         draw_order: list[str], title: str,
-                        hw_label: str | None) -> str:
+                        hw_label: str | None,
+                        lat: dict | None = None) -> str:
     small_sizes = SMALL_SIZES
     large_sizes = LARGE_SIZES
 
     hw_offset = 14 if hw_label else 0
     panel_h = 260
+    lat_panel_h = 160
+    lat_gap = 70
     x_pad_left = 70
     panel_gap_x = 40
     x_pad_right = 70
@@ -385,7 +390,18 @@ def generate_main_chart(tput: dict, msgs: dict, impls: list[str],
     header_y = 16
     row_top = hw_offset + header_y + 30
     row_bot = row_top + panel_h
-    svg_h = row_bot + legend_h + 10
+
+    has_lat = lat and any(s in lat and any(name in lat[s] for name in impls)
+                          for s in small_sizes)
+    if has_lat:
+        lat_top = row_bot + lat_gap
+        lat_bot = lat_top + lat_panel_h
+        svg_h = lat_bot + legend_h + 10
+    else:
+        svg_h = row_bot + legend_h + 10
+    lat_fixed_min = 20.0
+    lat_fixed_max = 120.0
+    lat_fixed_step = 20.0
 
     L = []
     L.append(
@@ -419,11 +435,22 @@ def generate_main_chart(tput: dict, msgs: dict, impls: list[str],
                           tput, p2_xl, p2_xr, row_top, row_bot,
                           "medium/large messages (higher is better)", impls, draw_order)
 
+    if has_lat:
+        lat_xl = x_pad_left
+        lat_xr = svg_w - x_pad_right
+        draw_latency_panel(L, small_sizes, make_xs(small_sizes, lat_xl, lat_xr),
+                           lat, lat_xl, lat_xr, lat_top, lat_bot,
+                           "REQ/REP round-trip latency, TCP (lower is better)",
+                           lat_min=lat_fixed_min,
+                           lat_max=lat_fixed_max,
+                           lat_step=lat_fixed_step)
+
     # Legend (two rows when > 4 items, only impls with data)
     all_sizes = small_sizes + large_sizes
     has_data = {name for s in all_sizes for name in tput.get(s, {})} | \
                {name for s in all_sizes for name in msgs.get(s, {})}
-    leg_y = row_bot + 30
+    leg_base = lat_bot if has_lat else row_bot
+    leg_y = leg_base + 30
     legend_items = [(k, LABELS[k]) for k in impls if k in COLORS and k in has_data]
     row_gap = 20
     item_w = 190
@@ -467,11 +494,11 @@ def generate_main_chart(tput: dict, msgs: dict, impls: list[str],
 
 def main():
     hw = detect_hardware()
-    tput, _lat, msgs = load_data()
+    tput, lat, msgs = load_data()
     out_dir = REPO / "doc" / "charts"
     out_dir.mkdir(parents=True, exist_ok=True)
     svg = generate_main_chart(tput, msgs, MAIN_IMPLS, MAIN_DRAW_ORDER,
-                              MAIN_TITLE, hw)
+                              MAIN_TITLE, hw, lat=lat)
     out = out_dir / "main_tcp.svg"
     out.write_text(svg)
     print(f"Written: {out}", file=sys.stderr)

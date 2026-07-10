@@ -19,6 +19,7 @@ LARGE_MESSAGE_SIZES = [256, 1024, 4096, 16384]
 METRIC_LINE_WIDTH = 2.5
 CPU_LINE_WIDTH = 1.6
 MARKER_RADIUS = 3.0
+MIN_WHISKER_PX = 3.0
 MSG_LINE_DASH = "6,3"
 CPU_LINE_DASH = "2,5"
 
@@ -164,6 +165,32 @@ def svg_dots(points: list[tuple[float, float]], color: str, radius: float = 3) -
         f' fill="{color}" stroke="white" stroke-width="1"/>'
         for x, y in points
     ]
+
+
+def _whisker(L: list[str], x: float, y_lo: float, y_hi: float, color: str):
+    mid = (y_lo + y_hi) / 2
+    half = max(abs(y_hi - y_lo) / 2, MIN_WHISKER_PX / 2)
+    y1 = mid + half
+    y2 = mid - half
+    cap = 4
+    L.append(
+        f'  <line x1="{x:.1f}" y1="{y1:.1f}"'
+        f' x2="{x:.1f}" y2="{y2:.1f}"'
+        f' stroke="{color}" stroke-width="1.5"'
+        f' opacity="0.5"/>'
+    )
+    L.append(
+        f'  <line x1="{x - cap:.1f}" y1="{y1:.1f}"'
+        f' x2="{x + cap:.1f}" y2="{y1:.1f}"'
+        f' stroke="{color}" stroke-width="1.5"'
+        f' opacity="0.5"/>'
+    )
+    L.append(
+        f'  <line x1="{x - cap:.1f}" y1="{y2:.1f}"'
+        f' x2="{x + cap:.1f}" y2="{y2:.1f}"'
+        f' stroke="{color}" stroke-width="1.5"'
+        f' opacity="0.5"/>'
+    )
 
 
 def svg_x_marks(points: list[tuple[float, float]], color: str, radius: float = 3) -> list[str]:
@@ -638,27 +665,8 @@ def draw_split_throughput_cpu_panel(
             for i, size in enumerate(sizes):
                 val = tput.get(size, {}).get(name)
                 if val and len(val) >= 4 and val[2] > 0 and val[3] > 0:
-                    x = xs[i]
-                    y1 = y_metric(val[2])
-                    y2 = y_metric(val[3])
-                    L.append(
-                        f'  <line x1="{x:.1f}" y1="{y1:.1f}"'
-                        f' x2="{x:.1f}" y2="{y2:.1f}"'
-                        f' stroke="{COLORS[name]}" stroke-width="1.0"'
-                        f' opacity="0.45"/>'
-                    )
-                    L.append(
-                        f'  <line x1="{x - 3:.1f}" y1="{y1:.1f}"'
-                        f' x2="{x + 3:.1f}" y2="{y1:.1f}"'
-                        f' stroke="{COLORS[name]}" stroke-width="1.0"'
-                        f' opacity="0.45"/>'
-                    )
-                    L.append(
-                        f'  <line x1="{x - 3:.1f}" y1="{y2:.1f}"'
-                        f' x2="{x + 3:.1f}" y2="{y2:.1f}"'
-                        f' stroke="{COLORS[name]}" stroke-width="1.0"'
-                        f' opacity="0.45"/>'
-                    )
+                    _whisker(L, xs[i], y_metric(val[2]), y_metric(val[3]),
+                             COLORS[name])
             L.append(svg_polyline(pts, COLORS[name],
                                   width=METRIC_LINE_WIDTH,
                                   dash=MSG_LINE_DASH))
@@ -677,6 +685,12 @@ def draw_split_throughput_cpu_panel(
             L.extend(svg_x_marks(zero_pts, COLORS[name],
                                  radius=MARKER_RADIUS))
         else:
+            for i, size in enumerate(sizes):
+                val = tput.get(size, {}).get(name)
+                if val and len(val) >= 4 and val[0] > 0 and val[2] > 0 and val[3] > 0:
+                    ratio = val[1] / val[0]
+                    _whisker(L, xs[i], y_metric(val[2] * ratio),
+                             y_metric(val[3] * ratio), COLORS[name])
             L.append(svg_polyline(pts, COLORS[name],
                                   width=METRIC_LINE_WIDTH))
             zero_pts = []
@@ -849,21 +863,8 @@ def draw_throughput_cpu_panel(
             for i, size in enumerate(sizes):
                 val = tput.get(size, {}).get(name)
                 if val and len(val) >= 4 and val[2] > 0 and val[3] > 0:
-                    x = xs[i]
-                    y1 = y_msg(val[2])
-                    y2 = y_msg(val[3])
-                    L.append(
-                        f'  <line x1="{x:.1f}" y1="{y1:.1f}" x2="{x:.1f}" y2="{y2:.1f}"'
-                        f' stroke="{COLORS[name]}" stroke-width="1.0" opacity="0.45"/>'
-                    )
-                    L.append(
-                        f'  <line x1="{x - 3:.1f}" y1="{y1:.1f}" x2="{x + 3:.1f}" y2="{y1:.1f}"'
-                        f' stroke="{COLORS[name]}" stroke-width="1.0" opacity="0.45"/>'
-                    )
-                    L.append(
-                        f'  <line x1="{x - 3:.1f}" y1="{y2:.1f}" x2="{x + 3:.1f}" y2="{y2:.1f}"'
-                        f' stroke="{COLORS[name]}" stroke-width="1.0" opacity="0.45"/>'
-                    )
+                    _whisker(L, xs[i], y_msg(val[2]), y_msg(val[3]),
+                             COLORS[name])
             L.append(svg_polyline(pts, COLORS[name], width=2.0, dash="5,3"))
 
     # solid GB/s lines (inner right axis)
@@ -1732,7 +1733,7 @@ def main():
         "inproc": "inproc",
     }
 
-    tcp_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "omq-libzmq", "zmq.rs", "rzmq", "rzmq-iouring"]
+    tcp_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
     ipc_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
     inproc_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "rzmq", "rzmq-iouring"]
 
@@ -1831,9 +1832,9 @@ def main():
     from gen_main_chart import (MAIN_DRAW_ORDER, MAIN_IMPLS, MAIN_TITLE,
                                 generate_main_chart,
                                 load_data as load_main_data)
-    tput, _lat, msgs = load_main_data()
+    tput, lat, msgs = load_main_data()
     svg = generate_main_chart(tput, msgs, MAIN_IMPLS, MAIN_DRAW_ORDER,
-                              MAIN_TITLE, hw)
+                              MAIN_TITLE, hw, lat=lat)
     if svg:
         out = REPO / "doc" / "charts" / "main_tcp.svg"
         out.parent.mkdir(parents=True, exist_ok=True)

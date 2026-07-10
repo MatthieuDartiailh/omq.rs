@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-07-10
+
+### Added
+
+- `close()` and consumer-drop detection so pipe owners can wake blocked senders and detach dead consumers cleanly.
+
+## [0.3.5] - 2026-07-04
+
+### Fixed
+
+- Use wrapping counters to prevent overflow on long-lived rings.
+- Harden capacity validation.
+
 ## [0.3.4] - 2026-07-03
 
 ### Fixed

@@ -884,8 +884,8 @@ def gen_combined_chart(data, path):
     async_omq_tp = data["async_omq_tp"]
     async_pz_tp = data["async_pz_tp"]
 
-    msg_max = 3_000_000
-    mbps_max = 6_000
+    msg_max = 4_000_000
+    mbps_max = 4_000
 
     def y_msg(v):
         frac = v / msg_max if msg_max > 0 else 0
@@ -922,6 +922,7 @@ def gen_combined_chart(data, path):
         )
 
     msg_tick = 500_000
+    mbps_tick = 500
     for val in range(msg_tick, msg_max + 1, msg_tick):
         yy = y_msg(val)
         L.append(
@@ -933,15 +934,7 @@ def gen_combined_chart(data, path):
             f' dominant-baseline="middle" fill="#374151"'
             f' font-size="10">{_fmt_y_rate(val)}</text>'
         )
-
-    n_r_ticks = 5
-    for i in range(n_r_ticks + 1):
-        mbps_val = i * mbps_max / n_r_ticks
-        yy = y_mbps(mbps_val)
-        L.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1" stroke-dasharray="3,6"/>'
-        )
+        mbps_val = (val // msg_tick) * mbps_tick
         L.append(
             f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
             f' dominant-baseline="middle" fill="#6b7280"'

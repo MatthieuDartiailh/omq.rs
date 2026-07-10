@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-10
+
+### Fixed
+
+- Drop Python-owned send buffers immediately after copying into Rust-owned `Bytes`, instead of holding them until the send completes. Reduces Python memory pressure under sustained send load.
+
+### Changed
+
+- Migrate to PyO3 0.29.
+- *(deps)* Bump `omq-tokio` to 0.17.0, `omq-proto` to 0.21.0.
+
 ## [0.14.0] - 2026-07-04
 
 ### Changed

@@ -1017,15 +1017,6 @@ IMPLS = {
         "supports_pubsub": True,
         "env": {"RZMQ_IO_URING": "1"},
     },
-    "omq-libzmq": {
-        "prefix": "m",
-        "class": "classic",
-        "transports": ["tcp", "inproc", "ipc"],
-        "inproc_tput_subcmd": "inproc",
-        "inproc_lat_subcmd": "inproc-latency",
-        "inproc_pubsub_subcmd": "inproc-pubsub",
-        "supports_pubsub": True,
-    },
 }
 
 PUBSUB_PEER_COUNTS = [1, 8, 32]
@@ -1080,24 +1071,6 @@ def build_peers(impl_names: set[str], ws_needed: bool):
             binaries["rzmq"] = rzmq_bin
         if "rzmq-iouring" in impl_names:
             binaries["rzmq-iouring"] = rzmq_bin
-
-    if "omq-libzmq" in impl_names:
-        print("==> building omq-libzmq bench_peer...", file=sys.stderr)
-        subprocess.run(
-            ["cargo", "build", "--release", "-p", "omq-libzmq", "-q"],
-            cwd=ROOT, check=True,
-        )
-        src = ROOT / "scripts" / "libzmq_bench_peer.c"
-        out = ROOT / "scripts" / "omq_libzmq_bench_peer"
-        inc = ROOT / "omq-libzmq" / "include"
-        lib_dir = ROOT / "target" / "release"
-        subprocess.run(
-            ["gcc", "-O2", "-o", str(out), str(src),
-             f"-I{inc}", f"-L{lib_dir}", "-lomq_zmq", "-lpthread",
-             f"-Wl,-rpath,{lib_dir}"],
-            check=True,
-        )
-        binaries["omq-libzmq"] = str(out)
 
     return binaries
 
@@ -1566,8 +1539,6 @@ def main():
         versions.append(f"zmq.rs {cargo_version('zeromq', manifest=ROOT / 'scripts' / 'zmqrs_bench_peer' / 'Cargo.toml')}")
     if impl_names & {"rzmq", "rzmq-iouring"}:
         versions.append(f"rzmq {cargo_version('rzmq', manifest=ROOT / 'scripts' / 'rzmq_bench_peer' / 'Cargo.toml')}")
-    if "omq-libzmq" in impl_names:
-        versions.append(f"omq-libzmq {cargo_version('omq-libzmq')}")
     print(" vs ".join(versions), file=sys.stderr)
 
     base_port = args.base_port or random.randint(20_000, 40_000)
