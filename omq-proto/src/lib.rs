@@ -6,6 +6,9 @@
 //! subscription matcher. None of this depends on a runtime.
 #![forbid(unsafe_code)]
 
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("omq requires a 64-bit target");
+
 pub mod backoff;
 pub mod endpoint;
 pub mod error;
