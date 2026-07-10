@@ -337,6 +337,47 @@ impl PeerTransmitSlot {
             .expect("transmit_slot fanout_reactivation poisoned") = Some(cb);
     }
 
+    /// Arena-only fast path: if all queued data is in the
+    /// [`FrameBuffer`] arena (no external `Bytes`, no ring items),
+    /// copy the arena bytes into `out` and clear the arena,
+    /// preserving its capacity. Returns `None` if the fast path
+    /// does not apply.
+    pub(crate) fn try_drain_arena_only(&self, out: &mut Vec<u8>) -> Option<DrainOutcome> {
+        {
+            let rx = self.ring_rx.lock().expect("transmit_slot ring_rx poisoned");
+            if !rx.is_empty() {
+                return None;
+            }
+        }
+        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if !eq.has_arena_only() {
+            return None;
+        }
+        out.extend_from_slice(eq.arena_bytes());
+        eq.clear_arena();
+        drop(eq);
+
+        self.data_signal.clear();
+        self.queued_msgs.store(0, Ordering::Relaxed);
+        self.queued_ring_bytes.store(0, Ordering::Relaxed);
+        let below_lwm = self.is_below_lwm(0, 0);
+        let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
+        if below_lwm
+            && self
+                .fanout_active
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            && let Some(cb) = self
+                .fanout_reactivation
+                .lock()
+                .expect("transmit_slot fanout_reactivation poisoned")
+                .clone()
+        {
+            cb(self.peer_id);
+        }
+        Some(DrainOutcome { space_available })
+    }
+
     pub(crate) fn drain(&self, buf: &mut Vec<Bytes>, max_chunks: usize) -> DrainOutcome {
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
         let before_chunks = buf.len();

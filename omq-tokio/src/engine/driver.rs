@@ -542,6 +542,7 @@ where
         let mut large_recv_buf = BytesMut::new();
         let mut eq = FrameBuffer::with_arena_threshold(arena_threshold);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
+        let mut arena_buf: Vec<u8> = Vec::with_capacity(4096);
         let mut pipe_batch: Vec<Message> = Vec::with_capacity(SHARED_MAX_BATCH_MSGS);
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> =
@@ -624,20 +625,10 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    let chunk = if decoder.is_some() {
-                        // Decoders (lz4 etc.) consume the full input each call,
-                        // so split().freeze() would leave a 0-cap BytesMut that
-                        // needs reallocation. Copy + clear reuses the buffer.
-                        let b = Bytes::copy_from_slice(&read_buf);
-                        read_buf.clear();
-                        b
-                    } else {
-                        let chunk = read_buf.split().freeze();
-                        if read_buf.capacity() < READ_BUF_SIZE {
-                            read_buf.reserve(READ_BUF_SIZE);
-                        }
-                        chunk
-                    };
+                    // Copy + clear: allocates proportional to actual
+                    // data, preserves the 128 KiB read buffer capacity.
+                    let chunk = Bytes::copy_from_slice(&read_buf);
+                    read_buf.clear();
                     if let Err(e) = codec.handle_input(chunk) {
                         while let Some(ev) = codec.poll_event() {
                             let _ = peer_out
@@ -783,7 +774,8 @@ where
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
                     drain_transmit_slot(
-                        transmit_slot.as_ref().unwrap(), &mut drain_buf, &mut writer,
+                        transmit_slot.as_ref().unwrap(), &mut drain_buf,
+                        &mut arena_buf, &mut writer,
                     ).await?;
                 },
 
@@ -872,8 +864,23 @@ async fn flush_all<W: AsyncWrite + Unpin>(
 async fn drain_transmit_slot<W: AsyncWrite + Unpin>(
     slot: &PeerTransmitSlot,
     drain_buf: &mut Vec<Bytes>,
+    arena_buf: &mut Vec<u8>,
     writer: &mut W,
 ) -> io::Result<()> {
+    // Fast path: all content is in the FrameBuffer arena (inline
+    // messages). Copy into the reusable staging buffer and write
+    // directly, preserving the arena's 256 KiB capacity.
+    arena_buf.clear();
+    if let Some(drain) = slot.try_drain_arena_only(arena_buf) {
+        if !arena_buf.is_empty() {
+            writer.write_all(arena_buf).await?;
+        }
+        if drain.space_available {
+            slot.space_available.notify_waiters();
+        }
+        return Ok(());
+    }
+
     let mut budget = DrainBudget::WIRE_DRAIN;
     loop {
         drain_buf.clear();
