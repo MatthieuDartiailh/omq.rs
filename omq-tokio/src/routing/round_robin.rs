@@ -51,14 +51,15 @@ impl ActivePipes {
     fn deactivate(&mut self, pos: usize) {
         let pipe = self.active.swap_remove(pos);
         self.inactive.push(pipe);
-        if self.active.is_empty() {
+        if self.active.is_empty() || self.cursor >= self.active.len() {
             self.cursor = 0;
-        } else {
-            self.cursor %= self.active.len();
         }
     }
 
     fn try_reactivate_any(&mut self) {
+        if self.inactive.is_empty() {
+            return;
+        }
         let mut i = 0;
         while i < self.inactive.len() {
             if self.inactive[i].tx.above_lwm.load(Ordering::Acquire) {
@@ -75,10 +76,8 @@ impl ActivePipes {
         self.fallback_peers.remove(&peer_id);
         if let Some(pos) = self.active.iter().position(|p| p.peer_id == peer_id) {
             self.active.swap_remove(pos);
-            if self.active.is_empty() {
+            if self.active.is_empty() || self.cursor >= self.active.len() {
                 self.cursor = 0;
-            } else {
-                self.cursor %= self.active.len();
             }
         } else if let Some(pos) = self.inactive.iter().position(|p| p.peer_id == peer_id) {
             self.inactive.swap_remove(pos);
@@ -163,8 +162,11 @@ impl Submitter {
 
         let mut scanned = 0usize;
         while scanned < active.active.len() {
-            let i = active.cursor % active.active.len();
-            active.cursor = (i + 1) % active.active.len();
+            let i = active.cursor;
+            active.cursor += 1;
+            if active.cursor >= active.active.len() {
+                active.cursor = 0;
+            }
             scanned += 1;
             match active.active[i].tx.try_send(msg) {
                 Ok(()) => return Ok(()),
