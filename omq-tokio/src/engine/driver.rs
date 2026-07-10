@@ -1136,6 +1136,23 @@ pub(crate) async fn flush_frame_buffer<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    if eq.has_arena_only() {
+        loop {
+            let len = eq.arena_bytes().len();
+            if len == 0 {
+                return Ok(());
+            }
+            let n = {
+                let data = eq.arena_bytes();
+                writer.write_vectored(&[io::IoSlice::new(data)]).await?
+            };
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+            }
+            eq.advance_arena(n);
+        }
+    }
+
     loop {
         drain_buf.clear();
         eq.drain(drain_buf, 1024);

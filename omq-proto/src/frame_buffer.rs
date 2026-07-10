@@ -103,6 +103,20 @@ impl FrameBuffer {
         self.entries.is_empty() && !self.arena.is_empty()
     }
 
+    /// Advance past `n` bytes of arena content that have been written
+    /// to the wire. Only valid when `has_arena_only()`.
+    pub fn advance_arena(&mut self, n: usize) {
+        use bytes::Buf;
+        debug_assert!(self.entries.is_empty());
+        debug_assert!(n <= self.arena.len());
+        if n >= self.arena.len() {
+            self.clear_arena();
+        } else {
+            self.arena.advance(n);
+            self.total_bytes -= n;
+        }
+    }
+
     pub fn uncommitted_arena(&self) -> &[u8] {
         &self.arena[self.arena_mark as usize..]
     }
