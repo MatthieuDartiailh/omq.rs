@@ -26,7 +26,7 @@ fn tcp_from_lz4(ep: &Endpoint) -> Endpoint {
     }
 }
 
-async fn bind_lz4_loopback(sock: &Socket) -> (Endpoint, omq_tokio::MonitorStream) {
+async fn bind_lz4_loopback(sock: &Socket) -> Endpoint {
     let mut mon = sock.monitor();
     sock.bind(lz4_loopback()).await.unwrap();
     let port = loop {
@@ -37,29 +37,10 @@ async fn bind_lz4_loopback(sock: &Socket) -> (Endpoint, omq_tokio::MonitorStream
             break port;
         }
     };
-    let ep = Endpoint::Lz4Tcp {
+    Endpoint::Lz4Tcp {
         host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
         port,
-    };
-    (ep, mon)
-}
-
-async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
-    let fut = async {
-        let mut count = 0;
-        while count < n {
-            match mon.recv().await {
-                Ok(MonitorEvent::SubscribeReceived { .. }) => count += 1,
-                Ok(_) => {}
-                Err(e) => {
-                    panic!("monitor closed after {count}/{n} subscribes: {e:?}")
-                }
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), fut)
-        .await
-        .expect("subscribes did not propagate within 5s");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -77,7 +58,7 @@ async fn pub_sub_lz4_sharded_fan_out_ships_dict_to_late_subscriber() {
     let opts = Options::default().compression_dict(dict);
 
     let publisher = Socket::new(SocketType::Pub, opts.clone());
-    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+    let ep = bind_lz4_loopback(&publisher).await;
 
     let mut decoded_subs = Vec::with_capacity(N_DECODED_SUBS);
     for _ in 0..N_DECODED_SUBS {
@@ -86,12 +67,18 @@ async fn pub_sub_lz4_sharded_fan_out_ships_dict_to_late_subscriber() {
         sub.subscribe(bytes::Bytes::new()).await.unwrap();
         decoded_subs.push(sub);
     }
-    wait_for_subscribes(&mut mon, N_DECODED_SUBS).await;
+    publisher
+        .wait_subscribed(N_DECODED_SUBS as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     let raw_sub = Socket::new(SocketType::Sub, Options::default());
     raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
     raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
-    wait_for_subscribes(&mut mon, 1).await;
+    publisher
+        .wait_subscribed((N_DECODED_SUBS + 1) as u64, Duration::from_secs(1))
+        .await
+        .expect("raw subscriber subscription did not arrive");
 
     let payload1 = bytes::Bytes::from(format!("{sample}{}", " ".repeat(256)));
     let payload2 = bytes::Bytes::from(format!("{sample}{}", " ".repeat(300)));
@@ -159,7 +146,7 @@ async fn pub_sub_lz4_sharded_fan_out_auto_trains_dict_for_late_subscriber() {
 
     let opts = Options::default().compression_auto_train(true);
     let publisher = Socket::new(SocketType::Pub, opts.clone());
-    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+    let ep = bind_lz4_loopback(&publisher).await;
 
     let mut decoded_subs = Vec::with_capacity(N_DECODED_SUBS);
     for _ in 0..N_DECODED_SUBS {
@@ -168,7 +155,10 @@ async fn pub_sub_lz4_sharded_fan_out_auto_trains_dict_for_late_subscriber() {
         sub.subscribe(bytes::Bytes::new()).await.unwrap();
         decoded_subs.push(sub);
     }
-    wait_for_subscribes(&mut mon, N_DECODED_SUBS).await;
+    publisher
+        .wait_subscribed(N_DECODED_SUBS as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     for i in 0..N_TRAINING_MSGS {
         let payload = bytes::Bytes::from(format!(
@@ -190,7 +180,10 @@ async fn pub_sub_lz4_sharded_fan_out_auto_trains_dict_for_late_subscriber() {
     let raw_sub = Socket::new(SocketType::Sub, Options::default());
     raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
     raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
-    wait_for_subscribes(&mut mon, 1).await;
+    publisher
+        .wait_subscribed((N_DECODED_SUBS + 1) as u64, Duration::from_secs(1))
+        .await
+        .expect("raw subscriber subscription did not arrive");
 
     let late_payload = bytes::Bytes::from(format!(
         "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":1000,\"bid\":101.25,\"ask\":101.27,\"depth\":[10125,10126,10127],\"pad\":\"{}\"}}",
@@ -249,7 +242,7 @@ async fn pub_sub_lz4_sharded_fan_out_deferred_large_message_preserves_order() {
         .compression_offload_threshold(Some(1));
 
     let publisher = Socket::new(SocketType::Pub, opts.clone());
-    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+    let ep = bind_lz4_loopback(&publisher).await;
 
     let mut subs = Vec::with_capacity(N_SUBS);
     for _ in 0..N_SUBS {
@@ -258,7 +251,10 @@ async fn pub_sub_lz4_sharded_fan_out_deferred_large_message_preserves_order() {
         sub.subscribe(bytes::Bytes::new()).await.unwrap();
         subs.push(sub);
     }
-    wait_for_subscribes(&mut mon, N_SUBS).await;
+    publisher
+        .wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     let mut expected = Vec::with_capacity(N_MSGS);
     let first = bytes::Bytes::from(vec![b'A'; 2 * 1024 * 1024]);
@@ -289,13 +285,16 @@ async fn pub_sub_lz4_sharded_fan_out_deferred_large_message_preserves_order() {
 #[tokio::test]
 async fn pub_sub_prefix_filter() {
     let publisher = Socket::new(SocketType::Pub, Options::default());
-    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+    let ep = bind_lz4_loopback(&publisher).await;
 
     let subscriber = Socket::new(SocketType::Sub, Options::default());
     subscriber.connect(ep).await.unwrap();
     subscriber.subscribe("news.").await.unwrap();
 
-    wait_for_subscribes(&mut mon, 1).await;
+    publisher
+        .wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
 
     publisher
         .send(Message::multipart(["news.sports", "ball scores"]))
@@ -340,7 +339,7 @@ async fn pub_sub_lz4_fan_out() {
     const N_MSGS: usize = 200;
 
     let publisher = Socket::new(SocketType::Pub, Options::default());
-    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+    let ep = bind_lz4_loopback(&publisher).await;
 
     let mut subs = Vec::with_capacity(N_SUBS);
     for _ in 0..N_SUBS {
@@ -349,7 +348,10 @@ async fn pub_sub_lz4_fan_out() {
         s.subscribe(bytes::Bytes::new()).await.unwrap();
         subs.push(s);
     }
-    wait_for_subscribes(&mut mon, N_SUBS).await;
+    publisher
+        .wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     for i in 0..N_MSGS {
         let body = format!("msg-{i:04}");
@@ -394,7 +396,7 @@ async fn pub_sub_lz4_fan_out_with_dict() {
     let opts = Options::default().compression_dict(dict);
 
     let publisher = Socket::new(SocketType::Pub, opts.clone());
-    let (ep, mut mon) = bind_lz4_loopback(&publisher).await;
+    let ep = bind_lz4_loopback(&publisher).await;
 
     let mut subs = Vec::with_capacity(N_SUBS);
     for _ in 0..N_SUBS {
@@ -403,7 +405,10 @@ async fn pub_sub_lz4_fan_out_with_dict() {
         s.subscribe(bytes::Bytes::new()).await.unwrap();
         subs.push(s);
     }
-    wait_for_subscribes(&mut mon, N_SUBS).await;
+    publisher
+        .wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     for i in 0..N_MSGS {
         let body = format!(r#"{{"seq":{i},"msg":"hello world","tag":"bench"}}"#);

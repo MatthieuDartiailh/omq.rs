@@ -186,7 +186,9 @@ async fn pub_sub_connect_before_bind(ep: Endpoint) {
 
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     pub_.bind(ep).await.unwrap();
-    test_support::wait_for_subscribe(&pub_).await;
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
 
     let deadline = std::time::Instant::now() + TIMEOUT;
     loop {

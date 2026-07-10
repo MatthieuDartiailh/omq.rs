@@ -6,7 +6,7 @@ mod peer;
 
 pub(crate) use peer::spawn_driver;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
@@ -206,6 +206,7 @@ pub(crate) struct SocketDriver {
     transmit_slots: super::transmit_slot_cache::TransmitSlotCache,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+    subscribe_count: Arc<AtomicU64>,
 }
 
 impl SocketDriver {
@@ -223,6 +224,7 @@ impl SocketDriver {
         req_awaiting_reply: Arc<AtomicBool>,
         transmit_slots: super::transmit_slot_cache::TransmitSlotCache,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+        subscribe_count: Arc<AtomicU64>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -257,6 +259,7 @@ impl SocketDriver {
             transmit_slots,
             compression_pool: None,
             recv_sink_config,
+            subscribe_count,
         }
     }
 

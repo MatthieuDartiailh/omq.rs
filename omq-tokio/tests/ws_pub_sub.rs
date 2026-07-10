@@ -29,8 +29,9 @@ async fn ws_pub_sub_basic() {
     let sub = Socket::new(SocketType::Sub, Options::default());
     sub.subscribe("news.").await.unwrap();
     sub.connect(ws_endpoint(port)).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
 
     pub_.send(Message::multipart([
         Bytes::from_static(b"news.sports"),
@@ -57,8 +58,9 @@ async fn ws_pub_sub_unsubscribe() {
     let sub = Socket::new(SocketType::Sub, Options::default());
     sub.subscribe("news.").await.unwrap();
     sub.connect(ws_endpoint(port)).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
 
     pub_.send(Message::multipart([
         Bytes::from_static(b"news.sports"),
@@ -99,7 +101,6 @@ async fn ws_pub_sub_fan_out() {
     let bound = pub_.bind(ws_endpoint(0)).await.unwrap();
     let port = get_port(&bound);
 
-    let mut mon = pub_.monitor();
     let mut subs = Vec::with_capacity(N_SUBS);
     for _ in 0..N_SUBS {
         let s = Socket::new(SocketType::Sub, Options::default());
@@ -107,20 +108,9 @@ async fn ws_pub_sub_fan_out() {
         s.subscribe(Bytes::new()).await.unwrap();
         subs.push(s);
     }
-
-    let fut = async {
-        let mut count = 0;
-        while count < N_SUBS {
-            match mon.recv().await {
-                Ok(omq_tokio::MonitorEvent::SubscribeReceived { .. }) => count += 1,
-                Ok(_) => {}
-                Err(e) => panic!("monitor closed after {count}/{N_SUBS} subscribes: {e:?}"),
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), fut)
+    pub_.wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
         .await
-        .expect("subscribes did not propagate");
+        .expect("subscriptions did not arrive");
 
     for i in 0..N_MSGS {
         pub_.send(Message::single(format!("msg-{i:04}")))

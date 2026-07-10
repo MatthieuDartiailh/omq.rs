@@ -14,19 +14,18 @@ fn lz4_ws_loopback(port: u16) -> Endpoint {
     }
 }
 
-async fn bind_lz4_ws(sock: &Socket) -> (u16, omq_tokio::MonitorStream) {
+async fn bind_lz4_ws(sock: &Socket) -> u16 {
     let mut mon = sock.monitor();
     sock.bind(lz4_ws_loopback(0)).await.unwrap();
-    let port = loop {
+    loop {
         match mon.recv().await {
             Ok(MonitorEvent::Listening {
                 endpoint: Endpoint::Lz4Ws { port, .. },
-            }) => break port,
+            }) => return port,
             Ok(_) => {}
             other => panic!("expected Lz4Ws Listening, got {other:?}"),
         }
-    };
-    (port, mon)
+    }
 }
 
 async fn wait_handshake(sock: &Socket) {
@@ -44,28 +43,12 @@ async fn wait_handshake(sock: &Socket) {
     .expect("handshake did not complete within 5s");
 }
 
-async fn wait_for_subscribes(mon: &mut omq_tokio::MonitorStream, n: usize) {
-    let fut = async {
-        let mut count = 0;
-        while count < n {
-            match mon.recv().await {
-                Ok(MonitorEvent::SubscribeReceived { .. }) => count += 1,
-                Ok(_) => {}
-                Err(e) => panic!("monitor closed after {count}/{n} subscribes: {e:?}"),
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), fut)
-        .await
-        .expect("subscribes did not propagate within 5s");
-}
-
 // ---- PUSH / PULL ----
 
 #[tokio::test]
 async fn lz4_ws_small_message_roundtrip() {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let (port, _mon) = bind_lz4_ws(&pull).await;
+    let port = bind_lz4_ws(&pull).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -83,7 +66,7 @@ async fn lz4_ws_small_message_roundtrip() {
 #[tokio::test]
 async fn lz4_ws_large_compressible_message_roundtrip() {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let (port, _mon) = bind_lz4_ws(&pull).await;
+    let port = bind_lz4_ws(&pull).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -100,7 +83,7 @@ async fn lz4_ws_large_compressible_message_roundtrip() {
 #[tokio::test]
 async fn lz4_ws_multipart_message_roundtrip() {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let (port, _mon) = bind_lz4_ws(&pull).await;
+    let port = bind_lz4_ws(&pull).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -121,7 +104,7 @@ async fn lz4_ws_multipart_message_roundtrip() {
 #[tokio::test]
 async fn lz4_ws_empty_message_roundtrip() {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let (port, _mon) = bind_lz4_ws(&pull).await;
+    let port = bind_lz4_ws(&pull).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -137,7 +120,7 @@ async fn lz4_ws_empty_message_roundtrip() {
 #[tokio::test]
 async fn lz4_ws_incompressible_data_roundtrip() {
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let (port, _mon) = bind_lz4_ws(&pull).await;
+    let port = bind_lz4_ws(&pull).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -157,7 +140,7 @@ async fn lz4_ws_incompressible_data_roundtrip() {
 async fn lz4_ws_many_messages_in_a_row() {
     const N: usize = 200;
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let (port, _mon) = bind_lz4_ws(&pull).await;
+    let port = bind_lz4_ws(&pull).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -180,7 +163,7 @@ async fn lz4_ws_many_messages_in_a_row() {
 #[tokio::test]
 async fn lz4_ws_req_rep() {
     let rep = Socket::new(SocketType::Rep, Options::default());
-    let (port, _mon) = bind_lz4_ws(&rep).await;
+    let port = bind_lz4_ws(&rep).await;
 
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -205,7 +188,7 @@ async fn lz4_ws_req_rep() {
 #[tokio::test]
 async fn lz4_ws_router_dealer_identity_routing() {
     let router = Socket::new(SocketType::Router, Options::default());
-    let (port, _mon) = bind_lz4_ws(&router).await;
+    let port = bind_lz4_ws(&router).await;
 
     let dealer = Socket::new(
         SocketType::Dealer,
@@ -240,13 +223,16 @@ async fn lz4_ws_router_dealer_identity_routing() {
 #[tokio::test]
 async fn lz4_ws_pub_sub_prefix_filter() {
     let publisher = Socket::new(SocketType::Pub, Options::default());
-    let (port, mut mon) = bind_lz4_ws(&publisher).await;
+    let port = bind_lz4_ws(&publisher).await;
 
     let subscriber = Socket::new(SocketType::Sub, Options::default());
     subscriber.connect(lz4_ws_loopback(port)).await.unwrap();
     subscriber.subscribe("news.").await.unwrap();
 
-    wait_for_subscribes(&mut mon, 1).await;
+    publisher
+        .wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
 
     publisher
         .send(Message::multipart(["news.sports", "ball scores"]))
@@ -288,7 +274,7 @@ async fn lz4_ws_pub_sub_fan_out() {
     const N_MSGS: usize = 50;
 
     let publisher = Socket::new(SocketType::Pub, Options::default());
-    let (port, mut mon) = bind_lz4_ws(&publisher).await;
+    let port = bind_lz4_ws(&publisher).await;
 
     let mut subs = Vec::with_capacity(N_SUBS);
     for _ in 0..N_SUBS {
@@ -297,7 +283,10 @@ async fn lz4_ws_pub_sub_fan_out() {
         s.subscribe(Bytes::new()).await.unwrap();
         subs.push(s);
     }
-    wait_for_subscribes(&mut mon, N_SUBS).await;
+    publisher
+        .wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
 
     for i in 0..N_MSGS {
         let body = format!("msg-{i:04}");
@@ -331,7 +320,7 @@ async fn lz4_ws_dict_roundtrip() {
     let opts = || Options::default().compression_dict(dict.clone());
 
     let pull = Socket::new(SocketType::Pull, opts());
-    let (port, _mon) = bind_lz4_ws(&pull).await;
+    let port = bind_lz4_ws(&pull).await;
 
     let push = Socket::new(SocketType::Push, opts());
     push.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -362,7 +351,7 @@ async fn lz4_ws_auto_train_dict() {
     let opts = Options::default().compression_dict(dict);
 
     let pull = Socket::new(SocketType::Pull, opts.clone());
-    let (port, _mon) = bind_lz4_ws(&pull).await;
+    let port = bind_lz4_ws(&pull).await;
 
     let push = Socket::new(SocketType::Push, opts);
     push.connect(lz4_ws_loopback(port)).await.unwrap();
@@ -385,7 +374,7 @@ async fn lz4_ws_auto_train_dict() {
 #[tokio::test]
 async fn lz4_ws_reconnect_after_server_restart() {
     let pull1 = Socket::new(SocketType::Pull, Options::default());
-    let (port, _mon) = bind_lz4_ws(&pull1).await;
+    let port = bind_lz4_ws(&pull1).await;
 
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(lz4_ws_loopback(port)).await.unwrap();

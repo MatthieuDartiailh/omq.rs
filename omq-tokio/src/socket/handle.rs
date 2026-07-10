@@ -1,6 +1,6 @@
 //! Public `Socket` handle.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
@@ -60,6 +60,9 @@ struct Inner {
     /// synchronous sends, `send()` yields to the runtime so driver tasks
     /// on the same worker thread can drain and flush.
     send_ops: AtomicU32,
+    /// Subscription commands received from peers. Incremented by the
+    /// actor on each `Command::Subscribe`; read by `wait_subscribed`.
+    subscribe_count: Arc<AtomicU64>,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
     actor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -115,6 +118,7 @@ impl Socket {
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let transmit_slots = TransmitSlotCache::new();
+        let subscribe_count = Arc::new(AtomicU64::new(0));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -128,6 +132,7 @@ impl Socket {
             req_awaiting_reply.clone(),
             transmit_slots.clone(),
             recv_sink_config,
+            subscribe_count.clone(),
         );
         let actor_task = spawn_driver(driver);
         Self {
@@ -142,6 +147,7 @@ impl Socket {
                 req_awaiting_reply,
                 transmit_slots,
                 send_ops: AtomicU32::new(0),
+                subscribe_count,
                 last_bound_endpoint: RwLock::new(None),
                 actor_task: Mutex::new(Some(actor_task)),
             }),
@@ -491,6 +497,35 @@ impl Socket {
             let conns = self.connections().await?;
             if conns.len() >= min_peers {
                 return Ok(conns.len());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(5)),
+            )
+            .await;
+        }
+    }
+
+    /// Wait until the socket has received at least `min_subscriptions`
+    /// subscription commands from peers, or until `timeout` expires.
+    /// Returns the total subscription count at the time the threshold
+    /// was met, or `Error::Timeout`.
+    ///
+    /// Reads an atomic counter incremented by the actor on each
+    /// `Subscribe` command, so it reflects fully-processed subscriptions
+    /// (after routing registration), not just wire arrival.
+    pub async fn wait_subscribed(
+        &self,
+        min_subscriptions: u64,
+        timeout: std::time::Duration,
+    ) -> Result<u64> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let count = self.inner.subscribe_count.load(Ordering::Acquire);
+            if count >= min_subscriptions {
+                return Ok(count);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(Error::Timeout);
