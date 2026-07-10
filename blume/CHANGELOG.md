@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-07-10
+
+### Fixed
+
+- Receiver drain ordering for large messages: LIFO delivery when the internal buffer wrapped caused fan-out throughput collapse at large message sizes. Rewrite drain logic to maintain FIFO ordering across all buffer states.
+
+## [0.4.4] - 2026-07-04
+
+### Fixed
+
+- Sender count overflow check.
+- Close handling panic safety.
+- Close operation panic safety.
+
 ## [0.4.3] - 2026-07-03
 
 ### Added

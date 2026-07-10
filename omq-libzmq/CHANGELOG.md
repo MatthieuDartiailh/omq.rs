@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-10
+
+### Fixed
+
+- Skip `malloc(0)` for zero-length frames: `malloc(0)` is implementation-defined and may return NULL. Guard `malloc` + `memcpy` behind `sz > 0` in `zmq_msg_recv` and `zmq_msg_copy`.
+- Crash on `recv_drain` mutex poison instead of silent hang: `stash_remaining_parts` silently swallowed a poisoned mutex, causing every subsequent `zmq_recv` to re-enter the drain path and hang.
+
+### Performance
+
+- Remove unconditional `thread::yield_now()` on send success. The old code yielded every 64 messages, causing extreme run-to-run variance (CV 50-76%). Spin-yield on queue-full reduced from 64 to 8 iterations with `spin_loop` hints for the first 4.
+- Zero-alloc `zmq_recv` fast path: borrow first frame via `msg.get()` instead of `part_bytes()` which allocated on every message.
+- `zmq_msg_recv` uses single `malloc` (`KIND_HEAP`) instead of `Bytes::copy_from_slice` + `Box::new` (2 allocations) for frames up to 128 bytes.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.17.0, `yring` to 0.3.6.
+
+## [0.5.0] - 2026-07-04
+
+### Added
+
+- IPC support on Windows (named pipes).
+
+### Fixed
+
+- Harden message property setters, socket option edge cases, and C API boundary checks.
+- Timeout and DNS connect edge case hardening.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.16.0, `yring` to 0.3.5.
+
 ## [0.4.10] - 2026-07-03
 
 ### Fixed
