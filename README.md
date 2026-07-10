@@ -1,11 +1,9 @@
 # ØMQ.rs
 
-> Modern ZeroMQ for the hard parts: reconnection, back-pressure, churn, soak tests, and real benchmarks.
-
-Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. OMQ gives you socket-level messaging patterns that work the same way in-process, between processes, and over the network.
+Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Socket-level messaging patterns that work the same way in-process, between processes, and over the network.
 
 - Tokio backend for Linux, macOS, and Windows
-- 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and DGRAM
+- 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and STREAM
 - 9 transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `lz4+ws://`, and `lz4+wss://`
 - 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no libzmq, no libsodium
@@ -27,69 +25,12 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 - HWM back-pressure and routing fairness under load, not only in empty-queue examples.
 - The hot paths are size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
 - Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
-- Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences (see charts below).
+- Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences.
 
-### Benchmarks
+## Usage
 
-<details>
-<summary>PUSH/PULL by transport</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
-</p>
-</details>
-
-<details>
-<summary>REQ/REP latency</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/tcp.svg" alt="REQ/REP latency: TCP" width="850">
-</p>
-</details>
-
-<details>
-<summary>Fan-out and fan-in</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout/tcp.svg" alt="PUSH fan-out: TCP" width="850">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin/tcp.svg" alt="PUSH fan-in: TCP" width="850">
-</p>
-</details>
-
-<details>
-<summary>PUB/SUB throughput</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
-</p>
-</details>
-
-<details>
-<summary>Compression: lz4+tcp://</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/lz4_tcp.svg" alt="PUB/SUB lz4+tcp fan-out: projected throughput at link speed" width="850">
-</p>
-</details>
-
-<details>
-<summary>Mechanisms: PLAIN / CURVE / BLAKE3ZMQ</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/mechanism/tokio.svg" alt="Mechanisms: omq-tokio" width="850">
-</p>
-</details>
-
-## Install
-
-> [!CAUTION]
-> **Experimental.** The API is unstable and may change without notice. Not yet battle-tested in production. Bug reports and testing in real workloads are very welcome.
-
-```sh
-cargo add omq-tokio
-```
+> [!NOTE]
+> The API is still evolving and may change between minor versions. Bug reports and testing in real workloads are welcome.
 
 The Rust backend is [`omq-tokio`](omq-tokio/): tokio + mio on Linux,
 macOS, and Windows. It works on single-thread and multi-thread tokio
@@ -109,6 +50,9 @@ pull.bind("tcp://127.0.0.1:5555".parse()?).await?;
 let msg = pull.recv().await?;
 assert_eq!(&msg[0], b"hello");
 ```
+
+More examples in [examples/zguide-tokio/](examples/zguide-tokio/), a
+port of the ZeroMQ Guide patterns to OMQ.
 
 ## Cargo features
 

@@ -29,12 +29,6 @@ Transport coverage differs by implementation. Missing lines mean that
 implementation does not expose a usable peer for that transport and
 pattern in this benchmark suite.
 
-## Main TCP Charts
-
-<p align="center">
-  <img src="doc/charts/main_tcp.svg" alt="PUSH/PULL throughput: TCP" width="950">
-</p>
-
 ## PUSH/PULL Throughput
 
 <p align="center">
@@ -69,15 +63,27 @@ pattern in this benchmark suite.
   <img src="doc/charts/pubsub/tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
 </p>
 
-## Fan-Out And Fan-In
+## Fan-Out
 
-These charts show 1-to-N and N-to-1 PUSH/PULL over TCP. Fan-out whiskers
-show the slowest and fastest puller in a measured round.
+1-to-N PUSH/PULL over TCP. Whiskers show the slowest and fastest
+puller in a measured round.
 
 <p align="center">
   <img src="doc/charts/pushpull/fanout/tcp.svg" alt="PUSH fan-out: TCP" width="850">
 </p>
 
+## Fan-In
+
+N-to-1 PUSH/PULL over TCP.
+
 <p align="center">
   <img src="doc/charts/pushpull/fanin/tcp.svg" alt="PUSH fan-in: TCP" width="850">
+</p>
+
+## Mechanisms
+
+PUSH/PULL throughput under NULL, PLAIN, CURVE, and BLAKE3ZMQ.
+
+<p align="center">
+  <img src="doc/charts/mechanism/tokio.svg" alt="Mechanisms: omq-tokio" width="850">
 </p>
