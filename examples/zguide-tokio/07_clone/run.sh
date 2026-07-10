@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-trap 'kill $(jobs -p) 2>/dev/null' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
 cargo run --bin zg07_server &
 sleep 0.3

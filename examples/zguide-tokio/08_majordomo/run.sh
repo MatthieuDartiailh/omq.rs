@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-trap 'kill $(jobs -p) 2>/dev/null' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
 cargo run --bin zg08_broker -- ipc://@omq-zguide-08-frontend ipc://@omq-zguide-08-backend 3 &
 sleep 0.3

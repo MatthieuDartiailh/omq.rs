@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-trap 'kill $(jobs -p) 2>/dev/null' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
 cargo build --bins 2>&1
 BIN="$(dirname "$0")/../target/debug"
