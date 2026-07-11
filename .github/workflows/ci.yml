@@ -88,7 +88,7 @@ jobs:
       - run: cargo test -p omq-tokio --features lz4
 
   lint:
-    name: fmt + clippy
+    name: fmt + clippy (${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
@@ -110,10 +110,14 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features
 
   pyomq:
-    name: pyomq
+    name: pyomq (${{ matrix.os }})
     needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
