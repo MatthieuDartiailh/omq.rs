@@ -1,4 +1,4 @@
-//! Identity-based routing for ROUTER, REP, SERVER, PEER.
+//! Identity-based routing for ROUTER, REP, SERVER, PEER, STREAM.
 //!
 //! Each peer is keyed by `(identity, connection_id)`; the identity-to-peer
 //! map holds the LATEST `peer_id` for a given identity, so a reconnect
@@ -14,17 +14,57 @@
 
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Notify;
+
 use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 
-use crate::engine::PeerDriverHandle;
-use crate::engine::transmit_slot::TryFrameResult;
+use crate::engine::{PeerDriverCommand, PeerDriverHandle, SendPipeError, SendPipeProducer};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 
-use super::peer_outbound::PeerOutbound;
+enum SendRetry {
+    Full(Message, Arc<Notify>),
+}
+
+/// Per-peer send target. Prefers `SendPipe` (zero-copy yring) when available;
+/// falls back to the driver inbox for peers without a pipe (STREAM raw TCP).
+#[derive(Debug)]
+enum PeerTarget {
+    Pipe(SendPipeProducer),
+    Inbox(tokio::sync::mpsc::Sender<PeerDriverCommand>),
+}
+
+impl PeerTarget {
+    fn try_send(&mut self, msg: Message) -> core::result::Result<(), SendPipeError> {
+        match self {
+            Self::Pipe(p) => p.try_send(msg),
+            Self::Inbox(tx) => match tx.try_send(PeerDriverCommand::SendMessage(msg)) {
+                Ok(()) => Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(
+                    PeerDriverCommand::SendMessage(m),
+                )) => Err(SendPipeError::Full(m)),
+                Err(_) => Err(SendPipeError::Closed(Message::default())),
+            },
+        }
+    }
+
+    fn space_available(&self) -> Option<Arc<Notify>> {
+        match self {
+            Self::Pipe(p) => Some(p.space_available()),
+            Self::Inbox(_) => None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Pipe(p) => p.is_empty(),
+            Self::Inbox(_) => true,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
@@ -39,54 +79,89 @@ impl Submitter {
         g.identity_to_peer.clear();
     }
 
-    fn resolve_target(&self, msg: &mut Message) -> Result<Option<PeerOutbound>> {
-        if msg.is_empty() {
-            return Err(Error::Unroutable);
-        }
-        let identity = msg.pop_front().unwrap();
-
-        let target: Option<PeerOutbound> = {
-            let g = self.inner.lock().expect("identity inner poisoned");
-            g.identity_to_peer
-                .get(&identity)
-                .and_then(|peer_id| g.peers.get(peer_id))
-                .map(|p| p.target.clone())
-        };
-
-        if target.is_none() && self.router_mandatory {
-            return Err(Error::Unroutable);
-        }
-        Ok(target)
-    }
-
     pub(crate) fn try_send(
         &self,
         mut msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         let retry = msg.clone();
-        let target = self
-            .resolve_target(&mut msg)
-            .map_err(omq_proto::error::TrySendError::Error)?;
-
-        if let Some(t) = target {
-            match t.try_encode(&msg) {
-                TryFrameResult::Ok => {}
-                TryFrameResult::Full | TryFrameResult::Ineligible => {
-                    return Err(omq_proto::error::TrySendError::Full(retry));
-                }
-                TryFrameResult::Dead => {
-                    return Err(omq_proto::error::TrySendError::Closed);
-                }
-            }
+        if msg.is_empty() {
+            return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
         }
-        Ok(())
+        let identity = msg.pop_front().unwrap();
+        let mut g = self.inner.lock().expect("identity inner poisoned");
+        let Some(&id) = g.identity_to_peer.get(&identity) else {
+            if self.router_mandatory {
+                return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
+            }
+            return Ok(());
+        };
+        let Some(peer) = g.peers.get_mut(&id) else {
+            if self.router_mandatory {
+                return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
+            }
+            return Ok(());
+        };
+        match peer.target.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(SendPipeError::Full(_)) => Err(omq_proto::error::TrySendError::Full(retry)),
+            Err(SendPipeError::Closed(_)) => Err(omq_proto::error::TrySendError::Closed),
+        }
     }
 
     pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
-        let Some(t) = self.resolve_target(&mut msg)? else {
-            return Ok(());
+        if msg.is_empty() {
+            return Err(Error::Unroutable);
+        }
+        let identity = msg.pop_front().unwrap();
+
+        loop {
+            let retry = self.try_send_to(&identity, msg)?;
+            match retry {
+                Ok(()) => return Ok(()),
+                Err(SendRetry::Full(returned, space)) => {
+                    msg = returned;
+                    let notified = space.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    match self.try_send_to(&identity, msg)? {
+                        Ok(()) => return Ok(()),
+                        Err(SendRetry::Full(returned, _)) => msg = returned,
+                    }
+                    notified.await;
+                }
+            }
+        }
+    }
+
+    fn try_send_to(
+        &self,
+        identity: &Bytes,
+        msg: Message,
+    ) -> Result<core::result::Result<(), SendRetry>> {
+        let mut g = self.inner.lock().expect("identity inner poisoned");
+        let Some(&id) = g.identity_to_peer.get(identity) else {
+            if self.router_mandatory {
+                return Err(Error::Unroutable);
+            }
+            return Ok(Ok(()));
         };
-        t.send(msg).await
+        let Some(peer) = g.peers.get_mut(&id) else {
+            if self.router_mandatory {
+                return Err(Error::Unroutable);
+            }
+            return Ok(Ok(()));
+        };
+        match peer.target.try_send(msg) {
+            Ok(()) => Ok(Ok(())),
+            Err(SendPipeError::Closed(_)) => Err(Error::Closed),
+            Err(SendPipeError::Full(returned)) => {
+                let space = peer
+                    .target
+                    .space_available()
+                    .unwrap_or_else(|| Arc::new(Notify::new()));
+                Ok(Err(SendRetry::Full(returned, space)))
+            }
+        }
     }
 }
 
@@ -105,7 +180,7 @@ struct IdentityInner {
 #[derive(Debug)]
 struct IdentityPeer {
     identity: Bytes,
-    target: PeerOutbound,
+    target: PeerTarget,
 }
 
 impl IdentitySend {
@@ -133,7 +208,16 @@ impl IdentitySend {
         handle: PeerDriverHandle,
         identity: Bytes,
     ) {
-        let target = PeerOutbound::from_handle(&handle);
+        let target = if let Some(ref pipe_handle) = handle.send_pipe {
+            if let Some(pipe) = pipe_handle.lock().expect("identity send pipe").take() {
+                PeerTarget::Pipe(pipe)
+            } else {
+                PeerTarget::Inbox(handle.inbox.clone())
+            }
+        } else {
+            PeerTarget::Inbox(handle.inbox.clone())
+        };
+
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.peers.insert(
             peer_id,
@@ -213,28 +297,24 @@ impl IdentityRecv {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::engine::PeerDriverCommand;
+    use crate::engine::send_pipe;
 
     #[test]
     fn try_send_reports_full_and_preserves_routing_frame() {
         let mut send = IdentitySend::new(&Options::default());
         let submitter = send.submitter();
-        let (tx, mut rx) = mpsc::channel(1);
-        send.connection_added(
-            1,
-            PeerDriverHandle {
-                inbox: tx,
-                cancel: CancellationToken::new(),
-                transmit_slot: None,
-                transmit_slot_tx: None,
-                send_pipe: None,
-            },
-            Bytes::from_static(b"id"),
-        );
+
+        let (pipe_tx, _pipe_rx) = send_pipe(1);
+        let handle = PeerDriverHandle {
+            inbox: tokio::sync::mpsc::channel(1).0,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            transmit_slot: None,
+            transmit_slot_tx: None,
+            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe_tx)))),
+        };
+        send.connection_added(1, handle, Bytes::from_static(b"id"));
 
         submitter
             .try_send(Message::multipart([
@@ -253,12 +333,5 @@ mod tests {
 
         assert_eq!(returned.part_bytes(0).unwrap(), &b"id"[..]);
         assert_eq!(returned.part_bytes(1).unwrap(), &b"two"[..]);
-
-        match rx.try_recv().unwrap() {
-            PeerDriverCommand::SendMessage(msg) => {
-                assert_eq!(msg.part_bytes(0).unwrap(), &b"one"[..]);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
     }
 }

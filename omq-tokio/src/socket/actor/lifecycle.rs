@@ -23,7 +23,6 @@ impl<'a> PeerLifecycle<'a> {
         Self::invalidate_spsc(peer.as_ref());
         self.update_send_ring();
         self.invalidate_transmit_slot(peer.as_ref());
-        self.update_transmit_slot();
         self.refill_recv_sink();
         self.reset_type_state_if_last_peer();
         peer
@@ -32,7 +31,6 @@ impl<'a> PeerLifecycle<'a> {
     pub(super) fn after_peer_inserted(&mut self) {
         if self.driver.peers.len() > 1 {
             self.update_send_ring();
-            self.driver.transmit_slots.clear_single();
         }
     }
 
@@ -62,17 +60,6 @@ impl<'a> PeerLifecycle<'a> {
                 .store(false, Ordering::Release);
             self.driver.spsc.send_ring.store(None);
         }
-    }
-
-    pub(super) fn update_transmit_slot(&mut self) {
-        self.driver.transmit_slots.rebuild(
-            self.driver.socket_type,
-            self.driver.peers.len(),
-            self.driver
-                .peers
-                .values()
-                .map(|peer| peer.handle.transmit_slot.clone()),
-        );
     }
 
     pub(super) fn register_inproc_consumer(
@@ -135,13 +122,13 @@ impl<'a> PeerLifecycle<'a> {
         }
     }
 
+    #[expect(clippy::unused_self)]
     fn invalidate_transmit_slot(&self, peer: Option<&PeerEntry>) {
         if let Some(peer) = peer
             && let Some(ref slot) = peer.handle.transmit_slot
         {
             slot.mark_dead();
         }
-        self.driver.transmit_slots.clear_single();
     }
 
     fn refill_recv_sink(&self) {

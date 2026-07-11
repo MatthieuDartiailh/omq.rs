@@ -574,7 +574,6 @@ impl SocketDriver {
         );
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;
-        PeerLifecycle::new(self).update_transmit_slot();
     }
 
     async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
