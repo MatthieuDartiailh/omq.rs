@@ -51,7 +51,7 @@ pub(crate) enum FanOutMode {
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `FrameBuffer::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
-const DIRECT_SHARD_PEER_CAP: usize = 1;
+const DIRECT_SHARD_PEER_CAP: usize = 0;
 const WORKER_SHARD_PEER_CAP: usize = 4;
 const MAX_FAN_OUT_WORKER_SHARDS: usize = 8;
 const SHARD_CTRL_RING_CAP: usize = 64;
@@ -1277,77 +1277,9 @@ impl Submitter {
             .prepare(msg)
             .map_err(omq_proto::error::TrySendError::Error)?;
 
-        if let Some(ref shards) = self.shards
-            && self.has_sharded_peers()
-        {
+        if let Some(ref shards) = self.shards {
             self.dispatch_to_shards_and_fallback(shards, &forwarded, group)
                 .map_err(omq_proto::error::TrySendError::Error)?;
-            return Ok(());
-        }
-
-        match self.try_cached(&forwarded, group.as_deref()) {
-            CachedResult::SoleWire(r) => {
-                return match r {
-                    TryFrameResult::Ok | TryFrameResult::Dead | TryFrameResult::Ineligible => {
-                        Ok(())
-                    }
-                    TryFrameResult::Full if !self.lossy || self.xpub_nodrop => {
-                        Err(omq_proto::error::TrySendError::Full(forwarded))
-                    }
-                    TryFrameResult::Full => {
-                        let target = {
-                            let cached = self.cached.lock().unwrap();
-                            cached.sole_wire.clone()
-                        };
-                        if let Some(target) = target {
-                            self.deactivate_target(&target);
-                        }
-                        Ok(())
-                    }
-                };
-            }
-            CachedResult::Cached { targets, encoder } => {
-                if (!self.lossy || self.xpub_nodrop) && !targets_have_space(&targets) {
-                    return Err(omq_proto::error::TrySendError::Full(forwarded));
-                }
-                let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-                if self
-                    .dispatch_to_targets(
-                        &targets,
-                        &forwarded,
-                        encoder.as_deref(),
-                        self.lossy && !self.xpub_nodrop,
-                        &mut deactivate,
-                    )
-                    .map_err(omq_proto::error::TrySendError::Error)?
-                    .is_full()
-                    && self.xpub_nodrop
-                {
-                    return Err(omq_proto::error::TrySendError::Full(forwarded));
-                }
-                return Ok(());
-            }
-            CachedResult::Miss => {}
-        }
-
-        let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
-        if (!self.lossy || self.xpub_nodrop) && !targets_have_space(&targets) {
-            return Err(omq_proto::error::TrySendError::Full(forwarded));
-        }
-        let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-        if self
-            .dispatch_to_targets(
-                &targets,
-                &forwarded,
-                encoder.as_deref(),
-                self.lossy && !self.xpub_nodrop,
-                &mut deactivate,
-            )
-            .map_err(omq_proto::error::TrySendError::Error)?
-            .is_full()
-            && self.xpub_nodrop
-        {
-            return Err(omq_proto::error::TrySendError::Full(forwarded));
         }
         Ok(())
     }
@@ -1356,9 +1288,7 @@ impl Submitter {
         let (forwarded, group) = self.prepare(msg)?;
         let msg_bytes = forwarded.byte_len();
 
-        if let Some(ref shards) = self.shards
-            && self.has_sharded_peers()
-        {
+        if let Some(ref shards) = self.shards {
             match self.try_defer_to_shards(&forwarded, group.clone()) {
                 DeferredEnqueue::Direct => {}
                 DeferredEnqueue::Enqueued | DeferredEnqueue::Dropped => return Ok(()),
@@ -1368,88 +1298,7 @@ impl Submitter {
             let target_count = targets.fallback_targets.len() + targets.sharded_count;
             self.dispatch_shard_targets(shards, &forwarded, group, &targets)?;
             self.maybe_yield(target_count, msg_bytes).await;
-            return Ok(());
         }
-
-        match self.try_cached(&forwarded, group.as_deref()) {
-            CachedResult::SoleWire(TryFrameResult::Full) if self.lossy && !self.xpub_nodrop => {
-                let target = {
-                    let cached = self.cached.lock().unwrap();
-                    cached.sole_wire.clone()
-                };
-                if let Some(target) = target {
-                    self.deactivate_target(&target);
-                }
-                self.maybe_yield(1, msg_bytes).await;
-                return Ok(());
-            }
-            CachedResult::SoleWire(TryFrameResult::Full) => {
-                let target = {
-                    let cached = self.cached.lock().unwrap();
-                    cached.sole_wire.clone()
-                };
-                if let Some(target) = target {
-                    target.send(forwarded).await?;
-                    self.maybe_yield(1, msg_bytes).await;
-                    return Ok(());
-                }
-            }
-            CachedResult::SoleWire(TryFrameResult::Ok) if self.lossy && !self.xpub_nodrop => {
-                self.maybe_yield(1, msg_bytes).await;
-                return Ok(());
-            }
-            CachedResult::SoleWire(TryFrameResult::Ok) => {
-                self.maybe_yield(1, msg_bytes).await;
-                return Ok(());
-            }
-            CachedResult::Cached { targets, encoder } => {
-                // Encode once and distribute synchronously on this task via
-                // the thread-local arena (`dispatch_to_targets`), the same
-                // path `try_send` uses. The earlier all-wire fast path
-                // handed the message to a single `fan_out_pump` task through
-                // `FanOutArena.eq`; under the multi-thread runtime that put
-                // the send task and the pump task in a per-message ping-pong
-                // on that mutex plus a cross-thread `Notify` wakeup, burning
-                // CPU without adding parallelism (distribution stays serial
-                // on the one pump). Inline dispatch removes both hops.
-                if self.xpub_nodrop {
-                    send_to_targets_nodrop(&targets, forwarded.clone()).await?;
-                    return Ok(());
-                }
-                let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-                let outcome = self.dispatch_to_targets(
-                    &targets,
-                    &forwarded,
-                    encoder.as_deref(),
-                    self.lossy && !self.xpub_nodrop,
-                    &mut deactivate,
-                )?;
-                if !self.lossy && outcome.is_full() {
-                    send_to_targets_nodrop(&outcome.full_targets, forwarded.clone()).await?;
-                }
-                self.maybe_yield(targets.len(), msg_bytes).await;
-                return Ok(());
-            }
-            _ => {}
-        }
-
-        let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
-        if self.xpub_nodrop {
-            send_to_targets_nodrop(&targets, forwarded.clone()).await?;
-            return Ok(());
-        }
-        let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-        let outcome = self.dispatch_to_targets(
-            &targets,
-            &forwarded,
-            encoder.as_deref(),
-            self.lossy && !self.xpub_nodrop,
-            &mut deactivate,
-        )?;
-        if !self.lossy && outcome.is_full() {
-            send_to_targets_nodrop(&outcome.full_targets, forwarded.clone()).await?;
-        }
-        self.maybe_yield(targets.len(), msg_bytes).await;
         Ok(())
     }
 
@@ -1650,18 +1499,8 @@ impl FanOutInner {
 
 impl FanOutSend {
     pub(crate) fn new(options: &Options, mode: FanOutMode) -> Self {
-        let use_shards = !options.xpub_nodrop
-            && matches!(
-                tokio::runtime::Handle::current().runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::MultiThread
-            );
-        let shards = if use_shards {
-            Some(FanOutShards::spawn(options, mode))
-        } else {
-            None
-        };
-        let (deferred, deferred_rx) = if use_shards
-            && let Some(threshold) = options.compression_offload_threshold
+        let shards = Some(FanOutShards::spawn(options, mode));
+        let (deferred, deferred_rx) = if let Some(threshold) = options.compression_offload_threshold
             && threshold > 0
         {
             let cap = options.send_hwm.unwrap_or(1000).max(1) as usize;
@@ -1747,7 +1586,6 @@ impl FanOutSend {
         let target_is_ws = false;
 
         let shard_eligible = !target_is_ws
-            && self.shards.is_some()
             && matches!(target, PeerOutbound::Wire { .. })
             && handle.transmit_slot_tx.is_some();
 
@@ -1757,31 +1595,27 @@ impl FanOutSend {
             (self.shards.as_ref(), &target)
         {
             let shard = shards.assign_peer();
-            if shard > 0 {
-                let added = handle
-                    .transmit_slot_tx
-                    .as_ref()
-                    .and_then(|tx| tx.lock().expect("transmit_slot_tx poisoned").take())
-                    .map(|producer| {
-                        shards.add_worker_peer(
-                            shard,
-                            ShardPeerAdd {
-                                peer_id,
-                                slot: slot.clone(),
-                                producer,
-                                any_groups,
-                            },
-                        );
-                    })
-                    .is_some();
-                if added {
-                    Some(shard)
-                } else {
-                    shards.remove_peer(shard, peer_id);
-                    None
-                }
-            } else {
+            let added = handle
+                .transmit_slot_tx
+                .as_ref()
+                .and_then(|tx| tx.lock().expect("transmit_slot_tx poisoned").take())
+                .map(|producer| {
+                    shards.add_worker_peer(
+                        shard,
+                        ShardPeerAdd {
+                            peer_id,
+                            slot: slot.clone(),
+                            producer,
+                            any_groups,
+                        },
+                    );
+                })
+                .is_some();
+            if added {
                 Some(shard)
+            } else {
+                shards.remove_peer(shard, peer_id);
+                None
             }
         } else {
             None
@@ -2223,28 +2057,14 @@ mod tests {
         );
         assert_eq!(
             FanOutShards::desired_active_shards(1, TEST_MAX_LOGICAL_SHARDS),
-            1
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(DIRECT_SHARD_PEER_CAP, TEST_MAX_LOGICAL_SHARDS),
-            1
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(DIRECT_SHARD_PEER_CAP + 1, TEST_MAX_LOGICAL_SHARDS),
             2
         );
         assert_eq!(
-            FanOutShards::desired_active_shards(
-                DIRECT_SHARD_PEER_CAP + WORKER_SHARD_PEER_CAP,
-                TEST_MAX_LOGICAL_SHARDS
-            ),
+            FanOutShards::desired_active_shards(WORKER_SHARD_PEER_CAP, TEST_MAX_LOGICAL_SHARDS),
             2
         );
         assert_eq!(
-            FanOutShards::desired_active_shards(
-                DIRECT_SHARD_PEER_CAP + WORKER_SHARD_PEER_CAP + 1,
-                TEST_MAX_LOGICAL_SHARDS
-            ),
+            FanOutShards::desired_active_shards(WORKER_SHARD_PEER_CAP + 1, TEST_MAX_LOGICAL_SHARDS),
             3
         );
         assert_eq!(
@@ -2261,15 +2081,11 @@ mod tests {
         );
         assert_eq!(
             FanOutShards::desired_active_shards(1, TEST_LOW_WORKER_COUNT),
-            1
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(DIRECT_SHARD_PEER_CAP, TEST_LOW_WORKER_COUNT),
-            1
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(DIRECT_SHARD_PEER_CAP + 1, TEST_LOW_WORKER_COUNT),
             2
+        );
+        assert_eq!(
+            FanOutShards::desired_active_shards(WORKER_SHARD_PEER_CAP + 1, TEST_LOW_WORKER_COUNT),
+            3
         );
         assert_eq!(
             FanOutShards::desired_active_shards(TEST_HIGH_WORKER_COUNT, TEST_LOW_WORKER_COUNT),
@@ -2295,7 +2111,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_peer_fills_direct_shard_then_workers_and_reuses() {
+    fn assign_peer_distributes_to_workers() {
         let shards = FanOutShards {
             state: std::sync::Mutex::new(FanOutShardState {
                 direct_load: 0,
@@ -2305,16 +2121,17 @@ mod tests {
             }),
         };
 
-        let n = DIRECT_SHARD_PEER_CAP + WORKER_SHARD_PEER_CAP;
-        let assigned: Vec<_> = (0..n).map(|_| shards.assign_peer()).collect();
-        assert_eq!(assigned, vec![0, 1, 1, 1, 1]);
-
-        shards.remove_peer(0, 1);
-        assert_eq!(shards.assign_peer(), 0);
+        let assigned: Vec<_> = (0..WORKER_SHARD_PEER_CAP)
+            .map(|_| shards.assign_peer())
+            .collect();
+        assert!(
+            assigned.iter().all(|&s| s > 0),
+            "all peers go to worker shards"
+        );
     }
 
     #[test]
-    fn assign_peer_caps_direct_shard_and_distributes_to_workers() {
+    fn assign_peer_round_robins_across_workers() {
         let shards = FanOutShards {
             state: std::sync::Mutex::new(FanOutShardState {
                 direct_load: 0,
@@ -2329,7 +2146,11 @@ mod tests {
             loads[shards.assign_peer()] += 1;
         }
 
-        assert_eq!(loads, [1, 8, 8, 8, 7]);
+        assert_eq!(loads[0], 0, "shard 0 gets no peers");
+        assert!(
+            loads[1..].iter().all(|&l| l > 0),
+            "all worker shards get peers"
+        );
     }
 
     fn test_endpoints(count: usize) -> Vec<ShardEndpoint> {
