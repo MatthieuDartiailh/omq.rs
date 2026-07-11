@@ -26,7 +26,7 @@ const TRANSMIT_SLOT_LWM_DIVISOR: usize = 2;
 
 type FanOutReactivation = Arc<dyn Fn(u64) + Send + Sync + 'static>;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum TransmitChunk {
     Inline {
         buf: [u8; TRANSMIT_SLOT_INLINE_CAP],

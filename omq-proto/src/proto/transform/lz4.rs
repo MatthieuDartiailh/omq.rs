@@ -66,7 +66,7 @@ pub const MAX_DICT_BYTES: usize = 8192;
 /// Default auto-train dictionary capacity in bytes.
 const DEFAULT_DICT_CAPACITY: usize = 2048;
 
-pub(crate) fn is_dict_shipment(msg: &Message) -> bool {
+pub fn is_dict_shipment(msg: &Message) -> bool {
     msg.len() == 1
         && msg
             .part_bytes(0)
