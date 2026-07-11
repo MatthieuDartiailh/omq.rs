@@ -41,6 +41,9 @@ one outbound. Per-connection driver tasks bridge queues and wire.
 Full detail in `doc/`:
 [`architecture.md`](doc/architecture.md),
 [`libzmq/`](doc/libzmq/).
+Transport RFCs (wire format, dict shipping rules, security):
+[`lz4-rfc.md`](doc/lz4-rfc.md),
+[`blake3zmq-rfc.md`](doc/blake3zmq-rfc.md).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
@@ -111,6 +114,10 @@ Lints: `missing_debug_implementations` = **deny**,
 
 - Rust 2024 edition, MSRV **1.93**. ASCII-only source.
 - `main` branch is protected. All changes go through PRs.
+
+**Readability off the hot path.** Outside the hot path, prefer
+simple, readable code over clever abstractions. Maintainability
+beats micro-optimization where performance is not critical.
 
 ## ZMQ fundamentals
 
@@ -206,10 +213,20 @@ convenience. Core guarantees:
 
 ## Performance invariants
 
-Fan-out sockets (PUB, XPUB, RADIO) send the same message to many
-peers. The wire bytes are identical for all peers on the same
-transport when no per-peer encryption is active.
-**Encode/compress/frame once, distribute the encoded bytes.**
+**Caller thread: enqueue only.** The caller thread pushes raw
+`Message` values into send pipes or shard rings. Encoding, framing,
+compression, and wire I/O happen on driver or shard worker tasks.
+Never add encoding or compression work to the caller's send path.
+
+**Per-shard encoding and compression.** Fan-out shard workers encode
+and compress independently. Duplicating compression across S shards
+(typically 2-3) is cheaper than serializing through a shared encoder
+mutex or adding scheduling hops to a single compression worker.
+
+**LZ4 dict: one shipment per direction per connection.** The LZ4
+RFC (doc/lz4-rfc.md Sec. 7.2) requires at most one LZ4D dict
+shipment per direction per connection. A second shipment closes the
+connection. Never re-ship a dict on an existing connection.
 
 **Budget every drain loop.** Every loop that drains a channel or
 queue must be capped by both message count AND byte count
