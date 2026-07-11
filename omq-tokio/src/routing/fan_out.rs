@@ -7,7 +7,7 @@
 //! without a producer mutex.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -183,6 +183,7 @@ struct FanOutShardState {
 
 struct FanOutShards {
     state: Mutex<FanOutShardState>,
+    active_mask: AtomicU8,
 }
 
 impl std::fmt::Debug for FanOutShards {
@@ -190,6 +191,7 @@ impl std::fmt::Debug for FanOutShards {
         let state = self.state.lock().expect("fanout shards poisoned");
         f.debug_struct("FanOutShards")
             .field("shards", &state.endpoints.len())
+            .field("active_mask", &self.active_mask.load(Ordering::Relaxed))
             .field("active_limit", &state.active_limit)
             .field("eligible_peers", &state.eligible_peers)
             .field(
@@ -260,6 +262,8 @@ struct DeferredFanOutWorker {
 pub(crate) struct Submitter {
     shards: Option<Arc<FanOutShards>>,
     sharded_peer_count: Arc<AtomicUsize>,
+    fallback_peer_count: Arc<AtomicUsize>,
+    has_transform_encoder: Arc<AtomicBool>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
@@ -274,6 +278,8 @@ impl Clone for Submitter {
         Self {
             shards: self.shards.clone(),
             sharded_peer_count: self.sharded_peer_count.clone(),
+            fallback_peer_count: self.fallback_peer_count.clone(),
+            has_transform_encoder: self.has_transform_encoder.clone(),
             inner: self.inner.clone(),
             generation: self.generation.clone(),
             mode: self.mode,
@@ -326,6 +332,7 @@ impl FanOutShards {
                 eligible_peers: 0,
                 active_limit: 0,
             }),
+            active_mask: AtomicU8::new(0),
         })
     }
 
@@ -417,6 +424,8 @@ impl FanOutShards {
         let active_limit = state.active_limit.max(1).min(max_shards);
         let shard = Self::least_loaded_shard(&state, active_limit);
         Self::increment_shard_load(&mut state, shard);
+        self.active_mask
+            .fetch_or(1 << (shard - 1), Ordering::Release);
         shard
     }
 
@@ -444,10 +453,14 @@ impl FanOutShards {
         let mut state = self.state.lock().expect("fanout shards poisoned");
         state.eligible_peers = state.eligible_peers.saturating_sub(1);
         Self::decrement_shard_load(&mut state, shard);
-        if shard > 0
-            && let Some(endpoint) = state.endpoints.get_mut(shard - 1)
-        {
-            Self::push_control(endpoint, ShardControl::RemovePeer { peer_id });
+        if shard > 0 {
+            if state.endpoints.get(shard - 1).is_some_and(|e| e.load == 0) {
+                self.active_mask
+                    .fetch_and(!(1 << (shard - 1)), Ordering::Release);
+            }
+            if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
+                Self::push_control(endpoint, ShardControl::RemovePeer { peer_id });
+            }
         }
     }
 
@@ -457,13 +470,19 @@ impl FanOutShards {
     /// boundary separate from per-peer HWM. Acceptable because fan-out
     /// sockets (PUB/XPUB/RADIO) are lossy by design.
     fn dispatch(&self, dispatch: &ShardDispatch) {
+        let mask = self.active_mask.load(Ordering::Acquire);
+        if mask == 0 {
+            return;
+        }
         let mut state = self.state.lock().expect("fanout shards poisoned");
         let mut touched = SmallVec::<[usize; 8]>::new();
-        for (idx, endpoint) in state.endpoints.iter_mut().enumerate() {
-            if endpoint.load == 0 {
-                continue;
-            }
-            if endpoint.data_tx.push(dispatch.clone()).is_ok() {
+        let mut m = mask;
+        while m != 0 {
+            let idx = m.trailing_zeros() as usize;
+            m &= m - 1;
+            if let Some(endpoint) = state.endpoints.get_mut(idx)
+                && endpoint.data_tx.push(dispatch.clone()).is_ok()
+            {
                 touched.push(idx);
             }
         }
@@ -482,6 +501,7 @@ impl FanOutShards {
         }
         state.eligible_peers = 0;
         state.active_limit = 0;
+        self.active_mask.store(0, Ordering::Release);
     }
 
     fn is_empty(&self) -> bool {
@@ -873,27 +893,34 @@ impl DeferredFanOutWorker {
 }
 
 fn encode_messages_for_fanout(messages: &[Message], target_count: usize) -> EncodedFanOut {
-    let mut eq = FrameBuffer::one_shot();
-    let mut chunks = Vec::new();
-    for wire_msg in messages {
-        encode_fan_out_message(&mut eq, wire_msg, target_count, FAN_OUT_TOTAL_COPY_BUDGET);
+    use std::cell::RefCell;
+    thread_local! {
+        static ARENA: RefCell<FrameBuffer> = RefCell::new(FrameBuffer::one_shot());
+        static CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
     }
-    let fanout_encoded = match finish_fan_out_frame(
-        &mut eq,
-        &mut chunks,
-        target_count,
-        FAN_OUT_TOTAL_COPY_BUDGET,
-    ) {
-        FanOutFrame::Arena(raw) if raw.len() <= TRANSMIT_SLOT_INLINE_CAP => {
-            EncodedFanOut::inline(raw)
+    ARENA.with(|cell| {
+        let eq = &mut *cell.borrow_mut();
+        for wire_msg in messages {
+            encode_fan_out_message(eq, wire_msg, target_count, FAN_OUT_TOTAL_COPY_BUDGET);
         }
-        FanOutFrame::Arena(raw) => {
-            EncodedFanOut::shared(Vec::from([Bytes::copy_from_slice(raw)]).into())
-        }
-        FanOutFrame::Chunks(wire_chunks) => EncodedFanOut::shared(Arc::from(wire_chunks.to_vec())),
-    };
-    clear_fan_out_frame(&mut eq, &mut chunks);
-    fanout_encoded
+        CHUNKS.with(|drain| {
+            let chunks = &mut *drain.borrow_mut();
+            let fanout_encoded =
+                match finish_fan_out_frame(eq, chunks, target_count, FAN_OUT_TOTAL_COPY_BUDGET) {
+                    FanOutFrame::Arena(raw) if raw.len() <= TRANSMIT_SLOT_INLINE_CAP => {
+                        EncodedFanOut::inline(raw)
+                    }
+                    FanOutFrame::Arena(raw) => {
+                        EncodedFanOut::shared(Vec::from([Bytes::copy_from_slice(raw)]).into())
+                    }
+                    FanOutFrame::Chunks(wire_chunks) => {
+                        EncodedFanOut::shared(Arc::from(wire_chunks.to_vec()))
+                    }
+                };
+            clear_fan_out_frame(eq, chunks);
+            fanout_encoded
+        })
+    })
 }
 
 fn encode_message_for_fanout(msg: &Message, target_count: usize) -> EncodedFanOut {
@@ -1004,6 +1031,35 @@ impl Submitter {
         deactivate_fanout_target(&self.inner, &self.generation, target);
     }
 
+    fn dispatch_shards_only(
+        &self,
+        shards: &FanOutShards,
+        msg: &Message,
+        group: Option<String>,
+    ) -> bool {
+        if self.fallback_peer_count.load(Ordering::Relaxed) > 0
+            || self.has_transform_encoder.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        let sharded_count = self.sharded_peer_count.load(Ordering::Acquire);
+        if sharded_count == 0 {
+            return true;
+        }
+        let encoded = EncodedFanOutFrame {
+            dict: None,
+            payload: encode_message_for_fanout(msg, sharded_count),
+        };
+        let dispatch = ShardDispatch {
+            encoded,
+            topic: first_frame_bytes(msg),
+            group,
+            peer_ids: None,
+        };
+        shards.dispatch(&dispatch);
+        true
+    }
+
     /// Encode a message through the shared transform encoder, then frame
     /// the result for fan-out distribution. The Mutex serializes
     /// concurrent callers because fan-out must encode once and distribute
@@ -1065,6 +1121,9 @@ impl Submitter {
             }
         }
 
+        if self.dispatch_shards_only(shards, msg, group.clone()) {
+            return Ok(DispatchOutcome::default());
+        }
         let targets = self.collect_shard_targets(msg, group.as_deref());
         self.dispatch_shard_targets(shards, msg, group, &targets)
     }
@@ -1153,6 +1212,11 @@ impl Submitter {
                 DeferredEnqueue::Enqueued | DeferredEnqueue::Dropped => return Ok(()),
             }
 
+            if self.dispatch_shards_only(shards, &forwarded, group.clone()) {
+                let target_count = self.sharded_peer_count.load(Ordering::Relaxed);
+                self.maybe_yield(target_count, msg_bytes).await;
+                return Ok(());
+            }
             let targets = self.collect_shard_targets(&forwarded, group.as_deref());
             let target_count = targets.fallback_targets.len() + targets.sharded_count;
             self.dispatch_shard_targets(shards, &forwarded, group, &targets)?;
@@ -1224,6 +1288,8 @@ impl Submitter {
 pub(crate) struct FanOutSend {
     shards: Option<Arc<FanOutShards>>,
     sharded_peer_count: Arc<AtomicUsize>,
+    fallback_peer_count: Arc<AtomicUsize>,
+    has_transform_encoder: Arc<AtomicBool>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
@@ -1360,9 +1426,13 @@ impl FanOutSend {
                 .run(rx),
             );
         }
+        let fallback_peer_count = Arc::new(AtomicUsize::new(0));
+        let has_transform_encoder = Arc::new(AtomicBool::new(false));
         Self {
             shards,
             sharded_peer_count,
+            fallback_peer_count,
+            has_transform_encoder,
             inner,
             generation,
             mode,
@@ -1380,6 +1450,8 @@ impl FanOutSend {
         Submitter {
             shards: self.shards.clone(),
             sharded_peer_count: self.sharded_peer_count.clone(),
+            fallback_peer_count: self.fallback_peer_count.clone(),
+            has_transform_encoder: self.has_transform_encoder.clone(),
             inner: self.inner.clone(),
             generation: self.generation.clone(),
             mode: self.mode,
@@ -1452,13 +1524,18 @@ impl FanOutSend {
             if g.fan_out_encoder.is_none() {
                 g.init_fan_out_encoder();
             }
+            if g.fan_out_encoder.is_some() {
+                self.has_transform_encoder.store(true, Ordering::Release);
+            }
         }
         if shard.is_none() {
-            // Fallback/direct peers use `dispatch_to_targets`, which needs
-            // the direct fan-out encoder initialized from the socket options.
+            self.fallback_peer_count.fetch_add(1, Ordering::Release);
             let mut g = self.inner.lock().expect("fanout inner poisoned");
             if has_transform && g.fan_out_encoder.is_none() {
                 g.init_fan_out_encoder();
+            }
+            if g.fan_out_encoder.is_some() {
+                self.has_transform_encoder.store(true, Ordering::Release);
             }
         }
 
@@ -1500,6 +1577,9 @@ impl FanOutSend {
         if let Some(peer) = g.peers.remove(&peer_id) {
             if peer.shard.is_some_and(|shard| shard > 0) {
                 self.sharded_peer_count.fetch_sub(1, Ordering::Release);
+            }
+            if peer.shard.is_none() {
+                self.fallback_peer_count.fetch_sub(1, Ordering::Release);
             }
             g.recompute_subscribe_all();
             drop(g);
@@ -1832,6 +1912,7 @@ fn first_frame_bytes(msg: &Message) -> Bytes {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU8;
 
     use tokio::sync::Notify;
 
@@ -1930,6 +2011,7 @@ mod tests {
                 eligible_peers: 0,
                 active_limit: 0,
             }),
+            active_mask: AtomicU8::new(0),
         };
 
         let assigned: Vec<_> = (0..WORKER_SHARD_PEER_CAP)
@@ -1949,6 +2031,7 @@ mod tests {
                 eligible_peers: 0,
                 active_limit: 0,
             }),
+            active_mask: AtomicU8::new(0),
         };
 
         let mut loads = [0usize; WORKER_SHARD_PEER_CAP + 1];
