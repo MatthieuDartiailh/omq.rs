@@ -1,11 +1,10 @@
 //! Fan-out send: caller-side distribution into shard workers.
 //!
 //! PUB and XPUB filter by SUBSCRIBE-driven prefix set; RADIO filters
-//! by joined groups. Normal lossy fan-out sends encode once on the
-//! caller, then take one shard mutex and push the encoded dispatch into
-//! each nonempty shard's yring input. Each shard owns its peers' yring
-//! producers and filters/pushes without a producer mutex. `xpub_nodrop`
-//! keeps the direct dispatch path so it can preserve backpressure.
+//! by joined groups. Fan-out sends encode once on the caller, then push
+//! the encoded dispatch into each active shard's yring input. Each
+//! shard worker owns its peers' yring producers and filters/pushes
+//! without a producer mutex.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -51,7 +50,6 @@ pub(crate) enum FanOutMode {
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `FrameBuffer::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
-const DIRECT_SHARD_PEER_CAP: usize = 0;
 const WORKER_SHARD_PEER_CAP: usize = 4;
 const MAX_FAN_OUT_WORKER_SHARDS: usize = 8;
 const SHARD_CTRL_RING_CAP: usize = 64;
@@ -70,25 +68,12 @@ fn yield_interval(peer_count: usize, msg_bytes: usize) -> u32 {
     peer_interval.min(byte_interval)
 }
 
-enum CachedResult {
-    SoleWire(TryFrameResult),
-    Cached {
-        targets: Arc<Vec<PeerOutbound>>,
-        encoder: Option<SharedFanOutEncoder>,
-    },
-    Miss,
-}
-
 #[derive(Debug, Default)]
 struct DispatchOutcome {
     full_targets: SmallVec<[PeerOutbound; 8]>,
 }
 
 impl DispatchOutcome {
-    fn is_full(&self) -> bool {
-        !self.full_targets.is_empty()
-    }
-
     fn push_full(&mut self, target: &PeerOutbound) {
         self.full_targets.push(target.clone());
     }
@@ -191,7 +176,6 @@ struct ShardEndpoint {
 }
 
 struct FanOutShardState {
-    direct_load: usize,
     endpoints: Vec<ShardEndpoint>,
     eligible_peers: usize,
     active_limit: usize,
@@ -205,10 +189,9 @@ impl std::fmt::Debug for FanOutShards {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = self.state.lock().expect("fanout shards poisoned");
         f.debug_struct("FanOutShards")
-            .field("shards", &(state.endpoints.len() + 1))
+            .field("shards", &state.endpoints.len())
             .field("active_limit", &state.active_limit)
             .field("eligible_peers", &state.eligible_peers)
-            .field("direct_load", &state.direct_load)
             .field(
                 "worker_loads",
                 &state.endpoints.iter().map(|s| s.load).collect::<Vec<_>>(),
@@ -284,16 +267,6 @@ pub(crate) struct Submitter {
     xpub_nodrop: bool,
     lossy: bool,
     deferred: Option<Arc<DeferredFanOut>>,
-    cached: Mutex<CachedFanOut>,
-}
-
-#[derive(Debug, Default)]
-struct CachedFanOut {
-    generation: u64,
-    sole_wire: Option<PeerOutbound>,
-    all_targets: Option<Arc<Vec<PeerOutbound>>>,
-    encoder: Option<SharedFanOutEncoder>,
-    all_wire: bool,
 }
 
 impl Clone for Submitter {
@@ -308,7 +281,6 @@ impl Clone for Submitter {
             xpub_nodrop: self.xpub_nodrop,
             lossy: self.lossy,
             deferred: self.deferred.clone(),
-            cached: Mutex::new(CachedFanOut::default()),
         }
     }
 }
@@ -350,7 +322,6 @@ impl FanOutShards {
         }
         Arc::new(Self {
             state: Mutex::new(FanOutShardState {
-                direct_load: 0,
                 endpoints,
                 eligible_peers: 0,
                 active_limit: 0,
@@ -362,9 +333,8 @@ impl FanOutShards {
         if eligible_peers == 0 || max_shards == 0 {
             return 0;
         }
-        let worker_peers = eligible_peers.saturating_sub(DIRECT_SHARD_PEER_CAP);
         let worker_shards =
-            worker_peers.saturating_add(WORKER_SHARD_PEER_CAP - 1) / WORKER_SHARD_PEER_CAP;
+            eligible_peers.saturating_add(WORKER_SHARD_PEER_CAP - 1) / WORKER_SHARD_PEER_CAP;
         1usize.saturating_add(worker_shards).min(max_shards)
     }
 
@@ -376,35 +346,24 @@ impl FanOutShards {
         state.endpoints.len() + 1
     }
 
-    fn logical_shard_load(state: &FanOutShardState, shard: usize) -> usize {
-        if shard == 0 {
-            state.direct_load
-        } else {
-            state.endpoints[shard - 1].load
-        }
+    fn shard_load(state: &FanOutShardState, shard: usize) -> usize {
+        state.endpoints[shard - 1].load
     }
 
-    fn increment_logical_shard_load(state: &mut FanOutShardState, shard: usize) {
-        if shard == 0 {
-            state.direct_load += 1;
-        } else {
-            state.endpoints[shard - 1].load += 1;
-        }
+    fn increment_shard_load(state: &mut FanOutShardState, shard: usize) {
+        state.endpoints[shard - 1].load += 1;
     }
 
-    fn decrement_logical_shard_load(state: &mut FanOutShardState, shard: usize) {
-        if shard == 0 {
-            state.direct_load = state.direct_load.saturating_sub(1);
-        } else if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
+    fn decrement_shard_load(state: &mut FanOutShardState, shard: usize) {
+        if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
             endpoint.load = endpoint.load.saturating_sub(1);
         }
     }
 
     fn least_loaded_shard(state: &FanOutShardState, active_limit: usize) -> usize {
-        (0..active_limit)
-            .filter(|&shard| shard != 0 || state.direct_load < DIRECT_SHARD_PEER_CAP)
-            .min_by_key(|&shard| Self::logical_shard_load(state, shard))
-            .unwrap_or(0)
+        (1..active_limit)
+            .min_by_key(|&shard| Self::shard_load(state, shard))
+            .unwrap_or(1)
     }
 
     fn push_control(endpoint: &mut ShardEndpoint, cmd: ShardControl) {
@@ -457,7 +416,7 @@ impl FanOutShards {
         state.active_limit = state.active_limit.max(desired);
         let active_limit = state.active_limit.max(1).min(max_shards);
         let shard = Self::least_loaded_shard(&state, active_limit);
-        Self::increment_logical_shard_load(&mut state, shard);
+        Self::increment_shard_load(&mut state, shard);
         shard
     }
 
@@ -484,7 +443,7 @@ impl FanOutShards {
     fn remove_peer(&self, shard: usize, peer_id: u64) {
         let mut state = self.state.lock().expect("fanout shards poisoned");
         state.eligible_peers = state.eligible_peers.saturating_sub(1);
-        Self::decrement_logical_shard_load(&mut state, shard);
+        Self::decrement_shard_load(&mut state, shard);
         if shard > 0
             && let Some(endpoint) = state.endpoints.get_mut(shard - 1)
         {
@@ -521,7 +480,6 @@ impl FanOutShards {
             Self::push_control(endpoint, ShardControl::Shutdown);
             endpoint.load = 0;
         }
-        state.direct_load = 0;
         state.eligible_peers = 0;
         state.active_limit = 0;
     }
@@ -1017,12 +975,6 @@ impl Submitter {
         if let Some(ref shards) = self.shards {
             shards.shutdown();
         }
-        let mut cached = self.cached.lock().unwrap();
-        cached.sole_wire = None;
-        cached.all_targets = None;
-        cached.encoder = None;
-        cached.all_wire = false;
-        cached.generation = u64::MAX;
     }
 
     fn validate_group(msg: Message) -> core::result::Result<(Message, Option<String>), Error> {
@@ -1052,61 +1004,6 @@ impl Submitter {
         deactivate_fanout_target(&self.inner, &self.generation, target);
     }
 
-    fn has_sharded_peers(&self) -> bool {
-        self.sharded_peer_count.load(Ordering::Acquire) > 0
-    }
-
-    fn try_cached(&self, msg: &Message, group: Option<&str>) -> CachedResult {
-        if group.is_some() {
-            return CachedResult::Miss;
-        }
-        let current = self.generation.load(Ordering::Acquire);
-        let mut cached = self.cached.lock().unwrap();
-        if cached.generation != current {
-            let g = self.inner.lock().expect("fanout inner poisoned");
-            let use_active = self.lossy && !self.xpub_nodrop;
-            let all_targets = if use_active {
-                &g.active_all_targets
-            } else {
-                &g.all_targets
-            };
-            if g.all_subscribe_all && all_targets.len() == 1 && g.fan_out_encoder.is_none() {
-                cached.sole_wire = Some(all_targets[0].clone());
-                cached.all_targets = None;
-                cached.encoder = None;
-                cached.all_wire = false;
-            } else if g.all_subscribe_all && !all_targets.is_empty() {
-                cached.sole_wire = None;
-                let targets: Vec<PeerOutbound> = all_targets.to_vec();
-                cached.all_wire = targets
-                    .iter()
-                    .all(|t| matches!(t, PeerOutbound::Wire { .. }));
-                #[cfg(feature = "ws")]
-                if cached.all_wire && targets.iter().any(PeerOutbound::is_ws) {
-                    cached.all_wire = false;
-                }
-                cached.all_targets = Some(Arc::new(targets));
-                cached.encoder.clone_from(&g.fan_out_encoder);
-            } else {
-                cached.sole_wire = None;
-                cached.all_targets = None;
-                cached.encoder = None;
-                cached.all_wire = false;
-            }
-            cached.generation = current;
-        }
-        if let Some(ref target) = cached.sole_wire {
-            return CachedResult::SoleWire(target.try_encode(msg));
-        }
-        if let Some(ref targets) = cached.all_targets {
-            return CachedResult::Cached {
-                targets: targets.clone(),
-                encoder: cached.encoder.clone(),
-            };
-        }
-        CachedResult::Miss
-    }
-
     /// Encode a message through the shared transform encoder, then frame
     /// the result for fan-out distribution. The Mutex serializes
     /// concurrent callers because fan-out must encode once and distribute
@@ -1131,44 +1028,6 @@ impl Submitter {
             &self.inner,
             transformed,
             target_count,
-        ))
-    }
-
-    fn dispatch_to_targets(
-        &self,
-        targets: &[PeerOutbound],
-        msg: &Message,
-        encoder: Option<&Mutex<Option<MessageEncoder>>>,
-        drop_on_full: bool,
-        deactivate: &mut impl FnMut(&PeerOutbound),
-    ) -> Result<DispatchOutcome> {
-        let Some(encoder) = encoder else {
-            return dispatch_to_targets(targets, msg, None, drop_on_full, deactivate);
-        };
-        if targets.is_empty() {
-            return Ok(DispatchOutcome::default());
-        }
-        #[cfg(feature = "ws")]
-        if targets.iter().any(PeerOutbound::is_ws) {
-            let mut outcome = DispatchOutcome::default();
-            for t in targets {
-                if t.try_encode(msg) == TryFrameResult::Full {
-                    if drop_on_full {
-                        deactivate(t);
-                    }
-                    outcome.push_full(t);
-                }
-            }
-            return Ok(outcome);
-        }
-
-        let batch = self.encode_fanout_batch(msg, targets.len(), encoder)?;
-        Ok(dispatch_encoded_batch(
-            &batch,
-            targets,
-            msg,
-            drop_on_full,
-            deactivate,
         ))
     }
 
@@ -1300,38 +1159,6 @@ impl Submitter {
             self.maybe_yield(target_count, msg_bytes).await;
         }
         Ok(())
-    }
-
-    fn collect_targets(
-        &self,
-        msg: &Message,
-        group: Option<&str>,
-    ) -> (SmallVec<[PeerOutbound; 8]>, Option<SharedFanOutEncoder>) {
-        let g = self.inner.lock().expect("fanout inner poisoned");
-        let use_active = self.lossy && !self.xpub_nodrop;
-        let targets = if g.all_subscribe_all && matches!(self.mode, FanOutMode::SubscriptionPrefix)
-        {
-            if use_active {
-                g.active_all_targets.clone()
-            } else {
-                g.all_targets.clone()
-            }
-        } else {
-            g.peers
-                .values()
-                .filter(|p| !use_active || p.fanout_active)
-                .filter(|p| match (self.mode, group) {
-                    (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
-                    (FanOutMode::SubscriptionPrefix, _) => {
-                        p.subscriptions.matches(&first_frame_bytes(msg))
-                    }
-                    (FanOutMode::Group, None) => false,
-                })
-                .map(|p| p.target.clone())
-                .collect()
-        };
-        let encoder = g.fan_out_encoder.clone();
-        (targets, encoder)
     }
 
     fn collect_shard_targets(&self, msg: &Message, group: Option<&str>) -> ShardDispatchTargets {
@@ -1560,7 +1387,6 @@ impl FanOutSend {
             xpub_nodrop: self.xpub_nodrop,
             lossy: self.lossy,
             deferred: self.deferred.clone(),
-            cached: Mutex::new(CachedFanOut::default()),
         }
     }
 
@@ -1794,20 +1620,6 @@ impl FanOutSend {
     }
 }
 
-fn targets_have_space(targets: &[PeerOutbound]) -> bool {
-    targets.iter().all(|t| match t {
-        PeerOutbound::Wire { slot, .. } => slot.has_space() || slot.dead.load(Ordering::Acquire),
-        PeerOutbound::Inbox(_) => true,
-    })
-}
-
-async fn send_to_targets_nodrop(targets: &[PeerOutbound], msg: Message) -> Result<()> {
-    for target in targets {
-        target.send(msg.clone()).await?;
-    }
-    Ok(())
-}
-
 fn dispatch_encoded_batch(
     encoded: &EncodedFanOutFrame,
     targets: &[PeerOutbound],
@@ -2024,8 +1836,8 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        DIRECT_SHARD_PEER_CAP, FanOutShardState, FanOutShards, MAX_FAN_OUT_WORKER_SHARDS,
-        ShardEndpoint, WORKER_SHARD_PEER_CAP, yield_interval,
+        FanOutShardState, FanOutShards, MAX_FAN_OUT_WORKER_SHARDS, ShardEndpoint,
+        WORKER_SHARD_PEER_CAP, yield_interval,
     };
 
     const TEST_MAX_LOGICAL_SHARDS: usize = MAX_FAN_OUT_WORKER_SHARDS + 1;
@@ -2085,7 +1897,7 @@ mod tests {
         );
         assert_eq!(
             FanOutShards::desired_active_shards(WORKER_SHARD_PEER_CAP + 1, TEST_LOW_WORKER_COUNT),
-            3
+            TEST_LOW_WORKER_COUNT
         );
         assert_eq!(
             FanOutShards::desired_active_shards(TEST_HIGH_WORKER_COUNT, TEST_LOW_WORKER_COUNT),
@@ -2114,7 +1926,6 @@ mod tests {
     fn assign_peer_distributes_to_workers() {
         let shards = FanOutShards {
             state: std::sync::Mutex::new(FanOutShardState {
-                direct_load: 0,
                 endpoints: test_endpoints(TEST_LOW_WORKER_COUNT),
                 eligible_peers: 0,
                 active_limit: 0,
@@ -2134,7 +1945,6 @@ mod tests {
     fn assign_peer_round_robins_across_workers() {
         let shards = FanOutShards {
             state: std::sync::Mutex::new(FanOutShardState {
-                direct_load: 0,
                 endpoints: test_endpoints(WORKER_SHARD_PEER_CAP),
                 eligible_peers: 0,
                 active_limit: 0,

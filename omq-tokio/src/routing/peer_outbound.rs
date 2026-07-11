@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::engine::{PeerDriverCommand, PeerDriverHandle};
-use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
 #[derive(Debug, Clone)]
@@ -46,47 +45,6 @@ impl PeerOutbound {
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => TryFrameResult::Full,
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => TryFrameResult::Dead,
             },
-        }
-    }
-
-    pub(crate) async fn send(&self, msg: Message) -> Result<()> {
-        match self {
-            Self::Wire { slot, inbox } => match slot.try_encode(&msg) {
-                TryFrameResult::Ok => Ok(()),
-                // HWM backpressure: retry until space is available or
-                // the slot dies. Termination: `mark_dead()` fires on
-                // peer disconnect, connection error, heartbeat timeout,
-                // or socket close, causing `try_encode` to return `Dead`.
-                TryFrameResult::Full => loop {
-                    let notified = slot.space_available.notified();
-                    match slot.try_encode(&msg) {
-                        TryFrameResult::Ok => return Ok(()),
-                        TryFrameResult::Dead => return Err(Error::Closed),
-                        TryFrameResult::Full => {
-                            tokio::select! {
-                                biased;
-                                () = notified => {}
-                                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                            }
-                        }
-                        TryFrameResult::Ineligible => {
-                            return inbox
-                                .send(PeerDriverCommand::SendMessage(msg))
-                                .await
-                                .map_err(|_| Error::Closed);
-                        }
-                    }
-                },
-                TryFrameResult::Ineligible => inbox
-                    .send(PeerDriverCommand::SendMessage(msg))
-                    .await
-                    .map_err(|_| Error::Closed),
-                TryFrameResult::Dead => Err(Error::Closed),
-            },
-            Self::Inbox(tx) => tx
-                .send(PeerDriverCommand::SendMessage(msg))
-                .await
-                .map_err(|_| Error::Closed),
         }
     }
 

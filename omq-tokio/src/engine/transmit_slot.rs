@@ -453,18 +453,6 @@ impl PeerTransmitSlot {
         DrainOutcome { space_available }
     }
 
-    pub(crate) fn has_space(&self) -> bool {
-        if self.dead.load(Ordering::Acquire) {
-            return false;
-        }
-        let eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        let has_space = !self.is_full(&eq);
-        if has_space {
-            self.fanout_active.store(true, Ordering::Release);
-        }
-        has_space
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         let eq = self.eq.lock().expect("transmit_slot eq poisoned");
         eq.is_empty() && self.ring_is_empty()
