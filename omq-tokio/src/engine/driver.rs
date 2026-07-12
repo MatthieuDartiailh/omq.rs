@@ -142,48 +142,60 @@ impl YringSink {
 }
 
 impl RecvSink {
+    /// Non-blocking push. Returns the message back if the yring is full.
+    /// Channel variant always succeeds (awaits space).
+    pub(crate) async fn try_send(&mut self, m: Message) -> Option<Message> {
+        match self {
+            Self::Channel(pipe) => {
+                let _ = pipe.send(m).await;
+                None
+            }
+            Self::Yring(sink) => match sink.producer.push(m) {
+                Ok(()) => {
+                    sink.flush_and_signal();
+                    None
+                }
+                Err(returned) => Some(returned),
+            },
+        }
+    }
+
     async fn send(&mut self, m: Message) -> bool {
         match self {
             Self::Channel(pipe) => pipe.send(m).await.is_ok(),
             Self::Yring(sink) => {
                 let mut msg = m;
                 loop {
-                    match sink.producer.push(msg) {
-                        Ok(()) => {
-                            sink.flush_and_signal();
-                            return true;
-                        }
-                        Err(returned) => {
-                            msg = returned;
-                            if sink.producer.is_consumer_dropped() {
-                                return false;
-                            }
-                            let notified = sink.space.notified();
-                            tokio::pin!(notified);
-                            notified.as_mut().enable();
-                            match sink.producer.push(msg) {
-                                Ok(()) => {
-                                    // Can't call flush_and_signal(): `notified`
-                                    // borrows `sink.space` until end of scope.
-                                    if let yring::FlushResult::Flushed {
-                                        was_empty: true, ..
-                                    } = sink.producer.flush_and_check()
-                                    {
-                                        (sink.signal)();
-                                    }
-                                    return true;
-                                }
-                                Err(returned2) => {
-                                    msg = returned2;
-                                    tokio::select! {
-                                        biased;
-                                        () = notified => {}
-                                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                                    }
-                                }
-                            }
-                        }
+                    if let Err(returned) = sink.producer.push(msg) {
+                        msg = returned;
+                    } else {
+                        sink.flush_and_signal();
+                        return true;
                     }
+                    if sink.producer.is_consumer_dropped() {
+                        return false;
+                    }
+                    let notified = sink.space.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if let Err(returned) = sink.producer.push(msg) {
+                        msg = returned;
+                        tokio::select! {
+                            biased;
+                            () = notified => {}
+                            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                        }
+                        continue;
+                    }
+                    // Field-level borrows: notified holds sink.space,
+                    // but producer and signal are disjoint fields.
+                    if let yring::FlushResult::Flushed {
+                        was_empty: true, ..
+                    } = sink.producer.flush_and_check()
+                    {
+                        (sink.signal)();
+                    }
+                    return true;
                 }
             }
         }

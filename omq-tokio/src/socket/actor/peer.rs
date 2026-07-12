@@ -872,29 +872,9 @@ async fn inproc_peer_driver(
                         }
                         let m = try_push_spsc(spsc.as_ref(), m);
                         if let Some(m) = m {
-                            let m = if let Some(ref mut sink) = recv_sink {
-                                match sink {
-                                    crate::engine::RecvSink::Channel(tx) => {
-                                        let _ = tx.send(m).await;
-                                        None
-                                    }
-                                    crate::engine::RecvSink::Yring(yring_sink) => {
-                                        match yring_sink.producer.push(m) {
-                                            Ok(()) => {
-                                                if let yring::FlushResult::Flushed {
-                                                    was_empty: true, ..
-                                                } = yring_sink.producer.flush_and_check()
-                                                {
-                                                    (yring_sink.signal)();
-                                                }
-                                                None
-                                            }
-                                            Err(returned) => Some(returned),
-                                        }
-                                    }
-                                }
-                            } else {
-                                Some(m)
+                            let m = match recv_sink.as_mut() {
+                                Some(sink) => sink.try_send(m).await,
+                                None => Some(m),
                             };
                             if let Some(m) = m
                                 && !route_inproc_message(

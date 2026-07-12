@@ -1339,6 +1339,40 @@ fn dispatch_to_targets(
     }
 }
 
+fn push_to_peers(
+    targets: &[PeerOutbound],
+    msg: &Message,
+    drop_on_full: bool,
+    deactivate: &mut impl FnMut(&PeerOutbound),
+    outcome: &mut DispatchOutcome,
+    push_wire: impl Fn(&PeerTransmitSlot) -> TryFrameResult,
+) {
+    for t in targets {
+        match t {
+            PeerOutbound::Wire { slot, .. } => {
+                if drop_on_full && !slot.fanout_active() {
+                    outcome.push_full(t);
+                    continue;
+                }
+                if push_wire(slot) == TryFrameResult::Full {
+                    if drop_on_full {
+                        deactivate(t);
+                    }
+                    outcome.push_full(t);
+                }
+            }
+            PeerOutbound::Inbox(tx) => {
+                if tx
+                    .try_send(PeerDriverCommand::SendMessage(msg.clone()))
+                    .is_err()
+                {
+                    outcome.push_full(t);
+                }
+            }
+        }
+    }
+}
+
 fn dispatch_encoded(
     eq: &mut FrameBuffer,
     targets: &[PeerOutbound],
@@ -1350,30 +1384,14 @@ fn dispatch_encoded(
     let mut outcome = DispatchOutcome::default();
     match finish_fan_out_frame(eq, chunks, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET) {
         FanOutFrame::Arena(raw) => {
-            for t in targets {
-                match t {
-                    PeerOutbound::Wire { slot, .. } => {
-                        if drop_on_full && !slot.fanout_active() {
-                            outcome.push_full(t);
-                            continue;
-                        }
-                        if slot.try_push_pre_framed_no_signal(raw) == TryFrameResult::Full {
-                            if drop_on_full {
-                                deactivate(t);
-                            }
-                            outcome.push_full(t);
-                        }
-                    }
-                    PeerOutbound::Inbox(tx) => {
-                        if tx
-                            .try_send(PeerDriverCommand::SendMessage(msg.clone()))
-                            .is_err()
-                        {
-                            outcome.push_full(t);
-                        }
-                    }
-                }
-            }
+            push_to_peers(
+                targets,
+                msg,
+                drop_on_full,
+                deactivate,
+                &mut outcome,
+                |slot| slot.try_push_pre_framed_no_signal(raw),
+            );
             for t in targets {
                 if let PeerOutbound::Wire { slot, .. } = t {
                     slot.signal_encoded();
@@ -1381,30 +1399,14 @@ fn dispatch_encoded(
             }
         }
         FanOutFrame::Chunks(encoded) => {
-            for t in targets {
-                match t {
-                    PeerOutbound::Wire { slot, .. } => {
-                        if drop_on_full && !slot.fanout_active() {
-                            outcome.push_full(t);
-                            continue;
-                        }
-                        if slot.try_push_encoded(encoded) == TryFrameResult::Full {
-                            if drop_on_full {
-                                deactivate(t);
-                            }
-                            outcome.push_full(t);
-                        }
-                    }
-                    PeerOutbound::Inbox(tx) => {
-                        if tx
-                            .try_send(PeerDriverCommand::SendMessage(msg.clone()))
-                            .is_err()
-                        {
-                            outcome.push_full(t);
-                        }
-                    }
-                }
-            }
+            push_to_peers(
+                targets,
+                msg,
+                drop_on_full,
+                deactivate,
+                &mut outcome,
+                |slot| slot.try_push_encoded(encoded),
+            );
         }
     }
     clear_fan_out_frame(eq, chunks);
