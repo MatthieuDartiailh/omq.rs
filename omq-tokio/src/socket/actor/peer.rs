@@ -227,6 +227,11 @@ impl SocketDriver {
             .options
             .arena_threshold
             .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
+        let arena_cap = if matches!(endpoint, Endpoint::Ipc(_)) {
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP_IPC
+        } else {
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP
+        };
         let uses_crypto = self.options.mechanism.has_frame_transform();
         let slot = if uses_crypto {
             None
@@ -241,6 +246,7 @@ impl SocketDriver {
                 has_transform,
                 passthrough_info,
                 arena_threshold,
+                arena_cap,
                 transmit_slot_cap,
                 transmit_slot_msg_cap,
                 #[cfg(feature = "ws")]
@@ -249,7 +255,9 @@ impl SocketDriver {
                 ws_masked,
             ))
         };
-        let driver = driver.with_arena_threshold(arena_threshold);
+        let driver = driver
+            .with_arena_threshold(arena_threshold)
+            .with_arena_cap(arena_cap);
         let driver = match slot {
             Some(ref s) => driver.with_transmit_slot(s.clone()),
             None => driver,

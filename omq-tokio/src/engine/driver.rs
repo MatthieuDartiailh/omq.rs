@@ -360,6 +360,7 @@ where
     transmit_slot: Option<Arc<PeerTransmitSlot>>,
     send_pipe_rx: Option<SendPipeConsumer>,
     arena_threshold: usize,
+    arena_cap: usize,
 }
 
 impl<T> ConnectionDriver<T>
@@ -411,6 +412,7 @@ where
             transmit_slot: None,
             send_pipe_rx: None,
             arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
+            arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
         }
     }
 
@@ -493,6 +495,12 @@ where
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_arena_cap(mut self, cap: usize) -> Self {
+        self.arena_cap = cap;
+        self
+    }
+
     /// Run the driver to completion. Returns:
     /// - `Ok(())` on clean shutdown (peer EOF, canceled, `Close` command,
     ///   inbox dropped).
@@ -530,13 +538,14 @@ where
             transmit_slot,
             mut send_pipe_rx,
             arena_threshold,
+            arena_cap,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
         let mut large_recv_buf = BytesMut::new();
-        let mut eq = FrameBuffer::with_arena_threshold(arena_threshold);
+        let mut eq = FrameBuffer::with_config(arena_threshold, arena_cap);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
         let mut arena_buf: Vec<u8> = Vec::with_capacity(4096);
         let mut pipe_batch: Vec<Message> = Vec::with_capacity(SHARED_MAX_BATCH_MSGS);

@@ -80,13 +80,14 @@ impl PeerTransmitSlot {
         has_transform: bool,
         transform_passthrough: Option<(Bytes, usize)>,
         arena_threshold: usize,
+        arena_cap: usize,
         cap: usize,
         msg_cap: usize,
         #[cfg(feature = "ws")] is_ws: bool,
         #[cfg(feature = "ws")] ws_masked: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
-            eq: Mutex::new(FrameBuffer::with_arena_threshold(arena_threshold)),
+            eq: Mutex::new(FrameBuffer::with_config(arena_threshold, arena_cap)),
             cap,
             msg_cap: msg_cap.max(1),
             data_signal: DataSignal::new(),
@@ -348,6 +349,7 @@ mod tests {
             false,
             None,
             omq_proto::frame_buffer::ARENA_THRESHOLD,
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             TRANSMIT_SLOT_CAP_DEFAULT,
             TRANSMIT_SLOT_MSG_CAP_DEFAULT,
             #[cfg(feature = "ws")]
