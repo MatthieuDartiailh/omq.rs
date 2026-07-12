@@ -19,12 +19,9 @@ use omq_proto::proto::{Command, Connection, Event};
 
 use super::compression_pool::CompressionPool;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
-use super::transmit_slot::{PeerTransmitSlot, TransmitChunk};
+use super::transmit_slot::PeerTransmitSlot;
 use crate::routing::fallback_queue::FallbackReceiver;
 use omq_proto::frame_buffer::FrameBuffer;
-
-pub(crate) type TransmitSlotProducerHandle =
-    Arc<std::sync::Mutex<Option<yring::Producer<TransmitChunk>>>>;
 
 /// Where the driver routes decoded inbound messages.
 ///
@@ -306,7 +303,6 @@ pub struct PeerDriverHandle {
     pub inbox: mpsc::Sender<PeerDriverCommand>,
     pub cancel: CancellationToken,
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
-    pub(crate) transmit_slot_tx: Option<TransmitSlotProducerHandle>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
 }
 
@@ -1335,7 +1331,6 @@ mod tests {
                 inbox: c_inbox_tx,
                 cancel: c_cancel,
                 transmit_slot: None,
-                transmit_slot_tx: None,
                 send_pipe: None,
             },
             EventAdapter { rx: c_evt_rx },
@@ -1343,7 +1338,6 @@ mod tests {
                 inbox: s_inbox_tx,
                 cancel: s_cancel,
                 transmit_slot: None,
-                transmit_slot_tx: None,
                 send_pipe: None,
             },
             EventAdapter { rx: s_evt_rx },

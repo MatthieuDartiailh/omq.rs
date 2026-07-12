@@ -228,15 +228,15 @@ impl SocketDriver {
             .arena_threshold
             .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
         let uses_crypto = self.options.mechanism.has_frame_transform();
-        let (slot, transmit_slot_tx) = if uses_crypto {
-            (None, None)
+        let slot = if uses_crypto {
+            None
         } else {
             let transmit_slot_cap = self
                 .options
                 .transmit_slot_cap
                 .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
             let transmit_slot_msg_cap = self.options.send_hwm.unwrap_or(1000).max(1) as usize;
-            let (s, tx) = crate::engine::transmit_slot::PeerTransmitSlot::new(
+            Some(crate::engine::transmit_slot::PeerTransmitSlot::new(
                 peer_id,
                 has_transform,
                 passthrough_info,
@@ -247,11 +247,7 @@ impl SocketDriver {
                 is_ws,
                 #[cfg(feature = "ws")]
                 ws_masked,
-            );
-            (
-                Some(s),
-                Some(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
-            )
+            ))
         };
         let driver = driver.with_arena_threshold(arena_threshold);
         let driver = match slot {
@@ -304,7 +300,6 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel,
                     transmit_slot: slot.clone(),
-                    transmit_slot_tx,
                     send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
@@ -444,7 +439,6 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
                     transmit_slot: None,
-                    transmit_slot_tx: None,
                     send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),

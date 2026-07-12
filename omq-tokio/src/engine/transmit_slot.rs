@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use tokio::sync::Notify;
 
 use super::signal::DataSignal;
@@ -21,63 +21,9 @@ use omq_proto::message::Message;
 pub(crate) const TRANSMIT_SLOT_CAP_DEFAULT: usize = 512 * 1024;
 #[cfg(test)]
 pub(crate) const TRANSMIT_SLOT_MSG_CAP_DEFAULT: usize = 1000;
-pub(crate) const TRANSMIT_SLOT_INLINE_CAP: usize = 72;
 const TRANSMIT_SLOT_LWM_DIVISOR: usize = 2;
 
 type FanOutReactivation = Arc<dyn Fn(u64) + Send + Sync + 'static>;
-
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-pub(crate) enum TransmitChunk {
-    Inline {
-        buf: [u8; TRANSMIT_SLOT_INLINE_CAP],
-        len: u16,
-    },
-    Shared(Arc<[Bytes]>),
-}
-
-impl TransmitChunk {
-    #[allow(dead_code)]
-    pub(crate) fn inline(data: &[u8]) -> Self {
-        debug_assert!(data.len() <= TRANSMIT_SLOT_INLINE_CAP);
-        let mut buf = [0; TRANSMIT_SLOT_INLINE_CAP];
-        buf[..data.len()].copy_from_slice(data);
-        Self::Inline {
-            buf,
-            len: data.len() as u16,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn shared(chunks: Arc<[Bytes]>) -> Self {
-        Self::Shared(chunks)
-    }
-
-    fn byte_len(&self) -> usize {
-        match self {
-            Self::Inline { len, .. } => *len as usize,
-            Self::Shared(chunks) => chunks.iter().map(Bytes::len).sum(),
-        }
-    }
-
-    fn drain_into(self, out: &mut Vec<Bytes>, inline: &mut BytesMut) {
-        match self {
-            Self::Inline { buf, len } => {
-                inline.extend_from_slice(&buf[..len as usize]);
-            }
-            Self::Shared(chunks) => {
-                flush_inline(inline, out);
-                out.extend(chunks.iter().cloned());
-            }
-        }
-    }
-}
-
-fn flush_inline(inline: &mut BytesMut, out: &mut Vec<Bytes>) {
-    if !inline.is_empty() {
-        out.push(inline.split().freeze());
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TryFrameResult {
@@ -89,7 +35,6 @@ pub(crate) enum TryFrameResult {
 
 pub(crate) struct PeerTransmitSlot {
     eq: Mutex<FrameBuffer>,
-    ring_rx: Mutex<yring::Consumer<TransmitChunk>>,
     cap: usize,
     msg_cap: usize,
     pub(crate) data_signal: DataSignal,
@@ -104,7 +49,6 @@ pub(crate) struct PeerTransmitSlot {
     pub(crate) dead: AtomicBool,
     pub(crate) peer_id: u64,
     queued_msgs: AtomicUsize,
-    queued_ring_bytes: AtomicUsize,
     fanout_dict_shipped: AtomicBool,
     fanout_active: AtomicBool,
     above_lwm: AtomicBool,
@@ -140,11 +84,9 @@ impl PeerTransmitSlot {
         msg_cap: usize,
         #[cfg(feature = "ws")] is_ws: bool,
         #[cfg(feature = "ws")] ws_masked: bool,
-    ) -> (Arc<Self>, yring::Producer<TransmitChunk>) {
-        let (ring_tx, ring_rx) = yring::spsc(msg_cap.max(1));
-        let slot = Arc::new(Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             eq: Mutex::new(FrameBuffer::with_arena_threshold(arena_threshold)),
-            ring_rx: Mutex::new(ring_rx),
             cap,
             msg_cap: msg_cap.max(1),
             data_signal: DataSignal::new(),
@@ -159,13 +101,11 @@ impl PeerTransmitSlot {
             dead: AtomicBool::new(false),
             peer_id,
             queued_msgs: AtomicUsize::new(0),
-            queued_ring_bytes: AtomicUsize::new(0),
             fanout_dict_shipped: AtomicBool::new(false),
             fanout_active: AtomicBool::new(true),
             above_lwm: AtomicBool::new(false),
             fanout_reactivation: Mutex::new(None),
-        });
-        (slot, ring_tx)
+        })
     }
 
     #[cfg(feature = "ws")]
@@ -193,7 +133,7 @@ impl PeerTransmitSlot {
                 is_ws: self.is_ws,
                 #[cfg(not(feature = "ws"))]
                 is_ws: false,
-                queued_bytes: eq.total_bytes() + self.queued_ring_bytes.load(Ordering::Relaxed),
+                queued_bytes: eq.total_bytes(),
                 queued_messages: self.queued_msgs.load(Ordering::Relaxed),
             },
             HandleFrameCaps {
@@ -236,10 +176,7 @@ impl PeerTransmitSlot {
         }
         eq.push_shared_chunks(chunks);
         self.queued_msgs.fetch_add(1, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(
-            eq.total_bytes() + self.queued_ring_bytes.load(Ordering::Relaxed),
-            self.queued_msgs.load(Ordering::Relaxed),
-        );
+        self.mark_above_lwm_if_needed(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
         drop(eq);
         self.signal_encoded();
         TryFrameResult::Ok
@@ -256,57 +193,8 @@ impl PeerTransmitSlot {
         }
         eq.push_pre_framed(data);
         self.queued_msgs.fetch_add(1, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(
-            eq.total_bytes() + self.queued_ring_bytes.load(Ordering::Relaxed),
-            self.queued_msgs.load(Ordering::Relaxed),
-        );
+        self.mark_above_lwm_if_needed(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
         TryFrameResult::Ok
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn try_push_ring_item(
-        &self,
-        tx: &mut yring::Producer<TransmitChunk>,
-        item: TransmitChunk,
-    ) -> TryFrameResult {
-        if self.dead.load(Ordering::Acquire) {
-            return TryFrameResult::Dead;
-        }
-        if !self.handshake_done.load(Ordering::Acquire) {
-            return TryFrameResult::Ineligible;
-        }
-        let bytes = item.byte_len();
-        if self
-            .queued_ring_bytes
-            .load(Ordering::Relaxed)
-            .saturating_add(bytes)
-            >= self.cap
-            || self.queued_msgs.load(Ordering::Relaxed) >= self.msg_cap
-        {
-            self.above_lwm.store(true, Ordering::Relaxed);
-            return TryFrameResult::Full;
-        }
-        if tx.is_full() {
-            self.above_lwm.store(true, Ordering::Relaxed);
-            return TryFrameResult::Full;
-        }
-        if tx.push(item).is_err() {
-            self.above_lwm.store(true, Ordering::Relaxed);
-            return TryFrameResult::Full;
-        }
-        self.queued_ring_bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.queued_msgs.fetch_add(1, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(
-            self.queued_ring_bytes.load(Ordering::Relaxed),
-            self.queued_msgs.load(Ordering::Relaxed),
-        );
-        TryFrameResult::Ok
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn flush_ring(&self, tx: &mut yring::Producer<TransmitChunk>) {
-        tx.flush();
-        self.signal_encoded();
     }
 
     pub(crate) fn signal_encoded(&self) {
@@ -343,17 +231,10 @@ impl PeerTransmitSlot {
     }
 
     /// Arena-only fast path: if all queued data is in the
-    /// [`FrameBuffer`] arena (no external `Bytes`, no ring items),
-    /// copy the arena bytes into `out` and clear the arena,
-    /// preserving its capacity. Returns `None` if the fast path
-    /// does not apply.
+    /// [`FrameBuffer`] arena (no external `Bytes`), copy the arena
+    /// bytes into `out` and clear the arena, preserving its capacity.
+    /// Returns `None` if the fast path does not apply.
     pub(crate) fn try_drain_arena_only(&self, out: &mut Vec<u8>) -> Option<DrainOutcome> {
-        {
-            let rx = self.ring_rx.lock().expect("transmit_slot ring_rx poisoned");
-            if !rx.is_empty() {
-                return None;
-            }
-        }
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
         if !eq.has_arena_only() {
             return None;
@@ -364,7 +245,6 @@ impl PeerTransmitSlot {
 
         self.data_signal.clear();
         self.queued_msgs.store(0, Ordering::Relaxed);
-        self.queued_ring_bytes.store(0, Ordering::Relaxed);
         let below_lwm = self.is_below_lwm(0, 0);
         let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
         if below_lwm
@@ -392,39 +272,6 @@ impl PeerTransmitSlot {
         let eq_bytes = eq.total_bytes();
         drop(eq);
 
-        let mut popped_items = 0usize;
-        let mut popped_bytes = 0usize;
-        if buf.len() < max_chunks {
-            let mut rx = self.ring_rx.lock().expect("transmit_slot ring_rx poisoned");
-            rx.prefetch();
-            let mut inline = BytesMut::with_capacity(TRANSMIT_SLOT_INLINE_CAP * 4);
-            while buf.len() < max_chunks {
-                let Some(item) = rx.pop() else {
-                    break;
-                };
-                popped_items += 1;
-                popped_bytes += item.byte_len();
-                item.drain_into(buf, &mut inline);
-            }
-            flush_inline(&mut inline, buf);
-            if popped_items > 0 {
-                rx.release();
-            }
-        }
-
-        if popped_items > 0 {
-            self.queued_ring_bytes
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    Some(n.saturating_sub(popped_bytes))
-                })
-                .ok();
-            self.queued_msgs
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    Some(n.saturating_sub(popped_items))
-                })
-                .ok();
-        }
-
         if eq_drained_chunks > 0 {
             self.queued_msgs
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -433,14 +280,12 @@ impl PeerTransmitSlot {
                 .ok();
         }
 
-        if eq_empty && self.ring_is_empty() {
+        if eq_empty {
             self.data_signal.clear();
             self.queued_msgs.store(0, Ordering::Relaxed);
-            self.queued_ring_bytes.store(0, Ordering::Relaxed);
         }
-        let queued_bytes = eq_bytes + self.queued_ring_bytes.load(Ordering::Relaxed);
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
-        let below_lwm = self.is_below_lwm(queued_bytes, queued_msgs);
+        let below_lwm = self.is_below_lwm(eq_bytes, queued_msgs);
         let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
         if below_lwm
             && self
@@ -460,7 +305,7 @@ impl PeerTransmitSlot {
 
     pub(crate) fn is_empty(&self) -> bool {
         let eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        eq.is_empty() && self.ring_is_empty()
+        eq.is_empty()
     }
 
     pub(crate) fn mark_dead(&self) {
@@ -469,14 +314,7 @@ impl PeerTransmitSlot {
             let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
             *eq = FrameBuffer::one_shot();
         }
-        {
-            let mut rx = self.ring_rx.lock().expect("transmit_slot ring_rx poisoned");
-            rx.prefetch();
-            while rx.pop().is_some() {}
-            rx.release();
-        }
         self.queued_msgs.store(0, Ordering::Relaxed);
-        self.queued_ring_bytes.store(0, Ordering::Relaxed);
         self.fanout_active.store(false, Ordering::Relaxed);
         self.above_lwm.store(false, Ordering::Relaxed);
         self.data_signal.wake_all();
@@ -484,8 +322,7 @@ impl PeerTransmitSlot {
     }
 
     fn is_full(&self, eq: &FrameBuffer) -> bool {
-        eq.total_bytes() + self.queued_ring_bytes.load(Ordering::Relaxed) >= self.cap
-            || self.queued_msgs.load(Ordering::Relaxed) >= self.msg_cap
+        eq.total_bytes() >= self.cap || self.queued_msgs.load(Ordering::Relaxed) >= self.msg_cap
     }
 
     fn mark_above_lwm_if_needed(&self, queued_bytes: usize, queued_messages: usize) {
@@ -498,13 +335,6 @@ impl PeerTransmitSlot {
         queued_bytes <= self.cap / TRANSMIT_SLOT_LWM_DIVISOR
             && queued_messages <= self.msg_cap / TRANSMIT_SLOT_LWM_DIVISOR
     }
-
-    fn ring_is_empty(&self) -> bool {
-        self.ring_rx
-            .lock()
-            .expect("transmit_slot ring_rx poisoned")
-            .is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -513,7 +343,7 @@ mod tests {
 
     #[test]
     fn transmit_slot_caps_queued_messages_independent_of_bytes() {
-        let (slot, _tx) = PeerTransmitSlot::new(
+        let slot = PeerTransmitSlot::new(
             1,
             false,
             None,

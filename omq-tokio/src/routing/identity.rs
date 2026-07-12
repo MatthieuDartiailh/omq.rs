@@ -311,7 +311,6 @@ mod tests {
             inbox: tokio::sync::mpsc::channel(1).0,
             cancel: tokio_util::sync::CancellationToken::new(),
             transmit_slot: None,
-            transmit_slot_tx: None,
             send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe_tx)))),
         };
         send.connection_added(1, handle, Bytes::from_static(b"id"));

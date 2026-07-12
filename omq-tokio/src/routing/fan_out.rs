@@ -3,7 +3,7 @@
 //! PUB and XPUB filter by SUBSCRIBE-driven prefix set; RADIO filters
 //! by joined groups. The caller pushes raw `Message` values into each
 //! active shard's yring. Each shard worker encodes (and optionally
-//! compresses) locally, then distributes to its peers' `TransmitChunk`
+//! compresses) locally, then pushes into its peers' `PeerTransmitSlot`
 //! rings.
 
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -32,7 +32,7 @@ use omq_proto::proto::transform::MessageEncoder;
 
 use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
-use crate::engine::transmit_slot::{PeerTransmitSlot, TransmitChunk, TryFrameResult};
+use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 
 /// Filter mode for a fan-out send strategy.
 #[derive(Debug, Clone, Copy)]
@@ -109,7 +109,6 @@ enum ShardControl {
 struct ShardPeerAdd {
     peer_id: u64,
     slot: Arc<PeerTransmitSlot>,
-    producer: yring::Producer<TransmitChunk>,
     any_groups: bool,
 }
 
@@ -126,8 +125,6 @@ struct ShardPeer {
     groups: FxHashSet<String>,
     any_groups: bool,
     slot: Arc<PeerTransmitSlot>,
-    #[allow(dead_code)]
-    producer: yring::Producer<TransmitChunk>,
     dict_shipped: bool,
 }
 
@@ -513,7 +510,6 @@ impl ShardWorker {
                         any_groups: add.any_groups,
                         dict_shipped: add.slot.fanout_dict_shipped(),
                         slot: add.slot,
-                        producer: add.producer,
                     },
                 );
             }
@@ -1086,7 +1082,7 @@ impl FanOutSend {
 
         let shard_eligible = !target_is_ws
             && matches!(target, PeerOutbound::Wire { .. })
-            && handle.transmit_slot_tx.is_some();
+            && handle.transmit_slot.is_some();
 
         let shard = if !shard_eligible {
             None
@@ -1094,45 +1090,32 @@ impl FanOutSend {
             (self.shards.as_ref(), &target)
         {
             let shard = shards.assign_peer();
-            let added = handle
-                .transmit_slot_tx
-                .as_ref()
-                .and_then(|tx| tx.lock().expect("transmit_slot_tx poisoned").take())
-                .map(|producer| {
-                    shards.add_worker_peer(
-                        shard,
-                        ShardPeerAdd {
-                            peer_id,
-                            slot: slot.clone(),
-                            producer,
-                            any_groups,
-                        },
-                    );
-                })
-                .is_some();
-            if added {
-                let mut g = self.inner.lock().expect("fanout inner poisoned");
-                if has_transform {
-                    g.has_compression = true;
-                }
-                if g.has_compression {
-                    let options = g.options.clone();
-                    let dict = g.compression_dict.clone();
-                    shards.send_to_shard(
-                        shard,
-                        ShardControl::SetCompression {
-                            options: Box::new(options),
-                            dict,
-                        },
-                    );
-                } else {
-                    drop(g);
-                }
-                Some(shard)
-            } else {
-                shards.remove_peer(shard, peer_id);
-                None
+            shards.add_worker_peer(
+                shard,
+                ShardPeerAdd {
+                    peer_id,
+                    slot: slot.clone(),
+                    any_groups,
+                },
+            );
+            let mut g = self.inner.lock().expect("fanout inner poisoned");
+            if has_transform {
+                g.has_compression = true;
             }
+            if g.has_compression {
+                let options = g.options.clone();
+                let dict = g.compression_dict.clone();
+                shards.send_to_shard(
+                    shard,
+                    ShardControl::SetCompression {
+                        options: Box::new(options),
+                        dict,
+                    },
+                );
+            } else {
+                drop(g);
+            }
+            Some(shard)
         } else {
             None
         };
