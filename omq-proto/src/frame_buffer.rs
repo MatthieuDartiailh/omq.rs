@@ -6,6 +6,7 @@ use crate::message::Message;
 use crate::proto::frame;
 
 pub const ARENA_THRESHOLD: usize = 4 * 1024;
+pub const ARENA_INITIAL_CAP: usize = 16 * 1024;
 
 /// An entry in the encoded output sequence: either a range within the
 /// arena buffer or an external zero-copy `Bytes` (large payload).
@@ -51,7 +52,7 @@ impl FrameBuffer {
     }
 
     pub fn with_arena_threshold(arena_threshold: usize) -> Self {
-        let cap = 256 * 1024;
+        let cap = ARENA_INITIAL_CAP;
         Self {
             entries: VecDeque::with_capacity(32),
             total_bytes: 0,
