@@ -8,6 +8,7 @@
 //! benefit. libzmq itself aborts on internal errors, so abort-on-panic
 //! is acceptable behavior for a drop-in replacement.
 
+#![deny(unsafe_op_in_unsafe_fn)]
 // Crate-level: 53 of 64 extern "C" fns trigger this lint. Per-function
 // #[expect] would be pure noise for a C API crate.
 #![expect(clippy::not_unsafe_ptr_arg_deref)]

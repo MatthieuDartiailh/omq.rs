@@ -145,9 +145,9 @@ pub struct Options {
 
     /// Payload size at which the encoder switches from contiguous arena
     /// copies to zero-copy gather-write. Messages smaller than this are
-    /// appended into a shared 256 KiB arena buffer (one iovec per batch);
-    /// larger messages produce per-frame iovecs referencing the original
-    /// `Bytes` payload.
+    /// appended into a shared arena buffer (one iovec per batch); larger
+    /// messages produce per-frame iovecs referencing the original `Bytes`
+    /// payload.
     ///
     /// `None` uses the default (`ARENA_THRESHOLD`, 4 KiB). Raise this
     /// when payloads are owned by an external runtime (e.g. Python

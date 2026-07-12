@@ -1,3 +1,4 @@
+#![deny(unsafe_op_in_unsafe_fn)]
 //! Bounded SPSC ring with ypipe-style batched flush/prefetch.
 //!
 //! Three pointers:

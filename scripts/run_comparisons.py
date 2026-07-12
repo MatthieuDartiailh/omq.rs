@@ -204,10 +204,18 @@ def libzmq_version() -> str:
 
 # ── process management ────────────────────────────────────────────
 
-def spawn_process(binary: str, *args: str, env: dict | None = None) -> subprocess.Popen:
+MEASURED_CPU = "0,1"
+OTHER_CPU = "2,3,4,5"
+
+
+def spawn_process(binary: str, *args: str, env: dict | None = None,
+                  cpu: str | None = None) -> subprocess.Popen:
     merged = {**os.environ, **(env or {})} if env else None
+    cmd = [binary, *args]
+    if cpu is not None:
+        cmd = ["taskset", "-c", cpu] + cmd
     return _register_proc(subprocess.Popen(
-        [binary, *args],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -231,11 +239,15 @@ def read_bound_port(proc: subprocess.Popen, timeout: float = 5.0) -> int | None:
 
 
 def capture_with_cpu(binary: str, *args: str, timeout: int = 15,
-                     env: dict | None = None) -> tuple[str, float]:
+                     env: dict | None = None,
+                     cpu: str | None = None) -> tuple[str, float]:
     """Run a single-process bench and return (stdout, cpu_seconds)."""
     merged = {**os.environ, **(env or {})} if env else None
+    cmd = [binary, *args]
+    if cpu is not None:
+        cmd = ["taskset", "-c", cpu] + cmd
     proc = _register_proc(subprocess.Popen(
-        [binary, *args],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=False,
@@ -268,10 +280,14 @@ def capture_with_cpu(binary: str, *args: str, timeout: int = 15,
 
 
 def capture_process(binary: str, *args: str, timeout: int = 15,
-                    env: dict | None = None) -> str:
+                    env: dict | None = None,
+                    cpu: str | None = None) -> str:
     merged = {**os.environ, **(env or {})} if env else None
+    cmd = [binary, *args]
+    if cpu is not None:
+        cmd = ["taskset", "-c", cpu] + cmd
     proc = _register_proc(subprocess.Popen(
-        [binary, *args],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -464,7 +480,8 @@ def _run_throughput_once(
 
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
-    push = spawn_process(binary, "push", addr, str(size), env=cell_env)
+    push = spawn_process(binary, "push", addr, str(size), env=cell_env,
+                         cpu=MEASURED_CPU)
     if transport in ("ipc", "ws"):
         time.sleep(0.2)
         connect_addr = addr
@@ -476,7 +493,7 @@ def _run_throughput_once(
         connect_addr = str(port)
     try:
         output = capture_process(binary, "pull", connect_addr, str(size), dur,
-                                 env=recv_env)
+                                 env=recv_env, cpu=OTHER_CPU)
         push_cpu = read_proc_cpu(push.pid)
     finally:
         _hard_kill(push)
@@ -541,7 +558,7 @@ def _run_pubsub_once(
         pub_args = [binary, "pub", addr, str(size)]
         if pub_needs_peers:
             pub_args.append(str(peers))
-        pub_ = spawn_process(*pub_args, env=cell_env)
+        pub_ = spawn_process(*pub_args, env=cell_env, cpu=MEASURED_CPU)
         if transport in ("ipc", "ws"):
             time.sleep(0.2)
             connect_addr = addr
@@ -556,7 +573,8 @@ def _run_pubsub_once(
         try:
             for _ in range(peers):
                 subs.append(spawn_process(binary, "sub", connect_addr,
-                                          str(size), dur, env=recv_env))
+                                          str(size), dur, env=recv_env,
+                                          cpu=OTHER_CPU))
             time.sleep(0.05)
             timeout_s = max(int(duration) + 5, 8)
             for s in subs:
@@ -649,7 +667,7 @@ def _run_fanout_once(
     push_args = [binary, push_subcmd, addr, str(size)]
     if push_needs_peers:
         push_args.append(str(peers))
-    push = spawn_process(*push_args, env=cell_env)
+    push = spawn_process(*push_args, env=cell_env, cpu=MEASURED_CPU)
     if transport in ("ipc", "ws"):
         time.sleep(0.2)
         connect_addr = addr
@@ -669,7 +687,8 @@ def _run_fanout_once(
     try:
         for _ in range(peers):
             pulls.append(spawn_process(binary, "pull", connect_addr,
-                                       str(size), str(duration), env=recv_env))
+                                       str(size), str(duration), env=recv_env,
+                                       cpu=OTHER_CPU))
         time.sleep(0.05)
         time.sleep(max(0.0, start_at + PEER_WARMUP_SECS - time.time()))
         push_cpu_before = read_proc_cpu(push.pid)
@@ -779,7 +798,7 @@ def _run_fanin_once(
     pull_args = [binary, pull_subcmd, addr, str(size), dur]
     if pull_needs_peers:
         pull_args.append(str(peers))
-    pull = spawn_process(*pull_args, env=cell_env)
+    pull = spawn_process(*pull_args, env=cell_env, cpu=MEASURED_CPU)
     if transport in ("ipc", "ws"):
         time.sleep(0.2)
         connect_addr = addr
@@ -793,7 +812,8 @@ def _run_fanin_once(
     try:
         for _ in range(peers):
             pushers.append(spawn_process(binary, "push-connect", connect_addr,
-                                         str(size), env=cell_env))
+                                         str(size), env=cell_env,
+                                         cpu=OTHER_CPU))
         stdout, _ = pull.communicate(timeout=max(int(duration) + 10, 15))
         _deregister_proc(pull)
         pusher_cpus = [read_proc_cpu(p.pid) for p in pushers]
@@ -851,7 +871,8 @@ def run_latency_cell(
 
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
-    rep = spawn_process(binary, "rep", addr, str(size), env=env)
+    rep = spawn_process(binary, "rep", addr, str(size), env=env,
+                        cpu=OTHER_CPU)
     if transport in ("ipc", "ws"):
         time.sleep(0.2)
         connect_addr = addr
@@ -865,7 +886,7 @@ def run_latency_cell(
         output = capture_process(
             binary, "req", connect_addr, str(size),
             str(iterations), str(warmup),
-            timeout=timeout, env=env,
+            timeout=timeout, env=env, cpu=MEASURED_CPU,
         )
         rep_cpu = read_proc_cpu(rep.pid)
     finally:
@@ -972,7 +993,7 @@ IMPLS = {
         "fanout_push_subcmd": "push-fanout",
         "fanio_needs_peer_count": True,
         "supports_pubsub": True,
-        "env": {"OMQ_BENCH_TOKIO_THREADS": "4"},
+        "env": {"OMQ_BENCH_TOKIO_THREADS": "2"},
     },
     "libzmq": {
         "prefix": "z",

@@ -19,20 +19,18 @@ use omq_proto::proto::{Command, Connection, Event};
 
 use super::compression_pool::CompressionPool;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
-use super::transmit_slot::{PeerTransmitSlot, TransmitChunk};
+use super::transmit_slot::PeerTransmitSlot;
 use crate::routing::fallback_queue::FallbackReceiver;
 use omq_proto::frame_buffer::FrameBuffer;
 
-pub(crate) type TransmitSlotProducerHandle =
-    Arc<std::sync::Mutex<Option<yring::Producer<TransmitChunk>>>>;
-
 /// Where the driver routes decoded inbound messages.
 ///
-/// `Channel`: the existing path via `async_channel` (pure-Rust callers).
-/// `Yring`: direct push to a lock-free SPSC ring + external signal,
-/// used by omq-libzmq to eliminate the recv-pump relay task.
+/// `Channel`: push into the shared recv pipe (yring + Mutex).
+/// `Yring`: direct push to a per-peer lock-free SPSC ring + external
+/// signal, used by omq-libzmq for direct delivery.
+#[allow(private_interfaces)]
 pub enum RecvSink {
-    Channel(async_channel::Sender<Message>),
+    Channel(Arc<crate::socket::recv::SharedRecvPipe>),
     Yring(YringSink),
 }
 
@@ -115,7 +113,7 @@ impl RecvSinkConfig {
 impl std::fmt::Debug for RecvSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Channel(tx) => f.debug_tuple("Channel").field(tx).finish(),
+            Self::Channel(pipe) => f.debug_tuple("Channel").field(pipe).finish(),
             Self::Yring(y) => f
                 .debug_struct("Yring")
                 .field("producer", &y.producer)
@@ -144,48 +142,60 @@ impl YringSink {
 }
 
 impl RecvSink {
+    /// Non-blocking push. Returns the message back if the yring is full.
+    /// Channel variant always succeeds (awaits space).
+    pub(crate) async fn try_send(&mut self, m: Message) -> Option<Message> {
+        match self {
+            Self::Channel(pipe) => {
+                let _ = pipe.send(m).await;
+                None
+            }
+            Self::Yring(sink) => match sink.producer.push(m) {
+                Ok(()) => {
+                    sink.flush_and_signal();
+                    None
+                }
+                Err(returned) => Some(returned),
+            },
+        }
+    }
+
     async fn send(&mut self, m: Message) -> bool {
         match self {
-            Self::Channel(tx) => tx.send(m).await.is_ok(),
+            Self::Channel(pipe) => pipe.send(m).await.is_ok(),
             Self::Yring(sink) => {
                 let mut msg = m;
                 loop {
-                    match sink.producer.push(msg) {
-                        Ok(()) => {
-                            sink.flush_and_signal();
-                            return true;
-                        }
-                        Err(returned) => {
-                            msg = returned;
-                            if sink.producer.is_consumer_dropped() {
-                                return false;
-                            }
-                            let notified = sink.space.notified();
-                            tokio::pin!(notified);
-                            notified.as_mut().enable();
-                            match sink.producer.push(msg) {
-                                Ok(()) => {
-                                    // Can't call flush_and_signal(): `notified`
-                                    // borrows `sink.space` until end of scope.
-                                    if let yring::FlushResult::Flushed {
-                                        was_empty: true, ..
-                                    } = sink.producer.flush_and_check()
-                                    {
-                                        (sink.signal)();
-                                    }
-                                    return true;
-                                }
-                                Err(returned2) => {
-                                    msg = returned2;
-                                    tokio::select! {
-                                        biased;
-                                        () = notified => {}
-                                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                                    }
-                                }
-                            }
-                        }
+                    if let Err(returned) = sink.producer.push(msg) {
+                        msg = returned;
+                    } else {
+                        sink.flush_and_signal();
+                        return true;
                     }
+                    if sink.producer.is_consumer_dropped() {
+                        return false;
+                    }
+                    let notified = sink.space.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if let Err(returned) = sink.producer.push(msg) {
+                        msg = returned;
+                        tokio::select! {
+                            biased;
+                            () = notified => {}
+                            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                        }
+                        continue;
+                    }
+                    // Field-level borrows: notified holds sink.space,
+                    // but producer and signal are disjoint fields.
+                    if let yring::FlushResult::Flushed {
+                        was_empty: true, ..
+                    } = sink.producer.flush_and_check()
+                    {
+                        (sink.signal)();
+                    }
+                    return true;
                 }
             }
         }
@@ -305,7 +315,6 @@ pub struct PeerDriverHandle {
     pub inbox: mpsc::Sender<PeerDriverCommand>,
     pub cancel: CancellationToken,
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
-    pub(crate) transmit_slot_tx: Option<TransmitSlotProducerHandle>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
 }
 
@@ -342,8 +351,8 @@ where
     /// Receive-side message decoder. Symmetric to `encoder`.
     decoder: Option<MessageDecoder>,
     /// Shared round-robin send queue. When set, the driver reads outbound
-    /// messages directly from this queue (bypassing the pump task
-    /// hop through `inbox`). `None` for non-round-robin socket types.
+    /// messages directly from this queue. `None` for non-round-robin
+    /// socket types.
     shared_msg_rx: Option<FallbackReceiver>,
     /// Direct recv channel. When set, inbound `Event::Message` frames are
     /// pushed straight into the user-facing recv channel without going through
@@ -358,11 +367,11 @@ where
     offload_threshold: usize,
     /// Per-peer encode slot: the socket handle encodes ZMTP frames into
     /// this slot's `FrameBuffer`, and the driver flushes them to the
-    /// wire. Replaces the `DirectIo` pattern where the handle locked the
-    /// writer directly.
+    /// wire.
     transmit_slot: Option<Arc<PeerTransmitSlot>>,
     send_pipe_rx: Option<SendPipeConsumer>,
     arena_threshold: usize,
+    arena_cap: usize,
 }
 
 impl<T> ConnectionDriver<T>
@@ -414,6 +423,7 @@ where
             transmit_slot: None,
             send_pipe_rx: None,
             arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
+            arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
         }
     }
 
@@ -444,7 +454,7 @@ where
     }
 
     /// Provide the shared round-robin send queue. The driver polls this
-    /// directly after handshake, eliminating the pump-task intermediary.
+    /// directly after handshake.
     #[must_use]
     pub(crate) fn with_shared_rx(mut self, rx: FallbackReceiver) -> Self {
         self.shared_msg_rx = Some(rx);
@@ -457,8 +467,11 @@ where
     /// whose recv path is a plain fair-queue delivery with no per-type
     /// post-processing.
     #[must_use]
-    pub fn with_recv_direct(mut self, tx: async_channel::Sender<Message>) -> Self {
-        self.recv_direct = Some(RecvSink::Channel(tx));
+    pub(crate) fn with_recv_direct(
+        mut self,
+        pipe: Arc<crate::socket::recv::SharedRecvPipe>,
+    ) -> Self {
+        self.recv_direct = Some(RecvSink::Channel(pipe));
         self
     }
 
@@ -490,6 +503,12 @@ where
     #[must_use]
     pub(crate) fn with_arena_threshold(mut self, threshold: usize) -> Self {
         self.arena_threshold = threshold;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_arena_cap(mut self, cap: usize) -> Self {
+        self.arena_cap = cap;
         self
     }
 
@@ -530,14 +549,16 @@ where
             transmit_slot,
             mut send_pipe_rx,
             arena_threshold,
+            arena_cap,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
         let (mut reader, mut writer) = split(stream);
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
         let mut large_recv_buf = BytesMut::new();
-        let mut eq = FrameBuffer::with_arena_threshold(arena_threshold);
+        let mut eq = FrameBuffer::with_config(arena_threshold, arena_cap);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
+        let mut arena_buf: Vec<u8> = Vec::with_capacity(4096);
         let mut pipe_batch: Vec<Message> = Vec::with_capacity(SHARED_MAX_BATCH_MSGS);
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> =
@@ -620,20 +641,10 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    let chunk = if decoder.is_some() {
-                        // Decoders (lz4 etc.) consume the full input each call,
-                        // so split().freeze() would leave a 0-cap BytesMut that
-                        // needs reallocation. Copy + clear reuses the buffer.
-                        let b = Bytes::copy_from_slice(&read_buf);
-                        read_buf.clear();
-                        b
-                    } else {
-                        let chunk = read_buf.split().freeze();
-                        if read_buf.capacity() < READ_BUF_SIZE {
-                            read_buf.reserve(READ_BUF_SIZE);
-                        }
-                        chunk
-                    };
+                    // Copy + clear: allocates proportional to actual
+                    // data, preserves the 128 KiB read buffer capacity.
+                    let chunk = Bytes::copy_from_slice(&read_buf);
+                    read_buf.clear();
                     if let Err(e) = codec.handle_input(chunk) {
                         while let Some(ev) = codec.poll_event() {
                             let _ = peer_out
@@ -779,7 +790,8 @@ where
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
                     drain_transmit_slot(
-                        transmit_slot.as_ref().unwrap(), &mut drain_buf, &mut writer,
+                        transmit_slot.as_ref().unwrap(), &mut drain_buf,
+                        &mut arena_buf, &mut writer,
                     ).await?;
                 },
 
@@ -868,8 +880,23 @@ async fn flush_all<W: AsyncWrite + Unpin>(
 async fn drain_transmit_slot<W: AsyncWrite + Unpin>(
     slot: &PeerTransmitSlot,
     drain_buf: &mut Vec<Bytes>,
+    arena_buf: &mut Vec<u8>,
     writer: &mut W,
 ) -> io::Result<()> {
+    // Fast path: all content is in the FrameBuffer arena (inline
+    // messages). Copy into the reusable staging buffer and write
+    // directly, preserving the arena capacity.
+    arena_buf.clear();
+    if let Some(drain) = slot.try_drain_arena_only(arena_buf) {
+        if !arena_buf.is_empty() {
+            writer.write_all(arena_buf).await?;
+        }
+        if drain.space_available {
+            slot.space_available.notify_waiters();
+        }
+        return Ok(());
+    }
+
     let mut budget = DrainBudget::WIRE_DRAIN;
     loop {
         drain_buf.clear();
@@ -1030,6 +1057,7 @@ fn drain_offload_result(
     codec: &Connection,
     eq: &mut FrameBuffer,
 ) -> Result<()> {
+    #[cfg(feature = "lz4")]
     if let (Some(enc), Some(pool)) = (pool_enc, pool) {
         pool.put(enc);
     }
@@ -1324,7 +1352,6 @@ mod tests {
                 inbox: c_inbox_tx,
                 cancel: c_cancel,
                 transmit_slot: None,
-                transmit_slot_tx: None,
                 send_pipe: None,
             },
             EventAdapter { rx: c_evt_rx },
@@ -1332,7 +1359,6 @@ mod tests {
                 inbox: s_inbox_tx,
                 cancel: s_cancel,
                 transmit_slot: None,
-                transmit_slot_tx: None,
                 send_pipe: None,
             },
             EventAdapter { rx: s_evt_rx },

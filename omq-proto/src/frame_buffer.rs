@@ -6,6 +6,8 @@ use crate::message::Message;
 use crate::proto::frame;
 
 pub const ARENA_THRESHOLD: usize = 4 * 1024;
+pub const ARENA_INITIAL_CAP: usize = 16 * 1024;
+pub const ARENA_INITIAL_CAP_IPC: usize = 64 * 1024;
 
 /// An entry in the encoded output sequence: either a range within the
 /// arena buffer or an external zero-copy `Bytes` (large payload).
@@ -30,9 +32,9 @@ pub struct FrameBuffer {
     /// High-water mark of arena capacity. After `split().freeze()`, the
     /// arena loses its allocation (frozen `Bytes` holds the Arc). On the
     /// next encode, `BytesMut::reserve` allocates fresh. Without this
-    /// hint it starts small and cascades (256K→512K→1M→2M), copying all
-    /// existing data at each step. Pre-reserving to the peak eliminates
-    /// the cascade: one allocation at full size, zero data copies.
+    /// hint it starts small and grows repeatedly, copying all existing
+    /// data at each step. Pre-reserving to the peak eliminates the
+    /// cascade: one allocation at full size, zero data copies.
     arena_peak_cap: usize,
 }
 
@@ -47,18 +49,17 @@ impl std::fmt::Debug for FrameBuffer {
 
 impl FrameBuffer {
     pub fn new() -> Self {
-        Self::with_arena_threshold(ARENA_THRESHOLD)
+        Self::with_config(ARENA_THRESHOLD, ARENA_INITIAL_CAP)
     }
 
-    pub fn with_arena_threshold(arena_threshold: usize) -> Self {
-        let cap = 256 * 1024;
+    pub fn with_config(arena_threshold: usize, arena_cap: usize) -> Self {
         Self {
             entries: VecDeque::with_capacity(32),
             total_bytes: 0,
-            arena: BytesMut::with_capacity(cap),
+            arena: BytesMut::with_capacity(arena_cap),
             arena_threshold,
             arena_mark: 0,
-            arena_peak_cap: cap,
+            arena_peak_cap: arena_cap,
         }
     }
 

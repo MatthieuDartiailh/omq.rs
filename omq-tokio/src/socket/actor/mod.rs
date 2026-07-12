@@ -164,7 +164,7 @@ pub(crate) struct SocketDriver {
     socket_type: SocketType,
     options: Options,
     cmd_rx: mpsc::Receiver<SocketCommand>,
-    recv_tx: async_channel::Sender<Message>,
+    recv_tx: Arc<super::recv::SharedRecvPipe>,
     cancel: CancellationToken,
     internal_tx: mpsc::Sender<InternalEvent>,
     internal_rx: mpsc::Receiver<InternalEvent>,
@@ -203,7 +203,6 @@ pub(crate) struct SocketDriver {
     close_deadline: Option<Instant>,
     close_ack: Option<oneshot::Sender<Result<()>>>,
     spsc: super::recv::SpscHandles,
-    transmit_slots: super::transmit_slot_cache::TransmitSlotCache,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     subscribe_count: Arc<AtomicU64>,
@@ -215,14 +214,13 @@ impl SocketDriver {
         socket_type: SocketType,
         options: Options,
         cmd_rx: mpsc::Receiver<SocketCommand>,
-        recv_tx: async_channel::Sender<Message>,
+        recv_tx: Arc<super::recv::SharedRecvPipe>,
         cancel: CancellationToken,
         monitor: MonitorPublisher,
         send_strategy: SendStrategy,
         spsc: super::recv::SpscHandles,
         type_state: Arc<Mutex<TypeState>>,
         req_awaiting_reply: Arc<AtomicBool>,
-        transmit_slots: super::transmit_slot_cache::TransmitSlotCache,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         subscribe_count: Arc<AtomicU64>,
     ) -> Self {
@@ -256,7 +254,6 @@ impl SocketDriver {
             close_deadline: None,
             close_ack: None,
             spsc,
-            transmit_slots,
             compression_pool: None,
             recv_sink_config,
             subscribe_count,
@@ -390,6 +387,7 @@ impl SocketDriver {
         self.close_ack = ack;
         // Close the recv channel so any awaiting recv() returns Closed.
         self.recv_tx.close();
+        // close() sets the closed flag; existing ring data can still be drained.
         // Stop accepting new peers.
         for l in &self.listeners {
             l.cancel.cancel();

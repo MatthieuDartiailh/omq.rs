@@ -207,10 +207,9 @@ async fn async_main(args: Vec<String>) {
 }
 
 async fn run_pub(ep: Endpoint, size: usize, peers: usize) {
-    let pub_ = Socket::new(
-        SocketType::Pub,
-        bench_options(size).on_mute(omq_tokio::OnMute::DropNewest),
-    );
+    let mut opts = bench_options(size);
+    opts.xpub_nodrop = true;
+    let pub_ = Socket::new(SocketType::Pub, opts);
     let monitor = pub_.monitor();
     let bound = pub_.bind(ep).await.expect("pub bind");
     print_bound_port(&bound);
@@ -367,10 +366,9 @@ async fn run_sub(ep: Endpoint, size: usize, duration: Duration) {
 
 async fn run_inproc_pubsub(name: String, size: usize, duration: Duration, peers: usize) {
     let ep = Endpoint::Inproc { name };
-    let pub_ = Socket::new(
-        SocketType::Pub,
-        bench_options(size).on_mute(omq_tokio::OnMute::DropNewest),
-    );
+    let mut opts = bench_options(size);
+    opts.xpub_nodrop = true;
+    let pub_ = Socket::new(SocketType::Pub, opts);
     pub_.bind(ep.clone()).await.expect("pub bind");
 
     let mut subs = Vec::with_capacity(peers);

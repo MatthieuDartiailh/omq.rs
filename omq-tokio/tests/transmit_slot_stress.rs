@@ -1,6 +1,5 @@
 //! Stress tests for `PeerTransmitSlot` refactor edge cases.
 use bytes::Bytes;
-use omq_proto::error::TrySendError;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
@@ -46,20 +45,16 @@ async fn push_pull_burst_single_peer() {
 }
 
 #[tokio::test]
-async fn try_send_single_peer_full_transmit_slot_preserves_fifo() {
+async fn try_send_single_peer_send_pipe_preserves_fifo() {
     let ep = tcp_ep(free_port());
-    let push = Socket::new(SocketType::Push, Options::default().transmit_slot_cap(1));
+    let push = Socket::new(SocketType::Push, Options::default().send_hwm(2));
     let pull = Socket::new(SocketType::Pull, opts());
     pull.bind(ep.clone()).await.unwrap();
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     push.try_send(Message::single("first")).unwrap();
-    let returned = match push.try_send(Message::single("second")) {
-        Err(TrySendError::Full(msg)) => msg,
-        other => panic!("expected full wire slot, got {other:?}"),
-    };
-    push.send(returned).await.unwrap();
+    push.try_send(Message::single("second")).unwrap();
 
     let first = tokio::time::timeout(TIMEOUT, pull.recv())
         .await

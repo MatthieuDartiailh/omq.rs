@@ -227,33 +227,37 @@ impl SocketDriver {
             .options
             .arena_threshold
             .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
+        let arena_cap = if matches!(endpoint, Endpoint::Ipc(_)) {
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP_IPC
+        } else {
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP
+        };
         let uses_crypto = self.options.mechanism.has_frame_transform();
-        let (slot, transmit_slot_tx) = if uses_crypto {
-            (None, None)
+        let slot = if uses_crypto {
+            None
         } else {
             let transmit_slot_cap = self
                 .options
                 .transmit_slot_cap
                 .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
             let transmit_slot_msg_cap = self.options.send_hwm.unwrap_or(1000).max(1) as usize;
-            let (s, tx) = crate::engine::transmit_slot::PeerTransmitSlot::new(
+            Some(crate::engine::transmit_slot::PeerTransmitSlot::new(
                 peer_id,
                 has_transform,
                 passthrough_info,
                 arena_threshold,
+                arena_cap,
                 transmit_slot_cap,
                 transmit_slot_msg_cap,
                 #[cfg(feature = "ws")]
                 is_ws,
                 #[cfg(feature = "ws")]
                 ws_masked,
-            );
-            (
-                Some(s),
-                Some(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
-            )
+            ))
         };
-        let driver = driver.with_arena_threshold(arena_threshold);
+        let driver = driver
+            .with_arena_threshold(arena_threshold)
+            .with_arena_cap(arena_cap);
         let driver = match slot {
             Some(ref s) => driver.with_transmit_slot(s.clone()),
             None => driver,
@@ -304,7 +308,6 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel,
                     transmit_slot: slot.clone(),
-                    transmit_slot_tx,
                     send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
@@ -444,7 +447,6 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
                     transmit_slot: None,
-                    transmit_slot_tx: None,
                     send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
@@ -574,7 +576,6 @@ impl SocketDriver {
         );
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;
-        PeerLifecycle::new(self).update_transmit_slot();
     }
 
     async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
@@ -721,7 +722,7 @@ struct InprocDriverCtx {
     cancel: tokio_util::sync::CancellationToken,
     peer_props: omq_proto::proto::command::PeerProperties,
     max_message_size: Option<usize>,
-    recv_direct: Option<async_channel::Sender<omq_proto::message::Message>>,
+    recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
     spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
     recv_sink: Option<crate::engine::RecvSink>,
     shared_rx: Option<crate::routing::fallback_queue::FallbackReceiver>,
@@ -871,29 +872,9 @@ async fn inproc_peer_driver(
                         }
                         let m = try_push_spsc(spsc.as_ref(), m);
                         if let Some(m) = m {
-                            let m = if let Some(ref mut sink) = recv_sink {
-                                match sink {
-                                    crate::engine::RecvSink::Channel(tx) => {
-                                        let _ = tx.send(m).await;
-                                        None
-                                    }
-                                    crate::engine::RecvSink::Yring(yring_sink) => {
-                                        match yring_sink.producer.push(m) {
-                                            Ok(()) => {
-                                                if let yring::FlushResult::Flushed {
-                                                    was_empty: true, ..
-                                                } = yring_sink.producer.flush_and_check()
-                                                {
-                                                    (yring_sink.signal)();
-                                                }
-                                                None
-                                            }
-                                            Err(returned) => Some(returned),
-                                        }
-                                    }
-                                }
-                            } else {
-                                Some(m)
+                            let m = match recv_sink.as_mut() {
+                                Some(sink) => sink.try_send(m).await,
+                                None => Some(m),
                             };
                             if let Some(m) = m
                                 && !route_inproc_message(
@@ -953,13 +934,13 @@ fn try_push_spsc(
 /// Returns `true` if sent, `false` if the channel closed.
 async fn route_inproc_message(
     m: Message,
-    recv_direct: Option<&async_channel::Sender<Message>>,
+    recv_direct: Option<&std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
     peer_out: &mpsc::Sender<(u64, crate::engine::PeerEvent)>,
     peer_id: u64,
 ) -> bool {
     use crate::engine::PeerEvent;
     match recv_direct {
-        Some(tx) => tx.send(m).await.is_ok(),
+        Some(pipe) => pipe.send(m).await.is_ok(),
         None => peer_out
             .send((peer_id, PeerEvent::Event(ZmtpEvent::Message(m))))
             .await

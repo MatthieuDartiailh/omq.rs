@@ -38,7 +38,7 @@ LABELS = {
     "libzmq": "libzmq v4.3.5 (1T)",
     "libzmq-mt": "libzmq v4.3.5 (4T)",
     "omq-tokio": "omq-tokio (1T)",
-    "omq-tokio-mt": "omq-tokio (4T)",
+    "omq-tokio-mt": "omq-tokio (2T)",
     "zmq.rs": "zmq.rs v0.6.0 [6T]",
     "rzmq": "rzmq v0.5.24 [6T]",
     "rzmq-iouring": "rzmq v0.5.24 (io_uring) [6T]",

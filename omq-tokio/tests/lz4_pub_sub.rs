@@ -237,9 +237,7 @@ async fn pub_sub_lz4_sharded_fan_out_deferred_large_message_preserves_order() {
     for _ in 0..100 {
         trainer.add_sample(sample.as_bytes());
     }
-    let opts = Options::default()
-        .compression_dict(bytes::Bytes::from(trainer.train()))
-        .compression_offload_threshold(Some(1));
+    let opts = Options::default().compression_dict(bytes::Bytes::from(trainer.train()));
 
     let publisher = Socket::new(SocketType::Pub, opts.clone());
     let ep = bind_lz4_loopback(&publisher).await;

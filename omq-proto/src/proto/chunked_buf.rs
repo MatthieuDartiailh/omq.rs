@@ -44,7 +44,7 @@ impl ChunkedInputBuf {
         self.total_len
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.total_len == 0
     }

@@ -1,4 +1,5 @@
-//! Socket recv mux for async-channel plus per-peer yring fast paths.
+//! Socket recv mux: shared recv pipe (yring + Mutex) plus per-peer
+//! yring fast paths. Zero heap allocations per message.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,7 +21,7 @@ pub(crate) type SpscSendRing = Arc<ArcSwapOption<InprocSpsc>>;
 pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
 
 /// Notified by the actor when the consumers Vec changes. Wakes
-/// any `recv()` that's blocked on the normal `async_channel` path.
+/// any `recv()` that's blocked so it re-drains with the updated list.
 pub(crate) type SpscActivated = Arc<tokio::sync::Notify>;
 
 /// Bumped by the actor whenever the consumers Vec changes. Lets
@@ -54,6 +55,115 @@ impl std::fmt::Debug for TcpYringConsumer {
 
 pub(crate) type TcpConsumers = Arc<RwLock<Vec<Arc<TcpYringConsumer>>>>;
 
+// ---------------------------------------------------------------------------
+// SharedRecvPipe: MPSC yring-based recv channel
+// ---------------------------------------------------------------------------
+
+/// Shared recv pipe. Replaces `async_channel` for the socket recv path.
+///
+/// Producers (actor, connection drivers) hold `Arc<SharedRecvPipe>` and
+/// call [`send`](Self::send). The single consumer
+/// ([`SpscAwareRecv`]) owns the `yring::Consumer` and drains it.
+///
+/// Zero heap allocations on both sides. The yring is pre-allocated at
+/// construction; `tokio::sync::Notify` uses intrusive waiters.
+pub(crate) struct SharedRecvPipe {
+    producer: Mutex<yring::Producer<Message>>,
+    notify: Arc<tokio::sync::Notify>,
+    space: Arc<tokio::sync::Notify>,
+    closed: AtomicBool,
+}
+
+impl std::fmt::Debug for SharedRecvPipe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedRecvPipe")
+            .field("closed", &self.closed.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl SharedRecvPipe {
+    /// Blocking send. Waits for space if the ring is full.
+    pub(crate) async fn send(&self, msg: Message) -> Result<()> {
+        let mut msg = msg;
+        loop {
+            let space_notified = self.space.notified();
+            tokio::pin!(space_notified);
+            space_notified.as_mut().enable();
+
+            {
+                let mut prod = self.producer.lock().unwrap();
+                if self.closed.load(Ordering::Acquire) || prod.is_consumer_dropped() {
+                    return Err(Error::Closed);
+                }
+                match prod.push(msg) {
+                    Ok(()) => {
+                        prod.flush();
+                        drop(prod);
+                        self.notify.notify_one();
+                        return Ok(());
+                    }
+                    Err(returned) => {
+                        msg = returned;
+                    }
+                }
+            }
+            space_notified.await;
+        }
+    }
+
+    /// Close the pipe. New sends return `Error::Closed`. Existing
+    /// messages in the ring can still be drained by the consumer.
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        if let Ok(mut prod) = self.producer.lock() {
+            prod.close();
+        }
+        self.notify.notify_waiters();
+        self.space.notify_waiters();
+    }
+}
+
+impl Drop for SharedRecvPipe {
+    fn drop(&mut self) {
+        if !*self.closed.get_mut() {
+            self.producer.get_mut().unwrap().close();
+        }
+        self.notify.notify_waiters();
+        self.space.notify_waiters();
+    }
+}
+
+/// Create a recv pipe pair.
+///
+/// Returns `(producer_pipe, consumer, data_notify, space_notify)`.
+/// The `data_notify` is fired by producers on push; the consumer
+/// awaits it. `space_notify` is fired by the consumer on release;
+/// blocked producers await it.
+pub(crate) fn recv_pipe(
+    capacity: usize,
+) -> (
+    Arc<SharedRecvPipe>,
+    yring::Consumer<Message>,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let (prod, cons) = yring::spsc(capacity);
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let space = Arc::new(tokio::sync::Notify::new());
+    let pipe = Arc::new(SharedRecvPipe {
+        producer: Mutex::new(prod),
+        notify: notify.clone(),
+        space: space.clone(),
+        closed: AtomicBool::new(false),
+    });
+    (pipe, cons, notify, space)
+}
+
+// ---------------------------------------------------------------------------
+// SpscHandles / SpscAwareRecv
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 pub(crate) struct SpscHandles {
     pub consumers: SpscConsumers,
@@ -80,11 +190,10 @@ impl Default for SpscHandles {
 }
 
 /// Recv channel that integrates per-peer SPSC awareness. Fair-queues
-/// across per-peer yring consumers (inproc + TCP), then falls back to
-/// the `async_channel`.
+/// across per-peer yring consumers (inproc + TCP) and the shared recv
+/// pipe, returning messages one at a time.
 #[derive(Debug)]
 pub(crate) struct SpscAwareRecv {
-    rx: async_channel::Receiver<Message>,
     /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
     consumers: SpscConsumers,
     /// Per-TCP-peer yring consumers. Actor appends on handshake.
@@ -101,23 +210,51 @@ pub(crate) struct SpscAwareRecv {
     /// Cheap guard for the send fast path. Avoids an `ArcSwap` load on the
     /// common TCP/no-inproc path.
     send_ring_available: Arc<AtomicBool>,
-    /// Batched messages drained from consumers (inproc + TCP).
-    inproc_cache: Mutex<VecDeque<Message>>,
-    /// Cached clone of consumers Vecs, refreshed when generation changes.
-    cached_consumers: Mutex<CachedConsumers>,
+    /// Data arrival signal from the shared recv pipe.
+    recv_pipe_notify: Arc<tokio::sync::Notify>,
+    /// Space-available signal for the shared recv pipe.
+    recv_pipe_space: Arc<tokio::sync::Notify>,
+    /// Drain state: cached consumer snapshots, message batch buffer,
+    /// and the shared recv pipe consumer.
+    drain_state: Mutex<DrainState>,
 }
 
 #[derive(Debug)]
-struct CachedConsumers {
+struct DrainState {
     generation: u64,
     inproc: Vec<Arc<InprocSpsc>>,
     tcp: Vec<Arc<TcpYringConsumer>>,
+    batch: VecDeque<Message>,
+    recv_consumer: yring::Consumer<Message>,
+}
+
+enum DrainResult {
+    Message(Message),
+    Empty,
+    Closed,
+}
+
+fn drain_yring(consumer: &mut yring::Consumer<Message>, batch: &mut VecDeque<Message>) -> bool {
+    let got = consumer.prefetch();
+    if got > 0 {
+        while let Some(msg) = consumer.pop() {
+            batch.push_back(msg);
+        }
+        consumer.release();
+        true
+    } else {
+        false
+    }
 }
 
 impl SpscAwareRecv {
-    pub(crate) fn new(rx: async_channel::Receiver<Message>, handles: SpscHandles) -> Self {
+    pub(crate) fn new(
+        recv_consumer: yring::Consumer<Message>,
+        recv_pipe_notify: Arc<tokio::sync::Notify>,
+        recv_pipe_space: Arc<tokio::sync::Notify>,
+        handles: SpscHandles,
+    ) -> Self {
         Self {
-            rx,
             consumers: handles.consumers,
             tcp_consumers: handles.tcp_consumers,
             consumer_generation: handles.consumer_generation,
@@ -125,67 +262,64 @@ impl SpscAwareRecv {
             activated: handles.activated,
             send_ring: handles.send_ring,
             send_ring_available: handles.send_ring_available,
-            inproc_cache: Mutex::new(VecDeque::new()),
-            cached_consumers: Mutex::new(CachedConsumers {
+            recv_pipe_notify,
+            recv_pipe_space,
+            drain_state: Mutex::new(DrainState {
                 generation: u64::MAX,
                 inproc: Vec::new(),
                 tcp: Vec::new(),
+                batch: VecDeque::new(),
+                recv_consumer,
             }),
         }
     }
 
-    fn try_drain_consumers(&self) -> Option<Message> {
-        if self.consumer_generation.load(Ordering::Relaxed) == 0 {
-            return None;
+    fn try_drain(&self) -> DrainResult {
+        let mut guard = self.drain_state.lock().unwrap();
+
+        if let Some(msg) = guard.batch.pop_front() {
+            return DrainResult::Message(msg);
         }
-        {
-            let mut cache = self.inproc_cache.lock().unwrap();
-            if let Some(msg) = cache.pop_front() {
-                return Some(msg);
-            }
-        }
+
         let current_gen = self.consumer_generation.load(Ordering::Acquire);
-        let mut cached = self.cached_consumers.lock().unwrap();
-        if cached.generation != current_gen {
-            cached.inproc.clone_from(&self.consumers.read().unwrap());
-            cached.tcp.clone_from(&self.tcp_consumers.read().unwrap());
-            cached.generation = current_gen;
+        if guard.generation != current_gen {
+            guard.inproc.clone_from(&self.consumers.read().unwrap());
+            guard.tcp.clone_from(&self.tcp_consumers.read().unwrap());
+            guard.generation = current_gen;
         }
-        let inproc = cached.inproc.clone();
-        let tcp = cached.tcp.clone();
-        drop(cached);
-        let mut cache = self.inproc_cache.lock().unwrap();
+
+        let state = &mut *guard;
         let mut has_disconnected = false;
-        for p in &inproc {
+
+        for p in &state.inproc {
             if let Ok(mut consumer) = p.consumer.try_lock() {
-                let got = consumer.prefetch();
-                if got > 0 {
-                    while let Some(msg) = consumer.pop() {
-                        cache.push_back(msg);
-                    }
-                    consumer.release();
+                if drain_yring(&mut consumer, &mut state.batch) {
                     p.space_notify.notify_waiters();
                 } else if consumer.is_disconnected() {
                     has_disconnected = true;
                 }
             }
         }
-        for tc in &tcp {
+
+        for tc in &state.tcp {
             if let Ok(mut consumer) = tc.consumer.try_lock() {
-                let got = consumer.prefetch();
-                if got > 0 {
-                    while let Some(msg) = consumer.pop() {
-                        cache.push_back(msg);
-                    }
-                    consumer.release();
+                if drain_yring(&mut consumer, &mut state.batch) {
                     tc.space.notify_one();
                 } else if consumer.is_disconnected() {
                     has_disconnected = true;
                 }
             }
         }
-        let result = cache.pop_front();
-        drop(cache);
+
+        if drain_yring(&mut state.recv_consumer, &mut state.batch) {
+            self.recv_pipe_space.notify_waiters();
+        }
+
+        let result = state.batch.pop_front();
+        let pipe_disconnected = state.recv_consumer.is_disconnected();
+        let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
+        drop(guard);
+
         if has_disconnected {
             self.consumers
                 .write()
@@ -197,42 +331,60 @@ impl SpscAwareRecv {
                     .map_or(true, |c| !c.is_disconnected())
             });
             self.consumer_generation.fetch_add(1, Ordering::Release);
-            self.cached_consumers.lock().unwrap().generation = u64::MAX;
+            self.drain_state.lock().unwrap().generation = u64::MAX;
         }
-        result
+
+        match result {
+            Some(msg) => DrainResult::Message(msg),
+            None if pipe_disconnected && !has_peers => DrainResult::Closed,
+            None => DrainResult::Empty,
+        }
     }
 
     #[expect(clippy::needless_continue)]
     pub(crate) async fn recv(&self) -> Result<Message> {
         loop {
-            if let Some(msg) = self.try_drain_consumers() {
-                return Ok(msg);
+            match self.try_drain() {
+                DrainResult::Message(msg) => return Ok(msg),
+                DrainResult::Closed => return Err(Error::Closed),
+                DrainResult::Empty => {}
             }
+
+            let pipe = self.recv_pipe_notify.notified();
+            tokio::pin!(pipe);
+            pipe.as_mut().enable();
 
             if self.consumer_generation.load(Ordering::Acquire) > 0 {
                 let notified = self.recv_notify.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                if let Some(msg) = self.try_drain_consumers() {
-                    return Ok(msg);
+
+                match self.try_drain() {
+                    DrainResult::Message(msg) => return Ok(msg),
+                    DrainResult::Closed => return Err(Error::Closed),
+                    DrainResult::Empty => {}
                 }
+
                 tokio::select! {
                     biased;
                     () = notified => continue,
-                    res = self.rx.recv() => {
-                        return res.map_err(|_| Error::Closed);
-                    }
+                    () = &mut pipe => continue,
                     () = self.activated.notified() => continue,
                 }
             } else {
+                match self.try_drain() {
+                    DrainResult::Message(msg) => return Ok(msg),
+                    DrainResult::Closed => return Err(Error::Closed),
+                    DrainResult::Empty => {}
+                }
+
                 let activated = self.activated.notified();
                 tokio::pin!(activated);
                 activated.as_mut().enable();
+
                 tokio::select! {
                     biased;
-                    res = self.rx.recv() => {
-                        return res.map_err(|_| Error::Closed);
-                    }
+                    () = &mut pipe => continue,
                     () = activated => continue,
                 }
             }
@@ -240,22 +392,24 @@ impl SpscAwareRecv {
     }
 
     pub(crate) fn try_recv(&self) -> Result<Message> {
-        if let Some(msg) = self.try_drain_consumers() {
-            return Ok(msg);
+        match self.try_drain() {
+            DrainResult::Message(msg) => Ok(msg),
+            DrainResult::Closed => Err(Error::Closed),
+            DrainResult::Empty => Err(Error::WouldBlock),
         }
-        self.rx.try_recv().map_err(|e| match e {
-            async_channel::TryRecvError::Empty => Error::WouldBlock,
-            async_channel::TryRecvError::Closed => Error::Closed,
-        })
     }
 
     pub(crate) fn shutdown(&self) {
-        self.inproc_cache.lock().unwrap().clear();
         {
-            let mut cached = self.cached_consumers.lock().unwrap();
-            cached.inproc.clear();
-            cached.tcp.clear();
-            cached.generation = u64::MAX;
+            let mut state = self.drain_state.lock().unwrap();
+            while state.recv_consumer.prefetch() > 0 {
+                while state.recv_consumer.pop().is_some() {}
+                state.recv_consumer.release();
+            }
+            state.batch.clear();
+            state.inproc.clear();
+            state.tcp.clear();
+            state.generation = u64::MAX;
         }
         self.consumers.write().unwrap().clear();
         self.tcp_consumers.write().unwrap().clear();
@@ -264,7 +418,7 @@ impl SpscAwareRecv {
         }
         self.send_ring_available.store(false, Ordering::Release);
         self.send_ring.store(None);
-        while self.rx.try_recv().is_ok() {}
+        self.recv_pipe_space.notify_waiters();
     }
 
     pub(crate) fn try_push_spsc_or_full(&self, msg: Message) -> SpscPush {

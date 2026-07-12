@@ -25,6 +25,8 @@ pub(crate) mod round_robin;
 // subscription matcher lives in omq-proto now.
 pub(crate) use omq_proto::subscription;
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 
 use crate::engine::PeerDriverHandle;
@@ -238,7 +240,10 @@ pub(crate) enum RecvStrategy {
 }
 
 impl RecvStrategy {
-    pub(crate) fn for_socket_type(t: SocketType, recv_tx: async_channel::Sender<Message>) -> Self {
+    pub(crate) fn for_socket_type(
+        t: SocketType,
+        recv_tx: Arc<crate::socket::recv::SharedRecvPipe>,
+    ) -> Self {
         match recv_category(t) {
             RecvCategory::None => Self::None,
             RecvCategory::Identity => Self::Identity(IdentityRecv::new(recv_tx)),
