@@ -47,11 +47,11 @@ Transport RFCs (wire format, dict shipping rules, security):
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
-`FrameBuffer`: arena (256 KiB) + entry-based framer used by both
-backends. Frame headers are always written into the arena. Small
-messages (<8 KiB `ARENA_THRESHOLD`) go contiguously into the arena
+`FrameBuffer`: arena (16 KiB TCP/WS, 64 KiB IPC) + entry-based framer
+used by both backends. Frame headers are always written into the arena.
+Small messages (<4 KiB `ARENA_THRESHOLD`) go contiguously into the arena
 (1 iovec per batch). Large payloads are tracked as external `Bytes`
-entries (zero-copy gather-write). `Message`: 80 B, inline up to 71 B.
+entries (zero-copy gather-write). `Message`: 64 B, inline up to 55 B.
 `Payload`: 64 B, inline up to 62 B.
 
 **omq-tokio hot path.** `SocketDriver` actor owns peer table and

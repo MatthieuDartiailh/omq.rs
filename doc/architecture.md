@@ -67,16 +67,17 @@ enum MessageInner {
 }
 ```
 
-`Payload` is 64 B and stores up to 62 B inline. `Message` is 80 B and stores up
-to 71 B inline, so 64 B user messages avoid heap allocation and refcount
-traffic. Larger single-part messages use `Bytes`; multipart messages use
+`Payload` is 64 B and stores up to 62 B inline. `Message` is 64 B and stores up
+to 55 B inline, avoiding heap allocation and refcount traffic for small
+messages. Larger single-part messages use `Bytes`; multipart messages use
 `Vec<Payload>`.
 
 ## Encoding
 
-`FrameBuffer` is the outbound framing buffer: a 256 KiB arena plus an entry list.
-Frame headers always go into the arena. Small messages below `ARENA_THRESHOLD`
-(8 KiB) encode header and payload contiguously into the arena. Large messages
+`FrameBuffer` is the outbound framing buffer: an arena (16 KiB for TCP/WS,
+64 KiB for IPC) plus an entry list. Frame headers always go into the arena.
+Small messages below `ARENA_THRESHOLD` (4 KiB) encode header and payload
+contiguously into the arena. Large messages
 write the header into the arena and keep payload `Bytes` as external entries
 for gather write. The arena tracks its peak capacity so that after
 `split().freeze()` reclaims the buffer, the next reserve pre-allocates at full

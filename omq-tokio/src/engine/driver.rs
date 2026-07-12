@@ -1049,7 +1049,7 @@ async fn drain_pipeline(
     Ok(())
 }
 
-#[allow(unused_variables)]
+#[allow(unused_variables, clippy::needless_pass_by_value)]
 fn drain_offload_result(
     pool_enc: Option<MessageEncoder>,
     frames: Result<TransformedOut>,

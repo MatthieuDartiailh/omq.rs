@@ -283,11 +283,18 @@ impl Frame {
 }
 
 /// Maximum bytes stored inline in a `Message` (no heap, no refcount).
-/// 71 is the largest value that keeps `Message` at 80 bytes.
-pub const MAX_INLINE_MESSAGE: usize = 71;
+/// 55 is the largest value that keeps `Message` at 64 bytes (one cache line).
+///
+// Bench: PUSH/PULL TCP, 2T/3core (i7-8700B), msg/s:
+//   payload   64B msg (this)    80B msg         delta
+//     16 B     7.3M / 11.8M    6.3M /  9.7M    +15% / +21%
+//     32 B     7.0M / 11.4M    6.0M /  9.3M    +17% / +23%
+//     64 B     5.1M /  7.0M    6.1M /  9.1M    -17% / -23%  (heap threshold)
+//    128 B     4.6M /  6.8M    4.9M /  5.8M     -5% / +18%
+//    256 B     4.1M /  5.3M    4.4M /  4.7M     -6% / +12%
+pub const MAX_INLINE_MESSAGE: usize = 55;
 
-const _: () = assert!(MAX_INLINE_MESSAGE >= 64);
-const _: () = assert!(std::mem::size_of::<Message>() == 80);
+const _: () = assert!(std::mem::size_of::<Message>() == 64);
 
 pub(crate) enum MessageInner {
     Empty,

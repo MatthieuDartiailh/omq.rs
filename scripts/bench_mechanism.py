@@ -31,6 +31,9 @@ CHART_SIZES = [
 ]
 MECHANISMS = ["PLAIN", "CURVE", "BLAKE3ZMQ"]
 
+MEASURED_CPU = "0,1,2"
+OTHER_CPU = "3,4,5"
+
 DURATION = float(os.environ.get("OMQ_BENCH_DURATION", "2.0"))
 ROUNDS = int(os.environ.get("OMQ_BENCH_ROUNDS", "3"))
 
@@ -61,11 +64,15 @@ def cargo_build(backend: str):
     )
 
 
-def spawn(binary: str, *args: str, mechanism: str = "null") -> subprocess.Popen:
+def spawn(binary: str, *args: str, mechanism: str = "null",
+          cpu: str | None = None) -> subprocess.Popen:
     env = os.environ.copy()
     env["OMQ_BENCH_MECHANISM"] = mechanism
+    cmd = [binary, *args]
+    if cpu is not None:
+        cmd = ["taskset", "-c", cpu] + cmd
     return subprocess.Popen(
-        [binary, *args],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         env=env,
@@ -99,11 +106,14 @@ def kill(proc: subprocess.Popen):
 
 
 def capture(binary: str, *args: str, mechanism: str = "null",
-            timeout: int = 15) -> str:
+            timeout: int = 15, cpu: str | None = None) -> str:
     env = os.environ.copy()
     env["OMQ_BENCH_MECHANISM"] = mechanism
+    cmd = [binary, *args]
+    if cpu is not None:
+        cmd = ["taskset", "-c", cpu] + cmd
     proc = subprocess.Popen(
-        [binary, *args],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         env=env,
@@ -129,7 +139,7 @@ def run_cell(binary: str, mechanism: str, size: int) -> dict | None:
 
 def run_once(binary: str, mechanism: str, size: int) -> dict | None:
     push = spawn(binary, "push", "tcp://127.0.0.1:0", str(size),
-                 mechanism=mechanism)
+                 mechanism=mechanism, cpu=MEASURED_CPU)
     port = read_bound_port(push)
     if port is None:
         kill(push)
@@ -137,7 +147,8 @@ def run_once(binary: str, mechanism: str, size: int) -> dict | None:
     try:
         timeout_s = max(int(DURATION) + 10, 15)
         output = capture(binary, "pull", str(port), str(size), str(DURATION),
-                         mechanism=mechanism, timeout=timeout_s)
+                         mechanism=mechanism, timeout=timeout_s,
+                         cpu=OTHER_CPU)
     finally:
         kill(push)
     return parse_throughput(output, size)
