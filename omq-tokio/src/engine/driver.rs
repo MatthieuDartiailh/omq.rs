@@ -27,7 +27,7 @@ use omq_proto::frame_buffer::FrameBuffer;
 ///
 /// `Channel`: push into the shared recv pipe (yring + Mutex).
 /// `Yring`: direct push to a per-peer lock-free SPSC ring + external
-/// signal, used by omq-libzmq to eliminate the recv-pump relay task.
+/// signal, used by omq-libzmq for direct delivery.
 #[allow(private_interfaces)]
 pub enum RecvSink {
     Channel(Arc<crate::socket::recv::SharedRecvPipe>),
@@ -339,8 +339,8 @@ where
     /// Receive-side message decoder. Symmetric to `encoder`.
     decoder: Option<MessageDecoder>,
     /// Shared round-robin send queue. When set, the driver reads outbound
-    /// messages directly from this queue (bypassing the pump task
-    /// hop through `inbox`). `None` for non-round-robin socket types.
+    /// messages directly from this queue. `None` for non-round-robin
+    /// socket types.
     shared_msg_rx: Option<FallbackReceiver>,
     /// Direct recv channel. When set, inbound `Event::Message` frames are
     /// pushed straight into the user-facing recv channel without going through
@@ -355,8 +355,7 @@ where
     offload_threshold: usize,
     /// Per-peer encode slot: the socket handle encodes ZMTP frames into
     /// this slot's `FrameBuffer`, and the driver flushes them to the
-    /// wire. Replaces the `DirectIo` pattern where the handle locked the
-    /// writer directly.
+    /// wire.
     transmit_slot: Option<Arc<PeerTransmitSlot>>,
     send_pipe_rx: Option<SendPipeConsumer>,
     arena_threshold: usize,
@@ -443,7 +442,7 @@ where
     }
 
     /// Provide the shared round-robin send queue. The driver polls this
-    /// directly after handshake, eliminating the pump-task intermediary.
+    /// directly after handshake.
     #[must_use]
     pub(crate) fn with_shared_rx(mut self, rx: FallbackReceiver) -> Self {
         self.shared_msg_rx = Some(rx);
@@ -874,7 +873,7 @@ async fn drain_transmit_slot<W: AsyncWrite + Unpin>(
 ) -> io::Result<()> {
     // Fast path: all content is in the FrameBuffer arena (inline
     // messages). Copy into the reusable staging buffer and write
-    // directly, preserving the arena's 256 KiB capacity.
+    // directly, preserving the arena capacity.
     arena_buf.clear();
     if let Some(drain) = slot.try_drain_arena_only(arena_buf) {
         if !arena_buf.is_empty() {
@@ -1046,6 +1045,7 @@ fn drain_offload_result(
     codec: &Connection,
     eq: &mut FrameBuffer,
 ) -> Result<()> {
+    #[cfg(feature = "lz4")]
     if let (Some(enc), Some(pool)) = (pool_enc, pool) {
         pool.put(enc);
     }

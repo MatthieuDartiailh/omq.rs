@@ -151,14 +151,6 @@ impl FallbackQueue {
         self.inner.queue.len()
     }
 
-    /// Close the queue and wake all waiting receivers so they can observe
-    /// the closed state and return.
-    #[allow(dead_code)]
-    pub(crate) fn close(&self) {
-        self.inner.queue.close();
-        self.inner.data_signal.wake_all();
-    }
-
     pub(crate) fn shutdown(&self) {
         self.inner.queue.close();
         let mut drained = 0usize;
@@ -277,11 +269,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_unblocks_recv() {
+    async fn shutdown_unblocks_recv() {
         let (q, rx) = FallbackQueue::new(4, OnMute::Block);
         let recv_task = tokio::spawn(async move { rx.recv().await });
         tokio::task::yield_now().await;
-        q.close();
+        q.shutdown();
         let result = recv_task.await.unwrap();
         assert!(result.is_none(), "closed queue should return None");
     }

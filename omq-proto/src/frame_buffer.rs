@@ -32,9 +32,9 @@ pub struct FrameBuffer {
     /// High-water mark of arena capacity. After `split().freeze()`, the
     /// arena loses its allocation (frozen `Bytes` holds the Arc). On the
     /// next encode, `BytesMut::reserve` allocates fresh. Without this
-    /// hint it starts small and cascades (256K→512K→1M→2M), copying all
-    /// existing data at each step. Pre-reserving to the peak eliminates
-    /// the cascade: one allocation at full size, zero data copies.
+    /// hint it starts small and grows repeatedly, copying all existing
+    /// data at each step. Pre-reserving to the peak eliminates the
+    /// cascade: one allocation at full size, zero data copies.
     arena_peak_cap: usize,
 }
 

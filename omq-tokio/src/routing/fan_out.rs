@@ -27,7 +27,7 @@ use omq_proto::flow::DrainBudget;
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
-#[allow(unused_imports)]
+#[cfg(feature = "lz4")]
 use omq_proto::proto::transform::MessageEncoder;
 
 use super::peer_outbound::PeerOutbound;
