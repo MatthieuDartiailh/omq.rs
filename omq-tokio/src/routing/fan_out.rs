@@ -32,9 +32,7 @@ use omq_proto::proto::transform::MessageEncoder;
 
 use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
-use crate::engine::transmit_slot::{
-    PeerTransmitSlot, TRANSMIT_SLOT_INLINE_CAP, TransmitChunk, TryFrameResult,
-};
+use crate::engine::transmit_slot::{PeerTransmitSlot, TransmitChunk, TryFrameResult};
 
 /// Filter mode for a fan-out send strategy.
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +126,7 @@ struct ShardPeer {
     groups: FxHashSet<String>,
     any_groups: bool,
     slot: Arc<PeerTransmitSlot>,
+    #[allow(dead_code)]
     producer: yring::Producer<TransmitChunk>,
     dict_shipped: bool,
 }
@@ -617,9 +616,10 @@ impl ShardWorker {
 
         let target_count = peer_ids.len();
 
-        // Encode dict first (before payload) so they use the FrameBuffer
-        // independently.
-        let dict_chunk = dict_msg.map(|dict| {
+        // Encode dict and payload into per-peer slots. Both go through
+        // push_frame_to_peer (direct FrameBuffer push) to preserve ordering.
+        let has_dict = dict_msg.is_some();
+        if let Some(dict) = dict_msg {
             let frame = build_fan_out_frame(
                 &mut self.eq,
                 dict,
@@ -627,10 +627,17 @@ impl ShardWorker {
                 target_count,
                 FAN_OUT_TOTAL_COPY_BUDGET,
             );
-            let c = frame_to_transmit_chunk(&frame);
+            for &peer_id in &peer_ids {
+                if let Some(peer) = self.peers.get_mut(&peer_id)
+                    && !peer.dict_shipped
+                    && Self::push_frame_to_peer(self.lossy, peer_id, peer, &frame, touched).await
+                {
+                    peer.dict_shipped = true;
+                    peer.slot.mark_fanout_dict_shipped();
+                }
+            }
             clear_fan_out_frame(&mut self.eq, &mut self.chunks);
-            c
-        });
+        }
 
         // Encode the payload messages into the FrameBuffer.
         for wire_msg in &wire_messages[payload_start..] {
@@ -648,40 +655,32 @@ impl ShardWorker {
             target_count,
             FAN_OUT_TOTAL_COPY_BUDGET,
         );
-        let chunk = frame_to_transmit_chunk(&encoded);
 
         for peer_id in peer_ids {
             if let Some(peer) = self.peers.get_mut(&peer_id) {
-                if let Some(ref dc) = dict_chunk
-                    && !peer.dict_shipped
-                {
-                    if !Self::push_chunk_to_peer(self.lossy, peer_id, peer, dc.clone(), touched)
-                        .await
-                    {
-                        continue;
-                    }
-                    peer.dict_shipped = true;
-                    peer.slot.mark_fanout_dict_shipped();
+                if has_dict && !peer.dict_shipped {
+                    continue;
                 }
-                Self::push_chunk_to_peer(self.lossy, peer_id, peer, chunk.clone(), touched).await;
+                Self::push_frame_to_peer(self.lossy, peer_id, peer, &encoded, touched).await;
             }
         }
 
         clear_fan_out_frame(&mut self.eq, &mut self.chunks);
     }
 
-    async fn push_chunk_to_peer(
+    async fn push_frame_to_peer(
         lossy: bool,
         peer_id: u64,
         peer: &mut ShardPeer,
-        chunk: TransmitChunk,
+        frame: &FanOutFrame<'_>,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
         loop {
-            match peer
-                .slot
-                .try_push_ring_item(&mut peer.producer, chunk.clone())
-            {
+            let result = match frame {
+                FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
+                FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
+            };
+            match result {
                 TryFrameResult::Ok => {
                     touched.push(peer_id);
                     return true;
@@ -692,7 +691,7 @@ impl ShardWorker {
                     return false;
                 }
                 TryFrameResult::Full => {
-                    peer.slot.flush_ring(&mut peer.producer);
+                    peer.slot.signal_encoded();
                     let notified = peer.slot.space_available.notified();
                     tokio::select! {
                         biased;
@@ -708,26 +707,14 @@ impl ShardWorker {
         }
     }
 
-    fn flush_touched(&mut self, touched: &mut SmallVec<[u64; 32]>) {
+    fn flush_touched(&self, touched: &mut SmallVec<[u64; 32]>) {
         touched.sort_unstable();
         touched.dedup();
         for &peer_id in touched.iter() {
-            if let Some(peer) = self.peers.get_mut(&peer_id) {
-                peer.slot.flush_ring(&mut peer.producer);
+            if let Some(peer) = self.peers.get(&peer_id) {
+                peer.slot.signal_encoded();
             }
         }
-    }
-}
-
-fn frame_to_transmit_chunk(frame: &FanOutFrame<'_>) -> TransmitChunk {
-    match frame {
-        FanOutFrame::Arena(raw) if raw.len() <= TRANSMIT_SLOT_INLINE_CAP => {
-            TransmitChunk::inline(raw)
-        }
-        FanOutFrame::Arena(raw) => {
-            TransmitChunk::shared(Vec::from([Bytes::copy_from_slice(raw)]).into())
-        }
-        FanOutFrame::Chunks(wire_chunks) => TransmitChunk::shared(Arc::from(wire_chunks.to_vec())),
     }
 }
 

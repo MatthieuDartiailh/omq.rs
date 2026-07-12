@@ -27,6 +27,7 @@ const TRANSMIT_SLOT_LWM_DIVISOR: usize = 2;
 type FanOutReactivation = Arc<dyn Fn(u64) + Send + Sync + 'static>;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) enum TransmitChunk {
     Inline {
         buf: [u8; TRANSMIT_SLOT_INLINE_CAP],
@@ -36,6 +37,7 @@ pub(crate) enum TransmitChunk {
 }
 
 impl TransmitChunk {
+    #[allow(dead_code)]
     pub(crate) fn inline(data: &[u8]) -> Self {
         debug_assert!(data.len() <= TRANSMIT_SLOT_INLINE_CAP);
         let mut buf = [0; TRANSMIT_SLOT_INLINE_CAP];
@@ -46,6 +48,7 @@ impl TransmitChunk {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn shared(chunks: Arc<[Bytes]>) -> Self {
         Self::Shared(chunks)
     }
@@ -260,6 +263,7 @@ impl PeerTransmitSlot {
         TryFrameResult::Ok
     }
 
+    #[allow(dead_code)]
     pub(crate) fn try_push_ring_item(
         &self,
         tx: &mut yring::Producer<TransmitChunk>,
@@ -299,6 +303,7 @@ impl PeerTransmitSlot {
         TryFrameResult::Ok
     }
 
+    #[allow(dead_code)]
     pub(crate) fn flush_ring(&self, tx: &mut yring::Producer<TransmitChunk>) {
         tx.flush();
         self.signal_encoded();
