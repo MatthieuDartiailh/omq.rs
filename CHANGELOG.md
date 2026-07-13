@@ -6,13 +6,142 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [omq-proto 0.22.0]
+
+### Performance
+
+- `Message` shrunk from 80 B to 64 B. Inline threshold reduced from
+  71 to 55 bytes. Halves per-message memory on the hot path.
+- `FrameBuffer` arena reduced from 256 KiB to 16 KiB (TCP/WS) and
+  64 KiB (IPC).
+- Per-shard fan-out encoding: shard workers encode and compress
+  independently.
+
+### Changed
+
+- **Breaking:** `FrameBuffer::with_arena_threshold` renamed to
+  `FrameBuffer::with_config`.
+
+## [omq-tokio 0.18.0]
+
+### Performance
+
+- Recv pipe: `yring`-based receive pipe replaces `async_channel`.
+- Per-shard fan-out encoding.
+- Fan-out always via shard workers; direct dispatch removed.
+- `TransmitSlotCache` caller-side encode bypass removed. All sends
+  via send pipes or shard workers.
+
+### Fixed
+
+- Fan-out LZ4 dict frame ordering with per-shard encoding.
+
 ### Removed
 
-- Remove the experimental `omq-compio` backend and its examples, tests,
-  benchmark peers, and charts. The backend could not simultaneously
-  provide cancel-safe reliability, better small-message performance than
-  `omq-tokio`, and acceptable large-message behavior for ZeroMQ-style
-  workloads where frames can be tiny or huge.
+- **Breaking:** `ConnectionDriver::with_recv_direct`.
+
+## [yring 0.3.7]
+
+### Changed
+
+- Deny `unsafe_op_in_unsafe_fn` lint.
+
+## [omq-libzmq 0.5.2]
+
+### Changed
+
+- Deny `unsafe_op_in_unsafe_fn` lint.
+
+## [omq-proto 0.21.0] - 2026-07-10
+
+### Added
+
+- `DrainBudget` type: caps every drain loop by message count and byte
+  count.
+- `DataSignal` type: coalesced producer-to-consumer wakeups.
+- `reconnect_stop_conn_refused` option.
+
+### Performance
+
+- `Message` inline storage raised to 71 bytes (80-byte value).
+- Arena threshold lowered from 96 KiB to 4 KiB for zero-copy
+  gather-write.
+- Encode-once fan-out: shared pre-encoded wire bytes for PUB/XPUB/RADIO.
+- LZ4 fan-out dictionary shipment from a socket-level encoder.
+- `FrameBuffer` direct-write path for arena-only batches.
+- Round-robin modulo elimination.
+
+### Changed
+
+- Fan-out sockets (PUB/XPUB/RADIO) ignore `OnMute::Block`, matching
+  libzmq.
+- Rename internal types: `EncodedQueue` to `FrameBuffer`,
+  `WireSlot` to `PeerTransmitSlot`, `DropQueue` to `FallbackQueue`,
+  `PeerSend` to `PeerOutbound`.
+
+## [omq-tokio 0.17.0] - 2026-07-10
+
+### Added
+
+- `Socket::wait_subscribed`: deterministic PUB/SUB subscription
+  readiness.
+- `Socket::wait_connected`: poll until a peer completes the ZMTP
+  handshake.
+- `Socket::disconnect` for live peers.
+- `reconnect_stop_conn_refused` option.
+
+### Performance
+
+- Reuse per-connection `BytesMut` for large-frame receives. 256 KiB
+  recovered from 1.4 GB/s to 4.7 GB/s.
+- Sharded PUB fan-out with bounded worker tasks.
+- `DrainBudget` enforcement on all drain loops.
+- `DataSignal` coalescing across all producer-to-consumer signaling.
+- Multi-peer PUSH: arena direct-write, round-robin modulo elimination,
+  batch cap raised to 512.
+- Coalesced PUSH send-pipe wakeups.
+
+### Fixed
+
+- `RecvSink::Yring` livelock on consumer drop.
+- `Exclusive::Submitter` livelock on shutdown.
+- `blume` receiver ordering for large messages.
+
+### Changed
+
+- Route PUSH through `yring` send pipes. Fan-out sockets ignore
+  `OnMute::Block`.
+
+## [yring 0.3.6] - 2026-07-10
+
+### Added
+
+- `close()` and consumer-drop detection.
+
+## [blume 0.4.5] - 2026-07-10
+
+### Fixed
+
+- Receiver drain ordering for large messages: LIFO delivery when the
+  internal buffer wrapped caused fan-out throughput collapse.
+
+## [omq-libzmq 0.5.1] - 2026-07-10
+
+### Performance
+
+- Remove unconditional `thread::yield_now()` on send success.
+- Zero-alloc `zmq_recv` fast path.
+- `zmq_msg_recv` single `malloc` for frames up to 128 bytes.
+
+### Fixed
+
+- Skip `malloc(0)` for zero-length frames.
+- Crash on `recv_drain` mutex poison instead of silent hang.
+
+### Removed
+
+- Remove the experimental `omq-compio` backend and its examples,
+  tests, benchmark peers, and charts.
 
 ## [omq-proto 0.20.0] - 2026-07-04
 

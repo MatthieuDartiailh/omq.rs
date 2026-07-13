@@ -63,8 +63,8 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 |-------------------|---------------------------------------------------|----------------------------------|
 | `plain`           | PLAIN username/password auth (RFC 24)             | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
-| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](https://github.com/paddor/omq-blake3zmq/blob/main/RFC.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
-| `lz4`             | `lz4+tcp://` compression transport ([RFC](https://github.com/paddor/omq-lz4/blob/main/RFC.md)) | `lz4rip` |
+| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](doc/blake3zmq-rfc.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
+| `lz4`             | `lz4+tcp://` compression transport ([RFC](doc/lz4-rfc.md)) | `lz4rip` |
 | `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
 
 > [!WARNING]
@@ -130,6 +130,10 @@ OMQ_FUZZ=1 ./scripts/test-all.sh  # include fuzz suites
   throughput on bandwidth-limited links.
 - [doc/architecture.md](doc/architecture.md): architecture and tokio
   backend internals.
+- [doc/blake3zmq-rfc.md](doc/blake3zmq-rfc.md): BLAKE3ZMQ mechanism
+  wire format and security properties.
+- [doc/lz4-rfc.md](doc/lz4-rfc.md): LZ4 compression transport wire
+  format and dictionary shipping rules.
 
 ## Platform and requirements
 

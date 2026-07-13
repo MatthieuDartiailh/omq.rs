@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Deny `unsafe_op_in_unsafe_fn` lint. All unsafe function bodies now
+  require explicit `unsafe` blocks.
+- *(deps)* Bump `omq-tokio` to 0.18.0, `yring` to 0.3.7.
+
 ## [0.5.1] - 2026-07-10
 
 ### Fixed

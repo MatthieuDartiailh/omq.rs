@@ -20,7 +20,7 @@
 
 use bytes::Bytes;
 pub use lz4rip::block::DictTrainer;
-use lz4rip::block::{self, Compressor, Decompressor};
+use lz4rip::block::{self, Compressor, Decompressor, DictCompressor};
 use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
@@ -73,6 +73,24 @@ pub fn is_dict_shipment(msg: &Message) -> bool {
             .is_some_and(|part| part.starts_with(&SENTINEL_LZ4D))
 }
 
+enum LzCompressor {
+    NoDict(Compressor),
+    Dict(DictCompressor),
+}
+
+impl LzCompressor {
+    fn compress_into(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, lz4rip::block::CompressError> {
+        match self {
+            Self::NoDict(c) => c.compress_into(input, output),
+            Self::Dict(c) => c.compress_into(input, output),
+        }
+    }
+}
+
 /// Send-side per-connection LZ4 state.
 pub struct Lz4Encoder {
     /// Outbound dict, validated at construction. Shipped on the first
@@ -88,7 +106,7 @@ pub struct Lz4Encoder {
     /// Reusable compression output buffer.
     out_buf: Vec<u8>,
     /// Reusable block compressor (optionally dict-seeded).
-    compressor: Compressor,
+    compressor: LzCompressor,
     /// User override for the compression threshold.
     threshold_override: Option<usize>,
     /// Auto-training state. Fed message parts, then trained after
@@ -107,7 +125,7 @@ impl Default for Lz4Encoder {
             max_message_size: None,
             block_size: LZ4M_BLOCK_SIZE,
             out_buf: Vec::new(),
-            compressor: Compressor::new(),
+            compressor: LzCompressor::NoDict(Compressor::new()),
             threshold_override: None,
             trainer: None,
             train_msgs_left: 0,
@@ -161,7 +179,7 @@ impl Lz4Encoder {
     /// [`MAX_DICT_BYTES`].
     pub fn with_send_dict(dict: Bytes) -> Result<Self> {
         validate_dict(&dict, "LZ4", MAX_DICT_BYTES)?;
-        let compressor = Compressor::with_dict(&dict);
+        let compressor = LzCompressor::Dict(DictCompressor::new(&dict));
         Ok(Self {
             send_dict: Some(dict),
             send_dict_shipped: false,
@@ -241,8 +259,8 @@ impl Lz4Encoder {
     #[must_use]
     pub fn new_offload(&self) -> Self {
         let compressor = match &self.send_dict {
-            Some(d) => Compressor::with_dict(d),
-            None => Compressor::new(),
+            Some(d) => LzCompressor::Dict(DictCompressor::new(d)),
+            None => LzCompressor::NoDict(Compressor::new()),
         };
         Self {
             send_dict: self.send_dict.clone(),
@@ -265,7 +283,7 @@ impl Lz4Encoder {
             && self.send_dict.is_none()
         {
             self.send_dict = Some(dict.clone());
-            self.compressor = Compressor::with_dict(dict);
+            self.compressor = LzCompressor::Dict(DictCompressor::new(dict));
         }
     }
 
@@ -280,7 +298,7 @@ impl Lz4Encoder {
                 let dict_bytes = trainer.train();
                 if !dict_bytes.is_empty() {
                     let dict = Bytes::from(dict_bytes);
-                    self.compressor = Compressor::with_dict(&dict);
+                    self.compressor = LzCompressor::Dict(DictCompressor::new(&dict));
                     self.send_dict = Some(dict);
                     self.send_dict_shipped = false;
                 }

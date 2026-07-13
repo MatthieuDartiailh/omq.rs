@@ -109,6 +109,7 @@ to the peer once. After that the compression threshold drops from 512 B to
 no C compiler required.
 
 See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for throughput charts and benchmark details.
+Wire format: [LZ4 transport RFC](https://github.com/paddor/omq.rs/blob/main/doc/lz4-rfc.md).
 
 ## CURVE authentication
 
@@ -173,6 +174,8 @@ The callback receives a `PeerInfo` with a `.public_key` attribute (raw
 > and should not be relied on for anything that matters until it has had
 > third-party review. Use **CURVE** (RFC 26) for production / regulated
 > workloads.
+
+Wire format: [BLAKE3ZMQ mechanism RFC](https://github.com/paddor/omq.rs/blob/main/doc/blake3zmq-rfc.md).
 
 ## Develop
 
