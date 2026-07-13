@@ -87,11 +87,9 @@ impl DrainBudget {
 
 /// Max bytes one shared-queue batch buffers before flushing.
 ///
-/// 1 MiB folds large messages into bigger writev calls without
-/// outgrowing typical kernel TCP send buffers. Smaller caps (e.g.
-/// 256 KiB) under-utilize writev for 32 KiB+ messages and let the
-/// per-syscall overhead dominate; larger caps add latency without extra
-/// throughput once the kernel send buffer is the bottleneck.
+/// 128 KiB bounds encode-before-write bursts while retaining enough data
+/// for efficient writev calls. Larger caps add latency without reliable
+/// throughput gains once the kernel send buffer is the bottleneck.
 ///
 /// Override at runtime via `OMQ_BATCH_BYTES`. Read once and cached.
 #[must_use]
@@ -101,7 +99,7 @@ pub fn max_batch_bytes() -> usize {
         std::env::var("OMQ_BATCH_BYTES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1024 * 1024)
+            .unwrap_or(128 * 1024)
     })
 }
 
