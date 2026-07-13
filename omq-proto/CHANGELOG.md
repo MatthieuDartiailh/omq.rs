@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `FrameBuffer::with_arena_threshold` renamed to
   `FrameBuffer::with_config`. The user-facing `Options::arena_threshold`
   setter is unchanged.
+- *(deps)* Bump `lz4rip` 0.9 to 0.11.1.
 
 ## [0.21.0] - 2026-07-10
 
