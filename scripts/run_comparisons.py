@@ -204,8 +204,8 @@ def libzmq_version() -> str:
 
 # ── process management ────────────────────────────────────────────
 
-MEASURED_CPU = "0,1"
-OTHER_CPU = "2,3,4,5"
+MEASURED_CPU = "0,1,2"
+OTHER_CPU = "3,4,5"
 
 
 def spawn_process(binary: str, *args: str, env: dict | None = None,
