@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- Recv pipe: `yring`-based receive pipe replaces `async_channel`.
+  Single writer (connection driver), single reader (socket handle).
+  Eliminates async-channel overhead per message.
+- Per-shard fan-out encoding: each shard worker encodes and compresses
+  independently.
+- Fan-out always routed through shard workers. Direct dispatch path
+  removed for simpler code and consistent latency.
+- `TransmitSlotCache` caller-side encode bypass removed. All sends
+  flow through send pipes or shard workers.
+- Reduce TCP read buffer and per-connection arena allocations.
+- Reduce recv path allocations: merge `DrainState`, hoist channel
+  future creation out of drain loop.
+
+### Fixed
+
+- Fan-out LZ4 dict frame ordering when shard workers compress
+  independently.
+
+### Removed
+
+- **Breaking:** `ConnectionDriver::with_recv_direct`. Replaced by
+  the `yring` recv pipe.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.22.0.
+
 ## [0.17.0] - 2026-07-10
 
 ### Added

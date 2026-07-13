@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- `Message` shrunk from 80 B to 64 B. Inline threshold reduced from
+  71 to 55 bytes, trading 16 bytes of inline capacity for halved
+  per-message memory on the hot path.
+- `FrameBuffer` arena reduced from 256 KiB to 16 KiB (TCP/WS) and
+  64 KiB (IPC). Lower per-connection memory footprint.
+- Per-shard fan-out encoding: shard workers encode and compress
+  independently, eliminating shared-encoder contention.
+
+### Changed
+
+- **Breaking:** `FrameBuffer::with_arena_threshold` renamed to
+  `FrameBuffer::with_config`. The user-facing `Options::arena_threshold`
+  setter is unchanged.
+
 ## [0.21.0] - 2026-07-10
 
 ### Added
