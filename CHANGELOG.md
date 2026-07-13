@@ -6,6 +6,12 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Performance
+
+- Reduce the default shared-queue batch byte cap from 1 MiB to 128 KiB.
+  This bounds encode-before-write bursts. Refreshed turbo-off comparison
+  charts show steadier, slightly higher throughput in the current run.
+
 ## [omq-proto 0.22.0]
 
 ### Performance

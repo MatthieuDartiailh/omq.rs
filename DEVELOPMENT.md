@@ -156,6 +156,10 @@ python3 scripts/run_comparisons.py --omq --transport tcp --no-latency \
 python3 scripts/gen_comparison_chart.py
 ```
 
+The default `OMQ_BATCH_BYTES` cap is 128 KiB. Set the variable explicitly
+when comparing alternate caps; chart refreshes should use the same cap as
+the production default.
+
 Omit `--impl` to rebench all implementations when external baselines
 are stale. Full refresh after omq/rzmq changes:
 
