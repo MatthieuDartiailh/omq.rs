@@ -40,14 +40,16 @@ async fn rebind(ep: &omq_tokio::Endpoint, make: impl Fn() -> Socket) -> Option<S
 
 fn run_mechanism_storm(
     name: &str,
-    make_server: impl Fn() -> Socket,
-    make_client: impl Fn(omq_tokio::Endpoint) -> Socket,
+    make_server: impl Fn() -> Socket + Send + Sync + 'static,
+    make_client: impl Fn(omq_tokio::Endpoint) -> Socket + Send + Sync + 'static,
 ) {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
+    let name = name.to_owned();
+    let report_name = name.clone();
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         let probe = make_server();
         let ep = probe.bind(soak_common::tcp_ep(0)).await.unwrap();
         probe.close().await.unwrap();
@@ -106,7 +108,7 @@ fn run_mechanism_storm(
     });
 
     let report = monitor.stop();
-    report.assert_no_leak(name);
+    report.assert_no_leak(&report_name);
 }
 
 #[cfg(feature = "curve")]

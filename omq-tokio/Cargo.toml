@@ -26,7 +26,6 @@ ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfi
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
 # `cargo test`. Run with `cargo test --features fuzz`.
-rt-multi-thread = ["tokio/rt-multi-thread"]
 fuzz = []
 soak = []
 
@@ -62,8 +61,16 @@ name = "bench_peer_tokio"
 path = "src/bin/bench_peer_tokio.rs"
 
 [[bin]]
+name = "bench_peer_blocking"
+path = "src/bin/bench_peer_blocking.rs"
+
+[[bin]]
 name = "bench_proxy_client"
 path = "src/bin/bench_proxy_client.rs"
+
+[[bin]]
+name = "perf_verify"
+path = "src/bin/perf_verify.rs"
 
 [[example]]
 name = "pub_sub_lz4"

@@ -1,6 +1,5 @@
 //! CURVE Curve25519 keypair: long-term keys + Z85 helpers.
 
-use crypto_box::aead::OsRng;
 use subtle::ConstantTimeEq;
 use zeroize::ZeroizeOnDrop;
 
@@ -87,8 +86,8 @@ impl CurveSecretKey {
 
     /// Derive the corresponding public key from this secret key.
     pub fn derive_public(&self) -> CurvePublicKey {
-        let sk = crypto_box::SecretKey::from(self.0);
-        CurvePublicKey::from_bytes(*sk.public_key().as_bytes())
+        let sk = x25519_dalek::StaticSecret::from(self.0);
+        CurvePublicKey::from_bytes(*x25519_dalek::PublicKey::from(&sk).as_bytes())
     }
 }
 
@@ -110,11 +109,8 @@ impl Eq for CurveSecretKey {}
 impl CurveKeypair {
     /// Generate a fresh long-term keypair using the OS RNG.
     pub fn generate() -> Self {
-        // crypto_box::SecretKey wraps an X25519 secret key; we derive the
-        // public key via its `public_key()`. We unwrap into raw bytes for
-        // our own storage so callers don't need crypto_box in their API.
-        let sec = crypto_box::SecretKey::generate(&mut OsRng);
-        let pub_ = sec.public_key();
+        let sec = x25519_dalek::StaticSecret::random();
+        let pub_ = x25519_dalek::PublicKey::from(&sec);
         Self {
             secret: CurveSecretKey::from_bytes(sec.to_bytes()),
             public: CurvePublicKey::from_bytes(*pub_.as_bytes()),

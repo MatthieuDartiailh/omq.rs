@@ -22,8 +22,8 @@ fn accept_all(_: &omq_tokio::MechanismPeerInfo) -> bool {
 }
 
 fn main() {
-    let rt = common::build_runtime();
-    rt.block_on(async {
+    let ctx = common::build_context();
+    ctx.block_on(async {
         common::print_header("PUSH/PULL mechanism (tcp)");
 
         let sizes = common::sizes();

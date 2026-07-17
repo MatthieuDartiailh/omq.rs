@@ -22,14 +22,18 @@
  *   <count> <elapsed_secs> <msg_size> <cpu_secs>
  */
 
+#define _DEFAULT_SOURCE
 #include <zmq.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
 
 static double now_secs(void) {
     struct timespec ts;
@@ -69,16 +73,52 @@ static void die(const char *msg) {
     exit(1);
 }
 
-static void print_bound_port(void *sock) {
+/* Fixed CURVE keypairs for benchmarking (Z85-encoded, 40 chars each). */
+#define CURVE_SERVER_PUBLIC "c[nMZc{RbXmBJGbya&4/kW#Y.Ql4uT1wNJmp6/D@"
+#define CURVE_SERVER_SECRET "2(&.P[s%^&[zcwc3wjPJHlsb^j.F]{F4Bh{ed8S?"
+#define CURVE_CLIENT_PUBLIC "c[m^Q0-jh2zf931U<A)s8LsJaZ>KZY1#Na%Plr<s"
+#define CURVE_CLIENT_SECRET "R0/+YXMg3!(j7@pEBeg:r4hj]Nuldfd7-&jIGw+/"
+
+static int bench_curve_enabled(void) {
+    const char *s = getenv("ZMQ_BENCH_CURVE");
+    return s && *s && strcmp(s, "0") != 0;
+}
+
+static void setup_curve_server(void *sock) {
+    int as_server = 1;
+    zmq_setsockopt(sock, ZMQ_CURVE_SERVER, &as_server, sizeof(as_server));
+    zmq_setsockopt(sock, ZMQ_CURVE_PUBLICKEY, CURVE_SERVER_PUBLIC, 40);
+    zmq_setsockopt(sock, ZMQ_CURVE_SECRETKEY, CURVE_SERVER_SECRET, 40);
+}
+
+static void setup_curve_client(void *sock) {
+    zmq_setsockopt(sock, ZMQ_CURVE_PUBLICKEY, CURVE_CLIENT_PUBLIC, 40);
+    zmq_setsockopt(sock, ZMQ_CURVE_SECRETKEY, CURVE_CLIENT_SECRET, 40);
+    zmq_setsockopt(sock, ZMQ_CURVE_SERVERKEY, CURVE_SERVER_PUBLIC, 40);
+}
+
+static void report_bound_port(void *ctx, void *sock) {
     char ep[256];
     size_t ep_len = sizeof(ep);
-    if (zmq_getsockopt(sock, ZMQ_LAST_ENDPOINT, ep, &ep_len) == 0) {
-        char *colon = strrchr(ep, ':');
-        if (colon) {
-            printf("PORT %s\n", colon + 1);
-            fflush(stdout);
-        }
-    }
+    if (zmq_getsockopt(sock, ZMQ_LAST_ENDPOINT, ep, &ep_len) != 0)
+        return;
+    char *colon = strrchr(ep, ':');
+    if (!colon)
+        return;
+    const char *port_str = colon + 1;
+
+    const char *coord = getenv("OMQ_BENCH_COORD");
+    if (!coord || !*coord)
+        return;
+
+    void *push = zmq_socket(ctx, ZMQ_PUSH);
+    if (!push) return;
+    int linger = 0;
+    zmq_setsockopt(push, ZMQ_LINGER, &linger, sizeof(linger));
+    zmq_connect(push, coord);
+    char msg[64];
+    snprintf(msg, sizeof(msg), "READY %s", port_str);
+    zmq_send(push, msg, strlen(msg), 0);
 }
 
 /* Returns a zmq address string. If s looks like a bare port number, expands
@@ -95,6 +135,7 @@ static const char *resolve_addr(const char *s, char *buf, size_t bufsz) {
     }
     return s;
 }
+
 
 typedef struct { void *ctx; const char *name; int size; } InprocPushArg;
 
@@ -136,7 +177,7 @@ int main(int argc, char **argv) {
         void *sock = zmq_socket(ctx, ZMQ_PUSH);
         if (!sock) die("zmq_socket PUSH");
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
-        print_bound_port(sock);
+        report_bound_port(ctx, sock);
         wait_for_start_barrier();
 
         char *buf = calloc(1, size);
@@ -225,7 +266,7 @@ done:;
         void *sock = zmq_socket(ctx, ZMQ_PULL);
         if (!sock) die("zmq_socket PULL");
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
-        print_bound_port(sock);
+        report_bound_port(ctx, sock);
         wait_for_start_barrier();
 
         zmq_msg_t msg;
@@ -268,9 +309,8 @@ done_pull_bind:;
         double elapsed = now_secs() - t0;
         double cpu = cpu_time_secs() - cpu_before;
         printf("%lld %.6f %d %.6f\n", count, elapsed, size, cpu);
-
-        zmq_msg_close(&msg);
-        zmq_close(sock);
+        fflush(stdout);
+        _exit(0);
 
     } else if (strcmp(role, "inproc") == 0) {
         if (argc < 5) goto usage;
@@ -337,8 +377,9 @@ done_inproc:;
         if (!sock) die("zmq_socket PUB");
         int block = 1;
         zmq_setsockopt(sock, ZMQ_XPUB_NODROP, &block, sizeof(block));
+        if (bench_curve_enabled()) setup_curve_server(sock);
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
-        print_bound_port(sock);
+        report_bound_port(ctx, sock);
         wait_for_start_barrier();
 
         char *buf = calloc(1, size);
@@ -357,6 +398,7 @@ done_inproc:;
 
         void *sock = zmq_socket(ctx, ZMQ_SUB);
         if (!sock) die("zmq_socket SUB");
+        if (bench_curve_enabled()) setup_curve_client(sock);
         zmq_setsockopt(sock, ZMQ_SUBSCRIBE, "", 0);
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
         wait_for_start_barrier();
@@ -495,11 +537,152 @@ done_inproc_pubsub:;
         for (int i = 0; i < actual_peers; i++) zmq_close(subs[i]);
         exit(0);
 
+    } else if (strcmp(role, "multi-pull") == 0 ||
+               strcmp(role, "multi-sub") == 0) {
+        if (argc < 6) goto usage;
+        double duration = atof(argv[4]);
+        int count = atoi(argv[5]);
+        if (count < 1 || count > 256) {
+            fprintf(stderr, "socket_count must be 1..256\n");
+            return 1;
+        }
+        int is_sub = (strcmp(role, "multi-sub") == 0);
+
+        typedef struct {
+            void *sock;
+            _Atomic long long counter;
+            volatile int stop;
+        } RecvWorker;
+
+        void *recv_thread(void *arg) {
+            RecvWorker *w = arg;
+            zmq_msg_t msg;
+            zmq_msg_init(&msg);
+            while (!w->stop) {
+                int rc = zmq_msg_recv(&msg, w->sock, 0);
+                if (rc < 0) {
+                    if (zmq_errno() == EAGAIN) continue;
+                    break;
+                }
+                atomic_fetch_add_explicit(&w->counter, 1,
+                                          memory_order_relaxed);
+            }
+            zmq_msg_close(&msg);
+            return NULL;
+        }
+
+        RecvWorker workers[256];
+        void *sockets[256];
+        pthread_t threads[256];
+
+        for (int i = 0; i < count; i++) {
+            if (is_sub) {
+                sockets[i] = zmq_socket(ctx, ZMQ_SUB);
+                if (!sockets[i]) die("zmq_socket SUB");
+                if (bench_curve_enabled()) setup_curve_client(sockets[i]);
+                zmq_setsockopt(sockets[i], ZMQ_SUBSCRIBE, "", 0);
+            } else {
+                sockets[i] = zmq_socket(ctx, ZMQ_PULL);
+                if (!sockets[i]) die("zmq_socket PULL");
+            }
+            if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
+            workers[i].sock = sockets[i];
+            atomic_store(&workers[i].counter, 0);
+            workers[i].stop = 0;
+        }
+
+        wait_for_start_barrier();
+
+        /* warmup: let sockets receive for 500 ms, then zero counters */
+        for (int i = 0; i < count; i++)
+            pthread_create(&threads[i], NULL, recv_thread, &workers[i]);
+
+        struct timespec warmup_ts = {0, 500000000};
+        nanosleep(&warmup_ts, NULL);
+        for (int i = 0; i < count; i++)
+            atomic_store(&workers[i].counter, 0);
+
+        double cpu_before = cpu_time_secs();
+        double t0 = now_secs();
+        double deadline_secs = duration;
+        long sleep_secs = (long)deadline_secs;
+        long sleep_ns = (long)((deadline_secs - sleep_secs) * 1e9);
+        struct timespec dur_ts = { sleep_secs, sleep_ns };
+        nanosleep(&dur_ts, NULL);
+        double elapsed = now_secs() - t0;
+        double cpu = cpu_time_secs() - cpu_before;
+
+        for (int i = 0; i < count; i++)
+            workers[i].stop = 1;
+
+        /* unblock threads stuck in zmq_msg_recv by setting a short timeout */
+        int timeout_ms = 1;
+        for (int i = 0; i < count; i++)
+            zmq_setsockopt(sockets[i], ZMQ_RCVTIMEO, &timeout_ms,
+                           sizeof(timeout_ms));
+        for (int i = 0; i < count; i++)
+            pthread_join(threads[i], NULL);
+
+        long long total = 0;
+        double per_min = 1e18, per_max = 0;
+        for (int i = 0; i < count; i++) {
+            long long c = atomic_load(&workers[i].counter);
+            total += c;
+            double rate = (double)c / elapsed;
+            if (rate < per_min) per_min = rate;
+            if (rate > per_max) per_max = rate;
+        }
+        printf("%lld %.6f %d %.6f %d %.1f %.1f\n",
+               total, elapsed, size, cpu, count, per_min, per_max);
+
+        for (int i = 0; i < count; i++)
+            zmq_close(sockets[i]);
+
+    } else if (strcmp(role, "multi-push") == 0) {
+        if (argc < 5) goto usage;
+        int count = atoi(argv[4]);
+        if (count < 1 || count > 256) {
+            fprintf(stderr, "socket_count must be 1..256\n");
+            return 1;
+        }
+
+        void *send_thread(void *arg) {
+            void *sock = arg;
+            char *buf = calloc(1, size);
+            memset(buf, 'x', size);
+            for (;;) {
+                if (zmq_send(sock, buf, size, 0) < 0) break;
+            }
+            free(buf);
+            return NULL;
+        }
+
+        void *sockets[256];
+        pthread_t threads[256];
+
+        for (int i = 0; i < count; i++) {
+            sockets[i] = zmq_socket(ctx, ZMQ_PUSH);
+            if (!sockets[i]) die("zmq_socket PUSH");
+            if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
+        }
+
+        wait_for_start_barrier();
+
+        for (int i = 0; i < count; i++)
+            pthread_create(&threads[i], NULL, send_thread, sockets[i]);
+
+        /* run forever; killed externally */
+        for (int i = 0; i < count; i++)
+            pthread_join(threads[i], NULL);
+
+        for (int i = 0; i < count; i++)
+            zmq_close(sockets[i]);
+
     } else if (strcmp(role, "rep") == 0) {
         void *sock = zmq_socket(ctx, ZMQ_REP);
         if (!sock) die("zmq_socket REP");
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
-        print_bound_port(sock);
+        report_bound_port(ctx, sock);
 
         zmq_msg_t msg;
         zmq_msg_init(&msg);
@@ -684,6 +867,9 @@ done_inproc_pubsub:;
 usage:
     fprintf(stderr, "usage: %s push <addr> <size>\n", argv[0]);
     fprintf(stderr, "       %s pull <addr> <size> <duration_secs>\n", argv[0]);
+    fprintf(stderr, "       %s multi-pull <addr> <size> <duration_secs> <count>\n", argv[0]);
+    fprintf(stderr, "       %s multi-sub <addr> <size> <duration_secs> <count>\n", argv[0]);
+    fprintf(stderr, "       %s multi-push <addr> <size> <count>\n", argv[0]);
     fprintf(stderr, "       %s inproc <name> <size> <duration_secs>\n", argv[0]);
     fprintf(stderr, "       %s rep <addr> <size>\n", argv[0]);
     fprintf(stderr, "       %s req <addr> <size> <iterations> <warmup>\n", argv[0]);

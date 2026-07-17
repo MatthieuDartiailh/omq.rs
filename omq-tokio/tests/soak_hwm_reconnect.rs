@@ -43,9 +43,11 @@ async fn rebind(ep: &omq_tokio::Endpoint) -> Option<Socket> {
 fn run_hwm_storm(name: &str, mute: OnMute) {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
+    let name = name.to_owned();
+    let report_name = name.clone();
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         // Probe for a port, then close so we can rebind.
         let probe = Socket::new(SocketType::Pull, soak_common::soak_options());
         let ep = probe.bind(soak_common::tcp_ep(0)).await.unwrap();
@@ -115,7 +117,7 @@ fn run_hwm_storm(name: &str, mute: OnMute) {
     });
 
     let report = monitor.stop();
-    report.assert_no_leak(name);
+    report.assert_no_leak(&report_name);
 }
 
 #[test]

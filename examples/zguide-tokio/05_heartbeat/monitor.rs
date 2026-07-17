@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Context, Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
     args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
@@ -17,42 +17,44 @@ fn msg_str(msg: &Message, idx: usize) -> String {
     String::from_utf8_lossy(&msg.part_bytes(idx).unwrap()).to_string()
 }
 
-#[tokio::main]
-async fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let ep = endpoint_or(&args, 1, "ipc://@omq-zguide-05-heartbeat");
+fn main() {
+    let ctx = Context::new();
+    ctx.block_on(async move {
+        let args: Vec<String> = std::env::args().collect();
+        let ep = endpoint_or(&args, 1, "ipc://@omq-zguide-05-heartbeat");
 
-    let sub = Socket::new(SocketType::Sub, Options::default());
-    sub.connect(ep).await.unwrap();
-    sub.subscribe("HEARTBEAT").await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.connect(ep).await.unwrap();
+        sub.subscribe("HEARTBEAT").await.unwrap();
 
-    let timeout = Duration::from_millis(150);
-    let mut alive = false;
-    let mut events: Vec<String> = Vec::new();
+        let timeout = Duration::from_millis(150);
+        let mut alive = false;
+        let mut events: Vec<String> = Vec::new();
 
-    for _ in 0..20 {
-        match tokio::time::timeout(timeout, sub.recv()).await {
-            Ok(Ok(msg)) => {
-                let body = msg_str(&msg, 0);
-                if !alive {
-                    events.push("alive".to_string());
-                    alive = true;
-                    println!("monitor: ALIVE ({body})");
+        for _ in 0..20 {
+            match tokio::time::timeout(timeout, sub.recv()).await {
+                Ok(Ok(msg)) => {
+                    let body = msg_str(&msg, 0);
+                    if !alive {
+                        events.push("alive".to_string());
+                        alive = true;
+                        println!("monitor: ALIVE ({body})");
+                    }
                 }
-            }
-            Ok(Err(e)) => {
-                eprintln!("monitor: recv error: {e}");
-                break;
-            }
-            Err(_) => {
-                if alive {
-                    events.push("dead".to_string());
-                    alive = false;
-                    println!("monitor: DEAD (timeout)");
+                Ok(Err(e)) => {
+                    eprintln!("monitor: recv error: {e}");
+                    break;
+                }
+                Err(_) => {
+                    if alive {
+                        events.push("dead".to_string());
+                        alive = false;
+                        println!("monitor: DEAD (timeout)");
+                    }
                 }
             }
         }
-    }
 
-    println!("monitor: events: {events:?}");
+        println!("monitor: events: {events:?}");
+    });
 }

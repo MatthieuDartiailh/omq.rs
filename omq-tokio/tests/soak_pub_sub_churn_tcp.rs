@@ -53,8 +53,8 @@ fn soak_pub_sub_churn_tcp() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         let publisher = Socket::new(SocketType::Pub, pub_options());
         let mut mon = publisher.monitor();
         let ep = publisher.bind(soak_common::tcp_ep(0)).await.unwrap();

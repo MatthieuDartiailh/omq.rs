@@ -129,11 +129,19 @@ struct ShardPeer {
 }
 
 struct ShardEndpoint {
-    data_tx: yring::Producer<ShardDispatch>,
     ctrl_tx: yring::Producer<ShardControl>,
-    data_signal: Arc<DataSignal>,
     ctrl_notify: Arc<Notify>,
     load: usize,
+}
+
+struct DistributorEndpoint {
+    data_tx: yring::Producer<ShardDispatch>,
+    data_signal: Arc<DataSignal>,
+}
+
+struct DistributionTarget {
+    data_tx: yring::Producer<ShardDispatch>,
+    data_signal: Arc<DataSignal>,
 }
 
 struct FanOutShardState {
@@ -144,7 +152,21 @@ struct FanOutShardState {
 
 struct FanOutShards {
     state: Mutex<FanOutShardState>,
-    active_mask: AtomicU8,
+    active_mask: Arc<AtomicU8>,
+    distributor: Mutex<DistributorEndpoint>,
+}
+
+impl std::fmt::Debug for DistributorEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DistributorEndpoint")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for DistributionTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DistributionTarget").finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for FanOutShards {
@@ -159,11 +181,10 @@ impl std::fmt::Debug for FanOutShards {
                 "worker_loads",
                 &state.endpoints.iter().map(|s| s.load).collect::<Vec<_>>(),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-#[derive(Debug)]
 struct ShardWorker {
     data_rx: yring::Consumer<ShardDispatch>,
     ctrl_rx: yring::Consumer<ShardControl>,
@@ -176,6 +197,19 @@ struct ShardWorker {
     chunks: Vec<Bytes>,
     #[cfg(feature = "lz4")]
     encoder: Option<MessageEncoder>,
+    distribution_targets: Vec<DistributionTarget>,
+    active_mask: Option<Arc<AtomicU8>>,
+}
+
+impl std::fmt::Debug for ShardWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardWorker")
+            .field("mode", &self.mode)
+            .field("lossy", &self.lossy)
+            .field("peers", &self.peers.len())
+            .field("distribution_targets", &self.distribution_targets.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "lz4")]
@@ -227,25 +261,78 @@ impl Clone for Submitter {
 }
 
 impl FanOutShards {
-    fn spawn(options: &Options, mode: FanOutMode) -> Arc<Self> {
+    fn spawn(
+        options: &Options,
+        mode: FanOutMode,
+        io_pool: &crate::context::IoPoolHandle,
+    ) -> Arc<Self> {
         let pipe_cap = options.send_hwm.unwrap_or(1000).max(16) as usize;
-        let runtime_workers = tokio::runtime::Handle::current()
-            .metrics()
-            .num_workers()
-            .max(1);
+        let worker_shards = Self::worker_shard_count(io_pool.thread_count());
         let lossy = fan_out_is_lossy(options);
-        let worker_shards = Self::worker_shard_count(runtime_workers);
+        let active_mask = Arc::new(AtomicU8::new(0));
+
+        // Create all channels up front.
+        let mut data_channels: Vec<_> = (0..worker_shards)
+            .map(|_| {
+                let (tx, rx) = yring::spsc(pipe_cap);
+                let sig = Arc::new(DataSignal::new());
+                (tx, rx, sig)
+            })
+            .collect();
+        let mut ctrl_channels: Vec<_> = (0..worker_shards)
+            .map(|_| {
+                let (tx, rx) = yring::spsc(SHARD_CTRL_RING_CAP);
+                let notify = Arc::new(Notify::new());
+                (tx, rx, notify)
+            })
+            .collect();
+
+        // Channel 0 (shard 1): data Producer goes into the distributor
+        // endpoint. Channels 1..N-1 (shards 2..N): data Producers go
+        // into distribution targets owned by shard worker 1.
+        let (dist_tx, dist_rx, dist_signal) = data_channels.remove(0);
+        let distributor = DistributorEndpoint {
+            data_tx: dist_tx,
+            data_signal: Arc::clone(&dist_signal),
+        };
+
+        let mut distribution_targets: Vec<DistributionTarget> =
+            Vec::with_capacity(data_channels.len());
+        let mut secondary_data: Vec<(yring::Consumer<ShardDispatch>, Arc<DataSignal>)> =
+            Vec::with_capacity(data_channels.len());
+        for (tx, rx, sig) in data_channels {
+            distribution_targets.push(DistributionTarget {
+                data_tx: tx,
+                data_signal: Arc::clone(&sig),
+            });
+            secondary_data.push((rx, sig));
+        }
+
+        // Build endpoints (ctrl only) and spawn workers.
+        let mut dist_rx = Some(dist_rx);
+        let mut dist_signal = Some(dist_signal);
         let mut endpoints = Vec::with_capacity(worker_shards);
-        for _ in 0..worker_shards {
-            let (data_tx, data_rx) = yring::spsc(pipe_cap);
-            let (ctrl_tx, ctrl_rx) = yring::spsc(SHARD_CTRL_RING_CAP);
-            let data_signal = Arc::new(DataSignal::new());
-            let ctrl_notify = Arc::new(Notify::new());
-            tokio::spawn(
+        for i in 0..worker_shards {
+            let (ctrl_tx, ctrl_rx, ctrl_notify) = ctrl_channels.remove(0);
+
+            let (data_rx, data_signal, dist_targets, mask) = if i == 0 {
+                (
+                    dist_rx.take().expect("shard 0 data_rx"),
+                    dist_signal.take().expect("shard 0 data_signal"),
+                    std::mem::take(&mut distribution_targets),
+                    Some(Arc::clone(&active_mask)),
+                )
+            } else {
+                let (rx, sig) = secondary_data.remove(0);
+                (rx, sig, Vec::new(), None)
+            };
+
+            io_pool.spawn_on(
+                i,
                 ShardWorker {
                     data_rx,
                     ctrl_rx,
-                    data_signal: data_signal.clone(),
+                    data_signal,
                     ctrl_notify: ctrl_notify.clone(),
                     mode,
                     lossy,
@@ -254,13 +341,13 @@ impl FanOutShards {
                     chunks: Vec::new(),
                     #[cfg(feature = "lz4")]
                     encoder: None,
+                    distribution_targets: dist_targets,
+                    active_mask: mask,
                 }
                 .run(),
             );
             endpoints.push(ShardEndpoint {
-                data_tx,
                 ctrl_tx,
-                data_signal,
                 ctrl_notify,
                 load: 0,
             });
@@ -271,7 +358,8 @@ impl FanOutShards {
                 eligible_peers: 0,
                 active_limit: 0,
             }),
-            active_mask: AtomicU8::new(0),
+            active_mask,
+            distributor: Mutex::new(distributor),
         })
     }
 
@@ -313,17 +401,6 @@ impl FanOutShards {
     }
 
     fn push_control(endpoint: &mut ShardEndpoint, cmd: ShardControl) {
-        #[cfg(feature = "rt-multi-thread")]
-        if let Ok(handle) = tokio::runtime::Handle::try_current()
-            && matches!(
-                handle.runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::MultiThread
-            )
-        {
-            tokio::task::block_in_place(|| Self::push_control_spinning(endpoint, cmd));
-            return;
-        }
-
         Self::push_control_spinning(endpoint, cmd);
     }
 
@@ -395,30 +472,13 @@ impl FanOutShards {
         }
     }
 
-    /// Push a raw message to every active shard's data ring. If a
-    /// shard's ring is full, the message is silently dropped for that
-    /// shard's peer set.
+    /// Push a raw message into shard 1's data ring. Shard worker 1
+    /// distributes to secondary shards in batches.
     fn dispatch(&self, dispatch: &ShardDispatch) {
-        let mask = self.active_mask.load(Ordering::Acquire);
-        if mask == 0 {
-            return;
-        }
-        let mut state = self.state.lock().expect("fanout shards poisoned");
-        let mut touched = SmallVec::<[usize; 8]>::new();
-        let mut m = mask;
-        while m != 0 {
-            let idx = m.trailing_zeros() as usize;
-            m &= m - 1;
-            if let Some(endpoint) = state.endpoints.get_mut(idx)
-                && endpoint.data_tx.push(dispatch.clone()).is_ok()
-            {
-                touched.push(idx);
-            }
-        }
-        for idx in touched {
-            let endpoint = &mut state.endpoints[idx];
-            endpoint.data_tx.flush();
-            endpoint.data_signal.mark();
+        let mut dist = self.distributor.lock().expect("distributor poisoned");
+        if dist.data_tx.push(dispatch.clone()).is_ok() {
+            dist.data_tx.flush();
+            dist.data_signal.mark();
         }
     }
 
@@ -434,12 +494,17 @@ impl FanOutShards {
     }
 
     fn is_empty(&self) -> bool {
-        self.state
-            .lock()
-            .expect("fanout shards poisoned")
-            .endpoints
-            .iter()
-            .all(|endpoint| endpoint.data_tx.is_empty() && endpoint.ctrl_tx.is_empty())
+        let dist = self.distributor.lock().expect("distributor poisoned");
+        let dist_empty = dist.data_tx.is_empty();
+        drop(dist);
+        dist_empty
+            && self
+                .state
+                .lock()
+                .expect("fanout shards poisoned")
+                .endpoints
+                .iter()
+                .all(|endpoint| endpoint.ctrl_tx.is_empty())
     }
 }
 
@@ -471,19 +536,44 @@ impl ShardWorker {
                 return;
             }
 
-            // 2. Data up to budget.
+            // 2. Data up to budget. The distributor shard drains into
+            //    a batch, distributes to secondary shards FIRST (so
+            //    they can start encoding in parallel), then processes
+            //    its own peers.
             budget.reset();
             let mut drained = false;
-            self.data_rx.prefetch();
-            while let Some(dispatch) = self.data_rx.pop() {
-                drained = true;
-                let msg_bytes = dispatch.msg.byte_len();
-                self.dispatch(&dispatch, &mut touched).await;
-                if !budget.account(msg_bytes) {
-                    break;
+            let is_distributor = !self.distribution_targets.is_empty();
+            if is_distributor {
+                let mut batch: SmallVec<[ShardDispatch; 32]> = SmallVec::new();
+                self.data_rx.prefetch();
+                while let Some(dispatch) = self.data_rx.pop() {
+                    drained = true;
+                    if !budget.account(dispatch.msg.byte_len()) {
+                        batch.push(dispatch);
+                        break;
+                    }
+                    batch.push(dispatch);
                 }
+                self.data_rx.release();
+
+                if !batch.is_empty() {
+                    self.distribute_batch(&batch);
+                    for dispatch in &batch {
+                        self.dispatch(dispatch, &mut touched).await;
+                    }
+                }
+            } else {
+                self.data_rx.prefetch();
+                while let Some(dispatch) = self.data_rx.pop() {
+                    drained = true;
+                    let msg_bytes = dispatch.msg.byte_len();
+                    self.dispatch(&dispatch, &mut touched).await;
+                    if !budget.account(msg_bytes) {
+                        break;
+                    }
+                }
+                self.data_rx.release();
             }
-            self.data_rx.release();
 
             self.flush_touched(&mut touched);
             if drained {
@@ -496,6 +586,24 @@ impl ShardWorker {
                 () = self.ctrl_notify.notified() => {}
                 () = self.data_signal.notified() => {}
             }
+        }
+    }
+
+    fn distribute_batch(&mut self, batch: &[ShardDispatch]) {
+        let Some(ref active_mask) = self.active_mask else {
+            return;
+        };
+        let mask = active_mask.load(Ordering::Acquire);
+        for (i, target) in self.distribution_targets.iter_mut().enumerate() {
+            // targets[0] = shard 2 (bit 1), targets[1] = shard 3 (bit 2), ...
+            if mask & (1 << (i + 1)) == 0 {
+                continue;
+            }
+            for dispatch in batch {
+                let _ = target.data_tx.push(dispatch.clone());
+            }
+            target.data_tx.flush();
+            target.data_signal.mark();
         }
     }
 
@@ -1000,8 +1108,12 @@ impl FanOutInner {
 }
 
 impl FanOutSend {
-    pub(crate) fn new(options: &Options, mode: FanOutMode) -> Self {
-        let shards = Some(FanOutShards::spawn(options, mode));
+    pub(crate) fn new(
+        options: &Options,
+        mode: FanOutMode,
+        io_pool: &crate::context::IoPoolHandle,
+    ) -> Self {
+        let shards = Some(FanOutShards::spawn(options, mode, io_pool));
         let inner = Arc::new(Mutex::new(FanOutInner {
             peers: FxHashMap::default(),
             all_subscribe_all: false,
@@ -1419,14 +1531,14 @@ fn first_frame_bytes(msg: &Message) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU8;
+    use std::sync::{Arc, Mutex};
 
     use tokio::sync::Notify;
 
     use super::{
-        FanOutShardState, FanOutShards, MAX_FAN_OUT_WORKER_SHARDS, ShardEndpoint,
-        WORKER_SHARD_PEER_CAP, yield_interval,
+        DistributorEndpoint, FanOutShardState, FanOutShards, MAX_FAN_OUT_WORKER_SHARDS,
+        ShardDispatch, ShardEndpoint, WORKER_SHARD_PEER_CAP, yield_interval,
     };
 
     const TEST_MAX_LOGICAL_SHARDS: usize = MAX_FAN_OUT_WORKER_SHARDS + 1;
@@ -1519,7 +1631,8 @@ mod tests {
                 eligible_peers: 0,
                 active_limit: 0,
             }),
-            active_mask: AtomicU8::new(0),
+            active_mask: Arc::new(AtomicU8::new(0)),
+            distributor: test_distributor(),
         };
 
         let assigned: Vec<_> = (0..WORKER_SHARD_PEER_CAP)
@@ -1539,7 +1652,8 @@ mod tests {
                 eligible_peers: 0,
                 active_limit: 0,
             }),
-            active_mask: AtomicU8::new(0),
+            active_mask: Arc::new(AtomicU8::new(0)),
+            distributor: test_distributor(),
         };
 
         let mut loads = [0usize; WORKER_SHARD_PEER_CAP + 1];
@@ -1559,14 +1673,19 @@ mod tests {
     }
 
     fn test_endpoint() -> ShardEndpoint {
-        let (data_tx, _data_rx) = yring::spsc(4);
         let (ctrl_tx, _ctrl_rx) = yring::spsc(4);
         ShardEndpoint {
-            data_tx,
             ctrl_tx,
-            data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
             ctrl_notify: Arc::new(Notify::new()),
             load: 0,
         }
+    }
+
+    fn test_distributor() -> Mutex<DistributorEndpoint> {
+        let (data_tx, _data_rx) = yring::spsc::<ShardDispatch>(4);
+        Mutex::new(DistributorEndpoint {
+            data_tx,
+            data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
+        })
     }
 }

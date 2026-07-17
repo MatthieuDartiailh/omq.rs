@@ -84,6 +84,7 @@ pub(crate) fn spawn(
         inbox: inbox_tx,
         cancel: handle_cancel,
         transmit_slot: None,
+        direct_tcp_writer: None,
         send_pipe: None,
     }
 }

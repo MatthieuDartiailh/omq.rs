@@ -10,7 +10,13 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_reqrep_tcp.svg" alt="REQ/REP latency: TCP implementations" width="950">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pubsub_tcp.svg" alt="PUB/SUB throughput: TCP implementations" width="950">
 </p>
 
 [Full comparison charts](COMPARISONS.md)

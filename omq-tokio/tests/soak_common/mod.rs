@@ -65,15 +65,8 @@ pub fn soak_duration() -> Duration {
     Duration::from_secs(secs.max(5))
 }
 
-pub fn tokio_runtime() -> tokio::runtime::Runtime {
-    match std::env::var("OMQ_SOAK_TOKIO_RUNTIME").as_deref() {
-        Ok("current_thread") => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("current-thread runtime"),
-        Ok("multi_thread") | Err(_) => tokio::runtime::Runtime::new().expect("runtime"),
-        Ok(other) => panic!("unsupported OMQ_SOAK_TOKIO_RUNTIME={other:?}"),
-    }
+pub fn build_context() -> omq_tokio::Context {
+    omq_tokio::Context::with_config(omq_tokio::ContextConfig::from_env())
 }
 
 // ---------------------------------------------------------------------------

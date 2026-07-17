@@ -1,13 +1,15 @@
-//! Round-robin send with swap-to-back deactivation.
+//! Round-robin send with fair deactivation.
 //!
 //! Peers register active per-peer yring pipes. The socket submitter
 //! scans active pipes from a moving cursor and sends to the first pipe
-//! with capacity. Full pipes are swapped to an inactive list and
-//! reactivated when the consumer drains below LWM.
+//! with capacity. Full pipes move to an inactive list and are reactivated
+//! when the consumer drains below LWM. Active order stays stable so a full
+//! pipe cannot reorder and bias the cursor toward another peer.
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
@@ -24,13 +26,38 @@ struct ActivePipe {
     tx: SendPipeProducer,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ActivePipes {
     active: Vec<ActivePipe>,
     inactive: Vec<ActivePipe>,
     pipe_peers: HashSet<u64>,
     fallback_peers: HashSet<u64>,
     cursor: usize,
+    random_state: u64,
+    inactive_cursor: usize,
+    last_reactivation_probe: Instant,
+}
+
+const REACTIVATION_PROBE_INTERVAL: Duration = Duration::from_millis(1);
+const REACTIVATION_PROBE_BATCH: usize = 8;
+
+impl Default for ActivePipes {
+    fn default() -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_secs() ^ u64::from(d.subsec_nanos()))
+            .max(1);
+        Self {
+            active: Vec::new(),
+            inactive: Vec::new(),
+            pipe_peers: HashSet::new(),
+            fallback_peers: HashSet::new(),
+            cursor: 0,
+            random_state: seed,
+            inactive_cursor: 0,
+            last_reactivation_probe: Instant::now(),
+        }
+    }
 }
 
 impl ActivePipes {
@@ -46,27 +73,74 @@ impl ActivePipes {
         self.pipe_peers.clear();
         self.fallback_peers.clear();
         self.cursor = 0;
+        self.inactive_cursor = 0;
+        self.last_reactivation_probe = Instant::now();
     }
 
     fn deactivate(&mut self, pos: usize) {
-        let pipe = self.active.swap_remove(pos);
+        let was_empty = self.inactive.is_empty();
+        let pipe = self.active.remove(pos);
         self.inactive.push(pipe);
-        if self.active.is_empty() || self.cursor >= self.active.len() {
+        if was_empty {
+            self.inactive_cursor = self.random_index(self.inactive.len());
+        }
+        if self.active.is_empty() {
             self.cursor = 0;
+        } else {
+            if pos < self.cursor {
+                self.cursor -= 1;
+            }
+            if self.cursor >= self.active.len() {
+                self.cursor = 0;
+            }
         }
     }
 
-    fn try_reactivate_any(&mut self) {
+    fn reactivation_probe_due(&mut self) -> bool {
         if self.inactive.is_empty() {
+            return false;
+        }
+        if self.last_reactivation_probe.elapsed() >= REACTIVATION_PROBE_INTERVAL {
+            self.last_reactivation_probe = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn try_reactivate_one(&mut self) {
+        let Some(len) = (!self.inactive.is_empty()).then_some(self.inactive.len()) else {
+            return;
+        };
+        let i = self.inactive_cursor % len;
+        self.inactive_cursor = (i + 1) % len;
+        if self.inactive[i].tx.above_lwm.load(Ordering::Acquire) {
             return;
         }
-        let mut i = 0;
-        while i < self.inactive.len() {
-            if self.inactive[i].tx.above_lwm.load(Ordering::Acquire) {
-                i += 1;
-            } else {
-                let pipe = self.inactive.swap_remove(i);
-                self.active.push(pipe);
+        let pipe = self.inactive.remove(i);
+        self.active.push(pipe);
+        if self.inactive.is_empty() {
+            self.inactive_cursor = 0;
+        } else if i < self.inactive_cursor {
+            self.inactive_cursor -= 1;
+        }
+    }
+
+    fn try_reactivate_batch(&mut self) {
+        for _ in 0..REACTIVATION_PROBE_BATCH {
+            if self.inactive.is_empty() {
+                break;
+            }
+            self.try_reactivate_one();
+        }
+    }
+
+    fn try_reactivate_when_empty(&mut self) {
+        let probes = self.inactive.len();
+        for _ in 0..probes {
+            self.try_reactivate_one();
+            if !self.active.is_empty() {
+                break;
             }
         }
     }
@@ -75,17 +149,38 @@ impl ActivePipes {
         self.pipe_peers.remove(&peer_id);
         self.fallback_peers.remove(&peer_id);
         if let Some(pos) = self.active.iter().position(|p| p.peer_id == peer_id) {
-            self.active.swap_remove(pos);
-            if self.active.is_empty() || self.cursor >= self.active.len() {
+            self.active.remove(pos);
+            if self.active.is_empty() {
                 self.cursor = 0;
+            } else {
+                if pos < self.cursor {
+                    self.cursor -= 1;
+                }
+                if self.cursor >= self.active.len() {
+                    self.cursor = 0;
+                }
             }
         } else if let Some(pos) = self.inactive.iter().position(|p| p.peer_id == peer_id) {
-            self.inactive.swap_remove(pos);
+            self.inactive.remove(pos);
+            if self.inactive.is_empty() {
+                self.inactive_cursor = 0;
+            } else {
+                self.inactive_cursor %= self.inactive.len();
+            }
         }
     }
 
     fn should_use_fallback(&self) -> bool {
         (self.active.is_empty() && self.inactive.is_empty()) || !self.fallback_peers.is_empty()
+    }
+
+    fn random_index(&mut self, len: usize) -> usize {
+        let mut x = self.random_state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.random_state = x.max(1);
+        (x as usize) % len
     }
 }
 
@@ -158,7 +253,13 @@ impl Submitter {
                 .map_err(omq_proto::error::TrySendError::Full);
         }
 
-        active.try_reactivate_any();
+        if active.active.is_empty() {
+            // No pipe can make progress until one inactive pipe crosses LWM.
+            // Probe the whole rotating list only in this stalled state.
+            active.try_reactivate_when_empty();
+        } else if active.reactivation_probe_due() {
+            active.try_reactivate_batch();
+        }
 
         let mut scanned = 0usize;
         while scanned < active.active.len() {
@@ -176,21 +277,24 @@ impl Submitter {
                     if active.active.is_empty() {
                         break;
                     }
-                    // After deactivate, position i holds a different pipe
-                    // (swapped from the end). Don't increment scanned for
-                    // the new occupant.
+                    // Position i now holds the next stable-order pipe.
                     scanned = scanned.saturating_sub(1);
                 }
                 Err(SendPipeError::Closed(returned)) => {
                     let peer_id = active.active[i].peer_id;
                     active.pipe_peers.remove(&peer_id);
-                    active.active.swap_remove(i);
+                    active.active.remove(i);
                     msg = returned;
                     if active.active.is_empty() {
                         active.cursor = 0;
                         break;
                     }
-                    active.cursor %= active.active.len();
+                    if i < active.cursor {
+                        active.cursor -= 1;
+                    }
+                    if active.cursor >= active.active.len() {
+                        active.cursor = 0;
+                    }
                     scanned = scanned.saturating_sub(1);
                 }
             }
@@ -220,11 +324,18 @@ impl ActivePipes {
             }
             let peer_id = self.active[i].peer_id;
             self.pipe_peers.remove(&peer_id);
-            self.active.swap_remove(i);
+            self.active.remove(i);
             if self.active.is_empty() {
                 self.cursor = 0;
                 return None;
             }
+            if i < self.cursor {
+                self.cursor -= 1;
+            }
+            if self.cursor >= self.active.len() {
+                self.cursor = 0;
+            }
+            scanned = scanned.saturating_sub(1);
         }
         None
     }
@@ -275,7 +386,11 @@ impl RoundRobinSend {
         if let Some(tx) = send_pipe {
             active.remove_peer(peer_id);
             active.pipe_peers.insert(peer_id);
-            active.active.push(ActivePipe { peer_id, tx });
+            let pos = {
+                let len = active.active.len() + 1;
+                active.random_index(len)
+            };
+            active.active.insert(pos, ActivePipe { peer_id, tx });
             return;
         }
         active.fallback_peers.insert(peer_id);
@@ -311,5 +426,35 @@ impl RoundRobinSend {
         let active_empty = guard.active.iter().all(|pipe| pipe.tx.is_empty());
         let inactive_empty = guard.inactive.iter().all(|pipe| pipe.tx.is_empty());
         self.queue.len() == 0 && active_empty && inactive_empty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActivePipe, ActivePipes};
+    use crate::engine::send_pipe::send_pipe;
+
+    #[test]
+    fn deactivation_preserves_active_peer_order() {
+        let mut pipes = ActivePipes::default();
+        for peer_id in 0..4 {
+            pipes.active.push(ActivePipe {
+                peer_id,
+                tx: send_pipe(4).0,
+            });
+        }
+        pipes.cursor = 2;
+
+        pipes.deactivate(1);
+
+        assert_eq!(
+            pipes
+                .active
+                .iter()
+                .map(|pipe| pipe.peer_id)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
+        assert_eq!(pipes.cursor, 1);
     }
 }

@@ -24,14 +24,14 @@ sys.path.insert(0, str(REPO / "scripts"))
 from chart_hw import detect_hardware
 
 # Union of all impls plotted in the main chart; used only as a load filter.
-IMPLS = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt",
+IMPLS = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-2t",
          "zmq.rs", "rzmq", "rzmq-iouring"]
 
 COLORS = {
     "libzmq": "#eab308",
     "libzmq-mt": "#a16207",
     "omq-tokio": "#f97316",
-    "omq-tokio-mt": "#dc2626",
+    "omq-tokio-2t": "#dc2626",
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
     "rzmq-iouring": "#15803d",
@@ -41,16 +41,16 @@ LABELS = {
     "libzmq": "libzmq v4.3.5 (1T)",
     "libzmq-mt": "libzmq v4.3.5 (4T)",
     "omq-tokio": "omq-tokio (1T)",
-    "omq-tokio-mt": "omq-tokio (2T)",
+    "omq-tokio-2t": "omq-tokio (2T)",
     "zmq.rs": "zmq.rs v0.6.0 [6T]",
     "rzmq": "rzmq v0.5.24 [6T]",
     "rzmq-iouring": "rzmq v0.5.24 (io_uring) [6T]",
 }
 
-MAIN_IMPLS = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt",
+MAIN_IMPLS = ["libzmq", "omq-tokio",
               "zmq.rs", "rzmq", "rzmq-iouring"]
 MAIN_DRAW_ORDER = ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq",
-                   "libzmq-mt", "omq-tokio-mt", "omq-tokio"]
+                   "omq-tokio"]
 MAIN_TITLE = "PUSH/PULL throughput, TCP loopback, 2-process"
 
 
@@ -349,7 +349,7 @@ def draw_latency_panel(
     L.append(svg_line(x_left, y_top, x_left, y_bot, stroke="#9ca3af", width=1.5))
     L.append(svg_line(x_left, y_bot, x_right, y_bot, stroke="#9ca3af", width=1.5))
 
-    lat_draw_order = ["libzmq", "libzmq-mt", "omq-tokio-mt", "omq-tokio",
+    lat_draw_order = ["libzmq", "omq-tokio",
                       "rzmq", "rzmq-iouring", "zmq.rs"]
     for name in lat_draw_order:
         pts = [

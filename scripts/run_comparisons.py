@@ -204,8 +204,9 @@ def libzmq_version() -> str:
 
 # ── process management ────────────────────────────────────────────
 
-MEASURED_CPU = "0,1,2"
+MEASURED_CPU = "0,1,2,3"
 OTHER_CPU = "3,4,5"
+SINK_IO_THREADS = "3"
 
 
 def spawn_process(binary: str, *args: str, env: dict | None = None,
@@ -394,6 +395,34 @@ def parse_throughput(output: str, size: int) -> dict | None:
     return result
 
 
+def parse_multi_throughput(output: str, size: int, peers: int) -> dict | None:
+    """Parse output from multi-pull / multi-sub.
+
+    Format: total_count elapsed size cpu_secs socket_count per_min_rate per_max_rate
+    """
+    parts = output.strip().split()
+    if len(parts) < 4:
+        return None
+    count = float(parts[0])
+    elapsed = float(parts[1])
+    if count <= 0 or elapsed <= 0:
+        return None
+    cpu = float(parts[3])
+    per_peer_msgs = count / elapsed / peers
+    result = {
+        "msgs_s": per_peer_msgs,
+        "mbps": count * size / elapsed / 1e6,
+        "elapsed": elapsed,
+        "peers_measured": peers,
+    }
+    if cpu > 0:
+        result["pull_cpu"] = cpu
+    if len(parts) >= 7:
+        result["peer_min"] = float(parts[5])
+        result["peer_max"] = float(parts[6])
+    return result
+
+
 def zero_tput_result(duration: float) -> dict:
     return {
         "msgs_s": 0.0,
@@ -463,7 +492,7 @@ def _run_throughput_once(
     dur = str(duration)
     issues: list = []
     cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
-    recv_env = {**cell_env, "OMQ_BENCH_TOKIO_THREADS": "1"}
+    recv_env = {**cell_env, "OMQ_IO_THREADS": "1"}
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
         timeout_s = max(int(duration) + 5, 8)
@@ -554,7 +583,9 @@ def _run_pubsub_once(
     else:
         addr = _fresh_addr(addr)
         cleanup_ipc_socket(addr)
-        recv_env = {**cell_env, "OMQ_BENCH_TOKIO_THREADS": "1"}
+        recv_env = {**cell_env,
+                    "OMQ_IO_THREADS": SINK_IO_THREADS,
+                    "ZMQ_IO_THREADS": SINK_IO_THREADS}
         pub_args = [binary, "pub", addr, str(size)]
         if pub_needs_peers:
             pub_args.append(str(peers))
@@ -568,64 +599,29 @@ def _run_pubsub_once(
                 kill_process(pub_)
                 return None
             connect_addr = str(port)
-        subs = []
-        outputs = []
         try:
-            for _ in range(peers):
-                subs.append(spawn_process(binary, "sub", connect_addr,
-                                          str(size), dur, env=recv_env,
-                                          cpu=OTHER_CPU))
-            time.sleep(0.05)
-            timeout_s = max(int(duration) + 5, 8)
-            for s in subs:
-                try:
-                    out, _ = s.communicate(timeout=timeout_s)
-                    _deregister_proc(s)
-                except subprocess.TimeoutExpired:
-                    print(f"WARNING: timeout: {binary} sub {connect_addr} {size} {dur}",
-                          file=sys.stderr)
-                    _hard_kill(s)
-                    out = ""
-                outputs.append(out)
+            timeout_s = max(int(duration) + 8, 10)
+            output, _ = capture_with_cpu(
+                binary, "multi-sub", connect_addr, str(size), dur,
+                str(peers), timeout=timeout_s, env=recv_env, cpu=OTHER_CPU)
             pub_cpu = read_proc_cpu(pub_.pid)
         finally:
             _hard_kill(pub_)
-            for s in subs:
-                _hard_kill(s)
             cleanup_ipc_socket(addr)
-        parsed = [r for r in (parse_throughput(o, size) for o in outputs) if r]
-        if not parsed:
-            result = zero_tput_result(duration)
-        elif len(parsed) != peers:
+        result = parse_multi_throughput(output, size, peers)
+        if not result:
             result = zero_tput_result(duration)
         else:
-            per_peer = [r["msgs_s"] for r in parsed]
-            total = sum(per_peer)
-            elapsed = max(r["elapsed"] for r in parsed)
-            pull_cpu = sum(r.get("pull_cpu", 0.0) for r in parsed)
-            n_with_cpu = sum(1 for r in parsed if "pull_cpu" in r)
-            result = {
-                "msgs_s": total / peers,
-                "mbps": total * size / 1e6,
-                "elapsed": elapsed,
-                "peer_min": min(per_peer),
-                "peer_max": max(per_peer),
-                "peers_measured": len(per_peer),
-            }
             pub_ok = _note(issues, pub_cpu > 0, impl, "pubsub", transport, size,
                            peers, "pub CPU (/proc)")
-            sub_ok = _note(issues, n_with_cpu == len(parsed), impl, "pubsub",
-                           transport, size, peers,
-                           f"CPU from {len(parsed) - n_with_cpu} of "
-                           f"{len(parsed)} subscribers (peer stdout)")
+            sub_ok = _note(issues, "pull_cpu" in result, impl, "pubsub",
+                           transport, size, peers, "subscriber CPU (multi-sub stdout)")
             if pub_ok and sub_ok:
-                result["cpu_time"] = pub_cpu + pull_cpu
+                result["cpu_time"] = pub_cpu + result["pull_cpu"]
             if pub_ok:
                 result["pub_cpu_time"] = pub_cpu
     if result:
         result["_issues"] = issues
-        if peers > 1 and "peers_measured" not in result:
-            result["mbps"] *= peers
     return result
 
 
@@ -633,15 +629,15 @@ def run_fanout_cell(
     binary: str, transport: str, addr: str, size: int, peers: int,
     duration: float = DEFAULT_DURATION,
     rounds: int = DEFAULT_ROUNDS,
-    push_subcmd: str = "push",
-    push_needs_peers: bool = False,
+    fanout_subcmd: str = "push",
+    fanout_needs_peers: bool = False,
     env: dict | None = None,
     impl: str = "?",
 ) -> dict | None:
     best = None
     for _ in range(max(1, rounds)):
         result = _run_fanout_once(binary, transport, addr, size, peers, duration,
-                                  push_subcmd, push_needs_peers, env=env, impl=impl)
+                                  fanout_subcmd, fanout_needs_peers, env=env, impl=impl)
         if result and (best is None or result["msgs_s"] > best["msgs_s"]):
             best = result
     _flush_issues(best)
@@ -651,21 +647,20 @@ def run_fanout_cell(
 def _run_fanout_once(
     binary: str, transport: str, addr: str, size: int, peers: int,
     duration: float,
-    push_subcmd: str = "push",
-    push_needs_peers: bool = False,
+    fanout_subcmd: str = "push",
+    fanout_needs_peers: bool = False,
     env: dict | None = None,
     impl: str = "?",
 ) -> dict | None:
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
     issues: list = []
-    start_at = time.time() + 2.0
-    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{start_at:.6f}"}
-    recv_env = {**cell_env, "OMQ_BENCH_TOKIO_THREADS": "1"}
-    # Some peers need the worker count up front to
-    # accept exactly N connections; pass it as a trailing arg when required.
-    push_args = [binary, push_subcmd, addr, str(size)]
-    if push_needs_peers:
+    cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
+    recv_env = {**cell_env,
+                "OMQ_IO_THREADS": SINK_IO_THREADS,
+                "ZMQ_IO_THREADS": SINK_IO_THREADS}
+    push_args = [binary, fanout_subcmd, addr, str(size)]
+    if fanout_needs_peers:
         push_args.append(str(peers))
     push = spawn_process(*push_args, env=cell_env, cpu=MEASURED_CPU)
     if transport in ("ipc", "ws"):
@@ -679,85 +674,25 @@ def _run_fanout_once(
             kill_process(push)
             return None
         connect_addr = str(port)
-    # Capture EVERY puller (not 1 + N-1 blind drains) so we can report
-    # aggregate throughput AND per-peer fairness: a starving peer (broken
-    # round-robin) shows up as a wide [peer_min, peer_max] spread.
-    pulls = []
-    outputs = []
     try:
-        for _ in range(peers):
-            pulls.append(spawn_process(binary, "pull", connect_addr,
-                                       str(size), str(duration), env=recv_env,
-                                       cpu=OTHER_CPU))
-        time.sleep(0.05)
-        time.sleep(max(0.0, start_at + PEER_WARMUP_SECS - time.time()))
-        push_cpu_before = read_proc_cpu(push.pid)
-        # A starved puller (e.g. rzmq's load-balancer skipping one of N peers)
-        # blocks in recv() past its own deadline and never prints. Keep the
-        # timeout tight so a dead round is cheap: best-of-N only needs one
-        # clean round per cell, so retries are far cheaper than a 15s hang.
-        for p in pulls:
-            try:
-                out, _ = p.communicate(timeout=max(int(duration) + 3, 5))
-                _deregister_proc(p)
-            except subprocess.TimeoutExpired:
-                _hard_kill(p)
-                out = ""
-            outputs.append(out)
-        push_cpu = max(0.0, read_proc_cpu(push.pid) - push_cpu_before)
+        timeout_s = max(int(duration) + 8, 10)
+        output, _ = capture_with_cpu(
+            binary, "multi-pull", connect_addr, str(size), str(duration),
+            str(peers), timeout=timeout_s, env=recv_env, cpu=OTHER_CPU)
+        push_cpu = read_proc_cpu(push.pid)
     finally:
         _hard_kill(push)
-        for p in pulls:
-            _hard_kill(p)
         cleanup_ipc_socket(addr)
-    if os.environ.get("OMQ_DEBUG_RAW"):
-        for i, o in enumerate(outputs):
-            print(f"   [raw] {impl} fan_out size={size} peers={peers} "
-                  f"puller#{i}: {o.strip()!r}", file=sys.stderr)
-    parsed = [r for r in (parse_throughput(o, size) for o in outputs) if r]
-    if not parsed:
+    result = parse_multi_throughput(output, size, peers)
+    if not result:
         return zero_tput_result(duration)
-    # Every puller must report, or msgs_s (total/peers) and the fairness whisker
-    # would be computed from a partial set. Treat persistent partial delivery as
-    # zero transported for this supported pattern instead of recording an
-    # undercounted point.
-    if len(parsed) != peers:
-        return zero_tput_result(duration)
-    per_peer = [r["msgs_s"] for r in parsed]
-    total = sum(per_peer)
-    # Reject physically-impossible rounds. A single TCP loopback stream tops
-    # out well under SINGLE_STREAM_MBPS, so any one peer reporting above that
-    # is a measurement glitch (a truncated/concatenated stdout line parsed
-    # into a bogus count), NOT a real result. Discard the whole round:
-    # best-of-N selects the MAX msgs_s, so without this guard an inflated
-    # glitch round wins and a 78 GB/s point lands in the chart.
-    peak_mbps = max(per_peer) * size / 1e6
-    if peak_mbps > SINGLE_STREAM_MBPS:
-        print(f"   !! discarding glitch round: {impl} fan_out size={size} "
-              f"peers={peers} peak {peak_mbps:.0f} MB/s/peer "
-              f"(> {SINGLE_STREAM_MBPS} ceiling)", file=sys.stderr)
-        return None
-    elapsed = max(r["elapsed"] for r in parsed)
-    pull_cpu = sum(r.get("pull_cpu", 0.0) for r in parsed)
-    n_with_cpu = sum(1 for r in parsed if "pull_cpu" in r)
-    # msgs_s = mean per-peer rate (outer-right axis, matches the whisker);
-    # mbps = aggregate bytes/s across all pullers (inner-right GB/s axis).
-    result = {
-        "msgs_s": total / peers,
-        "mbps": total * size / 1e6,
-        "elapsed": elapsed,
-        "peer_min": min(per_peer),
-        "peer_max": max(per_peer),
-        "peers_measured": len(per_peer),
-    }
     push_ok = _note(issues, push_cpu > 0, impl, "fan_out", transport, size, peers,
-                          "push CPU (/proc)")
+                    "push CPU (/proc)")
     if push_ok:
-        # Fan-out CPU is producer-side cost. Pullers are measurement sinks.
         result["cpu_time"] = push_cpu
         result["push_cpu_time"] = push_cpu
-    if n_with_cpu == len(parsed):
-        result["pull_cpu_time"] = pull_cpu
+    if "pull_cpu" in result:
+        result["pull_cpu_time"] = result["pull_cpu"]
     result["_issues"] = issues
     return result
 
@@ -794,7 +729,6 @@ def _run_fanin_once(
     dur = str(duration)
     issues: list = []
     cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
-    # Some peers need the worker count to accept exactly N pushers.
     pull_args = [binary, pull_subcmd, addr, str(size), dur]
     if pull_needs_peers:
         pull_args.append(str(peers))
@@ -808,35 +742,28 @@ def _run_fanin_once(
             kill_process(pull)
             return None
         connect_addr = str(port)
-    pushers = []
+    multi_push = spawn_process(binary, "multi-push", connect_addr,
+                               str(size), str(peers), env=cell_env,
+                               cpu=OTHER_CPU)
     try:
-        for _ in range(peers):
-            pushers.append(spawn_process(binary, "push-connect", connect_addr,
-                                         str(size), env=cell_env,
-                                         cpu=OTHER_CPU))
         stdout, _ = pull.communicate(timeout=max(int(duration) + 10, 15))
         _deregister_proc(pull)
-        pusher_cpus = [read_proc_cpu(p.pid) for p in pushers]
+        push_cpu = read_proc_cpu(multi_push.pid)
     except subprocess.TimeoutExpired:
         _hard_kill(pull)
         stdout = ""
-        pusher_cpus = []
+        push_cpu = 0.0
     finally:
-        for p in pushers:
-            _hard_kill(p)
+        _hard_kill(multi_push)
         cleanup_ipc_socket(addr)
     result = parse_throughput(stdout, size)
     if result:
-        # Pusher CPU comes from /proc, which always reads (alive or zombie), so
-        # a per-pusher 0 means genuinely idle (back-pressured), not missing.
-        # Only a whole-set zero is suspicious; the collector's stdout CPU is the
-        # field that can actually go absent.
-        push_ok = _note(issues, sum(pusher_cpus) > 0, impl, "fan_in", transport,
-                              size, peers, "pusher CPU (all /proc reads 0)")
+        push_ok = _note(issues, push_cpu > 0, impl, "fan_in", transport,
+                        size, peers, "pusher CPU (/proc multi-push)")
         pull_ok = _note(issues, "pull_cpu" in result, impl, "fan_in", transport,
-                              size, peers, "collector CPU (peer stdout)")
+                        size, peers, "collector CPU (peer stdout)")
         if push_ok and pull_ok:
-            result["cpu_time"] = sum(pusher_cpus) + result["pull_cpu"]
+            result["cpu_time"] = push_cpu + result["pull_cpu"]
         if pull_ok:
             result["pull_cpu_time"] = result["pull_cpu"]
         result["_issues"] = issues
@@ -979,9 +906,11 @@ IMPLS = {
         "inproc_lat_subcmd": "inproc-latency",
         "inproc_pubsub_subcmd": "inproc-pubsub",
         "pub_needs_peer_count": True,
+        "fanout_subcmd": "pub-fanout",
+        "fanio_needs_peer_count": True,
         "supports_pubsub": True,
     },
-    "omq-tokio-mt": {
+    "omq-tokio-2t": {
         "binary_from": "omq-tokio",
         "prefix": "u",
         "class": "classic",
@@ -990,10 +919,10 @@ IMPLS = {
         "inproc_lat_subcmd": "inproc-latency",
         "inproc_pubsub_subcmd": "inproc-pubsub",
         "pub_needs_peer_count": True,
-        "fanout_push_subcmd": "push-fanout",
-        "fanio_needs_peer_count": True,
+        "fanout_subcmd": "push",
+        "fanio_needs_peer_count": False,
         "supports_pubsub": True,
-        "env": {"OMQ_BENCH_TOKIO_THREADS": "2"},
+        "env": {"OMQ_IO_THREADS": "2"},
     },
     "libzmq": {
         "prefix": "z",
@@ -1003,6 +932,14 @@ IMPLS = {
         "inproc_lat_subcmd": "inproc-latency",
         "inproc_pubsub_subcmd": "inproc-pubsub",
         "supports_pubsub": True,
+    },
+    "libzmq-2t": {
+        "binary_from": "libzmq",
+        "prefix": "Y",
+        "class": "classic",
+        "transports": ["tcp", "ipc", "ws"],
+        "supports_pubsub": True,
+        "env": {"ZMQ_IO_THREADS": "2"},
     },
     "libzmq-mt": {
         "binary_from": "libzmq",
@@ -1038,37 +975,109 @@ IMPLS = {
         "supports_pubsub": True,
         "env": {"RZMQ_IO_URING": "1"},
     },
+    "omq-tokio-1t": {
+        "binary_from": "omq-tokio",
+        "prefix": "s1",
+        "transports": ["tcp", "ipc"],
+        "pub_needs_peer_count": True,
+        "fanout_subcmd": "pub-fanout",
+        "fanio_needs_peer_count": True,
+        "supports_pubsub": True,
+        "env": {"OMQ_IO_THREADS": "1"},
+    },
+    "omq-tokio-4t": {
+        "binary_from": "omq-tokio",
+        "prefix": "s4",
+        "transports": ["tcp", "ipc"],
+        "pub_needs_peer_count": True,
+        "fanout_subcmd": "pub-fanout",
+        "fanio_needs_peer_count": True,
+        "supports_pubsub": True,
+        "env": {"OMQ_IO_THREADS": "4"},
+    },
+    "libzmq-curve-1t": {
+        "binary_from": "libzmq",
+        "prefix": "lc1",
+        "class": "curve",
+        "transports": ["tcp"],
+        "supports_pubsub": True,
+        "env": {"ZMQ_IO_THREADS": "1", "ZMQ_BENCH_CURVE": "1"},
+    },
+    "libzmq-curve-2t": {
+        "binary_from": "libzmq",
+        "prefix": "lc2",
+        "class": "curve",
+        "transports": ["tcp"],
+        "supports_pubsub": True,
+        "env": {"ZMQ_IO_THREADS": "2", "ZMQ_BENCH_CURVE": "1"},
+    },
+    "libzmq-curve-4t": {
+        "binary_from": "libzmq",
+        "prefix": "lc4",
+        "class": "curve",
+        "transports": ["tcp"],
+        "supports_pubsub": True,
+        "env": {"ZMQ_IO_THREADS": "4", "ZMQ_BENCH_CURVE": "1"},
+    },
+    "omq-curve-1t": {
+        "binary_from": "omq-tokio",
+        "prefix": "oc1",
+        "class": "curve",
+        "transports": ["tcp"],
+        "pub_needs_peer_count": True,
+        "supports_pubsub": True,
+        "env": {"OMQ_IO_THREADS": "1", "OMQ_BENCH_MECHANISM": "curve"},
+    },
+    "omq-curve-2t": {
+        "binary_from": "omq-tokio",
+        "prefix": "oc2",
+        "class": "curve",
+        "transports": ["tcp"],
+        "pub_needs_peer_count": True,
+        "supports_pubsub": True,
+        "env": {"OMQ_IO_THREADS": "2", "OMQ_BENCH_MECHANISM": "curve"},
+    },
+    "omq-curve-4t": {
+        "binary_from": "omq-tokio",
+        "prefix": "oc4",
+        "class": "curve",
+        "transports": ["tcp"],
+        "pub_needs_peer_count": True,
+        "supports_pubsub": True,
+        "env": {"OMQ_IO_THREADS": "4", "OMQ_BENCH_MECHANISM": "curve"},
+    },
 }
 
-PUBSUB_PEER_COUNTS = [1, 8, 32]
-FANOUT_PEER_COUNTS = [2, 4, 8]
-FANIN_PEER_COUNTS = [2, 4, 8]
+PUBSUB_PEER_COUNTS = [4, 64]
+FANOUT_PEER_COUNTS = [4, 64]
+FANIN_PEER_COUNTS = [4, 64]
 
 
 def build_peers(impl_names: set[str], ws_needed: bool):
     binaries = {}
     features = ["ws"] if ws_needed else []
 
-    if impl_names & {"omq-tokio", "omq-tokio-mt"}:
+    omq_io_names = {"omq-tokio-1t", "omq-tokio-2t", "omq-tokio-4t"}
+    curve_omq_names = {"omq-curve-1t", "omq-curve-2t", "omq-curve-4t"}
+    omq_all = {"omq-tokio", "omq-tokio-2t"} | omq_io_names | curve_omq_names
+    if impl_names & omq_all:
         print("==> building omq-tokio bench_peer...", file=sys.stderr)
         tokio_features = list(features) if features else []
-        tokio_features.append("rt-multi-thread")
+        if impl_names & curve_omq_names:
+            tokio_features.append("curve")
         cargo_build("omq-tokio", "bench_peer_tokio", features=tokio_features)
         tokio_bin = str(ROOT / "target" / "release" / "bench_peer_tokio")
-        if "omq-tokio" in impl_names:
-            binaries["omq-tokio"] = tokio_bin
-        if "omq-tokio-mt" in impl_names:
-            binaries["omq-tokio-mt"] = tokio_bin
+        for name in omq_all & impl_names:
+            binaries[name] = tokio_bin
 
-    if impl_names & {"libzmq", "libzmq-mt"}:
+    curve_libzmq_names = {"libzmq-curve-1t", "libzmq-curve-2t", "libzmq-curve-4t"}
+    if impl_names & ({"libzmq", "libzmq-2t", "libzmq-mt"} | curve_libzmq_names):
         print("==> building libzmq bench_peer...", file=sys.stderr)
         src = ROOT / "scripts" / "libzmq_bench_peer.c"
         out = ROOT / "scripts" / "libzmq_bench_peer"
         gcc_build(src, out)
-        if "libzmq" in impl_names:
-            binaries["libzmq"] = str(out)
-        if "libzmq-mt" in impl_names:
-            binaries["libzmq-mt"] = str(out)
+        for ln in ({"libzmq", "libzmq-2t", "libzmq-mt"} | curve_libzmq_names) & impl_names:
+            binaries[ln] = str(out)
 
     if "zmq.rs" in impl_names:
         print("==> building zmq.rs bench_peer...", file=sys.stderr)
@@ -1115,6 +1124,8 @@ def run_benchmarks(
     fanout_peers: list[int] | None = None,
     run_fanin: bool = False,
     fanin_peers: list[int] | None = None,
+    run_curve: bool = False,
+    curve_peers: int = 16,
 ):
     _cleanup_ipc_sockets()
     atexit.register(_cleanup_ipc_sockets)
@@ -1235,6 +1246,7 @@ def run_benchmarks(
             pubsub_active = {
                 name: path for name, path in active.items()
                 if IMPLS[name].get("supports_pubsub")
+                and IMPLS[name].get("class") != "curve"
             }
         else:
             pubsub_active = {}
@@ -1313,8 +1325,8 @@ def run_benchmarks(
                         result = run_fanout_cell(
                             binary, transport, addr, size, peers,
                             duration=duration, rounds=rounds,
-                            push_subcmd=impl_def.get("fanout_push_subcmd", "push"),
-                            push_needs_peers=impl_def.get("fanio_needs_peer_count", False),
+                            fanout_subcmd=impl_def.get("fanout_subcmd", "push"),
+                            fanout_needs_peers=impl_def.get("fanio_needs_peer_count", False),
                             env=impl_def.get("env"), impl=name,
                         )
                         cells[name] = result
@@ -1419,6 +1431,66 @@ def run_benchmarks(
                             line += f"  {0:>9.0f} msg/s {0:>6.1f} MB/s ZERO"
                     print(line, file=sys.stderr)
 
+    # ── CURVE PUB/SUB ─────────────────────────────────────────────
+    if run_curve:
+        curve_active = {
+            name: path for name, path in binaries.items()
+            if IMPLS[name].get("class") == "curve"
+            and "tcp" in IMPLS[name]["transports"]
+        }
+        if curve_active:
+            peers = curve_peers
+            print(f"\n── CURVE pub/sub {peers}p: tcp ──", file=sys.stderr)
+            header = "".join(f"  {name:>22s}" for name in curve_active)
+            print(f"{'size':>10s}{header}", file=sys.stderr)
+            for idx, size in enumerate(sizes):
+                cells = {}
+                for name, binary in curve_active.items():
+                    impl_def = IMPLS[name]
+                    prefix = impl_def["prefix"]
+                    port_offset = 500 + idx
+                    addr = addr_for("tcp", prefix, port_offset, base_port)
+                    result = run_pubsub_cell(
+                        binary, "tcp", addr, size, peers,
+                        pub_needs_peers=impl_def.get("pub_needs_peer_count", False),
+                        duration=duration, rounds=rounds,
+                        env=impl_def.get("env"), impl=name,
+                    )
+                    cells[name] = result
+                    if result:
+                        row = {
+                            "run_id": run_id,
+                            "impl": name,
+                            "kind": "pub_sub",
+                            "transport": "tcp",
+                            "peers": peers,
+                            "msg_size": size,
+                            "msgs_s": round(result["msgs_s"], 1),
+                            "mbps": round(result["mbps"], 1),
+                        }
+                        if "elapsed" in result:
+                            row["elapsed"] = round(result["elapsed"], 6)
+                        if "cpu_time" in result:
+                            row["cpu_time"] = round(result["cpu_time"], 6)
+                        if "pub_cpu_time" in result:
+                            row["pub_cpu_time"] = round(result["pub_cpu_time"], 6)
+                        if result.get("zero_transport"):
+                            row["zero_transport"] = True
+                        append_jsonl(row)
+                    else:
+                        append_zero_tput_row(run_id, name, "pub_sub",
+                                             "tcp", size, peers)
+
+                line = f"{size_label(size):>10s}"
+                for name in curve_active:
+                    r = cells.get(name)
+                    if r and not r.get("zero_transport"):
+                        line += (f"  {r['msgs_s']:>9.0f} msg/s"
+                                 f" {r['mbps']:>6.1f} MB/s")
+                    else:
+                        line += f"  {0:>9.0f} msg/s {0:>6.1f} MB/s ZERO"
+                print(line, file=sys.stderr)
+
     print(file=sys.stderr)
 
 
@@ -1432,7 +1504,7 @@ def main():
     )
     parser.add_argument(
         "--omq", action="store_true",
-        help="rebench only this project's backends (omq-tokio, omq-tokio-mt). "
+        help="rebench only this project's backends (omq-tokio, omq-tokio-2t). "
              "Competitor data is external and stable, so it is "
              "reused from the JSONL cache. The fast iteration path.",
     )
@@ -1507,6 +1579,14 @@ def main():
         help=f"comma-separated peer counts for fan-in (default: {','.join(str(p) for p in FANIN_PEER_COUNTS)})",
     )
     parser.add_argument(
+        "--curve", action="store_true",
+        help="run CURVE PUB/SUB benchmarks (libzmq + omq, 1T/2T/4T, 16 subscribers)",
+    )
+    parser.add_argument(
+        "--curve-peers", type=int, default=16,
+        help="subscriber count for CURVE benchmarks (default: 16)",
+    )
+    parser.add_argument(
         "--base-port", type=int, default=0,
         help="base TCP port (default: random ephemeral)",
     )
@@ -1545,14 +1625,18 @@ def main():
 
     impl_names = set(args.impls) if args.impls else set()
     if args.omq:
-        impl_names |= {"omq-tokio", "omq-tokio-mt"}
+        impl_names |= {"omq-tokio", "omq-tokio-2t"}
+    curve_impl_names = {"libzmq-curve-1t", "libzmq-curve-2t", "libzmq-curve-4t",
+                        "omq-curve-1t", "omq-curve-2t", "omq-curve-4t"}
+    if args.curve and not impl_names & curve_impl_names:
+        impl_names |= curve_impl_names
     if not impl_names:
         impl_names = set(IMPLS.keys())
 
     binaries = build_peers(impl_names, ws_needed)
 
     versions = []
-    if impl_names & {"omq-tokio", "omq-tokio-mt"}:
+    if impl_names & {"omq-tokio", "omq-tokio-2t"}:
         versions.append(f"omq {cargo_version('omq-tokio')}")
     if "libzmq" in impl_names:
         versions.append(f"libzmq {libzmq_version()}")
@@ -1581,7 +1665,9 @@ def main():
                    run_fanout=args.fanout,
                    fanout_peers=fanout_peers,
                    run_fanin=args.fanin,
-                   fanin_peers=fanin_peers)
+                   fanin_peers=fanin_peers,
+                   run_curve=args.curve,
+                   curve_peers=args.curve_peers)
 
     # A run that quietly undercounted CPU is worse than a failed one: it ships a
     # plausible chart that lies. Abort loudly so the operator fixes the peer

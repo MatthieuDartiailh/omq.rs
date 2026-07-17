@@ -136,6 +136,7 @@ pub(crate) fn fake_handle(
         inbox,
         cancel,
         transmit_slot: None,
+        direct_tcp_writer: None,
         send_pipe: None,
     }
 }

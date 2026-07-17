@@ -148,10 +148,9 @@ async fn rep_survives_client_disconnect_mid_cycle() {
             .expect("REP recv timed out for first client")
             .unwrap();
         assert_eq!(m, Message::single("drop-me"));
-        // req1 drops here: connection closes before REP replies.
+        req1.close().await.unwrap();
     }
 
-    // Give REP time to detect the disconnect and clear the stale envelope.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Second client: full roundtrip must succeed.
@@ -248,6 +247,52 @@ async fn three_req_to_one_rep_direct_io_routing() {
             reply.part_bytes(0).unwrap(),
             format!("reply-{i}").as_bytes()
         );
+    }
+}
+
+/// Multiple REQ peers may have requests queued before REP calls `recv()`. The
+/// body queue must retain each request's routing envelope independently.
+#[tokio::test]
+async fn queued_requests_from_multiple_reqs_preserve_envelopes() {
+    const PEERS: usize = 3;
+
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
+
+    let mut reqs = Vec::with_capacity(PEERS);
+    for i in 0..PEERS {
+        let req = Socket::new(SocketType::Req, Options::default());
+        req.connect(ep.clone()).await.unwrap();
+        test_support::wait_for_handshake(&req).await;
+        req.send(Message::single(format!("queued-{i}")))
+            .await
+            .unwrap();
+        reqs.push(req);
+    }
+
+    for _ in 0..PEERS {
+        let request = tokio::time::timeout(Duration::from_secs(5), rep.recv())
+            .await
+            .expect("REP recv timed out")
+            .unwrap();
+        let body = request.part_bytes(0).unwrap();
+        let index = std::str::from_utf8(&body)
+            .unwrap()
+            .strip_prefix("queued-")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        rep.send(Message::single(format!("reply-{index}")))
+            .await
+            .unwrap();
+    }
+
+    for (i, req) in reqs.iter().enumerate() {
+        let reply = tokio::time::timeout(Duration::from_secs(5), req.recv())
+            .await
+            .expect("REQ recv timed out")
+            .unwrap();
+        assert_eq!(reply, Message::single(format!("reply-{i}")));
     }
 }
 

@@ -1,9 +1,8 @@
 //! CURVE mechanism: 4-message handshake (HELLO / WELCOME / INITIATE /
 //! READY) plus per-frame MESSAGE encryption. Wire format follows RFC 26.
 //!
-//! The actual crypto is done by `crypto_box::SalsaBox` (Curve25519
-//! XSalsa20-Poly1305). This module is just protocol layout + state
-//! machine.
+//! Crypto: X25519 DH + XSalsa20-Poly1305 via `crypto_box::SalsaBox`.
+//! This module is just protocol layout + state machine.
 //!
 //!
 //! Internally split into [`CurveClient`] and [`CurveServer`] so each
@@ -19,14 +18,75 @@
 
 use std::sync::Arc;
 
-use bytes::{BufMut, Bytes, BytesMut};
-use crypto_box::aead::rand_core::{OsRng, RngCore};
-use crypto_box::{PublicKey, SalsaBox, SecretKey, aead::Aead};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crypto_box::SalsaBox;
+use crypto_box::aead::generic_array::GenericArray;
+use crypto_box::aead::{Aead, AeadInPlace};
+use rand::Rng;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::curve_cookie::CurveCookieKeyring;
 use super::{CurveKeypair, CurvePublicKey, MechanismStep, try_error_command};
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
+
+/// `NaCl` `crypto_box` construction via the `crypto_box` crate: X25519
+/// DH + `HSalsa20` key derivation + XSalsa20-Poly1305 AEAD.
+struct CurveBox {
+    inner: SalsaBox,
+}
+
+impl CurveBox {
+    fn new(peer_public: &PublicKey, our_secret: &StaticSecret) -> Self {
+        let cb_public = crypto_box::PublicKey::from(*peer_public.as_bytes());
+        let cb_secret = crypto_box::SecretKey::from(our_secret.to_bytes());
+        Self {
+            inner: SalsaBox::new(&cb_public, &cb_secret),
+        }
+    }
+
+    fn encrypt(&self, nonce: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
+        self.inner
+            .encrypt(GenericArray::from_slice(nonce), plaintext)
+            .expect("SalsaBox::encrypt infallible without AAD")
+    }
+
+    fn decrypt(
+        &self,
+        nonce: &[u8; 24],
+        ciphertext: &[u8],
+    ) -> core::result::Result<Vec<u8>, crypto_box::aead::Error> {
+        self.inner
+            .decrypt(GenericArray::from_slice(nonce), ciphertext)
+    }
+
+    fn encrypt_in_place_detached(&self, nonce: &[u8; 24], buf: &mut [u8]) -> [u8; 16] {
+        self.inner
+            .encrypt_in_place_detached(GenericArray::from_slice(nonce), b"", buf)
+            .expect("SalsaBox::encrypt infallible without AAD")
+            .into()
+    }
+
+    fn decrypt_in_place_detached(
+        &self,
+        nonce: &[u8; 24],
+        buf: &mut [u8],
+        tag: &[u8; 16],
+    ) -> core::result::Result<(), crypto_box::aead::Error> {
+        self.inner.decrypt_in_place_detached(
+            GenericArray::from_slice(nonce),
+            b"",
+            buf,
+            GenericArray::from_slice(tag),
+        )
+    }
+}
+
+impl std::fmt::Debug for CurveBox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CurveBox")
+    }
+}
 
 const NONCE_HELLO: &[u8; 16] = b"CurveZMQHELLO---";
 const NONCE_INITIATE: &[u8; 16] = b"CurveZMQINITIATE";
@@ -55,10 +115,14 @@ fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
 
 /// Reject low-order Curve25519 public keys that force the X25519 shared
 /// secret to all-zeros, making session encryption predictable.
-fn validate_dh_not_zero(our_secret: &SecretKey, peer_public: &[u8; 32]) -> Result<()> {
-    let sec = x25519_dalek::StaticSecret::from(our_secret.to_bytes());
-    let pub_ = x25519_dalek::PublicKey::from(*peer_public);
-    if sec.diffie_hellman(&pub_).to_bytes().iter().all(|&b| b == 0) {
+fn validate_dh_not_zero(our_secret: &StaticSecret, peer_public: &[u8; 32]) -> Result<()> {
+    let pub_ = PublicKey::from(*peer_public);
+    if our_secret
+        .diffie_hellman(&pub_)
+        .to_bytes()
+        .iter()
+        .all(|&b| b == 0)
+    {
         return Err(Error::HandshakeFailed(
             "X25519 produced all-zero shared secret (low-order public key)".into(),
         ));
@@ -70,7 +134,7 @@ fn validate_dh_not_zero(our_secret: &SecretKey, peer_public: &[u8; 32]) -> Resul
 /// MESSAGE commands, decrypts incoming MESSAGE commands.
 pub struct CurveTransform {
     /// Box keyed on (our transient secret, peer transient public).
-    salsa: SalsaBox,
+    salsa: CurveBox,
     /// Outgoing MESSAGE nonce counter.
     out_counter: u64,
     /// Incoming MESSAGE nonce counter. Must increase monotonically (RFC 26).
@@ -108,17 +172,18 @@ impl CurveTransform {
             .checked_add(1)
             .ok_or_else(|| Error::Protocol("CURVE outbound nonce counter exhausted".into()))?;
         let nonce = nonce_short(&self.out_prefix, self.out_counter);
-        let mut pt = Vec::with_capacity(1 + plaintext.len());
-        pt.push(u8::from(more) | (u8::from(command) << 1));
-        pt.extend_from_slice(plaintext);
-        let ct = self
+        let pt_len = 1 + plaintext.len();
+        // NaCl wire layout: nonce(8) || tag(16) || ciphertext.
+        let mut buf = BytesMut::with_capacity(8 + 16 + pt_len);
+        buf.put_slice(&self.out_counter.to_be_bytes());
+        buf.put_slice(&[0u8; 16]); // placeholder for tag
+        buf.put_u8(u8::from(more) | (u8::from(command) << 1));
+        buf.extend_from_slice(plaintext);
+        let tag = self
             .salsa
-            .encrypt(&nonce.into(), pt.as_slice())
-            .map_err(|_| Error::Protocol("CURVE encrypt failed".into()))?;
-        let mut body = BytesMut::with_capacity(8 + ct.len());
-        body.put_slice(&self.out_counter.to_be_bytes());
-        body.put_slice(&ct);
-        Ok(body.freeze())
+            .encrypt_in_place_detached(&nonce, &mut buf[8 + 16..]);
+        buf[8..8 + 16].copy_from_slice(&tag);
+        Ok(buf.freeze())
     }
 
     /// Wrap an encrypted body in the `\x07MESSAGE` ZMTP command frame.
@@ -145,31 +210,35 @@ impl CurveTransform {
                 "CURVE MESSAGE nonce counter not monotonically increasing".into(),
             ));
         }
-        let ct = &body[8..];
+        // NaCl wire layout: nonce(8) || tag(16) || ciphertext.
         let nonce = nonce_short(&self.in_prefix, counter);
-        let pt = self
-            .salsa
-            .decrypt(&nonce.into(), ct)
+        let tag: [u8; 16] = body[8..8 + 16].try_into().unwrap();
+        let ct = &body[8 + 16..];
+        let mut buf = BytesMut::with_capacity(ct.len());
+        buf.extend_from_slice(ct);
+        self.salsa
+            .decrypt_in_place_detached(&nonce, &mut buf, &tag)
             .map_err(|_| Error::Protocol("CURVE decrypt failed".into()))?;
-        if pt.is_empty() {
+        if buf.is_empty() {
             return Err(Error::Protocol(
                 "CURVE MESSAGE plaintext missing flags".into(),
             ));
         }
-        let more = pt[0] & 0x01 != 0;
-        let command = pt[0] & 0x02 != 0;
+        let more = buf[0] & 0x01 != 0;
+        let command = buf[0] & 0x02 != 0;
         self.in_counter = counter;
-        Ok((more, command, Bytes::copy_from_slice(&pt[1..])))
+        buf.advance(1);
+        Ok((more, command, buf.freeze()))
     }
 }
 
 fn build_transform(
-    our_eph_secret: &SecretKey,
+    our_eph_secret: &StaticSecret,
     peer_eph_public: &PublicKey,
     out_counter: u64,
     is_server: bool,
 ) -> CurveTransform {
-    let salsa = SalsaBox::new(peer_eph_public, our_eph_secret);
+    let salsa = CurveBox::new(peer_eph_public, our_eph_secret);
     let (out_prefix, in_prefix) = if is_server {
         (*NONCE_MESSAGE_S, *NONCE_MESSAGE_C)
     } else {
@@ -244,9 +313,8 @@ impl CurveMechanism {
 // CurveClient
 // =====================================================================
 
-#[derive(Debug)]
 pub(crate) struct CurveClient {
-    our_lt_secret: SecretKey,
+    our_lt_secret: StaticSecret,
     our_lt_public: PublicKey,
     peer_lt_public: PublicKey,
     our_props: PeerProperties,
@@ -255,21 +323,29 @@ pub(crate) struct CurveClient {
     state: Option<CurveClientState>,
 }
 
+impl std::fmt::Debug for CurveClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CurveClient")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
 enum CurveClientState {
     Init {
-        our_eph_secret: SecretKey,
+        our_eph_secret: StaticSecret,
         our_eph_public: PublicKey,
     },
     AwaitingWelcome {
-        our_eph_secret: SecretKey,
+        our_eph_secret: StaticSecret,
         our_eph_public: PublicKey,
     },
     AwaitingReady {
-        our_eph_secret: SecretKey,
+        our_eph_secret: StaticSecret,
         peer_eph_public: PublicKey,
     },
     Done {
-        our_eph_secret: SecretKey,
+        our_eph_secret: StaticSecret,
         peer_eph_public: PublicKey,
     },
 }
@@ -288,11 +364,11 @@ impl std::fmt::Debug for CurveClientState {
 impl CurveClient {
     #[expect(clippy::needless_pass_by_value)]
     fn new(our_keypair: CurveKeypair, server_public: CurvePublicKey) -> Self {
-        let our_lt_secret = SecretKey::from_bytes(*our_keypair.secret.as_bytes());
-        let our_lt_public = PublicKey::from_bytes(*our_keypair.public.as_bytes());
-        let peer_lt_public = PublicKey::from_bytes(*server_public.as_bytes());
-        let our_eph_secret = SecretKey::generate(&mut OsRng);
-        let our_eph_public = our_eph_secret.public_key();
+        let our_lt_secret = StaticSecret::from(*our_keypair.secret.as_bytes());
+        let our_lt_public = PublicKey::from(*our_keypair.public.as_bytes());
+        let peer_lt_public = PublicKey::from(*server_public.as_bytes());
+        let our_eph_secret = StaticSecret::random();
+        let our_eph_public = PublicKey::from(&our_eph_secret);
         Self {
             our_lt_secret,
             our_lt_public,
@@ -370,7 +446,7 @@ impl CurveClient {
         }
     }
 
-    fn eph_secret(&self) -> &SecretKey {
+    fn eph_secret(&self) -> &StaticSecret {
         match self.state.as_ref().unwrap() {
             CurveClientState::Init { our_eph_secret, .. }
             | CurveClientState::AwaitingWelcome { our_eph_secret, .. }
@@ -392,9 +468,8 @@ impl CurveClient {
     fn build_hello(&mut self) -> Result<Bytes> {
         let counter = self.next_out_counter()?;
         let nonce = nonce_short(NONCE_HELLO, counter);
-        let signature_box = SalsaBox::new(&self.peer_lt_public, self.eph_secret())
-            .encrypt(&nonce.into(), &[0u8; 64][..])
-            .map_err(|_| Error::Protocol("CURVE HELLO encrypt failed".into()))?;
+        let signature_box =
+            CurveBox::new(&self.peer_lt_public, self.eph_secret()).encrypt(&nonce, &[0u8; 64][..]);
         let mut body = BytesMut::with_capacity(194);
         body.put_u8(0x01);
         body.put_u8(0x00);
@@ -415,8 +490,8 @@ impl CurveClient {
         let welcome_suffix: [u8; 16] = body[..16].try_into().unwrap();
         let welcome_box = &body[16..];
         let nonce = nonce_long(NONCE_WELCOME_PREFIX, &welcome_suffix);
-        let pt = SalsaBox::new(&self.peer_lt_public, self.eph_secret())
-            .decrypt(&nonce.into(), welcome_box)
+        let pt = CurveBox::new(&self.peer_lt_public, self.eph_secret())
+            .decrypt(&nonce, welcome_box)
             .map_err(|_| Error::HandshakeFailed("CURVE WELCOME decrypt failed".into()))?;
         if pt.len() != 128 {
             return Err(Error::HandshakeFailed(format!(
@@ -430,7 +505,7 @@ impl CurveClient {
 
         validate_dh_not_zero(self.eph_secret(), &sp_bytes)?;
 
-        let peer_eph_public = PublicKey::from_bytes(sp_bytes);
+        let peer_eph_public = PublicKey::from(sp_bytes);
 
         // Transition: AwaitingWelcome -> AwaitingReady, moving ephemeral secret
         let CurveClientState::AwaitingWelcome { our_eph_secret, .. } = self.state.take().unwrap()
@@ -463,16 +538,15 @@ impl CurveClient {
         // Vouch box: Box[Cp(32) + S_long(32)](C_long_secret -> Sp,
         // "VOUCH---" + 16-byte vouch-nonce suffix).
         let mut vouch_suffix = [0u8; 16];
-        OsRng.fill_bytes(&mut vouch_suffix);
+        rand::rng().fill_bytes(&mut vouch_suffix);
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, &vouch_suffix);
         let mut vouch_pt = [0u8; 64];
-        vouch_pt[..32].copy_from_slice(our_eph_secret.public_key().as_bytes());
+        vouch_pt[..32].copy_from_slice(PublicKey::from(our_eph_secret).as_bytes());
         vouch_pt[32..].copy_from_slice(self.peer_lt_public.as_bytes());
         // RFC 26: vouch box is sealed by the client's long-term secret to
         // the SERVER'S TRANSIENT public key (S_eph), NOT the long-term one.
-        let vouch_box = SalsaBox::new(peer_eph_public, &self.our_lt_secret)
-            .encrypt(&vouch_nonce.into(), &vouch_pt[..])
-            .map_err(|_| Error::Protocol("CURVE VOUCH encrypt failed".into()))?;
+        let vouch_box = CurveBox::new(peer_eph_public, &self.our_lt_secret)
+            .encrypt(&vouch_nonce, &vouch_pt[..]);
 
         // Initiate plaintext = C_long_pub(32) + vouch_suffix(16) + vouch_box(80) + metadata.
         let metadata = encode_metadata(&our_props)?;
@@ -483,9 +557,8 @@ impl CurveClient {
         init_pt.extend_from_slice(&metadata);
 
         let nonce = nonce_short(NONCE_INITIATE, counter);
-        let init_box = SalsaBox::new(peer_eph_public, our_eph_secret)
-            .encrypt(&nonce.into(), init_pt.as_slice())
-            .map_err(|_| Error::Protocol("CURVE INITIATE encrypt failed".into()))?;
+        let init_box =
+            CurveBox::new(peer_eph_public, our_eph_secret).encrypt(&nonce, init_pt.as_slice());
 
         let mut body = BytesMut::with_capacity(96 + 8 + init_box.len());
         body.put_slice(&self.received_cookie);
@@ -508,8 +581,8 @@ impl CurveClient {
             unreachable!();
         };
         let nonce = nonce_short(NONCE_READY, counter);
-        let pt = SalsaBox::new(peer_eph_public, our_eph_secret)
-            .decrypt(&nonce.into(), ready_box)
+        let pt = CurveBox::new(peer_eph_public, our_eph_secret)
+            .decrypt(&nonce, ready_box)
             .map_err(|_| Error::HandshakeFailed("CURVE READY decrypt failed".into()))?;
         let props = decode_metadata(&pt)?;
 
@@ -551,9 +624,8 @@ impl CurveClient {
 // CurveServer
 // =====================================================================
 
-#[derive(Debug)]
 pub(crate) struct CurveServer {
-    our_lt_secret: SecretKey,
+    our_lt_secret: StaticSecret,
     our_lt_public: PublicKey,
     cookie_keyring: Arc<CurveCookieKeyring>,
     authenticator: Option<super::Authenticator>,
@@ -562,11 +634,19 @@ pub(crate) struct CurveServer {
     state: CurveServerState,
 }
 
+impl std::fmt::Debug for CurveServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CurveServer")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
 enum CurveServerState {
     Init,
     AwaitingInitiate,
     Done {
-        our_eph_secret: SecretKey,
+        our_eph_secret: StaticSecret,
         peer_eph_public: PublicKey,
     },
 }
@@ -588,8 +668,8 @@ impl CurveServer {
         cookie_keyring: Arc<CurveCookieKeyring>,
         authenticator: Option<super::Authenticator>,
     ) -> Self {
-        let our_lt_secret = SecretKey::from_bytes(*our_keypair.secret.as_bytes());
-        let our_lt_public = PublicKey::from_bytes(*our_keypair.public.as_bytes());
+        let our_lt_secret = StaticSecret::from(*our_keypair.secret.as_bytes());
+        let our_lt_public = PublicKey::from(*our_keypair.public.as_bytes());
         Self {
             our_lt_secret,
             our_lt_public,
@@ -627,7 +707,7 @@ impl CurveServer {
         match (name.as_ref(), &self.state) {
             (b"HELLO", CurveServerState::Init) => {
                 let (our_eph_secret, peer_eph_public) = self.parse_hello(&body)?;
-                let welcome = self.build_welcome(&our_eph_secret, &peer_eph_public)?;
+                let welcome = self.build_welcome(&our_eph_secret, &peer_eph_public);
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"WELCOME"),
                     body: welcome,
@@ -656,7 +736,7 @@ impl CurveServer {
         }
     }
 
-    fn parse_hello(&mut self, body: &[u8]) -> Result<(SecretKey, PublicKey)> {
+    fn parse_hello(&mut self, body: &[u8]) -> Result<(StaticSecret, PublicKey)> {
         if body.len() != 194 {
             return Err(Error::HandshakeFailed(format!(
                 "CURVE HELLO has wrong length {}",
@@ -676,10 +756,10 @@ impl CurveServer {
 
         validate_dh_not_zero(&self.our_lt_secret, &cp_bytes)?;
 
-        let cp = PublicKey::from_bytes(cp_bytes);
+        let cp = PublicKey::from(cp_bytes);
         let nonce = nonce_short(NONCE_HELLO, counter);
-        let pt = SalsaBox::new(&cp, &self.our_lt_secret)
-            .decrypt(&nonce.into(), signature_box)
+        let pt = CurveBox::new(&cp, &self.our_lt_secret)
+            .decrypt(&nonce, signature_box)
             .map_err(|_| Error::HandshakeFailed("CURVE HELLO signature invalid".into()))?;
         if pt.len() != 64 || pt.iter().any(|&b| b != 0) {
             return Err(Error::HandshakeFailed(
@@ -687,18 +767,18 @@ impl CurveServer {
             ));
         }
 
-        let our_eph_secret = SecretKey::generate(&mut OsRng);
+        let our_eph_secret = StaticSecret::random();
         Ok((our_eph_secret, cp))
     }
 
     fn build_welcome(
         &mut self,
-        our_eph_secret: &SecretKey,
+        our_eph_secret: &StaticSecret,
         peer_eph_public: &PublicKey,
-    ) -> Result<Bytes> {
-        let our_eph_public = our_eph_secret.public_key();
+    ) -> Bytes {
+        let our_eph_public = PublicKey::from(our_eph_secret);
         let mut welcome_suffix = [0u8; 16];
-        OsRng.fill_bytes(&mut welcome_suffix);
+        rand::rng().fill_bytes(&mut welcome_suffix);
         let welcome_nonce = nonce_long(NONCE_WELCOME_PREFIX, &welcome_suffix);
 
         let cookie = self
@@ -709,15 +789,14 @@ impl CurveServer {
         let mut welcome_pt = Vec::with_capacity(128);
         welcome_pt.extend_from_slice(our_eph_public.as_bytes());
         welcome_pt.extend_from_slice(&cookie);
-        let welcome_box = SalsaBox::new(peer_eph_public, &self.our_lt_secret)
-            .encrypt(&welcome_nonce.into(), welcome_pt.as_slice())
-            .map_err(|_| Error::Protocol("CURVE WELCOME encrypt failed".into()))?;
+        let welcome_box = CurveBox::new(peer_eph_public, &self.our_lt_secret)
+            .encrypt(&welcome_nonce, welcome_pt.as_slice());
 
         let mut body = BytesMut::with_capacity(160);
         body.put_slice(&welcome_suffix);
         body.put_slice(&welcome_box);
 
-        Ok(body.freeze())
+        body.freeze()
     }
 
     fn parse_initiate(&mut self, body: &[u8]) -> Result<PeerProperties> {
@@ -730,12 +809,12 @@ impl CurveServer {
 
         // Recover ephemeral state from the cookie (stateless-server).
         let (cp_bytes, sn_secret_bytes) = self.cookie_keyring.decrypt_cookie(cookie_bytes)?;
-        let sn_secret = SecretKey::from_bytes(sn_secret_bytes);
-        let cp = PublicKey::from_bytes(cp_bytes);
+        let sn_secret = StaticSecret::from(sn_secret_bytes);
+        let cp = PublicKey::from(cp_bytes);
 
         let nonce = nonce_short(NONCE_INITIATE, counter);
-        let init_pt = SalsaBox::new(&cp, &sn_secret)
-            .decrypt(&nonce.into(), init_box)
+        let init_pt = CurveBox::new(&cp, &sn_secret)
+            .decrypt(&nonce, init_box)
             .map_err(|_| Error::HandshakeFailed("CURVE INITIATE decrypt failed".into()))?;
         if init_pt.len() < 32 + 16 + 80 {
             return Err(Error::HandshakeFailed(
@@ -749,7 +828,7 @@ impl CurveServer {
 
         validate_dh_not_zero(&sn_secret, &client_lt_bytes)?;
 
-        let cl = PublicKey::from_bytes(client_lt_bytes);
+        let cl = PublicKey::from(client_lt_bytes);
         Self::verify_vouch(
             &sn_secret,
             &self.our_lt_public,
@@ -783,7 +862,7 @@ impl CurveServer {
     }
 
     fn verify_vouch(
-        our_eph_secret: &SecretKey,
+        our_eph_secret: &StaticSecret,
         our_lt_public: &PublicKey,
         vouch_suffix: &[u8; 16],
         vouch_box: &[u8],
@@ -791,8 +870,8 @@ impl CurveServer {
         expected_cp: &PublicKey,
     ) -> Result<()> {
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, vouch_suffix);
-        let vouch_pt = SalsaBox::new(cl, our_eph_secret)
-            .decrypt(&vouch_nonce.into(), vouch_box)
+        let vouch_pt = CurveBox::new(cl, our_eph_secret)
+            .decrypt(&vouch_nonce, vouch_box)
             .map_err(|_| Error::HandshakeFailed("CURVE VOUCH invalid".into()))?;
         if vouch_pt.len() != 64
             || &vouch_pt[..32] != expected_cp.as_bytes()
@@ -819,9 +898,8 @@ impl CurveServer {
         };
         let nonce = nonce_short(NONCE_READY, counter);
         let metadata = encode_metadata(&self.our_props)?;
-        let ready_box = SalsaBox::new(peer_eph_public, our_eph_secret)
-            .encrypt(&nonce.into(), metadata.as_slice())
-            .map_err(|_| Error::Protocol("CURVE READY encrypt failed".into()))?;
+        let ready_box =
+            CurveBox::new(peer_eph_public, our_eph_secret).encrypt(&nonce, metadata.as_slice());
         let mut body = BytesMut::with_capacity(8 + ready_box.len());
         body.put_slice(&counter.to_be_bytes());
         body.put_slice(&ready_box);

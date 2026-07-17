@@ -20,6 +20,7 @@ pub(crate) mod fair_queue;
 pub(crate) mod fallback_queue;
 pub(crate) mod fan_out;
 pub(crate) mod identity;
+pub(crate) mod latency;
 pub(crate) mod peer_outbound;
 pub(crate) mod round_robin;
 // subscription matcher lives in omq-proto now.
@@ -45,6 +46,7 @@ pub(crate) use exclusive::{ExclusiveSend, Submitter as ExclusiveSubmitter};
 pub(crate) use fair_queue::FairQueueRecv;
 pub(crate) use fan_out::{FanOutMode, FanOutSend, Submitter as FanOutSubmitter};
 pub(crate) use identity::{IdentityRecv, IdentitySend, Submitter as IdentitySubmitter};
+pub(crate) use latency::{LatencySend, Submitter as LatencySubmitter};
 pub(crate) use round_robin::{RoundRobinSend, Submitter as RoundRobinSubmitter};
 
 /// Send-side policy.
@@ -52,6 +54,7 @@ pub(crate) use round_robin::{RoundRobinSend, Submitter as RoundRobinSubmitter};
 pub(crate) enum SendStrategy {
     None,
     RoundRobin(RoundRobinSend),
+    Latency(LatencySend),
     Exclusive(ExclusiveSend),
     FanOut(FanOutSend),
     Identity(IdentitySend),
@@ -61,6 +64,7 @@ pub(crate) enum SendStrategy {
 pub(crate) enum SendSubmitter {
     None,
     RoundRobin(RoundRobinSubmitter),
+    Latency(LatencySubmitter),
     Exclusive(ExclusiveSubmitter),
     FanOut(FanOutSubmitter),
     Identity(IdentitySubmitter),
@@ -71,6 +75,7 @@ impl SendSubmitter {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.shutdown(),
+            Self::Latency(s) => s.shutdown(),
             Self::Exclusive(s) => s.shutdown(),
             Self::FanOut(s) => s.shutdown(),
             Self::Identity(s) => s.shutdown(),
@@ -81,9 +86,36 @@ impl SendSubmitter {
         match self {
             Self::None => Err(Error::Protocol("socket type does not support send".into())),
             Self::RoundRobin(s) => s.send(msg).await,
+            Self::Latency(s) => s.send(msg).await,
             Self::Exclusive(s) => s.send(msg).await,
             Self::FanOut(s) => s.send(msg).await,
             Self::Identity(s) => s.send(msg).await,
+        }
+    }
+
+    pub(crate) async fn send_rep_to_peer(
+        &self,
+        peer_id: u64,
+        identity: &Bytes,
+        msg: Message,
+    ) -> Result<()> {
+        match self {
+            Self::Identity(s) => s.send_rep(peer_id, identity, msg).await,
+            _ => Err(Error::Protocol("REP latency route unavailable".into())),
+        }
+    }
+
+    pub(crate) fn send_rep_try_to_peer(
+        &self,
+        peer_id: u64,
+        identity: &Bytes,
+        msg: Message,
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        match self {
+            Self::Identity(s) => s.try_send_rep(peer_id, identity, msg),
+            _ => Err(omq_proto::error::TrySendError::Error(Error::Protocol(
+                "REP latency route unavailable".into(),
+            ))),
         }
     }
 
@@ -96,6 +128,7 @@ impl SendSubmitter {
                 "socket type does not support send".into(),
             ))),
             Self::RoundRobin(s) => s.try_send(msg),
+            Self::Latency(s) => s.try_send(msg),
             Self::Exclusive(s) => s.try_send(msg),
             Self::FanOut(s) => s.try_send(msg),
             Self::Identity(s) => s.try_send(msg),
@@ -104,16 +137,36 @@ impl SendSubmitter {
 }
 
 impl SendStrategy {
-    pub(crate) fn for_socket_type(t: SocketType, options: &Options) -> Self {
+    pub(crate) fn for_socket_type(
+        t: SocketType,
+        options: &Options,
+        io_pool: &crate::context::IoPoolHandle,
+    ) -> Self {
         match send_category(t) {
             SendCategory::None => Self::None,
-            SendCategory::FanOut(FanOutKind::SubscriptionPrefix) => {
-                Self::FanOut(FanOutSend::new(options, FanOutMode::SubscriptionPrefix))
-            }
+            SendCategory::FanOut(FanOutKind::SubscriptionPrefix) => Self::FanOut(FanOutSend::new(
+                options,
+                FanOutMode::SubscriptionPrefix,
+                io_pool,
+            )),
             SendCategory::FanOut(FanOutKind::Group) => {
-                Self::FanOut(FanOutSend::new(options, FanOutMode::Group))
+                Self::FanOut(FanOutSend::new(options, FanOutMode::Group, io_pool))
             }
-            SendCategory::IdentityRouted => Self::Identity(IdentitySend::new(options)),
+            SendCategory::IdentityRouted => Self::Identity(IdentitySend::new(t, options)),
+            SendCategory::RoundRobin
+                if t == SocketType::Req
+                    && !options.mechanism.has_frame_transform()
+                    && options.workload_profile != Some(omq_proto::WorkloadProfile::Throughput) =>
+            {
+                Self::Latency(LatencySend::new(options))
+            }
+            SendCategory::RoundRobin
+                if t == SocketType::Rep
+                    && !options.mechanism.has_frame_transform()
+                    && options.workload_profile != Some(omq_proto::WorkloadProfile::Throughput) =>
+            {
+                Self::Identity(IdentitySend::new(t, options))
+            }
             SendCategory::RoundRobin => Self::RoundRobin(RoundRobinSend::new(options)),
             SendCategory::Exclusive => Self::Exclusive(ExclusiveSend::new()),
         }
@@ -123,6 +176,7 @@ impl SendStrategy {
         match self {
             Self::None => SendSubmitter::None,
             Self::RoundRobin(s) => SendSubmitter::RoundRobin(s.submitter()),
+            Self::Latency(s) => SendSubmitter::Latency(s.submitter()),
             Self::Exclusive(s) => SendSubmitter::Exclusive(s.submitter()),
             Self::FanOut(s) => SendSubmitter::FanOut(s.submitter()),
             Self::Identity(s) => SendSubmitter::Identity(s.submitter()),
@@ -139,9 +193,10 @@ impl SendStrategy {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.connection_added(peer_id, &handle, is_inproc),
+            Self::Latency(s) => s.connection_added(peer_id, &handle),
             Self::Exclusive(s) => s.connection_added(peer_id, handle),
             Self::FanOut(s) => s.connection_added(peer_id, handle),
-            Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity),
+            Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity, is_inproc),
         }
     }
 
@@ -158,6 +213,7 @@ impl SendStrategy {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.connection_removed(peer_id),
+            Self::Latency(s) => s.connection_removed(peer_id),
             Self::Exclusive(s) => s.connection_removed(peer_id),
             Self::FanOut(s) => s.connection_removed(peer_id),
             Self::Identity(s) => s.connection_removed(peer_id),
@@ -206,6 +262,7 @@ impl SendStrategy {
     pub(crate) fn shared_rx(&self) -> Option<fallback_queue::FallbackReceiver> {
         match self {
             Self::RoundRobin(s) => Some(s.shared_rx()),
+            Self::Latency(s) => Some(s.shared_rx()),
             _ => None,
         }
     }
@@ -214,6 +271,7 @@ impl SendStrategy {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.shutdown(),
+            Self::Latency(s) => s.shutdown(),
             Self::Exclusive(s) => s.shutdown(),
             Self::FanOut(s) => s.shutdown(),
             Self::Identity(s) => s.shutdown(),
@@ -224,6 +282,7 @@ impl SendStrategy {
         match self {
             Self::None => true,
             Self::RoundRobin(s) => s.is_drained(),
+            Self::Latency(s) => s.is_drained(),
             Self::Exclusive(s) => s.is_drained(),
             Self::FanOut(s) => s.is_drained(),
             Self::Identity(s) => s.is_drained(),

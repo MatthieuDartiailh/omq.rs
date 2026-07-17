@@ -123,7 +123,8 @@ impl FrameBuffer {
     }
 
     pub fn take_arena_bytes(&mut self) -> Bytes {
-        let frozen = self.arena.split().freeze();
+        let frozen = Bytes::copy_from_slice(&self.arena);
+        self.arena.clear();
         self.arena_mark = 0;
         self.total_bytes = 0;
         frozen
@@ -198,6 +199,34 @@ impl FrameBuffer {
         }
     }
 
+    /// Frame a REP reply without first materializing its routing envelope as
+    /// a `Message`. The peer identity is local routing metadata; the wire
+    /// shape is `[empty delimiter, body...]`.
+    pub fn frame_rep(&mut self, _identity: &Bytes, msg: &Message) {
+        self.frame_rep_gather(msg);
+    }
+
+    fn frame_rep_gather(&mut self, msg: &Message) {
+        let before = self.arena.len();
+        frame::write_frame_header(&mut self.arena, !msg.is_empty(), 0);
+        self.total_bytes += self.arena.len() - before;
+        if msg.is_empty() {
+            return;
+        }
+        let parts = msg.parts_payload();
+        for (i, part) in parts.iter().enumerate() {
+            let before = self.arena.len();
+            frame::write_frame_header(&mut self.arena, i + 1 < parts.len(), part.len());
+            self.total_bytes += self.arena.len() - before;
+            self.commit_arena_range();
+            let bytes = part.as_bytes();
+            if !bytes.is_empty() {
+                self.total_bytes += bytes.len();
+                self.entries.push_back(Entry::External(bytes));
+            }
+        }
+    }
+
     pub fn frame_prefixed(&mut self, prefix: &Bytes, msg: &Message) {
         if msg.byte_len() + prefix.len() * msg.len() < self.arena_threshold {
             self.frame_prefixed_inline(prefix, msg);
@@ -254,10 +283,13 @@ impl FrameBuffer {
             if cap > self.arena_peak_cap {
                 self.arena_peak_cap = cap;
             }
-            let frozen = self.arena.split().freeze();
-            if self.arena.capacity() < self.arena_peak_cap {
-                self.arena.reserve(self.arena_peak_cap);
-            }
+            // Copy the arena content and clear() to preserve the backing
+            // allocation. The alternative (split().freeze()) transfers the
+            // entire backing to the frozen Bytes, forcing a fresh
+            // reserve() that causes page-fault storms on glibc's
+            // per-thread arenas.
+            let frozen = Bytes::copy_from_slice(&self.arena);
+            self.arena.clear();
             Some(frozen)
         };
 
@@ -430,6 +462,25 @@ mod tests {
         let large = Message::from(Bytes::from(vec![0xBB; 128 * 1024]));
         eq.frame(&large);
         assert!(!eq.has_arena_only());
+    }
+
+    #[test]
+    fn rep_frame_keeps_identity_off_wire() {
+        let mut eq = FrameBuffer::one_shot();
+        let body = Message::single(Bytes::from_static(b"reply"));
+        eq.frame_rep(&Bytes::from_static(b"peer-id"), &body);
+
+        let mut actual = Vec::new();
+        eq.drain(&mut actual, 1024);
+        let actual: Vec<u8> = actual
+            .into_iter()
+            .flat_map(|chunk| chunk.to_vec())
+            .collect();
+
+        let expected_message = Message::multipart([Bytes::new(), Bytes::from_static(b"reply")]);
+        let mut expected = BytesMut::new();
+        crate::proto::frame::encode_message_flat(&expected_message, &mut expected);
+        assert_eq!(actual, expected.as_ref());
     }
 
     #[test]

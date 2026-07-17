@@ -748,19 +748,13 @@ fn do_subscribe(
         return crate::error::fail(crate::error::ETERM);
     };
     let result = if subscribe {
-        crate::socket::with_socket(
-            &sock_arc.ctx,
-            sock_arc.thread_idx,
-            inner,
-            move |s| async move { s.subscribe(prefix).await },
-        )
+        crate::socket::with_socket(&sock_arc.ctx, inner, move |s| async move {
+            s.subscribe(prefix).await
+        })
     } else {
-        crate::socket::with_socket(
-            &sock_arc.ctx,
-            sock_arc.thread_idx,
-            inner,
-            move |s| async move { s.unsubscribe(prefix).await },
-        )
+        crate::socket::with_socket(&sock_arc.ctx, inner, move |s| async move {
+            s.unsubscribe(prefix).await
+        })
     };
     match result {
         Ok(Ok(())) => 0,

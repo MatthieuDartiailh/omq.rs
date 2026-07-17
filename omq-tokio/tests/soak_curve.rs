@@ -24,8 +24,8 @@ fn soak_curve_sustained() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         let pull = Socket::new(
             SocketType::Pull,
             soak_common::soak_options().curve_server(server_kp),

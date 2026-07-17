@@ -15,8 +15,8 @@ const WARMUP_ITERS: usize = 1_000;
 const ITERS: usize = 10_000;
 
 fn main() {
-    let rt = common::build_runtime();
-    rt.block_on(async {
+    let ctx = common::build_context();
+    ctx.block_on(async {
         common::print_header("CLIENT/SERVER Latency (serial ping-pong)");
         let mut seq = 0usize;
         for transport in common::transports() {

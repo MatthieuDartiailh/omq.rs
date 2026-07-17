@@ -128,8 +128,8 @@ fn soak_router_dealer_churn() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         let router = Socket::new(
             SocketType::Router,
             soak_common::soak_options().router_mandatory(true),

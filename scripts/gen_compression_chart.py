@@ -561,7 +561,7 @@ def main():
 
     svg = generate_svg(panels, tput_ranges, dict_size_label,
                        backend=args.backend, hw_label=detect_hardware())
-    output = repo / "doc" / "charts" / "compression" / f"{args.backend}_{ds}.svg"
+    output = repo / "doc" / "charts" / "compression" / f"{args.backend}.svg"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(svg)
     print(f"Written: {output}", file=sys.stderr)

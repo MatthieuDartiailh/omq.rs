@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Context, Endpoint, Message, Options, Socket, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
     args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
@@ -18,42 +18,44 @@ fn msg_str(msg: &Message, idx: usize) -> String {
     String::from_utf8_lossy(&msg.part_bytes(idx).unwrap()).to_string()
 }
 
-#[tokio::main]
-async fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let heartbeat_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-10-heartbeat");
-    let service_ep = endpoint_or(&args, 2, "ipc://@omq-zguide-10-backup");
+fn main() {
+    let ctx = Context::new();
+    ctx.block_on(async move {
+        let args: Vec<String> = std::env::args().collect();
+        let heartbeat_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-10-heartbeat");
+        let service_ep = endpoint_or(&args, 2, "ipc://@omq-zguide-10-backup");
 
-    let sub = Socket::new(SocketType::Sub, Options::default());
-    sub.connect(heartbeat_ep).await.unwrap();
-    sub.subscribe("HB").await.unwrap();
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.connect(heartbeat_ep).await.unwrap();
+        sub.subscribe("HB").await.unwrap();
 
-    let rep = Socket::new(SocketType::Rep, Options::default());
-    rep.bind(service_ep).await.unwrap();
+        let rep = Socket::new(SocketType::Rep, Options::default());
+        rep.bind(service_ep).await.unwrap();
 
-    // Phase 1: monitor heartbeats.
-    let timeout = Duration::from_millis(300);
-    loop {
-        match tokio::time::timeout(timeout, sub.recv()).await {
-            Ok(Ok(_)) => {} // heartbeat received, primary is alive
-            Ok(Err(e)) => {
-                eprintln!("backup: recv error: {e}");
-                return;
-            }
-            Err(_) => {
-                println!("backup: primary heartbeat lost -- taking over!");
-                break;
+        // Phase 1: monitor heartbeats.
+        let timeout = Duration::from_millis(300);
+        loop {
+            match tokio::time::timeout(timeout, sub.recv()).await {
+                Ok(Ok(_)) => {} // heartbeat received, primary is alive
+                Ok(Err(e)) => {
+                    eprintln!("backup: recv error: {e}");
+                    return;
+                }
+                Err(_) => {
+                    println!("backup: primary heartbeat lost -- taking over!");
+                    break;
+                }
             }
         }
-    }
 
-    // Phase 2: serve requests.
-    loop {
-        let msg = rep.recv().await.unwrap();
-        let body = msg_str(&msg, 0);
-        println!("backup: served {body}");
-        rep.send(Message::single(format!("backup:{body}")))
-            .await
-            .unwrap();
-    }
+        // Phase 2: serve requests.
+        loop {
+            let msg = rep.recv().await.unwrap();
+            let body = msg_str(&msg, 0);
+            println!("backup: served {body}");
+            rep.send(Message::single(format!("backup:{body}")))
+                .await
+                .unwrap();
+        }
+    });
 }

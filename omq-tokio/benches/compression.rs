@@ -69,8 +69,8 @@ mod inner {
     }
 
     pub(super) fn tokio_main() {
-        let rt = common::build_runtime();
-        rt.block_on(async {
+        let ctx = common::build_context();
+        ctx.block_on(async {
             let transports = active_transports();
             if transports.is_empty() {
                 return;

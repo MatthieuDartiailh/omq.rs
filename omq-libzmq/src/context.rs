@@ -3,25 +3,14 @@
 use std::ffi::c_int;
 
 use rustc_hash::FxHashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
 
 use tokio::runtime::Handle;
 
-type Job = Box<dyn FnOnce() + Send + 'static>;
-
-pub(crate) struct IoThread {
-    pub handle: Handle,
-    pub submit: flume::Sender<Job>,
-    #[expect(dead_code)]
-    join: Option<thread::JoinHandle<()>>,
-}
-
-/// Per-context: one tokio runtime per io thread.
+/// Per-context: a single `omq_tokio::Context` managing the tokio runtime.
 pub(crate) struct OmqContext {
-    pub(crate) io_threads: Vec<IoThread>,
-    pub next_thread: AtomicUsize,
+    pub(crate) ctx: omq_tokio::Context,
     pub terminated: Arc<AtomicBool>,
     pub socket_count: AtomicI32,
     socket_notify: (Mutex<()>, Condvar),
@@ -41,61 +30,23 @@ pub(crate) fn next_socket_id() -> u64 {
 }
 
 impl OmqContext {
-    fn new(n_io_threads: usize) -> Option<Arc<Self>> {
+    fn new(n_io_threads: usize) -> Arc<Self> {
         let n = n_io_threads.max(1);
-        let terminated = Arc::new(AtomicBool::new(false));
-        let mut io_threads = Vec::with_capacity(n);
-        for i in 0..n {
-            let (tx, rx) = flume::unbounded::<Job>();
-            let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
-            let name = format!("omq-libzmq-io-{i}");
-            let join = thread::Builder::new()
-                .name(name)
-                .spawn(move || {
-                    let rt = tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(1)
-                        .enable_all()
-                        .build()
-                        .expect("omq-libzmq: tokio runtime");
-                    let _ = handle_tx.send(rt.handle().clone());
-                    rt.block_on(async move {
-                        while let Ok(job) = rx.recv_async().await {
-                            job();
-                        }
-                    });
-                })
-                .ok()?;
-            let handle = handle_rx.recv().ok()?;
-            io_threads.push(IoThread {
-                handle,
-                submit: tx,
-                join: Some(join),
-            });
-        }
-        Some(Arc::new(Self {
-            io_threads,
-            next_thread: AtomicUsize::new(0),
-            terminated,
+        let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig { io_threads: n });
+        Arc::new(Self {
+            ctx,
+            terminated: Arc::new(AtomicBool::new(false)),
             socket_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
             max_sockets: AtomicI32::new(1023),
             max_msg_size: AtomicI64::new(-1),
             inproc_binds: Mutex::new(FxHashMap::default()),
             inproc_waiting: Mutex::new(FxHashMap::default()),
-        }))
+        })
     }
 
-    pub(crate) fn assign_thread(&self) -> usize {
-        let n = self.io_threads.len();
-        self.next_thread.fetch_add(1, Ordering::Relaxed) % n
-    }
-
-    pub(crate) fn submit(&self, thread_idx: usize, job: Job) {
-        let _ = self.io_threads[thread_idx].submit.send(job);
-    }
-
-    pub(crate) fn handle(&self, thread_idx: usize) -> &Handle {
-        &self.io_threads[thread_idx].handle
+    pub(crate) fn handle(&self) -> &Handle {
+        self.ctx.handle()
     }
 
     pub(crate) fn socket_opened(&self) {
@@ -114,7 +65,7 @@ impl OmqContext {
 impl std::fmt::Debug for OmqContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OmqContext")
-            .field("io_threads", &self.io_threads.len())
+            .field("ctx", &self.ctx)
             .field("terminated", &self.terminated.load(Ordering::Relaxed))
             .field("socket_count", &self.socket_count.load(Ordering::Relaxed))
             .field("max_sockets", &self.max_sockets.load(Ordering::Relaxed))
@@ -127,16 +78,15 @@ impl std::fmt::Debug for OmqContext {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_new() -> *mut libc::c_void {
-    let Some(arc) = OmqContext::new(1) else {
-        crate::error::set_errno(libc::EAGAIN);
-        return std::ptr::null_mut();
-    };
+    let arc = OmqContext::new(1);
     Box::into_raw(Box::new(arc)).cast()
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn zmq_init(_io_threads: c_int) -> *mut libc::c_void {
-    zmq_ctx_new()
+pub extern "C" fn zmq_init(io_threads: c_int) -> *mut libc::c_void {
+    let n = (io_threads as usize).max(1);
+    let arc = OmqContext::new(n);
+    Box::into_raw(Box::new(arc)).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -230,7 +180,7 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
     // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     match option {
-        ZMQ_IO_THREADS => c_int::try_from(ctx.io_threads.len()).unwrap_or(c_int::MAX),
+        ZMQ_IO_THREADS => c_int::try_from(ctx.ctx.io_threads()).unwrap_or(c_int::MAX),
         ZMQ_MAX_SOCKETS | ZMQ_SOCKET_LIMIT => ctx.max_sockets.load(Ordering::Relaxed),
         ZMQ_MAX_MSGSZ => ctx.max_msg_size.load(Ordering::Relaxed) as c_int,
         ZMQ_IPV6_CTX => 0,

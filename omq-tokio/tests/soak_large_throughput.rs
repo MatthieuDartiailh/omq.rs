@@ -92,11 +92,13 @@ fn soak_large_message_throughput() {
     let sent = Arc::new(AtomicU64::new(0));
     let recvd = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
+    let report_sent = sent.clone();
+    let report_stats = Arc::new(std::sync::Mutex::new(PayloadStats::new()));
+    let stats = report_stats.clone();
 
-    let rt = soak_common::tokio_runtime();
-    let stats = Arc::new(std::sync::Mutex::new(PayloadStats::new()));
+    let ctx = soak_common::build_context();
 
-    rt.block_on(async {
+    ctx.block_on(async move {
         let pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(4));
         let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
 
@@ -178,8 +180,8 @@ fn soak_large_message_throughput() {
     let report = monitor.stop();
     report.assert_no_leak("large_throughput");
 
-    let mut st = stats.lock().unwrap();
-    let total_sent = sent.load(Ordering::Relaxed);
+    let mut st = report_stats.lock().unwrap();
+    let total_sent = report_sent.load(Ordering::Relaxed);
     st.finalize(total_sent);
     eprintln!(
         "[large_throughput] reorders: {}, max distance: {}, dropped: {}/{}",

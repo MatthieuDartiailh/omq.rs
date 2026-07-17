@@ -51,6 +51,10 @@ struct Inner {
     send_submitter: SendSubmitter,
     /// Shared with the actor for REP `pre_send` / `post_recv`.
     type_state: Arc<Mutex<TypeState>>,
+    /// Shared request identity for the latency REP path.
+    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, Bytes)>>>,
+    rep_current: Arc<Mutex<Option<(u64, Bytes)>>>,
+    rep_latency: bool,
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
@@ -77,7 +81,20 @@ impl Socket {
     /// bytes, heartbeat TTL overflow, etc.) or if `conflate` is set on an
     /// incompatible socket type.
     pub fn new(socket_type: SocketType, options: Options) -> Self {
-        Self::new_inner(socket_type, options, None)
+        Self::new_inner(
+            socket_type,
+            options,
+            None,
+            &crate::context::IoPoolHandle::none(),
+        )
+    }
+
+    pub(crate) fn new_with_io_pool(
+        socket_type: SocketType,
+        options: Options,
+        io_pool: &crate::context::IoPoolHandle,
+    ) -> Self {
+        Self::new_inner(socket_type, options, None, io_pool)
     }
 
     /// Like [`Socket::new`], but installs a [`RecvSinkConfig`] that the
@@ -88,17 +105,31 @@ impl Socket {
         options: Options,
         config: Arc<crate::engine::RecvSinkConfig>,
     ) -> Self {
-        Self::new_inner(socket_type, options, Some(config))
+        Self::new_inner(
+            socket_type,
+            options,
+            Some(config),
+            &crate::context::IoPoolHandle::none(),
+        )
     }
 
     fn new_inner(
         socket_type: SocketType,
         options: Options,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+        io_pool: &crate::context::IoPoolHandle,
     ) -> Self {
         options
             .validate()
             .expect("Options::validate failed in Socket::new");
+        let latency_profile = options.workload_profile.unwrap_or(
+            if matches!(socket_type, SocketType::Req | SocketType::Rep) {
+                omq_proto::WorkloadProfile::Latency
+            } else {
+                omq_proto::WorkloadProfile::Throughput
+            },
+        ) == omq_proto::WorkloadProfile::Latency
+            && !options.mechanism.has_frame_transform();
         assert!(
             !options.conflate || crate::routing::supports_conflate(socket_type),
             "Options::conflate(true) is not valid for socket type {socket_type:?} \
@@ -108,13 +139,16 @@ impl Socket {
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.unwrap_or(1024).max(16) as usize);
         let recv_hwm = options.recv_hwm.unwrap_or(1024).max(16) as usize;
+        let blocking_recv_waker = super::recv::BlockingRecvWaker::new();
         let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
-            super::recv::recv_pipe(recv_hwm);
+            super::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
         let monitor = MonitorPublisher::new();
-        let send_strategy = SendStrategy::for_socket_type(socket_type, &options);
+        let send_strategy = SendStrategy::for_socket_type(socket_type, &options, io_pool);
         let send_submitter = send_strategy.submitter();
-        let spsc = SpscHandles::default();
+        let spsc = SpscHandles::new(blocking_recv_waker);
         let type_state = Arc::new(Mutex::new(TypeState::new()));
+        let rep_pending = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let rep_current = Arc::new(Mutex::new(None));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let subscribe_count = Arc::new(AtomicU64::new(0));
         let driver = SocketDriver::new(
@@ -127,20 +161,32 @@ impl Socket {
             send_strategy,
             spsc.clone(),
             type_state.clone(),
+            rep_pending.clone(),
+            rep_current.clone(),
             req_awaiting_reply.clone(),
             recv_sink_config,
             subscribe_count.clone(),
+            io_pool.clone(),
         );
-        let actor_task = spawn_driver(driver);
+        let actor_task = spawn_driver(driver, io_pool);
         Self {
             inner: Arc::new(Inner {
                 socket_type,
                 cmd_tx,
-                recv_rx: SpscAwareRecv::new(recv_consumer, recv_pipe_notify, recv_pipe_space, spsc),
+                recv_rx: SpscAwareRecv::new(
+                    recv_consumer,
+                    recv_pipe_notify,
+                    recv_pipe_space,
+                    spsc,
+                    latency_profile,
+                ),
                 monitor,
                 root_cancel: cancel,
                 send_submitter,
                 type_state,
+                rep_pending,
+                rep_current,
+                rep_latency: latency_profile && socket_type == SocketType::Rep,
                 req_awaiting_reply,
                 send_ops: AtomicU32::new(0),
                 subscribe_count,
@@ -237,6 +283,16 @@ impl Socket {
                 result
             }
             SocketType::Rep => {
+                if self.inner.rep_latency {
+                    let identity = self.inner.rep_current.lock().expect("rep identity").take();
+                    if let Some((peer_id, identity)) = identity {
+                        return self
+                            .inner
+                            .send_submitter
+                            .send_rep_to_peer(peer_id, &identity, msg)
+                            .await;
+                    }
+                }
                 let msg = self
                     .inner
                     .type_state
@@ -286,6 +342,15 @@ impl Socket {
                 result
             }
             SocketType::Rep => {
+                if self.inner.rep_latency {
+                    let identity = self.inner.rep_current.lock().expect("rep identity").take();
+                    if let Some((peer_id, identity)) = identity {
+                        return self
+                            .inner
+                            .send_submitter
+                            .send_rep_try_to_peer(peer_id, &identity, msg);
+                    }
+                }
                 let msg = self
                     .inner
                     .type_state
@@ -327,7 +392,89 @@ impl Socket {
                     .store(false, Ordering::Release);
                 return Ok(msg);
             },
+            SocketType::Rep => loop {
+                let msg = self.inner.recv_rx.recv().await?;
+                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(msg);
+                }
+                let body = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .post_recv(SocketType::Rep, msg)?;
+                if let Some(body) = body {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(body);
+                }
+            },
             _ => self.inner.recv_rx.recv().await,
+        }
+    }
+
+    /// Register the calling thread for `blocking_recv()` wakeups.
+    pub(crate) fn register_blocking_recv(&self) {
+        self.inner.recv_rx.register_blocking_thread();
+    }
+
+    /// Blocking receive for sync callers. The calling thread parks
+    /// until data arrives. Call `register_blocking_recv()` first.
+    pub(crate) fn blocking_recv(&self) -> Result<Message> {
+        match self.inner.socket_type {
+            SocketType::Req => loop {
+                let mut msg = self.inner.recv_rx.blocking_recv()?;
+                match msg.pop_front() {
+                    Some(delim) if delim.is_empty() => {}
+                    _ => continue,
+                }
+                self.inner
+                    .req_awaiting_reply
+                    .store(false, Ordering::Release);
+                return Ok(msg);
+            },
+            SocketType::Rep => loop {
+                let msg = self.inner.recv_rx.blocking_recv()?;
+                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(msg);
+                }
+                let body = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .post_recv(SocketType::Rep, msg)?;
+                if let Some(body) = body {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(body);
+                }
+            },
+            _ => self.inner.recv_rx.blocking_recv(),
         }
     }
 
@@ -345,6 +492,37 @@ impl Socket {
                         .req_awaiting_reply
                         .store(false, Ordering::Release);
                     return Ok(msg);
+                }
+            }
+        }
+        if self.inner.socket_type == SocketType::Rep {
+            loop {
+                let msg = self.inner.recv_rx.try_recv()?;
+                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(msg);
+                }
+                let body = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .post_recv(SocketType::Rep, msg)?;
+                if let Some(body) = body {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(body);
                 }
             }
         }

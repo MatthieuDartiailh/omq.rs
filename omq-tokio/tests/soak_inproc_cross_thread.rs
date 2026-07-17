@@ -20,9 +20,11 @@ fn soak_inproc_cross_thread() {
     let sent = Arc::new(AtomicU64::new(0));
     let recvd = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
+    let report_sent = sent.clone();
+    let report_recvd = recvd.clone();
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         let pull = Socket::new(SocketType::Pull, Options::default());
         pull.bind(ep.clone()).await.unwrap();
 
@@ -81,8 +83,8 @@ fn soak_inproc_cross_thread() {
         let _ = recv_task.await;
     });
 
-    let s = sent.load(Ordering::Relaxed);
-    let r = recvd.load(Ordering::Relaxed);
+    let s = report_sent.load(Ordering::Relaxed);
+    let r = report_recvd.load(Ordering::Relaxed);
     eprintln!(
         "[inproc_xthread] done: sent {s}, recvd {r} in {:.1}s",
         duration.as_secs_f64(),

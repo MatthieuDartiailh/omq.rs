@@ -15,8 +15,8 @@ const PATTERN: &str = "pub_sub";
 const PEER_COUNTS: &[usize] = &[3];
 
 fn main() {
-    let rt = common::build_runtime();
-    rt.block_on(async {
+    let ctx = common::build_context();
+    ctx.block_on(async {
         common::print_header("PUB/SUB");
         let peer_counts = common::peers_override();
         let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);

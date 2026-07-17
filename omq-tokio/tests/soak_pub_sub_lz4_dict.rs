@@ -123,8 +123,8 @@ fn soak_pub_sub_lz4_dict_sharded_fanout() {
     let raw_probes = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         let publisher = Socket::new(SocketType::Pub, lz4_options());
         let (ep, mut mon) = bind_lz4_pub(&publisher).await;
 

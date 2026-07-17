@@ -29,8 +29,14 @@ use zeromq::{
 
 fn cpu_time_secs() -> f64 {
     let mut usage = libc::rusage {
-        ru_utime: libc::timeval { tv_sec: 0, tv_usec: 0 },
-        ru_stime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ru_utime: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        ru_stime: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
         ..unsafe { std::mem::zeroed() }
     };
     // SAFETY: passing a valid pointer to a zeroed rusage struct.
@@ -48,26 +54,36 @@ fn resolve_addr(s: &str) -> String {
     }
 }
 
-fn resolve_bind_addr(s: &str) -> String {
-    if s == "0" {
+fn resolve_bind_addr(s: &str) -> (String, Option<u16>) {
+    if s == "0" || s == "tcp://127.0.0.1:0" || s == "tcp://0.0.0.0:0" {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        println!("PORT {port}");
-        format!("tcp://127.0.0.1:{port}")
+        (format!("tcp://127.0.0.1:{port}"), Some(port))
     } else {
-        resolve_addr(s)
+        (resolve_addr(s), None)
     }
 }
 
-#[tokio::main]
+async fn report_bound_port(port: u16) {
+    let Ok(coord_ep) = std::env::var("OMQ_BENCH_COORD") else {
+        return;
+    };
+    let mut push = PushSocket::new();
+    push.connect(&coord_ep).await.expect("coord connect");
+    let msg = format!("READY {port}");
+    push.send(ZmqMessage::from(msg)).await.expect("coord send");
+    std::mem::forget(push);
+}
+
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("push") => {
-            let addr = resolve_bind_addr(&args[2]);
+            let (addr, port) = resolve_bind_addr(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
-            run_push(&addr, size).await;
+            run_push(&addr, port, size).await;
         }
         Some("pull") => {
             let addr = resolve_addr(&args[2]);
@@ -76,8 +92,8 @@ async fn main() {
             run_pull(&addr, size, Duration::from_secs_f64(duration)).await;
         }
         Some("rep") => {
-            let addr = resolve_bind_addr(&args[2]);
-            run_rep(&addr).await;
+            let (addr, port) = resolve_bind_addr(&args[2]);
+            run_rep(&addr, port).await;
         }
         Some("req") => {
             let addr = resolve_addr(&args[2]);
@@ -92,21 +108,41 @@ async fn main() {
             run_push_connect(&addr, size).await;
         }
         Some("pull-bind") => {
-            let addr = resolve_bind_addr(&args[2]);
+            let (addr, port) = resolve_bind_addr(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
-            run_pull_bind(&addr, size, Duration::from_secs_f64(duration)).await;
+            run_pull_bind(&addr, port, size, Duration::from_secs_f64(duration)).await;
         }
         Some("pub") => {
-            let addr = resolve_bind_addr(&args[2]);
+            let (addr, port) = resolve_bind_addr(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
-            run_pub(&addr, size).await;
+            run_pub(&addr, port, size).await;
         }
         Some("sub") => {
             let addr = resolve_addr(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let duration: f64 = args[4].parse().expect("duration_secs");
             run_sub(&addr, size, Duration::from_secs_f64(duration)).await;
+        }
+        Some("multi-pull") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            let count: usize = args[5].parse().expect("socket_count");
+            run_multi_pull(&addr, size, Duration::from_secs_f64(duration), count).await;
+        }
+        Some("multi-sub") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            let count: usize = args[5].parse().expect("socket_count");
+            run_multi_sub(&addr, size, Duration::from_secs_f64(duration), count).await;
+        }
+        Some("multi-push") => {
+            let addr = resolve_addr(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let count: usize = args[4].parse().expect("socket_count");
+            run_multi_push(&addr, size, count).await;
         }
         _ => {
             eprintln!("usage: zmqrs_bench_peer push <addr> <size>");
@@ -121,9 +157,12 @@ async fn main() {
     }
 }
 
-async fn run_push(addr: &str, size: usize) {
+async fn run_push(addr: &str, coord_port: Option<u16>, size: usize) {
     let mut socket = PushSocket::new();
     socket.bind(addr).await.expect("push bind");
+    if let Some(port) = coord_port {
+        report_bound_port(port).await;
+    }
     wait_for_start_barrier().await;
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
@@ -152,9 +191,12 @@ async fn wait_for_start_barrier() {
     }
 }
 
-async fn run_rep(addr: &str) {
+async fn run_rep(addr: &str, coord_port: Option<u16>) {
     let mut rep = RepSocket::new();
     rep.bind(addr).await.expect("rep bind");
+    if let Some(port) = coord_port {
+        report_bound_port(port).await;
+    }
     loop {
         match rep.recv().await {
             Ok(msg) => {
@@ -222,9 +264,12 @@ async fn run_push_connect(addr: &str, size: usize) {
     }
 }
 
-async fn run_pull_bind(addr: &str, size: usize, duration: Duration) {
+async fn run_pull_bind(addr: &str, coord_port: Option<u16>, size: usize, duration: Duration) {
     let mut socket = PullSocket::new();
     socket.bind(addr).await.expect("pull bind");
+    if let Some(port) = coord_port {
+        report_bound_port(port).await;
+    }
 
     wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -252,9 +297,12 @@ async fn run_pull_bind(addr: &str, size: usize, duration: Duration) {
     std::process::exit(0);
 }
 
-async fn run_pub(addr: &str, size: usize) {
+async fn run_pub(addr: &str, coord_port: Option<u16>, size: usize) {
     let mut socket = PubSocket::new();
     socket.bind(addr).await.expect("pub bind");
+    if let Some(port) = coord_port {
+        report_bound_port(port).await;
+    }
     wait_for_start_barrier().await;
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
@@ -334,4 +382,131 @@ async fn run_pull(addr: &str, size: usize, duration: Duration) {
     // socket drop; without this the runtime blocks in sigsuspend indefinitely,
     // keeping the pipe open and stalling the caller's command substitution.
     std::process::exit(0);
+}
+
+async fn run_multi_pull(addr: &str, size: usize, duration: Duration, socket_count: usize) {
+    let mut sockets = Vec::with_capacity(socket_count);
+    for _ in 0..socket_count {
+        let mut s = PullSocket::new();
+        s.connect(addr).await.expect("pull connect");
+        sockets.push(s);
+    }
+
+    wait_for_start_barrier().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let counters: Vec<_> = (0..socket_count)
+        .map(|_| Arc::new(AtomicU64::new(0)))
+        .collect();
+
+    let cpu_before = cpu_time_secs();
+    let t0 = Instant::now();
+
+    let mut handles = Vec::with_capacity(socket_count);
+    for (mut sock, counter) in sockets.into_iter().zip(counters.iter().cloned()) {
+        handles.push(tokio::spawn(async move {
+            loop {
+                if sock.recv().await.is_err() {
+                    break;
+                }
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    tokio::time::sleep(duration).await;
+    let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
+
+    for h in &handles {
+        h.abort();
+    }
+
+    let per_socket: Vec<u64> = counters.iter().map(|c| c.load(Ordering::Relaxed)).collect();
+    let total: u64 = per_socket.iter().sum();
+    let per_min = per_socket.iter().copied().min().unwrap_or(0);
+    let per_max = per_socket.iter().copied().max().unwrap_or(0);
+    let per_min_rate = per_min as f64 / elapsed;
+    let per_max_rate = per_max as f64 / elapsed;
+    println!(
+        "{total} {elapsed:.6} {size} {cpu:.6} {socket_count} {per_min_rate:.1} {per_max_rate:.1}"
+    );
+    std::process::exit(0);
+}
+
+async fn run_multi_sub(addr: &str, size: usize, duration: Duration, socket_count: usize) {
+    let mut sockets = Vec::with_capacity(socket_count);
+    for _ in 0..socket_count {
+        let mut s = SubSocket::new();
+        s.connect(addr).await.expect("sub connect");
+        s.subscribe("").await.expect("subscribe");
+        sockets.push(s);
+    }
+
+    wait_for_start_barrier().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let counters: Vec<_> = (0..socket_count)
+        .map(|_| Arc::new(AtomicU64::new(0)))
+        .collect();
+
+    let cpu_before = cpu_time_secs();
+    let t0 = Instant::now();
+
+    let mut handles = Vec::with_capacity(socket_count);
+    for (mut sock, counter) in sockets.into_iter().zip(counters.iter().cloned()) {
+        handles.push(tokio::spawn(async move {
+            loop {
+                if sock.recv().await.is_err() {
+                    break;
+                }
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    tokio::time::sleep(duration).await;
+    let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
+
+    for h in &handles {
+        h.abort();
+    }
+
+    let per_socket: Vec<u64> = counters.iter().map(|c| c.load(Ordering::Relaxed)).collect();
+    let total: u64 = per_socket.iter().sum();
+    let per_min = per_socket.iter().copied().min().unwrap_or(0);
+    let per_max = per_socket.iter().copied().max().unwrap_or(0);
+    let per_min_rate = per_min as f64 / elapsed;
+    let per_max_rate = per_max as f64 / elapsed;
+    println!(
+        "{total} {elapsed:.6} {size} {cpu:.6} {socket_count} {per_min_rate:.1} {per_max_rate:.1}"
+    );
+    std::process::exit(0);
+}
+
+async fn run_multi_push(addr: &str, size: usize, socket_count: usize) {
+    let mut sockets = Vec::with_capacity(socket_count);
+    for _ in 0..socket_count {
+        let mut s = PushSocket::new();
+        s.connect(addr).await.expect("push connect");
+        sockets.push(s);
+    }
+
+    wait_for_start_barrier().await;
+
+    let payload = Bytes::from(vec![b'x'; size]);
+    for sock in sockets {
+        let p = payload.clone();
+        tokio::spawn(async move {
+            let mut sock = sock;
+            loop {
+                if sock.send(ZmqMessage::from(p.clone())).await.is_err() {
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+    }
+
+    std::future::pending::<()>().await;
 }

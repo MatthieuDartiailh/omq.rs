@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "blume",
+    "omq-bench",
     "omq-proto",
     "omq-tokio",
     "omq-libzmq",
