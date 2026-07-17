@@ -8,10 +8,8 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::proto::mechanism::MechanismSetup;
-#[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
+#[cfg(any(feature = "curve", feature = "plain"))]
 use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
-#[cfg(feature = "blake3zmq")]
-use crate::proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey};
 #[cfg(feature = "curve")]
 use crate::proto::mechanism::{CurveKeypair, CurvePublicKey};
 use crate::socket_ref::SocketRef;
@@ -471,38 +469,18 @@ impl Options {
         self
     }
 
-    /// Configure this socket as a BLAKE3ZMQ server. Non-standard,
-    /// omq-to-omq only - peers must also be `blake3zmq`-built.
-    /// A fresh cookie keyring with the default rotation interval
-    /// (~30 s) is created. Reach in via
-    /// [`MechanismSetup::blake3zmq_cookie_keyring`] to configure or
-    /// share it. Use [`Self::blake3zmq_authenticator`] to add a
-    /// per-client admission callback.
-    #[cfg(feature = "blake3zmq")]
-    #[must_use]
-    pub fn blake3zmq_server(mut self, our_keypair: Blake3ZmqKeypair) -> Self {
-        self.mechanism = MechanismSetup::Blake3ZmqServer {
-            our_keypair,
-            cookie_keyring: std::sync::Arc::new(
-                crate::proto::mechanism::blake3zmq::CookieKeyring::new(),
-            ),
-            authenticator: None,
-        };
-        self
-    }
-
     /// Install a server-side authenticator. Called once per handshake
     /// after the underlying mechanism has cryptographically verified
-    /// the peer (CURVE: vouch decrypt; BLAKE3ZMQ: vouch decrypt).
+    /// the peer (CURVE: vouch decrypt).
     /// The callback receives the peer's long-term public key plus a
     /// tag identifying which mechanism produced it. Return `false` to
     /// reject the client; the handshake aborts.
     ///
-    /// Works for both CURVE and BLAKE3ZMQ server configurations.
+    /// Works for CURVE server configurations.
     /// Panics if the current mechanism is not a server configuration
-    /// of an encrypting mechanism (i.e., `curve_server` or `blake3zmq_server`
+    /// of an encrypting mechanism (i.e., `curve_server`
     /// must be called before this method).
-    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    #[cfg(feature = "curve")]
     #[must_use]
     #[track_caller]
     pub fn authenticator<F>(mut self, f: F) -> Self
@@ -513,10 +491,6 @@ impl Options {
         match &mut self.mechanism {
             #[cfg(feature = "curve")]
             MechanismSetup::CurveServer { authenticator, .. } => {
-                *authenticator = Some(auth);
-            }
-            #[cfg(feature = "blake3zmq")]
-            MechanismSetup::Blake3ZmqServer { authenticator, .. } => {
                 *authenticator = Some(auth);
             }
             _ => panic!("authenticator requires a server-side encrypting mechanism"),
@@ -552,22 +526,6 @@ impl Options {
         self.mechanism = MechanismSetup::PlainClient {
             username: username.into(),
             password: password.into(),
-        };
-        self
-    }
-
-    /// Configure this socket as a BLAKE3ZMQ client targeting
-    /// `server_public`. Non-standard, omq-to-omq only.
-    #[cfg(feature = "blake3zmq")]
-    #[must_use]
-    pub fn blake3zmq_client(
-        mut self,
-        our_keypair: Blake3ZmqKeypair,
-        server_public: Blake3ZmqPublicKey,
-    ) -> Self {
-        self.mechanism = MechanismSetup::Blake3ZmqClient {
-            our_keypair,
-            server_public,
         };
         self
     }

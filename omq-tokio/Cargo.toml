@@ -20,7 +20,6 @@ workspace = true
 # Cargo.toml for the catalog.
 default = []
 curve = ["omq-proto/curve"]
-blake3zmq = ["omq-proto/blake3zmq"]
 plain = ["omq-proto/plain"]
 lz4 = ["omq-proto/lz4"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfile", "dep:rustls-pki-types", "dep:tokio-rustls"]

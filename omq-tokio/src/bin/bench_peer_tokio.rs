@@ -454,8 +454,6 @@ fn bench_options_server(msg_size: usize) -> Options {
         Some("plain") => o.plain_server(|_| true),
         #[cfg(feature = "curve")]
         Some("curve") => o.curve_server(bench_curve_server_keypair()),
-        #[cfg(feature = "blake3zmq")]
-        Some("blake3zmq") => o.blake3zmq_server(bench_b3_server_keypair()),
         Some(other) => panic!("unknown OMQ_BENCH_MECHANISM: {other}"),
     }
 }
@@ -471,12 +469,6 @@ fn bench_options_client(msg_size: usize) -> Options {
             let client_kp = bench_curve_client_keypair();
             let server_pub = bench_curve_server_keypair().public;
             o.curve_client(client_kp, server_pub)
-        }
-        #[cfg(feature = "blake3zmq")]
-        Some("blake3zmq") => {
-            let client_kp = bench_b3_client_keypair();
-            let server_pub = bench_b3_server_keypair().public;
-            o.blake3zmq_client(client_kp, server_pub)
         }
         Some(other) => panic!("unknown OMQ_BENCH_MECHANISM: {other}"),
     }
@@ -500,16 +492,6 @@ fn bench_curve_client_keypair() -> omq_tokio::CurveKeypair {
     let secret = omq_tokio::CurveSecretKey::from_bytes([0x02; 32]);
     let public = secret.derive_public();
     omq_tokio::CurveKeypair { public, secret }
-}
-
-#[cfg(feature = "blake3zmq")]
-fn bench_b3_server_keypair() -> omq_tokio::Blake3ZmqKeypair {
-    omq_tokio::Blake3ZmqKeypair::from_secret(omq_tokio::Blake3ZmqSecretKey([0x03; 32]))
-}
-
-#[cfg(feature = "blake3zmq")]
-fn bench_b3_client_keypair() -> omq_tokio::Blake3ZmqKeypair {
-    omq_tokio::Blake3ZmqKeypair::from_secret(omq_tokio::Blake3ZmqSecretKey([0x04; 32]))
 }
 
 async fn run_push(ep: Endpoint, size: usize) {

@@ -33,7 +33,7 @@ use super::chunked_buf::ChunkedInputBuf;
 #[cfg(test)]
 use super::command;
 use super::command::{Command, PeerProperties};
-#[cfg(any(feature = "blake3zmq", test))]
+#[cfg(test)]
 use super::frame;
 
 /// Parse a command-frame payload as raw `Command::Unknown { name, body }`
@@ -55,7 +55,7 @@ fn decode_command_raw(body: bytes::Bytes) -> Result<Command> {
 }
 use super::SocketType;
 use super::greeting::{self, Greeting, MechanismName};
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(feature = "curve")]
 use super::mechanism::FrameTransform;
 use super::mechanism::{MechanismSetup, SecurityMechanism};
 
@@ -195,13 +195,12 @@ pub struct Connection {
     /// Per-direction frame transform installed once a security mechanism
     /// completes. `None` for NULL. Compiled out when no encrypting
     /// mechanism is built in. CURVE wraps payloads in MESSAGE
-    /// commands; BLAKE3ZMQ encrypts data-frame payloads in place.
-    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    /// commands.
+    #[cfg(feature = "curve")]
     transform: Option<FrameTransform>,
     /// 64-byte ZMTP greeting we sent (captured at `queue_greeting` time)
     /// + 64-byte greeting we received (captured during decode). Both
-    ///   are needed by transcript-binding mechanisms (BLAKE3ZMQ); other
-    ///   mechanisms ignore them.
+    ///   are retained for protocol diagnostics.
     our_greeting: Bytes,
     peer_greeting: Bytes,
     peer_minor: u8,
@@ -242,7 +241,7 @@ pub struct Connection {
 
 impl Connection {
     /// Create a new connection and queue our greeting into the out buffer.
-    /// Supports the NULL, CURVE, and BLAKE3ZMQ mechanisms.
+    /// Supports the NULL and CURVE mechanisms.
     pub fn new(config: ConnectionConfig) -> Self {
         let mechanism = config.mechanism.clone().build();
         #[cfg(feature = "ws")]
@@ -251,7 +250,7 @@ impl Connection {
             state: State::AwaitingGreeting,
             peer_minor: greeting::ZMTP_MINOR,
             mechanism,
-            #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+            #[cfg(feature = "curve")]
             transform: None,
             our_greeting: Bytes::new(),
             peer_greeting: Bytes::new(),
@@ -327,16 +326,16 @@ impl Connection {
         matches!(self.state, State::Ready)
     }
 
-    /// Whether a frame-level crypto transform (CURVE, BLAKE3ZMQ) is active.
+    /// Whether a frame-level crypto transform (CURVE) is active.
     /// When false, frames are plain ZMTP DATA; callers may encode directly
     /// into their own flat buffer via [`send_message_flat`] rather than going
     /// through [`send_message`] + [`transmit_chunks`].
     pub fn has_frame_transform(&self) -> bool {
-        #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+        #[cfg(feature = "curve")]
         {
             self.transform.is_some()
         }
-        #[cfg(not(any(feature = "curve", feature = "blake3zmq")))]
+        #[cfg(not(feature = "curve"))]
         {
             false
         }
@@ -345,20 +344,20 @@ impl Connection {
     /// Temporarily remove the frame transform so the caller can run
     /// encryption on a blocking thread. Must be restored via
     /// [`restore_transform`] before the next `send_message` call.
-    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    #[cfg(feature = "curve")]
     pub fn take_transform(&mut self) -> Option<FrameTransform> {
         self.transform.take()
     }
 
     /// Put back a transform previously removed by [`take_transform`].
-    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    #[cfg(feature = "curve")]
     pub fn restore_transform(&mut self, tx: FrameTransform) {
         self.transform = Some(tx);
     }
 
     /// Emit pre-encrypted frames produced by
     /// [`FrameTransform::encrypt_message`] into the outbound buffer.
-    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    #[cfg(feature = "curve")]
     pub fn emit_encrypted_frames(&mut self, frames: &[(FrameFlags, Bytes)]) {
         for (flags, payload) in frames {
             self.emit_frame(*flags, Payload::from_bytes(payload.clone()));
@@ -392,38 +391,6 @@ impl Connection {
     /// The peer's negotiated ZMTP minor version (valid after handshake).
     pub fn peer_minor(&self) -> u8 {
         self.peer_minor
-    }
-}
-
-/// Compute the BLAKE3ZMQ AAD per RFC §10.3 (revised): every wire byte
-/// of the frame header that is not itself encrypted -
-/// `flags_byte || length_bytes`. `flags_byte` is the *wire* flags
-/// (MORE | LONG | COMMAND), and `length_bytes` is the 1-byte short or
-/// 8-byte big-endian long encoding of `ciphertext_len`.
-#[cfg(feature = "blake3zmq")]
-pub(crate) fn blake3zmq_aad(
-    flags: crate::message::FrameFlags,
-    ciphertext_len: usize,
-) -> ([u8; 9], usize) {
-    let mut wire_flags = 0u8;
-    if flags.more {
-        wire_flags |= frame::FLAG_MORE;
-    }
-    if flags.command {
-        wire_flags |= frame::FLAG_COMMAND;
-    }
-    let long = ciphertext_len > frame::MAX_SHORT_FRAME_SIZE;
-    if long {
-        wire_flags |= frame::FLAG_LONG;
-    }
-    let mut buf = [0u8; 9];
-    buf[0] = wire_flags;
-    if long {
-        buf[1..9].copy_from_slice(&(ciphertext_len as u64).to_be_bytes());
-        (buf, 9)
-    } else {
-        buf[1] = ciphertext_len as u8;
-        (buf, 2)
     }
 }
 

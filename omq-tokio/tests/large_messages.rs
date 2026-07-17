@@ -1,7 +1,7 @@
 //! Large messages over NULL mechanism TCP.
 //!
 //! Exercises multi-chunk Payload / scatter-gather framing at payload sizes
-//! that span many TCP segments. Encryption masks framing bugs in CURVE/BLAKE3
+//! that span many TCP segments. Encryption masks framing bugs in CURVE
 //! suites; this file tests plain framing directly.
 
 use std::net::Ipv4Addr;

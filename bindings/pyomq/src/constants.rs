@@ -62,12 +62,6 @@ pub const CURVE_PUBLICKEY: i32 = 48;
 pub const CURVE_SECRETKEY: i32 = 49;
 pub const CURVE_SERVERKEY: i32 = 50;
 
-// BLAKE3ZMQ options (omq-only, no libzmq equivalent):
-pub const BLAKE3ZMQ_SERVER: i32 = 1000;
-pub const BLAKE3ZMQ_PUBLICKEY: i32 = 1001;
-pub const BLAKE3ZMQ_SECRETKEY: i32 = 1002;
-pub const BLAKE3ZMQ_SERVERKEY: i32 = 1003;
-
 // omq-specific options (no libzmq equivalent):
 pub const OMQ_ON_MUTE: i32 = 1004;
 pub const OMQ_COMPRESSION_DICT: i32 = 1006;
@@ -166,10 +160,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         CURVE_PUBLICKEY,
         CURVE_SECRETKEY,
         CURVE_SERVERKEY,
-        BLAKE3ZMQ_SERVER,
-        BLAKE3ZMQ_PUBLICKEY,
-        BLAKE3ZMQ_SECRETKEY,
-        BLAKE3ZMQ_SERVERKEY,
         OMQ_ON_MUTE,
         OMQ_COMPRESSION_DICT,
         OMQ_COMPRESSION_AUTO_TRAIN,

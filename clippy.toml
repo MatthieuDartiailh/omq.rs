@@ -5,7 +5,6 @@ doc-valid-idents = [
     "..",
     "ZeroMQ",
     "ChaCha20",
-    "ChaCha20-BLAKE3",
     "XSalsa20",
     "Curve25519",
     "X25519",

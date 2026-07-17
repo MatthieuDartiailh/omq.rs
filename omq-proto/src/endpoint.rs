@@ -302,7 +302,7 @@ pub fn reject_encrypted_inproc(
         && !matches!(mechanism, crate::proto::mechanism::MechanismSetup::Null)
     {
         return Err(crate::error::Error::InvalidEndpoint(
-            "non-NULL mechanisms (PLAIN / CURVE / BLAKE3ZMQ) are not supported on \
+            "non-NULL mechanisms (PLAIN / CURVE) are not supported on \
              inproc - use ipc:// or tcp:// for authenticated or encrypted channels"
                 .into(),
         ));

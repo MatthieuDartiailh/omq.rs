@@ -82,7 +82,7 @@ N-to-1 PUSH/PULL over TCP.
 
 ## Mechanisms
 
-PUSH/PULL throughput under NULL, PLAIN, CURVE, and BLAKE3ZMQ.
+PUSH/PULL throughput under NULL, PLAIN, and CURVE.
 
 <p align="center">
   <img src="doc/charts/mechanism/tokio.svg" alt="Mechanisms: omq-tokio" width="850">

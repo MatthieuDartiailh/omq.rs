@@ -404,15 +404,6 @@ class Socket:
             from . import ZMQNotImplementedError
             raise ZMQNotImplementedError("curve feature not compiled")
 
-    def set_blake3zmq_auth(self, auth):
-        try:
-            return self._sock.set_blake3zmq_auth(auth)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-        except AttributeError:
-            from . import ZMQNotImplementedError
-            raise ZMQNotImplementedError("blake3zmq feature not compiled")
-
     def set_hwm(self, value):
         self.setsockopt(SNDHWM, value)
         self.setsockopt(RCVHWM, value)

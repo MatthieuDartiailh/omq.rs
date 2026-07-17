@@ -33,7 +33,6 @@ Feature-gated tests:
 ```sh
 cargo test -p omq-tokio --features plain     --test plain
 cargo test -p omq-tokio --features curve     --test curve
-cargo test -p omq-tokio --features blake3zmq --test blake3zmq
 cargo test -p omq-tokio --features lz4       --test lz4_tcp --test lz4_pub_sub
 ```
 
@@ -66,7 +65,7 @@ OMQ_FUZZ_ITERS=500000000 cargo test -p omq-tokio --features fuzz --release -- --
 Soak tests cover peer churn, reconnect storms, reconnect all types,
 PUB/SUB churn, ROUTER/DEALER churn, HWM reconnect, WebSocket
 throughput, WebSocket reconnect, large-message throughput, compression
-with lz4, PLAIN, CURVE, BLAKE3ZMQ, multi-socket, inproc cross-thread,
+with lz4, PLAIN, CURVE, multi-socket, inproc cross-thread,
 and cancel safety.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s). Set
@@ -74,7 +73,7 @@ Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s). Set
 runtime flavor.
 
 ```sh
-FEATURES="soak lz4 plain curve blake3zmq ws"
+FEATURES="soak lz4 plain curve ws"
 cargo test -p omq-tokio --features "$FEATURES" --release --no-run
 OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
   --features "$FEATURES" --release --test soak_peer_churn -- --nocapture

@@ -5,11 +5,6 @@
 //! XSalsa20-Poly1305). This module is just protocol layout + state
 //! machine.
 //!
-//! NOTE: The BLAKE3ZMQ handshake in `blake3zmq/handshake.rs` has a
-//! parallel structure (same four-message flow, similar state enums).
-//! This is intentional: each mechanism's handshake is kept
-//! self-contained so the crypto protocol flow is auditable without
-//! chasing through abstractions. Do not deduplicate.
 //!
 //! Internally split into [`CurveClient`] and [`CurveServer`] so each
 //! role carries only the fields it needs. Ephemeral key availability

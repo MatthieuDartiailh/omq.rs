@@ -86,11 +86,6 @@ from ._native import (  # type: ignore[attr-defined]
     CURVE_PUBLICKEY,
     CURVE_SECRETKEY,
     CURVE_SERVERKEY,
-    # BLAKE3ZMQ option ids
-    BLAKE3ZMQ_SERVER,
-    BLAKE3ZMQ_PUBLICKEY,
-    BLAKE3ZMQ_SECRETKEY,
-    BLAKE3ZMQ_SERVERKEY,
     # omq-specific options
     OMQ_ON_MUTE,
     OMQ_COMPRESSION_DICT,
@@ -151,7 +146,6 @@ STREAMER = 1
 NULL = 0
 PLAIN = 1
 CURVE = 2
-BLAKE3ZMQ = 3
 
 ETERM = 156384765
 ENOTSOCK = 108
@@ -222,12 +216,6 @@ def curve_public(secret):
     return _native.curve_public(secret)
 
 
-def blake3zmq_keypair():
-    if not hasattr(_native, "blake3zmq_keypair"):
-        raise ZMQNotImplementedError("blake3zmq feature not compiled")
-    return _native.blake3zmq_keypair()
-
-
 if hasattr(_native, "PeerInfo"):
     PeerInfo = _native.PeerInfo
 
@@ -274,10 +262,6 @@ _SOCKOPT_NAMES = {
     "curve_publickey": CURVE_PUBLICKEY,
     "curve_secretkey": CURVE_SECRETKEY,
     "curve_serverkey": CURVE_SERVERKEY,
-    "blake3zmq_server": BLAKE3ZMQ_SERVER,
-    "blake3zmq_publickey": BLAKE3ZMQ_PUBLICKEY,
-    "blake3zmq_secretkey": BLAKE3ZMQ_SECRETKEY,
-    "blake3zmq_serverkey": BLAKE3ZMQ_SERVERKEY,
     "on_mute": OMQ_ON_MUTE,
     "compression_dict": OMQ_COMPRESSION_DICT,
     "compression_auto_train": OMQ_COMPRESSION_AUTO_TRAIN,
@@ -565,14 +549,6 @@ class Socket(metaclass=_SocketMeta):
             raise error.from_native(e) from None
         except AttributeError:
             raise ZMQNotImplementedError("curve feature not compiled")
-
-    def set_blake3zmq_auth(self, auth):
-        try:
-            return self._sock.set_blake3zmq_auth(auth)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-        except AttributeError:
-            raise ZMQNotImplementedError("blake3zmq feature not compiled")
 
     def set_hwm(self, value):
         self.setsockopt(SNDHWM, value)
@@ -1056,7 +1032,6 @@ __all__ = [
     "TCP_KEEPALIVE_INTVL",
     "SNDMORE", "NOBLOCK", "DONTWAIT",
     "CURVE_SERVER", "CURVE_PUBLICKEY", "CURVE_SECRETKEY", "CURVE_SERVERKEY",
-    "BLAKE3ZMQ_SERVER", "BLAKE3ZMQ_PUBLICKEY", "BLAKE3ZMQ_SECRETKEY", "BLAKE3ZMQ_SERVERKEY",
     "OMQ_ON_MUTE", "OMQ_COMPRESSION_DICT",
     "OMQ_COMPRESSION_AUTO_TRAIN",
     "OMQ_ON_MUTE_BLOCK", "OMQ_ON_MUTE_DROP_NEWEST", "OMQ_ON_MUTE_DROP_OLDEST",
@@ -1072,7 +1047,7 @@ __all__ = [
     # device types
     "FORWARDER", "QUEUE", "STREAMER",
     # security mechanism constants
-    "NULL", "PLAIN", "CURVE", "BLAKE3ZMQ",
+    "NULL", "PLAIN", "CURVE",
     # version
     "__version__", "zmq_version_info", "zmq_version",
     "pyomq_version", "pyomq_version_info",
@@ -1086,7 +1061,7 @@ __all__ = [
     # extra constants
     "ETERM", "ENOTSOCK", "COPY_THRESHOLD",
     # curve
-    "curve_keypair", "curve_public", "blake3zmq_keypair", "PeerInfo",
+    "curve_keypair", "curve_public", "PeerInfo",
 ]
 
 

@@ -1391,7 +1391,7 @@ fn fuzz_message_size_boundary() {
 // Mechanism-specific fuzz (feature-gated)
 // ================================================================
 
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(feature = "curve")]
 mod mech_fuzz {
     use super::*;
 
@@ -1461,69 +1461,6 @@ mod mech_fuzz {
             drain(&mut conn);
             if i % 5_000 == 0 {
                 eprintln!("curve hello iter {i}");
-            }
-        }
-    }
-
-    #[cfg(feature = "blake3zmq")]
-    #[test]
-    fn fuzz_blake3zmq_server_input() {
-        use omq_tokio::Blake3ZmqKeypair;
-        use omq_tokio::proto::mechanism::blake3zmq::CookieKeyring;
-        use std::sync::Arc;
-        let mut rng = rng();
-        let keyring = Arc::new(CookieKeyring::new());
-        for i in 0..iters() / 8 {
-            let kp = Blake3ZmqKeypair::generate();
-            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
-                MechanismSetup::Blake3ZmqServer {
-                    our_keypair: kp,
-                    cookie_keyring: keyring.clone(),
-                    authenticator: None,
-                },
-            );
-            let mut conn = Connection::new(cfg);
-            let raw = random_bytes(&mut rng, 1024);
-            let _ = conn.handle_input(Bytes::copy_from_slice(&raw));
-            drain(&mut conn);
-            if i % 5_000 == 0 {
-                eprintln!("blake3zmq iter {i}");
-            }
-        }
-    }
-
-    #[cfg(feature = "blake3zmq")]
-    #[test]
-    fn fuzz_blake3zmq_hello_body() {
-        use omq_tokio::Blake3ZmqKeypair;
-        use omq_tokio::proto::mechanism::blake3zmq::CookieKeyring;
-        use std::sync::Arc;
-        let greeting = greeting_bytes(b"BLAKE3");
-        let keyring = Arc::new(CookieKeyring::new());
-        let mut rng = rng();
-        for i in 0..iters() / 8 {
-            let kp = Blake3ZmqKeypair::generate();
-            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
-                MechanismSetup::Blake3ZmqServer {
-                    our_keypair: kp,
-                    cookie_keyring: keyring.clone(),
-                    authenticator: None,
-                },
-            );
-            let mut conn = Connection::new(cfg);
-            let _ = conn.handle_input(Bytes::copy_from_slice(&greeting));
-            let body_len = rng.random_range(0..=256);
-            let mut body = Vec::with_capacity(1 + 5 + body_len);
-            body.push(5);
-            body.extend_from_slice(b"HELLO");
-            let mut tail = vec![0u8; body_len];
-            rng.fill_bytes(&mut tail);
-            body.extend_from_slice(&tail);
-            let frame = long_command_frame(&body);
-            let _ = conn.handle_input(Bytes::copy_from_slice(&frame));
-            drain(&mut conn);
-            if i % 5_000 == 0 {
-                eprintln!("blake3zmq hello iter {i}");
             }
         }
     }

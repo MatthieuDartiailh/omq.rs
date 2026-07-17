@@ -269,10 +269,6 @@ impl AsyncSocket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
-    #[cfg(feature = "blake3zmq")]
-    fn set_blake3zmq_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
-        crate::blake3zmq_auth::set_blake3zmq_auth_impl(&self.inner, auth)
-    }
 
     // ── Lifecycle ───────────────────────────────────────────────────
 

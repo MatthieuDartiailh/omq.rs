@@ -603,7 +603,7 @@ where
             }
 
             // Set handshake_done on the encode slot once the handshake
-            // completes and there's no frame transform (CURVE/BLAKE3ZMQ).
+            // completes and there's no frame transform (CURVE).
             // The slot stays disabled for crypto connections.
             if let Some(ref slot) = transmit_slot
                 && codec.is_ready()
@@ -1087,7 +1087,7 @@ fn drain_offload_result(
 /// entirely.
 ///
 /// The only path that still goes through `codec.send_message` is when a
-/// frame-level transform (CURVE/BLAKE3ZMQ) is active, since those
+/// frame-level transform (CURVE) is active, since those
 /// encrypt at the ZMTP frame layer and need the codec's internal state.
 fn encode_msg(
     msg: &Message,

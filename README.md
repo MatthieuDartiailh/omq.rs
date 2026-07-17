@@ -5,7 +5,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - Tokio backend for Linux, macOS, and Windows
 - 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and STREAM
 - 9 transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `lz4+ws://`, and `lz4+wss://`
-- 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
+- 3 security mechanisms: NULL, PLAIN, CURVE
 - No C compiler, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
 
@@ -63,17 +63,8 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 |-------------------|---------------------------------------------------|----------------------------------|
 | `plain`           | PLAIN username/password auth (RFC 24)             | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
-| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism ([RFC](doc/blake3zmq-rfc.md)) | `blake3`, `chacha20-blake3`, `x25519-dalek` |
 | `lz4`             | `lz4+tcp://` compression transport ([RFC](doc/lz4-rfc.md)) | `lz4rip` |
 | `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
-
-> [!WARNING]
-> **BLAKE3ZMQ has not been independently security audited.** It's an
-> omq-native construction (Noise XX + BLAKE3 + X25519 + ChaCha20-BLAKE3)
-> and should not be relied on for anything that matters until it has had
-> third-party review. Use **CURVE** (RFC 26) for production / regulated
-> workloads. Audits welcome - open an issue if you can help fund or
-> conduct one.
 
 ## Design highlights
 
@@ -110,7 +101,7 @@ covered by integration tests. The full suite:
   the wire parser and the socket-action state machine.
 - **29 soak test scenarios**: peer churn, reconnect storms, PUB/SUB
   churn, ROUTER/DEALER churn, HWM reconnect, cancel safety, compression
-  (lz4), PLAIN / CURVE / BLAKE3ZMQ auth, mechanism reconnect, large-message
+  (lz4), PLAIN / CURVE auth, mechanism reconnect, large-message
   throughput, multi-socket, inproc cross-thread, WebSocket throughput
   and reconnect. Each scenario samples RSS and FD counts to detect leaks.
 - **Loom** coverage for lock-free inproc queue behavior.
@@ -130,7 +121,6 @@ OMQ_FUZZ=1 ./scripts/test-all.sh  # include fuzz suites
   throughput on bandwidth-limited links.
 - [doc/architecture.md](doc/architecture.md): architecture and tokio
   backend internals.
-- [doc/blake3zmq-rfc.md](doc/blake3zmq-rfc.md): BLAKE3ZMQ mechanism
   wire format and security properties.
 - [doc/lz4-rfc.md](doc/lz4-rfc.md): LZ4 compression transport wire
   format and dictionary shipping rules.

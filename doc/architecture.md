@@ -92,7 +92,7 @@ transition fires `notify_one`. The consumer clears the flag before draining,
 then calls `rearm_if_nonempty` to self-wake if data remains. For
 budget-interrupted drains, `reschedule` fires unconditionally.
 
-CURVE and BLAKE3ZMQ keep per-connection nonce state, so encrypted traffic uses
+CURVE keeps per-connection nonce state, so encrypted traffic uses
 per-connection ordered transforms. LZ4 fan-out may encode once at socket level
 when wire bytes are identical for all matched subscribers.
 
@@ -168,7 +168,7 @@ with no active peer fall back to bounded pre-connect queues.
 ## Mechanisms And Monitoring
 
 Mechanisms live under `omq-proto/src/proto/mechanism/`: NULL is always on;
-PLAIN, CURVE, LZ4, WS, and BLAKE3ZMQ are feature-gated.
+PLAIN, CURVE, LZ4, and WS are feature-gated.
 
 `Socket::monitor()` returns a `Stream<Item = MonitorEvent>`. Events carry owned
 `PeerInfo` snapshots for listening, accept/connect, delayed connect,

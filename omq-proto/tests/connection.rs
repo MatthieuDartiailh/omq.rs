@@ -627,52 +627,6 @@ fn supply_payload_through_curve() {
     assert_eq!(m.part_bytes(0).unwrap(), plaintext.as_slice());
 }
 
-#[cfg(feature = "blake3zmq")]
-#[test]
-fn supply_payload_through_blake3zmq() {
-    use omq_proto::proto::mechanism::{Blake3ZmqKeypair, MechanismSetup};
-    let server_kp = Blake3ZmqKeypair::generate();
-    let client_kp = Blake3ZmqKeypair::generate();
-    let server_pub = server_kp.public;
-    let mut server = Connection::new(
-        ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
-            MechanismSetup::Blake3ZmqServer {
-                our_keypair: server_kp,
-                cookie_keyring: std::sync::Arc::new(
-                    omq_proto::proto::mechanism::blake3zmq::CookieKeyring::new(),
-                ),
-                authenticator: None,
-            },
-        ),
-    );
-    let mut client = Connection::new(
-        ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
-            MechanismSetup::Blake3ZmqClient {
-                our_keypair: client_kp,
-                server_public: server_pub,
-            },
-        ),
-    );
-    pump(&mut server, &mut client);
-    while server.poll_event().is_some() {}
-    while client.poll_event().is_some() {}
-
-    let plaintext = vec![0x55u8; 4096];
-    client
-        .send_message(&Message::single(Bytes::copy_from_slice(&plaintext)))
-        .unwrap();
-    let wire = client.poll_transmit();
-    client.advance_transmit(wire.len());
-
-    server.handle_input(wire.slice(..9)).unwrap();
-    let payload_len = server.begin_supplied_payload().expect("can switch");
-    server
-        .supply_payload(wire.slice(9..9 + payload_len))
-        .unwrap();
-    let m = server.poll_message().expect("message after supply");
-    assert_eq!(m.part_bytes(0).unwrap(), plaintext.as_slice());
-}
-
 #[test]
 fn bad_signature_rejected() {
     let mut c = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));

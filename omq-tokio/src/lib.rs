@@ -2,7 +2,7 @@
 //!
 //! Wire-compatible with libzmq. All 11 standard socket types plus 7
 //! draft types, TCP / IPC / inproc / UDP transports, NULL / CURVE /
-//! blake3zmq mechanisms, lz4+tcp compression transport.
+//! lz4+tcp compression transport.
 //!
 //! The codec, message types, mechanism handshakes, and routing
 //! algorithms live in the runtime-agnostic `omq-proto` crate.
@@ -19,10 +19,8 @@ pub mod transport;
 // to depend on omq-proto explicitly. Identical surface to the
 // pre-split crate.
 pub use omq_proto::IpcPath;
-#[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
+#[cfg(any(feature = "curve", feature = "plain"))]
 pub use omq_proto::{Authenticator, MechanismPeerInfo};
-#[cfg(feature = "blake3zmq")]
-pub use omq_proto::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 #[cfg(feature = "curve")]
 pub use omq_proto::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
 pub use omq_proto::{

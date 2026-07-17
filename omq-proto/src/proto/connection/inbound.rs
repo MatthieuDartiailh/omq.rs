@@ -10,15 +10,13 @@ use super::super::command::{self, Command, PeerProperties};
 use super::super::greeting::{self, MechanismName, effective_minor};
 use super::super::mechanism::MechanismStep;
 use super::super::{frame, is_compatible};
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(feature = "curve")]
 use super::FrameTransform;
-#[cfg(feature = "blake3zmq")]
-use super::blake3zmq_aad;
 use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 
 /// Absolute ceiling for a handshake command frame when the connection has
 /// no `max_message_size` configured. Real handshake commands (socket-type
-/// and identity properties, CURVE/BLAKE3ZMQ handshake messages) are a few
+/// and identity properties, CURVE handshake messages) are a few
 /// hundred bytes at most; this only exists to stop a pre-auth peer from
 /// making us buffer unbounded data during the handshake.
 const MAX_HANDSHAKE_COMMAND: usize = 256 * 1024;
@@ -109,7 +107,7 @@ impl Connection {
             our_props = our_props.with_identity(self.config.identity.clone());
         }
         let mut cmds = Vec::new();
-        // BLAKE3ZMQ needs the greetings for h0; CURVE/NULL ignore them.
+        // CURVE/NULL ignore the greeting bytes after capture.
         // Pass both directions so the mechanism can compute the
         // transcript correctly regardless of role.
         self.mechanism.start(
@@ -127,7 +125,7 @@ impl Connection {
         // pre-authentication, so a peer must not be able to make us buffer an
         // arbitrary amount by declaring a huge command frame and dribbling
         // bytes. Handshake commands (READY, CURVE HELLO/WELCOME/INITIATE,
-        // BLAKE3ZMQ messages) are never legitimately large, so cap them at an
+        // CURVE messages are never legitimately large, so cap them at an
         // absolute ceiling. This is independent of `max_message_size`, which
         // bounds user data messages: a user may set a tiny data limit yet must
         // still exchange the (larger) handshake commands.
@@ -166,7 +164,7 @@ impl Connection {
                     self.config.socket_type, peer_type
                 )));
             }
-            #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+            #[cfg(feature = "curve")]
             {
                 self.transform = self.mechanism.build_transform()?;
             }
@@ -223,7 +221,7 @@ impl Connection {
     }
 
     /// Run the post-handshake dispatch on an already-assembled wire frame:
-    /// decrypt (CURVE / BLAKE3ZMQ if active), demux command-vs-data, and
+    /// decrypt CURVE frames if active, demux command-vs-data, and
     /// either auto-answer / surface a command or accumulate a data frame
     /// into the pending message.
     ///
@@ -234,17 +232,6 @@ impl Connection {
     fn decode_assembled_frame(&mut self, flags: FrameFlags, payload: Payload) -> Result<()> {
         #[cfg(feature = "curve")]
         const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
-
-        // BLAKE3ZMQ: every post-handshake frame is AEAD-encrypted
-        // (RFC §10.3). Decrypt first; the wire COMMAND bit decides
-        // whether the plaintext is a command body or application data.
-        #[cfg(feature = "blake3zmq")]
-        if let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut() {
-            let ciphertext = payload.as_bytes();
-            let (aad, aad_len) = blake3zmq_aad(flags, ciphertext.len());
-            let plaintext = Bytes::from(tx.decrypt(&aad[..aad_len], &ciphertext)?);
-            return self.dispatch_decrypted(flags.command, flags.more, plaintext);
-        }
 
         // CURVE: wire body is `\x07 "MESSAGE" nonce(8) box(flags(1) || data)`.
         // The MORE and COMMAND bits live in the *encrypted* inner flags byte
@@ -276,7 +263,7 @@ impl Connection {
         Ok(())
     }
 
-    #[cfg(any(feature = "blake3zmq", feature = "curve"))]
+    #[cfg(feature = "curve")]
     fn dispatch_decrypted(&mut self, command: bool, more: bool, plaintext: Bytes) -> Result<()> {
         if command {
             let cmd = command::decode(plaintext)?;
