@@ -292,8 +292,18 @@ pub fn setsockopt(
         constants::SUBSCRIBE => {
             let v: &[u8] = value.extract()?;
             let bytes = Bytes::copy_from_slice(v);
-            let ctx = sock.ctx.clone();
+            sock.subscriptions.lock().unwrap().push(bytes.clone());
             drop(ov);
+            if let Some(s) = sock
+                .blocking_materialized
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|m| m.socket.clone())
+            {
+                return py.detach(|| s.subscribe(bytes)).map_err(map_err);
+            }
+            let ctx = sock.ctx.clone();
             let s = sock.ensure_socket()?;
             let r =
                 py.detach(|| ctx.with_socket(&s, move |s| async move { s.subscribe(bytes).await }));
@@ -302,8 +312,18 @@ pub fn setsockopt(
         constants::UNSUBSCRIBE => {
             let v: &[u8] = value.extract()?;
             let bytes = Bytes::copy_from_slice(v);
-            let ctx = sock.ctx.clone();
+            sock.subscriptions.lock().unwrap().retain(|p| p != &bytes);
             drop(ov);
+            if let Some(s) = sock
+                .blocking_materialized
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|m| m.socket.clone())
+            {
+                return py.detach(|| s.unsubscribe(bytes)).map_err(map_err);
+            }
+            let ctx = sock.ctx.clone();
             let s = sock.ensure_socket()?;
             let r = py
                 .detach(|| ctx.with_socket(&s, move |s| async move { s.unsubscribe(bytes).await }));

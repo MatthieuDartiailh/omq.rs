@@ -24,6 +24,26 @@ where
     py.detach(|| ctx.with_socket(&sock, op)).map_err(map_err)
 }
 
+pub(crate) fn blocking_unit<F>(inner: &Arc<SocketInner>, py: Python<'_>, op: F) -> PyResult<()>
+where
+    F: FnOnce(omq_tokio::blocking::Socket) -> Result<(), PError> + Send + 'static,
+{
+    let sock = inner.ensure_blocking_socket()?;
+    py.detach(|| op(sock)).map_err(map_err)
+}
+
+pub(crate) fn blocking_string<F>(
+    inner: &Arc<SocketInner>,
+    py: Python<'_>,
+    op: F,
+) -> PyResult<String>
+where
+    F: FnOnce(omq_tokio::blocking::Socket) -> Result<String, PError> + Send + 'static,
+{
+    let sock = inner.ensure_blocking_socket()?;
+    py.detach(|| op(sock)).map_err(map_err)
+}
+
 /// Like `sync_unit` but returns a `String`.
 pub(crate) fn sync_string<F, Fut>(
     inner: &Arc<SocketInner>,
