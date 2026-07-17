@@ -10,7 +10,7 @@ in other languages) to link against omq instead of libzmq.
 
 - **Transports:** `inproc://`, `tcp://`, `ipc://` (including Windows named pipes)
 - **Socket Types:** All standard ZMQ types (PUSH/PULL, PUB/SUB, REQ/REP, DEALER/ROUTER, etc.)
-- **Security:** PLAIN, CURVE, BLAKE3 with ChaCha20
+- **Security:** PLAIN, CURVE
 - **Compression:** LZ4 over TCP
 - **Cross-Platform:** Linux, macOS, Windows, BSD
 - **API Compatibility:** Drop-in libzmq replacement with identical ABI

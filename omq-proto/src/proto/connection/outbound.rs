@@ -16,10 +16,8 @@ use super::super::mechanism::curve::CurveTransform;
 use super::super::ws_codec;
 #[cfg(feature = "ws")]
 use super::super::zws;
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(feature = "curve")]
 use super::FrameTransform;
-#[cfg(feature = "blake3zmq")]
-use super::blake3zmq_aad;
 use super::{Connection, State};
 
 impl Connection {
@@ -28,25 +26,6 @@ impl Connection {
         for c in cmds {
             let mut body = BytesMut::new();
             command::encode(c, &mut body);
-
-            // BLAKE3ZMQ post-handshake: every frame is AEAD-encrypted
-            // (RFC §10.3), commands included.
-            #[cfg(feature = "blake3zmq")]
-            if matches!(self.state, State::Ready)
-                && let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut()
-            {
-                const TAG_LEN: usize = 32;
-                let plaintext = body.freeze();
-                let (aad, aad_len) = blake3zmq_aad(
-                    crate::message::FrameFlags::COMMAND,
-                    plaintext.len() + TAG_LEN,
-                );
-                let ciphertext = tx
-                    .encrypt(&aad[..aad_len], &plaintext)
-                    .map_err(|_| Error::Protocol("command encryption failed".into()))?;
-                self.emit_command_frame(Bytes::from(ciphertext));
-                continue;
-            }
 
             // CURVE post-handshake: commands traverse MESSAGE encryption.
             // The inner flags byte carries COMMAND (0x02) for the peer.
@@ -157,16 +136,11 @@ impl Connection {
         }
         for (i, part) in parts.iter().enumerate() {
             let more = i + 1 < n;
-            #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+            #[cfg(feature = "curve")]
             match self.transform.as_mut() {
                 #[cfg(feature = "curve")]
                 Some(FrameTransform::Curve(_)) => {
                     self.send_part_curve(more, part)?;
-                    continue;
-                }
-                #[cfg(feature = "blake3zmq")]
-                Some(FrameTransform::Blake3Zmq(_)) => {
-                    self.send_part_blake3zmq(more, part)?;
                     continue;
                 }
                 None => {}
@@ -245,30 +219,6 @@ impl Connection {
             crate::message::FrameFlags::LAST
         };
         self.emit_frame(flags, Payload::from_bytes(wire));
-        Ok(())
-    }
-
-    /// BLAKE3ZMQ data-phase send: encrypt the frame payload with the
-    /// wire frame envelope (flags byte + length bytes) as AAD per RFC
-    /// §10.3; emit a regular data frame (NOT a COMMAND frame) whose
-    /// payload is `ciphertext || tag`. Ciphertext length is known
-    /// up-front because ChaCha20 is a stream cipher
-    /// (`ciphertext_len = plaintext_len + 32`).
-    #[cfg(feature = "blake3zmq")]
-    fn send_part_blake3zmq(&mut self, more: bool, part: &Payload) -> Result<()> {
-        const TAG_LEN: usize = 32;
-        let flags = if more {
-            crate::message::FrameFlags::MORE
-        } else {
-            crate::message::FrameFlags::LAST
-        };
-        let plaintext = part.as_bytes();
-        let (aad, aad_len) = blake3zmq_aad(flags, plaintext.len() + TAG_LEN);
-        let Some(FrameTransform::Blake3Zmq(tx)) = self.transform.as_mut() else {
-            unreachable!("send_part_blake3zmq called without blake3zmq transform");
-        };
-        let ciphertext = tx.encrypt(&aad[..aad_len], &plaintext)?;
-        self.emit_frame(flags, Payload::from_bytes(Bytes::from(ciphertext)));
         Ok(())
     }
 

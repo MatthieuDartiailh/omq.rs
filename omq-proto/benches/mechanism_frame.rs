@@ -1,20 +1,18 @@
-//! Per-frame mechanism overhead microbench.
+//! Per-frame CURVE overhead microbench.
 //!
 //! Measures the raw cryptographic cost of sealing one ZMTP frame
-//! payload under each mechanism. Wrapper overhead (nonce assembly,
+//! payload under CURVE. Wrapper overhead (nonce assembly,
 //! counter increment, AAD construction) is sub-nanosecond and not
-//! distinguished here - we go straight at the primitives:
+//! distinguished here - we go straight at the primitive:
 //!
 //! - **CURVE**      one `crypto_box::SalsaBox` seal (XSalsa20 +
 //!   Poly1305 16-byte tag, RFC 26).
-//! - **BLAKE3ZMQ**  `ChaCha20` (legacy) + BLAKE3 keyed MAC (no per-message KDF).
 //!
-//! Run: `cargo bench -p omq-proto --bench mechanism_frame --features 'curve blake3zmq'`
+//! Run: `cargo bench -p omq-proto --bench mechanism_frame --features 'curve'`
 
 use std::hint::black_box;
 use std::time::Instant;
 
-use chacha20_blake3::Session20;
 use crypto_box::{SalsaBox, SecretKey, aead::Aead};
 
 const DEFAULT_SIZES: &[usize] = &[128, 2_048, 8_192];
@@ -37,23 +35,14 @@ fn sizes() -> Vec<usize> {
 const TARGET_NS_PER_CELL: u64 = 200_000_000; // 200 ms
 
 fn main() {
-    println!("Mechanism per-frame microbench");
-    println!("primitives: CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20+BLAKE3 MAC)");
+    println!("CURVE per-frame microbench (XSalsa20Poly1305)");
     println!(
         "target wall-time per cell: ~{} ms\n",
         TARGET_NS_PER_CELL / 1_000_000
     );
 
-    println!(
-        "  {:>6} | {:>14} | {:>14}",
-        "size", "CURVE ns/op", "BLAKE3ZMQ"
-    );
-    println!("  {}", "-".repeat(46));
-
-    let enc_key: [u8; 32] = black_box([0x42u8; 32]);
-    let auth_key: [u8; 32] = black_box([0x43u8; 32]);
-    let nonce: [u8; 8] = black_box([0x11u8; 8]);
-    let aad: &[u8] = &[];
+    println!("  {:>6} | {:>14}", "size", "CURVE ns/op");
+    println!("  {}", "-".repeat(24));
 
     let secret_a = SecretKey::generate(&mut crypto_box::aead::OsRng);
     let secret_b = SecretKey::generate(&mut crypto_box::aead::OsRng);
@@ -72,33 +61,16 @@ fn main() {
                     .unwrap(),
             );
         });
-        let b3_ns = bench(|| {
-            let mut session = Session20::new(enc_key, auth_key, nonce);
-            black_box(session.encrypt(black_box(&plain), aad));
-        });
 
-        println!(
-            "  {:>6} | {:>14} | {:>14}",
-            size,
-            format!("{curve_ns:>5} ns"),
-            format!("{b3_ns:>5} ns"),
-        );
-        rows.push((size, curve_ns, b3_ns));
+        println!("  {:>6} | {:>14}", size, format!("{curve_ns:>5} ns"));
+        rows.push((size, curve_ns));
     }
 
     println!();
-    println!(
-        "  {:>6} | {:>14} | {:>14}",
-        "size", "CURVE MiB/s", "BLAKE3ZMQ"
-    );
-    println!("  {}", "-".repeat(46));
-    for (size, curve_ns, b3_ns) in rows {
-        println!(
-            "  {:>6} | {:>14} | {:>14}",
-            size,
-            mibps(size, curve_ns),
-            mibps(size, b3_ns),
-        );
+    println!("  {:>6} | {:>14}", "size", "CURVE MiB/s");
+    println!("  {}", "-".repeat(24));
+    for (size, curve_ns) in rows {
+        println!("  {:>6} | {:>14}", size, mibps(size, curve_ns));
     }
 }
 

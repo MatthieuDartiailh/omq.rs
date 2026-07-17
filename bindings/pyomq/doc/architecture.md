@@ -13,7 +13,7 @@ python/pyomq/
 
 src/
   lib.rs            module root: classes, constants, wait_any, proxy,
-                    curve_keypair, blake3zmq_keypair, has_feature
+                    curve_keypair, has_feature
   runtime.rs        tokio runtime on dedicated thread; materialize,
                     wait_any, proxy
   socket.rs         sync Socket + SocketInner + RecvNotify (eventfd) +
@@ -27,7 +27,6 @@ src/
   conversions.rs    zero-copy PyBytes via PyBytesOwner + Bytes::from_owner
   error.rs          ZMQError with errno (EAGAIN, ETERM, etc.)
   auth.rs           CURVE authenticator: key-list or Python callable
-  blake3zmq_auth.rs BLAKE3ZMQ authenticator (same pattern)
 ```
 
 ## Threading model
@@ -244,12 +243,12 @@ IPV6, RATE, PROBE_ROUTER. Some raise ENOSYS: AFFINITY, BACKLOG.
 
 ## Authentication
 
-CURVE and BLAKE3ZMQ share the same bridge pattern. The Python side sets
+CURVE uses the same bridge pattern. The Python side sets
 an authenticator on the overlay via `setsockopt`:
 
 - `None`: clear authenticator.
 - Iterable of keys: build a `HashSet` of accepted keys. CURVE keys are
-  Z85-encoded strings; BLAKE3ZMQ keys are raw 32-byte `bytes`.
+  Z85-encoded strings.
 - Callable: wrap as `Py<PyAny>`. Called with a `PeerInfo` pyclass (has
   `.public_key` attribute). Must return truthy/falsy.
 

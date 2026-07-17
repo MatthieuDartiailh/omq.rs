@@ -25,10 +25,4 @@ impl PeerInfo {
         }
     }
 
-    #[cfg(feature = "blake3zmq")]
-    pub(crate) fn from_raw_bytes(py: Python<'_>, raw: &[u8; 32]) -> Self {
-        Self {
-            public_key: PyBytes::new(py, raw).unbind(),
-        }
-    }
 }

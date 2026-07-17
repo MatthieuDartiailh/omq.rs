@@ -9,7 +9,8 @@
 #   OMQ_TEST_RETRIES=N  retry each step up to N times (default 1) -
 #                       a few timing-sensitive tests may need one
 #                       retry on heavily loaded runners.
-#   OMQ_TEST_JOBS=N     max parallel test steps (default 4)
+#   OMQ_TEST_JOBS=N     max parallel test steps (default 2)
+#   OMQ_PERF=1          run hardware-sensitive perf verification
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -96,9 +97,12 @@ par_wait() {
 #    No --workspace: uses default-members, which excludes the example
 #    crates.
 # ---------------------------------------------------------------- #
-run cargo build --all-targets
+# Clippy compiles all targets; a separate all-target build only duplicates
+# that work before the test suite.
 run cargo clippy --all-targets --no-deps -- -D warnings
 run cargo test
+
+
 
 
 # ---------------------------------------------------------------- #
@@ -108,7 +112,7 @@ run cargo test
 #    test files need re-running. Step 3 (all features) catches
 #    cross-feature interactions.
 # ---------------------------------------------------------------- #
-for feature in plain curve blake3zmq; do
+for feature in plain curve; do
     par run cargo test -p omq-tokio  --features "$feature" --test "$feature"
 done
 par run cargo test -p omq-tokio  --features lz4 --test lz4_tcp --test lz4_pub_sub
@@ -121,7 +125,7 @@ par_wait
 #    cross-feature interactions and internal #[cfg(feature)] items
 #    inside otherwise-ungated test files (connect_before_bind lz4).
 # ---------------------------------------------------------------- #
-all_features='plain curve blake3zmq lz4'
+all_features='plain curve lz4'
 par run cargo test -p omq-proto  --features "$all_features"
 par run cargo test -p omq-tokio  --features "$all_features"
 par_wait

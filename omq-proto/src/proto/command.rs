@@ -217,20 +217,19 @@ fn write_name(out: &mut BytesMut, name: &[u8]) {
     out.put_slice(name);
 }
 
-/// Convenience wrapper used by encrypted-mechanism handshakes
-/// (currently only BLAKE3ZMQ - CURVE carries READY in its own
-/// frame format). Encodes peer properties to a fresh `Vec<u8>`
+/// Convenience wrapper used by PLAIN's encrypted-mechanism handshake.
+/// Encodes peer properties to a fresh `Vec<u8>`
 /// ready to embed in the handshake message body. Cfg-gated to
 /// avoid dead-code warnings in builds that don't include any
 /// mechanism that calls it.
-#[cfg(any(feature = "blake3zmq", feature = "plain"))]
+#[cfg(feature = "plain")]
 pub(crate) fn encode_properties(props: &PeerProperties) -> Vec<u8> {
     let mut buf = BytesMut::new();
     encode_properties_inner(props, &mut buf);
     buf.to_vec()
 }
 
-#[cfg(any(feature = "blake3zmq", feature = "plain"))]
+#[cfg(feature = "plain")]
 pub(crate) fn decode_properties(body: &[u8]) -> Result<PeerProperties> {
     decode_properties_inner(Bytes::copy_from_slice(body))
 }

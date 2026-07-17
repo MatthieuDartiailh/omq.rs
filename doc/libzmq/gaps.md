@@ -151,7 +151,6 @@ down and reconnects.
 | NULL | READY exchange + ZAP | READY exchange, no ZAP | **~** |
 | PLAIN | Username/password in HELLO | Username/password with authenticator callback | **=** |
 | CURVE (RFC 26) | Full, with ZAP | Full, inline authenticator | **=** |
-| BLAKE3ZMQ | N/A (omq-native) | Full, with transcript binding | **=** omq-only |
 | ZAP protocol | Separate inproc socket | Not implemented; inline callback | **~** deliberate |
 | Socket type compat check | 18-type matrix | 18-type matrix | **=** |
 | Mechanism mismatch | EVENT + protocol_error | Error::HandshakeFailed | **=** |

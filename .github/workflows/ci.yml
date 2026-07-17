@@ -57,7 +57,7 @@ jobs:
       - run: cargo test --workspace --no-fail-fast
 
   encryption:
-    name: encryption (curve + blake3zmq, ${{ matrix.os }})
+    name: encryption (curve, ${{ matrix.os }})
     needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
@@ -70,7 +70,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p omq-tokio --features curve
-      - run: cargo test -p omq-tokio --features blake3zmq
 
   compression:
     name: compression (${{ matrix.os }})

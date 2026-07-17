@@ -17,7 +17,6 @@ crate-type = ["cdylib"]
 default = []
 plain = ["omq-tokio/plain"]
 curve = ["omq-tokio/curve"]
-blake3zmq = ["omq-tokio/blake3zmq"]
 lz4 = ["omq-tokio/lz4"]
 
 [dependencies]

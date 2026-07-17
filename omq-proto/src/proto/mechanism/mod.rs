@@ -1,5 +1,4 @@
-//! Security-mechanism handshakes: NULL (default), CURVE (RFC 26),
-//! BLAKE3ZMQ (omq-native AEAD).
+//! Security-mechanism handshakes: NULL (default), CURVE (RFC 26).
 //!
 //! Each mechanism runs a small state machine that consumes [`Command`]s and
 //! may emit more. When the peer's properties have been accepted, the
@@ -19,13 +18,6 @@ pub use curve_cookie::CurveCookieKeyring;
 #[cfg(feature = "curve")]
 pub use curve_keys::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 
-#[cfg(feature = "blake3zmq")]
-pub mod blake3zmq;
-#[cfg(feature = "blake3zmq")]
-pub(crate) use blake3zmq::Blake3ZmqMechanism;
-#[cfg(feature = "blake3zmq")]
-pub use blake3zmq::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
-
 #[cfg(feature = "plain")]
 pub mod plain;
 #[cfg(feature = "plain")]
@@ -33,8 +25,7 @@ pub(crate) use plain::PlainMechanism;
 
 /// Security-mechanism configuration passed to [`Connection::new`] and
 /// stored in [`Options`](crate::options::Options). NULL is the default;
-/// CURVE is available behind the `curve` feature; BLAKE3ZMQ behind
-/// `blake3zmq`.
+/// CURVE is available behind the `curve` feature.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub enum MechanismSetup {
@@ -59,23 +50,6 @@ pub enum MechanismSetup {
         our_keypair: CurveKeypair,
         server_public: CurvePublicKey,
     },
-    /// BLAKE3ZMQ server side. Non-standard, omq-to-omq only. Available
-    /// behind the `blake3zmq` feature. The cookie keyring is shared
-    /// across every server-side connection on this Socket so its
-    /// 30-second rotation timeline (RFC section 9.2) doesn't reset per
-    /// connection.
-    #[cfg(feature = "blake3zmq")]
-    Blake3ZmqServer {
-        our_keypair: Blake3ZmqKeypair,
-        cookie_keyring: std::sync::Arc<blake3zmq::CookieKeyring>,
-        authenticator: Option<Authenticator>,
-    },
-    /// BLAKE3ZMQ client side. Available behind the `blake3zmq` feature.
-    #[cfg(feature = "blake3zmq")]
-    Blake3ZmqClient {
-        our_keypair: Blake3ZmqKeypair,
-        server_public: Blake3ZmqPublicKey,
-    },
     /// PLAIN server side (RFC 24): authenticates incoming clients by
     /// username + password. No encryption. The authenticator is
     /// required. PLAIN without auth serves no purpose.
@@ -93,33 +67,17 @@ impl MechanismSetup {
             Self::Null => MechanismName::NULL,
             #[cfg(feature = "curve")]
             Self::CurveServer { .. } | Self::CurveClient { .. } => MechanismName::CURVE,
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => MechanismName::BLAKE3,
             #[cfg(feature = "plain")]
             Self::PlainServer { .. } | Self::PlainClient { .. } => MechanismName::PLAIN,
         }
     }
 
-    /// Access the BLAKE3ZMQ server's cookie keyring so callers can
-    /// configure its rotation interval or share it across multiple
-    /// Sockets. `None` for non-BLAKE3ZMQ-server configs.
-    #[cfg(feature = "blake3zmq")]
-    pub fn blake3zmq_cookie_keyring(&self) -> Option<&std::sync::Arc<blake3zmq::CookieKeyring>> {
-        match self {
-            Self::Blake3ZmqServer { cookie_keyring, .. } => Some(cookie_keyring),
-            _ => None,
-        }
-    }
-
-    /// Whether this mechanism installs a per-frame crypto transform (CURVE,
-    /// BLAKE3ZMQ). NULL and PLAIN do not.
+    /// Whether this mechanism installs a per-frame crypto transform (CURVE).
     pub fn has_frame_transform(&self) -> bool {
         match self {
             Self::Null => false,
             #[cfg(feature = "curve")]
             Self::CurveServer { .. } | Self::CurveClient { .. } => true,
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => true,
             #[cfg(feature = "plain")]
             Self::PlainServer { .. } | Self::PlainClient { .. } => false,
         }
@@ -139,8 +97,6 @@ impl MechanismSetup {
                 Some(&our_keypair.secret)
             }
             Self::Null => None,
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => None,
             #[cfg(feature = "plain")]
             Self::PlainServer { .. } | Self::PlainClient { .. } => None,
         }
@@ -175,24 +131,6 @@ impl MechanismSetup {
                 our_keypair,
                 server_public,
             } => SecurityMechanism::Curve(CurveMechanism::new_client(our_keypair, server_public)),
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer {
-                our_keypair,
-                cookie_keyring,
-                authenticator,
-            } => SecurityMechanism::Blake3Zmq(Blake3ZmqMechanism::new_server(
-                our_keypair,
-                cookie_keyring,
-                authenticator,
-            )),
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqClient {
-                our_keypair,
-                server_public,
-            } => SecurityMechanism::Blake3Zmq(Blake3ZmqMechanism::new_client(
-                our_keypair,
-                server_public,
-            )),
             #[cfg(feature = "plain")]
             Self::PlainServer { authenticator } => {
                 SecurityMechanism::Plain(PlainMechanism::new_server(authenticator))
@@ -241,8 +179,7 @@ pub struct MechanismPeerInfo {
     /// [`Authenticator`] decide based on the mechanism type if it
     /// cares - most callbacks just check `public_key`.
     pub mechanism: MechanismName,
-    /// Peer's long-term 32-byte public key (CURVE / BLAKE3ZMQ are
-    /// both X25519 / Curve25519). Zeroed for PLAIN (no key exchange).
+    /// Peer's long-term 32-byte public key (CURVE). Zeroed for PLAIN.
     pub public_key: [u8; 32],
     /// PLAIN username. `None` for encrypting mechanisms.
     pub username: Option<String>,
@@ -251,14 +188,14 @@ pub struct MechanismPeerInfo {
 }
 
 /// Server-side admission callback shared by every encrypting
-/// mechanism (CURVE, BLAKE3ZMQ). Invoked once per handshake after
+/// mechanism (CURVE). Invoked once per handshake after
 /// vouch verification, before READY is sent. Returning `false`
 /// rejects the client; the handshake aborts. `Arc`-wrapped so the
 /// closure can be cloned through `MechanismSetup`.
 #[derive(Clone)]
 pub struct Authenticator(
     #[cfg_attr(
-        not(any(feature = "curve", feature = "blake3zmq", feature = "plain")),
+        not(any(feature = "curve", feature = "plain")),
         allow(dead_code, reason = "only non-NULL mechanisms call allow()")
     )]
     Arc<dyn Fn(&MechanismPeerInfo) -> bool + Send + Sync>,
@@ -272,7 +209,7 @@ impl Authenticator {
         Self(Arc::new(f))
     }
 
-    #[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
+    #[cfg(any(feature = "curve", feature = "plain"))]
     pub(crate) fn allow(&self, peer: &MechanismPeerInfo) -> bool {
         (self.0)(peer)
     }
@@ -300,7 +237,7 @@ pub(crate) enum MechanismStep {
     /// Consume more peer commands before handshake is done. (Used by
     /// multi-step mechanisms such as CURVE.)
     #[cfg_attr(
-        not(any(feature = "curve", feature = "blake3zmq", feature = "plain")),
+        not(any(feature = "curve", feature = "plain")),
         allow(dead_code, reason = "only multi-step mechanisms use Continue")
     )]
     Continue,
@@ -309,21 +246,16 @@ pub(crate) enum MechanismStep {
 }
 
 #[derive(Debug)]
-// `CurveMechanism` and `Blake3ZmqMechanism` carry tens of bytes of inline
+// `CurveMechanism` carries tens of bytes of inline
 // state (counters, prefixes, transient keys) while `NullMechanism` is one
 // enum tag. Boxing them would push every connection through an extra
 // allocation on the hot handshake path; we keep the inline shape on
 // purpose.
-#[cfg_attr(
-    any(feature = "curve", feature = "blake3zmq"),
-    allow(clippy::large_enum_variant)
-)]
+#[cfg_attr(feature = "curve", allow(clippy::large_enum_variant))]
 pub(crate) enum SecurityMechanism {
     Null(NullMechanism),
     #[cfg(feature = "curve")]
     Curve(CurveMechanism),
-    #[cfg(feature = "blake3zmq")]
-    Blake3Zmq(Blake3ZmqMechanism),
     #[cfg(feature = "plain")]
     Plain(PlainMechanism),
 }
@@ -335,8 +267,6 @@ impl SecurityMechanism {
             Self::Null(_) => MechanismName::NULL,
             #[cfg(feature = "curve")]
             Self::Curve(_) => MechanismName::CURVE,
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3Zmq(_) => MechanismName::BLAKE3,
             #[cfg(feature = "plain")]
             Self::Plain(_) => MechanismName::PLAIN,
         }
@@ -344,12 +274,8 @@ impl SecurityMechanism {
 
     /// Kick off the mechanism after greetings have been exchanged. Any
     /// immediate outbound commands get pushed onto `out`. Greeting
-    /// bytes are passed through for transcript-binding mechanisms
-    /// (BLAKE3ZMQ); NULL and CURVE ignore them.
-    #[cfg_attr(
-        not(any(feature = "curve", feature = "blake3zmq")),
-        allow(clippy::unnecessary_wraps)
-    )]
+    /// bytes are ignored by NULL and CURVE.
+    #[cfg_attr(not(feature = "curve"), allow(clippy::unnecessary_wraps))]
     pub(crate) fn start(
         &mut self,
         out: &mut Vec<Command>,
@@ -365,8 +291,6 @@ impl SecurityMechanism {
             }
             #[cfg(feature = "curve")]
             Self::Curve(m) => m.start(out, our_props),
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3Zmq(m) => m.start(out, our_props, our_greeting, peer_greeting),
             #[cfg(feature = "plain")]
             Self::Plain(m) => m.start(out, our_props),
         }
@@ -382,29 +306,19 @@ impl SecurityMechanism {
             Self::Null(m) => m.on_command(cmd, out),
             #[cfg(feature = "curve")]
             Self::Curve(m) => m.on_command(cmd, out),
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3Zmq(m) => m.on_command(cmd, out),
             #[cfg(feature = "plain")]
             Self::Plain(m) => m.on_command(cmd, out),
         }
     }
 
     /// Build the post-handshake frame transform. Only present when
-    /// at least one encrypting mechanism is compiled in (CURVE or
-    /// BLAKE3ZMQ). NULL returns `None`. BLAKE3ZMQ produces a
-    /// data-phase AEAD that operates on raw frame payloads;
     /// CURVE produces a per-part MESSAGE-command transform.
-    #[cfg(any(feature = "curve", feature = "blake3zmq"))]
-    #[cfg_attr(not(feature = "curve"), expect(clippy::unnecessary_wraps))]
+    #[cfg(feature = "curve")]
     pub(crate) fn build_transform(&self) -> Result<Option<FrameTransform>> {
         match self {
             Self::Null(_) => Ok(None),
             #[cfg(feature = "curve")]
             Self::Curve(m) => m.build_transform().map(|t| Some(FrameTransform::Curve(t))),
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3Zmq(m) => Ok(m
-                .build_transform(m.is_client())
-                .map(FrameTransform::Blake3Zmq)),
             #[cfg(feature = "plain")]
             Self::Plain(_) => Ok(None),
         }
@@ -413,11 +327,10 @@ impl SecurityMechanism {
 
 /// Per-connection frame transform installed after a security
 /// mechanism's handshake completes. CURVE wraps each part as a
-/// `MESSAGE` command (so the wire frame is a COMMAND frame); BLAKE3ZMQ
-/// encrypts the payload of an ordinary data frame in place. The
+/// `MESSAGE` command (so the wire frame is a COMMAND frame). The
 /// distinction matters at the codec layer - see Connection's
 /// send/recv dispatch.
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(feature = "curve")]
 #[derive(Debug)]
 #[allow(
     clippy::large_enum_variant,
@@ -426,11 +339,9 @@ impl SecurityMechanism {
 pub enum FrameTransform {
     #[cfg(feature = "curve")]
     Curve(CurveTransform),
-    #[cfg(feature = "blake3zmq")]
-    Blake3Zmq(blake3zmq::Blake3ZmqTransform),
 }
 
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+#[cfg(feature = "curve")]
 impl FrameTransform {
     /// Encrypt all parts of a message, returning `(flags, encrypted_payload)`
     /// pairs ready for [`Connection::emit_encrypted_frames`]. Advances the
@@ -469,20 +380,6 @@ impl FrameTransform {
                     FrameFlags::LAST
                 };
                 Ok((flags, wire))
-            }
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3Zmq(tx) => {
-                const TAG_LEN: usize = 32;
-                let flags = if more {
-                    FrameFlags::MORE
-                } else {
-                    FrameFlags::LAST
-                };
-                let plaintext = part.as_bytes();
-                let (aad, aad_len) =
-                    super::connection::blake3zmq_aad(flags, plaintext.len() + TAG_LEN);
-                let ciphertext = tx.encrypt(&aad[..aad_len], &plaintext)?;
-                Ok((flags, bytes::Bytes::from(ciphertext)))
             }
         }
     }

@@ -1,7 +1,7 @@
 //! Sans-I/O core for omq.
 //!
 //! ZMTP codec, message + payload types, frame parsing, mechanism
-//! handshakes (NULL / CURVE / BLAKE3ZMQ), compression transforms
+//! handshakes (NULL / CURVE), compression transforms
 //! (lz4), endpoint parsing, options, and the prefix-
 //! subscription matcher. None of this depends on a runtime.
 #![forbid(unsafe_code)]
@@ -37,10 +37,8 @@ pub use monitor::{
 };
 pub use options::{KeepAlive, MechanismConfig, OnMute, Options, ReconnectPolicy};
 pub use proto::mechanism::MechanismSetup;
-#[cfg(any(feature = "curve", feature = "blake3zmq", feature = "plain"))]
+#[cfg(any(feature = "curve", feature = "plain"))]
 pub use proto::mechanism::{Authenticator, MechanismPeerInfo};
-#[cfg(feature = "blake3zmq")]
-pub use proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 #[cfg(feature = "curve")]
 pub use proto::mechanism::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
 pub use proto::{SocketType, is_compatible};

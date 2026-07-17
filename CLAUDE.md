@@ -7,7 +7,7 @@ out-of-tree (maturin etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
   message/payload types, greeting + frame state machines, mechanism
-  handshakes (NULL / PLAIN / CURVE / BLAKE3ZMQ), compression transforms
+  handshakes (NULL / PLAIN / CURVE), compression transforms
   (lz4), endpoint parsing, options, subscription matcher. No async, no I/O.
 - **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
   Works on Linux and macOS (and likely other mio targets).
@@ -27,7 +27,6 @@ is covered by `tests/coverage_matrix.rs`.
 |---------|------|------|
 | `plain` | PLAIN auth (RFC 24) | - |
 | `curve` | CURVE handshake (RFC 26) | `crypto_box`, `crypto_secretbox` |
-| `blake3zmq` | BLAKE3 + ChaCha20 mechanism | `blake3`, `chacha20-blake3`, `x25519-dalek` |
 | `lz4` | `lz4+tcp://` transform | `lz4rip` |
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
 | `fuzz` | fuzz test suites | - |
@@ -42,8 +41,7 @@ Full detail in `doc/`:
 [`architecture.md`](doc/architecture.md),
 [`libzmq/`](doc/libzmq/).
 Transport RFCs (wire format, dict shipping rules, security):
-[`lz4-rfc.md`](doc/lz4-rfc.md),
-[`blake3zmq-rfc.md`](doc/blake3zmq-rfc.md).
+[`lz4-rfc.md`](doc/lz4-rfc.md).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).

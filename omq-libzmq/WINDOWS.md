@@ -29,7 +29,6 @@ This document describes the Windows-specific implementation, limitations, and us
 - **Security & Compression:**
   - PLAIN authentication (`plain` feature)
   - CURVE key exchange (`curve` feature)
-  - BLAKE3 with ChaCha20 (`blake3zmq` feature)
   - LZ4 compression (`lz4` feature)
 
 - **Messaging:**

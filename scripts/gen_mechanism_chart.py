@@ -57,7 +57,7 @@ def load_data(jsonl: Path) -> dict:
         key = (r["transport"], r["msg_size"])
         latest[key] = r
 
-    mechanisms = ["PLAIN", "CURVE", "BLAKE3ZMQ"]
+    mechanisms = ["PLAIN", "CURVE"]
     all_sizes = sorted({k[1] for k in latest})
     sizes = [s for s in all_sizes if all((m, s) in latest for m in mechanisms)]
 
@@ -120,9 +120,8 @@ def generate_svg(data: dict, backend: str, *, axis_limits=None) -> str:
     colors = {
         "PLAIN": "#374151",
         "CURVE": "#dc2626",
-        "BLAKE3ZMQ": "#2563eb",
     }
-    order = ["PLAIN", "CURVE", "BLAKE3ZMQ"]
+    order = ["PLAIN", "CURVE"]
 
     L = []
     L.append(
@@ -318,7 +317,7 @@ def main():
         if not data["sizes"]:
             print(f"SKIP: no mechanism data in {jsonl.name}. Run: "
                   f"cargo bench -p omq-{backend} --bench mechanism "
-                  f"--features 'plain curve blake3zmq'", file=sys.stderr)
+                  f"--features 'plain curve'", file=sys.stderr)
             continue
         all_data[backend] = data
 

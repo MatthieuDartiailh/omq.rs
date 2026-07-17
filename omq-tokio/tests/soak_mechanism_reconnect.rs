@@ -7,7 +7,7 @@
 //! crashes and rebinds with the same keypair; the client reconnects,
 //! re-handshakes, and resumes.
 //!
-//! Two sub-tests: CURVE (RFC 26) and BLAKE3ZMQ.
+//! CURVE (RFC 26) re-handshake test.
 
 #[global_allocator]
 static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::TrackingAllocator;
@@ -131,35 +131,6 @@ fn soak_curve_reconnect() {
                 SocketType::Push,
                 fast_reconnect()
                     .curve_client(client_kp.clone(), server_pub)
-                    .send_hwm(16)
-                    .linger(Duration::from_secs(5)),
-            )
-        },
-    );
-}
-
-#[cfg(feature = "blake3zmq")]
-#[test]
-fn soak_blake3zmq_reconnect() {
-    use omq_tokio::Blake3ZmqKeypair;
-
-    let server_kp = Blake3ZmqKeypair::generate();
-    let client_kp = Blake3ZmqKeypair::generate();
-    let server_pub = server_kp.public;
-
-    run_mechanism_storm(
-        "blake3zmq_reconnect",
-        move || {
-            Socket::new(
-                SocketType::Pull,
-                soak_common::soak_options().blake3zmq_server(server_kp.clone()),
-            )
-        },
-        move |_ep| {
-            Socket::new(
-                SocketType::Push,
-                fast_reconnect()
-                    .blake3zmq_client(client_kp.clone(), server_pub)
                     .send_hwm(16)
                     .linger(Duration::from_secs(5)),
             )

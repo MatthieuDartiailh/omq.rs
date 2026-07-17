@@ -47,7 +47,7 @@ Sync and `asyncio` APIs both ship in this release. All 20 ZMTP socket types are 
 - **Draft**: SERVER, CLIENT (RFC 41), RADIO, DISH (RFC 48), GATHER, SCATTER (RFC 49), PEER, CHANNEL (RFC 51).
 
 Transports: `tcp://`, `ipc://`, `inproc://`, and `udp://` (RADIO/DISH only).
-Optional features built into the wheel: `plain`, `curve`, `blake3zmq`, `lz4`.
+Optional features built into the wheel: `plain`, `curve`, `lz4`.
 
 DISH groups: use `socket.join(b"group")` / `socket.leave(b"group")` to manage
 subscriptions; messages are sent as multipart `[group, body]`.
@@ -138,44 +138,6 @@ pull.set_curve_auth(None)
 
 No ZAP, no filesystem key management. The callback runs during the CURVE
 handshake; returning a falsy value rejects the client.
-
-## BLAKE3ZMQ authentication
-
-BLAKE3ZMQ is an omq-native encryption mechanism using BLAKE3 key
-derivation and ChaCha20 encryption. Keys are raw 32-byte X25519 keypairs
-(not Z85-encoded like CURVE). Setup mirrors CURVE:
-
-```python
-server_pub, server_sec = zmq.blake3zmq_keypair()
-client_pub, client_sec = zmq.blake3zmq_keypair()
-
-pull = ctx.socket(zmq.PULL)
-pull.blake3zmq_server = 1
-pull.blake3zmq_publickey = server_pub
-pull.blake3zmq_secretkey = server_sec
-
-push = ctx.socket(zmq.PUSH)
-push.blake3zmq_serverkey = server_pub
-push.blake3zmq_publickey = client_pub
-push.blake3zmq_secretkey = client_sec
-
-# Client authentication (same three options as CURVE)
-pull.set_blake3zmq_auth([client_pub])                         # allow list
-pull.set_blake3zmq_auth(lambda peer: peer.public_key in ok)   # callback
-pull.set_blake3zmq_auth(None)                                 # accept all
-```
-
-The callback receives a `PeerInfo` with a `.public_key` attribute (raw
-32-byte bytes). Requires the `blake3zmq` feature (`pyomq.has("blake3zmq")`).
-
-> [!WARNING]
-> **BLAKE3ZMQ has not been independently security audited.** It's an
-> omq-native construction (Noise XX + BLAKE3 + X25519 + ChaCha20-BLAKE3)
-> and should not be relied on for anything that matters until it has had
-> third-party review. Use **CURVE** (RFC 26) for production / regulated
-> workloads.
-
-Wire format: [BLAKE3ZMQ mechanism RFC](https://github.com/paddor/omq.rs/blob/main/doc/blake3zmq-rfc.md).
 
 ## Develop
 

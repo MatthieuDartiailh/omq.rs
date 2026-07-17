@@ -1,10 +1,10 @@
-//! PUSH/PULL over TCP with PLAIN vs CURVE vs BLAKE3ZMQ mechanisms.
+//! PUSH/PULL over TCP with PLAIN vs CURVE mechanisms.
 //!
 //! Measures real end-to-end throughput including handshake, encryption,
 //! and decryption overhead. Single peer, loopback TCP.
 //!
 //! Run:
-//!   cargo bench -p omq-tokio --bench mechanism --features 'plain curve blake3zmq'
+//!   cargo bench -p omq-tokio --bench mechanism --features 'plain curve'
 
 #[path = "common/mod.rs"]
 mod common;
@@ -69,32 +69,6 @@ fn main() {
                 .await;
                 common::print_cell(size, cell);
                 common::append_jsonl(PATTERN, "CURVE", 1, size, cell);
-            }
-            println!();
-        }
-
-        #[cfg(feature = "blake3zmq")]
-        {
-            use omq_tokio::Blake3ZmqKeypair;
-            let server_kp = Blake3ZmqKeypair::generate();
-            let client_kp = Blake3ZmqKeypair::generate();
-            let server_pub = server_kp.public;
-
-            println!("--- BLAKE3ZMQ (tcp) ---");
-            for &size in &sizes {
-                seq += 1;
-                let cell = common::with_timeout(
-                    &format!("BLAKE3ZMQ/{size}B"),
-                    run_cell(
-                        Options::default().blake3zmq_server(server_kp.clone()),
-                        Options::default().blake3zmq_client(client_kp.clone(), server_pub),
-                        size,
-                        seq,
-                    ),
-                )
-                .await;
-                common::print_cell(size, cell);
-                common::append_jsonl(PATTERN, "BLAKE3ZMQ", 1, size, cell);
             }
             println!();
         }

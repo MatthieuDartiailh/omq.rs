@@ -51,8 +51,6 @@ impl MechanismName {
     pub const CURVE: Self = Self::from_ascii_panic(b"CURVE");
     /// PLAIN mechanism (RFC 24, username + password, no encryption).
     pub const PLAIN: Self = Self::from_ascii_panic(b"PLAIN");
-    /// BLAKE3ZMQ mechanism (non-standard, omq-to-omq only).
-    pub const BLAKE3: Self = Self::from_ascii_panic(b"BLAKE3");
 
     /// Build a mechanism name from an ASCII byte slice. Panics if
     /// `name` exceeds 20 bytes or contains non-ASCII / NUL.
@@ -173,7 +171,7 @@ pub fn peek_major(buf: &[u8]) -> Result<Option<u8>> {
 /// Try to decode a full greeting from `buf`. On success, consumes
 /// [`GREETING_LEN`] bytes and returns the parsed greeting alongside
 /// the raw 64 wire bytes - the latter is needed by transcript-binding
-/// mechanisms (e.g. BLAKE3ZMQ) that hash the exact bytes the peer sent.
+/// mechanisms that hash the exact bytes the peer sent.
 pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<(Greeting, bytes::Bytes)>> {
     let Some(sniff) = buf.peek_array::<VERSION_SNIFF_LEN>() else {
         return Ok(None);
