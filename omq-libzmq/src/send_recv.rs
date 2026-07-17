@@ -134,14 +134,13 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             0x00 => (false, bytes.slice(1..)),
             _ => (true, bytes),
         };
-        let result =
-            crate::socket::with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
-                if subscribe {
-                    s.subscribe(prefix).await
-                } else {
-                    s.unsubscribe(prefix).await
-                }
-            });
+        let result = crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
+            if subscribe {
+                s.subscribe(prefix).await
+            } else {
+                s.unsubscribe(prefix).await
+            }
+        });
         return match result {
             Ok(Ok(())) => ret_len,
             Ok(Err(ref e)) => fail(crate::error::map_omq_err(e)),
@@ -218,7 +217,7 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
                     Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
                 }
             }
-            let handle = sock.ctx.handle(sock.thread_idx);
+            let handle = sock.ctx.handle();
             let s = inner.clone();
             if sndtimeo > 0 {
                 let timeout = Duration::from_millis(sndtimeo as u64);

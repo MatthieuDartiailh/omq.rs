@@ -6,7 +6,7 @@
 # Knobs:
 #   OMQ_FUZZ=1          opt in to the ~1 M-iter hand-rolled fuzz suites
 #   OMQ_SKIP_PYOMQ=1    skip the pyomq build + pytest pass
-#   OMQ_TEST_RETRIES=N  retry each step up to N times (default 1) -
+#   OMQ_TEST_RETRIES=N  retry each step up to N times (default 2) -
 #                       a few timing-sensitive tests may need one
 #                       retry on heavily loaded runners.
 #   OMQ_TEST_JOBS=N     max parallel test steps (default 2)
@@ -15,8 +15,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-retries="${OMQ_TEST_RETRIES:-1}"
-jobs="${OMQ_TEST_JOBS:-4}"
+retries="${OMQ_TEST_RETRIES:-2}"
+jobs="${OMQ_TEST_JOBS:-2}"
 
 run() {
     echo "::: $*"
@@ -102,8 +102,11 @@ par_wait() {
 run cargo clippy --all-targets --no-deps -- -D warnings
 run cargo test
 
-
-
+if [[ "${OMQ_PERF:-}" == "1" && -f .perf_hw ]]; then
+    run cargo run --release -q -p omq-tokio --bin perf_verify
+else
+    echo "skip: .perf_hw not set up; see doc/perf-verification.md"
+fi
 
 # ---------------------------------------------------------------- #
 # 2) Feature-gated tests only. Step 1 already ran the full suite
@@ -151,7 +154,9 @@ elif [[ -d bindings/pyomq/.venv ]]; then
     # shellcheck disable=SC1091
     source .venv/bin/activate
     run maturin develop --release
-    run pytest -v
+    # The checked-in venv may have been copied from another worktree; invoke
+    # pytest through the active interpreter so its path cannot escape here.
+    run python -m pytest -v
     deactivate
     popd >/dev/null
 else

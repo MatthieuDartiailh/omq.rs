@@ -25,6 +25,14 @@ const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {
+    /// Scheduling profile for this socket.
+    ///
+    /// `None` selects the socket-type default: REQ and REP use the
+    /// latency profile; all other socket types use the throughput profile.
+    /// For ping-pong SERVER/CLIENT or ROUTER/DEALER workloads, set this
+    /// explicitly on both endpoints.
+    pub workload_profile: Option<WorkloadProfile>,
+
     /// Send-side high-water mark, total for the socket. `None` = unbounded.
     pub send_hwm: Option<u32>,
 
@@ -191,6 +199,7 @@ pub type MechanismConfig = MechanismSetup;
 impl Default for Options {
     fn default() -> Self {
         Self {
+            workload_profile: None,
             send_hwm: Some(1000),
             recv_hwm: Some(1000),
             linger: Some(Duration::ZERO),
@@ -232,6 +241,13 @@ impl Options {
     /// Create options with default values.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Select the scheduling profile used by this socket's I/O driver.
+    #[must_use]
+    pub fn workload_profile(mut self, profile: WorkloadProfile) -> Self {
+        self.workload_profile = Some(profile);
+        self
     }
 
     /// Check ZMTP protocol limits that would cause hard-to-debug wire
@@ -583,6 +599,15 @@ impl Options {
     }
 }
 
+/// Scheduling tradeoff for a socket's I/O driver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkloadProfile {
+    /// Prefer batching and throughput.
+    Throughput,
+    /// Prefer promptly handing messages to the application.
+    Latency,
+}
+
 impl From<Bytes> for Options {
     /// Convenience: build options with a given identity, defaults for the rest.
     fn from(identity: Bytes) -> Self {
@@ -755,6 +780,7 @@ mod tests {
     #[test]
     fn builder_chaining() {
         let o = Options::new()
+            .workload_profile(WorkloadProfile::Latency)
             .send_hwm(42)
             .recv_hwm(99)
             .linger(Duration::from_secs(5))
@@ -765,6 +791,7 @@ mod tests {
             .router_mandatory(true)
             .on_mute(OnMute::DropNewest);
         assert_eq!(o.send_hwm, Some(42));
+        assert_eq!(o.workload_profile, Some(WorkloadProfile::Latency));
         assert_eq!(o.recv_hwm, Some(99));
         assert_eq!(o.linger, Some(Duration::from_secs(5)));
         assert_eq!(o.identity, &b"router-id"[..]);
@@ -773,6 +800,17 @@ mod tests {
         assert!(o.conflate);
         assert!(o.router_mandatory);
         assert_eq!(o.on_mute, OnMute::DropNewest);
+    }
+
+    #[test]
+    fn workload_profile_defaults_to_socket_type_selection() {
+        assert_eq!(Options::default().workload_profile, None);
+        assert_eq!(
+            Options::new()
+                .workload_profile(WorkloadProfile::Throughput)
+                .workload_profile,
+            Some(WorkloadProfile::Throughput)
+        );
     }
 
     #[test]

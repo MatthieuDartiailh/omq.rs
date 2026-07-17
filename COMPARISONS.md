@@ -29,6 +29,21 @@ Transport coverage differs by implementation. Missing lines mean that
 implementation does not expose a usable peer for that transport and
 pattern in this benchmark suite.
 
+## Runtime modes
+
+The charts benchmark three OMQ execution styles where relevant:
+`blocking::Socket` with dedicated IO threads, Tokio with two background IO
+threads, and Tokio current-thread (CT), where application and IO work share
+one runtime thread. The benchmark peer on the uninteresting side uses the
+blocking API.
+
+`Context::current()` embeds OMQ in an existing tokio runtime:
+
+- **CT** keeps application and IO work on one thread. Its benchmark sender
+  yields in batches so the IO driver progresses without destroying batching.
+- **background IO** keeps application code out of the IO runtime and scales
+  across independent IO threads.
+
 ## PUSH/PULL Throughput
 
 <p align="center">

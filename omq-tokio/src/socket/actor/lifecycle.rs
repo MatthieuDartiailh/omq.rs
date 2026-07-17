@@ -19,6 +19,26 @@ impl<'a> PeerLifecycle<'a> {
         self.driver.send_strategy.connection_removed(peer_id);
         self.driver.recv_strategy.connection_removed(peer_id);
         let peer = self.driver.peers.remove(&peer_id);
+        if let Some(ref p) = peer {
+            self.driver.io_pool.release_thread(p.io_thread);
+            if self.driver.socket_type == SocketType::Rep && self.driver.uses_latency_profile() {
+                if self
+                    .driver
+                    .rep_current
+                    .lock()
+                    .expect("rep current")
+                    .as_ref()
+                    .is_some_and(|(current_peer_id, _)| *current_peer_id == peer_id)
+                {
+                    self.driver.rep_current.lock().expect("rep current").take();
+                }
+                self.driver
+                    .rep_pending
+                    .lock()
+                    .expect("rep pending")
+                    .retain(|(pending_peer_id, _)| *pending_peer_id != peer_id);
+            }
+        }
         self.publish_disconnect(peer.as_ref(), reason);
         Self::invalidate_spsc(peer.as_ref());
         self.update_send_ring();
@@ -88,6 +108,7 @@ impl<'a> PeerLifecycle<'a> {
     ) {
         let entry = Arc::new(crate::socket::recv::TcpYringConsumer {
             consumer: std::sync::Mutex::new(consumer),
+            batch_remaining: std::sync::atomic::AtomicUsize::new(0),
             space,
             peer_id,
         });
@@ -157,6 +178,7 @@ impl<'a> PeerLifecycle<'a> {
                     .lock()
                     .expect("type_state")
                     .on_peer_disconnected();
+                self.driver.rep_pending.lock().expect("rep pending").clear();
             }
             _ => {}
         }

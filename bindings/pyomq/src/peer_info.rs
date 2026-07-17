@@ -24,5 +24,4 @@ impl PeerInfo {
             public_key: PyBytes::new(py, z85.as_bytes()).unbind(),
         }
     }
-
 }

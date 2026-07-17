@@ -38,7 +38,7 @@ pub(crate) struct PeerTransmitSlot {
     cap: usize,
     msg_cap: usize,
     pub(crate) data_signal: DataSignal,
-    pub(crate) space_available: Notify,
+    pub(crate) space_available: Arc<Notify>,
     pub(crate) handshake_done: AtomicBool,
     pub(crate) has_transform: bool,
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
@@ -91,7 +91,7 @@ impl PeerTransmitSlot {
             cap,
             msg_cap: msg_cap.max(1),
             data_signal: DataSignal::new(),
-            space_available: Notify::new(),
+            space_available: Arc::new(Notify::new()),
             handshake_done: AtomicBool::new(false),
             has_transform,
             transform_passthrough,
@@ -158,6 +158,28 @@ impl PeerTransmitSlot {
             }
             HandleFrameDecision::Ineligible => return TryFrameResult::Ineligible,
         }
+        self.queued_msgs.fetch_add(1, Ordering::Relaxed);
+        self.mark_above_lwm_if_needed(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
+        drop(eq);
+        self.signal_encoded();
+        TryFrameResult::Ok
+    }
+
+    /// Encode a REP reply directly with its routing identity. Avoids building
+    /// a temporary multipart `Message` on the latency path.
+    pub(crate) fn try_encode_rep(&self, identity: &Bytes, msg: &Message) -> TryFrameResult {
+        if self.dead.load(Ordering::Acquire) {
+            return TryFrameResult::Dead;
+        }
+        if !self.handshake_done.load(Ordering::Acquire) {
+            return TryFrameResult::Ineligible;
+        }
+        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.is_full(&eq) {
+            self.above_lwm.store(true, Ordering::Relaxed);
+            return TryFrameResult::Full;
+        }
+        eq.frame_rep(identity, msg);
         self.queued_msgs.fetch_add(1, Ordering::Relaxed);
         self.mark_above_lwm_if_needed(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
         drop(eq);

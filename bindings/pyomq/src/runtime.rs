@@ -1,7 +1,8 @@
 //! Per-context tokio runtime on a dedicated background thread.
 //!
-//! Each `ContextInner` owns one tokio runtime + background thread.
-//! `term()` shuts down that runtime (aborts all pumps, drops the handle).
+//! Each `ContextInner` owns an `omq_tokio::Context` which manages
+//! the tokio runtime and background thread. `term()` shuts it down
+//! (aborts all pumps, drops the handle).
 //!
 //! omq-tokio::Socket is Send + Sync, so Python-side wrappers hold an
 //! Arc<Socket> directly in SocketInner. However, the socket's internal
@@ -10,29 +11,25 @@
 //! progress. Python threads have no tokio runtime context, so they
 //! cannot call socket.send()/recv() directly.
 //!
-//! The yring SPSC relay bridges the two worlds: Python does a fast
-//! lock-free ring push/pop (no syscall, no async context needed), and
-//! pump tasks on the tokio thread relay between the rings and the
-//! actual socket.send()/recv().await calls.
+//! Asyncio sockets use a yring relay. Synchronous sockets use the
+//! blocking API from `omq_tokio`, which owns its receive pipe and IO
+//! thread directly.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::FutureExt;
 use omq_tokio::Socket as InnerSocket;
 use pyo3::prelude::*;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
-type Job = Box<dyn FnOnce() + Send + 'static>;
-
 struct RuntimeState {
     pid: u32,
-    handle: Handle,
-    submit: flume::Sender<Job>,
+    ctx: omq_tokio::Context,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -75,7 +72,7 @@ impl ContextInner {
         })
     }
 
-    fn ensure_runtime(&self) -> PyResult<(Handle, flume::Sender<Job>)> {
+    fn ensure_runtime(&self) -> PyResult<Handle> {
         if self.terminated.load(Ordering::Acquire) {
             return Err(crate::error::map_err(omq_proto::error::Error::Closed));
         }
@@ -84,49 +81,48 @@ impl ContextInner {
         if let Some(rt) = guard.as_ref()
             && rt.pid == pid
         {
-            return Ok((rt.handle.clone(), rt.submit.clone()));
+            return Ok(rt.ctx.handle().clone());
         }
-        let (tx, rx) = flume::unbounded::<Job>();
-        let (handle_tx, handle_rx) = flume::bounded::<Handle>(1);
-        let n = self.io_threads;
-        thread::Builder::new()
-            .name("pyomq-tokio".into())
-            .spawn(move || {
-                let rt = if n <= 1 {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("pyomq: tokio runtime build")
-                } else {
-                    tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(n)
-                        .enable_all()
-                        .build()
-                        .expect("pyomq: tokio runtime build")
-                };
-                let _ = handle_tx.send(rt.handle().clone());
-                rt.block_on(async move {
-                    while let Ok(job) = rx.recv_async().await {
-                        job();
-                    }
-                });
-            })
-            .expect("pyomq: spawn tokio thread");
-        let handle = handle_rx.recv().expect("pyomq: runtime handle");
-        *guard = Some(RuntimeState {
-            pid,
-            handle: handle.clone(),
-            submit: tx.clone(),
+        let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig {
+            io_threads: self.io_threads,
         });
-        Ok((handle, tx))
+        let handle = ctx.handle().clone();
+        if let Some(stale) = guard.take() {
+            // In a forked child the inherited runtime threads no longer
+            // exist. Do not drop the context and try to join them.
+            std::mem::forget(stale);
+        }
+        *guard = Some(RuntimeState { pid, ctx });
+        Ok(handle)
     }
 
     pub fn runtime_handle(&self) -> PyResult<Handle> {
-        Ok(self.ensure_runtime()?.0)
+        self.ensure_runtime()
     }
 
-    fn submit_tx(&self) -> PyResult<flume::Sender<Job>> {
-        Ok(self.ensure_runtime()?.1)
+    /// Build a socket using omq-tokio's native blocking adapter.
+    pub fn materialize_blocking(
+        &self,
+        socket_type: omq_tokio::SocketType,
+        options: omq_tokio::Options,
+    ) -> PyResult<(u64, omq_tokio::blocking::Socket)> {
+        let handle = self.ensure_runtime()?;
+        let ctx = self
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("runtime initialized")
+            .ctx
+            .clone();
+        let (otx, orx) = flume::bounded(1);
+        handle.spawn(async move {
+            let id = next_id();
+            let _ = otx.send((id, ctx.blocking_socket(socket_type, options)));
+        });
+        Ok(Python::attach(|py| {
+            py.detach(|| orx.recv().expect("pyomq: runtime dropped result"))
+        }))
     }
 
     /// Spawn a Send future on the tokio runtime and block until it completes.
@@ -157,9 +153,10 @@ impl ContextInner {
         send_notify: Arc<crate::socket::RecvNotify>,
         recv_space: Arc<tokio::sync::Notify>,
     ) -> PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
+        let handle = self.ensure_runtime()?;
         let (otx, orx) = flume::bounded(1);
         let grr = global_recv_ready();
-        let job: Job = Box::new(move || {
+        handle.spawn(async move {
             let id = next_id();
             let sock = Arc::new(InnerSocket::new(socket_type, options));
 
@@ -217,9 +214,6 @@ impl ContextInner {
 
             let _ = otx.send((id, sock, send_pump, recv_pump));
         });
-        self.submit_tx()?
-            .send(job)
-            .expect("pyomq: tokio runtime gone");
         Ok(Python::attach(|py| {
             py.detach(|| orx.recv().expect("pyomq: runtime dropped result"))
         }))
@@ -264,15 +258,14 @@ impl ContextInner {
         self.spawn_blocking(op(s))
     }
 
-    /// Shut down this context's runtime. Drops the job channel, which
-    /// causes the background thread to exit (runtime drops, tasks abort).
-    /// The thread is detached, not joined, to avoid blocking.
+    /// Shut down this context's runtime. Delegates to
+    /// `omq_tokio::Context::term()` which cancels the runtime's
+    /// shutdown token and joins the background thread.
     pub fn term(&self) {
         self.terminated.store(true, Ordering::Release);
         let state = self.state.lock().unwrap().take();
         if let Some(s) = state {
-            drop(s.submit);
-            drop(s.handle);
+            s.ctx.term();
         }
     }
 
@@ -320,11 +313,12 @@ impl ContextInner {
 impl Drop for ContextInner {
     fn drop(&mut self) {
         if let Some(s) = self.state.get_mut().unwrap().take() {
-            drop(s.submit);
+            s.ctx.term();
         }
     }
 }
 
+#[allow(dead_code)]
 fn drain_recv_ring(inner: &Arc<crate::socket::SocketInner>) -> Vec<omq_tokio::Message> {
     let mat = inner.materialized.read().unwrap();
     let Some(m) = mat.as_ref() else { return vec![] };
@@ -339,6 +333,7 @@ fn drain_recv_ring(inner: &Arc<crate::socket::SocketInner>) -> Vec<omq_tokio::Me
     msgs
 }
 
+#[allow(dead_code)]
 fn push_to_capture(cap: &Arc<crate::socket::SocketInner>, msg: &omq_tokio::Message) {
     let copy = omq_tokio::Message::multipart(msg.iter());
     let mat = cap.materialized.read().unwrap();
@@ -349,6 +344,7 @@ fn push_to_capture(cap: &Arc<crate::socket::SocketInner>, msg: &omq_tokio::Messa
 }
 
 /// Run a forwarding proxy between two sockets on the tokio thread.
+#[allow(dead_code)]
 pub fn proxy(
     ctx: &Arc<ContextInner>,
     fe_inner: Arc<crate::socket::SocketInner>,
@@ -403,8 +399,153 @@ pub fn proxy(
     });
 }
 
+/// Forward messages using the native blocking sockets. The synchronous
+/// Python proxy runs in its caller's thread, so this loop may block there.
+#[allow(dead_code)]
+pub fn blocking_proxy(
+    fe_inner: Arc<crate::socket::SocketInner>,
+    be_inner: Arc<crate::socket::SocketInner>,
+    cap_inner: Option<Arc<crate::socket::SocketInner>>,
+    ctrl_inner: Option<Arc<crate::socket::SocketInner>>,
+) {
+    let Ok(fe) = fe_inner.ensure_blocking_socket() else {
+        return;
+    };
+    let Ok(be) = be_inner.ensure_blocking_socket() else {
+        return;
+    };
+    let cap = cap_inner
+        .as_ref()
+        .and_then(|inner| inner.ensure_blocking_socket().ok());
+    let ctrl = ctrl_inner
+        .as_ref()
+        .and_then(|inner| inner.ensure_blocking_socket().ok());
+
+    let (tx, rx) = flume::unbounded();
+    for (side, socket) in [(0_u8, fe.clone()), (1, be.clone())] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(msg) = socket.recv() {
+                if tx.send((side, msg)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    if let Some(socket) = ctrl.clone() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(msg) = socket.recv() {
+                if tx.send((2, msg)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(tx);
+
+    while let Ok((side, msg)) = rx.recv() {
+        if side == 2 {
+            let command: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
+            match command.as_slice() {
+                b"TERMINATE" | b"KILL" => return,
+                b"PAUSE" => loop {
+                    let Ok((_, msg)) = rx.recv() else { return };
+                    let command: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
+                    if command == b"RESUME" {
+                        break;
+                    }
+                    if command == b"TERMINATE" || command == b"KILL" {
+                        return;
+                    }
+                },
+                _ => {}
+            }
+        } else if side == 0 {
+            if let Some(capture) = &cap {
+                let _ = capture.send(msg.clone());
+            }
+            if be.send(msg).is_err() {
+                return;
+            }
+        } else {
+            if let Some(capture) = &cap {
+                let _ = capture.send(msg.clone());
+            }
+            if fe.send(msg).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+pub fn proxy_handles(
+    ctx: &Arc<ContextInner>,
+    fe: omq_tokio::blocking::Socket,
+    be: omq_tokio::blocking::Socket,
+    cap: Option<omq_tokio::blocking::Socket>,
+    ctrl: Option<omq_tokio::blocking::Socket>,
+) {
+    let fe = Arc::new(fe.into_async());
+    let be = Arc::new(be.into_async());
+    let cap = cap.map(|s| Arc::new(s.into_async()));
+    let ctrl = ctrl.map(|s| Arc::new(s.into_async()));
+    ctx.spawn_blocking(async move {
+        let mut route_id: Option<Bytes> = None;
+        loop {
+            tokio::select! {
+                biased;
+                command = async {
+                    let Some(ctrl) = &ctrl else { futures::future::pending().await };
+                    ctrl.recv().await
+                } => {
+                    let Ok(msg) = command else { return; };
+                    let command: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
+                    match command.as_slice() {
+                        b"TERMINATE" | b"KILL" => return,
+                        b"PAUSE" => loop {
+                            let Some(ctrl) = &ctrl else { return; };
+                            let Ok(msg) = ctrl.recv().await else { return; };
+                            let command: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
+                            if command == b"RESUME" { break; }
+                            if command == b"TERMINATE" || command == b"KILL" { return; }
+                        },
+                        _ => {}
+                    }
+                }
+                msg = fe.recv() => {
+                    let Ok(msg) = msg else { return; };
+                    let parts: Vec<Bytes> = msg.iter().collect();
+                    let msg = if parts.len() >= 3 && parts[1].is_empty() {
+                        route_id = Some(parts[0].clone());
+                        omq_tokio::Message::multipart(parts[2..].to_vec())
+                    } else { msg };
+                    if let Some(cap) = &cap { let _ = cap.send(msg.clone()).await; }
+                    if be.send(msg).await.is_err() { return; }
+                }
+                msg = be.recv() => {
+                    let Ok(msg) = msg else { return; };
+                    let msg = if let Some(id) = &route_id {
+                        let mut parts: Vec<Bytes> = msg.iter().collect();
+                        if parts.first().is_some_and(Bytes::is_empty) {
+                            parts.remove(0);
+                        }
+                        let mut routed = vec![id.clone(), Bytes::new()];
+                        routed.extend(parts);
+                        omq_tokio::Message::multipart(routed)
+                    } else { msg };
+                    if let Some(cap) = &cap { let _ = cap.send(msg.clone()).await; }
+                    if fe.send(msg).await.is_err() { return; }
+                }
+            }
+        }
+    });
+}
+
+#[allow(dead_code)]
 const PROXY_BATCH: usize = 64;
 
+#[allow(dead_code)]
 async fn proxy_drain_and_forward(
     from: &Arc<InnerSocket>,
     to: &Arc<InnerSocket>,
@@ -429,6 +570,7 @@ async fn proxy_drain_and_forward(
     true
 }
 
+#[allow(dead_code)]
 async fn proxy_loop(
     fe: &Arc<InnerSocket>,
     be: &Arc<InnerSocket>,
@@ -526,12 +668,25 @@ pub fn wait_any(
                 if !inner.rxbuf.lock().unwrap().is_empty() {
                     return true;
                 }
+                if !inner.rxmsgs.lock().unwrap().is_empty() {
+                    return true;
+                }
                 let mat = inner.materialized.read().unwrap();
                 if let Some(m) = mat.as_ref() {
                     let cons = m.recv_cons.lock().unwrap();
                     !cons.is_empty()
                 } else {
-                    false
+                    drop(mat);
+                    let Ok(sock) = inner.ensure_blocking_socket() else {
+                        return false;
+                    };
+                    match sock.try_recv() {
+                        Ok(msg) => {
+                            inner.rxmsgs.lock().unwrap().push(msg);
+                            true
+                        }
+                        Err(_) => false,
+                    }
                 }
             })
             .map(|(id, _)| *id)
@@ -566,7 +721,10 @@ pub fn wait_any(
             None => Duration::from_millis(100),
         };
 
-        rr.wait_timeout(wait_dur);
+        // Native blocking sockets have thread wakeups, not an eventfd.
+        // Poll their try-recv path periodically while retaining the
+        // eventfd fast path for asyncio sockets.
+        rr.wait_timeout(wait_dur.min(Duration::from_millis(10)));
 
         let ready = poll_ready(&sockets);
         if !ready.is_empty() {

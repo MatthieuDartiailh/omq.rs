@@ -443,29 +443,15 @@ fn rustc_version_runtime() -> String {
         .to_string()
 }
 
-/// Build the benchmark runtime. Set `OMQ_BENCH_TOKIO_THREADS=N` to
-/// control the thread count: 1 = `current_thread`, 2+ = `multi_thread`.
-/// Defaults to multi-thread with one worker per available CPU.
-pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
-    let threads: usize = std::env::var("OMQ_BENCH_TOKIO_THREADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(2, std::num::NonZero::get));
+pub(crate) fn build_context() -> omq_tokio::Context {
+    let config = omq_tokio::ContextConfig::from_env();
+    let threads = config.io_threads;
     if threads <= 1 {
         println!("runtime: current_thread\n");
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("bench: tokio runtime")
     } else {
-        println!("runtime: multi_thread ({threads} workers)\n");
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(threads)
-            .enable_all()
-            .build()
-            .expect("bench: tokio runtime")
+        println!("runtime: {threads} x current_thread\n");
     }
+    omq_tokio::Context::with_config(config)
 }
 
 /// Thin wrapper around `tokio::time::timeout` to enforce the per-cell

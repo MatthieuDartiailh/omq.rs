@@ -18,6 +18,18 @@ pub(crate) enum WsTransport {
     TlsServer(tokio_rustls::server::TlsStream<TcpStream>),
 }
 
+impl WsTransport {
+    pub(crate) fn migrate(self) -> std::io::Result<Self> {
+        match self {
+            Self::Plain(tcp) => {
+                let std = tcp.into_std()?;
+                Ok(Self::Plain(TcpStream::from_std(std)?))
+            }
+            other => Ok(other),
+        }
+    }
+}
+
 impl std::fmt::Debug for WsTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

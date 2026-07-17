@@ -156,6 +156,66 @@ ctx.term()
 }
 
 // ---------------------------------------------------------------------
+// Rust CURVE REP <- pyzmq CURVE REQ
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn rust_curve_rep_from_pyzmq_req() {
+    if skip_if_no_pyzmq_curve() {
+        return;
+    }
+
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub_z85 = server_kp.public.to_z85();
+    let client_pub_z85 = client_kp.public.to_z85();
+    let client_sec_z85 = client_kp.secret.to_z85();
+
+    let rep = Socket::new(SocketType::Rep, Options::default().curve_server(server_kp));
+    let port = bind_loopback(&rep).await;
+    let script = r#"
+import os, zmq
+ctx = zmq.Context.instance()
+s = ctx.socket(zmq.REQ)
+s.curve_secretkey = os.environ['CLI_SEC'].encode()
+s.curve_publickey = os.environ['CLI_PUB'].encode()
+s.curve_serverkey = os.environ['SRV_PUB'].encode()
+s.connect(f"tcp://127.0.0.1:{os.environ['PORT']}")
+s.send(b"curve-req")
+assert s.recv() == b"curve-rep"
+s.close(linger=2000)
+ctx.term()
+"#;
+    let child = Command::new("python3")
+        .args(["-c", script])
+        .env("PORT", port.to_string())
+        .env("SRV_PUB", &server_pub_z85)
+        .env("CLI_PUB", &client_pub_z85)
+        .env("CLI_SEC", &client_sec_z85)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn python3 req");
+
+    wait_for_curve_handshake(&rep).await;
+    let request = tokio::time::timeout(Duration::from_secs(5), rep.recv())
+        .await
+        .expect("CURVE REQ timed out")
+        .unwrap();
+    assert_eq!(request.part_bytes(0).unwrap(), &b"curve-req"[..]);
+    rep.send(Message::single("curve-rep")).await.unwrap();
+
+    let out = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pyzmq req exited non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------
 // Rust CURVE PUSH -> pyzmq CURVE PULL
 // ---------------------------------------------------------------------
 

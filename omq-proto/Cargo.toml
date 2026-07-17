@@ -28,7 +28,7 @@ soak = []
 
 [dependencies]
 bytes = "1.12.0"
-crypto_box = { version = "0.9", features = ["std"], optional = true }
+crypto_box = { version = "0.9", optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
 subtle = { version = "2.6", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"], optional = true }

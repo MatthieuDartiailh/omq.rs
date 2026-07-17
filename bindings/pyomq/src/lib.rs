@@ -91,12 +91,12 @@ fn native_proxy(
 ) -> PyResult<()> {
     let fe = frontend.borrow().inner.clone();
     let be = backend.borrow().inner.clone();
-    fe.ensure_id()?;
-    be.ensure_id()?;
+    fe.ensure_blocking_id()?;
+    be.ensure_blocking_id()?;
     let cap = match capture {
         Some(c) => {
             let inner = c.borrow().inner.clone();
-            inner.ensure_id()?;
+            inner.ensure_blocking_id()?;
             Some(inner)
         }
         None => None,
@@ -104,13 +104,23 @@ fn native_proxy(
     let ctrl = match control {
         Some(c) => {
             let inner = c.borrow().inner.clone();
-            inner.ensure_id()?;
+            inner.ensure_blocking_id()?;
             Some(inner)
         }
         None => None,
     };
+    let fe_sock = fe.ensure_blocking_socket()?;
+    let be_sock = be.ensure_blocking_socket()?;
+    let cap_sock = cap
+        .as_ref()
+        .map(|inner| inner.ensure_blocking_socket())
+        .transpose()?;
+    let ctrl_sock = ctrl
+        .as_ref()
+        .map(|inner| inner.ensure_blocking_socket())
+        .transpose()?;
     let ctx = fe.ctx.clone();
-    py.detach(|| runtime::proxy(&ctx, fe, be, cap, ctrl));
+    py.detach(|| runtime::proxy_handles(&ctx, fe_sock, be_sock, cap_sock, ctrl_sock));
     Ok(())
 }
 

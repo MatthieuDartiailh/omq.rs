@@ -35,7 +35,7 @@ pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,
     PeerCommandKind, PeerIdent, PeerInfo,
 };
-pub use options::{KeepAlive, MechanismConfig, OnMute, Options, ReconnectPolicy};
+pub use options::{KeepAlive, MechanismConfig, OnMute, Options, ReconnectPolicy, WorkloadProfile};
 pub use proto::mechanism::MechanismSetup;
 #[cfg(any(feature = "curve", feature = "plain"))]
 pub use proto::mechanism::{Authenticator, MechanismPeerInfo};

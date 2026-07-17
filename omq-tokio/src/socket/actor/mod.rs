@@ -145,6 +145,8 @@ struct PeerEntry {
     /// SPSC ring for this inproc peer (None for wire/stream peers).
     spsc: Option<Arc<crate::transport::inproc::InprocSpsc>>,
     task: Option<JoinHandle<()>>,
+    /// IO thread index this peer's driver runs on (for load tracking).
+    io_thread: usize,
 }
 
 struct ListenerEntry {
@@ -183,6 +185,9 @@ pub(crate) struct SocketDriver {
     /// REQ / REP envelope + alternation state. Shared with the socket
     /// handle so `Socket::send` can call `pre_send` without an actor hop.
     type_state: Arc<Mutex<TypeState>>,
+    /// REP latency route: identity of the request currently being served.
+    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, bytes::Bytes)>>>,
+    rep_current: Arc<Mutex<Option<(u64, bytes::Bytes)>>>,
     /// REQ alternation flag. Shared with the socket handle for lock-free
     /// send/recv on REQ. Actor resets on peer disconnect.
     req_awaiting_reply: Arc<AtomicBool>,
@@ -206,6 +211,7 @@ pub(crate) struct SocketDriver {
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     subscribe_count: Arc<AtomicU64>,
+    io_pool: crate::context::IoPoolHandle,
 }
 
 impl SocketDriver {
@@ -220,9 +226,12 @@ impl SocketDriver {
         send_strategy: SendStrategy,
         spsc: super::recv::SpscHandles,
         type_state: Arc<Mutex<TypeState>>,
+        rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, bytes::Bytes)>>>,
+        rep_current: Arc<Mutex<Option<(u64, bytes::Bytes)>>>,
         req_awaiting_reply: Arc<AtomicBool>,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         subscribe_count: Arc<AtomicU64>,
+        io_pool: crate::context::IoPoolHandle,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -244,6 +253,8 @@ impl SocketDriver {
             send_strategy,
             recv_strategy,
             type_state,
+            rep_pending,
+            rep_current,
             req_awaiting_reply,
             monitor,
             subscriptions: Vec::new(),
@@ -257,6 +268,7 @@ impl SocketDriver {
             compression_pool: None,
             recv_sink_config,
             subscribe_count,
+            io_pool,
         }
     }
 

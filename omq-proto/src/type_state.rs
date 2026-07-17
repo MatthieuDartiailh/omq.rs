@@ -13,6 +13,7 @@
 //! Socket model.
 
 use bytes::Bytes;
+use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
 use crate::message::{Message, Payload};
@@ -23,9 +24,9 @@ use crate::proto::SocketType;
 pub struct TypeState {
     /// REQ: true after send, clears on recv. Enforces alternation.
     req_awaiting_reply: bool,
-    /// REP: saved envelope (frames before the first empty delimiter).
-    /// Populated on recv, consumed on send.
-    rep_envelope: Option<Vec<Bytes>>,
+    /// REP: saved envelope (frames before the empty delimiter).
+    /// Populated on recv, consumed by send.
+    rep_envelope: Option<SmallVec<[Bytes; 2]>>,
 }
 
 impl TypeState {
@@ -84,15 +85,7 @@ impl TypeState {
                         "REP socket must receive a request before replying".into(),
                     ));
                 };
-                let mut new_msg = Message::new();
-                for frame in envelope {
-                    new_msg.push_part_payload(Payload::from_bytes(frame));
-                }
-                new_msg.push_part_payload(Payload::from_bytes(Bytes::new()));
-                for p in msg.into_parts_payload() {
-                    new_msg.push_part_payload(p);
-                }
-                Ok(new_msg)
+                Ok(Message::with_rep_envelope(envelope, msg))
             }
             _ => Ok(msg),
         }
@@ -142,13 +135,14 @@ impl TypeState {
                 let Some(delim_idx) = parts.iter().position(Payload::is_empty) else {
                     return Ok(None);
                 };
-                let mut envelope = Vec::with_capacity(delim_idx);
+                let mut envelope = SmallVec::with_capacity(delim_idx);
                 for p in parts.iter().take(delim_idx) {
                     envelope.push(p.as_bytes());
                 }
-                let body_parts: Vec<Payload> = parts.into_iter().skip(delim_idx + 1).collect();
+                let mut parts = parts;
+                parts.drain(..=delim_idx);
                 self.rep_envelope = Some(envelope);
-                Ok(Some(Message::from_payloads_vec(body_parts)))
+                Ok(Some(Message::from_payloads_vec(parts)))
             }
             _ => Ok(Some(msg)),
         }

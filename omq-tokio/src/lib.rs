@@ -10,6 +10,8 @@
 //! transport implementations, and the public `Socket` actor.
 #![forbid(unsafe_code)]
 
+pub mod blocking;
+pub mod context;
 pub mod engine;
 pub(crate) mod routing;
 pub mod socket;
@@ -38,6 +40,7 @@ pub use omq_proto::message;
 pub use omq_proto::options;
 pub use omq_proto::proto;
 
+pub use context::{Context, ContextConfig};
 pub use socket::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket,

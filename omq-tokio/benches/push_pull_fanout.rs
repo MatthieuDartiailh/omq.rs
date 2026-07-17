@@ -16,8 +16,8 @@ const PATTERN: &str = "push_pull_fanout";
 const PEER_COUNTS: &[usize] = &[1, 8];
 
 fn main() {
-    let rt = common::build_runtime();
-    rt.block_on(async {
+    let ctx = common::build_context();
+    ctx.block_on(async {
         common::print_header("PUSH/PULL fan-out");
         let peer_counts = common::peers_override();
         let peer_counts = peer_counts.as_deref().unwrap_or(PEER_COUNTS);

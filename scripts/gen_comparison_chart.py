@@ -25,24 +25,44 @@ CPU_LINE_DASH = "2,5"
 
 COLORS = {
     "libzmq": "#eab308",
+    "libzmq-2t": "#ca8a04",
     "libzmq-mt": "#a16207",
     "omq-tokio": "#f97316",
-    "omq-tokio-mt": "#dc2626",
+    "omq-tokio-2t": "#ea580c",
+    "omq-tokio-4t": "#dc2626",
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
     "rzmq-iouring": "#15803d",
     "omq-libzmq": "#06b6d4",
+    "omq-tokio-1t": "#f97316",
+    "omq-tokio-2t": "#ea580c",
+    "libzmq-curve-1t": "#eab308",
+    "libzmq-curve-2t": "#b45309",
+    "libzmq-curve-4t": "#92400e",
+    "omq-curve-1t": "#3b82f6",
+    "omq-curve-2t": "#2563eb",
+    "omq-curve-4t": "#1d4ed8",
 }
 
 LABELS = {
     "libzmq": "libzmq v4.3.5 (1T)",
+    "libzmq-2t": "libzmq v4.3.5 (2T)",
     "libzmq-mt": "libzmq v4.3.5 (4T)",
     "omq-tokio": "omq-tokio (1T)",
-    "omq-tokio-mt": "omq-tokio (2T)",
+    "omq-tokio-2t": "omq-tokio (2T)",
+    "omq-tokio-4t": "omq-tokio (4T)",
     "zmq.rs": "zmq.rs v0.6.0 [6T]",
     "rzmq": "rzmq v0.5.24 [6T]",
     "rzmq-iouring": "rzmq v0.5.24 (io_uring) [6T]",
     "omq-libzmq": "omq-libzmq [1T]",
+    "omq-tokio-1t": "omq-tokio (1T)",
+    "omq-tokio-2t": "omq-tokio (2T)",
+    "libzmq-curve-1t": "libzmq (1T)",
+    "libzmq-curve-2t": "libzmq (2T)",
+    "libzmq-curve-4t": "libzmq (4T)",
+    "omq-curve-1t": "omq-tokio (1T)",
+    "omq-curve-2t": "omq-tokio (2T)",
+    "omq-curve-4t": "omq-tokio (4T)",
 }
 
 
@@ -364,7 +384,7 @@ def draw_throughput_panel(
     # dashed msg/s lines
     draw_order = [name for name in
                   ["rzmq-iouring", "rzmq", "zmq.rs", "libzmq", "libzmq-mt",
-                   "omq-tokio-mt", "omq-tokio"]
+                   "omq-tokio-2t", "omq-tokio"]
                   if name in impls]
     for name in draw_order:
         pts = [
@@ -441,7 +461,7 @@ def draw_latency_panel(
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["rzmq-iouring", "libzmq", "libzmq-mt", "omq-tokio-mt", "omq-tokio",
+                  ["rzmq-iouring", "libzmq", "libzmq-mt", "omq-tokio-2t", "omq-tokio",
                    "rzmq", "zmq.rs"]
                   if name in impls]
     for name in draw_order:
@@ -485,10 +505,19 @@ def _throughput_draw_order(impls: list[str]) -> list[str]:
     order = [
         "rzmq-iouring",
         "libzmq",
+        "libzmq-2t",
         "libzmq-mt",
+        "libzmq-curve-1t",
+        "libzmq-curve-2t",
+        "libzmq-curve-4t",
         "omq-libzmq",
-        "omq-tokio-mt",
+        "omq-tokio-2t",
         "omq-tokio",
+        "omq-tokio-1t",
+        "omq-tokio-2t",
+        "omq-curve-1t",
+        "omq-curve-2t",
+        "omq-curve-4t",
         "rzmq",
         "zmq.rs",
     ]
@@ -840,7 +869,7 @@ def draw_throughput_cpu_panel(
 
     draw_order = [name for name in
                   ["rzmq-iouring", "libzmq", "libzmq-mt", "omq-libzmq",
-                   "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs"]
+                   "omq-tokio-2t", "omq-tokio", "rzmq", "zmq.rs"]
                   if name in impls]
 
     # dotted CPU% lines
@@ -957,7 +986,7 @@ def draw_latency_cpu_panel(
 
     draw_order = [name for name in
                   ["rzmq-iouring", "libzmq", "libzmq-mt", "omq-libzmq",
-                   "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs"]
+                   "omq-tokio-2t", "omq-tokio", "rzmq", "zmq.rs"]
                   if name in impls]
 
     # dotted CPU% lines (right axis)
@@ -1733,15 +1762,15 @@ def main():
         "inproc": "inproc",
     }
 
-    tcp_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
-    ipc_impls = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "rzmq-iouring"]
-    inproc_impls = ["libzmq", "omq-tokio", "omq-tokio-mt", "rzmq", "rzmq-iouring"]
+    omq_libzmq_tcp = ["libzmq", "libzmq-2t", "libzmq-mt", "omq-tokio", "omq-tokio-2t"]
+    omq_libzmq_ipc = ["libzmq", "libzmq-mt", "omq-tokio", "omq-tokio-2t"]
+    omq_libzmq_inproc = ["libzmq", "omq-tokio", "omq-tokio-2t"]
 
     # (transport, impls, log).
     cross_charts = [
-        ("tcp", tcp_impls, False),
-        ("ipc", ipc_impls, False),
-        ("inproc", inproc_impls, True),
+        ("tcp", omq_libzmq_tcp, False),
+        ("ipc", omq_libzmq_ipc, False),
+        ("inproc", omq_libzmq_inproc, True),
     ]
 
     for transport, impls, log in cross_charts:
@@ -1774,19 +1803,23 @@ def main():
             print(f"Written: {out}", file=sys.stderr)
 
     # ── PUB/SUB charts ──────────────────────────────────────────
-    pubsub_peer_counts = [1, 8, 32]
+    pubsub_peer_counts = [4, 64]
+    pubsub_impls = [
+        "libzmq", "libzmq-2t", "libzmq-mt",
+        "omq-tokio", "omq-tokio-2t",
+    ]
 
     def pubsub_title(peers, tl):
         sub_label = "1 subscriber" if peers == 1 else f"{peers} subscribers"
         return f"PUB/SUB throughput, {sub_label}: {tl}"
 
     panels = [
-        (p, load_pubsub_data("tcp", tcp_impls, p))
+        (p, load_pubsub_data("tcp", pubsub_impls, p))
         for p in pubsub_peer_counts
     ]
     if any(d["sizes"] for _, d in panels):
         svg = generate_multi_panel_cpu_chart(
-            panels, tcp_impls, "TCP loopback",
+            panels, pubsub_impls, "TCP loopback",
             hw_label=hw, title_fn=pubsub_title,
             label_overrides=label_overrides, show_st_mt=True,
         )
@@ -1795,8 +1828,40 @@ def main():
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
 
+    # ── CURVE PUB/SUB chart ────────────────────────────────────
+    curve_impls = [
+        "libzmq-curve-1t", "libzmq-curve-2t", "libzmq-curve-4t",
+        "omq-curve-1t", "omq-curve-2t", "omq-curve-4t",
+    ]
+    curve_labels = {
+        "libzmq-curve-1t": "libzmq (1T)",
+        "libzmq-curve-2t": "libzmq (2T)",
+        "libzmq-curve-4t": "libzmq (4T)",
+        "omq-curve-1t": "omq-tokio (1T)",
+        "omq-curve-2t": "omq-tokio (2T)",
+        "omq-curve-4t": "omq-tokio (4T)",
+    }
+
+    def curve_title(peers, tl):
+        sub_label = "1 subscriber" if peers == 1 else f"{peers} subscribers"
+        return f"PUB/SUB CURVE throughput, {sub_label}: {tl}"
+
+    curve_data = load_pubsub_data("tcp", curve_impls, 16)
+    if curve_data["sizes"]:
+        curve_panels = [(16, curve_data)]
+        svg = generate_multi_panel_cpu_chart(
+            curve_panels, curve_impls, "TCP loopback",
+            hw_label=hw, title_fn=curve_title,
+            label_overrides=curve_labels,
+        )
+        if svg:
+            out = REPO / "doc" / "charts" / "pubsub" / "curve_tcp.svg"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(svg)
+            print(f"Written: {out}", file=sys.stderr)
+
     # ── Fan-out / fan-in charts (TCP only) ──────────────────────
-    fanio_peers = [2, 4, 8]
+    fanio_peers = [4, 64]
 
     def fanout_title(peers, tl):
         return f"PUSH fan-out (1 PUSH → {peers} PULL): {tl}"
@@ -1809,13 +1874,13 @@ def main():
         ("fan_in", fanin_title, "fanin"),
     ]:
         panels = [
-            (p, load_fanio_data("tcp", tcp_impls, p, kind))
+            (p, load_fanio_data("tcp", omq_libzmq_tcp, p, kind))
             for p in fanio_peers
         ]
         if not any(d["sizes"] for _, d in panels):
             continue
         svg = generate_multi_panel_cpu_chart(
-            panels, tcp_impls, "TCP loopback",
+            panels, omq_libzmq_tcp, "TCP loopback",
             hw_label=hw,
             title_fn=tfn,
             label_overrides=label_overrides,

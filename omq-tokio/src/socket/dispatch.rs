@@ -8,11 +8,79 @@
 
 use std::io;
 use std::io::IoSlice;
+use std::io::Write;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+
+/// Caller-side TCP writer for the latency profile. It uses a duplicated
+/// nonblocking descriptor, so sends do not enter the connection driver's
+/// reactor loop.
+#[derive(Debug, Clone)]
+pub(crate) struct DirectTcpWriter {
+    stream: Arc<Mutex<std::net::TcpStream>>,
+    pending: Arc<Mutex<Vec<u8>>>,
+    scratch: Arc<Mutex<Vec<u8>>>,
+}
+
+impl DirectTcpWriter {
+    pub(crate) fn new(stream: std::net::TcpStream) -> Self {
+        Self {
+            stream: Arc::new(Mutex::new(stream)),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            scratch: Arc::new(Mutex::new(Vec::with_capacity(4096))),
+        }
+    }
+
+    pub(crate) fn try_write(&self, bytes: &[u8]) -> io::Result<bool> {
+        let mut pending = self.pending.lock().expect("direct writer pending");
+        if !pending.is_empty() {
+            let n = self
+                .stream
+                .lock()
+                .expect("direct writer stream")
+                .write(&pending)?;
+            pending.drain(..n);
+            if !pending.is_empty() {
+                return Ok(false);
+            }
+        }
+        let mut offset = 0;
+        while offset < bytes.len() {
+            match self
+                .stream
+                .lock()
+                .expect("direct writer stream")
+                .write(&bytes[offset..])
+            {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "tcp write")),
+                Ok(n) => offset += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    pending.extend_from_slice(&bytes[offset..]);
+                    return Ok(false);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn try_write_buffer(
+        &self,
+        fill: impl FnOnce(&mut Vec<u8>) -> bool,
+    ) -> io::Result<bool> {
+        let mut scratch = self.scratch.lock().expect("direct writer scratch");
+        scratch.clear();
+        if !fill(&mut scratch) {
+            return Ok(true);
+        }
+        self.try_write(&scratch)
+    }
+}
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
@@ -22,6 +90,14 @@ use crate::transport::{
     InprocConn, InprocPeerSnapshot, IpcTransport, Listener as _, PeerIdent, TcpTransport,
     Transport as _, inproc as inproc_transport,
 };
+
+/// Re-register a stream with the current thread's I/O reactor. Each
+/// `current_thread` tokio runtime has its own reactor; a stream
+/// accepted on one thread must be migrated before a driver on another
+/// thread can poll it.
+pub(crate) trait Migratable: Sized {
+    fn migrate(self) -> io::Result<Self>;
+}
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP, IPC, WS).
 /// Inproc does NOT go through this - it skips the ZMTP codec entirely
@@ -34,7 +110,49 @@ pub(crate) enum AnyStream {
     Ws(Box<crate::transport::ws::WsTransport>),
 }
 
+impl Migratable for AnyStream {
+    fn migrate(self) -> io::Result<Self> {
+        match self {
+            Self::Tcp(s) => {
+                let std = s.into_std()?;
+                Ok(Self::Tcp(TcpStream::from_std(std)?))
+            }
+            #[cfg(unix)]
+            Self::Ipc(s) => {
+                let std = s.into_std()?;
+                Ok(Self::Ipc(IpcStream::from_std(std)?))
+            }
+            #[cfg(target_os = "windows")]
+            Self::Ipc(s) => Ok(Self::Ipc(s)),
+            #[cfg(feature = "ws")]
+            Self::Ws(s) => Ok(Self::Ws(Box::new(s.migrate()?))),
+        }
+    }
+}
+
 impl AnyStream {
+    /// Split the stream while retaining a TCP write-half fast path.
+    pub(crate) fn split(self, fast_write: bool) -> (AnyReadHalf, AnyWriteHalf) {
+        match self {
+            Self::Tcp(stream) => {
+                let (reader, writer) = stream.into_split();
+                (
+                    AnyReadHalf::Tcp(reader),
+                    AnyWriteHalf::Tcp { writer, fast_write },
+                )
+            }
+            Self::Ipc(stream) => {
+                let (reader, writer) = tokio::io::split(Self::Ipc(stream));
+                (AnyReadHalf::Other(reader), AnyWriteHalf::Other(writer))
+            }
+            #[cfg(feature = "ws")]
+            Self::Ws(ws) => {
+                let (reader, writer) = tokio::io::split(Self::Ws(ws));
+                (AnyReadHalf::Other(reader), AnyWriteHalf::Other(writer))
+            }
+        }
+    }
+
     /// Apply per-socket TCP options (currently just keepalive). No-op
     /// for non-TCP variants. Called from the actor on every accepted /
     /// connected stream so the option lives for the connection's
@@ -52,6 +170,95 @@ impl AnyStream {
             Self::Ipc(_) => Ok(()),
             #[cfg(feature = "ws")]
             Self::Ws(_) => Ok(()),
+        }
+    }
+}
+
+pub(crate) enum AnyReadHalf {
+    Tcp(OwnedReadHalf),
+    Other(tokio::io::ReadHalf<AnyStream>),
+}
+
+impl AsyncRead for AnyReadHalf {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.as_mut().get_mut() {
+            Self::Tcp(reader) => Pin::new(reader).poll_read(cx, buf),
+            Self::Other(reader) => Pin::new(reader).poll_read(cx, buf),
+        }
+    }
+}
+
+pub(crate) enum AnyWriteHalf {
+    Tcp {
+        writer: OwnedWriteHalf,
+        fast_write: bool,
+    },
+    Other(tokio::io::WriteHalf<AnyStream>),
+}
+
+impl AsyncWrite for AnyWriteHalf {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.as_mut().get_mut() {
+            Self::Tcp { writer, fast_write } => {
+                if *fast_write {
+                    match writer.try_write(buf) {
+                        Ok(n) => return Poll::Ready(Ok(n)),
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(e) => return Poll::Ready(Err(e)),
+                    }
+                }
+                Pin::new(writer).poll_write(cx, buf)
+            }
+            Self::Other(writer) => Pin::new(writer).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.as_mut().get_mut() {
+            Self::Tcp { writer, fast_write } => {
+                if *fast_write {
+                    match writer.try_write_vectored(bufs) {
+                        Ok(n) => return Poll::Ready(Ok(n)),
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(e) => return Poll::Ready(Err(e)),
+                    }
+                }
+                Pin::new(writer).poll_write_vectored(cx, bufs)
+            }
+            Self::Other(writer) => Pin::new(writer).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Tcp { writer, .. } => writer.is_write_vectored(),
+            Self::Other(writer) => writer.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.as_mut().get_mut() {
+            Self::Tcp { writer, .. } => Pin::new(writer).poll_flush(cx),
+            Self::Other(writer) => Pin::new(writer).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.as_mut().get_mut() {
+            Self::Tcp { writer, .. } => Pin::new(writer).poll_shutdown(cx),
+            Self::Other(writer) => Pin::new(writer).poll_shutdown(cx),
         }
     }
 }

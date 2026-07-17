@@ -14,6 +14,81 @@ omq-tokio backend: SocketDriver, ConnectionDriver, transports, routing
 omq-proto core: Connection, frames, mechanisms, messages, options
 ```
 
+## Context and runtime management
+
+`Context` owns one or more independent `current_thread` tokio runtimes,
+each on its own OS thread. Each runtime has its own IO reactor (epoll /
+kqueue), timer wheel, and task scheduler. There is no cross-thread work
+stealing and no shared scheduler lock. Connections pinned to a thread
+run with zero contention from connections on other threads.
+
+- `Context::new()`: one IO thread. Default.
+- `Context::with_config(cfg)`: N IO threads. Each IO thread is a
+  separate `current_thread` runtime on a dedicated OS thread.
+  Connections are distributed across threads by least-load assignment.
+  Fan-out sockets (`PUB`, `XPUB`, `RADIO`) create one shard worker
+  per IO thread for parallel subscription matching and encoding.
+- `Context::current()`: wraps the caller's active tokio runtime
+  (works with both `current_thread` and `multi_thread`). No background
+  threads, no IO pool. All connections share the caller's runtime.
+  Shard count is always 1. This mode is useful for embedding omq in an
+  existing async application, and for single-connection benchmarks
+  where a `multi_thread` runtime can push a single TCP pipe to its
+  limit. It does not scale fan-out across threads.
+
+`Context::socket()` creates sockets whose driver tasks run on the
+context's runtime. `Context::block_on()` runs a future on the owned
+runtime and blocks the caller (not available on `Context::current()`).
+
+## Blocking API (background IO)
+
+`Context::blocking_socket()` creates a sync socket for callers with no
+async runtime. The application thread never touches tokio. The Context's
+IO thread handles all network I/O, connection management, encoding, and
+decoding. The application thread communicates with the IO thread through
+lock-free queues.
+
+**Send path.** `blocking::Socket::send()` tries `try_send()` first,
+which pushes the message into the send pipe (yring) on the caller's
+thread with no cross-thread hop. Only when the pipe is full does it
+fall back to `Context::block_on()`.
+
+**Recv path.** `blocking::Socket::recv()` calls `blocking_recv()`,
+which drains the recv pipe directly on the caller's thread via
+`try_drain()`. If no data is available, the thread parks via
+`std::thread::park()`. The IO thread's connection driver unparks
+the caller (via `BlockingRecvWaker`) when new data arrives.
+
+**Performance tradeoffs.** The blocking API pipelines I/O and
+application work across two threads: the IO thread reads from TCP,
+decodes frames, and pushes into the recv pipe while the application
+thread independently drains it. The async 1T path serializes these
+on one thread (connection driver and user recv take turns). This
+pipelining gives the blocking API roughly 2x throughput at small
+message sizes (16-128 B). At 4+ KiB, wire bandwidth saturates and
+the extra thread stops helping.
+
+Latency is worse: each message crosses a thread boundary (yring push
+plus `unpark()`), adding roughly 30 us per hop. In throughput mode
+this cost is amortized across batches; in request/reply it is paid
+on every round trip (roughly 80 us vs 47 us p50 at 16 B).
+
+| metric | async 1T | bg 1T | why |
+|--------|----------|-------|-----|
+| small-msg throughput | 7M msg/s | 14M msg/s | parallel I/O + app |
+| small-msg CPU (push) | 100% | 200% | 2 threads both saturated |
+| large-msg throughput | 5.5 GB/s | 5.2 GB/s | wire-limited |
+| REQ/REP latency | 47 us | 80 us | cross-thread signaling |
+
+When N > 1, accepted or connected TCP/IPC streams migrate from the
+accepting thread's reactor to the assigned thread's reactor via
+`into_std()` / `from_std()` re-registration. This is necessary because
+each `current_thread` runtime owns its own epoll fd; a socket registered
+on one reactor cannot be polled from another.
+
+The `OMQ_IO_THREADS` environment variable sets the default IO thread
+count for `ContextConfig::from_env()`.
+
 ## Crates
 
 `omq-proto` is pure protocol code. It has no file descriptors and no async
@@ -93,8 +168,10 @@ then calls `rearm_if_nonempty` to self-wake if data remains. For
 budget-interrupted drains, `reschedule` fires unconditionally.
 
 CURVE keeps per-connection nonce state, so encrypted traffic uses
-per-connection ordered transforms. LZ4 fan-out may encode once at socket level
-when wire bytes are identical for all matched subscribers.
+per-connection ordered transforms. CURVE encrypts and decrypts in place
+(`SalsaBox::encrypt_in_place_detached` / `decrypt_in_place_detached`) with one
+allocation per message. LZ4 fan-out may encode once at socket level when wire
+bytes are identical for all matched subscribers.
 
 ## Routing
 
@@ -107,16 +184,22 @@ waits on a rotating peer and `try_send` reports HWM backpressure.
 it before newer pipe-fed sends, so messages queued before handshake are not
 overtaken.
 
-Fan-out sockets (`PUB`, `XPUB`, `RADIO`) encode once and distribute matching
-wire bytes. Wide multi-thread fan-out uses shard workers. Each shard has
-split channels: a `yring` control channel for subscribe, cancel, add-peer,
-remove-peer, and shutdown commands, and a `yring` data channel for encoded
-dispatches. The worker drains all control commands unconditionally every
-iteration, then drains data dispatches up to `DrainBudget::WORKER` (256
-messages / 2 MiB). This separation guarantees control commands are reachable
-within bounded time regardless of data throughput. Fan-out sockets drop on
-mute; `OnMute::Block` does not make `PUB` or `XPUB` wait. `xpub_nodrop`
-stays on the direct backpressure path.
+Fan-out sockets (`PUB`, `XPUB`, `RADIO`) use shard workers for parallel
+subscription matching and encoding. With N IO threads, N shard workers run,
+one per IO thread. The caller pushes each message once to shard 1 (the
+distributor). Shard 1 processes its own peers, then distributes the batch to
+secondary shards. This keeps the caller's send path to a single `yring` push
+regardless of shard count. Each shard has split channels: a `yring` control
+channel for subscribe, cancel, add-peer, remove-peer, and shutdown commands,
+and a `yring` data channel for encoded dispatches. The worker drains all
+control commands unconditionally every iteration, then drains data dispatches
+up to `DrainBudget::WORKER` (256 messages / 2 MiB). This separation
+guarantees control commands are reachable within bounded time regardless of
+data throughput. Fan-out sockets drop on mute; `OnMute::Block` does not make
+`PUB` or `XPUB` wait. `xpub_nodrop` stays on the direct backpressure path.
+
+With `Context::current()` (borrowed runtime), fan-out always uses a single
+shard regardless of the runtime's thread count.
 
 Identity-routed sockets (`ROUTER`, `REP`, `SERVER`, `PEER`) route by peer
 identity. Exclusive sockets (`PAIR`, `CHANNEL`) target one peer. Fair-queue

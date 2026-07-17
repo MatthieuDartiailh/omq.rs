@@ -30,6 +30,7 @@ use omq_proto::proto::SocketType;
 pub struct InprocSpsc {
     pub producer: Mutex<yring::Producer<Message>>,
     pub consumer: Mutex<yring::Consumer<Message>>,
+    pub batch_remaining: std::sync::atomic::AtomicUsize,
     /// Receiver socket's shared recv notification. The driver and
     /// send fast path notify this after push so `recv()` wakes up.
     pub recv_notify: Arc<tokio::sync::Notify>,
@@ -240,6 +241,7 @@ impl InprocListener {
             Some(Arc::new(InprocSpsc {
                 producer: Mutex::new(p),
                 consumer: Mutex::new(c),
+                batch_remaining: std::sync::atomic::AtomicUsize::new(0),
                 recv_notify: notify,
                 recv_ready: std::sync::atomic::AtomicBool::new(false),
                 max_message_size: mms,

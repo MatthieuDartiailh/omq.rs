@@ -5,40 +5,46 @@
 
 use std::time::Duration;
 
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Context, Message, Options, Socket, SocketType};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let publisher = Socket::new(SocketType::Pub, Options::default());
-    publisher.bind("lz4+tcp://127.0.0.1:5556".parse()?).await?;
+fn main() {
+    let ctx = Context::new();
+    ctx.block_on(async move {
+        let publisher = Socket::new(SocketType::Pub, Options::default());
+        publisher
+            .bind("lz4+tcp://127.0.0.1:5556".parse().unwrap())
+            .await
+            .unwrap();
 
-    let subscriber = Socket::new(SocketType::Sub, Options::default());
-    subscriber
-        .connect("lz4+tcp://127.0.0.1:5556".parse()?)
-        .await?;
-    subscriber.subscribe("news.").await?; // prefix match
+        let subscriber = Socket::new(SocketType::Sub, Options::default());
+        subscriber
+            .connect("lz4+tcp://127.0.0.1:5556".parse().unwrap())
+            .await
+            .unwrap();
+        subscriber.subscribe("news.").await.unwrap(); // prefix match
 
-    // SUBSCRIBE travels from sub to pub over the wire; give it a moment.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+        // SUBSCRIBE travels from sub to pub over the wire; give it a moment.
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-    publisher
-        .send(Message::multipart(["news.sports", "ball scores"]))
-        .await?;
-    publisher
-        .send(Message::multipart(["weather", "sunny"]))
-        .await?; // filtered out
+        publisher
+            .send(Message::multipart(["news.sports", "ball scores"]))
+            .await
+            .unwrap();
+        publisher
+            .send(Message::multipart(["weather", "sunny"]))
+            .await
+            .unwrap(); // filtered out
 
-    let m = subscriber.recv().await?; // only "news.sports" arrives
-    let topic = m.part_bytes(0).unwrap();
-    let body = m.part_bytes(1).unwrap();
-    assert_eq!(&*topic, b"news.sports");
-    assert_eq!(&*body, b"ball scores");
+        let m = subscriber.recv().await.unwrap(); // only "news.sports" arrives
+        let topic = m.part_bytes(0).unwrap();
+        let body = m.part_bytes(1).unwrap();
+        assert_eq!(&*topic, b"news.sports");
+        assert_eq!(&*body, b"ball scores");
 
-    println!(
-        "{}: {}",
-        String::from_utf8_lossy(&topic),
-        String::from_utf8_lossy(&body),
-    );
-
-    Ok(())
+        println!(
+            "{}: {}",
+            String::from_utf8_lossy(&topic),
+            String::from_utf8_lossy(&body),
+        );
+    });
 }

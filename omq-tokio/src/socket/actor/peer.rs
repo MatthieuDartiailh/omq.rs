@@ -9,6 +9,7 @@ use super::{
     supports_subscribe,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
+use omq_proto::WorkloadProfile;
 
 impl SocketDriver {
     pub(super) async fn handle_internal_event(&mut self, evt: InternalEvent) {
@@ -127,7 +128,7 @@ impl SocketDriver {
     #[expect(clippy::too_many_lines)]
     fn spawn_byte_stream_connection(
         &mut self,
-        stream: AnyStream,
+        mut stream: AnyStream,
         peer_ident: PeerIdent,
         endpoint: Endpoint,
         is_server: bool,
@@ -187,8 +188,45 @@ impl SocketDriver {
             heartbeat_ttl: self.options.heartbeat_ttl,
             large_message_threshold: self.options.large_message_threshold.unwrap_or(0),
         };
+        let workload_profile = self.options.workload_profile.unwrap_or(
+            if matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
+                WorkloadProfile::Latency
+            } else {
+                WorkloadProfile::Throughput
+            },
+        );
         let has_encoder = MessageEncoder::for_endpoint(&endpoint, &self.options);
         let has_transform = has_encoder.is_some();
+        let latency_profile = workload_profile == WorkloadProfile::Latency
+            && !self.options.mechanism.has_frame_transform();
+        let direct_tcp_writer = if latency_profile
+            && matches!(self.socket_type, SocketType::Req | SocketType::Rep)
+            && matches!(endpoint, Endpoint::Tcp { .. })
+            && !has_transform
+        {
+            match stream {
+                AnyStream::Tcp(tcp) => {
+                    let Ok(std_tcp) = tcp.into_std() else {
+                        return;
+                    };
+                    let Ok(direct_tcp) = std_tcp.try_clone() else {
+                        return;
+                    };
+                    let Ok(driver_tcp) = tokio::net::TcpStream::from_std(std_tcp) else {
+                        return;
+                    };
+                    let direct =
+                        Arc::new(crate::socket::dispatch::DirectTcpWriter::new(direct_tcp));
+                    stream = AnyStream::Tcp(driver_tcp);
+                    Some(direct)
+                }
+                AnyStream::Ipc(_) => None,
+                #[cfg(feature = "ws")]
+                AnyStream::Ws(_) => None,
+            }
+        } else {
+            None
+        };
         let passthrough_info = has_encoder
             .as_ref()
             .and_then(|(enc, _)| enc.passthrough_info())
@@ -201,6 +239,12 @@ impl SocketDriver {
             peer_id,
             child_cancel.clone(),
             driver_cfg,
+        )
+        .with_receive_profile(
+            crate::engine::driver::ReceiveProfile::from_workload_for_socket(
+                workload_profile,
+                self.socket_type,
+            ),
         );
         let driver = match has_encoder {
             Some((enc, dec)) => {
@@ -223,12 +267,15 @@ impl SocketDriver {
             None => driver,
         };
 
-        let arena_threshold = self
-            .options
-            .arena_threshold
-            .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
+        let arena_threshold = self.options.arena_threshold.unwrap_or(if latency_profile {
+            usize::MAX
+        } else {
+            omq_proto::frame_buffer::ARENA_THRESHOLD
+        });
         let arena_cap = if matches!(endpoint, Endpoint::Ipc(_)) {
             omq_proto::frame_buffer::ARENA_INITIAL_CAP_IPC
+        } else if latency_profile {
+            4 * 1024
         } else {
             omq_proto::frame_buffer::ARENA_INITIAL_CAP
         };
@@ -270,34 +317,69 @@ impl SocketDriver {
         // delivery with no per-type post-processing, route messages directly
         // from the connection driver into the user-facing recv channel,
         // skipping the actor's event loop.
-        let driver = if can_bypass_actor_recv(self.socket_type) {
-            let can_use_yring = !matches!(self.socket_type, SocketType::Req);
+        let rep_latency = self.socket_type == SocketType::Rep && self.uses_latency_profile();
+        let rep_identity = Arc::new(std::sync::Mutex::new(None));
+        let driver = if can_bypass_actor_recv(self.socket_type) || rep_latency {
+            let can_use_yring =
+                can_bypass_actor_recv(self.socket_type) && self.socket_type != SocketType::Req;
             if can_use_yring {
                 let from_slot = self
                     .recv_sink_config
                     .as_ref()
                     .and_then(|cfg| cfg.take_sink());
                 if let Some(sink) = from_slot {
-                    driver.with_recv_sink(sink)
+                    if rep_latency {
+                        driver.with_recv_sink(crate::engine::RecvSink::rep(
+                            sink,
+                            rep_identity.clone(),
+                            self.rep_pending.clone(),
+                            peer_id,
+                        ))
+                    } else {
+                        driver.with_recv_sink(sink)
+                    }
                 } else {
                     let cap = self.options.recv_hwm.unwrap_or(1024).max(16) as usize;
                     let (prod, cons) = yring::spsc(cap);
                     let recv_notify = self.spsc.recv_notify.clone();
+                    let blocking_waker = self.spsc.blocking_recv_waker.clone();
                     let space = std::sync::Arc::new(tokio::sync::Notify::new());
                     let sink = crate::engine::RecvSink::Yring(crate::engine::YringSink {
                         producer: prod,
-                        signal: Box::new(move || recv_notify.notify_one()),
+                        signal: Box::new(move || {
+                            recv_notify.notify_one();
+                            blocking_waker.wake();
+                        }),
                         space: space.clone(),
                     });
                     PeerLifecycle::new(self).register_tcp_consumer(cons, space, peer_id);
-                    driver.with_recv_sink(sink)
+                    if rep_latency {
+                        driver.with_recv_sink(crate::engine::RecvSink::rep(
+                            sink,
+                            rep_identity.clone(),
+                            self.rep_pending.clone(),
+                            peer_id,
+                        ))
+                    } else {
+                        driver.with_recv_sink(sink)
+                    }
                 }
+            } else if rep_latency {
+                driver.with_recv_sink(crate::engine::RecvSink::rep(
+                    crate::engine::RecvSink::Channel(self.recv_tx.clone()),
+                    rep_identity,
+                    self.rep_pending.clone(),
+                    peer_id,
+                ))
             } else {
                 driver.with_recv_direct(self.recv_tx.clone())
             }
         } else {
             driver
         };
+
+        // Assign this connection to an IO thread.
+        let io_thread = self.io_pool.assign_thread();
 
         // Insert the peer BEFORE spawning the driver task.
         self.peers.insert(
@@ -308,6 +390,7 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel,
                     transmit_slot: slot.clone(),
+                    direct_tcp_writer: direct_tcp_writer.clone(),
                     send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
@@ -316,12 +399,22 @@ impl SocketDriver {
                 is_client: !is_server,
                 spsc: None,
                 task: None,
+                io_thread,
             },
         );
 
         PeerLifecycle::new(self).after_peer_inserted();
 
-        let task = tokio::spawn(async move {
+        let needs_migration = io_thread != 0;
+        let task = self.io_pool.spawn_on(io_thread, async move {
+            let driver = if needs_migration {
+                match driver.migrate_stream() {
+                    Ok(d) => d,
+                    Err(_) => return,
+                }
+            } else {
+                driver
+            };
             let _ = driver.run().await;
         });
         if let Some(peer) = self.peers.get_mut(&peer_id) {
@@ -358,6 +451,7 @@ impl SocketDriver {
                 is_client: !is_server,
                 spsc: None,
                 task: None,
+                io_thread: 0,
             },
         );
 
@@ -424,7 +518,8 @@ impl SocketDriver {
 
         // Extract recv_sink for poll() message detection, similar to wire path.
         // Only inproc peers with yring-backed recv bypass can use this.
-        let can_use_yring = !matches!(self.socket_type, SocketType::Req);
+        let can_use_yring =
+            can_bypass_actor_recv(self.socket_type) && self.socket_type != SocketType::Req;
         let recv_sink = if can_bypass_actor_recv(self.socket_type) && can_use_yring {
             self.recv_sink_config
                 .as_ref()
@@ -439,6 +534,8 @@ impl SocketDriver {
         // event runs through the same handle_peer_event path that
         // sets `info = Some(...)`, calls strategy.connection_added,
         // and replays subscriptions / joined groups.
+        let io_thread = self.io_pool.assign_thread();
+
         self.peers.insert(
             peer_id,
             PeerEntry {
@@ -447,6 +544,7 @@ impl SocketDriver {
                     inbox: inbox_tx,
                     cancel: child_cancel.clone(),
                     transmit_slot: None,
+                    direct_tcp_writer: None,
                     send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
                 },
                 identity: bytes::Bytes::new(),
@@ -455,6 +553,7 @@ impl SocketDriver {
                 is_client: !is_server,
                 spsc: spsc.clone(),
                 task: None,
+                io_thread,
             },
         );
 
@@ -463,31 +562,38 @@ impl SocketDriver {
         } else {
             None
         };
+        let recv_spsc = spsc
+            .clone()
+            .filter(|_| can_bypass_actor_recv(self.socket_type));
 
-        // Per-peer SPSC: always add to consumers Vec (recv side).
-        if let Some(ref s) = spsc {
-            let recv_bypass = can_bypass_actor_recv(self.socket_type);
-            PeerLifecycle::new(self).register_inproc_consumer(s, recv_bypass);
+        // Per-peer SPSC recv bypass only applies to plain fair-queue socket
+        // types. REP latency receives need actor bookkeeping for routing.
+        if let Some(ref s) = recv_spsc {
+            PeerLifecycle::new(self).register_inproc_consumer(s, true);
         }
         PeerLifecycle::new(self).update_send_ring();
 
-        let task = tokio::spawn(inproc_peer_driver(
-            inbox_rx,
-            in_rx,
-            out,
-            InprocDriverCtx {
-                peer_out: self.peer_out_tx.clone(),
-                peer_id,
-                cancel: child_cancel,
-                peer_props,
-                max_message_size: self.options.max_message_size,
-                recv_direct,
-                spsc,
-                recv_sink,
-                shared_rx: self.send_strategy.shared_rx(),
-                send_pipe_rx,
-            },
-        ));
+        let task = self.io_pool.spawn_on(
+            io_thread,
+            inproc_peer_driver(
+                inbox_rx,
+                in_rx,
+                out,
+                InprocDriverCtx {
+                    peer_out: self.peer_out_tx.clone(),
+                    peer_id,
+                    cancel: child_cancel,
+                    peer_props,
+                    max_message_size: self.options.max_message_size,
+                    recv_direct,
+                    spsc: recv_spsc,
+                    recv_sink,
+                    shared_rx: self.send_strategy.shared_rx(),
+                    send_pipe_rx,
+                    blocking_recv_waker: self.spsc.blocking_recv_waker.clone(),
+                },
+            ),
+        );
         if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.task = Some(task);
         }
@@ -505,6 +611,19 @@ impl SocketDriver {
             ZmtpEvent::Message(msg) => {
                 if self.closing {
                     return;
+                }
+                if self.socket_type == SocketType::Rep
+                    && self.uses_latency_profile()
+                    && self.peers.contains_key(&peer_id)
+                {
+                    let envelope_identity = msg
+                        .part_bytes(0)
+                        .filter(|part| !part.is_empty())
+                        .unwrap_or_default();
+                    self.rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .push_back((peer_id, envelope_identity));
                 }
                 if self.handle_legacy_subscribe(peer_id, &msg) {
                     return;
@@ -714,6 +833,19 @@ fn can_bypass_actor_recv(t: SocketType) -> bool {
     )
 }
 
+impl SocketDriver {
+    pub(super) fn uses_latency_profile(&self) -> bool {
+        self.options.workload_profile.unwrap_or(
+            if matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
+                WorkloadProfile::Latency
+            } else {
+                WorkloadProfile::Throughput
+            },
+        ) == WorkloadProfile::Latency
+            && !self.options.mechanism.has_frame_transform()
+    }
+}
+
 /// Inproc fast path connection driver context. Replaces the
 /// `engine::ConnectionDriver` / ZMTP codec stack for in-process peers.
 struct InprocDriverCtx {
@@ -727,6 +859,7 @@ struct InprocDriverCtx {
     recv_sink: Option<crate::engine::RecvSink>,
     shared_rx: Option<crate::routing::fallback_queue::FallbackReceiver>,
     send_pipe_rx: crate::engine::SendPipeConsumer,
+    blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
 }
 
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
@@ -753,6 +886,7 @@ async fn inproc_peer_driver(
         mut recv_sink,
         shared_rx,
         mut send_pipe_rx,
+        blocking_recv_waker,
     } = ctx;
     let mut shared_batch = Vec::with_capacity(crate::routing::SHARED_MAX_BATCH_MSGS);
     let mut send_pipe_batch = Vec::with_capacity(crate::routing::SHARED_MAX_BATCH_MSGS);
@@ -870,7 +1004,7 @@ async fn inproc_peer_driver(
                         {
                             return;
                         }
-                        let m = try_push_spsc(spsc.as_ref(), m);
+                        let m = try_push_spsc(spsc.as_ref(), m, &blocking_recv_waker);
                         if let Some(m) = m {
                             let m = match recv_sink.as_mut() {
                                 Some(sink) => sink.try_send(m).await,
@@ -907,6 +1041,7 @@ async fn inproc_peer_driver(
     if let Some(ref ring) = spsc {
         ring.recv_notify.notify_one();
     }
+    blocking_recv_waker.wake();
     let _ = peer_out.try_send((peer_id, PeerEvent::Closed));
 }
 
@@ -915,6 +1050,7 @@ async fn inproc_peer_driver(
 fn try_push_spsc(
     spsc: Option<&Arc<crate::transport::inproc::InprocSpsc>>,
     m: Message,
+    blocking_waker: &crate::socket::recv::BlockingRecvWaker,
 ) -> Option<Message> {
     let Some(ring) = spsc else {
         return Some(m);
@@ -927,6 +1063,7 @@ fn try_push_spsc(
     producer.flush();
     drop(producer);
     ring.recv_notify.notify_one();
+    blocking_waker.wake();
     None
 }
 
@@ -955,7 +1092,11 @@ fn xpub_notification(tag: u8, prefix: &bytes::Bytes) -> Message {
     Message::single(b.freeze())
 }
 
-/// Spawn a socket driver on the current tokio runtime.
-pub(crate) fn spawn_driver(driver: SocketDriver) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { driver.run().await })
+/// Spawn the socket driver actor. With a multi-thread IO pool, this
+/// targets the primary IO thread; otherwise bare `tokio::spawn`.
+pub(crate) fn spawn_driver(
+    driver: SocketDriver,
+    io_pool: &crate::context::IoPoolHandle,
+) -> tokio::task::JoinHandle<()> {
+    io_pool.spawn_primary(async move { driver.run().await })
 }

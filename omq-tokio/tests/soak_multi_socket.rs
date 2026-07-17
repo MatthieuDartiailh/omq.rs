@@ -68,8 +68,8 @@ fn soak_multi_socket() {
     let monitor = soak_common::ResourceMonitor::start();
     let mut tracker = soak_common::ThroughputTracker::new(Duration::from_secs(10));
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    let tracker = ctx.block_on(async move {
         let pairs = create_pairs().await;
         eprintln!("[multi_socket] created {} socket pairs", pairs.len());
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -138,10 +138,10 @@ fn soak_multi_socket() {
             "[multi_socket] done: {total_exchanged} messages across 50 pairs in {:.1}s",
             start.elapsed().as_secs_f64(),
         );
+        tracker
     });
 
     let report = monitor.stop();
     tracker.assert_stable("multi_socket");
-    drop(tracker);
     report.assert_no_leak("multi_socket");
 }

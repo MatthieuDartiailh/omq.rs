@@ -20,10 +20,13 @@ use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 
+use crate::engine::transmit_slot::TryFrameResult;
 use crate::engine::{PeerDriverCommand, PeerDriverHandle, SendPipeError, SendPipeProducer};
-use omq_proto::error::{Error, Result};
+use crate::routing::peer_outbound::PeerOutbound;
+use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
+use omq_proto::proto::SocketType;
 
 enum SendRetry {
     Full(Message, Arc<Notify>),
@@ -34,13 +37,21 @@ enum SendRetry {
 #[derive(Debug)]
 enum PeerTarget {
     Pipe(SendPipeProducer),
+    RepInproc(SendPipeProducer),
+    Direct(PeerOutbound),
     Inbox(tokio::sync::mpsc::Sender<PeerDriverCommand>),
 }
 
 impl PeerTarget {
     fn try_send(&mut self, msg: Message) -> core::result::Result<(), SendPipeError> {
         match self {
-            Self::Pipe(p) => p.try_send(msg),
+            Self::Pipe(p) | Self::RepInproc(p) => p.try_send(msg),
+            Self::Direct(target) => match target.try_encode(&msg) {
+                TryFrameResult::Ok => Ok(()),
+                TryFrameResult::Full => Err(SendPipeError::Full(msg)),
+                TryFrameResult::Dead => Err(SendPipeError::Closed(msg)),
+                TryFrameResult::Ineligible => unreachable!("direct target handles ineligible"),
+            },
             Self::Inbox(tx) => match tx.try_send(PeerDriverCommand::SendMessage(msg)) {
                 Ok(()) => Ok(()),
                 Err(tokio::sync::mpsc::error::TrySendError::Full(
@@ -53,14 +64,55 @@ impl PeerTarget {
 
     fn space_available(&self) -> Option<Arc<Notify>> {
         match self {
-            Self::Pipe(p) => Some(p.space_available()),
+            Self::Pipe(p) | Self::RepInproc(p) => Some(p.space_available()),
+            Self::Direct(target) => target.space_available(),
             Self::Inbox(_) => None,
+        }
+    }
+
+    pub(crate) fn try_send_rep(
+        &mut self,
+        identity: &Bytes,
+        msg: Message,
+    ) -> core::result::Result<(), SendPipeError> {
+        match self {
+            Self::Direct(target) => match target.try_encode_rep(identity, &msg) {
+                TryFrameResult::Ok => Ok(()),
+                TryFrameResult::Full => Err(SendPipeError::Full(msg)),
+                TryFrameResult::Dead => Err(SendPipeError::Closed(msg)),
+                TryFrameResult::Ineligible => unreachable!(),
+            },
+            Self::Pipe(p) => {
+                let wrapped =
+                    Message::with_prefix(identity.clone(), Message::with_prefix(Bytes::new(), msg));
+                p.try_send(wrapped)
+            }
+            Self::RepInproc(p) => {
+                let msg = if identity.is_empty() {
+                    Message::with_prefix(Bytes::new(), msg)
+                } else {
+                    Message::with_prefix(identity.clone(), Message::with_prefix(Bytes::new(), msg))
+                };
+                p.try_send(msg)
+            }
+            Self::Inbox(tx) => {
+                let wrapped =
+                    Message::with_prefix(identity.clone(), Message::with_prefix(Bytes::new(), msg));
+                match tx.try_send(PeerDriverCommand::SendMessage(wrapped)) {
+                    Ok(()) => Ok(()),
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(
+                        PeerDriverCommand::SendMessage(m),
+                    )) => Err(SendPipeError::Full(m)),
+                    Err(_) => Err(SendPipeError::Closed(Message::default())),
+                }
+            }
         }
     }
 
     fn is_empty(&self) -> bool {
         match self {
-            Self::Pipe(p) => p.is_empty(),
+            Self::Pipe(p) | Self::RepInproc(p) => p.is_empty(),
+            Self::Direct(target) => target.is_empty(),
             Self::Inbox(_) => true,
         }
     }
@@ -133,6 +185,41 @@ impl Submitter {
         }
     }
 
+    pub(crate) async fn send_rep(
+        &self,
+        peer_id: u64,
+        identity: &Bytes,
+        mut msg: Message,
+    ) -> Result<()> {
+        loop {
+            match self.try_send_rep(peer_id, identity, msg) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Full(returned)) => msg = returned,
+                Err(TrySendError::Error(error)) => return Err(error),
+                Err(TrySendError::Closed) => return Err(Error::Closed),
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub(crate) fn try_send_rep(
+        &self,
+        peer_id: u64,
+        identity: &Bytes,
+        msg: Message,
+    ) -> core::result::Result<(), TrySendError> {
+        let mut g = self.inner.lock().expect("identity inner poisoned");
+        let Some(peer) = g.peers.get_mut(&peer_id) else {
+            return Err(TrySendError::Error(Error::Unroutable));
+        };
+        peer.target
+            .try_send_rep(identity, msg)
+            .map_err(|e| match e {
+                SendPipeError::Full(m) => TrySendError::Full(m),
+                SendPipeError::Closed(_) => TrySendError::Closed,
+            })
+    }
+
     fn try_send_to(
         &self,
         identity: &Bytes,
@@ -169,6 +256,8 @@ impl Submitter {
 pub(crate) struct IdentitySend {
     inner: Arc<Mutex<IdentityInner>>,
     router_mandatory: bool,
+    latency_profile: bool,
+    rep_latency: bool,
 }
 
 #[derive(Debug)]
@@ -184,13 +273,24 @@ struct IdentityPeer {
 }
 
 impl IdentitySend {
-    pub(crate) fn new(options: &Options) -> Self {
+    pub(crate) fn new(socket_type: SocketType, options: &Options) -> Self {
+        let latency_profile =
+            options
+                .workload_profile
+                .unwrap_or(if socket_type == SocketType::Rep {
+                    omq_proto::WorkloadProfile::Latency
+                } else {
+                    omq_proto::WorkloadProfile::Throughput
+                })
+                == omq_proto::WorkloadProfile::Latency;
         Self {
             inner: Arc::new(Mutex::new(IdentityInner {
                 peers: FxHashMap::default(),
                 identity_to_peer: FxHashMap::default(),
             })),
             router_mandatory: options.router_mandatory,
+            latency_profile,
+            rep_latency: socket_type == SocketType::Rep && latency_profile,
         }
     }
 
@@ -207,10 +307,17 @@ impl IdentitySend {
         peer_id: u64,
         handle: PeerDriverHandle,
         identity: Bytes,
+        is_inproc: bool,
     ) {
-        let target = if let Some(ref pipe_handle) = handle.send_pipe {
+        let target = if self.latency_profile {
+            PeerTarget::Direct(PeerOutbound::from_handle(&handle))
+        } else if let Some(ref pipe_handle) = handle.send_pipe {
             if let Some(pipe) = pipe_handle.lock().expect("identity send pipe").take() {
-                PeerTarget::Pipe(pipe)
+                if self.rep_latency && is_inproc {
+                    PeerTarget::RepInproc(pipe)
+                } else {
+                    PeerTarget::Pipe(pipe)
+                }
             } else {
                 PeerTarget::Inbox(handle.inbox.clone())
             }
@@ -303,7 +410,8 @@ mod tests {
 
     #[test]
     fn try_send_reports_full_and_preserves_routing_frame() {
-        let mut send = IdentitySend::new(&Options::default());
+        let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
+        let mut send = IdentitySend::new(SocketType::Rep, &options);
         let submitter = send.submitter();
 
         let (pipe_tx, _pipe_rx) = send_pipe(1);
@@ -311,9 +419,10 @@ mod tests {
             inbox: tokio::sync::mpsc::channel(1).0,
             cancel: tokio_util::sync::CancellationToken::new(),
             transmit_slot: None,
+            direct_tcp_writer: None,
             send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe_tx)))),
         };
-        send.connection_added(1, handle, Bytes::from_static(b"id"));
+        send.connection_added(1, handle, Bytes::from_static(b"id"), false);
 
         submitter
             .try_send(Message::multipart([

@@ -20,8 +20,8 @@ fn soak_plain_sustained() {
     let recvd = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         let pull = Socket::new(
             SocketType::Pull,
             soak_common::soak_options().plain_server(|peer| {

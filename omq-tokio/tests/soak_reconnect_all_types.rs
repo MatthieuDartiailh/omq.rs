@@ -147,8 +147,8 @@ fn soak_reconnect_all_types() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 
-    let rt = soak_common::tokio_runtime();
-    rt.block_on(async {
+    let ctx = soak_common::build_context();
+    ctx.block_on(async move {
         let mut pairs = create_all_pairs().await;
 
         let mut rng = rand::make_rng::<StdRng>();

@@ -51,7 +51,6 @@ pub(crate) struct RecvConsumers {
 #[derive(Debug)]
 pub(crate) struct OmqSocket {
     pub id: u64,
-    pub thread_idx: usize,
     pub ctx: Arc<OmqContext>,
     pub socket_type: SocketType,
     pub overlay: Mutex<SocketOverlay>,
@@ -115,11 +114,10 @@ fn map_socket_type(t: c_int) -> Option<SocketType> {
 }
 
 /// Run an async op against the socket's inner Arc and return the result.
-/// Spawns the future on the io thread's tokio runtime and blocks the
+/// Spawns the future on the context's tokio runtime and blocks the
 /// calling thread until completion.
 pub(crate) fn with_socket<F, Fut, T>(
     ctx: &Arc<OmqContext>,
-    thread_idx: usize,
     inner: &Arc<omq_tokio::Socket>,
     op: F,
 ) -> Result<T, ()>
@@ -130,7 +128,7 @@ where
 {
     let (otx, orx) = flume::bounded::<T>(1);
     let s = inner.clone();
-    ctx.handle(thread_idx).spawn(async move {
+    ctx.handle().spawn(async move {
         let out = op(s).await;
         let _ = otx.send(out);
     });
@@ -247,7 +245,6 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         set_errno(libc::EMFILE);
         return std::ptr::null_mut();
     };
-    let thread_idx = ctx.assign_thread();
     let id = next_socket_id();
 
     let ctx_arc = ctx.clone();
@@ -255,7 +252,6 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
 
     let sock = Arc::new(OmqSocket {
         id,
-        thread_idx,
         ctx: ctx_arc,
         socket_type,
         overlay: Mutex::new(SocketOverlay::default()),
@@ -299,7 +295,9 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     let Ok(overlay) = sock.overlay.lock() else {
         return;
     };
-    let opts = overlay.to_options();
+    let opts = overlay
+        .to_options()
+        .workload_profile(omq_tokio::options::WorkloadProfile::Throughput);
     let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
     drop(overlay);
 
@@ -335,37 +333,28 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     ));
     let _ = sock.recv_sink_config.set(recv_sink_cfg.clone());
 
-    // Build the inner socket ON the tokio io thread.
-    // Socket::new() calls tokio::spawn internally (spawn_driver), so it
-    // must run within a tokio runtime context.
-    let (otx, orx) = flume::bounded(1);
-    sock.ctx.submit(
-        sock.thread_idx,
-        Box::new(move || {
-            let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_config(
-                socket_type,
-                opts,
-                recv_sink_cfg,
-            ));
+    // Enter the tokio runtime context so that Socket::new (which calls
+    // tokio::spawn internally for its driver task) and the recv pump
+    // spawn below are scheduled on the context's runtime.
+    let _guard = sock.ctx.handle().enter();
 
-            // Recv pump: relay from async_channel into the pump yring.
-            // Handles second+ peers whose drivers push to async_channel.
-            // For the single-peer case, the async_channel stays empty
-            // and this task idles.
-            let s_recv = inner.clone();
-            let recv_pump = tokio::spawn(async move {
-                while let Ok(msg) = s_recv.recv().await {
-                    push_to_pump(&mut pump_prod, msg, recv_notify, &recv_space).await;
-                }
-            });
+    let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_config(
+        socket_type,
+        opts,
+        recv_sink_cfg,
+    ));
 
-            let _ = otx.send((inner, recv_pump));
-        }),
-    );
+    // Recv pump: relay from async_channel into the pump yring.
+    // Handles second+ peers whose drivers push to async_channel.
+    // For the single-peer case, the async_channel stays empty
+    // and this task idles.
+    let s_recv = inner.clone();
+    let recv_pump = tokio::spawn(async move {
+        while let Ok(msg) = s_recv.recv().await {
+            push_to_pump(&mut pump_prod, msg, recv_notify, &recv_space).await;
+        }
+    });
 
-    let Ok((inner, recv_pump)) = orx.recv() else {
-        return;
-    };
     let _ = sock.inner.set(inner);
     let _ = sock.recv_pump.set(recv_pump);
 }
@@ -385,7 +374,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // Enter the tokio runtime context so that dropping OmqSocket (and
     // the Arc<omq_tokio::Socket> it holds) doesn't panic from missing
     // reactor.
-    let _guard = arc.ctx.handle(arc.thread_idx).enter();
+    let _guard = arc.ctx.handle().enter();
 
     arc.notify.close();
     arc.ctx.socket_closed();
@@ -481,7 +470,7 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
         return fail(ETERM);
     };
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
+    let result = with_socket(&sock.ctx, inner, move |s| async move {
         s.bind(endpoint.clone()).await?;
         let resolved = s.last_bound_endpoint().map(|ep| ep.to_string());
         Ok::<_, omq_tokio::error::Error>(resolved)
@@ -515,7 +504,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         return fail(ETERM);
     };
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
+    let result = with_socket(&sock.ctx, inner, move |s| async move {
         s.connect(endpoint).await
     });
 
@@ -545,7 +534,7 @@ pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -
         return fail(ETERM);
     };
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
+    let result = with_socket(&sock.ctx, inner, move |s| async move {
         s.unbind(endpoint).await
     });
 
@@ -563,7 +552,7 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
         return fail(ETERM);
     };
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
+    let result = with_socket(&sock.ctx, inner, move |s| async move {
         s.disconnect(endpoint).await
     });
 
@@ -580,9 +569,7 @@ pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) ->
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
-    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
-        s.join(g).await
-    });
+    let result = with_socket(&sock.ctx, inner, move |s| async move { s.join(g).await });
     result_to_rc(&result)
 }
 
@@ -596,9 +583,7 @@ pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
-    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
-        s.leave(g).await
-    });
+    let result = with_socket(&sock.ctx, inner, move |s| async move { s.leave(g).await });
     result_to_rc(&result)
 }
 
@@ -636,7 +621,7 @@ pub extern "C" fn zmq_socket_monitor(
         return fail(ETERM);
     };
 
-    let result = with_socket(&sock.ctx, sock.thread_idx, inner, move |s| async move {
+    let result = with_socket(&sock.ctx, inner, move |s| async move {
         let mut stream = s.monitor();
 
         // Create a PAIR socket for publishing events, bind it to addr.

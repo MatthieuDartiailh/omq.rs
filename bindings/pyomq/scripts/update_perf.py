@@ -690,7 +690,7 @@ sys.stdout.flush(); os._exit(0)
 
 
 BENCH_PROXY_CLIENT = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "target", "release",
+    os.path.dirname(__file__), "..", "target", "release",
     "bench_proxy_client",
 )
 

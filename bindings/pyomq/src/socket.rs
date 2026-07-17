@@ -1,12 +1,8 @@
 //! Sync `Socket` Python class and the shared inner state used by both
 //! the sync and async wrappers.
 //!
-//! Hot path is queue-relayed: every `send` / `recv` goes through a
-//! per-socket yring SPSC ring buffer. Two pump tasks on the tokio
-//! thread bridge the rings to the actual `omq_tokio::Socket`'s async
-//! send/recv. The fast path (ring not full / not empty) does NOT call
-//! `Python::allow_threads`. The slow path (Full / Empty) releases the
-//! GIL and parks via spin+condvar.
+//! The synchronous wrapper uses `omq_tokio::blocking::Socket` directly.
+//! The asyncio wrapper retains its yring relay and eventfd adapter.
 
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use omq_proto::TrySendError;
 use omq_proto::error::Error as PError;
 use omq_tokio::MonitorEvent;
 use pyo3::prelude::*;
@@ -133,15 +130,24 @@ impl Drop for RecvNotify {
 use std::sync::atomic::AtomicU32;
 
 static FORK_GEN: AtomicU32 = AtomicU32::new(0);
+static PARENT_FORK_GEN: AtomicU32 = AtomicU32::new(0);
+static FORKED: AtomicBool = AtomicBool::new(false);
 static ATFORK_REGISTERED: std::sync::Once = std::sync::Once::new();
 
 extern "C" fn atfork_child() {
+    FORKED.store(true, Ordering::Relaxed);
     FORK_GEN.fetch_add(1, Ordering::Relaxed);
+}
+
+extern "C" fn atfork_parent() {
+    // The parent's runtime remains valid, but sockets materialized before
+    // fork need one safe receive to resynchronize with child-side peers.
+    PARENT_FORK_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn register_atfork() {
     ATFORK_REGISTERED.call_once(|| unsafe {
-        libc::pthread_atfork(None, None, Some(atfork_child));
+        libc::pthread_atfork(Some(atfork_parent), None, Some(atfork_child));
     });
 }
 
@@ -160,6 +166,12 @@ pub(crate) struct Materialized {
     pub recv_pump: JoinHandle<()>,
 }
 
+pub(crate) struct BlockingMaterialized {
+    pub id: u64,
+    fork_gen: u32,
+    pub socket: omq_tokio::blocking::Socket,
+}
+
 /// Shared state for sync (`Socket`) and async (`AsyncSocket`) wrappers.
 /// Both pyclasses hold an `Arc<SocketInner>` and route I/O through the
 /// helpers below.
@@ -167,9 +179,16 @@ pub(crate) struct SocketInner {
     pub ctx: Arc<ContextInner>,
     pub socket_type: omq_tokio::SocketType,
     pub overlay: Mutex<options::Overlay>,
+    pub subscriptions: Mutex<Vec<Bytes>>,
+    pub endpoints: Mutex<Vec<(omq_tokio::Endpoint, bool)>>,
+    has_tcp_endpoint: AtomicBool,
+    parent_fork_gen: AtomicU32,
+    post_fork: AtomicBool,
     pub sndbuf: Mutex<SendBuffer>,
     pub rxbuf: Mutex<Vec<Bytes>>,
+    pub rxmsgs: Mutex<Vec<omq_tokio::Message>>,
     pub materialized: std::sync::RwLock<Option<Materialized>>,
+    pub blocking_materialized: std::sync::RwLock<Option<BlockingMaterialized>>,
     closed: AtomicBool,
 }
 
@@ -181,9 +200,16 @@ impl SocketInner {
             ctx,
             socket_type,
             overlay: Mutex::new(overlay),
+            subscriptions: Mutex::new(Vec::new()),
+            endpoints: Mutex::new(Vec::new()),
+            has_tcp_endpoint: AtomicBool::new(false),
+            parent_fork_gen: AtomicU32::new(PARENT_FORK_GEN.load(Ordering::Relaxed)),
+            post_fork: AtomicBool::new(FORKED.load(Ordering::Relaxed)),
             sndbuf: Mutex::new(SendBuffer::default()),
             rxbuf: Mutex::new(Vec::new()),
+            rxmsgs: Mutex::new(Vec::new()),
             materialized: std::sync::RwLock::new(None),
+            blocking_materialized: std::sync::RwLock::new(None),
             closed: AtomicBool::new(false),
         })
     }
@@ -246,8 +272,77 @@ impl SocketInner {
     }
 
     pub fn ensure_id(&self) -> PyResult<u64> {
+        let fgen = FORK_GEN.load(Ordering::Relaxed);
+        if let Some(m) = self.blocking_materialized.read().unwrap().as_ref()
+            && m.fork_gen == fgen
+        {
+            return Ok(m.id);
+        }
         self.materialize()?;
         Ok(self.materialized.read().unwrap().as_ref().unwrap().id)
+    }
+
+    pub fn materialize_blocking(&self) -> PyResult<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(map_err(omq_proto::error::Error::Closed));
+        }
+        let fgen = FORK_GEN.load(Ordering::Relaxed);
+        if self
+            .blocking_materialized
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|m| m.fork_gen == fgen)
+        {
+            return Ok(());
+        }
+        let mut slot = self.blocking_materialized.write().unwrap();
+        if slot.as_ref().is_some_and(|m| m.fork_gen == fgen) {
+            return Ok(());
+        }
+        // The inherited blocking socket owns the parent's runtime. Dropping
+        // it after fork would try to join threads that do not exist here.
+        if let Some(stale) = slot.take() {
+            std::mem::forget(stale);
+        }
+        let opts = self.overlay.lock().unwrap().to_options()?;
+        let (id, socket) = self.ctx.materialize_blocking(self.socket_type, opts)?;
+        for (endpoint, is_bind) in self.endpoints.lock().unwrap().clone() {
+            if is_bind {
+                socket.bind(endpoint).map_err(map_err)?;
+            } else {
+                socket.connect(endpoint).map_err(map_err)?;
+            }
+        }
+        *slot = Some(BlockingMaterialized {
+            id,
+            fork_gen: fgen,
+            socket,
+        });
+        Ok(())
+    }
+
+    pub fn ensure_blocking_socket(&self) -> PyResult<omq_tokio::blocking::Socket> {
+        self.materialize_blocking()?;
+        Ok(self
+            .blocking_materialized
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .socket
+            .clone())
+    }
+
+    pub fn ensure_blocking_id(&self) -> PyResult<u64> {
+        self.materialize_blocking()?;
+        Ok(self
+            .blocking_materialized
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .id)
     }
 
     /// Return the Arc<Socket> after materializing. Used by dispatch.
@@ -310,6 +405,11 @@ impl SocketInner {
             m.recv_notify.force_wake();
         }
         mat
+    }
+
+    pub fn take_blocking_materialized(&self) -> Option<BlockingMaterialized> {
+        self.closed.store(true, Ordering::Relaxed);
+        self.blocking_materialized.write().unwrap().take()
     }
 }
 
@@ -498,29 +598,55 @@ impl Socket {
 #[pymethods]
 impl Socket {
     fn socket_id(&self) -> PyResult<u64> {
-        self.inner.ensure_id()
+        self.inner.ensure_blocking_id()
     }
 
     fn bind(&self, py: Python<'_>, endpoint: &str) -> PyResult<String> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::sync_string(&self.inner, py, |s| async move {
-            s.bind(ep).await.map(|bound| bound.to_string())
-        })
+        let bound = dispatch::blocking_string(&self.inner, py, move |s| {
+            let bound = s.bind(ep.clone())?;
+            Ok(bound.to_string())
+        })?;
+        if let Ok(endpoint) = SocketInner::parse_endpoint(&bound) {
+            if endpoint.to_string().starts_with("tcp://") {
+                self.inner.has_tcp_endpoint.store(true, Ordering::Release);
+            }
+            self.inner.endpoints.lock().unwrap().push((endpoint, true));
+        }
+        Ok(bound)
     }
 
     fn connect(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.connect(ep).await })
+        let subscriptions = self.inner.subscriptions.lock().unwrap().clone();
+        let recorded_ep = ep.clone();
+        dispatch::blocking_unit(&self.inner, py, move |s| {
+            s.connect(ep)?;
+            for prefix in subscriptions {
+                s.subscribe(prefix)?;
+            }
+            Ok(())
+        })?;
+        let is_tcp = recorded_ep.to_string().starts_with("tcp://");
+        self.inner
+            .endpoints
+            .lock()
+            .unwrap()
+            .push((recorded_ep, false));
+        if is_tcp {
+            self.inner.has_tcp_endpoint.store(true, Ordering::Release);
+        }
+        Ok(())
     }
 
     fn unbind(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.unbind(ep).await })
+        dispatch::blocking_unit(&self.inner, py, move |s| s.unbind(ep))
     }
 
     fn disconnect(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.disconnect(ep).await })
+        dispatch::blocking_unit(&self.inner, py, move |s| s.disconnect(ep))
     }
 
     #[pyo3(signature = (payload, flags = 0))]
@@ -577,37 +703,31 @@ impl Socket {
 
     fn subscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.subscribe(bytes).await })
+        dispatch::blocking_unit(&self.inner, py, move |s| s.subscribe(bytes))
     }
 
     fn unsubscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
-        dispatch::sync_unit(
-            &self.inner,
-            py,
-            |s| async move { s.unsubscribe(bytes).await },
-        )
+        dispatch::blocking_unit(&self.inner, py, move |s| s.unsubscribe(bytes))
     }
 
     fn join(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.join(bytes).await })
+        dispatch::blocking_unit(&self.inner, py, move |s| s.join(bytes))
     }
 
     fn leave(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
-        dispatch::sync_unit(&self.inner, py, |s| async move { s.leave(bytes).await })
+        dispatch::blocking_unit(&self.inner, py, move |s| s.leave(bytes))
     }
 
     /// Return a list of dicts describing every live peer connection.
     fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let sock = self.inner.ensure_socket()?;
-        let ctx = self.inner.ctx.clone();
         let statuses: Vec<omq_tokio::ConnectionStatus> = py.detach(|| {
-            ctx.with_socket(&sock, |s| async move {
-                s.connections().await.unwrap_or_default()
-            })
-        });
+            self.inner
+                .ensure_blocking_socket()
+                .map(|s| s.connections().unwrap_or_default())
+        })?;
         // Temporary allocation to be able to propagate errors
         let temp = statuses
             .iter()
@@ -623,12 +743,11 @@ impl Socket {
         py: Python<'py>,
         connection_id: u64,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let sock = self.inner.ensure_socket()?;
-        let ctx = self.inner.ctx.clone();
         let status: Option<omq_tokio::ConnectionStatus> = py.detach(|| {
-            ctx.with_socket(&sock, move |s| async move {
-                s.connection_info(connection_id).await.ok().flatten()
-            })
+            self.inner
+                .ensure_blocking_socket()
+                .ok()
+                .and_then(|s| s.connection_info(connection_id).ok().flatten())
         });
         match status {
             Some(cs) => connection_status_to_dict(py, &cs).map(|d| d.into_any()),
@@ -638,10 +757,9 @@ impl Socket {
 
     /// Return a `Monitor` that delivers connection-lifecycle events for
     /// this socket. Multiple monitors can be active simultaneously.
-    fn monitor(&self, py: Python<'_>) -> PyResult<Monitor> {
-        let sock = self.inner.ensure_socket()?;
-        let ctx = self.inner.ctx.clone();
-        let stream = py.detach(|| ctx.with_socket(&sock, |s| async move { s.monitor() }));
+    fn monitor(&self, _py: Python<'_>) -> PyResult<Monitor> {
+        let sock = self.inner.ensure_blocking_socket()?;
+        let stream = sock.monitor();
         Ok(Monitor::from_stream(&self.inner.ctx, stream))
     }
 
@@ -658,17 +776,15 @@ impl Socket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
-
     #[pyo3(signature = (_linger=None))]
     fn close(&self, py: Python<'_>, _linger: Option<i64>) -> PyResult<()> {
-        let m = self.inner.take_materialized();
-        let Some(m) = m else {
-            return Ok(());
-        };
-        let ctx = self.inner.ctx.clone();
-        py.detach(|| {
-            ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump);
-        });
+        if let Some(m) = self.inner.take_blocking_materialized() {
+            py.detach(|| m.socket.close()).map_err(map_err)?;
+        }
+        if let Some(m) = self.inner.take_materialized() {
+            let ctx = self.inner.ctx.clone();
+            py.detach(|| ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump));
+        }
         Ok(())
     }
 
@@ -692,107 +808,112 @@ impl Socket {
 
 impl Socket {
     fn send_message(&self, py: Python<'_>, msg: omq_tokio::Message) -> PyResult<()> {
-        self.inner.materialize()?;
-        let result = {
-            let mat_guard = self.inner.materialized.read().unwrap();
-            let mat = mat_guard.as_ref().unwrap();
-            let mut prod = mat.send_prod.lock().unwrap();
-            prod.push_and_flush(msg)
-        };
-        match result {
-            Ok(_) => Ok(()),
-            Err(mut msg) => {
-                let send_notify = {
-                    let mat_guard = self.inner.materialized.read().unwrap();
-                    mat_guard.as_ref().unwrap().send_notify.clone()
-                };
-                let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
-                py.detach(|| {
-                    let deadline = timeout.map(|t| Instant::now() + t);
-                    send_notify.park_begin();
+        let sock = self.inner.ensure_blocking_socket()?;
+        let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
+        let post_fork = self.inner.post_fork.swap(false, Ordering::AcqRel);
+        if post_fork {
+            let tcp = self.inner.has_tcp_endpoint.load(Ordering::Acquire);
+            py.detach(|| {
+                if tcp {
+                    let _ = sock.wait_connected(1, Duration::from_secs(1));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            });
+        }
+
+        match sock.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Closed) => Err(map_err(PError::Closed)),
+            Err(TrySendError::Error(e)) => Err(map_err(e)),
+            Err(TrySendError::Full(msg)) => py.detach(|| match timeout {
+                None => sock.send(msg).map_err(map_err),
+                Some(timeout) => {
+                    let deadline = Instant::now() + timeout;
+                    let mut msg = msg;
                     loop {
-                        let push_result = {
-                            let mat_guard = self.inner.materialized.read().unwrap();
-                            let mat = mat_guard.as_ref().ok_or_else(|| {
-                                send_notify.park_end();
-                                map_err(PError::Closed)
-                            })?;
-                            let mut prod = mat.send_prod.lock().unwrap();
-                            prod.push_and_flush(msg)
-                        };
-                        match push_result {
-                            Ok(_) => {
-                                send_notify.park_end();
-                                return Ok(());
-                            }
-                            Err(returned) => msg = returned,
+                        match sock.try_send(msg) {
+                            Ok(()) => return Ok(()),
+                            Err(TrySendError::Full(returned)) => msg = returned,
+                            Err(TrySendError::Closed) => return Err(map_err(PError::Closed)),
+                            Err(TrySendError::Error(e)) => return Err(map_err(e)),
                         }
-                        if deadline.is_some_and(|d| Instant::now() >= d) {
-                            send_notify.park_end();
+                        if Instant::now() >= deadline {
                             return Err(timeout_err());
                         }
-                        let wait_dur = deadline
-                            .map(|d| d.saturating_duration_since(Instant::now()))
-                            .unwrap_or(Duration::from_millis(100));
-                        send_notify.wait_timeout(wait_dur);
+                        std::thread::sleep(Duration::from_millis(1));
                     }
-                })
-            }
+                }
+            }),
         }
     }
 
     fn recv_message(&self, py: Python<'_>) -> PyResult<omq_tokio::Message> {
-        self.inner.materialize()?;
-        let (recv_notify, recv_space) = {
-            let mat_guard = self.inner.materialized.read().unwrap();
-            let mat = mat_guard.as_ref().unwrap();
-            let mut cons = mat.recv_cons.lock().unwrap();
-            if let Some(m) = cons.prefetch_and_pop() {
-                mat.recv_space.notify_one();
-                return Ok(m);
+        let cached = {
+            let mut msgs = self.inner.rxmsgs.lock().unwrap();
+            if msgs.is_empty() {
+                None
+            } else {
+                Some(msgs.remove(0))
             }
-            (mat.recv_notify.clone(), mat.recv_space.clone())
         };
+        if let Some(msg) = cached {
+            return Ok(msg);
+        }
+        let sock = self.inner.ensure_blocking_socket()?;
         let timeout = self.inner.overlay.lock().unwrap().rcvtimeo;
-        py.detach(|| {
-            let deadline = timeout.map(|t| Instant::now() + t);
-
-            recv_notify.park_begin();
-            {
-                let mat_guard = self.inner.materialized.read().unwrap();
-                let mat = mat_guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
-                let mut cons = mat.recv_cons.lock().unwrap();
-                if let Some(m) = cons.prefetch_and_pop() {
-                    recv_notify.park_end();
-                    recv_space.notify_one();
-                    return Ok(m);
+        let parent_fork = self.inner.parent_fork_gen.load(Ordering::Acquire)
+            != PARENT_FORK_GEN.load(Ordering::Acquire);
+        if parent_fork {
+            self.inner
+                .parent_fork_gen
+                .store(PARENT_FORK_GEN.load(Ordering::Acquire), Ordering::Release);
+        }
+        let post_fork_recv = self.inner.post_fork.load(Ordering::Acquire)
+            || FORKED.load(Ordering::Acquire)
+            || parent_fork;
+        let tcp = self.inner.has_tcp_endpoint.load(Ordering::Acquire);
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Pull) && post_fork_recv && tcp {
+            let wait = timeout.unwrap_or(Duration::from_secs(1));
+            let _ = sock.wait_connected(1, wait);
+            let _ = sock.connections();
+        }
+        // Probe the backend pipe while holding the GIL. This is safe for
+        // sockets with any mix of inproc, ipc, and tcp endpoints.
+        if !post_fork_recv {
+            match sock.try_recv() {
+                Ok(msg) => return Ok(msg),
+                Err(omq_proto::error::Error::Closed) => {
+                    return Err(map_err(omq_proto::error::Error::Closed));
                 }
+                Err(_) => {}
             }
-
-            loop {
-                let wait_dur = match deadline {
-                    Some(d) => {
-                        let now = Instant::now();
-                        if now >= d {
-                            recv_notify.park_end();
-                            return Err(timeout_err());
-                        }
-                        d - now
+        }
+        py.detach(|| match timeout {
+            None if !post_fork_recv => sock.recv().map_err(map_err),
+            None => loop {
+                match sock.try_recv() {
+                    Ok(msg) => {
+                        self.inner.post_fork.store(false, Ordering::Release);
+                        break Ok(msg);
                     }
-                    None => Duration::from_millis(100),
-                };
-                recv_notify.wait_timeout(wait_dur);
-                {
-                    let mat_guard = self.inner.materialized.read().unwrap();
-                    let mat = mat_guard.as_ref().ok_or_else(|| {
-                        recv_notify.park_end();
-                        map_err(PError::Closed)
-                    })?;
-                    let mut cons = mat.recv_cons.lock().unwrap();
-                    if let Some(m) = cons.prefetch_and_pop() {
-                        recv_notify.park_end();
-                        recv_space.notify_one();
-                        return Ok(m);
+                    Err(omq_proto::error::Error::Closed) => {
+                        break Err(map_err(omq_proto::error::Error::Closed));
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(1)),
+                }
+            },
+            Some(timeout) => {
+                let deadline = Instant::now() + timeout;
+                loop {
+                    match sock.try_recv() {
+                        Ok(msg) => return Ok(msg),
+                        Err(omq_proto::error::Error::Closed) => {
+                            return Err(map_err(omq_proto::error::Error::Closed));
+                        }
+                        Err(_) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => return Err(timeout_err()),
                     }
                 }
             }
@@ -800,12 +921,18 @@ impl Socket {
     }
 
     fn try_recv_message(&self) -> PyResult<omq_tokio::Message> {
-        self.inner.materialize()?;
-        let mat_guard = self.inner.materialized.read().unwrap();
-        let mat = mat_guard.as_ref().unwrap();
-        let mut cons = mat.recv_cons.lock().unwrap();
-        let msg = cons.prefetch_and_pop().ok_or_else(timeout_err)?;
-        mat.recv_space.notify_one();
-        Ok(msg)
+        let cached = {
+            let mut msgs = self.inner.rxmsgs.lock().unwrap();
+            if msgs.is_empty() {
+                None
+            } else {
+                Some(msgs.remove(0))
+            }
+        };
+        if let Some(msg) = cached {
+            return Ok(msg);
+        }
+        let sock = self.inner.ensure_blocking_socket()?;
+        sock.try_recv().map_err(map_err)
     }
 }

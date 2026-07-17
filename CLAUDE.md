@@ -37,6 +37,9 @@ is covered by `tests/coverage_matrix.rs`.
 Three-layer split: `omq-proto` (sans-I/O ZMTP codec) -> `omq-tokio`
 backend -> user `Socket` API. Two queues per socket: one inbound,
 one outbound. Per-connection driver tasks bridge queues and wire.
+`Context` owns a tokio runtime on a dedicated OS thread (1 IO thread
+/ current_thread by default, multi_thread for N > 1).
+`Context::current()` wraps an existing runtime for embedded use.
 Full detail in `doc/`:
 [`architecture.md`](doc/architecture.md),
 [`libzmq/`](doc/libzmq/).

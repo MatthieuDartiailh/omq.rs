@@ -1,5 +1,6 @@
 //! Per-connection driver: one tokio task per live peer connection.
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -7,11 +8,12 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, split};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use futures::stream::FuturesOrdered;
+use omq_proto::WorkloadProfile;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut};
@@ -21,7 +23,90 @@ use super::compression_pool::CompressionPool;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
 use super::transmit_slot::PeerTransmitSlot;
 use crate::routing::fallback_queue::FallbackReceiver;
+use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
+use omq_proto::flow::{DrainBudget, max_batch_bytes};
 use omq_proto::frame_buffer::FrameBuffer;
+
+const RECV_SMALL_MSG: usize = 1024;
+const RECV_MEDIUM_MSG: usize = 4096;
+const RECV_SMALL_BYTES: usize = 64 * 1024;
+const RECV_MEDIUM_BYTES: usize = 1024 * 1024;
+const RECV_LARGE_BYTES: usize = 1024 * 1024;
+const RECV_MEDIUM_TIME: Duration = Duration::from_micros(200);
+const RECV_LARGE_TIME: Duration = Duration::from_micros(200);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiveProfile {
+    Latency,
+    LatencyReq,
+    Throughput,
+}
+
+/// Stream abstraction allowing production TCP streams to use owned halves.
+pub trait DriverStream: Sized {
+    type Reader: AsyncRead + Send + Unpin + 'static;
+    type Writer: AsyncWrite + Send + Unpin + 'static;
+
+    fn split(self, fast_write: bool) -> (Self::Reader, Self::Writer);
+}
+
+impl DriverStream for AnyStream {
+    type Reader = AnyReadHalf;
+    type Writer = AnyWriteHalf;
+
+    fn split(self, fast_write: bool) -> (Self::Reader, Self::Writer) {
+        AnyStream::split(self, fast_write)
+    }
+}
+
+impl DriverStream for tokio::net::TcpStream {
+    type Reader = tokio::net::tcp::OwnedReadHalf;
+    type Writer = tokio::net::tcp::OwnedWriteHalf;
+
+    fn split(self, _fast_write: bool) -> (Self::Reader, Self::Writer) {
+        self.into_split()
+    }
+}
+
+impl ReceiveProfile {
+    pub(crate) fn from_workload_for_socket(
+        profile: WorkloadProfile,
+        socket_type: omq_proto::SocketType,
+    ) -> Self {
+        match (profile, socket_type) {
+            (WorkloadProfile::Latency, omq_proto::SocketType::Req) => Self::LatencyReq,
+            (WorkloadProfile::Latency, _) => Self::Latency,
+            (WorkloadProfile::Throughput, _) => Self::Throughput,
+        }
+    }
+
+    fn budget(self, msg_bytes: usize) -> DrainBudget {
+        match self {
+            Self::Latency | Self::LatencyReq => DrainBudget::new(8, 16 * 1024),
+            Self::Throughput => {
+                let (max_msgs, max_bytes) = if msg_bytes <= RECV_SMALL_MSG {
+                    (256, RECV_SMALL_BYTES)
+                } else if msg_bytes <= RECV_MEDIUM_MSG {
+                    (256, RECV_MEDIUM_BYTES)
+                } else {
+                    (256, RECV_LARGE_BYTES)
+                };
+                DrainBudget::new(max_msgs, max_bytes)
+            }
+        }
+    }
+
+    fn time(self, msg_bytes: usize) -> Option<Duration> {
+        match self {
+            Self::Latency | Self::LatencyReq => Some(Duration::from_micros(5)),
+            // The small profile already has tight message/byte bounds. Avoid
+            // clock reads here; this is the hot path for tiny messages.
+            Self::Throughput if msg_bytes <= RECV_SMALL_MSG => None,
+            Self::Throughput if msg_bytes <= RECV_MEDIUM_MSG => Some(RECV_MEDIUM_TIME),
+            Self::Throughput => Some(RECV_LARGE_TIME),
+        }
+    }
+}
 
 /// Where the driver routes decoded inbound messages.
 ///
@@ -32,6 +117,17 @@ use omq_proto::frame_buffer::FrameBuffer;
 pub enum RecvSink {
     Channel(Arc<crate::socket::recv::SharedRecvPipe>),
     Yring(YringSink),
+    Rep(RepRecvSink),
+}
+
+/// REP's latency receive path: perform identity/envelope handling in the
+/// connection driver, before the message reaches the socket actor.
+#[derive(Debug)]
+pub struct RepRecvSink {
+    sink: Box<RecvSink>,
+    identity: std::sync::Arc<std::sync::Mutex<Option<bytes::Bytes>>>,
+    pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, bytes::Bytes)>>>,
+    peer_id: u64,
 }
 
 /// Yring-based recv sink. Pushes decoded messages directly into a
@@ -118,6 +214,7 @@ impl std::fmt::Debug for RecvSink {
                 .debug_struct("Yring")
                 .field("producer", &y.producer)
                 .finish_non_exhaustive(),
+            Self::Rep(_) => f.debug_tuple("Rep").finish_non_exhaustive(),
         }
     }
 }
@@ -142,6 +239,26 @@ impl YringSink {
 }
 
 impl RecvSink {
+    pub(crate) fn set_rep_identity(&mut self, identity: bytes::Bytes) {
+        if let Self::Rep(rep) = self {
+            *rep.identity.lock().expect("rep identity") = Some(identity);
+        }
+    }
+
+    pub(crate) fn rep(
+        sink: RecvSink,
+        identity: std::sync::Arc<std::sync::Mutex<Option<bytes::Bytes>>>,
+        pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, bytes::Bytes)>>>,
+        peer_id: u64,
+    ) -> Self {
+        Self::Rep(RepRecvSink {
+            sink: Box::new(sink),
+            identity,
+            pending,
+            peer_id,
+        })
+    }
+
     /// Non-blocking push. Returns the message back if the yring is full.
     /// Channel variant always succeeds (awaits space).
     pub(crate) async fn try_send(&mut self, m: Message) -> Option<Message> {
@@ -157,10 +274,11 @@ impl RecvSink {
                 }
                 Err(returned) => Some(returned),
             },
+            Self::Rep(_) => unreachable!("REP uses the blocking direct path"),
         }
     }
 
-    async fn send(&mut self, m: Message) -> bool {
+    async fn send_plain(&mut self, m: Message) -> bool {
         match self {
             Self::Channel(pipe) => pipe.send(m).await.is_ok(),
             Self::Yring(sink) => {
@@ -198,7 +316,37 @@ impl RecvSink {
                     return true;
                 }
             }
+            Self::Rep(_) => unreachable!("plain send on REP sink"),
         }
+    }
+
+    async fn send(&mut self, m: Message) -> bool {
+        if let Self::Rep(rep) = self {
+            let mut m = m;
+            let identity =
+                if let Some(identity) = rep.identity.lock().expect("rep identity").clone() {
+                    if m.part_bytes(0).is_some_and(|part| part.is_empty()) {
+                        m.pop_front();
+                    }
+                    identity
+                } else if m.part_bytes(1).is_some_and(|part| part.is_empty()) {
+                    let Some(identity) = m.pop_front() else {
+                        return false;
+                    };
+                    m.pop_front();
+                    identity
+                } else {
+                    bytes::Bytes::new()
+                };
+            rep.pending
+                .lock()
+                .expect("rep pending")
+                .push_back((rep.peer_id, identity.clone()));
+            let wrapped =
+                Message::with_prefix(identity, Message::with_prefix(bytes::Bytes::new(), m));
+            return rep.sink.send_plain(wrapped).await;
+        }
+        self.send_plain(m).await
     }
 }
 
@@ -271,7 +419,6 @@ async fn batch_encode(
 const READ_BUF_SIZE: usize = 128 * 1024;
 
 use crate::routing::SHARED_MAX_BATCH_MSGS;
-use omq_proto::flow::{DrainBudget, max_batch_bytes};
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
@@ -315,6 +462,7 @@ pub struct PeerDriverHandle {
     pub inbox: mpsc::Sender<PeerDriverCommand>,
     pub cancel: CancellationToken,
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
+    pub(crate) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
 }
 
@@ -334,7 +482,7 @@ pub enum PeerEvent {
 #[derive(Debug)]
 pub struct ConnectionDriver<T>
 where
-    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    T: DriverStream,
 {
     stream: T,
     codec: Connection,
@@ -372,11 +520,12 @@ where
     send_pipe_rx: Option<SendPipeConsumer>,
     arena_threshold: usize,
     arena_cap: usize,
+    receive_profile: ReceiveProfile,
 }
 
 impl<T> ConnectionDriver<T>
 where
-    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    T: DriverStream,
 {
     pub fn new(
         stream: T,
@@ -424,6 +573,7 @@ where
             send_pipe_rx: None,
             arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
             arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+            receive_profile: ReceiveProfile::Throughput,
         }
     }
 
@@ -512,6 +662,22 @@ where
         self
     }
 
+    pub(crate) fn with_receive_profile(mut self, profile: ReceiveProfile) -> Self {
+        self.receive_profile = profile;
+        self
+    }
+
+    /// Re-register the stream with the current thread's reactor. Call
+    /// at the top of a future spawned on the target IO thread so the
+    /// fd is polled by that thread, not the one that accepted/connected.
+    pub(crate) fn migrate_stream(mut self) -> io::Result<Self>
+    where
+        T: crate::socket::dispatch::Migratable,
+    {
+        self.stream = self.stream.migrate()?;
+        Ok(self)
+    }
+
     /// Run the driver to completion. Returns:
     /// - `Ok(())` on clean shutdown (peer EOF, canceled, `Close` command,
     ///   inbox dropped).
@@ -550,12 +716,14 @@ where
             mut send_pipe_rx,
             arena_threshold,
             arena_cap,
+            receive_profile,
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
-        let (mut reader, mut writer) = split(stream);
+        let latency_profile = !matches!(receive_profile, ReceiveProfile::Throughput);
+        let (mut reader, mut writer) = stream.split(latency_profile);
         let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
-        let mut large_recv_buf = BytesMut::new();
+        let recv_pool = RecvBufPool::new();
         let mut eq = FrameBuffer::with_config(arena_threshold, arena_cap);
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
         let mut arena_buf: Vec<u8> = Vec::with_capacity(4096);
@@ -581,6 +749,18 @@ where
             }
 
             while let Some(ev) = codec.poll_event() {
+                if let Event::HandshakeSucceeded {
+                    peer_properties, ..
+                } = &ev
+                {
+                    let identity = peer_properties
+                        .identity
+                        .clone()
+                        .unwrap_or_else(|| omq_proto::message::generated_identity(peer_id));
+                    if let Some(sink) = recv_direct.as_mut() {
+                        sink.set_rep_identity(identity);
+                    }
+                }
                 if peer_out
                     .send((peer_id, PeerEvent::Event(ev)))
                     .await
@@ -589,6 +769,10 @@ where
                     return Ok(());
                 }
             }
+            let recv_batch_start = Instant::now();
+            let mut recv_budget = None;
+            let mut recv_batch_time = None;
+            let mut recv_budget_exhausted = false;
             while let Some(m) = codec.poll_message() {
                 let m = match decoder.as_mut() {
                     Some(dec) => match dec.decode(m)? {
@@ -597,9 +781,27 @@ where
                     },
                     None => m,
                 };
+                let msg_bytes = m.byte_len();
+                let budget = recv_budget.get_or_insert_with(|| {
+                    recv_batch_time = receive_profile.time(msg_bytes);
+                    receive_profile.budget(msg_bytes)
+                });
                 if !route_message(m, &mut recv_direct, &peer_out, peer_id).await {
                     return Ok(());
                 }
+                let budget_remains = budget.account(msg_bytes);
+                let time_check = budget.msgs().is_multiple_of(32);
+                if !budget_remains
+                    || (time_check
+                        && recv_batch_time.is_some_and(|limit| recv_batch_start.elapsed() >= limit))
+                {
+                    recv_budget_exhausted = true;
+                    break;
+                }
+            }
+            if recv_budget_exhausted {
+                tokio::task::yield_now().await;
+                continue;
             }
 
             // Set handshake_done on the encode slot once the handshake
@@ -616,6 +818,20 @@ where
             let want_write = codec.has_pending_transmit() || !eq.is_empty();
             let hb_enabled = hb_interval.is_some() && codec.is_ready();
 
+            // Latency-routed REQ/REP sends are encoded into the wire slot by
+            // the caller. Drain that already-queued work before polling the
+            // reader, avoiding an extra zero-time reactor roundtrip.
+            if latency_profile && transmit_slot.as_ref().is_some_and(|slot| !slot.is_empty()) {
+                drain_transmit_slot(
+                    transmit_slot.as_ref().unwrap(),
+                    &mut drain_buf,
+                    &mut arena_buf,
+                    &mut writer,
+                )
+                .await?;
+                continue;
+            }
+
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
@@ -625,12 +841,29 @@ where
                     return Ok(());
                 }
 
+                // Latency-routed sends are written by the socket handle into
+                // the slot. Poll this wakeup before the reader: otherwise a
+                // reply can cause an unnecessary zero-time reactor poll
+                // before the next request is written.
+                () = async {
+                    transmit_slot.as_ref().unwrap().data_signal.notified().await;
+                }, if latency_profile && transmit_slot.as_ref().is_some_and(|s| {
+                    s.handshake_done.load(Ordering::Acquire)
+                }) => {
+                    drain_transmit_slot(
+                        transmit_slot.as_ref().unwrap(), &mut drain_buf,
+                        &mut arena_buf, &mut writer,
+                    ).await?;
+                    if latency_profile {
+                    }
+                }
+
                 // Handshake deadline; disabled once handshake completes.
                 () = sleep_until_opt(handshake_deadline), if handshake_deadline.is_some() => {
                     return Err(Error::HandshakeFailed("handshake timeout".into()));
                 }
 
-                res = reader.read_buf(&mut read_buf) => {
+                res = reader.read_buf(&mut read_buf), if !latency_profile || inbox.is_empty() => {
                     last_input = Instant::now();
                     let n = res?;
                     if n == 0 {
@@ -641,10 +874,7 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    // Copy + clear: allocates proportional to actual
-                    // data, preserves the 128 KiB read buffer capacity.
-                    let chunk = Bytes::copy_from_slice(&read_buf);
-                    read_buf.clear();
+                    let chunk = read_buf.split().freeze();
                     if let Err(e) = codec.handle_input(chunk) {
                         while let Some(ev) = codec.poll_event() {
                             let _ = peer_out
@@ -655,7 +885,7 @@ where
                     }
                     handle_large_messages(
                         &mut codec, &mut reader, &config, &mut last_input,
-                        &mut large_recv_buf,
+                        &recv_pool,
                     ).await?;
                 }
 
@@ -675,7 +905,8 @@ where
                     res?;
                 }
 
-                cmd = inbox.recv() => match cmd {
+                cmd = inbox.recv() => {
+                    match cmd {
                     Some(PeerDriverCommand::SendMessage(first)) => {
                         // TODO: Give driver control commands an explicit
                         // msg/byte/time budget. Current mixed inbox batches
@@ -715,15 +946,24 @@ where
                             drain_writes(&mut writer, &mut codec).await.ok();
                             return Ok(());
                         }
+                        if latency_profile {
+                        }
                     }
                     Some(PeerDriverCommand::SendEncoded(chunks)) => {
                         eq.push_shared_chunks(&chunks);
                         flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf).await?;
+                        if latency_profile {
+                        }
                     }
-                    Some(PeerDriverCommand::SendCommand(c)) => codec.send_command(&c)?,
+                    Some(PeerDriverCommand::SendCommand(c)) => {
+                        codec.send_command(&c)?;
+                        if latency_profile {
+                        }
+                    }
                     Some(PeerDriverCommand::Close) | None => {
                         drain_writes(&mut writer, &mut codec).await.ok();
                         return Ok(());
+                    }
                     }
                 },
 
@@ -786,7 +1026,7 @@ where
                 // directly, bypassing the local FrameBuffer.
                 () = async {
                     transmit_slot.as_ref().unwrap().data_signal.notified().await;
-                }, if transmit_slot.as_ref().is_some_and(|s| {
+                }, if !latency_profile && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
                     drain_transmit_slot(
@@ -950,20 +1190,65 @@ async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// After reading bytes from the wire, check for large frames whose
-/// payload exceeds the threshold and read them directly into a
-/// pre-sized buffer (bypasses the fixed `read_buf` -> codec copy path).
-///
-/// `reuse_buf` is kept across calls so the allocation is reused. Once
-/// grown to the largest frame size seen on a connection it stays there,
-/// avoiding per-message mmap/munmap for payloads above glibc's 128 KiB
-/// mmap threshold.
+// -- Recv buffer pool --------------------------------------------------------
+//
+// Large messages (above the arena threshold) need their own allocation.
+// Without pooling, each message triggers mmap + page faults for fresh
+// zeroed pages. The pool recycles buffers: pages stay warm, no syscall
+// per message after warmup.
+
+#[derive(Debug)]
+struct RecvBufPool(std::sync::Mutex<Vec<Vec<u8>>>);
+
+impl RecvBufPool {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(std::sync::Mutex::new(Vec::new())))
+    }
+
+    fn take(&self, capacity: usize) -> Vec<u8> {
+        let mut pool = self.0.lock().expect("recv buf pool");
+        if let Some(mut buf) = pool.pop() {
+            if buf.capacity() < capacity {
+                buf.reserve(capacity - buf.capacity());
+            }
+            buf
+        } else {
+            Vec::with_capacity(capacity)
+        }
+    }
+
+    fn give(&self, buf: Vec<u8>) {
+        self.0.lock().expect("recv buf pool").push(buf);
+    }
+}
+
+struct PooledRecvBuf {
+    buf: Vec<u8>,
+    pool: Arc<RecvBufPool>,
+}
+
+impl AsRef<[u8]> for PooledRecvBuf {
+    fn as_ref(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
+impl Drop for PooledRecvBuf {
+    fn drop(&mut self) {
+        let buf = std::mem::take(&mut self.buf);
+        self.pool.give(buf);
+    }
+}
+
+/// Read large frames directly into pooled buffers (bypasses the fixed
+/// `read_buf` -> codec copy path). The pool recycles allocations so
+/// pages stay warm across messages.
 async fn handle_large_messages<R: AsyncRead + Unpin>(
     codec: &mut Connection,
     reader: &mut R,
     config: &PeerDriverConfig,
     last_input: &mut Instant,
-    reuse_buf: &mut BytesMut,
+    recv_pool: &Arc<RecvBufPool>,
 ) -> Result<()> {
     #[cfg(feature = "ws")]
     let skip_large = codec.is_ws();
@@ -979,13 +1264,17 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
         let Some((plen, prefix)) = codec.begin_supplied_payload_with_prefix() else {
             break;
         };
-        reuse_buf.resize(plen, 0);
-        reuse_buf[..prefix.len()].copy_from_slice(prefix.as_slice());
+        let mut buf = recv_pool.take(plen);
+        buf.resize(plen, 0);
+        buf[..prefix.len()].copy_from_slice(prefix.as_slice());
         if prefix.len() < plen {
-            reader.read_exact(&mut reuse_buf[prefix.len()..]).await?;
+            reader.read_exact(&mut buf[prefix.len()..plen]).await?;
         }
         *last_input = Instant::now();
-        let payload = reuse_buf.split().freeze();
+        let payload = Bytes::from_owner(PooledRecvBuf {
+            buf,
+            pool: Arc::clone(recv_pool),
+        });
         codec.supply_payload(payload)?;
     }
     Ok(())
@@ -1274,11 +1563,21 @@ where
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use tokio::io::DuplexStream;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use omq_proto::proto::connection::{ConnectionConfig, Role};
     use omq_proto::proto::{Event, SocketType};
+
+    impl DriverStream for DuplexStream {
+        type Reader = tokio::io::ReadHalf<Self>;
+        type Writer = tokio::io::WriteHalf<Self>;
+
+        fn split(self, _fast_write: bool) -> (Self::Reader, Self::Writer) {
+            tokio::io::split(self)
+        }
+    }
 
     /// Adapter: pull `(u64, PeerEvent::Event)` off the shared peer-out
     /// channel and yield bare `Event` values, matching the older
@@ -1352,6 +1651,7 @@ mod tests {
                 inbox: c_inbox_tx,
                 cancel: c_cancel,
                 transmit_slot: None,
+                direct_tcp_writer: None,
                 send_pipe: None,
             },
             EventAdapter { rx: c_evt_rx },
@@ -1359,6 +1659,7 @@ mod tests {
                 inbox: s_inbox_tx,
                 cancel: s_cancel,
                 transmit_slot: None,
+                direct_tcp_writer: None,
                 send_pipe: None,
             },
             EventAdapter { rx: s_evt_rx },

@@ -269,7 +269,6 @@ impl AsyncSocket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
-
     // ── Lifecycle ───────────────────────────────────────────────────
 
     #[pyo3(signature = (_linger=None))]
