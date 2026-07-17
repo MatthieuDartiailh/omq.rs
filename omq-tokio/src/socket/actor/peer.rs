@@ -287,7 +287,7 @@ impl SocketDriver {
                 .options
                 .transmit_slot_cap
                 .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
-            let transmit_slot_msg_cap = self.options.send_hwm.unwrap_or(1000).max(1) as usize;
+            let transmit_slot_msg_cap = self.options.send_hwm.max(1) as usize;
             Some(crate::engine::transmit_slot::PeerTransmitSlot::new(
                 peer_id,
                 has_transform,
@@ -309,7 +309,7 @@ impl SocketDriver {
             Some(ref s) => driver.with_transmit_slot(s.clone()),
             None => driver,
         };
-        let pipe_cap = self.options.send_hwm.unwrap_or(1024).max(16) as usize;
+        let pipe_cap = self.options.send_hwm.max(16) as usize;
         let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
         let driver = driver.with_send_pipe(send_pipe_rx);
 
@@ -339,7 +339,7 @@ impl SocketDriver {
                         driver.with_recv_sink(sink)
                     }
                 } else {
-                    let cap = self.options.recv_hwm.unwrap_or(1024).max(16) as usize;
+                    let cap = self.options.recv_hwm.max(16) as usize;
                     let (prod, cons) = yring::spsc(cap);
                     let recv_notify = self.spsc.recv_notify.clone();
                     let blocking_waker = self.spsc.blocking_recv_waker.clone();
@@ -499,7 +499,7 @@ impl SocketDriver {
         let inbox_cap = 64usize;
         let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
         let child_cancel = self.cancel.child_token();
-        let pipe_cap = self.options.send_hwm.unwrap_or(1024).max(16) as usize;
+        let pipe_cap = self.options.send_hwm.max(16) as usize;
         let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
 
         // Pre-build the synthesised PeerProperties from the
@@ -1004,23 +1004,20 @@ async fn inproc_peer_driver(
                         {
                             return;
                         }
-                        let m = try_push_spsc(spsc.as_ref(), m, &blocking_recv_waker);
-                        if let Some(m) = m {
-                            let m = match recv_sink.as_mut() {
-                                Some(sink) => sink.try_send(m).await,
-                                None => Some(m),
-                            };
-                            if let Some(m) = m
-                                && !route_inproc_message(
-                                    m,
-                                    recv_direct.as_ref(),
-                                    &peer_out,
-                                    peer_id,
-                                )
-                                .await
-                            {
-                                return;
-                            }
+                        let m = match recv_sink.as_mut() {
+                            Some(sink) => sink.try_send(m).await,
+                            None => Some(m),
+                        };
+                        if let Some(m) = m
+                            && !route_inproc_message(
+                                m,
+                                recv_direct.as_ref(),
+                                &peer_out,
+                                peer_id,
+                            )
+                            .await
+                        {
+                            return;
                         }
                     }
                     Some(InboundFrame::Command(c)) => {
@@ -1043,28 +1040,6 @@ async fn inproc_peer_driver(
     }
     blocking_recv_waker.wake();
     let _ = peer_out.try_send((peer_id, PeerEvent::Closed));
-}
-
-/// Try to push a message into the SPSC ring. Returns `None` if pushed
-/// (consumed), or `Some(m)` if the ring is full or absent.
-fn try_push_spsc(
-    spsc: Option<&Arc<crate::transport::inproc::InprocSpsc>>,
-    m: Message,
-    blocking_waker: &crate::socket::recv::BlockingRecvWaker,
-) -> Option<Message> {
-    let Some(ring) = spsc else {
-        return Some(m);
-    };
-    let mut producer = ring.producer.lock().unwrap();
-    if producer.is_full() {
-        return Some(m);
-    }
-    let _ = producer.push(m);
-    producer.flush();
-    drop(producer);
-    ring.recv_notify.notify_one();
-    blocking_waker.wake();
-    None
 }
 
 /// Route a message to `recv_direct` or through the actor via `emit_event`.

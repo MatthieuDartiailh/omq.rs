@@ -133,8 +133,8 @@ impl SocketOverlay {
             },
         };
         omq_tokio::Options {
-            send_hwm: self.send_hwm.or(Some(DEFAULT_HWM as u32)),
-            recv_hwm: self.recv_hwm.or(Some(DEFAULT_HWM as u32)),
+            send_hwm: self.send_hwm.unwrap_or(DEFAULT_HWM as u32),
+            recv_hwm: self.recv_hwm.unwrap_or(DEFAULT_HWM as u32),
             linger: self.linger,
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
@@ -321,13 +321,19 @@ pub extern "C" fn zmq_setsockopt(
             let Some(v) = read_i32(optval, optvallen) else {
                 return fail(libc::EINVAL);
             };
-            lock_overlay!(sock_arc).send_hwm = if v <= 0 { None } else { Some(v as u32) };
+            if v <= 0 {
+                return fail(libc::EINVAL);
+            }
+            lock_overlay!(sock_arc).send_hwm = Some(v as u32);
         }
         ZMQ_RCVHWM => {
             let Some(v) = read_i32(optval, optvallen) else {
                 return fail(libc::EINVAL);
             };
-            lock_overlay!(sock_arc).recv_hwm = if v <= 0 { None } else { Some(v as u32) };
+            if v <= 0 {
+                return fail(libc::EINVAL);
+            }
+            lock_overlay!(sock_arc).recv_hwm = Some(v as u32);
         }
         ZMQ_LINGER => {
             let Some(v) = read_i32(optval, optvallen) else {

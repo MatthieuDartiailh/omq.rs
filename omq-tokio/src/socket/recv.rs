@@ -29,19 +29,27 @@ const RECV_BATCH_MESSAGES: usize = 256;
 /// Waker for blocking `recv()`. IO threads call `wake()` alongside
 /// `tokio::sync::Notify::notify_one()`. The blocking user thread
 /// parks via `std::thread::park()` and is woken by `unpark()`.
-pub(crate) struct BlockingRecvWaker(Mutex<Option<std::thread::Thread>>);
+pub(crate) struct BlockingRecvWaker {
+    registered: AtomicBool,
+    thread: Mutex<Option<std::thread::Thread>>,
+}
 
 impl BlockingRecvWaker {
     pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self(Mutex::new(None)))
+        Arc::new(Self {
+            registered: AtomicBool::new(false),
+            thread: Mutex::new(None),
+        })
     }
 
     pub(crate) fn register(&self, thread: std::thread::Thread) {
-        *self.0.lock().unwrap() = Some(thread);
+        *self.thread.lock().unwrap() = Some(thread);
+        self.registered.store(true, Ordering::Release);
     }
 
     pub(crate) fn wake(&self) {
-        if let Ok(guard) = self.0.try_lock()
+        if self.registered.load(Ordering::Acquire)
+            && let Ok(guard) = self.thread.try_lock()
             && let Some(ref t) = *guard
         {
             t.unpark();
@@ -611,7 +619,8 @@ impl SpscAwareRecv {
         if !self.send_ring_available.load(Ordering::Acquire) {
             return SpscPush::Unavailable(msg);
         }
-        let Some(pair) = self.send_ring.load_full() else {
+        let pair = self.send_ring.load();
+        let Some(pair) = pair.as_ref() else {
             return SpscPush::Unavailable(msg);
         };
         if !pair.recv_ready.load(Ordering::Acquire)
@@ -621,9 +630,7 @@ impl SpscAwareRecv {
         {
             return SpscPush::Unavailable(msg);
         }
-        let Ok(mut producer) = pair.producer.try_lock() else {
-            return SpscPush::Unavailable(msg);
-        };
+        let mut producer = pair.producer.lock().unwrap();
         if producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
             return SpscPush::Unavailable(msg);
         }
@@ -638,16 +645,6 @@ impl SpscAwareRecv {
         pair.recv_notify.notify_one();
         self.blocking_recv_waker.wake();
         SpscPush::Sent
-    }
-
-    /// SPSC send fast path: push directly into the peer's yring.
-    /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
-    /// unavailable or the ring is full.
-    pub(crate) fn try_push_spsc(&self, msg: Message) -> core::result::Result<(), Message> {
-        match self.try_push_spsc_or_full(msg) {
-            SpscPush::Sent => Ok(()),
-            SpscPush::Unavailable(msg) | SpscPush::Full { msg, .. } => Err(msg),
-        }
     }
 }
 

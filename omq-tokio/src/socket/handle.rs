@@ -137,8 +137,8 @@ impl Socket {
              carry queueable single-message-state semantics"
         );
         let cancel = CancellationToken::new();
-        let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.unwrap_or(1024).max(16) as usize);
-        let recv_hwm = options.recv_hwm.unwrap_or(1024).max(16) as usize;
+        let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.max(16) as usize);
+        let recv_hwm = options.recv_hwm.max(16) as usize;
         let blocking_recv_waker = super::recv::BlockingRecvWaker::new();
         let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
             super::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
@@ -307,10 +307,7 @@ impl Socket {
             }
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                let Some(msg) = self.send_spsc_or_return(msg).await? else {
-                    return Ok(());
-                };
-                self.inner.send_submitter.send(msg).await
+                self.send_spsc_or_submit(msg).await
             }
         }
     }
@@ -368,11 +365,11 @@ impl Socket {
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
-                let msg = match self.try_push_spsc(msg) {
-                    Ok(()) => return Ok(()),
-                    Err(msg) => msg,
-                };
-                self.inner.send_submitter.try_send(msg)
+                match self.inner.recv_rx.try_push_spsc_or_full(msg) {
+                    SpscPush::Sent => Ok(()),
+                    SpscPush::Full { msg, .. } => Err(TrySendError::Full(msg)),
+                    SpscPush::Unavailable(msg) => self.inner.send_submitter.try_send(msg),
+                }
             }
         }
     }
@@ -802,11 +799,13 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
 }
 
 impl Socket {
-    async fn send_spsc_or_return(&self, mut msg: Message) -> Result<Option<Message>> {
+    async fn send_spsc_or_submit(&self, mut msg: Message) -> Result<()> {
         loop {
             match self.inner.recv_rx.try_push_spsc_or_full(msg) {
-                SpscPush::Sent => return Ok(None),
-                SpscPush::Unavailable(returned) => return Ok(Some(returned)),
+                SpscPush::Sent => return Ok(()),
+                SpscPush::Unavailable(returned) => {
+                    return self.inner.send_submitter.send(returned).await;
+                }
                 SpscPush::Full {
                     msg: returned,
                     space,
@@ -816,28 +815,18 @@ impl Socket {
                     tokio::pin!(notified);
                     notified.as_mut().enable();
                     match self.inner.recv_rx.try_push_spsc_or_full(msg) {
-                        SpscPush::Sent => return Ok(None),
-                        SpscPush::Unavailable(returned) => return Ok(Some(returned)),
+                        SpscPush::Sent => return Ok(()),
+                        SpscPush::Unavailable(returned) => {
+                            return self.inner.send_submitter.send(returned).await;
+                        }
                         SpscPush::Full { msg: returned, .. } => {
-                            tokio::select! {
-                                biased;
-                                () = notified => {
-                                    msg = returned;
-                                }
-                                () = tokio::task::yield_now() => return Ok(Some(returned)),
-                            }
+                            notified.await;
+                            msg = returned;
                         }
                     }
                 }
             }
         }
-    }
-
-    /// SPSC send fast path: push directly into the peer's yring.
-    /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
-    /// unavailable or the ring is full.
-    fn try_push_spsc(&self, msg: Message) -> core::result::Result<(), Message> {
-        self.inner.recv_rx.try_push_spsc(msg)
     }
 }
 

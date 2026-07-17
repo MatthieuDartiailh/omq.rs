@@ -27,7 +27,7 @@ async fn connect_to_silent_peer_times_out_then_backpressures() {
     let opts = Options {
         handshake_timeout: Some(Duration::from_millis(100)),
         reconnect: ReconnectPolicy::Disabled,
-        send_hwm: Some(hwm),
+        send_hwm: hwm,
         ..Default::default()
     };
     let push = Socket::new(SocketType::Push, opts);
