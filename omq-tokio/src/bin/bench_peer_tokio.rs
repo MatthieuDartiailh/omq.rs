@@ -1240,8 +1240,8 @@ fn train_json_dict(capacity: usize) -> Vec<u8> {
         (4096, 4),
     ];
     for &(size, count) in sample_sizes {
-        let payload = json_payload_seeded(size, 0);
-        for _ in 0..count {
+        for i in 1..=count {
+            let payload = json_payload_seeded(size, i as u32);
             trainer.add_sample(&payload);
         }
     }

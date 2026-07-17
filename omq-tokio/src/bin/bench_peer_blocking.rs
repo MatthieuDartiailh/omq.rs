@@ -88,6 +88,7 @@ fn install_signals() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig::from_env());
@@ -152,6 +153,25 @@ fn main() {
             let warmup: usize = args[5].parse().expect("warmup");
             run_req(&ctx, ep, size, iterations, warmup);
         }
+        Some("inproc") => {
+            let name = args[2].clone();
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            run_inproc(&ctx, name, size, Duration::from_secs_f64(duration));
+        }
+        Some("inproc-2ut") => {
+            let name = args[2].clone();
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            run_inproc_2ut(&ctx, name, size, Duration::from_secs_f64(duration));
+        }
+        Some("inproc-latency") => {
+            let name = args[2].clone();
+            let size: usize = args[3].parse().expect("msg_size");
+            let iterations: usize = args[4].parse().expect("iterations");
+            let warmup: usize = args[5].parse().expect("warmup");
+            run_inproc_latency(&ctx, name, size, iterations, warmup);
+        }
         _ => {
             eprintln!("usage: bench_peer_blocking push <addr> <size>");
             eprintln!("       bench_peer_blocking pull <addr> <size> <duration_secs>");
@@ -164,6 +184,11 @@ fn main() {
             eprintln!("       bench_peer_blocking multi-sub <addr> <size> <duration_secs> <count>");
             eprintln!("       bench_peer_blocking rep <addr> <size>");
             eprintln!("       bench_peer_blocking req <addr> <size> <iterations> <warmup>");
+            eprintln!("       bench_peer_blocking inproc <name> <size> <duration_secs>");
+            eprintln!("       bench_peer_blocking inproc-2ut <name> <size> <duration_secs>");
+            eprintln!(
+                "       bench_peer_blocking inproc-latency <name> <size> <iterations> <warmup>"
+            );
             std::process::exit(1);
         }
     }
@@ -667,6 +692,174 @@ fn percentile(sorted: &[u64], p: f64) -> f64 {
     }
     let idx = ((sorted.len() as f64 * p / 100.0) as usize).min(sorted.len() - 1);
     sorted[idx] as f64 / 1_000.0
+}
+
+fn run_inproc(ctx: &omq_tokio::Context, name: String, size: usize, duration: Duration) {
+    let ep = Endpoint::Inproc { name };
+    let push = ctx.blocking_socket(SocketType::Push, bench_options(size));
+    push.bind(ep.clone()).expect("push bind");
+    let pull = ctx.blocking_socket(SocketType::Pull, bench_options(size));
+    pull.connect(ep).expect("pull connect");
+
+    let payload = bench_payload(size);
+    std::thread::spawn(move || {
+        if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
+            loop {
+                send_fast(&push, Message::from_slice(&payload));
+            }
+        } else {
+            let msg = Message::single(payload.clone());
+            loop {
+                send_fast(&push, msg.clone());
+            }
+        }
+    });
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let mut count: u64 = 0;
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if pull.try_recv().is_ok() {
+            count += 1;
+            while Instant::now() < deadline && pull.try_recv().is_ok() {
+                count += 1;
+            }
+        } else {
+            std::thread::yield_now();
+        }
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!("{count} {elapsed:.6} {size}");
+}
+
+fn run_inproc_2ut(ctx: &omq_tokio::Context, name: String, size: usize, duration: Duration) {
+    let ep = Endpoint::Inproc { name };
+    let pull = ctx.blocking_socket(SocketType::Pull, bench_options(size));
+    let push = ctx.blocking_socket(SocketType::Push, bench_options(size));
+    pull.bind(ep.clone()).expect("pull bind");
+    push.connect(ep).expect("push connect");
+    push.wait_connected(1, Duration::from_secs(5))
+        .expect("wait for inproc connection");
+
+    let payload = bench_payload(size);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let sender_barrier = Arc::clone(&barrier);
+    let sender_stop = Arc::clone(&stop);
+    let sender_push = push.clone();
+    let sender = std::thread::spawn(move || {
+        sender_barrier.wait();
+        if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
+            loop {
+                if sender_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                match sender_push.try_send(Message::from_slice(&payload)) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => std::hint::spin_loop(),
+                    Err(_) => break,
+                }
+            }
+        } else {
+            let msg = Message::single(payload);
+            loop {
+                if sender_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                match sender_push.try_send(msg.clone()) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => std::hint::spin_loop(),
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
+    let receiver_barrier = barrier;
+    let receiver_stop = Arc::clone(&stop);
+    let receiver_pull = pull.clone();
+    let receiver = std::thread::spawn(move || {
+        receiver_barrier.wait();
+        let start = Instant::now();
+        let deadline = start + duration;
+        let mut count = 0u64;
+        let mut until_timer_check = 10_000usize;
+        loop {
+            match receiver_pull.try_recv() {
+                Ok(_) => count += 1,
+                Err(_) => std::hint::spin_loop(),
+            }
+            until_timer_check -= 1;
+            if until_timer_check == 0 {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                until_timer_check = 10_000;
+            }
+        }
+        receiver_stop.store(true, Ordering::Release);
+        (count, start.elapsed())
+    });
+
+    let (count, elapsed) = receiver.join().expect("receiver thread");
+    sender.join().expect("sender thread");
+    let _ = pull.close();
+    let _ = push.close();
+    println!("{count} {:.6} {size}", elapsed.as_secs_f64());
+}
+
+fn run_inproc_latency(
+    ctx: &omq_tokio::Context,
+    name: String,
+    size: usize,
+    iterations: usize,
+    warmup: usize,
+) {
+    let ep = Endpoint::Inproc { name };
+    let rep = ctx.blocking_socket(SocketType::Rep, Options::default());
+    rep.bind(ep.clone()).expect("rep bind");
+
+    std::thread::spawn(move || {
+        loop {
+            let msg = rep.recv().unwrap();
+            rep.send(msg).unwrap();
+        }
+    });
+
+    let req = ctx.blocking_socket(SocketType::Req, Options::default());
+    req.connect(ep).expect("req connect");
+    std::thread::sleep(Duration::from_millis(200));
+
+    let payload = Bytes::from(vec![b'x'; size]);
+    let msg = Message::single(payload);
+
+    for _ in 0..warmup {
+        req.send(msg.clone()).unwrap();
+        req.recv().unwrap();
+    }
+
+    let t_wall = Instant::now();
+    let mut rtts = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        req.send(msg.clone()).unwrap();
+        req.recv().unwrap();
+        rtts.push(t0.elapsed().as_nanos() as u64);
+    }
+    let elapsed = t_wall.elapsed().as_secs_f64();
+
+    rtts.sort_unstable();
+    let p50 = percentile(&rtts, 50.0);
+    let p99 = percentile(&rtts, 99.0);
+    let p999 = percentile(&rtts, 99.9);
+    let max = percentile(&rtts, 100.0);
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} 0 {elapsed:.6}");
 }
 
 #[expect(clippy::cast_precision_loss)]

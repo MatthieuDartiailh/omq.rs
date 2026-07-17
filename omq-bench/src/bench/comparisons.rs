@@ -87,9 +87,9 @@ static IMPLS: &[ImplDef] = &[
         prefix: "b",
         class: Some(ImplClass::Classic),
         main: false,
-        transports: &[Tcp, Ipc],
-        inproc_tput_subcmd: "",
-        inproc_lat_subcmd: "",
+        transports: &[Tcp, Ipc, Inproc],
+        inproc_tput_subcmd: "inproc",
+        inproc_lat_subcmd: "inproc-latency",
         inproc_pubsub_subcmd: "",
         pub_needs_peer_count: true,
         fanout_subcmd: "push",
@@ -112,6 +112,22 @@ static IMPLS: &[ImplDef] = &[
         fanio_needs_peer_count: true,
         supports_pubsub: true,
         env: &[("OMQ_IO_THREADS", "2")],
+    },
+    ImplDef {
+        name: "omq-tokio-2ut",
+        binary_from: Some("omq-tokio-1t"),
+        prefix: "v",
+        class: Some(ImplClass::Classic),
+        main: false,
+        transports: &[Inproc],
+        inproc_tput_subcmd: "inproc-2ut",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: true,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: false,
+        env: &[("OMQ_IO_THREADS", "1")],
     },
     ImplDef {
         name: "libzmq",
@@ -1423,7 +1439,13 @@ pub(crate) fn run(args: ComparisonsArgs) {
     }
 
     let mut impl_names: Vec<&str> = if args.omq {
-        vec!["omq-tokio-ct", "omq-tokio-2t"]
+        let mut v = vec!["omq-tokio-1t", "omq-tokio-2t"];
+        for name in &args.impls {
+            if !v.contains(&name.as_str()) {
+                v.push(name.as_str());
+            }
+        }
+        v
     } else if !args.impls.is_empty() {
         args.impls.iter().map(std::string::String::as_str).collect()
     } else {
@@ -1671,11 +1693,17 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 .copied()
                 .collect();
 
+            let pubsub_sizes: Vec<u64> = sizes
+                .iter()
+                .copied()
+                .filter(|s| COMPARISON_CHART_SIZES.contains(s))
+                .collect();
+
             for &peer_count in &args.pubsub_peers {
                 eprintln!("\n=== PubSub {peer_count}p / {transport_str} ===");
                 print_throughput_header(&pubsub_impls);
 
-                for &size in &sizes {
+                for &size in &pubsub_sizes {
                     eprint!("{:>8}", size_label(size));
                     for &impl_name in &pubsub_impls {
                         let def = find_impl(impl_name).unwrap();
@@ -1757,11 +1785,17 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 .copied()
                 .collect();
 
+            let fanout_sizes: Vec<u64> = sizes
+                .iter()
+                .copied()
+                .filter(|s| COMPARISON_CHART_SIZES.contains(s))
+                .collect();
+
             for &peer_count in &args.fanout_peers {
                 eprintln!("\n=== FanOut {peer_count}p / {transport_str} ===");
                 print_throughput_header(&fanout_impls);
 
-                for &size in &sizes {
+                for &size in &fanout_sizes {
                     eprint!("{:>8}", size_label(size));
                     for &impl_name in &fanout_impls {
                         let def = find_impl(impl_name).unwrap();
@@ -1837,11 +1871,17 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 .copied()
                 .collect();
 
+            let fanin_sizes: Vec<u64> = sizes
+                .iter()
+                .copied()
+                .filter(|s| COMPARISON_CHART_SIZES.contains(s))
+                .collect();
+
             for &peer_count in &args.fanin_peers {
                 eprintln!("\n=== FanIn {peer_count}p / {transport_str} ===");
                 print_throughput_header(&fanin_impls);
 
-                for &size in &sizes {
+                for &size in &fanin_sizes {
                     eprint!("{:>8}", size_label(size));
                     for &impl_name in &fanin_impls {
                         let def = find_impl(impl_name).unwrap();
@@ -1925,10 +1965,15 @@ pub(crate) fn run(args: ComparisonsArgs) {
 
         if !curve_impls.is_empty() {
             let peer_count = args.curve_peers;
+            let curve_sizes: Vec<u64> = sizes
+                .iter()
+                .copied()
+                .filter(|s| COMPARISON_CHART_SIZES.contains(s))
+                .collect();
             eprintln!("\n=== CURVE PubSub {peer_count}p / tcp ===");
             print_throughput_header(&curve_impls);
 
-            for &size in &sizes {
+            for &size in &curve_sizes {
                 eprint!("{:>8}", size_label(size));
                 for &impl_name in &curve_impls {
                     let def = find_impl(impl_name).unwrap();
