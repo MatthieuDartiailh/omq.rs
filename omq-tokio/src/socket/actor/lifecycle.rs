@@ -1,4 +1,4 @@
-use super::{DisconnectReason, Message, MonitorEvent, PeerEntry, SocketDriver, SocketType};
+use super::{DisconnectReason, MonitorEvent, PeerEntry, SocketDriver, SocketType};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -102,7 +102,7 @@ impl<'a> PeerLifecycle<'a> {
 
     pub(super) fn register_tcp_consumer(
         &mut self,
-        consumer: yring::Consumer<Message>,
+        consumer: yring::Consumer<crate::socket::recv::RecvItem>,
         space: Arc<tokio::sync::Notify>,
         peer_id: u64,
     ) {

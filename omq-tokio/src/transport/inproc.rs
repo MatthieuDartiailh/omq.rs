@@ -22,15 +22,16 @@ use tokio::sync::mpsc;
 
 use omq_proto::error::{Error, Result};
 use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
-use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
 use crate::engine::signal::DataSignal;
+use crate::socket::recv::RecvItem;
 
 /// Sender-side SPSC state for inproc fast path.
+#[allow(private_interfaces)]
 #[derive(Debug)]
 pub struct InprocTx {
-    pub producer: yring::ProducerOwner<Message>,
+    pub producer: yring::ProducerOwner<RecvItem>,
     pub(crate) recv_notify: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub max_message_size: Option<usize>,
@@ -39,9 +40,10 @@ pub struct InprocTx {
 }
 
 /// Receiver-side SPSC state for inproc fast path.
+#[allow(private_interfaces)]
 #[derive(Debug)]
 pub struct InprocRx {
-    pub consumer: Mutex<yring::Consumer<Message>>,
+    pub consumer: Mutex<yring::Consumer<RecvItem>>,
     pub batch_remaining: std::sync::atomic::AtomicUsize,
     pub(crate) recv_notify: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
@@ -305,6 +307,7 @@ impl Drop for InprocListener {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use omq_proto::message::Message;
     use omq_proto::proto::SocketType;
 
     fn snap(t: SocketType) -> InprocPeerSnapshot {

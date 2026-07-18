@@ -13,6 +13,7 @@ pub(crate) mod send_pipe;
 pub(crate) mod signal;
 pub(crate) mod transmit_slot;
 
+pub use crate::socket::recv::RecvItem;
 pub use driver::{
     ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverHandle, PeerEvent, RecvSink,
     RecvSinkConfig, YringSink,

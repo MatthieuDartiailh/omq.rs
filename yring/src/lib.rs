@@ -162,14 +162,6 @@ impl<T> Ring<T> {
         count
     }
 
-    pub(crate) fn prefetch_up_to(&self, cached_tail: &mut usize, max_items: usize) -> usize {
-        let new_tail = self.tail.0.load(Ordering::Acquire);
-        let available = new_tail.wrapping_sub(*cached_tail);
-        let count = available.min(max_items);
-        *cached_tail = cached_tail.wrapping_add(count);
-        count
-    }
-
     #[inline]
     pub(crate) fn consumer_is_empty(&self, head: usize, cached_tail: usize) -> bool {
         head == cached_tail && self.tail.0.load(Ordering::Acquire) == head
@@ -456,16 +448,6 @@ impl<T> Consumer<T> {
         self.ring.prefetch(&mut self.cached_tail)
     }
 
-    /// Load at most `max_items` flushed items with one Acquire load.
-    ///
-    /// Unlike [`prefetch`](Self::prefetch), this leaves later flushed items
-    /// for a subsequent prefetch. Call [`release`](Self::release) only after
-    /// all items returned by this prefetch have been popped.
-    #[inline]
-    pub fn prefetch_up_to(&mut self, max_items: usize) -> usize {
-        self.ring.prefetch_up_to(&mut self.cached_tail, max_items)
-    }
-
     /// Convenience: prefetch + pop + release. For callers that don't
     /// need batching.
     #[inline]
@@ -616,30 +598,6 @@ mod tests {
             assert_eq!(c.pop(), Some(i));
         }
         assert!(c.pop().is_none());
-    }
-
-    #[test]
-    fn bounded_batch_prefetch() {
-        let (mut p, mut c) = spsc::<u32>(8);
-        for i in 0..5 {
-            p.push(i).unwrap();
-        }
-        p.flush();
-
-        assert_eq!(c.prefetch_up_to(2), 2);
-        assert_eq!(c.pop(), Some(0));
-        assert_eq!(c.pop(), Some(1));
-        c.release();
-
-        assert_eq!(c.prefetch_up_to(2), 2);
-        assert_eq!(c.pop(), Some(2));
-        assert_eq!(c.pop(), Some(3));
-        c.release();
-
-        assert_eq!(c.prefetch_up_to(2), 1);
-        assert_eq!(c.pop(), Some(4));
-        c.release();
-        assert_eq!(c.prefetch_up_to(2), 0);
     }
 
     #[test]

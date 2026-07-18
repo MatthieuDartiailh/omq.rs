@@ -577,7 +577,12 @@ fn try_pop_dual(
     }
     cons.fast
         .prefetch_and_pop()
-        .or_else(|| cons.pump.prefetch_and_pop())
+        .map(omq_tokio::engine::RecvItem::into_message)
+        .or_else(|| {
+            cons.pump
+                .prefetch_and_pop()
+                .map(omq_tokio::engine::RecvItem::into_message)
+        })
 }
 
 #[inline]
