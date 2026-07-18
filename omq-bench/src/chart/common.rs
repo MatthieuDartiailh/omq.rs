@@ -110,6 +110,16 @@ pub(crate) fn nice_step(max_val: f64, target_lines: usize) -> f64 {
     mag * 10.0
 }
 
+pub(crate) fn nice_axis(max_val: f64, target_lines: usize) -> (f64, usize) {
+    let step = nice_step(max_val, target_lines);
+    if max_val <= 0.0 {
+        return (step * target_lines as f64, target_lines);
+    }
+
+    let ticks = (max_val / step).ceil().max(1.0) as usize;
+    (step * ticks as f64, ticks)
+}
+
 // ── hardware detection ─────────────────────────────────────────
 
 pub(crate) fn detect_hardware() -> Option<String> {
@@ -592,8 +602,7 @@ pub(crate) fn draw_throughput_dual_panel(
         .flat_map(|m| m.values())
         .map(|v| v / 1000.0)
         .fold(0.0_f64, f64::max);
-    let gbs_step = nice_step(gbs_raw, n_ticks);
-    let gbs_max = gbs_step * n_ticks as f64;
+    let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, n_ticks);
 
     let msgs_raw = small
         .iter()
@@ -601,14 +610,23 @@ pub(crate) fn draw_throughput_dual_panel(
         .flat_map(|m| m.values())
         .copied()
         .fold(0.0_f64, f64::max);
-    let msgs_step = nice_step(msgs_raw, n_ticks);
-    let msgs_max = msgs_step * n_ticks as f64;
+    let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
 
     if !small.is_empty() {
-        draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks, None)?;
+        draw_msgs_panel(
+            &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
+        )?;
     }
     if !large.is_empty() {
-        draw_gbs_panel(&right_area, &large, &present, tput, gbs_max, n_ticks, None)?;
+        draw_gbs_panel(
+            &right_area,
+            &large,
+            &present,
+            tput,
+            gbs_max,
+            gbs_ticks,
+            None,
+        )?;
     }
 
     draw_legend_table(&table_area, &present, cpu, snd_label, rcv_label)?;
@@ -882,11 +900,12 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
         .flat_map(|m| m.values())
         .copied()
         .fold(0.0_f64, f64::max);
-    let msgs_step = nice_step(msgs_raw, n_ticks);
-    let msgs_max = msgs_step * n_ticks as f64;
+    let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
 
     if !small.is_empty() {
-        draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks, None)?;
+        draw_msgs_panel(
+            &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
+        )?;
     }
     if !large.is_empty() {
         draw_gbs_panel_log(&right_area, &large, &present, tput)?;
@@ -1063,8 +1082,7 @@ pub(crate) fn draw_multirow_throughput(
             .flat_map(|m| m.values())
             .map(|v| v / 1000.0)
             .fold(0.0_f64, f64::max);
-        let gbs_step = nice_step(gbs_raw, n_ticks);
-        let gbs_max = gbs_step * n_ticks as f64;
+        let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, n_ticks);
 
         let msgs_raw = small
             .iter()
@@ -1072,13 +1090,12 @@ pub(crate) fn draw_multirow_throughput(
             .flat_map(|m| m.values())
             .copied()
             .fold(0.0_f64, f64::max);
-        let msgs_step = nice_step(msgs_raw, n_ticks);
-        let msgs_max = msgs_step * n_ticks as f64;
+        let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
 
         let row_fair = fairness.and_then(|f| f.get(idx).copied());
         if !small.is_empty() && msgs_max > 0.0 {
             draw_msgs_panel(
-                &left_area, &small, &present, msgs, msgs_max, n_ticks, row_fair,
+                &left_area, &small, &present, msgs, msgs_max, msgs_ticks, row_fair,
             )?;
         }
         if !large.is_empty() && gbs_max > 0.0 {
@@ -1088,7 +1105,7 @@ pub(crate) fn draw_multirow_throughput(
                 &present,
                 tput,
                 gbs_max,
-                n_ticks,
+                gbs_ticks,
                 row_fair,
             )?;
         }

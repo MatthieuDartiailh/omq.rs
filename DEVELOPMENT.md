@@ -184,7 +184,7 @@ Full refresh after omq/rzmq changes (all impls, all transports):
 test -f .chart_hw
 cargo run --release -p omq-bench -- run comparisons \
   --transport tcp --transport ipc --transport inproc \
-  --fanout --fanin --pubsub-peers 4,64
+  --fanout --fanin --pubsub-peers 4,32
 cargo run --release -p omq-bench -- chart comparison
 cargo run --release -p omq-bench -- chart main
 cargo run --release -p omq-bench -- chart fanio

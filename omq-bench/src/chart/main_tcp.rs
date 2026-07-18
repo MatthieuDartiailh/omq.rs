@@ -154,13 +154,13 @@ pub(crate) fn generate() {
         eprintln!("Written: {}", out.display());
     }
 
-    // PUB/SUB (64 peers)
-    let (tput, msgs, cpu) = load_tput("pub_sub", "tcp", Some(64), PUBSUB_IMPLS);
+    // PUB/SUB (32 peers)
+    let (tput, msgs, cpu) = load_tput("pub_sub", "tcp", Some(32), PUBSUB_IMPLS);
     if !tput.is_empty() {
         let out = dir.join("main_pubsub_tcp.svg");
         draw_throughput_dual_panel(
             &out,
-            "PUB/SUB throughput (64 peers), TCP loopback, 2-process",
+            "PUB/SUB throughput (32 peers), TCP loopback, 2-process",
             PUBSUB_SIZES,
             PUBSUB_IMPLS,
             &tput,
