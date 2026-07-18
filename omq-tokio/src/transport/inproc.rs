@@ -25,11 +25,13 @@ use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
+use crate::engine::signal::DataSignal;
+
 /// Sender-side SPSC state for inproc fast path.
 #[derive(Debug)]
 pub struct InprocTx {
     pub producer: yring::ProducerOwner<Message>,
-    pub recv_notify: Arc<tokio::sync::Notify>,
+    pub(crate) recv_notify: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub max_message_size: Option<usize>,
     pub space_notify: Arc<tokio::sync::Notify>,
@@ -41,7 +43,7 @@ pub struct InprocTx {
 pub struct InprocRx {
     pub consumer: Mutex<yring::Consumer<Message>>,
     pub batch_remaining: std::sync::atomic::AtomicUsize,
-    pub recv_notify: Arc<tokio::sync::Notify>,
+    pub(crate) recv_notify: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub space_notify: Arc<tokio::sync::Notify>,
 }
@@ -97,7 +99,7 @@ struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
     connector_to_listener_rx: mpsc::Receiver<InboundFrame>,
     listener_to_connector_tx: mpsc::Sender<InboundFrame>,
-    connector_recv_notify: Arc<tokio::sync::Notify>,
+    connector_recv_notify: Arc<DataSignal>,
     connector_blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     connector_max_message_size: Option<usize>,
     accept_ack: oneshot::Sender<InprocAck>,
@@ -120,7 +122,7 @@ static REGISTRY: LazyLock<Mutex<FxHashMap<String, mpsc::Sender<InprocConnectRequ
 pub(crate) fn bind(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<tokio::sync::Notify>,
+    recv_notify: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
 ) -> Result<InprocListener> {
@@ -152,7 +154,7 @@ pub(crate) fn bind(
 pub(crate) async fn connect_with_max_message_size(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<tokio::sync::Notify>,
+    recv_notify: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
 ) -> Result<InprocConn> {
@@ -200,7 +202,7 @@ pub struct InprocListener {
     name: String,
     endpoint: omq_proto::endpoint::Endpoint,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<tokio::sync::Notify>,
+    recv_notify: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     incoming: mpsc::Receiver<InprocConnectRequest>,
@@ -312,8 +314,8 @@ mod tests {
         }
     }
 
-    fn notify() -> Arc<tokio::sync::Notify> {
-        Arc::new(tokio::sync::Notify::new())
+    fn notify() -> Arc<DataSignal> {
+        Arc::new(DataSignal::new())
     }
 
     fn waker() -> Arc<crate::socket::recv::BlockingRecvWaker> {

@@ -17,6 +17,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
+use crate::engine::signal::DataSignal;
+
 /// Caller-side TCP writer for the latency profile. It uses a duplicated
 /// nonblocking descriptor, so sends do not enter the connection driver's
 /// reactor loop.
@@ -436,7 +438,7 @@ impl AnyListener {
 pub(super) async fn bind_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
-    recv_notify: &std::sync::Arc<tokio::sync::Notify>,
+    recv_notify: &std::sync::Arc<DataSignal>,
     blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     #[cfg(feature = "ws")] wss_tls: &omq_proto::options::WssTls,
@@ -484,7 +486,7 @@ pub(super) async fn bind_any(
 pub(super) async fn connect_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
-    recv_notify: &std::sync::Arc<tokio::sync::Notify>,
+    recv_notify: &std::sync::Arc<DataSignal>,
     blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     #[cfg(feature = "ws")] accept_invalid_certs: bool,

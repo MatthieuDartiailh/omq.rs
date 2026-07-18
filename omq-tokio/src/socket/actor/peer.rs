@@ -347,7 +347,7 @@ impl SocketDriver {
                     let sink = crate::engine::RecvSink::Yring(crate::engine::YringSink {
                         producer: prod,
                         signal: Box::new(move || {
-                            recv_notify.notify_one();
+                            recv_notify.mark();
                             blocking_waker.wake();
                         }),
                         space: space.clone(),
@@ -1037,7 +1037,7 @@ async fn inproc_peer_driver(
     .await;
     let () = result;
     if let Some(ref ring) = spsc {
-        ring.recv_notify.notify_one();
+        ring.recv_notify.wake_all();
     }
     blocking_recv_waker.wake();
     let _ = peer_out.try_send((peer_id, PeerEvent::Closed));

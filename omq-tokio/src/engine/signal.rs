@@ -77,8 +77,8 @@ impl DataSignal {
         self.notify.notify_waiters();
     }
 
-    pub(crate) async fn notified(&self) {
-        self.notify.notified().await;
+    pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
     }
 }
 

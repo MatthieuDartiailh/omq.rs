@@ -9,6 +9,7 @@ use arc_swap::ArcSwapOption;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
+use crate::engine::signal::DataSignal;
 use crate::transport::inproc::{InprocRx, InprocTx};
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
@@ -18,7 +19,7 @@ pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocRx>>>>;
 pub(crate) type SpscSendRing = Arc<ArcSwapOption<InprocTx>>;
 
 /// Shared recv notification. All inproc producers notify this.
-pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
+pub(crate) type SpscRecvNotify = Arc<DataSignal>;
 
 /// Notified by the actor when the consumers Vec changes. Wakes
 /// any `recv()` that's blocked so it re-drains with the updated list.
@@ -240,7 +241,7 @@ impl SpscHandles {
             consumer_generation: Arc::new(AtomicU64::new(0)),
             send_ring: Arc::new(ArcSwapOption::empty()),
             send_ring_available: Arc::new(AtomicBool::new(false)),
-            recv_notify: Arc::new(tokio::sync::Notify::new()),
+            recv_notify: Arc::new(DataSignal::new()),
             activated: Arc::new(tokio::sync::Notify::new()),
             tcp_consumers: Arc::new(RwLock::new(Vec::new())),
             blocking_recv_waker,
@@ -534,6 +535,35 @@ impl SpscAwareRecv {
         let result = latency_result.or_else(|| state.batch.pop_front());
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
+        let recv_empty = result.is_none()
+            && state.batch.is_empty()
+            && state.recv_consumer.is_empty()
+            && state.inproc.iter().all(|p| {
+                p.consumer
+                    .try_lock()
+                    .is_ok_and(|consumer| consumer.is_empty())
+            })
+            && state.tcp.iter().all(|tc| {
+                tc.consumer
+                    .try_lock()
+                    .is_ok_and(|consumer| consumer.is_empty())
+            });
+        if recv_empty {
+            self.recv_notify.clear();
+            let still_empty = state.batch.is_empty()
+                && state.recv_consumer.is_empty()
+                && state.inproc.iter().all(|p| {
+                    p.consumer
+                        .try_lock()
+                        .is_ok_and(|consumer| consumer.is_empty())
+                })
+                && state.tcp.iter().all(|tc| {
+                    tc.consumer
+                        .try_lock()
+                        .is_ok_and(|consumer| consumer.is_empty())
+                });
+            self.recv_notify.rearm_if_nonempty(still_empty);
+        }
         drop(guard);
 
         if has_disconnected {
@@ -663,7 +693,7 @@ impl SpscAwareRecv {
         }
         let _ = pair.producer.push(msg);
         pair.producer.flush();
-        pair.recv_notify.notify_one();
+        pair.recv_notify.mark();
         pair.blocking_recv_waker.wake();
         SpscPush::Sent
     }
