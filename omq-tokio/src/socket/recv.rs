@@ -9,16 +9,17 @@ use arc_swap::ArcSwapOption;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
-use crate::transport::inproc::InprocSpsc;
+use crate::engine::signal::DataSignal;
+use crate::transport::inproc::{InprocRx, InprocTx};
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
-pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
+pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocRx>>>>;
 
 /// Single-peer send fast path ring. Actor sets/clears.
-pub(crate) type SpscSendRing = Arc<ArcSwapOption<InprocSpsc>>;
+pub(crate) type SpscSendRing = Arc<ArcSwapOption<InprocTx>>;
 
 /// Shared recv notification. All inproc producers notify this.
-pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
+pub(crate) type SpscRecvNotify = Arc<DataSignal>;
 
 /// Notified by the actor when the consumers Vec changes. Wakes
 /// any `recv()` that's blocked so it re-drains with the updated list.
@@ -29,22 +30,41 @@ const RECV_BATCH_MESSAGES: usize = 256;
 /// Waker for blocking `recv()`. IO threads call `wake()` alongside
 /// `tokio::sync::Notify::notify_one()`. The blocking user thread
 /// parks via `std::thread::park()` and is woken by `unpark()`.
-pub(crate) struct BlockingRecvWaker(Mutex<Option<std::thread::Thread>>);
+pub(crate) struct BlockingRecvWaker {
+    registered: AtomicBool,
+    sleeping: AtomicBool,
+    thread: Mutex<Option<std::thread::Thread>>,
+}
 
 impl BlockingRecvWaker {
     pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self(Mutex::new(None)))
+        Arc::new(Self {
+            registered: AtomicBool::new(false),
+            sleeping: AtomicBool::new(false),
+            thread: Mutex::new(None),
+        })
     }
 
     pub(crate) fn register(&self, thread: std::thread::Thread) {
-        *self.0.lock().unwrap() = Some(thread);
+        *self.thread.lock().unwrap() = Some(thread);
+        self.registered.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn prepare_sleep(&self) {
+        self.sleeping.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn cancel_sleep(&self) {
+        self.sleeping.store(false, Ordering::Release);
     }
 
     pub(crate) fn wake(&self) {
-        if let Ok(guard) = self.0.try_lock()
-            && let Some(ref t) = *guard
+        if !self.sleeping.swap(false, Ordering::AcqRel) || !self.registered.load(Ordering::Acquire)
         {
-            t.unpark();
+            return;
+        }
+        if let Some(thread) = self.thread.lock().unwrap().clone() {
+            thread.unpark();
         }
     }
 }
@@ -221,7 +241,7 @@ impl SpscHandles {
             consumer_generation: Arc::new(AtomicU64::new(0)),
             send_ring: Arc::new(ArcSwapOption::empty()),
             send_ring_available: Arc::new(AtomicBool::new(false)),
-            recv_notify: Arc::new(tokio::sync::Notify::new()),
+            recv_notify: Arc::new(DataSignal::new()),
             activated: Arc::new(tokio::sync::Notify::new()),
             tcp_consumers: Arc::new(RwLock::new(Vec::new())),
             blocking_recv_waker,
@@ -264,7 +284,7 @@ pub(crate) struct SpscAwareRecv {
 #[derive(Debug)]
 struct DrainState {
     generation: u64,
-    inproc: Vec<Arc<InprocSpsc>>,
+    inproc: Vec<Arc<InprocRx>>,
     tcp: Vec<Arc<TcpYringConsumer>>,
     batch: VecDeque<Message>,
     recv_consumer: yring::Consumer<Message>,
@@ -367,7 +387,18 @@ impl SpscAwareRecv {
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
             }
-            std::thread::park();
+            self.blocking_recv_waker.prepare_sleep();
+            match self.try_drain() {
+                DrainResult::Message(msg) => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Ok(msg);
+                }
+                DrainResult::Closed => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Err(Error::Closed);
+                }
+                DrainResult::Empty => std::thread::park(),
+            }
         }
     }
 
@@ -504,6 +535,35 @@ impl SpscAwareRecv {
         let result = latency_result.or_else(|| state.batch.pop_front());
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
+        let recv_empty = result.is_none()
+            && state.batch.is_empty()
+            && state.recv_consumer.is_empty()
+            && state.inproc.iter().all(|p| {
+                p.consumer
+                    .try_lock()
+                    .is_ok_and(|consumer| consumer.is_empty())
+            })
+            && state.tcp.iter().all(|tc| {
+                tc.consumer
+                    .try_lock()
+                    .is_ok_and(|consumer| consumer.is_empty())
+            });
+        if recv_empty {
+            self.recv_notify.clear();
+            let still_empty = state.batch.is_empty()
+                && state.recv_consumer.is_empty()
+                && state.inproc.iter().all(|p| {
+                    p.consumer
+                        .try_lock()
+                        .is_ok_and(|consumer| consumer.is_empty())
+                })
+                && state.tcp.iter().all(|tc| {
+                    tc.consumer
+                        .try_lock()
+                        .is_ok_and(|consumer| consumer.is_empty())
+                });
+            self.recv_notify.rearm_if_nonempty(still_empty);
+        }
         drop(guard);
 
         if has_disconnected {
@@ -611,7 +671,8 @@ impl SpscAwareRecv {
         if !self.send_ring_available.load(Ordering::Acquire) {
             return SpscPush::Unavailable(msg);
         }
-        let Some(pair) = self.send_ring.load_full() else {
+        let pair = self.send_ring.load();
+        let Some(pair) = pair.as_ref() else {
             return SpscPush::Unavailable(msg);
         };
         if !pair.recv_ready.load(Ordering::Acquire)
@@ -621,33 +682,20 @@ impl SpscAwareRecv {
         {
             return SpscPush::Unavailable(msg);
         }
-        let Ok(mut producer) = pair.producer.try_lock() else {
-            return SpscPush::Unavailable(msg);
-        };
-        if producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
+        if pair.producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
             return SpscPush::Unavailable(msg);
         }
-        if producer.is_full() {
+        if pair.producer.is_full() {
             return SpscPush::Full {
                 msg,
                 space: pair.space_notify.clone(),
             };
         }
-        let _ = producer.push(msg);
-        producer.flush();
-        pair.recv_notify.notify_one();
-        self.blocking_recv_waker.wake();
+        let _ = pair.producer.push(msg);
+        pair.producer.flush();
+        pair.recv_notify.mark();
+        pair.blocking_recv_waker.wake();
         SpscPush::Sent
-    }
-
-    /// SPSC send fast path: push directly into the peer's yring.
-    /// Returns `Ok(())` if sent, `Err(msg)` if the fast path is
-    /// unavailable or the ring is full.
-    pub(crate) fn try_push_spsc(&self, msg: Message) -> core::result::Result<(), Message> {
-        match self.try_push_spsc_or_full(msg) {
-            SpscPush::Sent => Ok(()),
-            SpscPush::Unavailable(msg) | SpscPush::Full { msg, .. } => Err(msg),
-        }
     }
 }
 

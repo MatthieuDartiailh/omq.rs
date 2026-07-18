@@ -35,6 +35,10 @@ fn tcp_zero() -> Endpoint {
     "tcp://127.0.0.1:0".parse().expect("valid TCP endpoint")
 }
 
+fn inproc_endpoint() -> Endpoint {
+    "inproc://perf-gate".parse().expect("valid inproc endpoint")
+}
+
 fn read_thresholds() -> HashMap<String, f64> {
     let Ok(contents) = std::fs::read_to_string(".perf_hw") else {
         return HashMap::new();
@@ -129,13 +133,13 @@ async fn count_messages(sock: omq_tokio::Socket, deadline: Instant) -> u64 {
     count
 }
 
-async fn pushpull(size: usize, io_threads: usize) -> f64 {
+async fn pushpull(size: usize, io_threads: usize, endpoint: Endpoint) -> f64 {
     tokio::task::spawn_blocking(move || {
         let pull_ctx = Context::with_config(ContextConfig { io_threads });
         let push_ctx = Context::with_config(ContextConfig { io_threads });
         let pull = pull_ctx.blocking_socket(SocketType::Pull, Options::default());
         let push = push_ctx.blocking_socket(SocketType::Push, Options::default());
-        let endpoint = pull.bind(tcp_zero()).expect("PULL bind");
+        let endpoint = pull.bind(endpoint).expect("PULL bind");
         push.connect(endpoint).expect("PUSH connect");
         pull.wait_connected(1, Duration::from_secs(1))
             .expect("PULL connect timeout");
@@ -298,7 +302,7 @@ async fn main() {
     );
     for io_threads in [1, 2] {
         for (size, suffix) in [(16, "16b"), (1024, "1k"), (16 * 1024, "16k")] {
-            let value = pushpull(size, io_threads).await;
+            let value = pushpull(size, io_threads, tcp_zero()).await;
             ok &= verify(
                 &Sample {
                     name: format!("pushpull_{io_threads}io.{suffix}_msgs_s"),
@@ -320,6 +324,15 @@ async fn main() {
             );
         }
     }
+    let value = pushpull(16, 1, inproc_endpoint()).await;
+    ok &= verify(
+        &Sample {
+            name: "inproc_pushpull_1io.16b_msgs_s".to_string(),
+            value,
+            unit: "msg/s",
+        },
+        &thresholds,
+    );
     if thresholds.is_empty() {
         eprintln!("warning: .perf_hw missing; measurements not threshold-checked");
     }

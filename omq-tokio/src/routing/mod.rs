@@ -379,9 +379,6 @@ pub(crate) fn effective_queue_params(
     if options.conflate {
         (1, omq_proto::options::OnMute::DropOldest)
     } else {
-        (
-            options.send_hwm.map_or(usize::MAX, |n| n as usize),
-            options.on_mute,
-        )
+        (options.send_hwm as usize, options.on_mute)
     }
 }

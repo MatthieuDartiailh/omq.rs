@@ -120,8 +120,8 @@ impl Overlay {
     pub fn to_options(&self) -> PyResult<backend::Options> {
         #[allow(unused_mut)]
         let mut opts = backend::Options {
-            send_hwm: self.send_hwm,
-            recv_hwm: self.recv_hwm,
+            send_hwm: self.send_hwm.unwrap_or(1000),
+            recv_hwm: self.recv_hwm.unwrap_or(1000),
             linger: self.linger,
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
@@ -205,8 +205,8 @@ impl Overlay {
             rcvtimeo: None,
             sndtimeo: None,
             linger: o.linger,
-            send_hwm: o.send_hwm,
-            recv_hwm: o.recv_hwm,
+            send_hwm: Some(o.send_hwm),
+            recv_hwm: Some(o.recv_hwm),
             identity: o.identity.clone(),
             keepalive: o.tcp_keepalive,
             keepalive_idle: None,

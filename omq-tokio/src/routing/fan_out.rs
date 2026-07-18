@@ -266,7 +266,7 @@ impl FanOutShards {
         mode: FanOutMode,
         io_pool: &crate::context::IoPoolHandle,
     ) -> Arc<Self> {
-        let pipe_cap = options.send_hwm.unwrap_or(1000).max(16) as usize;
+        let pipe_cap = options.send_hwm.max(16) as usize;
         let worker_shards = Self::worker_shard_count(io_pool.thread_count());
         let lossy = fan_out_is_lossy(options);
         let active_mask = Arc::new(AtomicU8::new(0));

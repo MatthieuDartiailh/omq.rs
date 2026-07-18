@@ -25,23 +25,26 @@ use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
-/// Per-peer SPSC state for inproc fast path.
+use crate::engine::signal::DataSignal;
+
+/// Sender-side SPSC state for inproc fast path.
 #[derive(Debug)]
-pub struct InprocSpsc {
-    pub producer: Mutex<yring::Producer<Message>>,
+pub struct InprocTx {
+    pub producer: yring::ProducerOwner<Message>,
+    pub(crate) recv_notify: Arc<DataSignal>,
+    pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
+    pub max_message_size: Option<usize>,
+    pub space_notify: Arc<tokio::sync::Notify>,
+    pub(crate) blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
+}
+
+/// Receiver-side SPSC state for inproc fast path.
+#[derive(Debug)]
+pub struct InprocRx {
     pub consumer: Mutex<yring::Consumer<Message>>,
     pub batch_remaining: std::sync::atomic::AtomicUsize,
-    /// Receiver socket's shared recv notification. The driver and
-    /// send fast path notify this after push so `recv()` wakes up.
-    pub recv_notify: Arc<tokio::sync::Notify>,
-    /// Gates the send fast path (`Socket::send` bypassing the actor).
-    /// Set by the actor after installing the ring. The per-peer
-    /// driver does NOT check this; it always tries the ring first.
-    pub recv_ready: std::sync::atomic::AtomicBool,
-    /// Receiver's max message size. The send fast path checks this
-    /// before pushing (the driver checks separately). `None` = no limit.
-    pub max_message_size: Option<usize>,
-    /// Wakes async senders waiting for the receiver to drain this ring.
+    pub(crate) recv_notify: Arc<DataSignal>,
+    pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub space_notify: Arc<tokio::sync::Notify>,
 }
 
@@ -79,7 +82,8 @@ pub struct InprocConn {
     pub out: mpsc::Sender<InboundFrame>,
     pub in_rx: mpsc::Receiver<InboundFrame>,
     pub peer: InprocPeerSnapshot,
-    pub spsc: Option<Arc<InprocSpsc>>,
+    pub tx: Option<Arc<InprocTx>>,
+    pub rx: Option<Arc<InprocRx>>,
 }
 
 /// Default per-direction inflight-message capacity. Holds whole
@@ -95,10 +99,17 @@ struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
     connector_to_listener_rx: mpsc::Receiver<InboundFrame>,
     listener_to_connector_tx: mpsc::Sender<InboundFrame>,
-    connector_recv_notify: Arc<tokio::sync::Notify>,
+    connector_recv_notify: Arc<DataSignal>,
+    connector_blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     connector_max_message_size: Option<usize>,
-    accept_ack: oneshot::Sender<(InprocPeerSnapshot, Option<Arc<InprocSpsc>>)>,
+    accept_ack: oneshot::Sender<InprocAck>,
 }
+
+type InprocAck = (
+    InprocPeerSnapshot,
+    Option<Arc<InprocTx>>,
+    Option<Arc<InprocRx>>,
+);
 
 /// Global registry of bound inproc names → request channel.
 static REGISTRY: LazyLock<Mutex<FxHashMap<String, mpsc::Sender<InprocConnectRequest>>>> =
@@ -108,10 +119,11 @@ static REGISTRY: LazyLock<Mutex<FxHashMap<String, mpsc::Sender<InprocConnectRequ
 /// `InprocConn` per accepted connector. `snapshot` is captured
 /// here so we can hand it back to each connector synchronously
 /// during `accept`.
-pub fn bind(
+pub(crate) fn bind(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<tokio::sync::Notify>,
+    recv_notify: Arc<DataSignal>,
+    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
 ) -> Result<InprocListener> {
     let (tx, rx) = mpsc::channel(32);
@@ -133,26 +145,17 @@ pub fn bind(
         },
         snapshot,
         recv_notify,
+        blocking_recv_waker,
         max_message_size,
         incoming: rx,
     })
 }
 
-/// Connect to a previously-bound `name`. Creates two channels
-/// (one per direction), sends the listener-side halves through
-/// the registry, awaits the listener's snapshot reply.
-pub async fn connect(
-    name: &str,
-    snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<tokio::sync::Notify>,
-) -> Result<InprocConn> {
-    connect_with_max_message_size(name, snapshot, recv_notify, None).await
-}
-
 pub(crate) async fn connect_with_max_message_size(
     name: &str,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<tokio::sync::Notify>,
+    recv_notify: Arc<DataSignal>,
+    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
 ) -> Result<InprocConn> {
     let req_tx = {
@@ -171,6 +174,7 @@ pub(crate) async fn connect_with_max_message_size(
         connector_to_listener_rx: c2l_rx,
         listener_to_connector_tx: l2c_tx,
         connector_recv_notify: recv_notify,
+        connector_blocking_recv_waker: blocking_recv_waker,
         connector_max_message_size: max_message_size,
         accept_ack: ack_tx,
     };
@@ -179,7 +183,7 @@ pub(crate) async fn connect_with_max_message_size(
         .send(request)
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc binding closed: {name}")))?;
-    let (listener_snapshot, spsc) = ack_rx
+    let (listener_snapshot, tx, rx) = ack_rx
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc accept dropped: {name}")))?;
 
@@ -187,7 +191,8 @@ pub(crate) async fn connect_with_max_message_size(
         out: c2l_tx,
         in_rx: l2c_rx,
         peer: listener_snapshot,
-        spsc,
+        tx,
+        rx,
     })
 }
 
@@ -197,7 +202,8 @@ pub struct InprocListener {
     name: String,
     endpoint: omq_proto::endpoint::Endpoint,
     snapshot: InprocPeerSnapshot,
-    recv_notify: Arc<tokio::sync::Notify>,
+    recv_notify: Arc<DataSignal>,
+    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     incoming: mpsc::Receiver<InprocConnectRequest>,
 }
@@ -215,6 +221,7 @@ impl InprocListener {
 
     /// Accept the next incoming connector. Returns the connector's
     /// snapshot via the `InprocConn`. Acks back our own snapshot.
+    #[expect(clippy::needless_return)]
     pub async fn accept(&mut self) -> Result<InprocConn> {
         let req = self.incoming.recv().await.ok_or(Error::Closed)?;
         let InprocConnectRequest {
@@ -222,10 +229,21 @@ impl InprocListener {
             connector_to_listener_rx,
             listener_to_connector_tx,
             connector_recv_notify,
+            connector_blocking_recv_waker,
             connector_max_message_size,
             accept_ack,
         } = req;
-        let spsc = if is_spsc_eligible(self.snapshot.socket_type, connector.socket_type) {
+        if !is_spsc_eligible(self.snapshot.socket_type, connector.socket_type) {
+            let _ = accept_ack.send((self.snapshot.clone(), None, None));
+            return Ok(InprocConn {
+                out: listener_to_connector_tx,
+                in_rx: connector_to_listener_rx,
+                peer: connector,
+                tx: None,
+                rx: None,
+            });
+        }
+        {
             let (p, c) = yring::spsc(DEFAULT_INPROC_HWM);
             let listener_is_recv = is_recv_side(self.snapshot.socket_type);
             let notify = if listener_is_recv {
@@ -238,25 +256,40 @@ impl InprocListener {
             } else {
                 connector_max_message_size
             };
-            Some(Arc::new(InprocSpsc {
-                producer: Mutex::new(p),
-                consumer: Mutex::new(c),
-                batch_remaining: std::sync::atomic::AtomicUsize::new(0),
+            let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let tx = Arc::new(InprocTx {
+                producer: yring::ProducerOwner::new(p),
                 recv_notify: notify,
-                recv_ready: std::sync::atomic::AtomicBool::new(false),
+                recv_ready: ready.clone(),
                 max_message_size: mms,
                 space_notify: Arc::new(tokio::sync::Notify::new()),
-            }))
-        } else {
-            None
-        };
-        let _ = accept_ack.send((self.snapshot.clone(), spsc.clone()));
-        Ok(InprocConn {
-            out: listener_to_connector_tx,
-            in_rx: connector_to_listener_rx,
-            peer: connector,
-            spsc,
-        })
+                blocking_recv_waker: if listener_is_recv {
+                    Arc::clone(&self.blocking_recv_waker)
+                } else {
+                    Arc::clone(&connector_blocking_recv_waker)
+                },
+            });
+            let rx = Arc::new(InprocRx {
+                consumer: Mutex::new(c),
+                batch_remaining: std::sync::atomic::AtomicUsize::new(0),
+                recv_notify: tx.recv_notify.clone(),
+                recv_ready: ready,
+                space_notify: tx.space_notify.clone(),
+            });
+            let (listener_tx, listener_rx, connector_tx, connector_rx) = if listener_is_recv {
+                (None, Some(rx.clone()), Some(tx.clone()), None)
+            } else {
+                (Some(tx.clone()), None, None, Some(rx.clone()))
+            };
+            let _ = accept_ack.send((self.snapshot.clone(), connector_tx, connector_rx));
+            return Ok(InprocConn {
+                out: listener_to_connector_tx,
+                in_rx: connector_to_listener_rx,
+                peer: connector,
+                tx: listener_tx,
+                rx: listener_rx,
+            });
+        }
     }
 }
 
@@ -281,16 +314,22 @@ mod tests {
         }
     }
 
-    fn notify() -> Arc<tokio::sync::Notify> {
-        Arc::new(tokio::sync::Notify::new())
+    fn notify() -> Arc<DataSignal> {
+        Arc::new(DataSignal::new())
+    }
+
+    fn waker() -> Arc<crate::socket::recv::BlockingRecvWaker> {
+        crate::socket::recv::BlockingRecvWaker::new()
     }
 
     #[tokio::test]
     async fn bind_connect_accept_exchange() {
-        let mut l = bind("test-bca", snap(SocketType::Pull), notify(), None).unwrap();
+        let mut l = bind("test-bca", snap(SocketType::Pull), notify(), waker(), None).unwrap();
         let n = notify();
-        let connector =
-            tokio::spawn(async move { connect("test-bca", snap(SocketType::Push), n).await });
+        let connector = tokio::spawn(async move {
+            connect_with_max_message_size("test-bca", snap(SocketType::Push), n, waker(), None)
+                .await
+        });
         let server_side = l.accept().await.unwrap();
         let client_side = connector.await.unwrap().unwrap();
 
@@ -319,9 +358,9 @@ mod tests {
 
     #[tokio::test]
     async fn double_bind_rejected() {
-        let _l = bind("test-dup", snap(SocketType::Pair), notify(), None).unwrap();
+        let _l = bind("test-dup", snap(SocketType::Pair), notify(), waker(), None).unwrap();
         assert!(matches!(
-            bind("test-dup", snap(SocketType::Pair), notify(), None),
+            bind("test-dup", snap(SocketType::Pair), notify(), waker(), None),
             Err(Error::InvalidEndpoint(_))
         ));
     }
@@ -329,7 +368,14 @@ mod tests {
     #[tokio::test]
     async fn connect_without_bind_fails() {
         assert!(matches!(
-            connect("test-unbound", snap(SocketType::Push), notify()).await,
+            connect_with_max_message_size(
+                "test-unbound",
+                snap(SocketType::Push),
+                notify(),
+                waker(),
+                None,
+            )
+            .await,
             Err(Error::InvalidEndpoint(_))
         ));
     }
@@ -337,8 +383,8 @@ mod tests {
     #[tokio::test]
     async fn listener_drop_releases_name() {
         {
-            let _l = bind("test-drop", snap(SocketType::Pair), notify(), None).unwrap();
+            let _l = bind("test-drop", snap(SocketType::Pair), notify(), waker(), None).unwrap();
         }
-        let _l2 = bind("test-drop", snap(SocketType::Pair), notify(), None).unwrap();
+        let _l2 = bind("test-drop", snap(SocketType::Pair), notify(), waker(), None).unwrap();
     }
 }

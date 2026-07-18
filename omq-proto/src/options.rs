@@ -33,11 +33,11 @@ pub struct Options {
     /// explicitly on both endpoints.
     pub workload_profile: Option<WorkloadProfile>,
 
-    /// Send-side high-water mark, total for the socket. `None` = unbounded.
-    pub send_hwm: Option<u32>,
+    /// Send-side high-water mark, total for the socket.
+    pub send_hwm: u32,
 
-    /// Receive-side high-water mark, total for the socket. `None` = unbounded.
-    pub recv_hwm: Option<u32>,
+    /// Receive-side high-water mark, total for the socket.
+    pub recv_hwm: u32,
 
     /// Time to wait on close for the send queue to drain.
     /// `None` = wait forever. `Some(Duration::ZERO)` = drop immediately.
@@ -200,8 +200,8 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             workload_profile: None,
-            send_hwm: Some(1000),
-            recv_hwm: Some(1000),
+            send_hwm: 1000,
+            recv_hwm: 1000,
             linger: Some(Duration::ZERO),
             identity: Bytes::new(),
             reconnect: ReconnectPolicy::default(),
@@ -298,25 +298,13 @@ impl Options {
 
     #[must_use]
     pub fn send_hwm(mut self, hwm: u32) -> Self {
-        self.send_hwm = Some(hwm);
+        self.send_hwm = hwm;
         self
     }
 
     #[must_use]
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
-        self.recv_hwm = Some(hwm);
-        self
-    }
-
-    #[must_use]
-    pub fn unbounded_send(mut self) -> Self {
-        self.send_hwm = None;
-        self
-    }
-
-    #[must_use]
-    pub fn unbounded_recv(mut self) -> Self {
-        self.recv_hwm = None;
+        self.recv_hwm = hwm;
         self
     }
 
@@ -715,8 +703,8 @@ mod tests {
     #[test]
     fn defaults_are_per_socket_hwm_block() {
         let o = Options::default();
-        assert_eq!(o.send_hwm, Some(1000));
-        assert_eq!(o.recv_hwm, Some(1000));
+        assert_eq!(o.send_hwm, 1000);
+        assert_eq!(o.recv_hwm, 1000);
         assert_eq!(o.linger, Some(Duration::ZERO));
         assert_eq!(o.handshake_timeout, Some(Duration::from_secs(30)));
         assert_eq!(o.heartbeat_interval, None);
@@ -790,9 +778,9 @@ mod tests {
             .conflate(true)
             .router_mandatory(true)
             .on_mute(OnMute::DropNewest);
-        assert_eq!(o.send_hwm, Some(42));
+        assert_eq!(o.send_hwm, 42);
         assert_eq!(o.workload_profile, Some(WorkloadProfile::Latency));
-        assert_eq!(o.recv_hwm, Some(99));
+        assert_eq!(o.recv_hwm, 99);
         assert_eq!(o.linger, Some(Duration::from_secs(5)));
         assert_eq!(o.identity, &b"router-id"[..]);
         assert_eq!(o.heartbeat_interval, Some(Duration::from_secs(1)));
@@ -814,13 +802,6 @@ mod tests {
     }
 
     #[test]
-    fn unbounded_queues() {
-        let o = Options::new().unbounded_send().unbounded_recv();
-        assert_eq!(o.send_hwm, None);
-        assert_eq!(o.recv_hwm, None);
-    }
-
-    #[test]
     fn linger_forever() {
         let o = Options::new().linger_forever();
         assert_eq!(o.linger, None);
@@ -830,6 +811,6 @@ mod tests {
     fn from_bytes_sets_identity() {
         let o: Options = Bytes::from_static(b"id").into();
         assert_eq!(o.identity, &b"id"[..]);
-        assert_eq!(o.send_hwm, Some(1000));
+        assert_eq!(o.send_hwm, 1000);
     }
 }

@@ -55,7 +55,7 @@ impl<'a> PeerLifecycle<'a> {
     }
 
     pub(super) fn update_send_ring(&mut self) {
-        let mut sole_spsc: Option<&Arc<crate::transport::inproc::InprocSpsc>> = None;
+        let mut sole_spsc: Option<&Arc<crate::transport::inproc::InprocTx>> = None;
         let mut count = 0;
         for p in self.driver.peers.values() {
             if let Some(ref s) = p.spsc {
@@ -84,7 +84,7 @@ impl<'a> PeerLifecycle<'a> {
 
     pub(super) fn register_inproc_consumer(
         &mut self,
-        spsc: &Arc<crate::transport::inproc::InprocSpsc>,
+        spsc: &Arc<crate::transport::inproc::InprocRx>,
         recv_bypass: bool,
     ) {
         self.driver

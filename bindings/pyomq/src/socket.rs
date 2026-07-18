@@ -239,8 +239,8 @@ impl SocketInner {
         }
         *slot = None;
         let opts = self.overlay.lock().unwrap().to_options()?;
-        let send_cap = opts.send_hwm.map(|n| n.max(1) as usize).unwrap_or(1000);
-        let recv_cap = opts.recv_hwm.map(|n| n.max(1) as usize).unwrap_or(1000);
+        let send_cap = opts.send_hwm.max(1) as usize;
+        let recv_cap = opts.recv_hwm.max(1) as usize;
         let (send_prod, send_cons) = yring::async_spsc(send_cap);
         let (recv_prod, recv_cons) = yring::spsc(recv_cap);
         let recv_notify = Arc::new(RecvNotify::new());
