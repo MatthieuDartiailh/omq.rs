@@ -838,10 +838,13 @@ impl CurveServer {
             &cp,
         )?;
 
+        let props = decode_metadata(metadata)?;
+
         if let Some(auth) = &self.authenticator {
             let peer = super::MechanismPeerInfo {
                 mechanism: crate::proto::greeting::MechanismName::CURVE,
                 public_key: *cl.as_bytes(),
+                identity: props.identity.clone(),
                 username: None,
                 password: None,
             };
@@ -851,8 +854,6 @@ impl CurveServer {
                 ));
             }
         }
-
-        let props = decode_metadata(metadata)?;
 
         self.state = CurveServerState::Done {
             our_eph_secret: sn_secret,

@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use omq_tokio::endpoint::Host;
@@ -176,7 +177,9 @@ async fn curve_authenticator_admits_known_client() {
 
     let client = Socket::new(
         SocketType::Push,
-        Options::default().curve_client(client_kp, server_pub),
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"client-id"))
+            .curve_client(client_kp, server_pub),
     );
     client.connect(ep).await.unwrap();
 
@@ -189,6 +192,76 @@ async fn curve_authenticator_admits_known_client() {
     assert!(
         saw_callback.load(Ordering::SeqCst),
         "authenticator must run"
+    );
+}
+
+#[tokio::test]
+async fn curve_authenticator_identity_matches_router_message() {
+    let server_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let auth_identities = Arc::new(Mutex::new(Vec::new()));
+    let auth_identities_cb = auth_identities.clone();
+
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default()
+            .curve_server(server_kp)
+            .authenticator(move |peer| {
+                if let Some(identity) = &peer.identity {
+                    auth_identities_cb.lock().unwrap().push(identity.clone());
+                }
+                true
+            }),
+    );
+    let ep = router.bind(auth_ep("auth-router-identity")).await.unwrap();
+
+    let dealer_one = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"client-one"))
+            .curve_client(CurveKeypair::generate(), server_pub),
+    );
+    dealer_one.connect(ep.clone()).await.unwrap();
+
+    let dealer_two = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"client-two"))
+            .curve_client(CurveKeypair::generate(), server_pub),
+    );
+    dealer_two.connect(ep).await.unwrap();
+
+    dealer_one.send(Message::single("from-one")).await.unwrap();
+    dealer_two.send(Message::single("from-two")).await.unwrap();
+
+    let mut identities_by_message = Vec::new();
+    for _ in 0..2 {
+        let message = tokio::time::timeout(Duration::from_secs(1), router.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        identities_by_message.push((
+            message.part_bytes(1).unwrap().to_vec(),
+            message.part_bytes(0).unwrap().to_vec(),
+        ));
+    }
+    identities_by_message.sort_unstable();
+    assert_eq!(
+        identities_by_message,
+        vec![
+            (b"from-one".to_vec(), b"client-one".to_vec()),
+            (b"from-two".to_vec(), b"client-two".to_vec()),
+        ]
+    );
+
+    let mut stored_identities = auth_identities.lock().unwrap().clone();
+    stored_identities.sort_unstable();
+    assert_eq!(
+        stored_identities,
+        vec![
+            bytes::Bytes::from_static(b"client-one"),
+            bytes::Bytes::from_static(b"client-two"),
+        ]
     );
 }
 

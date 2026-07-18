@@ -153,6 +153,7 @@ impl PlainServer {
                 let peer = MechanismPeerInfo {
                     mechanism: MechanismName::PLAIN,
                     public_key: [0; 32],
+                    identity: None,
                     username: Some(username),
                     password: Some(password),
                 };
