@@ -11,6 +11,7 @@
 #                       retry on heavily loaded runners.
 #   OMQ_TEST_JOBS=N     max parallel test steps (default 2)
 #   OMQ_PERF=1          run hardware-sensitive perf verification
+#   OMQ_STRESS_ROUNDS=N connect-before-bind stress rounds (default 40)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
