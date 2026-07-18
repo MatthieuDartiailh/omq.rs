@@ -30,7 +30,8 @@ type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 #[derive(Clone, Copy, Debug)]
 pub struct ContextConfig {
     /// Number of IO threads. Each IO thread runs an independent
-    /// `current_thread` tokio runtime on its own OS thread.
+    /// `current_thread` tokio runtime on its own OS thread. Zero disables
+    /// owned IO threads and uses the caller's active runtime instead.
     /// Default: 1.
     pub io_threads: usize,
 }
@@ -49,7 +50,6 @@ impl ContextConfig {
         let io_threads = std::env::var("OMQ_IO_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .filter(|&v: &usize| v > 0)
             .unwrap_or(1);
         Self { io_threads }
     }
@@ -336,9 +336,13 @@ impl Context {
     /// Each IO thread runs an independent `current_thread` tokio
     /// runtime on its own OS thread. Connections are pinned to an
     /// IO thread for life (least-loaded assignment at connect/accept
-    /// time).
+    /// time). With zero IO threads, this is equivalent to
+    /// [`Context::current`] and requires an active tokio runtime.
     pub fn with_config(config: ContextConfig) -> Self {
-        let io_threads = config.io_threads.max(1);
+        if config.io_threads == 0 {
+            return Self::current();
+        }
+        let io_threads = config.io_threads;
         let pool = IoThreadPool::new(io_threads);
         Self {
             inner: Arc::new(ContextInner {
@@ -383,6 +387,10 @@ impl Context {
         socket_type: SocketType,
         options: Options,
     ) -> crate::blocking::Socket {
+        assert!(
+            self.io_threads() > 0,
+            "blocking_socket() requires at least one owned IO thread"
+        );
         crate::blocking::Socket::new(self.socket(socket_type, options), self.clone())
     }
 

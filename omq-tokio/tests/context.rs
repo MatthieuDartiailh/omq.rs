@@ -265,6 +265,25 @@ async fn context_current_wraps_runtime() {
 }
 
 #[tokio::test]
+async fn context_zero_io_threads_uses_caller_runtime() {
+    let ctx = Context::with_config(ContextConfig { io_threads: 0 });
+    assert_eq!(ctx.io_threads(), 0);
+
+    let pull = ctx.socket(SocketType::Pull, Options::default());
+    let push = ctx.socket(SocketType::Push, Options::default());
+    let ep = inproc_ep("zero-io-threads");
+    pull.bind(ep.clone()).await.unwrap();
+    push.connect(ep).await.unwrap();
+    push.send(Message::single("zero")).await.unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg, Message::single("zero"));
+}
+
+#[tokio::test]
 async fn context_current_socket_works() {
     let ctx = Context::current();
     let pull = ctx.socket(SocketType::Pull, Options::default());

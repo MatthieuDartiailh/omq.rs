@@ -128,7 +128,10 @@ where
 {
     let (otx, orx) = flume::bounded::<T>(1);
     let s = inner.clone();
-    ctx.handle().spawn(async move {
+    let Some(handle) = ctx.handle() else {
+        return Err(());
+    };
+    handle.spawn(async move {
         let out = op(s).await;
         let _ = otx.send(out);
     });
@@ -140,6 +143,12 @@ fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {
         (a, b),
         (SocketType::Push, SocketType::Pull) | (SocketType::Pull, SocketType::Push)
     )
+}
+
+fn zero_io_inproc_supported(sock: &OmqSocket, endpoint: &Endpoint) -> bool {
+    sock.ctx.zero_io_threads()
+        && matches!(endpoint, Endpoint::Inproc { .. })
+        && matches!(sock.socket_type, SocketType::Push | SocketType::Pull)
 }
 
 fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
@@ -279,7 +288,10 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
 /// options, then start the recv pump. Called once on first bind/connect
 /// so that options set between `zmq_socket` and first bind/connect take
 /// effect.
-pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
+pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
+    if sock.ctx.io_context().is_none() {
+        return false;
+    }
     // CAS guarantees exactly one thread wins the materialization race.
     if sock
         .bound_or_connected
@@ -290,10 +302,10 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
         while sock.inner.get().is_none() {
             std::hint::spin_loop();
         }
-        return;
+        return true;
     }
     let Ok(overlay) = sock.overlay.lock() else {
-        return;
+        return false;
     };
     let opts = overlay
         .to_options()
@@ -336,7 +348,10 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
     // Enter the tokio runtime context so that Socket::new (which calls
     // tokio::spawn internally for its driver task) and the recv pump
     // spawn below are scheduled on the context's runtime.
-    let _guard = sock.ctx.handle().enter();
+    let Some(handle) = sock.ctx.handle() else {
+        return false;
+    };
+    let _guard = handle.enter();
 
     let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_config(
         socket_type,
@@ -357,6 +372,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) {
 
     let _ = sock.inner.set(inner);
     let _ = sock.recv_pump.set(recv_pump);
+    true
 }
 
 #[unsafe(no_mangle)]
@@ -374,7 +390,13 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // Enter the tokio runtime context so that dropping OmqSocket (and
     // the Arc<omq_tokio::Socket> it holds) doesn't panic from missing
     // reactor.
-    let _guard = arc.ctx.handle().enter();
+    let Some(handle) = arc.ctx.handle() else {
+        arc.notify.close();
+        arc.ctx.socket_closed();
+        drop(arc);
+        return 0;
+    };
+    let _guard = handle.enter();
 
     arc.notify.close();
     arc.ctx.socket_closed();
@@ -464,7 +486,22 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     }
     drop(ov);
 
-    ensure_materialized(sock);
+    if sock.ctx.zero_io_threads() {
+        if !zero_io_inproc_supported(sock, &endpoint) {
+            return fail(libc::ENOTSUP);
+        }
+        if let Endpoint::Inproc { .. } = endpoint {
+            register_inproc_bind(sock, &addr_str);
+            if let Ok(mut ep) = sock.last_endpoint.lock() {
+                *ep = Some(addr_str);
+            }
+            return 0;
+        }
+    }
+
+    if !ensure_materialized(sock) {
+        return fail(ETERM);
+    }
 
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
@@ -498,7 +535,22 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         Err(e) => return fail(e),
     };
 
-    ensure_materialized(sock);
+    if sock.ctx.zero_io_threads() {
+        if !zero_io_inproc_supported(sock, &endpoint) {
+            return fail(libc::ENOTSUP);
+        }
+        if let Endpoint::Inproc { .. } = endpoint {
+            register_inproc_connect(sock, &addr_str);
+            if let Ok(mut ep) = sock.last_endpoint.lock() {
+                *ep = Some(addr_str);
+            }
+            return 0;
+        }
+    }
+
+    if !ensure_materialized(sock) {
+        return fail(ETERM);
+    }
 
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
