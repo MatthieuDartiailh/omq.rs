@@ -22,16 +22,27 @@ use crate::error::{Error, Result};
 #[non_exhaustive]
 pub enum Endpoint {
     /// `tcp://host:port` (IPv4, IPv6, or DNS name).
-    Tcp { host: Host, port: u16 },
+    Tcp {
+        /// Host to resolve or bind.
+        host: Host,
+        /// TCP port.
+        port: u16,
+    },
     /// `ipc://path` filesystem socket (Unix), `ipc://@name` Linux abstract namespace,
     /// or `ipc://name` Windows named pipe.
     Ipc(IpcPath),
     /// `inproc://name` in-process transport.
-    Inproc { name: String },
+    Inproc {
+        /// In-process endpoint name.
+        name: String,
+    },
     /// `udp://[group@]host:port` for RADIO/DISH (group optional).
     Udp {
+        /// Optional multicast group.
         group: Option<String>,
+        /// Host or multicast address.
         host: Host,
+        /// UDP port.
         port: u16,
     },
     /// `lz4+tcp://host:port` LZ4-compressed TCP. Requires the `lz4` feature.
@@ -62,7 +73,9 @@ pub enum Endpoint {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Host {
+    /// Literal IP address.
     Ip(IpAddr),
+    /// DNS name resolved at bind or connect time.
     Name(String),
     /// Wildcard (`0.0.0.0` / `::` / `*`) -- bind-only.
     Wildcard,

@@ -6,11 +6,15 @@ use crate::frame_buffer::FrameBuffer;
 use crate::message::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Encoded message storage selected for fan-out.
 pub enum FanOutFrame<'a> {
+    /// One contiguous arena slice.
     Arena(&'a [u8]),
+    /// Shared encoded chunks.
     Chunks(&'a [Bytes]),
 }
 
+/// Encode one message for reuse across multiple destinations.
 pub fn build_fan_out_frame<'a>(
     eq: &'a mut FrameBuffer,
     msg: &Message,
@@ -22,6 +26,7 @@ pub fn build_fan_out_frame<'a>(
     finish_fan_out_frame(eq, chunks, target_count, copy_budget)
 }
 
+/// Append one encoded message to the frame buffer.
 pub fn encode_fan_out_message(
     eq: &mut FrameBuffer,
     msg: &Message,
@@ -49,6 +54,7 @@ fn frame_header_len(payload_len: usize) -> usize {
     if payload_len > u8::MAX as usize { 9 } else { 2 }
 }
 
+/// Finalize the encoded frame and select arena or chunk storage.
 pub fn finish_fan_out_frame<'a>(
     eq: &'a mut FrameBuffer,
     chunks: &'a mut Vec<Bytes>,
@@ -64,6 +70,7 @@ pub fn finish_fan_out_frame<'a>(
     }
 }
 
+/// Release temporary fan-out storage.
 pub fn clear_fan_out_frame(eq: &mut FrameBuffer, chunks: &mut Vec<Bytes>) {
     eq.clear_arena();
     chunks.clear();

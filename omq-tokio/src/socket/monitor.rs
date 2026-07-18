@@ -25,7 +25,8 @@ pub(crate) const MONITOR_CAPACITY: usize = 64;
 /// Monitor events are diagnostic. Under sustained data-plane load they
 /// may lag (the broadcast channel has a 64-slot buffer). Do not use
 /// monitor events for readiness gating in production. Use
-/// [`Socket::wait_connected`] or [`Socket::connections`] for routing
+/// [`crate::Socket::wait_connected`] or [`crate::Socket::connections`] for
+/// routing
 /// readiness.
 #[derive(Debug)]
 pub struct MonitorStream {

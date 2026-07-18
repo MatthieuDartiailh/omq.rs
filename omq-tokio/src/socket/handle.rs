@@ -97,7 +97,7 @@ impl Socket {
         Self::new_inner(socket_type, options, None, io_pool)
     }
 
-    /// Like [`Socket::new`], but installs a [`RecvSinkConfig`] that the
+    /// Like [`Socket::new`], but installs a `RecvSinkConfig` that the
     /// actor will use for the first peer's driver (and refill on
     /// disconnect). Used by omq-libzmq to bypass the recv-pump relay.
     pub fn new_with_recv_sink_config(

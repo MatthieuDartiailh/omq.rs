@@ -354,8 +354,7 @@ impl Connection {
     /// Returns `Some(NextFrameInfo)` when the connection is in the data
     /// phase and a complete wire-frame header is buffered; `None`
     /// otherwise (handshake not done, header not yet buffered, or
-    /// codec already in [`AwaitingSuppliedPayload`](State) /
-    /// [`Closed`](State)).
+    /// codec already in `AwaitingSuppliedPayload` / `Closed` state).
     ///
     /// Used by I/O backends to decide, before any payload bytes have
     /// arrived in the codec buffer, whether to recv this frame's payload
@@ -364,9 +363,8 @@ impl Connection {
     /// `info.buffered_payload_prefix` — when zero, the codec has only
     /// the header and the entire payload is still on the wire.
     ///
-    /// Errors propagate the same protocol violations
-    /// [`frame::try_decode_frame`] would surface (reserved bits set,
-    /// COMMAND+MORE).
+    /// Errors propagate the same protocol violations as the frame decoder
+    /// (reserved bits set, COMMAND+MORE).
     pub fn peek_next_frame_payload_size(&self) -> Result<Option<NextFrameInfo>> {
         if !matches!(self.state, State::Ready) {
             return Ok(None);
@@ -398,13 +396,13 @@ impl Connection {
     }
 
     /// Consume the buffered header of the next frame and transition the
-    /// codec to [`AwaitingSuppliedPayload`](State). The caller is then
+    /// codec to `AwaitingSuppliedPayload`. The caller is then
     /// responsible for delivering exactly `payload_len` payload bytes via
     /// [`supply_payload`](Self::supply_payload).
     ///
     /// Returns `Some(payload_len)` on success. Returns `None` and leaves
     /// the codec untouched when:
-    /// - The connection is not in [`Ready`](State).
+    /// - The connection is not in `Ready` state.
     /// - No complete frame header is buffered.
     /// - The inbound buffer already contains payload bytes past the header
     ///   (caller would lose those bytes; fall back to the in-buf path).
@@ -481,7 +479,7 @@ impl Connection {
     /// are wrapped as a single-chunk `Payload` and dispatched through the
     /// same decrypt-and-demux path as in-buf-assembled frames.
     ///
-    /// On success the codec returns to [`Ready`](State) and resumes
+    /// On success the codec returns to `Ready` state and resumes
     /// normal input handling. Errors with [`Error::Protocol`] if called
     /// in a state other than `AwaitingSuppliedPayload`, or if the supplied
     /// length does not match what `begin_supplied_payload` returned.
