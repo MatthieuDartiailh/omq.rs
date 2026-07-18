@@ -145,6 +145,8 @@ impl MechanismSetup {
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use super::command::{Command, PeerProperties};
 use super::greeting::MechanismName;
 use crate::error::{Error, Result};
@@ -181,6 +183,8 @@ pub struct MechanismPeerInfo {
     pub mechanism: MechanismName,
     /// Peer's long-term 32-byte public key (CURVE). Zeroed for PLAIN.
     pub public_key: [u8; 32],
+    /// Peer's routing identity from the READY metadata.
+    pub identity: Option<Bytes>,
     /// PLAIN username. `None` for encrypting mechanisms.
     pub username: Option<String>,
     /// PLAIN password. `None` for encrypting mechanisms.
