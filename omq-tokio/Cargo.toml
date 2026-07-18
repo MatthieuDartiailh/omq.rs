@@ -81,6 +81,10 @@ name = "push_pull"
 harness = false
 
 [[bench]]
+name = "inproc_threads"
+harness = false
+
+[[bench]]
 name = "pub_sub"
 harness = false
 
