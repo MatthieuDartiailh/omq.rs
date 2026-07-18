@@ -303,7 +303,7 @@ fn drain_yring(
     batch: &mut VecDeque<Message>,
     max_items: usize,
 ) -> usize {
-    let count = consumer.prefetch_bounded(max_items);
+    let count = consumer.prefetch_up_to(max_items);
     if count == 0 {
         return 0;
     }

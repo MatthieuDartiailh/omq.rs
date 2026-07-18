@@ -161,7 +161,7 @@ impl<T> Ring<T> {
         count
     }
 
-    pub(crate) fn prefetch_bounded(&self, cached_tail: &mut usize, max_items: usize) -> usize {
+    pub(crate) fn prefetch_up_to(&self, cached_tail: &mut usize, max_items: usize) -> usize {
         let new_tail = self.tail.0.load(Ordering::Acquire);
         let available = new_tail.wrapping_sub(*cached_tail);
         let count = available.min(max_items);
@@ -450,8 +450,8 @@ impl<T> Consumer<T> {
     /// for a subsequent prefetch. Call [`release`](Self::release) only after
     /// all items returned by this prefetch have been popped.
     #[inline]
-    pub fn prefetch_bounded(&mut self, max_items: usize) -> usize {
-        self.ring.prefetch_bounded(&mut self.cached_tail, max_items)
+    pub fn prefetch_up_to(&mut self, max_items: usize) -> usize {
+        self.ring.prefetch_up_to(&mut self.cached_tail, max_items)
     }
 
     /// Convenience: prefetch + pop + release. For callers that don't
@@ -589,20 +589,20 @@ mod tests {
         }
         p.flush();
 
-        assert_eq!(c.prefetch_bounded(2), 2);
+        assert_eq!(c.prefetch_up_to(2), 2);
         assert_eq!(c.pop(), Some(0));
         assert_eq!(c.pop(), Some(1));
         c.release();
 
-        assert_eq!(c.prefetch_bounded(2), 2);
+        assert_eq!(c.prefetch_up_to(2), 2);
         assert_eq!(c.pop(), Some(2));
         assert_eq!(c.pop(), Some(3));
         c.release();
 
-        assert_eq!(c.prefetch_bounded(2), 1);
+        assert_eq!(c.prefetch_up_to(2), 1);
         assert_eq!(c.pop(), Some(4));
         c.release();
-        assert_eq!(c.prefetch_bounded(2), 0);
+        assert_eq!(c.prefetch_up_to(2), 0);
     }
 
     #[test]
