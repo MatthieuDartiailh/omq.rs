@@ -316,12 +316,17 @@ mod tests {
         Arc::new(tokio::sync::Notify::new())
     }
 
+    fn waker() -> Arc<crate::socket::recv::BlockingRecvWaker> {
+        crate::socket::recv::BlockingRecvWaker::new()
+    }
+
     #[tokio::test]
     async fn bind_connect_accept_exchange() {
-        let mut l = bind("test-bca", snap(SocketType::Pull), notify(), None).unwrap();
+        let mut l = bind("test-bca", snap(SocketType::Pull), notify(), waker(), None).unwrap();
         let n = notify();
         let connector = tokio::spawn(async move {
-            connect_with_max_message_size("test-bca", snap(SocketType::Push), n, None).await
+            connect_with_max_message_size("test-bca", snap(SocketType::Push), n, waker(), None)
+                .await
         });
         let server_side = l.accept().await.unwrap();
         let client_side = connector.await.unwrap().unwrap();
@@ -351,9 +356,9 @@ mod tests {
 
     #[tokio::test]
     async fn double_bind_rejected() {
-        let _l = bind("test-dup", snap(SocketType::Pair), notify(), None).unwrap();
+        let _l = bind("test-dup", snap(SocketType::Pair), notify(), waker(), None).unwrap();
         assert!(matches!(
-            bind("test-dup", snap(SocketType::Pair), notify(), None),
+            bind("test-dup", snap(SocketType::Pair), notify(), waker(), None),
             Err(Error::InvalidEndpoint(_))
         ));
     }
@@ -361,8 +366,14 @@ mod tests {
     #[tokio::test]
     async fn connect_without_bind_fails() {
         assert!(matches!(
-            connect_with_max_message_size("test-unbound", snap(SocketType::Push), notify(), None,)
-                .await,
+            connect_with_max_message_size(
+                "test-unbound",
+                snap(SocketType::Push),
+                notify(),
+                waker(),
+                None,
+            )
+            .await,
             Err(Error::InvalidEndpoint(_))
         ));
     }
@@ -370,8 +381,8 @@ mod tests {
     #[tokio::test]
     async fn listener_drop_releases_name() {
         {
-            let _l = bind("test-drop", snap(SocketType::Pair), notify(), None).unwrap();
+            let _l = bind("test-drop", snap(SocketType::Pair), notify(), waker(), None).unwrap();
         }
-        let _l2 = bind("test-drop", snap(SocketType::Pair), notify(), None).unwrap();
+        let _l2 = bind("test-drop", snap(SocketType::Pair), notify(), waker(), None).unwrap();
     }
 }
