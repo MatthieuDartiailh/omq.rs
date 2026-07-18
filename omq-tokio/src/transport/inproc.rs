@@ -33,6 +33,7 @@ pub struct InprocTx {
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub max_message_size: Option<usize>,
     pub space_notify: Arc<tokio::sync::Notify>,
+    pub(crate) blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
 }
 
 /// Receiver-side SPSC state for inproc fast path.
@@ -97,6 +98,7 @@ struct InprocConnectRequest {
     connector_to_listener_rx: mpsc::Receiver<InboundFrame>,
     listener_to_connector_tx: mpsc::Sender<InboundFrame>,
     connector_recv_notify: Arc<tokio::sync::Notify>,
+    connector_blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     connector_max_message_size: Option<usize>,
     accept_ack: oneshot::Sender<InprocAck>,
 }
@@ -119,6 +121,7 @@ pub(crate) fn bind(
     name: &str,
     snapshot: InprocPeerSnapshot,
     recv_notify: Arc<tokio::sync::Notify>,
+    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
 ) -> Result<InprocListener> {
     let (tx, rx) = mpsc::channel(32);
@@ -140,6 +143,7 @@ pub(crate) fn bind(
         },
         snapshot,
         recv_notify,
+        blocking_recv_waker,
         max_message_size,
         incoming: rx,
     })
@@ -149,6 +153,7 @@ pub(crate) async fn connect_with_max_message_size(
     name: &str,
     snapshot: InprocPeerSnapshot,
     recv_notify: Arc<tokio::sync::Notify>,
+    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
 ) -> Result<InprocConn> {
     let req_tx = {
@@ -167,6 +172,7 @@ pub(crate) async fn connect_with_max_message_size(
         connector_to_listener_rx: c2l_rx,
         listener_to_connector_tx: l2c_tx,
         connector_recv_notify: recv_notify,
+        connector_blocking_recv_waker: blocking_recv_waker,
         connector_max_message_size: max_message_size,
         accept_ack: ack_tx,
     };
@@ -195,6 +201,7 @@ pub struct InprocListener {
     endpoint: omq_proto::endpoint::Endpoint,
     snapshot: InprocPeerSnapshot,
     recv_notify: Arc<tokio::sync::Notify>,
+    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     incoming: mpsc::Receiver<InprocConnectRequest>,
 }
@@ -220,6 +227,7 @@ impl InprocListener {
             connector_to_listener_rx,
             listener_to_connector_tx,
             connector_recv_notify,
+            connector_blocking_recv_waker,
             connector_max_message_size,
             accept_ack,
         } = req;
@@ -253,6 +261,11 @@ impl InprocListener {
                 recv_ready: ready.clone(),
                 max_message_size: mms,
                 space_notify: Arc::new(tokio::sync::Notify::new()),
+                blocking_recv_waker: if listener_is_recv {
+                    Arc::clone(&self.blocking_recv_waker)
+                } else {
+                    Arc::clone(&connector_blocking_recv_waker)
+                },
             });
             let rx = Arc::new(InprocRx {
                 consumer: Mutex::new(c),

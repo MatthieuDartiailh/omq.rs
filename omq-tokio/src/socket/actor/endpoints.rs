@@ -298,6 +298,7 @@ impl SocketDriver {
             &endpoint,
             &snapshot,
             &self.spsc.recv_notify,
+            &self.spsc.blocking_recv_waker,
             self.options.max_message_size,
             #[cfg(feature = "ws")]
             &self.options.wss_tls,
@@ -382,6 +383,7 @@ impl SocketDriver {
         let tx_for_delay = tx.clone();
         let snapshot = self.inproc_snapshot();
         let recv_notify = self.spsc.recv_notify.clone();
+        let blocking_recv_waker = self.spsc.blocking_recv_waker.clone();
         let max_message_size = self.options.max_message_size;
         #[cfg(feature = "ws")]
         let accept_invalid_certs = self.options.wss_tls.accept_invalid_certs;
@@ -395,6 +397,7 @@ impl SocketDriver {
                         &ep_for_dial,
                         &snapshot,
                         &recv_notify,
+                        &blocking_recv_waker,
                         max_message_size,
                         #[cfg(feature = "ws")]
                         accept_invalid_certs,

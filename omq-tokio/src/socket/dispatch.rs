@@ -437,6 +437,7 @@ pub(super) async fn bind_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv_notify: &std::sync::Arc<tokio::sync::Notify>,
+    blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     #[cfg(feature = "ws")] wss_tls: &omq_proto::options::WssTls,
 ) -> Result<AnyListener> {
@@ -471,6 +472,7 @@ pub(super) async fn bind_any(
             name,
             snapshot.clone(),
             recv_notify.clone(),
+            blocking_recv_waker.clone(),
             max_message_size,
         )?)),
         Endpoint::Ipc(_) => Ok(AnyListener::Ipc(IpcTransport::bind(endpoint).await?)),
@@ -483,6 +485,7 @@ pub(super) async fn connect_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv_notify: &std::sync::Arc<tokio::sync::Notify>,
+    blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     #[cfg(feature = "ws")] accept_invalid_certs: bool,
     #[cfg(feature = "ws")] mechanism: &omq_proto::MechanismSetup,
@@ -530,6 +533,7 @@ pub(super) async fn connect_any(
                 name,
                 snapshot.clone(),
                 recv_notify.clone(),
+                blocking_recv_waker.clone(),
                 max_message_size,
             )
             .await?;

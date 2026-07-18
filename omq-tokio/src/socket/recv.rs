@@ -642,7 +642,7 @@ impl SpscAwareRecv {
         let _ = pair.producer.push(msg);
         pair.producer.flush();
         pair.recv_notify.notify_one();
-        self.blocking_recv_waker.wake();
+        pair.blocking_recv_waker.wake();
         SpscPush::Sent
     }
 }
