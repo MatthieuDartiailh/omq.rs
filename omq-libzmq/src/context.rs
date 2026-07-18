@@ -35,7 +35,7 @@ impl OmqContext {
         let n = n_io_threads;
         Arc::new(Self {
             ctx: OnceLock::new(),
-            configured_io_threads: AtomicI32::new(n as i32),
+            configured_io_threads: AtomicI32::new(i32::try_from(n).unwrap_or(i32::MAX)),
             terminated: Arc::new(AtomicBool::new(false)),
             socket_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
@@ -188,7 +188,6 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
         ZMQ_MAX_MSGSZ => {
             ctx.max_msg_size.store(i64::from(value), Ordering::Relaxed);
         }
-        #[expect(clippy::match_same_arms)]
         ZMQ_SOCKET_LIMIT | ZMQ_IPV6_CTX => {}
         _ => return crate::error::fail(libc::EINVAL),
     }

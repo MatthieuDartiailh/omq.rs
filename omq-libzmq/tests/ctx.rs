@@ -58,6 +58,28 @@ fn ctx_set_zero_io_threads() {
 }
 
 #[test]
+fn ctx_set_io_threads_before_socket_creation() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 3), 0);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_IO_THREADS), 3);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_set_io_threads_rejects_negative_and_late_changes() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, -1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    let sock = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!sock.is_null());
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 2), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    zmq_close(sock);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn zero_io_threads_support_inproc_push_pull() {
     let ctx = zmq_init(0);
     let push = zmq_socket(ctx, ZMQ_PUSH);
@@ -74,6 +96,24 @@ fn zero_io_threads_support_inproc_push_pull() {
 
     zmq_close(push);
     zmq_close(pull);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn zero_io_threads_reject_unsupported_transports() {
+    let ctx = zmq_init(0);
+    let pair = zmq_socket(ctx, 0);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let tcp = CString::new("tcp://127.0.0.1:*").unwrap();
+    let inproc = CString::new("inproc://zero-io-unsupported").unwrap();
+
+    assert_eq!(zmq_bind(pair, inproc.as_ptr()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::ENOTSUP);
+    assert_eq!(zmq_bind(push, tcp.as_ptr()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::ENOTSUP);
+
+    zmq_close(pair);
+    zmq_close(push);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
