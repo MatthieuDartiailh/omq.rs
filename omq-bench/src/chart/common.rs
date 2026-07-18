@@ -8,8 +8,13 @@ pub(crate) const COMPARISON_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
 pub(crate) const SMALL_CUTOFF: u64 = 1024;
 pub(crate) const LARGE_START: u64 = 256;
 
-pub(crate) const GRID_COLOR: RGBColor = RGBColor(229, 231, 235);
-pub(crate) const AXIS_COLOR: RGBColor = RGBColor(107, 114, 128);
+pub(crate) const BACKGROUND_COLOR: RGBColor = RGBColor(0, 0, 0);
+pub(crate) const GRID_COLOR: RGBColor = RGBColor(55, 65, 81);
+pub(crate) const AXIS_COLOR: RGBColor = RGBColor(156, 163, 175);
+pub(crate) const TEXT_COLOR: RGBColor = RGBColor(229, 231, 235);
+pub(crate) const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
+pub(crate) const TITLE_FILL: &str = "#F9FAFB";
+pub(crate) const MUTED_FILL: &str = "#9CA3AF";
 
 pub(crate) struct Impl {
     pub key: &'static str,
@@ -37,14 +42,14 @@ pub(crate) type FairnessMap = BTreeMap<u64, BTreeMap<String, FairnessEntry>>;
 
 // ── colors ─────────────────────────────────────────────────────
 
-pub(crate) const C_LIBZMQ: RGBColor = RGBColor(234, 179, 8);
-pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(161, 98, 7);
-pub(crate) const C_OMQ_1T: RGBColor = RGBColor(249, 115, 22);
+pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
+pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
+pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
 pub(crate) const C_OMQ_2T: RGBColor = RGBColor(185, 28, 28);
-pub(crate) const C_ZMQRS: RGBColor = RGBColor(37, 99, 235);
-pub(crate) const C_RZMQ: RGBColor = RGBColor(22, 163, 74);
-pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(21, 128, 61);
+pub(crate) const C_ZMQRS: RGBColor = RGBColor(96, 165, 250);
+pub(crate) const C_RZMQ: RGBColor = RGBColor(74, 222, 128);
+pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 
 // ── formatting ─────────────────────────────────────────────────
 
@@ -200,14 +205,14 @@ pub(crate) fn postprocess_svg(
     let mut header = format!(
         "\n<text x=\"{mid}\" y=\"17\" text-anchor=\"middle\" \
          font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" \
-         fill=\"#111827\">{title}</text>",
+         fill=\"{TITLE_FILL}\">{title}</text>",
     );
     if let Some(hw) = hw_label {
         write!(
             header,
             "\n<text x=\"{mid}\" y=\"31\" text-anchor=\"middle\" \
              font-family=\"sans-serif\" font-size=\"10\" \
-             fill=\"#9ca3af\">{hw}</text>",
+             fill=\"{MUTED_FILL}\">{hw}</text>",
         )
         .unwrap();
     }
@@ -234,13 +239,9 @@ pub(crate) fn draw_legend_table(
     snd_label: &str,
     rcv_label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style_hdr = ("sans-serif", 11)
-        .into_font()
-        .color(&RGBColor(107, 114, 128));
-    let style_val = ("sans-serif", 11).into_font().color(&RGBColor(55, 65, 81));
-    let style_dim = ("sans-serif", 11)
-        .into_font()
-        .color(&RGBColor(156, 163, 175));
+    let style_hdr = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
+    let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
+    let style_dim = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
 
     let col_swatch = 78;
     let col_name = col_swatch + 20;
@@ -640,7 +641,7 @@ pub(crate) fn draw_throughput_dual_panel(
     let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&BACKGROUND_COLOR)?;
     let (chart_area, table_area) = root.split_vertically(chart_h);
     let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
 
@@ -695,7 +696,10 @@ pub(crate) fn draw_msgs_panel(
     fairness: Option<&FairnessMap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut chart = ChartBuilder::on(area)
-        .caption("small messages (higher is better)", ("sans-serif", 12))
+        .caption(
+            "small messages (higher is better)",
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
+        )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Left, 70)
         .margin_top(36)
@@ -713,8 +717,8 @@ pub(crate) fn draw_msgs_panel(
         })
         .y_labels(n_ticks + 1)
         .y_label_formatter(&|v| fmt_msgs(*v))
-        .y_label_style(("sans-serif", 10))
-        .x_label_style(("sans-serif", 10))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
@@ -759,7 +763,7 @@ pub(crate) fn draw_gbs_panel(
     let mut chart = ChartBuilder::on(area)
         .caption(
             "medium/large messages (higher is better)",
-            ("sans-serif", 12),
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Right, 62)
@@ -778,8 +782,8 @@ pub(crate) fn draw_gbs_panel(
         })
         .y_labels(n_ticks + 1)
         .y_label_formatter(&|v| fmt_gbps(*v))
-        .y_label_style(("sans-serif", 10))
-        .x_label_style(("sans-serif", 10))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
@@ -841,14 +845,14 @@ pub(crate) fn draw_latency_single_panel(
     let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&BACKGROUND_COLOR)?;
     let (chart_area, table_area) = root.split_vertically(chart_h);
 
     let n = sizes.len();
     let mut chart = ChartBuilder::on(&chart_area)
         .caption(
             "p50 round-trip latency (lower is better)",
-            ("sans-serif", 12),
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Left, 60)
@@ -866,8 +870,8 @@ pub(crate) fn draw_latency_single_panel(
                 .map_or(String::new(), |&s| fmt_size(s))
         })
         .y_label_formatter(&|v| fmt_us(*v))
-        .y_label_style(("sans-serif", 10))
-        .x_label_style(("sans-serif", 10))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
@@ -938,7 +942,7 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
     let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&BACKGROUND_COLOR)?;
     let (chart_area, table_area) = root.split_vertically(chart_h);
     let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
 
@@ -996,7 +1000,7 @@ fn draw_gbs_panel_log(
     let mut chart = ChartBuilder::on(area)
         .caption(
             "medium/large messages (higher is better)",
-            ("sans-serif", 12),
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Right, 62)
@@ -1017,8 +1021,8 @@ fn draw_gbs_panel_log(
             let gbs = 10.0_f64.powf(*v);
             fmt_gbps(gbs)
         })
-        .y_label_style(("sans-serif", 10))
-        .x_label_style(("sans-serif", 10))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
@@ -1110,7 +1114,7 @@ pub(crate) fn draw_multirow_throughput(
     let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&BACKGROUND_COLOR)?;
 
     let n_ticks = 6usize;
 
@@ -1194,7 +1198,7 @@ fn postprocess_multirow_svg(
             extra,
             "\n<text x=\"{mid}\" y=\"{y}\" text-anchor=\"middle\" \
              font-family=\"sans-serif\" font-size=\"13\" font-weight=\"bold\" \
-             fill=\"#111827\">{label}</text>",
+             fill=\"{TITLE_FILL}\">{label}</text>",
         )
         .unwrap();
     }
