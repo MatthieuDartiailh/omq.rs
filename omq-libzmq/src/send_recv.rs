@@ -217,7 +217,9 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
                     Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
                 }
             }
-            let handle = sock.ctx.handle();
+            let Some(handle) = sock.ctx.handle() else {
+                return fail(ETERM);
+            };
             let s = inner.clone();
             if sndtimeo > 0 {
                 let timeout = Duration::from_millis(sndtimeo as u64);

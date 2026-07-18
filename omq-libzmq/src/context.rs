@@ -4,13 +4,14 @@ use std::ffi::c_int;
 
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use tokio::runtime::Handle;
 
-/// Per-context: a single `omq_tokio::Context` managing the tokio runtime.
+/// Per-context: lazily-created `omq_tokio::Context` and ZMQ state.
 pub(crate) struct OmqContext {
-    pub(crate) ctx: omq_tokio::Context,
+    pub(crate) ctx: OnceLock<omq_tokio::Context>,
+    pub(crate) configured_io_threads: AtomicI32,
     pub terminated: Arc<AtomicBool>,
     pub socket_count: AtomicI32,
     socket_notify: (Mutex<()>, Condvar),
@@ -31,10 +32,10 @@ pub(crate) fn next_socket_id() -> u64 {
 
 impl OmqContext {
     fn new(n_io_threads: usize) -> Arc<Self> {
-        let n = n_io_threads.max(1);
-        let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig { io_threads: n });
+        let n = n_io_threads;
         Arc::new(Self {
-            ctx,
+            ctx: OnceLock::new(),
+            configured_io_threads: AtomicI32::new(i32::try_from(n).unwrap_or(i32::MAX)),
             terminated: Arc::new(AtomicBool::new(false)),
             socket_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
@@ -45,8 +46,23 @@ impl OmqContext {
         })
     }
 
-    pub(crate) fn handle(&self) -> &Handle {
-        self.ctx.handle()
+    pub(crate) fn handle(&self) -> Option<&Handle> {
+        self.ctx.get().map(omq_tokio::Context::handle)
+    }
+
+    pub(crate) fn io_context(&self) -> Option<&omq_tokio::Context> {
+        let n = self.configured_io_threads.load(Ordering::Acquire);
+        (n > 0).then(|| {
+            self.ctx.get_or_init(|| {
+                omq_tokio::Context::with_config(omq_tokio::ContextConfig {
+                    io_threads: n as usize,
+                })
+            })
+        })
+    }
+
+    pub(crate) fn zero_io_threads(&self) -> bool {
+        self.configured_io_threads.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn socket_opened(&self) {
@@ -84,7 +100,7 @@ pub extern "C" fn zmq_ctx_new() -> *mut libc::c_void {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_init(io_threads: c_int) -> *mut libc::c_void {
-    let n = (io_threads as usize).max(1);
+    let n = io_threads.max(0) as usize;
     let arc = OmqContext::new(n);
     Box::into_raw(Box::new(arc)).cast()
 }
@@ -125,6 +141,9 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
         }
     }
 
+    if let Some(ctx) = arc.ctx.get() {
+        ctx.term();
+    }
     drop(arc);
     0
 }
@@ -154,7 +173,11 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     match option {
         ZMQ_IO_THREADS => {
-            // io threads already running; setting this is a no-op
+            if value < 0 || ctx.socket_count.load(Ordering::Acquire) != 0 || ctx.ctx.get().is_some()
+            {
+                return crate::error::fail(libc::EINVAL);
+            }
+            ctx.configured_io_threads.store(value, Ordering::Release);
         }
         ZMQ_MAX_SOCKETS => {
             if value < 0 {
@@ -165,7 +188,6 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
         ZMQ_MAX_MSGSZ => {
             ctx.max_msg_size.store(i64::from(value), Ordering::Relaxed);
         }
-        #[expect(clippy::match_same_arms)]
         ZMQ_SOCKET_LIMIT | ZMQ_IPV6_CTX => {}
         _ => return crate::error::fail(libc::EINVAL),
     }
@@ -180,7 +202,7 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
     // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
     match option {
-        ZMQ_IO_THREADS => c_int::try_from(ctx.ctx.io_threads()).unwrap_or(c_int::MAX),
+        ZMQ_IO_THREADS => ctx.configured_io_threads.load(Ordering::Acquire),
         ZMQ_MAX_SOCKETS | ZMQ_SOCKET_LIMIT => ctx.max_sockets.load(Ordering::Relaxed),
         ZMQ_MAX_MSGSZ => ctx.max_msg_size.load(Ordering::Relaxed) as c_int,
         ZMQ_IPV6_CTX => 0,

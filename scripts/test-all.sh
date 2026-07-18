@@ -132,7 +132,9 @@ par_wait() {
 # Clippy compiles all targets; a separate all-target build only duplicates
 # that work before the test suite.
 run cargo clippy --all-targets --no-deps -- -D warnings
+run cargo clippy -p omq-libzmq --all-targets --no-deps -- -D warnings
 run cargo test
+run cargo test -p omq-libzmq
 
 if [[ "${OMQ_PERF:-}" == "1" && -f .perf_hw ]]; then
     run cargo run --release -q -p omq-tokio --bin omq_perf_verify

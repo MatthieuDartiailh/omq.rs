@@ -1,8 +1,10 @@
 //! Context lifecycle tests.
 
 use omq_zmq::{
-    zmq_close, zmq_ctx_get, zmq_ctx_new, zmq_ctx_set, zmq_ctx_shutdown, zmq_ctx_term, zmq_socket,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_get, zmq_ctx_new, zmq_ctx_set, zmq_ctx_shutdown,
+    zmq_ctx_term, zmq_init, zmq_recv, zmq_send, zmq_socket,
 };
+use std::ffi::CString;
 use std::ffi::c_void;
 
 const ZMQ_PUSH: i32 = 8;
@@ -45,6 +47,74 @@ fn ctx_get_io_threads_default() {
     let n = zmq_ctx_get(ctx, ZMQ_IO_THREADS);
     assert_eq!(n, 1);
     zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_set_zero_io_threads() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 0), 0);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_IO_THREADS), 0);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_set_io_threads_before_socket_creation() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 3), 0);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_IO_THREADS), 3);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_set_io_threads_rejects_negative_and_late_changes() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, -1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    let sock = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!sock.is_null());
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 2), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    zmq_close(sock);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn zero_io_threads_support_inproc_push_pull() {
+    let ctx = zmq_init(0);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let addr = CString::new("inproc://zero-io-threads").unwrap();
+
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    assert_eq!(zmq_send(push, b"hello".as_ptr().cast(), 5, 0), 5);
+
+    let mut buf = [0u8; 8];
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 5);
+    assert_eq!(&buf[..5], b"hello");
+
+    zmq_close(push);
+    zmq_close(pull);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn zero_io_threads_reject_unsupported_transports() {
+    let ctx = zmq_init(0);
+    let pair = zmq_socket(ctx, 0);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let tcp = CString::new("tcp://127.0.0.1:*").unwrap();
+    let inproc = CString::new("inproc://zero-io-unsupported").unwrap();
+
+    assert_eq!(zmq_bind(pair, inproc.as_ptr()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::ENOTSUP);
+    assert_eq!(zmq_bind(push, tcp.as_ptr()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::ENOTSUP);
+
+    zmq_close(pair);
+    zmq_close(push);
+    assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
 #[test]
