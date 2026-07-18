@@ -83,6 +83,18 @@ static double quantile_d(const double *sorted, int n, double p) {
     return sorted[(int)(idx + 0.5)];
 }
 
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t va = *(const uint64_t *)a;
+    uint64_t vb = *(const uint64_t *)b;
+    return (va > vb) - (va < vb);
+}
+
+static double percentile_u64(uint64_t *sorted, int n, double p) {
+    int idx = (int)(n * p / 100.0);
+    if (idx >= n) idx = n - 1;
+    return sorted[idx] / 1000.0;
+}
+
 static void print_fairness(const double *rates, int n, double elapsed) {
     double sorted[256];
     for (int i = 0; i < n; i++)
@@ -165,6 +177,21 @@ static const char *resolve_addr(const char *s, char *buf, size_t bufsz) {
 
 
 typedef struct { void *ctx; const char *name; int size; } InprocPushArg;
+typedef struct { void *ctx; const char *name; int size; } InprocRepArg;
+typedef struct { void *sock; int size; } InprocPubSendArg;
+
+typedef struct {
+    void *sock;
+    _Atomic long long counter;
+    volatile int stop;
+} RecvWorker;
+
+typedef struct {
+    void *sock;
+    int size;
+    _Atomic long long counter;
+    volatile int stop;
+} SendWorker;
 
 static void *inproc_push_thread(void *arg_) {
     InprocPushArg *a = arg_;
@@ -179,6 +206,67 @@ static void *inproc_push_thread(void *arg_) {
     }
     free(buf);
     zmq_close(sock);
+    return NULL;
+}
+
+static void *inproc_rep_thread(void *arg_) {
+    InprocRepArg *a = arg_;
+    char addr[256];
+    snprintf(addr, sizeof(addr), "inproc://%s", a->name);
+    void *sock = zmq_socket(a->ctx, ZMQ_REP);
+    if (!sock || zmq_bind(sock, addr) != 0) return NULL;
+    zmq_msg_t msg;
+    zmq_msg_init(&msg);
+    for (;;) {
+        int rc = zmq_msg_recv(&msg, sock, 0);
+        if (rc < 0) break;
+        int sz = zmq_msg_size(&msg);
+        if (zmq_send(sock, zmq_msg_data(&msg), sz, 0) < 0) break;
+    }
+    zmq_msg_close(&msg);
+    zmq_close(sock);
+    return NULL;
+}
+
+static void *inproc_pub_send_thread(void *arg_) {
+    InprocPubSendArg *a = arg_;
+    char *buf = calloc(1, a->size);
+    memset(buf, 'x', a->size);
+    for (;;) {
+        if (zmq_send(a->sock, buf, a->size, 0) < 0) break;
+    }
+    free(buf);
+    return NULL;
+}
+
+static void *recv_thread(void *arg) {
+    RecvWorker *w = arg;
+    zmq_msg_t msg;
+    zmq_msg_init(&msg);
+    while (!w->stop) {
+        int rc = zmq_msg_recv(&msg, w->sock, 0);
+        if (rc < 0) {
+            if (zmq_errno() == EAGAIN) continue;
+            break;
+        }
+        atomic_fetch_add_explicit(&w->counter, 1, memory_order_relaxed);
+    }
+    zmq_msg_close(&msg);
+    return NULL;
+}
+
+static void *send_thread(void *arg) {
+    SendWorker *w = arg;
+    char *buf = calloc(1, w->size);
+    memset(buf, 'x', w->size);
+    while (!w->stop) {
+        if (zmq_send(w->sock, buf, w->size, 0) < 0) {
+            if (zmq_errno() == EAGAIN) continue;
+            break;
+        }
+        atomic_fetch_add_explicit(&w->counter, 1, memory_order_relaxed);
+    }
+    free(buf);
     return NULL;
 }
 
@@ -498,19 +586,7 @@ done_sub:;
             if (zmq_connect(subs[i], inproc_addr) != 0) die("zmq_connect");
         }
 
-        typedef struct { void *sock; int size; } InprocPubSendArg;
         InprocPubSendArg send_arg = { pub_sock, size };
-
-        void *inproc_pub_send_thread(void *arg_) {
-            InprocPubSendArg *a = arg_;
-            char *buf = calloc(1, a->size);
-            memset(buf, 'x', a->size);
-            for (;;) {
-                if (zmq_send(a->sock, buf, a->size, 0) < 0) break;
-            }
-            free(buf);
-            return NULL;
-        }
 
         pthread_t pub_tid;
         pthread_create(&pub_tid, NULL, inproc_pub_send_thread, &send_arg);
@@ -574,29 +650,6 @@ done_inproc_pubsub:;
             return 1;
         }
         int is_sub = (strcmp(role, "multi-sub") == 0);
-
-        typedef struct {
-            void *sock;
-            _Atomic long long counter;
-            volatile int stop;
-        } RecvWorker;
-
-        void *recv_thread(void *arg) {
-            RecvWorker *w = arg;
-            zmq_msg_t msg;
-            zmq_msg_init(&msg);
-            while (!w->stop) {
-                int rc = zmq_msg_recv(&msg, w->sock, 0);
-                if (rc < 0) {
-                    if (zmq_errno() == EAGAIN) continue;
-                    break;
-                }
-                atomic_fetch_add_explicit(&w->counter, 1,
-                                          memory_order_relaxed);
-            }
-            zmq_msg_close(&msg);
-            return NULL;
-        }
 
         RecvWorker workers[256];
         void *sockets[256];
@@ -676,28 +729,6 @@ done_inproc_pubsub:;
         }
         double duration = (argc >= 6) ? atof(argv[5]) : 0;
 
-        typedef struct {
-            void *sock;
-            _Atomic long long counter;
-            volatile int stop;
-        } SendWorker;
-
-        void *send_thread(void *arg) {
-            SendWorker *w = arg;
-            char *buf = calloc(1, size);
-            memset(buf, 'x', size);
-            while (!w->stop) {
-                if (zmq_send(w->sock, buf, size, 0) < 0) {
-                    if (zmq_errno() == EAGAIN) continue;
-                    break;
-                }
-                atomic_fetch_add_explicit(&w->counter, 1,
-                                          memory_order_relaxed);
-            }
-            free(buf);
-            return NULL;
-        }
-
         SendWorker workers[256];
         void *sockets[256];
         pthread_t threads[256];
@@ -707,6 +738,7 @@ done_inproc_pubsub:;
             if (!sockets[i]) die("zmq_socket PUSH");
             if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
             workers[i].sock = sockets[i];
+            workers[i].size = size;
             atomic_store(&workers[i].counter, 0);
             workers[i].stop = 0;
         }
@@ -816,22 +848,11 @@ done_inproc_pubsub:;
         double cpu = cpu_time_secs() - cpu_before;
         double wall_elapsed = now_secs() - wall_t0;
 
-        int cmp_u64(const void *a, const void *b) {
-            uint64_t va = *(const uint64_t *)a;
-            uint64_t vb = *(const uint64_t *)b;
-            return (va > vb) - (va < vb);
-        }
         qsort(rtts, iterations, sizeof(uint64_t), cmp_u64);
 
-        double percentile(uint64_t *sorted, int n, double p) {
-            int idx = (int)(n * p / 100.0);
-            if (idx >= n) idx = n - 1;
-            return sorted[idx] / 1000.0;
-        }
-
-        double p50  = percentile(rtts, iterations, 50);
-        double p99  = percentile(rtts, iterations, 99);
-        double p999 = percentile(rtts, iterations, 99.9);
+        double p50  = percentile_u64(rtts, iterations, 50);
+        double p99  = percentile_u64(rtts, iterations, 99);
+        double p999 = percentile_u64(rtts, iterations, 99.9);
         double max  = rtts[iterations - 1] / 1000.0;
         printf("%.3f %.3f %.3f %.3f %d %.6f %.6f\n", p50, p99, p999, max, iterations, cpu, wall_elapsed);
 
@@ -847,27 +868,7 @@ done_inproc_pubsub:;
         int warmup = atoi(argv[5]);
 
         /* REP thread */
-        typedef struct { void *ctx; const char *name; int size; } InprocRepArg;
         InprocRepArg rep_arg = { ctx, name, size };
-
-        void *inproc_rep_thread(void *arg_) {
-            InprocRepArg *a = arg_;
-            char addr[256];
-            snprintf(addr, sizeof(addr), "inproc://%s", a->name);
-            void *sock = zmq_socket(a->ctx, ZMQ_REP);
-            if (!sock || zmq_bind(sock, addr) != 0) return NULL;
-            zmq_msg_t msg;
-            zmq_msg_init(&msg);
-            for (;;) {
-                int rc = zmq_msg_recv(&msg, sock, 0);
-                if (rc < 0) break;
-                int sz = zmq_msg_size(&msg);
-                if (zmq_send(sock, zmq_msg_data(&msg), sz, 0) < 0) break;
-            }
-            zmq_msg_close(&msg);
-            zmq_close(sock);
-            return NULL;
-        }
 
         pthread_t tid;
         pthread_create(&tid, NULL, inproc_rep_thread, &rep_arg);
@@ -910,22 +911,11 @@ done_inproc_pubsub:;
         }
         clock_gettime(CLOCK_MONOTONIC, &wall_end);
 
-        int cmp_u64(const void *a, const void *b) {
-            uint64_t va = *(const uint64_t *)a;
-            uint64_t vb = *(const uint64_t *)b;
-            return (va > vb) - (va < vb);
-        }
         qsort(rtts, iterations, sizeof(uint64_t), cmp_u64);
 
-        double percentile(uint64_t *sorted, int n, double p) {
-            int idx = (int)(n * p / 100.0);
-            if (idx >= n) idx = n - 1;
-            return sorted[idx] / 1000.0;
-        }
-
-        double p50  = percentile(rtts, iterations, 50);
-        double p99  = percentile(rtts, iterations, 99);
-        double p999 = percentile(rtts, iterations, 99.9);
+        double p50  = percentile_u64(rtts, iterations, 50);
+        double p99  = percentile_u64(rtts, iterations, 99);
+        double p999 = percentile_u64(rtts, iterations, 99.9);
         double max  = rtts[iterations - 1] / 1000.0;
         double wall_elapsed = (double)(wall_end.tv_sec - wall_start.tv_sec)
                              + (double)(wall_end.tv_nsec - wall_start.tv_nsec) / 1e9;
