@@ -663,7 +663,7 @@ impl ShardWorker {
         #[allow(unused)] dict: Option<&Bytes>,
     ) {
         #[cfg(feature = "lz4")]
-        if self.encoder.is_none() {
+        if self.encoder.is_none() || dict.is_some() {
             use omq_proto::endpoint::{Endpoint, Host};
             let mut opts = options.clone().compression_auto_train(false);
             if let Some(d) = dict {
