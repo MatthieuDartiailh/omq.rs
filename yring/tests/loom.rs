@@ -5,27 +5,27 @@ use loom::thread;
 #[test]
 fn push_flush_prefetch_pop() {
     loom::model(|| {
-        let (mut p, mut c) = yring::spsc::<u32>(2);
+        let (mut producer, mut consumer) = yring::spsc::<u32>(2);
 
-        let h = thread::spawn(move || {
-            p.push(1).unwrap();
-            p.push(2).unwrap();
-            p.flush();
+        let handle = thread::spawn(move || {
+            producer.push(1).unwrap();
+            producer.push(2).unwrap();
+            producer.flush();
         });
 
         loop {
-            if c.prefetch() > 0 {
-                let a = c.pop().unwrap();
-                let b = c.pop().unwrap();
-                assert_eq!(a, 1);
-                assert_eq!(b, 2);
-                c.release();
+            if consumer.prefetch() > 0 {
+                let first = consumer.pop().unwrap();
+                let second = consumer.pop().unwrap();
+                assert_eq!(first, 1);
+                assert_eq!(second, 2);
+                consumer.release();
                 break;
             }
             thread::yield_now();
         }
 
-        h.join().unwrap();
+        handle.join().unwrap();
     });
 }
 
@@ -124,11 +124,11 @@ fn is_disconnected_after_producer_drop() {
     });
 }
 
-/// Verify push_async doesn't lose wakeups.
+/// Verify `push_async` doesn't lose wakeups.
 ///
 /// The critical race: consumer releases between the producer's
 /// "ring is full" check and waker registration. The retry after
-/// registration (step 4 in PushFuture::poll) must catch this.
+/// registration (step 4 in `PushFuture::poll`) must catch this.
 #[test]
 fn push_async_no_lost_wakeup() {
     use std::future::Future;
@@ -186,7 +186,7 @@ fn push_async_no_lost_wakeup() {
     });
 }
 
-/// Verify push_async detects consumer drop.
+/// Verify `push_async` detects consumer drop.
 #[test]
 fn push_async_consumer_dropped() {
     use std::future::Future;
@@ -223,5 +223,51 @@ fn push_async_consumer_dropped() {
             Poll::Ready(Err(20)) => {}
             other => panic!("expected Err(20), got {other:?}"),
         }
+    });
+}
+
+/// Verify `push_async` detects consumer drop during waker registration.
+#[test]
+fn push_async_consumer_drop_during_registration() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    use std::sync::{Arc, Mutex};
+
+    struct DropConsumerOnClone {
+        consumer: Mutex<Option<yring::AsyncConsumer<u32>>>,
+    }
+
+    fn clone(data: *const ()) -> RawWaker {
+        let hook = unsafe { Arc::from_raw(data.cast::<DropConsumerOnClone>()) };
+        hook.consumer.lock().unwrap().take();
+        let cloned = hook.clone();
+        std::mem::forget(hook);
+        RawWaker::new(Arc::into_raw(cloned).cast(), &VTABLE)
+    }
+
+    fn drop_waker(data: *const ()) {
+        unsafe { std::mem::drop(Arc::from_raw(data.cast::<DropConsumerOnClone>())) };
+    }
+
+    fn noop(_: *const ()) {}
+
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, drop_waker);
+
+    loom::model(|| {
+        let (mut producer, consumer) = yring::async_spsc::<u32>(1);
+        producer.push(1).unwrap();
+        producer.flush();
+
+        let hook = Arc::new(DropConsumerOnClone {
+            consumer: Mutex::new(Some(consumer)),
+        });
+        let waker =
+            unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(hook.clone()).cast(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut future = producer.push_async(2);
+
+        assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Ready(Err(2)));
     });
 }

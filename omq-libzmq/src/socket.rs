@@ -42,9 +42,9 @@ pub(crate) const DEFAULT_HWM: usize = 1000;
 #[derive(Debug)]
 pub(crate) struct RecvConsumers {
     /// Filled directly by the first peer's `ConnectionDriver`.
-    pub fast: yring::Consumer<omq_tokio::Message>,
+    pub fast: yring::Consumer<omq_tokio::engine::RecvItem>,
     /// Filled by the recv pump task (fallback for second+ peers).
-    pub pump: yring::Consumer<omq_tokio::Message>,
+    pub pump: yring::Consumer<omq_tokio::engine::RecvItem>,
 }
 
 #[expect(dead_code)]
@@ -659,12 +659,12 @@ pub extern "C" fn zmq_socket_monitor(
 }
 
 async fn push_to_pump(
-    prod: &mut yring::Producer<omq_tokio::Message>,
+    prod: &mut yring::Producer<omq_tokio::engine::RecvItem>,
     msg: omq_tokio::Message,
     recv_notify: RecvNotify,
     space: &Notify,
 ) {
-    let flush_signal = |prod: &mut yring::Producer<omq_tokio::Message>| {
+    let flush_signal = |prod: &mut yring::Producer<omq_tokio::engine::RecvItem>| {
         if let yring::FlushResult::Flushed {
             was_empty: true, ..
         } = prod.flush_and_check()
@@ -674,23 +674,23 @@ async fn push_to_pump(
     };
     let mut m = msg;
     loop {
-        match prod.push(m) {
+        match prod.push(omq_tokio::engine::RecvItem::new(m)) {
             Ok(()) => {
                 flush_signal(prod);
                 return;
             }
             Err(returned) => {
-                m = returned;
+                m = returned.into_message();
                 let notified = space.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                match prod.push(m) {
+                match prod.push(omq_tokio::engine::RecvItem::new(m)) {
                     Ok(()) => {
                         flush_signal(prod);
                         return;
                     }
                     Err(returned2) => {
-                        m = returned2;
+                        m = returned2.into_message();
                         notified.await;
                     }
                 }

@@ -25,6 +25,16 @@ pub(crate) struct CpuData {
     pub receiver: Option<f64>,
 }
 
+pub(crate) struct FairnessEntry {
+    pub min: f64,
+    pub p25: f64,
+    pub median: f64,
+    pub p75: f64,
+    pub max: f64,
+}
+
+pub(crate) type FairnessMap = BTreeMap<u64, BTreeMap<String, FairnessEntry>>;
+
 // ── colors ─────────────────────────────────────────────────────
 
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(234, 179, 8);
@@ -345,6 +355,62 @@ pub(crate) fn load_tput(
     (tput, msgs, cpu)
 }
 
+pub(crate) fn load_fairness(
+    kind: &str,
+    transport: &str,
+    peers: Option<u64>,
+    impls: &[Impl],
+) -> FairnessMap {
+    use crate::jsonl::{self, ComparisonRow};
+
+    let path = jsonl::cache_dir().join("comparisons.jsonl");
+    let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
+    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
+
+    let mut fairness: FairnessMap = BTreeMap::new();
+    let mut seen: BTreeMap<(String, u64), usize> = BTreeMap::new();
+
+    for (seq, row) in &rows {
+        if row.transport != transport || row.kind != kind {
+            continue;
+        }
+        if !keys.contains(&row.impl_name.as_str()) {
+            continue;
+        }
+        if let Some(p) = peers
+            && row.peers != Some(p)
+        {
+            continue;
+        }
+        let key = (row.impl_name.clone(), row.msg_size);
+        if seen.get(&key).is_some_and(|&prev| *seq < prev) {
+            continue;
+        }
+        seen.insert(key, *seq);
+        if let (Some(min), Some(p25), Some(median), Some(p75), Some(max)) = (
+            row.peer_min,
+            row.peer_p25,
+            row.peer_median,
+            row.peer_p75,
+            row.peer_max,
+        ) && median > 0.0
+        {
+            fairness.entry(row.msg_size).or_default().insert(
+                row.impl_name.clone(),
+                FairnessEntry {
+                    min,
+                    p25,
+                    median,
+                    p75,
+                    max,
+                },
+            );
+        }
+    }
+
+    fairness
+}
+
 pub(crate) fn load_latency(
     transport: &str,
     sizes: &[u64],
@@ -409,6 +475,68 @@ pub(crate) fn load_latency(
         .collect();
 
     (lat, cpu)
+}
+
+// ── fairness whiskers ─────────────────────────────────────────
+
+fn draw_whiskers<DB: DrawingBackend>(
+    chart: &mut ChartContext<
+        '_,
+        DB,
+        Cartesian2d<plotters::coord::types::RangedCoordf64, plotters::coord::types::RangedCoordf64>,
+    >,
+    sizes: &[u64],
+    present: &[&Impl],
+    chart_vals: &ValMap,
+    fairness: &FairnessMap,
+) {
+    let cap_hw = 0.06;
+
+    for imp in present {
+        let fill = RGBAColor(imp.color.0, imp.color.1, imp.color.2, 0.15);
+        let stroke = RGBAColor(imp.color.0, imp.color.1, imp.color.2, 0.5);
+
+        for (size_idx, &sz) in sizes.iter().enumerate() {
+            let Some(&agg) = chart_vals.get(&sz).and_then(|m| m.get(imp.key)) else {
+                continue;
+            };
+            let Some(f) = fairness.get(&sz).and_then(|m| m.get(imp.key)) else {
+                continue;
+            };
+            if f.median <= 0.0 {
+                continue;
+            }
+
+            let project = |v: f64| agg * v / f.median;
+            let y_min = project(f.min);
+            let y_p25 = project(f.p25);
+            let y_p75 = project(f.p75);
+            let y_max = project(f.max);
+
+            let x = size_idx as f64;
+
+            let _ = chart.draw_series(std::iter::once(PathElement::new(
+                vec![(x, y_min), (x, y_max)],
+                stroke.stroke_width(1),
+            )));
+            let _ = chart.draw_series(std::iter::once(PathElement::new(
+                vec![(x - cap_hw, y_min), (x + cap_hw, y_min)],
+                stroke.stroke_width(1),
+            )));
+            let _ = chart.draw_series(std::iter::once(PathElement::new(
+                vec![(x - cap_hw, y_max), (x + cap_hw, y_max)],
+                stroke.stroke_width(1),
+            )));
+            let _ = chart.draw_series(std::iter::once(Rectangle::new(
+                [(x - cap_hw, y_p25), (x + cap_hw, y_p75)],
+                fill.filled(),
+            )));
+            let _ = chart.draw_series(std::iter::once(Rectangle::new(
+                [(x - cap_hw, y_p25), (x + cap_hw, y_p75)],
+                stroke.stroke_width(1),
+            )));
+        }
+    }
 }
 
 // ── chart drawing helpers ──────────────────────────────────────
@@ -477,10 +605,10 @@ pub(crate) fn draw_throughput_dual_panel(
     let msgs_max = msgs_step * n_ticks as f64;
 
     if !small.is_empty() {
-        draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks)?;
+        draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks, None)?;
     }
     if !large.is_empty() {
-        draw_gbs_panel(&right_area, &large, &present, tput, gbs_max, n_ticks)?;
+        draw_gbs_panel(&right_area, &large, &present, tput, gbs_max, n_ticks, None)?;
     }
 
     draw_legend_table(&table_area, &present, cpu, snd_label, rcv_label)?;
@@ -497,6 +625,7 @@ pub(crate) fn draw_msgs_panel(
     msgs: &ValMap,
     msgs_max: f64,
     n_ticks: usize,
+    fairness: Option<&FairnessMap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut chart = ChartBuilder::on(area)
         .caption("small messages (higher is better)", ("sans-serif", 12))
@@ -523,6 +652,10 @@ pub(crate) fn draw_msgs_panel(
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
         .draw()?;
+
+    if let Some(fair) = fairness {
+        draw_whiskers(&mut chart, sizes, present, msgs, fair);
+    }
 
     for imp in present {
         let pts: Vec<(f64, f64)> = sizes
@@ -554,6 +687,7 @@ pub(crate) fn draw_gbs_panel(
     tput: &ValMap,
     gbs_max: f64,
     n_ticks: usize,
+    fairness: Option<&FairnessMap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut chart = ChartBuilder::on(area)
         .caption(
@@ -583,6 +717,18 @@ pub(crate) fn draw_gbs_panel(
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
         .draw()?;
+
+    if let Some(fair) = fairness {
+        let gbs_tput: ValMap = tput
+            .iter()
+            .map(|(&sz, m)| {
+                let gbs: BTreeMap<String, f64> =
+                    m.iter().map(|(k, v)| (k.clone(), v / 1000.0)).collect();
+                (sz, gbs)
+            })
+            .collect();
+        draw_whiskers(&mut chart, sizes, present, &gbs_tput, fair);
+    }
 
     for imp in present {
         let pts: Vec<(f64, f64)> = sizes
@@ -740,7 +886,7 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
     let msgs_max = msgs_step * n_ticks as f64;
 
     if !small.is_empty() {
-        draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks)?;
+        draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks, None)?;
     }
     if !large.is_empty() {
         draw_gbs_panel_log(&right_area, &large, &present, tput)?;
@@ -860,6 +1006,7 @@ pub(crate) fn draw_multirow_throughput(
     row_title_fn: &dyn Fn(u64) -> String,
     snd_label: &str,
     rcv_label: &str,
+    fairness: Option<&[&FairnessMap]>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
         .iter()
@@ -928,11 +1075,22 @@ pub(crate) fn draw_multirow_throughput(
         let msgs_step = nice_step(msgs_raw, n_ticks);
         let msgs_max = msgs_step * n_ticks as f64;
 
+        let row_fair = fairness.and_then(|f| f.get(idx).copied());
         if !small.is_empty() && msgs_max > 0.0 {
-            draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks)?;
+            draw_msgs_panel(
+                &left_area, &small, &present, msgs, msgs_max, n_ticks, row_fair,
+            )?;
         }
         if !large.is_empty() && gbs_max > 0.0 {
-            draw_gbs_panel(&right_area, &large, &present, tput, gbs_max, n_ticks)?;
+            draw_gbs_panel(
+                &right_area,
+                &large,
+                &present,
+                tput,
+                gbs_max,
+                n_ticks,
+                row_fair,
+            )?;
         }
     }
 

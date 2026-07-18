@@ -34,7 +34,7 @@ struct Peers {
 }
 
 fn build_peers() -> Peers {
-    eprintln!("  building bench_peer_blocking (lz4)...");
+    eprintln!("  building omq_bench_peer_blocking (lz4)...");
     let status = std::process::Command::new("cargo")
         .args([
             "build",
@@ -42,7 +42,7 @@ fn build_peers() -> Peers {
             "-p",
             "omq-tokio",
             "--bin",
-            "bench_peer_blocking",
+            "omq_bench_peer_blocking",
             "--features",
             "lz4",
             "-q",
@@ -51,7 +51,7 @@ fn build_peers() -> Peers {
         .expect("failed to run cargo build");
     assert!(status.success(), "build failed");
 
-    eprintln!("  building bench_peer_tokio (lz4)...");
+    eprintln!("  building omq_bench_peer_tokio (lz4)...");
     let status = std::process::Command::new("cargo")
         .args([
             "build",
@@ -59,7 +59,7 @@ fn build_peers() -> Peers {
             "-p",
             "omq-tokio",
             "--bin",
-            "bench_peer_tokio",
+            "omq_bench_peer_tokio",
             "--features",
             "lz4",
             "-q",
@@ -69,8 +69,8 @@ fn build_peers() -> Peers {
     assert!(status.success(), "build failed");
 
     Peers {
-        blocking: PathBuf::from("target/release/bench_peer_blocking"),
-        tokio: PathBuf::from("target/release/bench_peer_tokio"),
+        blocking: PathBuf::from("target/release/omq_bench_peer_blocking"),
+        tokio: PathBuf::from("target/release/omq_bench_peer_tokio"),
     }
 }
 

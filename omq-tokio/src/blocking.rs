@@ -79,10 +79,18 @@ impl Socket {
     pub fn send(&self, msg: Message) -> Result<()> {
         match self.inner.try_send(msg) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(msg)) => {
-                let s = self.inner.clone();
-                self.ctx.block_on(async move { s.send(msg).await })
-            }
+            Err(TrySendError::Full(mut msg)) => loop {
+                if !self.inner.wait_for_spsc_space(&msg) {
+                    let s = self.inner.clone();
+                    return self.ctx.block_on(async move { s.send(msg).await });
+                }
+                match self.inner.try_send(msg) {
+                    Ok(()) => break Ok(()),
+                    Err(TrySendError::Full(returned)) => msg = returned,
+                    Err(TrySendError::Closed) => break Err(omq_proto::error::Error::Closed),
+                    Err(TrySendError::Error(error)) => break Err(error),
+                }
+            },
             Err(TrySendError::Closed) => Err(omq_proto::error::Error::Closed),
             Err(TrySendError::Error(e)) => Err(e),
         }

@@ -389,7 +389,7 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                     "-p",
                     "omq-tokio",
                     "--bin",
-                    "bench_peer_tokio",
+                    "omq_bench_peer_tokio",
                     "-q",
                 ];
                 let feat_str;
@@ -401,7 +401,7 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                 run_build(&cmd);
                 binaries.insert(
                     source.to_string(),
-                    PathBuf::from("target/release/bench_peer_tokio"),
+                    PathBuf::from("target/release/omq_bench_peer_tokio"),
                 );
             }
             "omq-tokio-1t" => {
@@ -412,7 +412,7 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                     "-p",
                     "omq-tokio",
                     "--bin",
-                    "bench_peer_blocking",
+                    "omq_bench_peer_blocking",
                     "-q",
                 ];
                 if needs_curve {
@@ -422,7 +422,7 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                 run_build(&cmd);
                 binaries.insert(
                     source.to_string(),
-                    PathBuf::from("target/release/bench_peer_blocking"),
+                    PathBuf::from("target/release/omq_bench_peer_blocking"),
                 );
             }
             "libzmq" => {
@@ -1196,8 +1196,7 @@ fn run_fanin_once(
     let pull_output = pull_proc.wait_with_output(Duration::from_secs(duration as u64 + 30));
 
     let push_cpu = process::read_proc_cpu(push_proc.pid());
-    let timed_push =
-        def.name == "omq-tokio-1t" || def.name == "omq-tokio-ct" || def.name == "omq-tokio-2t";
+    let timed_push = def.name != "zmq.rs" && def.name != "rzmq" && def.name != "rzmq-iouring";
     let push_output = if timed_push {
         push_proc.wait_with_output(Duration::from_secs(duration as u64 + 30))
     } else {

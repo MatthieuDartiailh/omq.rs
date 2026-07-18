@@ -20,8 +20,9 @@ import tempfile
 import time
 from pathlib import Path
 
+
 REPO = Path(__file__).resolve().parent.parent
-PEER = REPO / "target" / "release" / "bench_peer_tokio"
+PEER = REPO / "target" / "release" / "omq_bench_peer_tokio"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL = CACHE_DIR / "results_compression_tokio.jsonl"
 CHART_SCRIPT = REPO / "scripts" / "gen_compression_chart.py"
@@ -36,10 +37,10 @@ DEFAULT_DICT_SIZES = [2048]
 def build_peer():
     if PEER.exists():
         return
-    print("Building bench_peer_tokio...", file=sys.stderr)
+    print("Building omq_bench_peer_tokio...", file=sys.stderr)
     subprocess.run(
         ["cargo", "build", "--release", "-p", "omq-tokio",
-         "--bin", "bench_peer_tokio", "--features", "lz4"],
+         "--bin", "omq_bench_peer_tokio", "--features", "lz4"],
         cwd=REPO, check=True, capture_output=True,
     )
 

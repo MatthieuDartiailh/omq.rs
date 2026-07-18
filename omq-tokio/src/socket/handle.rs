@@ -374,6 +374,10 @@ impl Socket {
         }
     }
 
+    pub(crate) fn wait_for_spsc_space(&self, msg: &Message) -> bool {
+        self.inner.recv_rx.wait_for_spsc_space(msg)
+    }
+
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
@@ -809,6 +813,7 @@ impl Socket {
                 SpscPush::Full {
                     msg: returned,
                     space,
+                    ..
                 } => {
                     msg = returned;
                     let notified = space.notified();

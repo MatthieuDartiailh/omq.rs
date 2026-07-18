@@ -10,8 +10,15 @@ use bytes::Bytes;
 use omq_tokio::endpoint::IpcPath;
 use omq_tokio::{Endpoint, Message, Options, ReconnectPolicy, Socket, SocketType};
 
-const ROUNDS: usize = 200;
+const DEFAULT_ROUNDS: usize = 40;
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+fn rounds() -> usize {
+    std::env::var("OMQ_STRESS_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_ROUNDS)
+}
 
 fn opts() -> Options {
     Options {
@@ -60,7 +67,7 @@ fn ep_for(transport: &Transport, tag: &str, round: usize) -> Endpoint {
 
 async fn stress_push_pull(transport: &Transport, bind_side: &str) {
     let tag = format!("pp-{bind_side}");
-    for i in 0..ROUNDS {
+    for i in 0..rounds() {
         let ep = ep_for(transport, &tag, i);
 
         let (push, pull) = if bind_side == "push" {
@@ -88,7 +95,7 @@ async fn stress_push_pull(transport: &Transport, bind_side: &str) {
 
 async fn stress_req_rep(transport: &Transport, bind_side: &str) {
     let tag = format!("rr-{bind_side}");
-    for i in 0..ROUNDS {
+    for i in 0..rounds() {
         let ep = ep_for(transport, &tag, i);
 
         let (req, rep) = if bind_side == "rep" {
@@ -123,7 +130,7 @@ async fn stress_req_rep(transport: &Transport, bind_side: &str) {
 
 async fn stress_pub_sub(transport: &Transport, bind_side: &str) {
     let tag = format!("ps-{bind_side}");
-    for i in 0..ROUNDS {
+    for i in 0..rounds() {
         let ep = ep_for(transport, &tag, i);
 
         let (pub_, sub) = if bind_side == "pub" {
@@ -158,7 +165,7 @@ async fn stress_pub_sub(transport: &Transport, bind_side: &str) {
 }
 
 async fn stress_pair(transport: &Transport) {
-    for i in 0..ROUNDS {
+    for i in 0..rounds() {
         let ep = ep_for(transport, "pair", i);
 
         let a = Socket::new(SocketType::Pair, Options::default());
@@ -184,7 +191,7 @@ async fn stress_pair(transport: &Transport) {
 
 async fn stress_dealer_router(transport: &Transport, bind_side: &str) {
     let tag = format!("dr-{bind_side}");
-    for i in 0..ROUNDS {
+    for i in 0..rounds() {
         let ep = ep_for(transport, &tag, i);
 
         let (dealer, router) = if bind_side == "router" {

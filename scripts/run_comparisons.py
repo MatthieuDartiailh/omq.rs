@@ -29,6 +29,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # ── process lifetime guard ────────────────────────────────────────
@@ -212,6 +213,8 @@ SINK_IO_THREADS = "3"
 def spawn_process(binary: str, *args: str, env: dict | None = None,
                   cpu: str | None = None) -> subprocess.Popen:
     merged = {**os.environ, **(env or {})} if env else None
+    if merged is None:
+        merged = os.environ.copy()
     cmd = [binary, *args]
     if cpu is not None:
         cmd = ["taskset", "-c", cpu] + cmd
@@ -898,7 +901,7 @@ def append_zero_tput_row(
 IMPLS = {
     "omq-tokio": {
         "crate": "omq-tokio",
-        "bin": "bench_peer_tokio",
+        "bin": "omq_bench_peer_tokio",
         "prefix": "t",
         "class": "classic",
         "transports": ["tcp", "inproc", "ipc", "ws"],
@@ -1061,12 +1064,12 @@ def build_peers(impl_names: set[str], ws_needed: bool):
     curve_omq_names = {"omq-curve-1t", "omq-curve-2t", "omq-curve-4t"}
     omq_all = {"omq-tokio", "omq-tokio-2t"} | omq_io_names | curve_omq_names
     if impl_names & omq_all:
-        print("==> building omq-tokio bench_peer...", file=sys.stderr)
+        print("==> building omq-tokio omq_bench_peer...", file=sys.stderr)
         tokio_features = list(features) if features else []
         if impl_names & curve_omq_names:
             tokio_features.append("curve")
-        cargo_build("omq-tokio", "bench_peer_tokio", features=tokio_features)
-        tokio_bin = str(ROOT / "target" / "release" / "bench_peer_tokio")
+        cargo_build("omq-tokio", "omq_bench_peer_tokio", features=tokio_features)
+        tokio_bin = str(ROOT / "target" / "release" / "omq_bench_peer_tokio")
         for name in omq_all & impl_names:
             binaries[name] = tokio_bin
 

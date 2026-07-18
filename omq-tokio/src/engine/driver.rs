@@ -24,6 +24,7 @@ use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
 use super::transmit_slot::PeerTransmitSlot;
 use crate::routing::fallback_queue::FallbackReceiver;
 use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
+use crate::socket::recv::RecvItem;
 use omq_proto::flow::{DrainBudget, max_batch_bytes};
 use omq_proto::frame_buffer::FrameBuffer;
 
@@ -133,8 +134,9 @@ pub struct RepRecvSink {
 /// Yring-based recv sink. Pushes decoded messages directly into a
 /// lock-free SPSC ring and signals the consumer via a callback on
 /// empty-to-non-empty transitions.
+#[allow(private_interfaces)]
 pub struct YringSink {
-    pub producer: yring::Producer<Message>,
+    pub producer: yring::Producer<RecvItem>,
     pub signal: Box<dyn Fn() + Send + Sync>,
     pub space: Arc<tokio::sync::Notify>,
 }
@@ -145,7 +147,7 @@ pub struct YringSink {
 /// `pending_consumer`.
 pub struct RecvSinkConfig {
     slot: std::sync::Mutex<Option<RecvSink>>,
-    pending_consumer: std::sync::Mutex<Option<yring::Consumer<Message>>>,
+    pending_consumer: std::sync::Mutex<Option<yring::Consumer<RecvItem>>>,
     signal: Arc<dyn Fn() + Send + Sync>,
     space: Arc<tokio::sync::Notify>,
     cap: usize,
@@ -197,7 +199,8 @@ impl RecvSinkConfig {
         self.slot.lock().unwrap().take()
     }
 
-    pub fn try_take_pending_consumer(&self) -> Option<yring::Consumer<Message>> {
+    #[allow(private_interfaces)]
+    pub fn try_take_pending_consumer(&self) -> Option<yring::Consumer<RecvItem>> {
         self.pending_consumer.try_lock().ok()?.take()
     }
 
@@ -267,12 +270,12 @@ impl RecvSink {
                 let _ = pipe.send(m).await;
                 None
             }
-            Self::Yring(sink) => match sink.producer.push(m) {
+            Self::Yring(sink) => match sink.producer.push(RecvItem::new(m)) {
                 Ok(()) => {
                     sink.flush_and_signal();
                     None
                 }
-                Err(returned) => Some(returned),
+                Err(returned) => Some(returned.message),
             },
             Self::Rep(_) => unreachable!("REP uses the blocking direct path"),
         }
@@ -284,8 +287,8 @@ impl RecvSink {
             Self::Yring(sink) => {
                 let mut msg = m;
                 loop {
-                    if let Err(returned) = sink.producer.push(msg) {
-                        msg = returned;
+                    if let Err(returned) = sink.producer.push(RecvItem::new(msg)) {
+                        msg = returned.message;
                     } else {
                         sink.flush_and_signal();
                         return true;
@@ -296,8 +299,8 @@ impl RecvSink {
                     let notified = sink.space.notified();
                     tokio::pin!(notified);
                     notified.as_mut().enable();
-                    if let Err(returned) = sink.producer.push(msg) {
-                        msg = returned;
+                    if let Err(returned) = sink.producer.push(RecvItem::new(msg)) {
+                        msg = returned.message;
                         tokio::select! {
                             biased;
                             () = notified => {}

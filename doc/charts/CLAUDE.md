@@ -63,6 +63,14 @@ Data: `comparisons.jsonl`, kind `fan_out`/`fan_in`.
 
 No CT. 2IO omq must outperform 1IO omq. Do not publish if it does not.
 
+**Fairness whiskers+baskets.** Fan-out and fan-in charts show per-peer
+fairness as box-and-whisker overlays at each data point. The whiskers
+show the projected aggregate range based on per-peer throughput spread:
+`projected = aggregate * (peer_quantile / peer_median)`. Whiskers span
+min to max, boxes span p25 to p75. Only impls with `peer_min`..`peer_max`
+data in the JSONL get whiskers (currently omq impls only). Data fields:
+`peer_min`, `peer_p25`, `peer_median`, `peer_p75`, `peer_max`.
+
 ## LZ4 chart (1 file)
 
 Data: `results_pushpull_lz4.jsonl`, patterns `pushpull_lz4` and

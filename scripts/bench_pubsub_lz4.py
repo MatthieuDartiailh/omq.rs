@@ -21,8 +21,9 @@ import tempfile
 import time
 from pathlib import Path
 
+
 REPO = Path(__file__).resolve().parent.parent
-PEER = REPO / "target" / "release" / "bench_peer_tokio"
+PEER = REPO / "target" / "release" / "omq_bench_peer_tokio"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omq"
 JSONL = CACHE_DIR / "results_pubsub_lz4.jsonl"
 
@@ -47,10 +48,10 @@ def next_port():
 
 
 def build_peer():
-    print("Building bench_peer_tokio (--features lz4)...", file=sys.stderr)
+    print("Building omq_bench_peer_tokio (--features lz4)...", file=sys.stderr)
     subprocess.run(
         ["cargo", "build", "--release", "-p", "omq-tokio",
-         "--bin", "bench_peer_tokio", "--features", "lz4"],
+         "--bin", "omq_bench_peer_tokio", "--features", "lz4"],
         cwd=REPO, check=True,
     )
 

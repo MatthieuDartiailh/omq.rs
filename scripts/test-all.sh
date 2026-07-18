@@ -11,9 +11,11 @@
 #                       retry on heavily loaded runners.
 #   OMQ_TEST_JOBS=N     max parallel test steps (default 2)
 #   OMQ_PERF=1          run hardware-sensitive perf verification
+#   OMQ_STRESS_ROUNDS=N connect-before-bind stress rounds (default 40)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
 
 retries="${OMQ_TEST_RETRIES:-2}"
 jobs="${OMQ_TEST_JOBS:-2}"
@@ -23,8 +25,17 @@ run() {
     local attempt=0
     while true; do
         attempt=$((attempt + 1))
-        if "$@"; then
+        "$@" &
+        local child=$!
+        _foreground_pid=$child
+        local rc=0
+        wait "$child" || rc=$?
+        _foreground_pid=0
+        if [[ $rc -eq 0 ]]; then
             return 0
+        fi
+        if [[ $rc -eq 130 || $rc -eq 143 ]]; then
+            return "$rc"
         fi
         if [[ $attempt -ge $retries ]]; then
             echo "::: FAILED after $attempt attempt(s): $*" >&2
@@ -38,16 +49,37 @@ run() {
 # Usage: par <func> [args...]
 _par_pids=()
 _par_rc=0
+_foreground_pid=0
+
+_kill_tree() {
+    local pid=$1
+    local child
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+        _kill_tree "$child"
+    done
+    kill -TERM "$pid" 2>/dev/null || true
+}
 
 _kill_workers() {
     for pid in "${_par_pids[@]}"; do
-        kill "$pid" 2>/dev/null || true
+        _kill_tree "$pid"
     done
     for pid in "${_par_pids[@]}"; do
         wait "$pid" 2>/dev/null || true
     done
     _par_pids=()
 }
+
+_handle_interrupt() {
+    trap - INT TERM
+    if [[ $_foreground_pid -ne 0 ]]; then
+        _kill_tree "$_foreground_pid"
+    fi
+    _kill_workers
+    exit 130
+}
+
+trap _handle_interrupt INT TERM
 
 par() {
     # Reap any finished workers.
@@ -103,7 +135,7 @@ run cargo clippy --all-targets --no-deps -- -D warnings
 run cargo test
 
 if [[ "${OMQ_PERF:-}" == "1" && -f .perf_hw ]]; then
-    run cargo run --release -q -p omq-tokio --bin perf_verify
+    run cargo run --release -q -p omq-tokio --bin omq_perf_verify
 else
     echo "skip: .perf_hw not set up; see doc/perf-verification.md"
 fi

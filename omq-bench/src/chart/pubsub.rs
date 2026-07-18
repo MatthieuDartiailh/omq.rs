@@ -104,6 +104,7 @@ pub(crate) fn generate() {
             },
             "pub CPU%",
             "sub CPU%",
+            None,
         )
         .expect("draw pubsub chart");
         eprintln!("Written: {}", out.display());

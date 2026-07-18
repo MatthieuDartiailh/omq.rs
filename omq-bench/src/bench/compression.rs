@@ -31,11 +31,11 @@ fn size_label(n: u64) -> String {
 }
 
 fn build_peer() -> PathBuf {
-    let bin = PathBuf::from("target/release/bench_peer_tokio");
+    let bin = PathBuf::from("target/release/omq_bench_peer_tokio");
     if bin.exists() {
         return bin;
     }
-    eprintln!("  building bench_peer_tokio (lz4)...");
+    eprintln!("  building omq_bench_peer_tokio (lz4)...");
     let status = std::process::Command::new("cargo")
         .args([
             "build",
@@ -43,7 +43,7 @@ fn build_peer() -> PathBuf {
             "-p",
             "omq-tokio",
             "--bin",
-            "bench_peer_tokio",
+            "omq_bench_peer_tokio",
             "--features",
             "lz4",
             "-q",
