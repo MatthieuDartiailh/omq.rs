@@ -14,6 +14,7 @@
 //! channel is wired up.
 
 use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Condvar, Mutex as StdMutex};
 
 use rustc_hash::FxHashMap;
 
@@ -28,6 +29,33 @@ use crate::engine::signal::DataSignal;
 use crate::socket::recv::RecvItem;
 
 /// Sender-side SPSC state for inproc fast path.
+#[derive(Debug)]
+pub(crate) struct BlockingSpace {
+    wait: StdMutex<()>,
+    changed: Condvar,
+}
+
+impl BlockingSpace {
+    pub(crate) fn new() -> Self {
+        Self {
+            wait: StdMutex::new(()),
+            changed: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn notify(&self) {
+        self.changed.notify_all();
+    }
+
+    pub(crate) fn wait_until(&self, mut is_full: impl FnMut() -> bool) {
+        let mut guard = self.wait.lock().unwrap();
+        while is_full() {
+            guard = self.changed.wait(guard).unwrap();
+        }
+    }
+}
+
+/// Sender-side SPSC state for inproc fast path.
 #[allow(private_interfaces)]
 #[derive(Debug)]
 pub struct InprocTx {
@@ -36,7 +64,14 @@ pub struct InprocTx {
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub max_message_size: Option<usize>,
     pub space_notify: Arc<tokio::sync::Notify>,
+    pub(crate) blocking_space: Arc<BlockingSpace>,
     pub(crate) blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
+}
+
+impl InprocTx {
+    pub(crate) fn wait_for_space(&self) {
+        self.blocking_space.wait_until(|| self.producer.is_full());
+    }
 }
 
 /// Receiver-side SPSC state for inproc fast path.
@@ -48,6 +83,7 @@ pub struct InprocRx {
     pub(crate) recv_notify: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub space_notify: Arc<tokio::sync::Notify>,
+    pub(crate) blocking_space: Arc<BlockingSpace>,
 }
 
 fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
@@ -259,12 +295,14 @@ impl InprocListener {
                 connector_max_message_size
             };
             let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let blocking_space = Arc::new(BlockingSpace::new());
             let tx = Arc::new(InprocTx {
                 producer: yring::ProducerOwner::new(p),
                 recv_notify: notify,
                 recv_ready: ready.clone(),
                 max_message_size: mms,
                 space_notify: Arc::new(tokio::sync::Notify::new()),
+                blocking_space: blocking_space.clone(),
                 blocking_recv_waker: if listener_is_recv {
                     Arc::clone(&self.blocking_recv_waker)
                 } else {
@@ -277,6 +315,7 @@ impl InprocListener {
                 recv_notify: tx.recv_notify.clone(),
                 recv_ready: ready,
                 space_notify: tx.space_notify.clone(),
+                blocking_space,
             });
             let (listener_tx, listener_rx, connector_tx, connector_rx) = if listener_is_recv {
                 (None, Some(rx.clone()), Some(tx.clone()), None)

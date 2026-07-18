@@ -545,6 +545,7 @@ impl SpscAwareRecv {
                         latency_result = msg.map(RecvItem::into_message);
                         if released {
                             peer.space_notify.notify_waiters();
+                            peer.blocking_space.notify();
                         }
                     } else {
                         let drained = drain_yring(
@@ -555,6 +556,7 @@ impl SpscAwareRecv {
                         );
                         if drained > 0 {
                             peer.space_notify.notify_waiters();
+                            peer.blocking_space.notify();
                         }
                     }
                     peer.batch_remaining.store(remaining, Ordering::Relaxed);
@@ -741,6 +743,7 @@ impl SpscAwareRecv {
         self.tcp_consumers.write().unwrap().clear();
         if let Some(pair) = self.send_ring.load_full() {
             pair.space_notify.notify_waiters();
+            pair.blocking_space.notify();
         }
         self.send_ring_available.store(false, Ordering::Release);
         self.send_ring.store(None);
@@ -776,6 +779,26 @@ impl SpscAwareRecv {
         pair.recv_notify.mark();
         pair.blocking_recv_waker.wake();
         SpscPush::Sent
+    }
+
+    pub(crate) fn wait_for_spsc_space(&self, msg: &Message) -> bool {
+        if !self.send_ring_available.load(Ordering::Acquire) {
+            return false;
+        }
+        let pair = self.send_ring.load();
+        let Some(pair) = pair.as_ref() else {
+            return false;
+        };
+        if !pair.recv_ready.load(Ordering::Acquire)
+            || pair
+                .max_message_size
+                .is_some_and(|max| msg.byte_len() > max)
+            || pair.producer.is_consumer_dropped()
+        {
+            return false;
+        }
+        pair.wait_for_space();
+        true
     }
 }
 
