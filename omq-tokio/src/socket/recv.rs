@@ -31,6 +31,7 @@ const RECV_BATCH_MESSAGES: usize = 256;
 /// parks via `std::thread::park()` and is woken by `unpark()`.
 pub(crate) struct BlockingRecvWaker {
     registered: AtomicBool,
+    sleeping: AtomicBool,
     thread: Mutex<Option<std::thread::Thread>>,
 }
 
@@ -38,6 +39,7 @@ impl BlockingRecvWaker {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             registered: AtomicBool::new(false),
+            sleeping: AtomicBool::new(false),
             thread: Mutex::new(None),
         })
     }
@@ -47,12 +49,21 @@ impl BlockingRecvWaker {
         self.registered.store(true, Ordering::Release);
     }
 
+    pub(crate) fn prepare_sleep(&self) {
+        self.sleeping.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn cancel_sleep(&self) {
+        self.sleeping.store(false, Ordering::Release);
+    }
+
     pub(crate) fn wake(&self) {
-        if self.registered.load(Ordering::Acquire)
-            && let Ok(guard) = self.thread.try_lock()
-            && let Some(ref t) = *guard
+        if !self.sleeping.swap(false, Ordering::AcqRel) || !self.registered.load(Ordering::Acquire)
         {
-            t.unpark();
+            return;
+        }
+        if let Some(thread) = self.thread.lock().unwrap().clone() {
+            thread.unpark();
         }
     }
 }
@@ -375,7 +386,18 @@ impl SpscAwareRecv {
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
             }
-            std::thread::park();
+            self.blocking_recv_waker.prepare_sleep();
+            match self.try_drain() {
+                DrainResult::Message(msg) => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Ok(msg);
+                }
+                DrainResult::Closed => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Err(Error::Closed);
+                }
+                DrainResult::Empty => std::thread::park(),
+            }
         }
     }
 
