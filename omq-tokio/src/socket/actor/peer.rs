@@ -513,7 +513,8 @@ impl SocketDriver {
             out,
             in_rx,
             peer: _peer,
-            spsc,
+            tx,
+            rx,
         } = conn;
 
         // Extract recv_sink for poll() message detection, similar to wire path.
@@ -551,7 +552,7 @@ impl SocketDriver {
                 info: None,
                 endpoint,
                 is_client: !is_server,
-                spsc: spsc.clone(),
+                spsc: tx.clone(),
                 task: None,
                 io_thread,
             },
@@ -562,7 +563,7 @@ impl SocketDriver {
         } else {
             None
         };
-        let recv_spsc = spsc
+        let recv_spsc = rx
             .clone()
             .filter(|_| can_bypass_actor_recv(self.socket_type));
 
@@ -855,7 +856,7 @@ struct InprocDriverCtx {
     peer_props: omq_proto::proto::command::PeerProperties,
     max_message_size: Option<usize>,
     recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
-    spsc: Option<std::sync::Arc<crate::transport::inproc::InprocSpsc>>,
+    spsc: Option<std::sync::Arc<crate::transport::inproc::InprocRx>>,
     recv_sink: Option<crate::engine::RecvSink>,
     shared_rx: Option<crate::routing::fallback_queue::FallbackReceiver>,
     send_pipe_rx: crate::engine::SendPipeConsumer,

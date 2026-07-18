@@ -248,6 +248,64 @@ impl<T> Drop for Producer<T> {
 // underlying Ring is Send+Sync. Moving the producer to another thread is safe.
 unsafe impl<T: Send> Send for Producer<T> {}
 
+/// Single-thread owner handle for a producer shared through an `Arc`.
+///
+/// The caller must use this value from exactly one producer thread. This
+/// preserves the SPSC producer cursor without a mutex. It is intended for
+/// transports that already guarantee one socket thread, such as inproc.
+pub struct ProducerOwner<T> {
+    producer: UnsafeCell<Producer<T>>,
+}
+
+// SAFETY: callers uphold the single-producer-thread contract documented
+// above. The underlying ring is already Send + Sync.
+unsafe impl<T: Send> Send for ProducerOwner<T> {}
+unsafe impl<T: Send> Sync for ProducerOwner<T> {}
+
+impl<T> ProducerOwner<T> {
+    /// Wrap a producer for single-thread shared ownership.
+    pub fn new(producer: Producer<T>) -> Self {
+        Self {
+            producer: UnsafeCell::new(producer),
+        }
+    }
+
+    /// Push one value without producer locking.
+    #[inline]
+    pub fn push(&self, value: T) -> Result<(), T> {
+        // SAFETY: the single-producer-thread contract guarantees exclusive
+        // access to the producer cursor.
+        unsafe { (&mut *self.producer.get()).push(value) }
+    }
+
+    /// Publish pending values.
+    #[inline]
+    pub fn flush(&self) {
+        // SAFETY: see `push`.
+        unsafe { (&mut *self.producer.get()).flush() }
+    }
+
+    /// Test whether the ring is full.
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        // SAFETY: see `push`.
+        unsafe { (&mut *self.producer.get()).is_full() }
+    }
+
+    /// Test whether the consumer has gone away.
+    #[inline]
+    pub fn is_consumer_dropped(&self) -> bool {
+        // SAFETY: see `push`.
+        unsafe { (&*self.producer.get()).is_consumer_dropped() }
+    }
+}
+
+impl<T> std::fmt::Debug for ProducerOwner<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProducerOwner").finish_non_exhaustive()
+    }
+}
+
 /// Receiving half. `Send` but not `Sync`.
 pub struct Consumer<T> {
     ring: Arc<Ring<T>>,

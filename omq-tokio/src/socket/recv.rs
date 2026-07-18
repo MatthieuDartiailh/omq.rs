@@ -9,13 +9,13 @@ use arc_swap::ArcSwapOption;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
-use crate::transport::inproc::InprocSpsc;
+use crate::transport::inproc::{InprocRx, InprocTx};
 
 /// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
-pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocSpsc>>>>;
+pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocRx>>>>;
 
 /// Single-peer send fast path ring. Actor sets/clears.
-pub(crate) type SpscSendRing = Arc<ArcSwapOption<InprocSpsc>>;
+pub(crate) type SpscSendRing = Arc<ArcSwapOption<InprocTx>>;
 
 /// Shared recv notification. All inproc producers notify this.
 pub(crate) type SpscRecvNotify = Arc<tokio::sync::Notify>;
@@ -272,7 +272,7 @@ pub(crate) struct SpscAwareRecv {
 #[derive(Debug)]
 struct DrainState {
     generation: u64,
-    inproc: Vec<Arc<InprocSpsc>>,
+    inproc: Vec<Arc<InprocRx>>,
     tcp: Vec<Arc<TcpYringConsumer>>,
     batch: VecDeque<Message>,
     recv_consumer: yring::Consumer<Message>,
@@ -630,18 +630,17 @@ impl SpscAwareRecv {
         {
             return SpscPush::Unavailable(msg);
         }
-        let mut producer = pair.producer.lock().unwrap();
-        if producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
+        if pair.producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
             return SpscPush::Unavailable(msg);
         }
-        if producer.is_full() {
+        if pair.producer.is_full() {
             return SpscPush::Full {
                 msg,
                 space: pair.space_notify.clone(),
             };
         }
-        let _ = producer.push(msg);
-        producer.flush();
+        let _ = pair.producer.push(msg);
+        pair.producer.flush();
         pair.recv_notify.notify_one();
         self.blocking_recv_waker.wake();
         SpscPush::Sent

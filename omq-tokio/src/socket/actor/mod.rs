@@ -143,7 +143,7 @@ struct PeerEntry {
     /// Used to decide whether to restart the dial after a mid-session drop.
     is_client: bool,
     /// SPSC ring for this inproc peer (None for wire/stream peers).
-    spsc: Option<Arc<crate::transport::inproc::InprocSpsc>>,
+    spsc: Option<Arc<crate::transport::inproc::InprocTx>>,
     task: Option<JoinHandle<()>>,
     /// IO thread index this peer's driver runs on (for load tracking).
     io_thread: usize,
