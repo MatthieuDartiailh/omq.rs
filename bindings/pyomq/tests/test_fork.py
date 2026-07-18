@@ -81,13 +81,13 @@ def test_pre_materialized_socket_works_after_fork():
     pull.setsockopt(zmq.RCVTIMEO, FORK_TIMEOUT_MS)
     ep = pull.bind("tcp://127.0.0.1:0")
     push.connect(ep)
-    time.sleep(0.05)
 
     # Materialize by sending a message before fork.
     push.send(b"pre-fork")
     assert pull.recv() == b"pre-fork"
 
     r, w = os.pipe()
+    ack_r, ack_w = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(r)
@@ -96,15 +96,24 @@ def test_pre_materialized_socket_works_after_fork():
         child_push = child_ctx.socket(zmq.PUSH)
         child_push.setsockopt(zmq.SNDTIMEO, FORK_TIMEOUT_MS)
         child_push.connect(ep)
-        time.sleep(0.05)
         child_push.send(b"child-msg")
+        os.write(w, b"s")
+        os.read(ack_r, 1)
+        os.close(ack_r)
         child_push.close()
         os._exit(0)
     else:
         os.close(w)
+        os.close(ack_r)
         try:
+            ready, _, _ = select.select([r], [], [], FORK_TIMEOUT_S)
+            if not ready:
+                pytest.fail("forked child did not send before timeout")
+            os.read(r, 1)
             msg = pull.recv()
         finally:
+            os.write(ack_w, b"a")
+            os.close(ack_w)
             try:
                 _waitpid_timeout(pid)
             finally:
