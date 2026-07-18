@@ -579,6 +579,31 @@ mod tests {
     }
 
     #[test]
+    fn producer_owner_rejects_concurrent_producer_thread() {
+        use std::sync::{Arc, Barrier};
+
+        let (producer, _consumer) = spsc::<u32>(4);
+        let owner = Arc::new(ProducerOwner::new(producer));
+        let barrier = Arc::new(Barrier::new(2));
+        let first = owner.clone();
+        let second = owner.clone();
+        let first_barrier = barrier.clone();
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            first.push(1)
+        });
+        let second_barrier = barrier;
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            second.push(2)
+        });
+
+        let first = first.join();
+        let second = second.join();
+        assert_ne!(first.is_ok(), second.is_ok());
+    }
+
+    #[test]
     fn batch_prefetch() {
         let (mut p, mut c) = spsc::<u32>(8);
         for i in 0..5 {
