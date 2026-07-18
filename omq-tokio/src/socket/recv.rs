@@ -350,11 +350,23 @@ enum DrainResult {
     Closed,
 }
 
+#[derive(Default)]
+struct SourceDrain {
+    message: Option<Message>,
+    disconnected: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecvSource {
     Inproc(usize),
     Stream(usize),
     Shared,
+}
+
+#[derive(Clone, Copy)]
+enum PeerSource<'a> {
+    Inproc(&'a InprocRx),
+    Stream(&'a TcpYringConsumer),
 }
 
 fn recv_source_at(index: usize, inproc_len: usize, stream_len: usize) -> RecvSource {
@@ -364,6 +376,64 @@ fn recv_source_at(index: usize, inproc_len: usize, stream_len: usize) -> RecvSou
         RecvSource::Stream(index - inproc_len)
     } else {
         RecvSource::Shared
+    }
+}
+
+fn drain_peer_source(
+    source: PeerSource<'_>,
+    latency: bool,
+    batch: &mut VecDeque<Message>,
+    budget: &mut DrainBudget,
+) -> SourceDrain {
+    match source {
+        PeerSource::Inproc(peer) => drain_peer_consumer(
+            &peer.consumer,
+            &peer.batch_remaining,
+            latency,
+            batch,
+            budget,
+            || {
+                peer.space_notify.notify_waiters();
+                peer.blocking_space.notify();
+            },
+        ),
+        PeerSource::Stream(peer) => drain_peer_consumer(
+            &peer.consumer,
+            &peer.batch_remaining,
+            latency,
+            batch,
+            budget,
+            || peer.space.notify_one(),
+        ),
+    }
+}
+
+fn drain_peer_consumer<F: FnMut()>(
+    consumer: &Mutex<yring::Consumer<RecvItem>>,
+    batch_remaining: &AtomicUsize,
+    latency: bool,
+    batch: &mut VecDeque<Message>,
+    budget: &mut DrainBudget,
+    mut on_release: F,
+) -> SourceDrain {
+    let Ok(mut consumer) = consumer.try_lock() else {
+        return SourceDrain::default();
+    };
+    let mut remaining = batch_remaining.load(Ordering::Relaxed);
+    let (message, released) = if latency {
+        let (item, released) = drain_yring_one(&mut consumer, &mut remaining);
+        (item.map(RecvItem::into_message), released)
+    } else {
+        let drained = drain_yring(&mut consumer, batch, &mut remaining, budget);
+        (None, drained > 0)
+    };
+    if released {
+        on_release();
+    }
+    batch_remaining.store(remaining, Ordering::Relaxed);
+    SourceDrain {
+        message,
+        disconnected: consumer.is_disconnected(),
     }
 }
 
@@ -471,7 +541,6 @@ impl SpscAwareRecv {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn try_drain(&self) -> DrainResult {
         let mut guard = self.drain_state.lock().unwrap();
 
@@ -479,146 +548,128 @@ impl SpscAwareRecv {
             return DrainResult::Message(msg);
         }
 
-        let current_gen = self.consumer_generation.load(Ordering::Acquire);
-        if guard.generation != current_gen {
-            guard.inproc.clone_from(&self.consumers.read().unwrap());
-            guard.tcp.clone_from(&self.tcp_consumers.read().unwrap());
-            guard.generation = current_gen;
-        }
+        self.refresh_snapshot(&mut guard);
 
         let state = &mut *guard;
-        let fast_msg = if state.latency
-            && state.inproc.is_empty()
-            && state.tcp.len() == 1
-            && state.recv_consumer.is_empty()
-        {
-            let tc = &state.tcp[0];
-            if let Ok(mut consumer) = tc.consumer.try_lock() {
-                let mut remaining = tc.batch_remaining.load(Ordering::Relaxed);
-                let (msg, released) = drain_yring_one(&mut consumer, &mut remaining);
-                tc.batch_remaining.store(remaining, Ordering::Relaxed);
-                if released {
-                    tc.space.notify_one();
-                }
-                if let Some(item) = msg {
-                    drop(consumer);
-                    Some(item.message)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if let Some(msg) = fast_msg {
+        if let Some(msg) = Self::try_latency_fast_path(state) {
             drop(guard);
             return DrainResult::Message(msg);
         }
-        let mut has_disconnected = false;
-        let mut latency_result = None;
-        let mut budget = DrainBudget::new(RECV_BATCH_MESSAGES, RECV_BATCH_BYTES);
+        let (latency_result, has_disconnected) = self.drain_sources(state);
+        let result = latency_result.or_else(|| state.batch.pop_front());
+        let pipe_disconnected = state.recv_consumer.is_disconnected();
+        let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
+        if result.is_none() && Self::state_is_empty(state) {
+            self.recv_notify.clear();
+            self.recv_notify
+                .rearm_if_nonempty(Self::state_is_empty(state));
+        }
+        drop(guard);
 
-        // One logical round-robin space covers all sources. This prevents a
-        // perpetually busy inproc or stream peer from consuming every batch.
+        if has_disconnected {
+            self.cleanup_disconnected();
+        }
+
+        match result {
+            Some(msg) => DrainResult::Message(msg),
+            None if pipe_disconnected && !has_peers => DrainResult::Closed,
+            None => DrainResult::Empty,
+        }
+    }
+
+    fn refresh_snapshot(&self, state: &mut DrainState) {
+        let current_gen = self.consumer_generation.load(Ordering::Acquire);
+        if state.generation == current_gen {
+            return;
+        }
+        state.inproc.clone_from(&self.consumers.read().unwrap());
+        state.tcp.clone_from(&self.tcp_consumers.read().unwrap());
+        state.generation = current_gen;
+    }
+
+    fn try_latency_fast_path(state: &mut DrainState) -> Option<Message> {
+        if !state.latency
+            || !state.inproc.is_empty()
+            || state.tcp.len() != 1
+            || !state.recv_consumer.is_empty()
+        {
+            return None;
+        }
+        let mut budget = DrainBudget::new(1, RECV_BATCH_BYTES);
+        drain_peer_source(
+            PeerSource::Stream(&state.tcp[0]),
+            true,
+            &mut state.batch,
+            &mut budget,
+        )
+        .message
+    }
+
+    fn drain_sources(&self, state: &mut DrainState) -> (Option<Message>, bool) {
+        let mut result = None;
+        let mut has_disconnected = false;
+        let mut budget = DrainBudget::new(RECV_BATCH_MESSAGES, RECV_BATCH_BYTES);
         let inproc_len = state.inproc.len();
         let tcp_len = state.tcp.len();
         let source_count = inproc_len + tcp_len + 1;
         let start = state.recv_cursor % source_count;
+
+        // One logical round-robin space covers all sources. This prevents a
+        // perpetually busy inproc or stream peer from consuming every batch.
         for offset in 0..source_count {
-            if latency_result.is_some() || (!state.latency && budget.exhausted()) {
+            if result.is_some() || (!state.latency && budget.exhausted()) {
                 break;
             }
             let source = (start + offset) % source_count;
             state.recv_cursor = (source + 1) % source_count;
-
-            match recv_source_at(source, inproc_len, tcp_len) {
-                RecvSource::Inproc(index) => {
-                    let peer = &state.inproc[index];
-                    let Ok(mut consumer) = peer.consumer.try_lock() else {
-                        continue;
-                    };
-                    let mut remaining = peer.batch_remaining.load(Ordering::Relaxed);
-                    if state.latency {
-                        let (msg, released) = drain_yring_one(&mut consumer, &mut remaining);
-                        latency_result = msg.map(RecvItem::into_message);
-                        if released {
-                            peer.space_notify.notify_waiters();
-                            peer.blocking_space.notify();
-                        }
-                    } else {
-                        let drained = drain_yring(
-                            &mut consumer,
-                            &mut state.batch,
-                            &mut remaining,
-                            &mut budget,
-                        );
-                        if drained > 0 {
-                            peer.space_notify.notify_waiters();
-                            peer.blocking_space.notify();
-                        }
-                    }
-                    peer.batch_remaining.store(remaining, Ordering::Relaxed);
-                    if consumer.is_disconnected() {
-                        has_disconnected = true;
-                    }
-                }
-                RecvSource::Stream(index) => {
-                    let peer = &state.tcp[index];
-                    let Ok(mut consumer) = peer.consumer.try_lock() else {
-                        continue;
-                    };
-                    let mut remaining = peer.batch_remaining.load(Ordering::Relaxed);
-                    if state.latency {
-                        let (msg, released) = drain_yring_one(&mut consumer, &mut remaining);
-                        latency_result = msg.map(RecvItem::into_message);
-                        if released {
-                            peer.space.notify_one();
-                        }
-                    } else {
-                        let drained = drain_yring(
-                            &mut consumer,
-                            &mut state.batch,
-                            &mut remaining,
-                            &mut budget,
-                        );
-                        if drained > 0 {
-                            peer.space.notify_one();
-                        }
-                    }
-                    peer.batch_remaining.store(remaining, Ordering::Relaxed);
-                    if consumer.is_disconnected() {
-                        has_disconnected = true;
-                    }
-                }
-                RecvSource::Shared if state.latency => {
-                    let (msg, released) =
-                        drain_yring_one(&mut state.recv_consumer, &mut state.recv_batch_remaining);
-                    if released {
-                        self.recv_pipe_space.notify_waiters();
-                    }
-                    latency_result = msg.map(RecvItem::into_message);
-                }
-                RecvSource::Shared => {
-                    let drained = drain_yring(
-                        &mut state.recv_consumer,
-                        &mut state.batch,
-                        &mut state.recv_batch_remaining,
-                        &mut budget,
-                    );
-                    if drained > 0 {
-                        self.recv_pipe_space.notify_waiters();
-                    }
-                }
-            }
+            let outcome = match recv_source_at(source, inproc_len, tcp_len) {
+                RecvSource::Inproc(index) => drain_peer_source(
+                    PeerSource::Inproc(&state.inproc[index]),
+                    state.latency,
+                    &mut state.batch,
+                    &mut budget,
+                ),
+                RecvSource::Stream(index) => drain_peer_source(
+                    PeerSource::Stream(&state.tcp[index]),
+                    state.latency,
+                    &mut state.batch,
+                    &mut budget,
+                ),
+                RecvSource::Shared => self.drain_shared_source(state, &mut budget),
+            };
+            result = outcome.message;
+            has_disconnected |= outcome.disconnected;
         }
+        (result, has_disconnected)
+    }
 
-        let result = latency_result.or_else(|| state.batch.pop_front());
-        let pipe_disconnected = state.recv_consumer.is_disconnected();
-        let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
-        let recv_empty = result.is_none()
-            && state.batch.is_empty()
+    fn drain_shared_source(&self, state: &mut DrainState, budget: &mut DrainBudget) -> SourceDrain {
+        if state.latency {
+            let (item, released) =
+                drain_yring_one(&mut state.recv_consumer, &mut state.recv_batch_remaining);
+            if released {
+                self.recv_pipe_space.notify_waiters();
+            }
+            SourceDrain {
+                message: item.map(RecvItem::into_message),
+                disconnected: false,
+            }
+        } else {
+            let drained = drain_yring(
+                &mut state.recv_consumer,
+                &mut state.batch,
+                &mut state.recv_batch_remaining,
+                budget,
+            );
+            if drained > 0 {
+                self.recv_pipe_space.notify_waiters();
+            }
+            SourceDrain::default()
+        }
+    }
+
+    fn state_is_empty(state: &DrainState) -> bool {
+        state.batch.is_empty()
             && state.recv_consumer.is_empty()
             && state.inproc.iter().all(|p| {
                 p.consumer
@@ -629,44 +680,21 @@ impl SpscAwareRecv {
                 tc.consumer
                     .try_lock()
                     .is_ok_and(|consumer| consumer.is_empty())
-            });
-        if recv_empty {
-            self.recv_notify.clear();
-            let still_empty = state.batch.is_empty()
-                && state.recv_consumer.is_empty()
-                && state.inproc.iter().all(|p| {
-                    p.consumer
-                        .try_lock()
-                        .is_ok_and(|consumer| consumer.is_empty())
-                })
-                && state.tcp.iter().all(|tc| {
-                    tc.consumer
-                        .try_lock()
-                        .is_ok_and(|consumer| consumer.is_empty())
-                });
-            self.recv_notify.rearm_if_nonempty(still_empty);
-        }
-        drop(guard);
+            })
+    }
 
-        if has_disconnected {
-            self.consumers
-                .write()
-                .unwrap()
-                .retain(|p| p.consumer.try_lock().map_or(true, |c| !c.is_disconnected()));
-            self.tcp_consumers.write().unwrap().retain(|tc| {
-                tc.consumer
-                    .try_lock()
-                    .map_or(true, |c| !c.is_disconnected())
-            });
-            self.consumer_generation.fetch_add(1, Ordering::Release);
-            self.drain_state.lock().unwrap().generation = u64::MAX;
-        }
-
-        match result {
-            Some(msg) => DrainResult::Message(msg),
-            None if pipe_disconnected && !has_peers => DrainResult::Closed,
-            None => DrainResult::Empty,
-        }
+    fn cleanup_disconnected(&self) {
+        self.consumers
+            .write()
+            .unwrap()
+            .retain(|p| p.consumer.try_lock().map_or(true, |c| !c.is_disconnected()));
+        self.tcp_consumers.write().unwrap().retain(|tc| {
+            tc.consumer
+                .try_lock()
+                .map_or(true, |c| !c.is_disconnected())
+        });
+        self.consumer_generation.fetch_add(1, Ordering::Release);
+        self.drain_state.lock().unwrap().generation = u64::MAX;
     }
 
     #[expect(clippy::needless_continue)]
