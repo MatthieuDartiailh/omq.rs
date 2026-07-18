@@ -16,7 +16,7 @@ const LATENCY_MAX_SIZE: u64 = 32768;
 
 const DEFAULT_DURATION: f64 = 3.0;
 const QUICK_DURATION: f64 = 1.5;
-const DEFAULT_ROUNDS: u32 = 2;
+const DEFAULT_ROUNDS: u32 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImplClass {
@@ -93,7 +93,7 @@ static IMPLS: &[ImplDef] = &[
         inproc_pubsub_subcmd: "",
         pub_needs_peer_count: true,
         fanout_subcmd: "push",
-        fanio_needs_peer_count: false,
+        fanio_needs_peer_count: true,
         supports_pubsub: true,
         env: &[],
     },
@@ -289,6 +289,29 @@ fn canonical_peer_binary<'a>(
     } else {
         binary
     }
+}
+
+fn fanio_binary<'a>(impl_name: &str, binaries: &'a HashMap<String, PathBuf>) -> &'a Path {
+    if impl_name == "omq-tokio-2t" {
+        &binaries["omq-tokio-1t"]
+    } else {
+        &binaries[impl_name]
+    }
+}
+
+fn impl_io_threads(def: &ImplDef) -> &'static str {
+    def.env
+        .iter()
+        .find_map(|&(k, v)| matches!(k, "OMQ_IO_THREADS" | "ZMQ_IO_THREADS").then_some(v))
+        .unwrap_or("1")
+}
+
+fn non_io_env(def: &ImplDef) -> Vec<(&'static str, &'static str)> {
+    def.env
+        .iter()
+        .copied()
+        .filter(|(k, _)| *k != "OMQ_IO_THREADS" && *k != "ZMQ_IO_THREADS")
+        .collect()
 }
 
 fn all_chart_sizes() -> Vec<u64> {
@@ -592,7 +615,7 @@ fn run_throughput_cell(
     rounds: u32,
     base_port: u16,
 ) -> CellResult {
-    best_of(rounds, |_| {
+    representative_of(rounds, |_| {
         run_throughput_once(
             binary,
             peer_binary,
@@ -753,7 +776,7 @@ fn run_pubsub_cell(
     rounds: u32,
     base_port: u16,
 ) -> CellResult {
-    best_of(rounds, |_| {
+    representative_of(rounds, |_| {
         run_pubsub_once(
             binary,
             peer_binary,
@@ -936,7 +959,7 @@ fn run_fanout_cell(
     rounds: u32,
     base_port: u16,
 ) -> CellResult {
-    best_of(rounds, |_| {
+    representative_of(rounds, |_| {
         run_fanout_once(
             binary,
             peer_binary,
@@ -973,14 +996,9 @@ fn run_fanout_once(
     let connect_addr;
 
     let mut push_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut pull_env: Vec<(&str, &str)> = Vec::new();
-    for &(k, v) in def.env {
-        if k != "OMQ_IO_THREADS" && k != "ZMQ_IO_THREADS" {
-            pull_env.push((k, v));
-        }
-    }
-    let pull_io_threads =
-        std::env::var("OMQ_BENCH_RECEIVER_IO_THREADS").unwrap_or_else(|_| "1".to_string());
+    let mut pull_env: Vec<(&str, &str)> = non_io_env(def);
+    let pull_io_threads = std::env::var("OMQ_BENCH_RECEIVER_IO_THREADS")
+        .unwrap_or_else(|_| impl_io_threads(def).to_string());
     pull_env.push(("OMQ_IO_THREADS", &pull_io_threads));
     pull_env.push(("ZMQ_IO_THREADS", &pull_io_threads));
     let start_at = std::time::SystemTime::now()
@@ -1112,7 +1130,7 @@ fn run_fanin_cell(
     rounds: u32,
     base_port: u16,
 ) -> CellResult {
-    best_of(rounds, |_| {
+    representative_of(rounds, |_| {
         run_fanin_once(
             binary,
             peer_binary,
@@ -1147,13 +1165,22 @@ fn run_fanin_once(
     let addr = addr_for(transport, def.prefix, 0, base_port, def.name);
     let connect_addr;
 
-    let pull_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut push_env: Vec<(&str, &str)> = Vec::new();
-    for &(k, v) in def.env {
-        if k != "OMQ_IO_THREADS" && k != "ZMQ_IO_THREADS" {
-            push_env.push((k, v));
-        }
-    }
+    let mut pull_env: Vec<(&str, &str)> = def.env.to_vec();
+    let mut push_env: Vec<(&str, &str)> = non_io_env(def);
+    let push_io_threads = std::env::var("OMQ_BENCH_SENDER_IO_THREADS")
+        .unwrap_or_else(|_| impl_io_threads(def).to_string());
+    push_env.push(("OMQ_IO_THREADS", &push_io_threads));
+    push_env.push(("ZMQ_IO_THREADS", &push_io_threads));
+    let start_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs_f64()
+        + 2.0;
+    let start_at_str = format!("{start_at:.6}");
+    pull_env.push(("OMQ_BENCH_START_AT", &start_at_str));
+    push_env.push(("OMQ_BENCH_START_AT", &start_at_str));
+    pull_env.push(("OMQ_BENCH_WARMUP_MS", "500"));
+    push_env.push(("OMQ_BENCH_WARMUP_MS", "500"));
 
     // pull-bind binds on the measured CPU.
     let mut pull_cmd = vec![binary_str, "pull-bind"];
@@ -1373,15 +1400,16 @@ fn run_latency_cell(
     })
 }
 
-fn best_of(rounds: u32, mut f: impl FnMut(u32) -> CellResult) -> CellResult {
-    let mut best: Option<CellResult> = None;
+fn representative_of(rounds: u32, mut f: impl FnMut(u32) -> CellResult) -> CellResult {
+    let mut results = Vec::new();
     for i in 0..rounds {
-        let result = f(i);
-        if best.as_ref().is_none_or(|b| result.msgs_s > b.msgs_s) {
-            best = Some(result);
-        }
+        results.push(f(i));
     }
-    best.unwrap_or_else(|| zero_result(0.0))
+    results.sort_by(|a, b| a.msgs_s.total_cmp(&b.msgs_s));
+    results
+        .into_iter()
+        .nth((rounds.saturating_sub(1) / 2) as usize)
+        .unwrap_or_else(|| zero_result(0.0))
 }
 
 fn cleanup_ipc_addr(addr: &str, impl_name: &str) {
@@ -1798,7 +1826,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                     eprint!("{:>8}", size_label(size));
                     for &impl_name in &fanout_impls {
                         let def = find_impl(impl_name).unwrap();
-                        let binary = &binaries[impl_name];
+                        let binary = fanio_binary(impl_name, &binaries);
                         let peer_binary = canonical_peer_binary(binary, def, &binaries);
 
                         let result = run_fanout_cell(
@@ -1884,7 +1912,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                     eprint!("{:>8}", size_label(size));
                     for &impl_name in &fanin_impls {
                         let def = find_impl(impl_name).unwrap();
-                        let binary = &binaries[impl_name];
+                        let binary = fanio_binary(impl_name, &binaries);
                         let peer_binary = canonical_peer_binary(binary, def, &binaries);
 
                         let result = run_fanin_cell(
