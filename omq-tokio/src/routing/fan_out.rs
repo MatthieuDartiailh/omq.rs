@@ -795,17 +795,29 @@ impl ShardWorker {
                     return false;
                 }
                 TryFrameResult::Full => {
-                    peer.slot.signal_encoded();
                     let notified = peer.slot.space_available.notified();
-                    tokio::select! {
-                        biased;
-                        () = notified => {}
-                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    peer.slot.signal_encoded();
+                    let result = match frame {
+                        FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
+                        FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
+                    };
+                    match result {
+                        TryFrameResult::Ok => {
+                            touched.push(peer_id);
+                            return true;
+                        }
+                        TryFrameResult::Dead => return false,
+                        TryFrameResult::Full => notified.await,
+                        TryFrameResult::Ineligible => {
+                            unreachable!("pre-framed fanout push cannot be ineligible")
+                        }
                     }
                 }
                 TryFrameResult::Ineligible if lossy => return false,
                 TryFrameResult::Ineligible => {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    unreachable!("pre-framed fanout push cannot be ineligible")
                 }
             }
         }

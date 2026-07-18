@@ -35,27 +35,30 @@ impl Submitter {
                 guard.as_ref().map(SendPipeProducer::space_available)
             };
 
-            match space {
-                Some(space) => {
-                    let notified = space.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
-                    match self.try_send(msg) {
-                        Ok(()) => return Ok(()),
-                        Err(omq_proto::error::TrySendError::Full(returned)) => msg = returned,
-                        Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
-                        Err(omq_proto::error::TrySendError::Closed) => return Err(Error::Closed),
-                    }
-                    notified.await;
+            if let Some(space) = space {
+                let notified = space.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                match self.try_send(msg) {
+                    Ok(()) => return Ok(()),
+                    Err(omq_proto::error::TrySendError::Full(returned)) => msg = returned,
+                    Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
+                    Err(omq_proto::error::TrySendError::Closed) => return Err(Error::Closed),
                 }
-                None => {
-                    tokio::select! {
-                        biased;
-                        () = self.peer_ready.notified() => {}
-                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                    }
-                }
+                notified.await;
+                continue;
             }
+
+            let notified = self.peer_ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match self.try_send(msg) {
+                Ok(()) => return Ok(()),
+                Err(omq_proto::error::TrySendError::Full(returned)) => msg = returned,
+                Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
+                Err(omq_proto::error::TrySendError::Closed) => return Err(Error::Closed),
+            }
+            notified.await;
         }
     }
 
