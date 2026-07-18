@@ -22,6 +22,7 @@ compile_error!("yring requires a 64-bit target (AtomicUsize must not wrap in pra
 mod compat;
 
 use std::mem::MaybeUninit;
+use std::sync::OnceLock;
 
 #[cfg(not(loom))]
 use compat::UnsafeCellExt;
@@ -252,13 +253,16 @@ unsafe impl<T: Send> Send for Producer<T> {}
 ///
 /// The caller must use this value from exactly one producer thread. This
 /// preserves the SPSC producer cursor without a mutex. It is intended for
-/// transports that already guarantee one socket thread, such as inproc.
+/// transports that already guarantee one socket thread, such as inproc. The
+/// first producer call binds the owner to its current thread; later calls
+/// from another thread panic.
 pub struct ProducerOwner<T> {
     producer: UnsafeCell<Producer<T>>,
+    owner: OnceLock<std::thread::ThreadId>,
 }
 
-// SAFETY: callers uphold the single-producer-thread contract documented
-// above. The underlying ring is already Send + Sync.
+// SAFETY: `with_producer` binds access to one thread before touching the
+// UnsafeCell. Calls from other threads panic without accessing the cell.
 unsafe impl<T: Send> Send for ProducerOwner<T> {}
 unsafe impl<T: Send> Sync for ProducerOwner<T> {}
 
@@ -267,36 +271,44 @@ impl<T> ProducerOwner<T> {
     pub fn new(producer: Producer<T>) -> Self {
         Self {
             producer: UnsafeCell::new(producer),
+            owner: OnceLock::new(),
         }
+    }
+
+    #[inline]
+    fn with_producer<R>(&self, f: impl FnOnce(&mut Producer<T>) -> R) -> R {
+        let current = std::thread::current().id();
+        let owner = self.owner.get_or_init(|| current);
+        assert_eq!(
+            *owner, current,
+            "ProducerOwner accessed from multiple producer threads"
+        );
+        // SAFETY: owner check above ensures one thread accesses producer.
+        unsafe { self.producer.with_mut(|ptr| f(&mut *ptr)) }
     }
 
     /// Push one value without producer locking.
     #[inline]
     pub fn push(&self, value: T) -> Result<(), T> {
-        // SAFETY: the single-producer-thread contract guarantees exclusive
-        // access to the producer cursor.
-        unsafe { (&mut *self.producer.get()).push(value) }
+        self.with_producer(|producer| producer.push(value))
     }
 
     /// Publish pending values.
     #[inline]
     pub fn flush(&self) {
-        // SAFETY: see `push`.
-        unsafe { (&mut *self.producer.get()).flush() }
+        self.with_producer(Producer::flush);
     }
 
     /// Test whether the ring is full.
     #[inline]
     pub fn is_full(&self) -> bool {
-        // SAFETY: see `push`.
-        unsafe { (&mut *self.producer.get()).is_full() }
+        self.with_producer(Producer::is_full)
     }
 
     /// Test whether the consumer has gone away.
     #[inline]
     pub fn is_consumer_dropped(&self) -> bool {
-        // SAFETY: see `push`.
-        unsafe { (&*self.producer.get()).is_consumer_dropped() }
+        self.with_producer(|producer| producer.is_consumer_dropped())
     }
 }
 

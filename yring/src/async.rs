@@ -194,6 +194,15 @@ impl<T> Future for PushFuture<'_, T> {
                 match this.producer.push(returned) {
                     Ok(()) => Poll::Ready(Ok(())),
                     Err(returned) => {
+                        if this
+                            .producer
+                            .ring
+                            .ring
+                            .consumer_dropped
+                            .load(Ordering::Acquire)
+                        {
+                            return Poll::Ready(Err(returned));
+                        }
                         this.val = Some(returned);
                         Poll::Pending
                     }
@@ -538,5 +547,46 @@ mod tests {
         let result = futures_lite::future::block_on(async { p.push_async(99).await });
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), 99);
+    }
+
+    #[test]
+    fn push_async_detects_drop_during_waker_registration() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::{Arc, Mutex};
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+        struct DropConsumerOnClone {
+            consumer: Mutex<Option<AsyncConsumer<u32>>>,
+        }
+
+        fn clone(data: *const ()) -> RawWaker {
+            let hook = unsafe { Arc::from_raw(data.cast::<DropConsumerOnClone>()) };
+            hook.consumer.lock().unwrap().take();
+            let cloned = hook.clone();
+            std::mem::forget(hook);
+            RawWaker::new(Arc::into_raw(cloned).cast(), &VTABLE)
+        }
+
+        fn drop_waker(data: *const ()) {
+            unsafe { std::mem::drop(Arc::from_raw(data.cast::<DropConsumerOnClone>())) };
+        }
+
+        fn noop(_: *const ()) {}
+
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, drop_waker);
+
+        let (mut p, c) = async_spsc::<u32>(1);
+        p.push(1).unwrap();
+        p.flush();
+        let hook = Arc::new(DropConsumerOnClone {
+            consumer: Mutex::new(Some(c)),
+        });
+        let waker =
+            unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(hook.clone()).cast(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut future = p.push_async(2);
+
+        assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Ready(Err(2)));
     }
 }

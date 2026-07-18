@@ -5,27 +5,27 @@ use loom::thread;
 #[test]
 fn push_flush_prefetch_pop() {
     loom::model(|| {
-        let (mut p, mut c) = yring::spsc::<u32>(2);
+        let (mut producer, mut consumer) = yring::spsc::<u32>(2);
 
-        let h = thread::spawn(move || {
-            p.push(1).unwrap();
-            p.push(2).unwrap();
-            p.flush();
+        let handle = thread::spawn(move || {
+            producer.push(1).unwrap();
+            producer.push(2).unwrap();
+            producer.flush();
         });
 
         loop {
-            if c.prefetch() > 0 {
-                let a = c.pop().unwrap();
-                let b = c.pop().unwrap();
-                assert_eq!(a, 1);
-                assert_eq!(b, 2);
-                c.release();
+            if consumer.prefetch() > 0 {
+                let first = consumer.pop().unwrap();
+                let second = consumer.pop().unwrap();
+                assert_eq!(first, 1);
+                assert_eq!(second, 2);
+                consumer.release();
                 break;
             }
             thread::yield_now();
         }
 
-        h.join().unwrap();
+        handle.join().unwrap();
     });
 }
 
@@ -124,11 +124,11 @@ fn is_disconnected_after_producer_drop() {
     });
 }
 
-/// Verify push_async doesn't lose wakeups.
+/// Verify `push_async` doesn't lose wakeups.
 ///
 /// The critical race: consumer releases between the producer's
 /// "ring is full" check and waker registration. The retry after
-/// registration (step 4 in PushFuture::poll) must catch this.
+/// registration (step 4 in `PushFuture::poll`) must catch this.
 #[test]
 fn push_async_no_lost_wakeup() {
     use std::future::Future;
@@ -186,7 +186,7 @@ fn push_async_no_lost_wakeup() {
     });
 }
 
-/// Verify push_async detects consumer drop.
+/// Verify `push_async` detects consumer drop.
 #[test]
 fn push_async_consumer_dropped() {
     use std::future::Future;
