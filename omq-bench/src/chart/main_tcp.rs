@@ -167,7 +167,7 @@ pub(crate) fn generate() {
             &msgs,
             &cpu,
             "snd CPU%",
-            "rcv CPU%",
+            "",
         )
         .expect("draw pubsub chart");
         eprintln!("Written: {}", out.display());

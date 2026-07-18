@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::common::{
     C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, FairnessMap, Impl,
-    ValMap, draw_multirow_throughput, load_fairness, load_tput, out_dir,
+    ValMap, draw_multirow_throughput, load_fairness, load_tput, merge_cpu_data, out_dir,
 };
 
 const FANIO_IMPLS: &[Impl] = &[
@@ -53,15 +53,7 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
         return;
     }
 
-    let mut merged_cpu: BTreeMap<String, CpuData> = BTreeMap::new();
-    for (_, _, _, cpu, _) in &panel_data {
-        for (k, v) in cpu {
-            merged_cpu.entry(k.clone()).or_insert_with(|| CpuData {
-                sender: v.sender,
-                receiver: v.receiver,
-            });
-        }
-    }
+    let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu, _)| cpu));
     let rows: Vec<(u64, &ValMap, &ValMap)> = panel_data
         .iter()
         .map(|(p, t, m, _, _)| (*p, t, m))

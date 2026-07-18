@@ -616,7 +616,23 @@ fn run_multi_sub(
         sockets.push(s);
     }
 
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for_warmup_barrier();
+    let warmup_deadline = Instant::now() + warmup_duration();
+    let warmup_handles: Vec<_> = sockets
+        .iter()
+        .cloned()
+        .map(|sock| {
+            std::thread::spawn(move || {
+                while Instant::now() < warmup_deadline {
+                    while sock.try_recv().is_ok() {}
+                    std::thread::yield_now();
+                }
+            })
+        })
+        .collect();
+    for handle in warmup_handles {
+        handle.join().unwrap();
+    }
     wait_for_start_barrier();
 
     let counters: Vec<Arc<AtomicU64>> = (0..socket_count)

@@ -250,8 +250,12 @@ pub(crate) fn draw_legend_table(
     let row_h = 16i32;
 
     table_area.draw_text("threads", &style_hdr, (col_threads, 4))?;
-    table_area.draw_text(snd_label, &style_hdr, (col_snd, 4))?;
-    table_area.draw_text(rcv_label, &style_hdr, (col_rcv, 4))?;
+    if !snd_label.is_empty() {
+        table_area.draw_text(snd_label, &style_hdr, (col_snd, 4))?;
+    }
+    if !rcv_label.is_empty() {
+        table_area.draw_text(rcv_label, &style_hdr, (col_rcv, 4))?;
+    }
 
     let cores = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
 
@@ -273,10 +277,14 @@ pub(crate) fn draw_legend_table(
         table_area.draw_text(&threads, &style_dim, (col_threads, y))?;
 
         if let Some(cd) = cpu.get(imp.key) {
-            if let Some(v) = cd.sender {
+            if !snd_label.is_empty()
+                && let Some(v) = cd.sender
+            {
                 table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_snd, y))?;
             }
-            if let Some(v) = cd.receiver {
+            if !rcv_label.is_empty()
+                && let Some(v) = cd.receiver
+            {
                 table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_rcv, y))?;
             }
         }
@@ -285,6 +293,65 @@ pub(crate) fn draw_legend_table(
 }
 
 // ── data loading ───────────────────────────────────────────────
+
+#[derive(Default)]
+struct CpuAccum {
+    sender_sum: f64,
+    receiver_sum: f64,
+    sender_count: u32,
+    receiver_count: u32,
+}
+
+impl CpuAccum {
+    fn add_sender_pct(&mut self, pct: f64) {
+        self.sender_sum += pct;
+        self.sender_count += 1;
+    }
+
+    fn add_receiver_pct(&mut self, pct: f64) {
+        self.receiver_sum += pct;
+        self.receiver_count += 1;
+    }
+
+    fn add_sender(&mut self, cpu_time: f64, elapsed: f64) {
+        self.add_sender_pct(cpu_time / elapsed * 100.0);
+    }
+
+    fn add_receiver(&mut self, cpu_time: f64, elapsed: f64) {
+        self.add_receiver_pct(cpu_time / elapsed * 100.0);
+    }
+
+    fn into_data(self) -> CpuData {
+        CpuData {
+            sender: (self.sender_count > 0).then(|| self.sender_sum / f64::from(self.sender_count)),
+            receiver: (self.receiver_count > 0)
+                .then(|| self.receiver_sum / f64::from(self.receiver_count)),
+        }
+    }
+}
+
+pub(crate) fn merge_cpu_data<'a>(
+    panel_cpus: impl IntoIterator<Item = &'a BTreeMap<String, CpuData>>,
+) -> BTreeMap<String, CpuData> {
+    let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
+
+    for cpu in panel_cpus {
+        for (name, data) in cpu {
+            let accum = cpu_sums.entry(name.clone()).or_default();
+            if let Some(sender) = data.sender {
+                accum.add_sender_pct(sender);
+            }
+            if let Some(receiver) = data.receiver {
+                accum.add_receiver_pct(receiver);
+            }
+        }
+    }
+
+    cpu_sums
+        .into_iter()
+        .map(|(name, accum)| (name, accum.into_data()))
+        .collect()
+}
 
 pub(crate) fn load_tput(
     kind: &str,
@@ -300,10 +367,9 @@ pub(crate) fn load_tput(
 
     let mut tput: ValMap = BTreeMap::new();
     let mut msgs: ValMap = BTreeMap::new();
-    let mut seen: BTreeMap<(String, u64), usize> = BTreeMap::new();
-    let mut cpu_sums: BTreeMap<String, (f64, f64, u32)> = BTreeMap::new();
+    let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
 
-    for (seq, row) in &rows {
+    for (_, row) in rows {
         if row.transport != transport || row.kind != kind {
             continue;
         }
@@ -316,10 +382,12 @@ pub(crate) fn load_tput(
             continue;
         }
         let key = (row.impl_name.clone(), row.msg_size);
-        if seen.get(&key).is_some_and(|&prev| *seq < prev) {
-            continue;
-        }
-        seen.insert(key, *seq);
+        latest.insert(key, row);
+    }
+
+    let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
+
+    for row in latest.into_values() {
         if let Some(v) = row.mbps {
             tput.entry(row.msg_size)
                 .or_default()
@@ -335,31 +403,21 @@ pub(crate) fn load_tput(
         {
             let e = cpu_sums.entry(row.impl_name.clone()).or_default();
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
-                e.0 += push / elapsed * 100.0;
-                e.2 += 1;
+                e.add_sender(push, elapsed);
             }
             if let Some(pull) = row.pull_cpu_time {
-                e.1 += pull / elapsed * 100.0;
+                e.add_receiver(pull, elapsed);
             } else if let (Some(total), Some(push)) =
                 (row.cpu_time, row.push_cpu_time.or(row.pub_cpu_time))
             {
-                e.1 += (total - push) / elapsed * 100.0;
+                e.add_receiver(total - push, elapsed);
             }
         }
     }
 
     let cpu = cpu_sums
         .into_iter()
-        .map(|(name, (snd, rcv, count))| {
-            let n = f64::from(count.max(1));
-            (
-                name,
-                CpuData {
-                    sender: Some(snd / n),
-                    receiver: Some(rcv / n),
-                },
-            )
-        })
+        .map(|(name, accum)| (name, accum.into_data()))
         .collect();
 
     (tput, msgs, cpu)
@@ -433,10 +491,9 @@ pub(crate) fn load_latency(
     let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
 
     let mut lat: ValMap = BTreeMap::new();
-    let mut seen: BTreeMap<(String, u64), usize> = BTreeMap::new();
-    let mut cpu_sums: BTreeMap<String, (f64, f64, u32)> = BTreeMap::new();
+    let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
 
-    for (seq, row) in &rows {
+    for (_, row) in rows {
         if row.transport != transport || row.kind != "latency" {
             continue;
         }
@@ -447,10 +504,12 @@ pub(crate) fn load_latency(
             continue;
         }
         let key = (row.impl_name.clone(), row.msg_size);
-        if seen.get(&key).is_some_and(|&prev| *seq < prev) {
-            continue;
-        }
-        seen.insert(key, *seq);
+        latest.insert(key, row);
+    }
+
+    let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
+
+    for row in latest.into_values() {
         if let Some(v) = row.p50_us {
             lat.entry(row.msg_size)
                 .or_default()
@@ -461,27 +520,17 @@ pub(crate) fn load_latency(
         {
             let e = cpu_sums.entry(row.impl_name.clone()).or_default();
             if let Some(req) = row.req_cpu_time {
-                e.0 += req / elapsed * 100.0;
-                e.2 += 1;
+                e.add_sender(req, elapsed);
             }
             if let (Some(total), Some(req)) = (row.cpu_time, row.req_cpu_time) {
-                e.1 += (total - req) / elapsed * 100.0;
+                e.add_receiver(total - req, elapsed);
             }
         }
     }
 
     let cpu = cpu_sums
         .into_iter()
-        .map(|(name, (snd, rcv, count))| {
-            let n = f64::from(count.max(1));
-            (
-                name,
-                CpuData {
-                    sender: Some(snd / n),
-                    receiver: Some(rcv / n),
-                },
-            )
-        })
+        .map(|(name, accum)| (name, accum.into_data()))
         .collect();
 
     (lat, cpu)

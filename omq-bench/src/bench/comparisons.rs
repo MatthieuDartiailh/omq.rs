@@ -291,8 +291,8 @@ fn canonical_peer_binary<'a>(
     }
 }
 
-fn fanio_binary<'a>(impl_name: &str, binaries: &'a HashMap<String, PathBuf>) -> &'a Path {
-    if impl_name == "omq-tokio-2t" {
+fn io_bench_binary<'a>(impl_name: &str, binaries: &'a HashMap<String, PathBuf>) -> &'a Path {
+    if matches!(impl_name, "omq-tokio-2t" | "omq-curve-2t") {
         &binaries["omq-tokio-1t"]
     } else {
         &binaries[impl_name]
@@ -689,13 +689,11 @@ fn run_throughput_once(
     let connect_addr;
 
     let push_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut pull_env: Vec<(&str, &str)> = vec![("OMQ_IO_THREADS", "1")];
-    // Copy mechanism/curve env to pull side.
-    for &(k, v) in def.env {
-        if k != "OMQ_IO_THREADS" && k != "ZMQ_IO_THREADS" {
-            pull_env.push((k, v));
-        }
-    }
+    let mut pull_env: Vec<(&str, &str)> = non_io_env(def);
+    let pull_io_threads = std::env::var("OMQ_BENCH_RECEIVER_IO_THREADS")
+        .unwrap_or_else(|_| impl_io_threads(def).to_string());
+    pull_env.push(("OMQ_IO_THREADS", &pull_io_threads));
+    pull_env.push(("ZMQ_IO_THREADS", &pull_io_threads));
 
     let push_cmd: Vec<&str>;
     let mut push_proc;
@@ -848,22 +846,11 @@ fn run_pubsub_once(
     let connect_addr;
 
     let mut pub_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut sub_env: Vec<(&str, &str)> = Vec::new();
-    for &(k, v) in def.env {
-        if k != "OMQ_IO_THREADS" && k != "ZMQ_IO_THREADS" {
-            sub_env.push((k, v));
-        }
-    }
+    let mut sub_env: Vec<(&str, &str)> = non_io_env(def);
     let receiver_io_threads = std::env::var("OMQ_BENCH_RECEIVER_IO_THREADS")
-        .ok()
-        .or_else(|| {
-            def.env
-                .iter()
-                .find_map(|&(key, value)| (key == "OMQ_IO_THREADS").then_some(value.to_string()))
-        })
-        .unwrap_or_else(|| "1".to_string());
+        .unwrap_or_else(|_| impl_io_threads(def).to_string());
     sub_env.push(("OMQ_IO_THREADS", &receiver_io_threads));
-    sub_env.push(("ZMQ_IO_THREADS", "1"));
+    sub_env.push(("ZMQ_IO_THREADS", &receiver_io_threads));
     let start_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
@@ -1327,12 +1314,11 @@ fn run_latency_cell(
     let connect_addr;
 
     let rep_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut req_env: Vec<(&str, &str)> = Vec::new();
-    for &(k, v) in def.env {
-        if k != "OMQ_IO_THREADS" && k != "ZMQ_IO_THREADS" {
-            req_env.push((k, v));
-        }
-    }
+    let mut req_env: Vec<(&str, &str)> = non_io_env(def);
+    let req_io_threads = std::env::var("OMQ_BENCH_CLIENT_IO_THREADS")
+        .unwrap_or_else(|_| impl_io_threads(def).to_string());
+    req_env.push(("OMQ_IO_THREADS", &req_io_threads));
+    req_env.push(("ZMQ_IO_THREADS", &req_io_threads));
 
     let mut rep_cmd = vec![peer_binary_str, "rep"];
     if transport == TransportKind::Tcp {
@@ -1570,10 +1556,10 @@ pub(crate) fn run(args: ComparisonsArgs) {
             print_throughput_header(&active_impls);
 
             for &size in &sizes {
-                eprint!("{:>8}", size_label(size));
+                let mut cells = Vec::with_capacity(active_impls.len());
                 for &impl_name in &active_impls {
                     let def = find_impl(impl_name).unwrap();
-                    let binary = &binaries[impl_name];
+                    let binary = io_bench_binary(impl_name, &binaries);
                     let peer_binary = canonical_peer_binary(binary, def, &binaries);
 
                     let result = run_throughput_cell(
@@ -1629,12 +1615,12 @@ pub(crate) fn run(args: ComparisonsArgs) {
                     jsonl::append_jsonl(&jsonl_path, &row);
 
                     if size >= 1024 {
-                        eprint!("  {:>14}", fmt_gbps(result.mbps));
+                        cells.push(fmt_gbps(result.mbps));
                     } else {
-                        eprint!("  {:>14}", fmt_rate(result.msgs_s));
+                        cells.push(fmt_rate(result.msgs_s));
                     }
                 }
-                eprintln!();
+                print_table_row(&size_label(size), &cells, 14);
             }
         }
 
@@ -1649,10 +1635,10 @@ pub(crate) fn run(args: ComparisonsArgs) {
             print_latency_header(&active_impls);
 
             for &size in &latency_sizes {
-                eprint!("{:>8}", size_label(size));
+                let mut cells = Vec::with_capacity(active_impls.len());
                 for &impl_name in &active_impls {
                     let def = find_impl(impl_name).unwrap();
-                    let binary = &binaries[impl_name];
+                    let binary = io_bench_binary(impl_name, &binaries);
 
                     let result = run_latency_cell(
                         binary,
@@ -1698,14 +1684,14 @@ pub(crate) fn run(args: ComparisonsArgs) {
                                 zero_transport: None,
                             };
                             jsonl::append_jsonl(&jsonl_path, &row);
-                            eprint!("  {:>14.1}", lat.p50_us);
+                            cells.push(format!("{:.1}", lat.p50_us));
                         }
                         None => {
-                            eprint!("  {:>14}", "-");
+                            cells.push("-".to_string());
                         }
                     }
                 }
-                eprintln!();
+                print_table_row(&size_label(size), &cells, 14);
             }
         }
 
@@ -1731,10 +1717,10 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 print_throughput_header(&pubsub_impls);
 
                 for &size in &pubsub_sizes {
-                    eprint!("{:>8}", size_label(size));
+                    let mut cells = Vec::with_capacity(pubsub_impls.len());
                     for &impl_name in &pubsub_impls {
                         let def = find_impl(impl_name).unwrap();
-                        let binary = &binaries[impl_name];
+                        let binary = io_bench_binary(impl_name, &binaries);
                         let peer_binary = canonical_peer_binary(binary, def, &binaries);
 
                         let result = run_pubsub_cell(
@@ -1791,12 +1777,12 @@ pub(crate) fn run(args: ComparisonsArgs) {
                         jsonl::append_jsonl(&jsonl_path, &row);
 
                         if size >= 1024 {
-                            eprint!("  {:>8.1}", result.mbps / 1000.0);
+                            cells.push(format!("{:.1}", result.mbps / 1000.0));
                         } else {
-                            eprint!("  {:>8.0}", result.msgs_s / 1000.0);
+                            cells.push(format!("{:.0}", result.msgs_s / 1000.0));
                         }
                     }
-                    eprintln!();
+                    print_table_row(&size_label(size), &cells, 8);
                 }
             }
         }
@@ -1823,10 +1809,10 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 print_throughput_header(&fanout_impls);
 
                 for &size in &fanout_sizes {
-                    eprint!("{:>8}", size_label(size));
+                    let mut cells = Vec::with_capacity(fanout_impls.len());
                     for &impl_name in &fanout_impls {
                         let def = find_impl(impl_name).unwrap();
-                        let binary = fanio_binary(impl_name, &binaries);
+                        let binary = io_bench_binary(impl_name, &binaries);
                         let peer_binary = canonical_peer_binary(binary, def, &binaries);
 
                         let result = run_fanout_cell(
@@ -1877,12 +1863,12 @@ pub(crate) fn run(args: ComparisonsArgs) {
                         jsonl::append_jsonl(&jsonl_path, &row);
 
                         if size >= 1024 {
-                            eprint!("  {:>8.1}", result.mbps / 1000.0);
+                            cells.push(format!("{:.1}", result.mbps / 1000.0));
                         } else {
-                            eprint!("  {:>8.0}", result.msgs_s / 1000.0);
+                            cells.push(format!("{:.0}", result.msgs_s / 1000.0));
                         }
                     }
-                    eprintln!();
+                    print_table_row(&size_label(size), &cells, 8);
                 }
             }
         }
@@ -1909,10 +1895,10 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 print_throughput_header(&fanin_impls);
 
                 for &size in &fanin_sizes {
-                    eprint!("{:>8}", size_label(size));
+                    let mut cells = Vec::with_capacity(fanin_impls.len());
                     for &impl_name in &fanin_impls {
                         let def = find_impl(impl_name).unwrap();
-                        let binary = fanio_binary(impl_name, &binaries);
+                        let binary = io_bench_binary(impl_name, &binaries);
                         let peer_binary = canonical_peer_binary(binary, def, &binaries);
 
                         let result = run_fanin_cell(
@@ -1968,12 +1954,12 @@ pub(crate) fn run(args: ComparisonsArgs) {
                         jsonl::append_jsonl(&jsonl_path, &row);
 
                         if size >= 1024 {
-                            eprint!("  {:>8.1}", result.mbps / 1000.0);
+                            cells.push(format!("{:.1}", result.mbps / 1000.0));
                         } else {
-                            eprint!("  {:>8.0}", result.msgs_s / 1000.0);
+                            cells.push(format!("{:.0}", result.msgs_s / 1000.0));
                         }
                     }
-                    eprintln!();
+                    print_table_row(&size_label(size), &cells, 8);
                 }
             }
         }
@@ -2001,10 +1987,10 @@ pub(crate) fn run(args: ComparisonsArgs) {
             print_throughput_header(&curve_impls);
 
             for &size in &curve_sizes {
-                eprint!("{:>8}", size_label(size));
+                let mut cells = Vec::with_capacity(curve_impls.len());
                 for &impl_name in &curve_impls {
                     let def = find_impl(impl_name).unwrap();
-                    let binary = &binaries[impl_name];
+                    let binary = io_bench_binary(impl_name, &binaries);
                     let peer_binary = canonical_peer_binary(binary, def, &binaries);
 
                     let result = run_pubsub_cell(
@@ -2061,12 +2047,12 @@ pub(crate) fn run(args: ComparisonsArgs) {
                     jsonl::append_jsonl(&jsonl_path, &row);
 
                     if size >= 1024 {
-                        eprint!("  {:>14}", fmt_gbps(result.mbps));
+                        cells.push(fmt_gbps(result.mbps));
                     } else {
-                        eprint!("  {:>14}", fmt_rate(result.msgs_s));
+                        cells.push(fmt_rate(result.msgs_s));
                     }
                 }
-                eprintln!();
+                print_table_row(&size_label(size), &cells, 14);
             }
         }
     }
@@ -2090,6 +2076,16 @@ fn print_latency_header(impls: &[&str]) {
         eprint!("  {name:>14}");
     }
     eprintln!("  (p50 us)");
+}
+
+fn print_table_row(label: &str, cells: &[String], width: usize) {
+    use std::fmt::Write as _;
+
+    let mut line = format!("{label:>8}");
+    for cell in cells {
+        write!(&mut line, "  {cell:>width$}").expect("write to string");
+    }
+    eprintln!("{line}");
 }
 
 fn fmt_rate(val: f64) -> String {
