@@ -3,7 +3,7 @@
 Run the fast TCP core-path gate with:
 
 ```text
-cargo run --release -p omq-tokio --bin perf_verify
+cargo run --release -p omq-tokio --bin omq_perf_verify
 ```
 
 The verifier measures CT REQ/REP latency at 256B, canonical 1-IO
