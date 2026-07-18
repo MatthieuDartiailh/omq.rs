@@ -225,3 +225,49 @@ fn push_async_consumer_dropped() {
         }
     });
 }
+
+/// Verify `push_async` detects consumer drop during waker registration.
+#[test]
+fn push_async_consumer_drop_during_registration() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    use std::sync::{Arc, Mutex};
+
+    struct DropConsumerOnClone {
+        consumer: Mutex<Option<yring::AsyncConsumer<u32>>>,
+    }
+
+    fn clone(data: *const ()) -> RawWaker {
+        let hook = unsafe { Arc::from_raw(data.cast::<DropConsumerOnClone>()) };
+        hook.consumer.lock().unwrap().take();
+        let cloned = hook.clone();
+        std::mem::forget(hook);
+        RawWaker::new(Arc::into_raw(cloned).cast(), &VTABLE)
+    }
+
+    fn drop_waker(data: *const ()) {
+        unsafe { std::mem::drop(Arc::from_raw(data.cast::<DropConsumerOnClone>())) };
+    }
+
+    fn noop(_: *const ()) {}
+
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, drop_waker);
+
+    loom::model(|| {
+        let (mut producer, consumer) = yring::async_spsc::<u32>(1);
+        producer.push(1).unwrap();
+        producer.flush();
+
+        let hook = Arc::new(DropConsumerOnClone {
+            consumer: Mutex::new(Some(consumer)),
+        });
+        let waker =
+            unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(hook.clone()).cast(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut future = producer.push_async(2);
+
+        assert_eq!(Pin::new(&mut future).poll(&mut cx), Poll::Ready(Err(2)));
+    });
+}
