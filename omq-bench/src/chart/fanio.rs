@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::common::{
-    C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, Impl, ValMap,
-    draw_multirow_throughput, load_tput, out_dir,
+    C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, FairnessMap, Impl,
+    ValMap, draw_multirow_throughput, load_fairness, load_tput, out_dir,
 };
 
 const FANIO_IMPLS: &[Impl] = &[
@@ -39,11 +39,14 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
     let sub = dir.join("pushpull").join(dir_name);
     std::fs::create_dir_all(&sub).ok();
 
-    let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>)> = Vec::new();
+    #[expect(clippy::type_complexity)]
+    let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>, FairnessMap)> =
+        Vec::new();
     for &peers in PEER_COUNTS {
         let (tput, msgs, cpu) = load_tput(kind, "tcp", Some(peers), FANIO_IMPLS);
+        let fair = load_fairness(kind, "tcp", Some(peers), FANIO_IMPLS);
         if !tput.is_empty() {
-            panel_data.push((peers, tput, msgs, cpu));
+            panel_data.push((peers, tput, msgs, cpu, fair));
         }
     }
     if panel_data.is_empty() {
@@ -51,7 +54,7 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
     }
 
     let mut merged_cpu: BTreeMap<String, CpuData> = BTreeMap::new();
-    for (_, _, _, cpu) in &panel_data {
+    for (_, _, _, cpu, _) in &panel_data {
         for (k, v) in cpu {
             merged_cpu.entry(k.clone()).or_insert_with(|| CpuData {
                 sender: v.sender,
@@ -59,8 +62,11 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
             });
         }
     }
-    let rows: Vec<(u64, &ValMap, &ValMap)> =
-        panel_data.iter().map(|(p, t, m, _)| (*p, t, m)).collect();
+    let rows: Vec<(u64, &ValMap, &ValMap)> = panel_data
+        .iter()
+        .map(|(p, t, m, _, _)| (*p, t, m))
+        .collect();
+    let fair_refs: Vec<&FairnessMap> = panel_data.iter().map(|(_, _, _, _, f)| f).collect();
     let out = sub.join("tcp.svg");
     let chart_title = title_fn(0);
     let _ = kind;
@@ -75,6 +81,7 @@ fn generate_fanio(kind: &str, dir_name: &str, title_fn: &dyn Fn(u64) -> String) 
         &|peers| format!("{peers} peers"),
         snd_label,
         rcv_label,
+        Some(&fair_refs),
     )
     .expect("draw fanio chart");
     eprintln!("Written: {}", out.display());

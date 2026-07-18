@@ -73,6 +73,33 @@ static void die(const char *msg) {
     exit(1);
 }
 
+static int cmp_double(const void *a, const void *b) {
+    double da = *(const double *)a, db = *(const double *)b;
+    return (da > db) - (da < db);
+}
+
+static double quantile_d(const double *sorted, int n, double p) {
+    double idx = (n - 1) * p;
+    return sorted[(int)(idx + 0.5)];
+}
+
+static void print_fairness(const double *rates, int n, double elapsed) {
+    double sorted[256];
+    for (int i = 0; i < n; i++)
+        sorted[i] = rates[i];
+    qsort(sorted, n, sizeof(double), cmp_double);
+    printf(" %.1f %.1f %.1f %.1f %.1f",
+           quantile_d(sorted, n, 0.10),
+           quantile_d(sorted, n, 0.25),
+           quantile_d(sorted, n, 0.50),
+           quantile_d(sorted, n, 0.75),
+           quantile_d(sorted, n, 0.90));
+    for (int i = 0; i < n; i++)
+        printf(" %.1f", sorted[i]);
+    printf("\n");
+    (void)elapsed;
+}
+
 /* Fixed CURVE keypairs for benchmarking (Z85-encoded, 40 chars each). */
 #define CURVE_SERVER_PUBLIC "c[nMZc{RbXmBJGbya&4/kW#Y.Ql4uT1wNJmp6/D@"
 #define CURVE_SERVER_SECRET "2(&.P[s%^&[zcwc3wjPJHlsb^j.F]{F4Bh{ed8S?"
@@ -624,16 +651,18 @@ done_inproc_pubsub:;
             pthread_join(threads[i], NULL);
 
         long long total = 0;
+        double rates[256];
         double per_min = 1e18, per_max = 0;
         for (int i = 0; i < count; i++) {
             long long c = atomic_load(&workers[i].counter);
             total += c;
-            double rate = (double)c / elapsed;
-            if (rate < per_min) per_min = rate;
-            if (rate > per_max) per_max = rate;
+            rates[i] = (double)c / elapsed;
+            if (rates[i] < per_min) per_min = rates[i];
+            if (rates[i] > per_max) per_max = rates[i];
         }
-        printf("%lld %.6f %d %.6f %d %.1f %.1f\n",
+        printf("%lld %.6f %d %.6f %d %.1f %.1f",
                total, elapsed, size, cpu, count, per_min, per_max);
+        print_fairness(rates, count, elapsed);
 
         for (int i = 0; i < count; i++)
             zmq_close(sockets[i]);
@@ -645,18 +674,31 @@ done_inproc_pubsub:;
             fprintf(stderr, "socket_count must be 1..256\n");
             return 1;
         }
+        double duration = (argc >= 6) ? atof(argv[5]) : 0;
+
+        typedef struct {
+            void *sock;
+            _Atomic long long counter;
+            volatile int stop;
+        } SendWorker;
 
         void *send_thread(void *arg) {
-            void *sock = arg;
+            SendWorker *w = arg;
             char *buf = calloc(1, size);
             memset(buf, 'x', size);
-            for (;;) {
-                if (zmq_send(sock, buf, size, 0) < 0) break;
+            while (!w->stop) {
+                if (zmq_send(w->sock, buf, size, 0) < 0) {
+                    if (zmq_errno() == EAGAIN) continue;
+                    break;
+                }
+                atomic_fetch_add_explicit(&w->counter, 1,
+                                          memory_order_relaxed);
             }
             free(buf);
             return NULL;
         }
 
+        SendWorker workers[256];
         void *sockets[256];
         pthread_t threads[256];
 
@@ -664,16 +706,54 @@ done_inproc_pubsub:;
             sockets[i] = zmq_socket(ctx, ZMQ_PUSH);
             if (!sockets[i]) die("zmq_socket PUSH");
             if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
+            workers[i].sock = sockets[i];
+            atomic_store(&workers[i].counter, 0);
+            workers[i].stop = 0;
         }
 
         wait_for_start_barrier();
 
         for (int i = 0; i < count; i++)
-            pthread_create(&threads[i], NULL, send_thread, sockets[i]);
+            pthread_create(&threads[i], NULL, send_thread, &workers[i]);
 
-        /* run forever; killed externally */
-        for (int i = 0; i < count; i++)
-            pthread_join(threads[i], NULL);
+        if (duration > 0) {
+            long sleep_secs = (long)duration;
+            long sleep_ns = (long)((duration - sleep_secs) * 1e9);
+            struct timespec dur_ts = { sleep_secs, sleep_ns };
+
+            double cpu_before = cpu_time_secs();
+            double t0 = now_secs();
+            nanosleep(&dur_ts, NULL);
+            double elapsed = now_secs() - t0;
+            double cpu = cpu_time_secs() - cpu_before;
+
+            for (int i = 0; i < count; i++)
+                workers[i].stop = 1;
+
+            int timeout_ms = 1;
+            for (int i = 0; i < count; i++)
+                zmq_setsockopt(sockets[i], ZMQ_SNDTIMEO, &timeout_ms,
+                               sizeof(timeout_ms));
+            for (int i = 0; i < count; i++)
+                pthread_join(threads[i], NULL);
+
+            long long total = 0;
+            double rates[256];
+            double per_min = 1e18, per_max = 0;
+            for (int i = 0; i < count; i++) {
+                long long c = atomic_load(&workers[i].counter);
+                total += c;
+                rates[i] = (double)c / elapsed;
+                if (rates[i] < per_min) per_min = rates[i];
+                if (rates[i] > per_max) per_max = rates[i];
+            }
+            printf("%lld %.6f %d %.6f %d %.1f %.1f",
+                   total, elapsed, size, cpu, count, per_min, per_max);
+            print_fairness(rates, count, elapsed);
+        } else {
+            for (int i = 0; i < count; i++)
+                pthread_join(threads[i], NULL);
+        }
 
         for (int i = 0; i < count; i++)
             zmq_close(sockets[i]);
@@ -869,7 +949,7 @@ usage:
     fprintf(stderr, "       %s pull <addr> <size> <duration_secs>\n", argv[0]);
     fprintf(stderr, "       %s multi-pull <addr> <size> <duration_secs> <count>\n", argv[0]);
     fprintf(stderr, "       %s multi-sub <addr> <size> <duration_secs> <count>\n", argv[0]);
-    fprintf(stderr, "       %s multi-push <addr> <size> <count>\n", argv[0]);
+    fprintf(stderr, "       %s multi-push <addr> <size> <count> [duration_secs]\n", argv[0]);
     fprintf(stderr, "       %s inproc <name> <size> <duration_secs>\n", argv[0]);
     fprintf(stderr, "       %s rep <addr> <size>\n", argv[0]);
     fprintf(stderr, "       %s req <addr> <size> <iterations> <warmup>\n", argv[0]);

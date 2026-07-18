@@ -153,14 +153,14 @@ Rebench omq impls only, then regenerate:
 ```sh
 cargo run --release -p omq-bench -- run comparisons \
   --impl omq-tokio-ct --impl omq-tokio-1t --transport tcp --no-pubsub
-cargo run --release -p omq-bench -- chart comparisons
+cargo run --release -p omq-bench -- chart main
 ```
 
 Rebench all impls (when external baselines are stale):
 
 ```sh
 cargo run --release -p omq-bench -- run comparisons --transport tcp --no-pubsub
-cargo run --release -p omq-bench -- chart comparisons
+cargo run --release -p omq-bench -- chart main
 ```
 
 ### Cross-library Comparison Charts
@@ -174,7 +174,8 @@ cargo run --release -p omq-bench -- run comparisons --omq
 cargo run --release -p omq-bench -- run comparisons --omq \
   --transport tcp --no-latency --no-pubsub \
   --sizes 32,128,512,2048,8192,32768 --allow-non-chart-sizes
-cargo run --release -p omq-bench -- chart comparisons
+cargo run --release -p omq-bench -- chart comparison
+cargo run --release -p omq-bench -- chart main
 ```
 
 Full refresh after omq/rzmq changes (all impls, all transports):
@@ -184,7 +185,9 @@ test -f .chart_hw
 cargo run --release -p omq-bench -- run comparisons \
   --transport tcp --transport ipc --transport inproc \
   --fanout --fanin --pubsub-peers 4,64
-cargo run --release -p omq-bench -- chart comparisons
+cargo run --release -p omq-bench -- chart comparison
+cargo run --release -p omq-bench -- chart main
+cargo run --release -p omq-bench -- chart fanio
 ```
 
 Stop if any benchmark prints warnings or timeouts. Fix the bench peer
@@ -214,7 +217,7 @@ auto-includes CURVE impls from the same family as the selected impls
 ```sh
 cargo run --release -p omq-bench -- run comparisons \
   --omq --curve --transport tcp --no-throughput --no-latency
-cargo run --release -p omq-bench -- chart comparisons
+cargo run --release -p omq-bench -- chart pubsub
 ```
 
 ### Mechanism Chart

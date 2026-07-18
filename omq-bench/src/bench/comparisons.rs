@@ -1196,8 +1196,7 @@ fn run_fanin_once(
     let pull_output = pull_proc.wait_with_output(Duration::from_secs(duration as u64 + 30));
 
     let push_cpu = process::read_proc_cpu(push_proc.pid());
-    let timed_push =
-        def.name == "omq-tokio-1t" || def.name == "omq-tokio-ct" || def.name == "omq-tokio-2t";
+    let timed_push = def.name != "zmq.rs" && def.name != "rzmq" && def.name != "rzmq-iouring";
     let push_output = if timed_push {
         push_proc.wait_with_output(Duration::from_secs(duration as u64 + 30))
     } else {
