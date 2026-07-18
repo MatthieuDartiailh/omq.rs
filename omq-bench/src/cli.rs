@@ -8,22 +8,40 @@ pub(crate) struct Cli {
 }
 
 #[derive(Subcommand)]
+#[expect(clippy::large_enum_variant)]
 pub(crate) enum Command {
     /// Run benchmarks.
     Run {
         #[command(subcommand)]
         sub: RunSub,
     },
+    /// Generate charts from cached JSONL data.
+    Chart {
+        #[command(subcommand)]
+        sub: Option<ChartSub>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ChartSub {
+    /// Main TCP overview charts.
+    Main,
+    /// Per-transport PUSH/PULL and REQ/REP charts.
+    Comparison,
+    /// PUB/SUB multi-panel and CURVE charts.
+    Pubsub,
+    /// Fan-out and fan-in charts.
+    Fanio,
+    /// PUB/SUB LZ4 compression chart.
+    Lz4,
 }
 
 #[derive(Subcommand)]
 pub(crate) enum RunSub {
     /// Cross-implementation comparisons.
     Comparisons(ComparisonsArgs),
-    /// Security mechanism benchmarks.
-    Mechanism(MechanismArgs),
-    /// PUB/SUB with LZ4 compression.
-    PubsubLz4(PubsubLz4Args),
+    /// PUSH/PULL with LZ4 compression.
+    PushpullLz4(PushpullLz4Args),
     /// Push/pull compression benchmarks.
     Compression(CompressionArgs),
 }
@@ -60,7 +78,7 @@ pub(crate) struct ComparisonsArgs {
     #[arg(long = "impl")]
     pub impls: Vec<String>,
 
-    /// Shorthand: omq-tokio-ct + omq-tokio-2t.
+    /// Shorthand: omq-tokio-1t + omq-tokio-2t.
     #[arg(long)]
     pub omq: bool,
 
@@ -97,7 +115,7 @@ pub(crate) struct ComparisonsArgs {
     pub no_pubsub: bool,
 
     /// Pub/sub peer counts (comma-separated).
-    #[arg(long, value_delimiter = ',', default_values_t = [4, 64])]
+    #[arg(long, value_delimiter = ',', default_values_t = [4, 32])]
     pub pubsub_peers: Vec<u64>,
 
     /// Latency iterations.
@@ -117,7 +135,7 @@ pub(crate) struct ComparisonsArgs {
     pub fanout: bool,
 
     /// Fan-out peer counts (comma-separated).
-    #[arg(long, value_delimiter = ',', default_values_t = [4, 64])]
+    #[arg(long, value_delimiter = ',', default_values_t = [4, 32])]
     pub fanout_peers: Vec<u64>,
 
     /// Enable fan-in benchmarks.
@@ -125,7 +143,7 @@ pub(crate) struct ComparisonsArgs {
     pub fanin: bool,
 
     /// Fan-in peer counts (comma-separated).
-    #[arg(long, value_delimiter = ',', default_values_t = [4, 64])]
+    #[arg(long, value_delimiter = ',', default_values_t = [4, 32])]
     pub fanin_peers: Vec<u64>,
 
     /// Enable CURVE benchmarks.
@@ -150,30 +168,7 @@ pub(crate) struct ComparisonsArgs {
 }
 
 #[derive(Parser)]
-pub(crate) struct MechanismArgs {
-    /// Backend name.
-    #[arg(default_value = "tokio")]
-    pub backend: String,
-
-    /// Use full chart-size list (16 sizes).
-    #[arg(long)]
-    pub chart_sizes: bool,
-
-    /// Custom sizes (comma-separated).
-    #[arg(long, value_delimiter = ',')]
-    pub sizes: Option<Vec<u64>>,
-
-    /// Duration per measurement in seconds.
-    #[arg(long, default_value_t = 3.0)]
-    pub duration: f64,
-
-    /// Best-of-N rounds.
-    #[arg(long, default_value_t = 3)]
-    pub rounds: u32,
-}
-
-#[derive(Parser)]
-pub(crate) struct PubsubLz4Args {
+pub(crate) struct PushpullLz4Args {
     /// Transports (comma-separated).
     #[arg(long, default_value = "tcp,lz4+tcp")]
     pub transports: String,

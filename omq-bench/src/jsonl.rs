@@ -1,6 +1,7 @@
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 pub(crate) fn cache_dir() -> PathBuf {
@@ -12,6 +13,25 @@ pub(crate) fn cache_dir() -> PathBuf {
             format!("{home}/.cache")
         });
     PathBuf::from(base).join("omq")
+}
+
+pub(crate) fn load_jsonl<T: DeserializeOwned>(path: &Path) -> Vec<(usize, T)> {
+    let Ok(file) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let reader = BufReader::new(file);
+    let mut rows = Vec::new();
+    for (i, line) in reader.lines().enumerate() {
+        let Ok(line) = line else { continue };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(row) = serde_json::from_str(&line) {
+            rows.push((i, row));
+        }
+    }
+    rows
 }
 
 /// Append a single row to a JSONL file, creating directories as needed.
@@ -95,20 +115,7 @@ pub(crate) struct ComparisonRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MechanismRow {
-    pub run_id: String,
-    pub pattern: String,
-    pub transport: String,
-    pub peers: u64,
-    pub msg_size: u64,
-    pub msg_count: f64,
-    pub elapsed: f64,
-    pub mbps: f64,
-    pub msgs_s: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PubsubLz4Row {
+pub(crate) struct PushpullLz4Row {
     pub run_id: String,
     pub pattern: String,
     pub transport: String,

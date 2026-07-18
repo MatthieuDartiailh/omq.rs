@@ -1,6 +1,6 @@
-<svg viewBox="0 0 850 418" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
-<rect x="0" y="0" width="850" height="418" opacity="1" fill="#FFFFFF" stroke="none"/>
-<text x="425" y="17" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="bold" fill="#111827">REQ/REP latency: TCP loopback, 2-process</text>
+<svg viewBox="0 0 850 466" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
+<rect x="0" y="0" width="850" height="466" opacity="1" fill="#FFFFFF" stroke="none"/>
+<text x="425" y="17" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="bold" fill="#111827">REQ/REP latency, TCP loopback, 2-process</text>
 <text x="425" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9ca3af">Linux VM on a 2018 Mac Mini, Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz, 6 cores, performance governor, turbo off</text>
 <text x="415" y="41" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#000000">
 p50 round-trip latency (lower is better)
@@ -93,6 +93,27 @@ p50 round-trip latency (lower is better)
 <circle cx="519" cy="218" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
 <circle cx="669" cy="213" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
 <circle cx="819" cy="199" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#2563EB" stroke-width="2" points="70,228 219,237 369,236 519,226 669,226 819,205 "/>
+<circle cx="70" cy="228" r="2.5" opacity="1" fill="#2563EB" stroke="none" stroke-width="1"/>
+<circle cx="219" cy="237" r="2.5" opacity="1" fill="#2563EB" stroke="none" stroke-width="1"/>
+<circle cx="369" cy="236" r="2.5" opacity="1" fill="#2563EB" stroke="none" stroke-width="1"/>
+<circle cx="519" cy="226" r="2.5" opacity="1" fill="#2563EB" stroke="none" stroke-width="1"/>
+<circle cx="669" cy="226" r="2.5" opacity="1" fill="#2563EB" stroke="none" stroke-width="1"/>
+<circle cx="819" cy="205" r="2.5" opacity="1" fill="#2563EB" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#16A34A" stroke-width="2" points="70,95 219,74 369,105 519,89 669,94 819,83 "/>
+<circle cx="70" cy="95" r="2.5" opacity="1" fill="#16A34A" stroke="none" stroke-width="1"/>
+<circle cx="219" cy="74" r="2.5" opacity="1" fill="#16A34A" stroke="none" stroke-width="1"/>
+<circle cx="369" cy="105" r="2.5" opacity="1" fill="#16A34A" stroke="none" stroke-width="1"/>
+<circle cx="519" cy="89" r="2.5" opacity="1" fill="#16A34A" stroke="none" stroke-width="1"/>
+<circle cx="669" cy="94" r="2.5" opacity="1" fill="#16A34A" stroke="none" stroke-width="1"/>
+<circle cx="819" cy="83" r="2.5" opacity="1" fill="#16A34A" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#15803D" stroke-width="2" points="70,186 219,191 369,187 519,188 669,180 819,159 "/>
+<circle cx="70" cy="186" r="2.5" opacity="1" fill="#15803D" stroke="none" stroke-width="1"/>
+<circle cx="219" cy="191" r="2.5" opacity="1" fill="#15803D" stroke="none" stroke-width="1"/>
+<circle cx="369" cy="187" r="2.5" opacity="1" fill="#15803D" stroke="none" stroke-width="1"/>
+<circle cx="519" cy="188" r="2.5" opacity="1" fill="#15803D" stroke="none" stroke-width="1"/>
+<circle cx="669" cy="180" r="2.5" opacity="1" fill="#15803D" stroke="none" stroke-width="1"/>
+<circle cx="819" cy="159" r="2.5" opacity="1" fill="#15803D" stroke="none" stroke-width="1"/>
 <text x="230" y="344" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#6B7280">
 threads
 </text>
@@ -140,5 +161,44 @@ CT
 </text>
 <text x="430" y="392" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 60%
+</text>
+<polyline fill="none" opacity="1" stroke="#2563EB" stroke-width="2" points="78,414 92,414 "/>
+<text x="98" y="408" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#374151">
+zmq.rs
+</text>
+<text x="230" y="408" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+6 MT
+</text>
+<text x="340" y="408" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+53%
+</text>
+<text x="430" y="408" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+58%
+</text>
+<polyline fill="none" opacity="1" stroke="#16A34A" stroke-width="2" points="78,430 92,430 "/>
+<text x="98" y="424" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#374151">
+rzmq
+</text>
+<text x="230" y="424" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+6 MT
+</text>
+<text x="340" y="424" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+61%
+</text>
+<text x="430" y="424" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+67%
+</text>
+<polyline fill="none" opacity="1" stroke="#15803D" stroke-width="2" points="78,446 92,446 "/>
+<text x="98" y="440" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#374151">
+rzmq-iouring
+</text>
+<text x="230" y="440" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+6 MT
+</text>
+<text x="340" y="440" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+93%
+</text>
+<text x="430" y="440" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+102%
 </text>
 </svg>

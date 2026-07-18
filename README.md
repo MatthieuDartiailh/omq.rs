@@ -12,12 +12,21 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
 </p>
+<details>
+<summary>REQ/REP latency</summary>
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_reqrep_tcp.svg" alt="REQ/REP latency: TCP implementations" width="950">
 </p>
+</details>
+
+<details>
+<summary>PUB/SUB throughput</summary>
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pubsub_tcp.svg" alt="PUB/SUB throughput: TCP implementations" width="950">
 </p>
+</details>
 
 [Full comparison charts](COMPARISONS.md)
 
@@ -30,6 +39,7 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 - Peer failures do not become user errors: `send()` and `recv()` keep working through disconnects, reconnects, slow consumers, and bind-side restarts.
 - HWM back-pressure and routing fairness under load, not only in empty-queue examples.
 - The hot paths are size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
+- The only Rust ZeroMQ implementation following libzmq's architecture: application threads stay separate from dedicated background IO threads, IO work scales linearly across those threads, and PUB peers are sharded across them automatically.
 - Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
 - Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences.
 

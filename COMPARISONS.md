@@ -37,14 +37,26 @@ threads, and Tokio current-thread (CT), where application and IO work share
 one runtime thread. The benchmark peer on the uninteresting side uses the
 blocking API.
 
+### Thread labels
+
+- **IO** keeps application code out of the IO runtime and scales
+  linearly across independent IO threads.
+- **UT** means user thread: an application OS thread that owns a
+  socket. The canonical inproc setup uses separate user threads for the
+  communicating sockets.
+
 `Context::current()` embeds OMQ in an existing tokio runtime:
 
-- **CT** keeps application and IO work on one thread. Its benchmark sender
-  yields in batches so the IO driver progresses without destroying batching.
-- **background IO** keeps application code out of the IO runtime and scales
-  across independent IO threads.
+- **CT** means current-thread Tokio: application tasks and OMQ IO share one
+  current-thread runtime and one OS thread.
+- **MT** means machine-threaded: the implementation may use the available
+  machine parallelism. The chart shows the detected CPU count.
 
 ## PUSH/PULL Throughput
+
+<p align="center">
+  <img src="doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
+</p>
 
 <p align="center">
   <img src="doc/charts/pushpull/tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
@@ -75,7 +87,19 @@ N-to-1 PUSH/PULL over TCP.
   <img src="doc/charts/pushpull/fanin/tcp.svg" alt="PUSH fan-in: TCP" width="850">
 </p>
 
+### LZ4 Compression
+
+PUSH/PULL throughput with TCP compression projections.
+
+<p align="center">
+  <img src="doc/charts/pushpull/lz4_tcp.svg" alt="PUSH/PULL LZ4 compression: TCP" width="850">
+</p>
+
 ## REQ/REP Latency
+
+<p align="center">
+  <img src="doc/charts/main_reqrep_tcp.svg" alt="REQ/REP latency: TCP implementations" width="950">
+</p>
 
 <p align="center">
   <img src="doc/charts/reqrep/tcp.svg" alt="REQ/REP latency: TCP" width="850">
@@ -92,13 +116,13 @@ N-to-1 PUSH/PULL over TCP.
 ## PUB/SUB Throughput
 
 <p align="center">
+  <img src="doc/charts/main_pubsub_tcp.svg" alt="PUB/SUB throughput: TCP implementations" width="950">
+</p>
+
+<p align="center">
   <img src="doc/charts/pubsub/tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
 </p>
 
-## Mechanisms
-
-PUSH/PULL throughput under NULL, PLAIN, and CURVE.
-
 <p align="center">
-  <img src="doc/charts/mechanism/tokio.svg" alt="Mechanisms: omq-tokio" width="850">
+  <img src="doc/charts/pubsub/curve_tcp.svg" alt="CURVE PUB/SUB throughput: TCP" width="850">
 </p>
