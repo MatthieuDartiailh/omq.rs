@@ -293,11 +293,8 @@ async fn client_server_reconnect_after_server_restart() {
     server1.close().await.unwrap();
     let server2 = rebind(&ep, || Socket::new(SocketType::Server, Options::default())).await;
 
-    client.send(Message::single("ping2")).await.unwrap();
-    let got2 = tokio::time::timeout(Duration::from_secs(3), server2.recv())
-        .await
-        .expect("post-restart recv timed out")
-        .unwrap();
+    let got2 =
+        send_single_until_received(&client, &server2, "ping2", "post-restart recv timed out").await;
     assert_eq!(got2, Message::multipart(["c1", "ping2"]));
 }
 
