@@ -910,15 +910,21 @@ fn run_inproc_latency(
     println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} 0 {elapsed:.6}");
 }
 
-#[expect(clippy::cast_precision_loss)]
+#[cfg(unix)]
+fn timeval_secs(tv: &libc::timeval) -> f64 {
+    let sec = u64::try_from(tv.tv_sec).unwrap_or(0);
+    let usec = u64::try_from(tv.tv_usec).unwrap_or(0);
+    (Duration::from_secs(sec) + Duration::from_micros(usec)).as_secs_f64()
+}
+
 #[cfg(unix)]
 fn cpu_time_secs() -> f64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     unsafe {
         libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
         let usage = usage.assume_init();
-        let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1e6;
-        let sys = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1e6;
+        let user = timeval_secs(&usage.ru_utime);
+        let sys = timeval_secs(&usage.ru_stime);
         user + sys
     }
 }

@@ -3,6 +3,8 @@
 
 #![cfg(feature = "curve")]
 
+mod test_support;
+
 use std::time::Duration;
 
 use std::sync::Arc;
@@ -24,11 +26,7 @@ fn tcp_ep(port: u16) -> Endpoint {
 // IPC on Unix, TCP :0 on Windows.
 #[cfg(unix)]
 fn auth_ep(name: &str) -> Endpoint {
-    use omq_tokio::IpcPath;
-    Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-curve-{name}-{}",
-        std::process::id()
-    )))
+    test_support::ipc_endpoint(&format!("curve-{name}"))
 }
 
 #[cfg(not(unix))]

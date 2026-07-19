@@ -12,6 +12,44 @@ pub fn tcp_loopback(port: u16) -> Endpoint {
     }
 }
 
+pub fn ipc_endpoint(name: &str) -> Endpoint {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    #[cfg(target_os = "linux")]
+    {
+        Endpoint::Ipc(omq_tokio::IpcPath::Abstract(format!(
+            "omq-test-{name}-{}-{nanos}",
+            std::process::id()
+        )))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Endpoint::Ipc(omq_tokio::IpcPath::NamedPipe(format!(
+            "omq-test-{name}-{}-{nanos}",
+            std::process::id()
+        )))
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "omq-test-{name}-{}-{nanos}.sock",
+            std::process::id()
+        ));
+        Endpoint::Ipc(omq_tokio::IpcPath::Filesystem(path))
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        panic!("IPC is unsupported on this target")
+    }
+}
+
 pub async fn bind_loopback(sock: &Socket) -> u16 {
     let mut mon = sock.monitor();
     sock.bind(tcp_loopback(0)).await.unwrap();
