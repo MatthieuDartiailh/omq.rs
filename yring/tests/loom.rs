@@ -106,6 +106,33 @@ fn wraparound_correctness() {
 }
 
 #[test]
+fn pointer_width_cursor_wrap_boundary() {
+    loom::model(|| {
+        let base = usize::MAX - 1;
+        let (mut p, mut c) = yring::loom_spsc_with_cursors::<u32>(2, base);
+
+        let h = thread::spawn(move || {
+            p.push(10).unwrap();
+            p.push(20).unwrap();
+            p.flush();
+        });
+
+        loop {
+            if c.prefetch() > 0 {
+                assert_eq!(c.pop(), Some(10));
+                assert_eq!(c.pop(), Some(20));
+                assert_eq!(c.pop(), None);
+                c.release();
+                break;
+            }
+            thread::yield_now();
+        }
+
+        h.join().unwrap();
+    });
+}
+
+#[test]
 fn is_disconnected_after_producer_drop() {
     loom::model(|| {
         let (mut p, mut c) = yring::spsc::<u32>(4);

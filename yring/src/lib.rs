@@ -2,9 +2,9 @@
 //! Bounded SPSC ring with ypipe-style batched flush/prefetch.
 //!
 //! Three pointers:
-//! - `head`: consumer read position (`AtomicU64`, consumer-owned)
-//! - `cursor`: writer position (plain u64, producer-only, no atomic)
-//! - `tail`: last flushed position (`AtomicU64`, producer writes, consumer reads)
+//! - `head`: consumer read position (`AtomicUsize`, consumer-owned)
+//! - `cursor`: writer position (plain usize, producer-only, no atomic)
+//! - `tail`: last flushed position (`AtomicUsize`, producer writes, consumer reads)
 //!
 //! `push` writes to the ring with zero atomics. `flush` makes all
 //! pending writes visible with one Release store. `pop` reads with
@@ -16,8 +16,8 @@ mod r#async;
 #[cfg(feature = "async")]
 pub use r#async::{AsyncConsumer, AsyncProducer, async_spsc};
 
-#[cfg(not(target_has_atomic = "64"))]
-compile_error!("yring requires target_has_atomic = \"64\"");
+#[cfg(not(target_has_atomic = "ptr"))]
+compile_error!("yring requires target_has_atomic = \"ptr\"");
 
 mod compat;
 
@@ -26,9 +26,10 @@ use std::sync::OnceLock;
 
 #[cfg(not(loom))]
 use compat::UnsafeCellExt;
-use compat::{Arc, AtomicBool, AtomicU64, Ordering, UnsafeCell};
+use compat::{Arc, AtomicBool, AtomicUsize, Ordering, UnsafeCell};
 
-type Cursor = u64;
+type AtomicCursor = AtomicUsize;
+type Cursor = usize;
 
 #[repr(align(128))]
 pub(crate) struct Padded<T>(pub(crate) T);
@@ -37,9 +38,9 @@ pub(crate) struct Ring<T> {
     pub(crate) buf: Box<[UnsafeCell<MaybeUninit<T>>]>,
     pub(crate) mask: usize,
     /// Consumer read position. Written by consumer, read by producer.
-    pub(crate) head: Padded<AtomicU64>,
+    pub(crate) head: Padded<AtomicCursor>,
     /// Last flushed position. Written by producer, read by consumer.
-    pub(crate) tail: Padded<AtomicU64>,
+    pub(crate) tail: Padded<AtomicCursor>,
     /// Set by `Producer::drop`. Lets the consumer detect that no more
     /// data will ever arrive.
     pub(crate) producer_dropped: AtomicBool,
@@ -62,14 +63,18 @@ impl<T> Ring<T> {
         let cap = capacity
             .checked_next_power_of_two()
             .expect("capacity must fit in the next power of two");
+        assert!(
+            cap <= usize::MAX / 2,
+            "capacity must be <= half the cursor range"
+        );
         let buf: Vec<UnsafeCell<MaybeUninit<T>>> = (0..cap)
             .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
             .collect();
         Self {
             buf: buf.into_boxed_slice(),
             mask: cap - 1,
-            head: Padded(AtomicU64::new(0)),
-            tail: Padded(AtomicU64::new(0)),
+            head: Padded(AtomicCursor::new(0)),
+            tail: Padded(AtomicCursor::new(0)),
             producer_dropped: AtomicBool::new(false),
             consumer_dropped: AtomicBool::new(false),
         }
@@ -86,13 +91,12 @@ impl<T> Ring<T> {
 
     #[inline]
     fn count(n: Cursor) -> usize {
-        debug_assert!(n <= usize::MAX as Cursor);
-        n as usize
+        n
     }
 
     #[inline]
     fn index(&self, cursor: Cursor) -> usize {
-        (cursor as usize) & self.mask
+        cursor & self.mask
     }
 
     #[inline]
@@ -102,9 +106,9 @@ impl<T> Ring<T> {
         cached_head: &mut Cursor,
         val: T,
     ) -> Result<(), T> {
-        if Self::distance(*cursor, *cached_head) >= self.capacity() as Cursor {
+        if Self::distance(*cursor, *cached_head) >= self.capacity() {
             *cached_head = self.head.0.load(Ordering::Acquire);
-            if Self::distance(*cursor, *cached_head) >= self.capacity() as Cursor {
+            if Self::distance(*cursor, *cached_head) >= self.capacity() {
                 return Err(val);
             }
         }
@@ -135,9 +139,9 @@ impl<T> Ring<T> {
 
     #[inline]
     pub(crate) fn is_full(&self, cursor: Cursor, cached_head: &mut Cursor) -> bool {
-        if Self::distance(cursor, *cached_head) >= self.capacity() as Cursor {
+        if Self::distance(cursor, *cached_head) >= self.capacity() {
             *cached_head = self.head.0.load(Ordering::Acquire);
-            Self::distance(cursor, *cached_head) >= self.capacity() as Cursor
+            Self::distance(cursor, *cached_head) >= self.capacity()
         } else {
             false
         }
@@ -366,6 +370,26 @@ pub fn spsc<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
             ring,
             head: 0,
             cached_tail: 0,
+        },
+    )
+}
+
+#[cfg(loom)]
+#[doc(hidden)]
+pub fn loom_spsc_with_cursors<T>(capacity: usize, cursor: usize) -> (Producer<T>, Consumer<T>) {
+    let ring = Arc::new(Ring::new(capacity));
+    ring.head.0.store(cursor, Ordering::Relaxed);
+    ring.tail.0.store(cursor, Ordering::Relaxed);
+    (
+        Producer {
+            ring: ring.clone(),
+            cursor,
+            cached_head: cursor,
+        },
+        Consumer {
+            ring,
+            head: cursor,
+            cached_tail: cursor,
         },
     )
 }
@@ -704,9 +728,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "capacity must be <= half the cursor range")]
+    fn capacity_half_range_panics_with_message() {
+        let _ = spsc::<u8>((usize::MAX / 2) + 1);
+    }
+
+    #[test]
     fn counters_wrap_without_panicking() {
         let (mut p, mut c) = spsc::<u32>(4);
-        let base: Cursor = u64::MAX - 1;
+        let base: Cursor = usize::MAX - 1;
         p.cursor = base;
         p.cached_head = base;
         c.head = base;
@@ -737,7 +767,7 @@ mod tests {
     #[test]
     fn counters_cross_u32_boundary_without_aliasing() {
         let (mut p, mut c) = spsc::<u32>(4);
-        let base: Cursor = u64::from(u32::MAX) - 1;
+        let base: Cursor = u32::MAX as usize - 1;
         p.cursor = base;
         p.cached_head = base;
         c.head = base;
@@ -802,7 +832,7 @@ mod tests {
 
         DROPS.store(0, Ordering::Relaxed);
         let (mut p, mut c) = spsc::<Counted>(4);
-        let base: Cursor = u64::MAX - 1;
+        let base: Cursor = usize::MAX - 1;
         p.cursor = base;
         p.cached_head = base;
         c.head = base;
