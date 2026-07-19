@@ -32,19 +32,10 @@ jobs:
               - '!**/*.py'
               - '!doc/**'
       - id: matrix
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REF: ${{ github.head_ref }}
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" && "$HEAD_REF" == "ci/darwin" ]]; then
-            echo 'test_matrix={"include":[{"toolchain":"stable","os":"macos-15-intel"}]}'
-            echo 'os_matrix={"os":["macos-15-intel"]}'
-            echo 'run_pyomq=false'
-          else
-            echo 'test_matrix={"include":[{"toolchain":"stable","os":"ubuntu-latest"},{"toolchain":"stable","os":"ubuntu-24.04-arm"},{"toolchain":"stable","os":"macos-15-intel"},{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
-            echo 'os_matrix={"os":["ubuntu-latest","macos-15-intel","windows-latest"]}'
-            echo 'run_pyomq=true'
-          fi >> "$GITHUB_OUTPUT"
+          echo 'test_matrix={"include":[{"toolchain":"stable","os":"ubuntu-latest"},{"toolchain":"stable","os":"ubuntu-24.04-arm"},{"toolchain":"stable","os":"macos-15-intel"},{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
+          echo 'os_matrix={"os":["ubuntu-latest","macos-15-intel","windows-latest"]}' >> "$GITHUB_OUTPUT"
+          echo 'run_pyomq=true' >> "$GITHUB_OUTPUT"
 
   test:
     name: cargo test (${{ matrix.toolchain }}, ${{ matrix.os }})
