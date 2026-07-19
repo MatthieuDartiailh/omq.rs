@@ -275,6 +275,14 @@ impl IdentitySend {
         }
     }
 
+    pub(crate) fn needs_peer_send_pipe(&self) -> bool {
+        !self.latency_profile
+    }
+
+    pub(crate) fn needs_transmit_slot(&self) -> bool {
+        self.latency_profile
+    }
+
     #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn connection_added(
         &mut self,
@@ -381,6 +389,24 @@ mod tests {
 
     use super::*;
     use crate::engine::send_pipe;
+
+    #[test]
+    fn throughput_identity_uses_peer_pipe_not_transmit_slot() {
+        let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
+        let send = IdentitySend::new(SocketType::Router, &options);
+
+        assert!(send.needs_peer_send_pipe());
+        assert!(!send.needs_transmit_slot());
+    }
+
+    #[test]
+    fn latency_identity_uses_transmit_slot_not_peer_pipe() {
+        let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Latency);
+        let send = IdentitySend::new(SocketType::Rep, &options);
+
+        assert!(!send.needs_peer_send_pipe());
+        assert!(send.needs_transmit_slot());
+    }
 
     #[test]
     fn try_send_reports_full_and_preserves_routing_frame() {

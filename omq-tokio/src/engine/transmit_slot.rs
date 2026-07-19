@@ -88,7 +88,7 @@ impl PeerTransmitSlot {
         #[cfg(feature = "ws")] ws_masked: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
-            eq: Mutex::new(FrameBuffer::with_config(arena_threshold, arena_cap)),
+            eq: Mutex::new(FrameBuffer::with_config_lazy(arena_threshold, arena_cap)),
             cap,
             msg_cap: msg_cap.max(1),
             data_signal: DataSignal::new(),

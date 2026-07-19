@@ -395,7 +395,10 @@ async fn batch_encode(
     Ok(count)
 }
 
-const READ_BUF_SIZE: usize = 128 * 1024;
+const READ_BUF_INITIAL_LATENCY: usize = 1024;
+const READ_BUF_INITIAL_THROUGHPUT: usize = 1024;
+const READ_BUF_MAX: usize = 128 * 1024;
+const READ_BUF_GROW_FULL_READS: usize = 2;
 
 use crate::routing::SHARED_MAX_BATCH_MSGS;
 
@@ -701,12 +704,18 @@ where
         let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
         let latency_profile = !matches!(receive_profile, ReceiveProfile::Throughput);
         let (mut reader, mut writer) = stream.split(latency_profile);
-        let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
+        let mut read_buf_target = if latency_profile {
+            READ_BUF_INITIAL_LATENCY
+        } else {
+            READ_BUF_INITIAL_THROUGHPUT
+        };
+        let mut read_buf_full_reads = 0usize;
+        let mut read_buf = BytesMut::with_capacity(read_buf_target);
         let recv_pool = RecvBufPool::new();
-        let mut eq = FrameBuffer::with_config(arena_threshold, arena_cap);
-        let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
-        let mut arena_buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut pipe_batch: Vec<Message> = Vec::with_capacity(SHARED_MAX_BATCH_MSGS);
+        let mut eq = FrameBuffer::with_config_lazy(arena_threshold, arena_cap);
+        let mut drain_buf: Vec<Bytes> = Vec::new();
+        let mut arena_buf: Vec<u8> = Vec::new();
+        let mut pipe_batch: Vec<Message> = Vec::new();
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> =
             config.handshake_timeout.map(|d| last_input + d);
@@ -841,7 +850,17 @@ where
                         inbox.close();
                         return Ok(());
                     }
+                    if n >= read_buf_target && read_buf_target < READ_BUF_MAX {
+                        read_buf_full_reads += 1;
+                        if read_buf_full_reads >= READ_BUF_GROW_FULL_READS {
+                            read_buf_target = (read_buf_target * 2).min(READ_BUF_MAX);
+                            read_buf_full_reads = 0;
+                        }
+                    } else {
+                        read_buf_full_reads = 0;
+                    }
                     let chunk = read_buf.split().freeze();
+                    read_buf.reserve(read_buf_target.saturating_sub(read_buf.capacity()));
                     if let Err(e) = codec.handle_input(chunk) {
                         while let Some(ev) = codec.poll_event() {
                             let _ = peer_out

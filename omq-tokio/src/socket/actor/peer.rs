@@ -283,9 +283,7 @@ impl SocketDriver {
             omq_proto::frame_buffer::ARENA_INITIAL_CAP
         };
         let uses_crypto = self.options.mechanism.has_frame_transform();
-        let slot = if uses_crypto {
-            None
-        } else {
+        let slot = if !uses_crypto && self.send_strategy.needs_transmit_slot() {
             let transmit_slot_cap = self
                 .options
                 .transmit_slot_cap
@@ -304,6 +302,8 @@ impl SocketDriver {
                 #[cfg(feature = "ws")]
                 ws_masked,
             ))
+        } else {
+            None
         };
         let driver = driver
             .with_arena_threshold(arena_threshold)
@@ -312,9 +312,16 @@ impl SocketDriver {
             Some(ref s) => driver.with_transmit_slot(s.clone()),
             None => driver,
         };
-        let pipe_cap = self.options.send_hwm.max(16) as usize;
-        let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
-        let driver = driver.with_send_pipe(send_pipe_rx);
+        let (send_pipe, driver) = if self.send_strategy.needs_peer_send_pipe() {
+            let pipe_cap = self.options.send_hwm.max(16) as usize;
+            let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
+            (
+                Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+                driver.with_send_pipe(send_pipe_rx),
+            )
+        } else {
+            (None, driver)
+        };
 
         // Recv bypass: for socket types whose recv path is a plain fair-queue
         // delivery with no per-type post-processing, route messages directly
@@ -390,7 +397,7 @@ impl SocketDriver {
                     cancel: child_cancel,
                     transmit_slot: slot.clone(),
                     direct_tcp_writer: direct_tcp_writer.clone(),
-                    send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+                    send_pipe,
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -498,8 +505,16 @@ impl SocketDriver {
         let inbox_cap = 64usize;
         let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
         let child_cancel = self.cancel.child_token();
-        let pipe_cap = self.options.send_hwm.max(16) as usize;
-        let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
+        let (send_pipe, send_pipe_rx) = if self.send_strategy.needs_peer_send_pipe() {
+            let pipe_cap = self.options.send_hwm.max(16) as usize;
+            let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
+            (
+                Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+                Some(send_pipe_rx),
+            )
+        } else {
+            (None, None)
+        };
 
         // Pre-build the synthesised PeerProperties from the
         // connect-time snapshot. The handshake-replay code in
@@ -545,7 +560,7 @@ impl SocketDriver {
                     cancel: child_cancel.clone(),
                     transmit_slot: None,
                     direct_tcp_writer: None,
-                    send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+                    send_pipe,
                 },
                 identity: bytes::Bytes::new(),
                 info: None,
@@ -855,7 +870,7 @@ struct InprocDriverCtx {
     spsc: Option<std::sync::Arc<crate::transport::inproc::InprocRx>>,
     recv_sink: Option<crate::engine::RecvSink>,
     shared_rx: Option<crate::routing::fallback_queue::FallbackReceiver>,
-    send_pipe_rx: crate::engine::SendPipeConsumer,
+    send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
     blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
 }
 
@@ -885,8 +900,8 @@ async fn inproc_peer_driver(
         mut send_pipe_rx,
         blocking_recv_waker,
     } = ctx;
-    let mut shared_batch = Vec::with_capacity(crate::routing::SHARED_MAX_BATCH_MSGS);
-    let mut send_pipe_batch = Vec::with_capacity(crate::routing::SHARED_MAX_BATCH_MSGS);
+    let mut shared_batch = Vec::new();
+    let mut send_pipe_batch = Vec::new();
 
     #[expect(clippy::items_after_statements)]
     async fn emit_event(
@@ -973,7 +988,10 @@ async fn inproc_peer_driver(
                         rx.release_permits(popped);
                     }
                 },
-                () = send_pipe_rx.notified() => {
+                () = async {
+                    send_pipe_rx.as_ref().unwrap().notified().await;
+                }, if send_pipe_rx.is_some() => {
+                    let send_pipe_rx = send_pipe_rx.as_mut().unwrap();
                     let drained = send_pipe_rx.drain_into(
                         &mut send_pipe_batch,
                         crate::routing::SHARED_MAX_BATCH_MSGS,

@@ -12,6 +12,8 @@
 
 use tokio::sync::broadcast;
 
+use std::sync::{Arc, Mutex};
+
 pub use omq_proto::monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,
     PeerCommandKind, PeerIdent, PeerInfo,
@@ -62,23 +64,31 @@ impl MonitorStream {
 /// Internal publisher used by the socket driver.
 #[derive(Debug, Clone)]
 pub(crate) struct MonitorPublisher {
-    tx: broadcast::Sender<MonitorEvent>,
+    tx: Arc<Mutex<Option<broadcast::Sender<MonitorEvent>>>>,
 }
 
 impl MonitorPublisher {
     pub(crate) fn new() -> Self {
-        let (tx, _) = broadcast::channel(MONITOR_CAPACITY);
-        Self { tx }
+        Self {
+            tx: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub(crate) fn publish(&self, event: MonitorEvent) {
         // `broadcast::Sender::send` only errors if there are no
         // subscribers, which is the common case when no one called
         // `Socket::monitor()`. Silently ignore.
-        let _ = self.tx.send(event);
+        if let Some(tx) = self.tx.lock().expect("monitor publisher").as_ref() {
+            let _ = tx.send(event);
+        }
     }
 
     pub(crate) fn subscribe(&self) -> MonitorStream {
-        MonitorStream::new(self.tx.subscribe())
+        let mut tx = self.tx.lock().expect("monitor publisher");
+        let tx = tx.get_or_insert_with(|| {
+            let (tx, _) = broadcast::channel(MONITOR_CAPACITY);
+            tx
+        });
+        MonitorStream::new(tx.subscribe())
     }
 }
