@@ -20,9 +20,12 @@ impl SocketDriver {
             InternalEvent::Connected { conn, endpoint } => {
                 self.spawn_on_handshake(conn, endpoint, false);
             }
-            InternalEvent::ConnectGaveUp => {
-                // Dial task exited. Leave the entry alone; the Socket remains
-                // usable; a follow-up connect would re-arm.
+            InternalEvent::ConnectGaveUp { endpoint } => {
+                if self.socket_type_ignores_duplicate_connect() {
+                    self.dialers.retain(|d| d.endpoint != endpoint);
+                }
+                // Non-deduped socket types leave the entry alone; follow-up
+                // connect calls can still add another dialer.
             }
             InternalEvent::ConnectDelayed {
                 endpoint,

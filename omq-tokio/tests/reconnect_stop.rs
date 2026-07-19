@@ -115,3 +115,31 @@ async fn reconnect_stop_after_established_session() {
         "expected no ConnectDelayed after ECONNREFUSED stop"
     );
 }
+
+#[tokio::test]
+async fn reconnect_stop_sub_can_rearm_same_endpoint() {
+    let ep = grab_and_release_port();
+
+    let opts = Options::default()
+        .reconnect(ReconnectPolicy::Fixed(Duration::from_millis(50)))
+        .reconnect_stop_conn_refused(true);
+    let sub = Socket::new(SocketType::Sub, opts);
+    sub.connect(ep.clone()).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    pub_.bind(ep.clone()).await.unwrap();
+    sub.connect(ep).await.unwrap();
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+
+    pub_.wait_subscribed(1, Duration::from_secs(2))
+        .await
+        .expect("subscription did not arrive after reconnect was rearmed");
+    pub_.send(Message::single("again")).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+        .await
+        .expect("subscriber did not receive after reconnect was rearmed")
+        .unwrap();
+    assert_eq!(msg, Message::single("again"));
+}

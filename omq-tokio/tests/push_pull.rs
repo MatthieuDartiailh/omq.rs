@@ -13,6 +13,24 @@ fn inproc_ep(name: &str) -> Endpoint {
 }
 
 #[tokio::test]
+async fn push_duplicate_tcp_connect_keeps_separate_pipes() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let port = test_support::bind_loopback(&pull).await;
+    let ep = test_support::tcp_loopback(port);
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep.clone()).await.unwrap();
+    push.connect(ep).await.unwrap();
+
+    pull.wait_connected(2, Duration::from_secs(1))
+        .await
+        .expect("pull did not see both push pipes");
+    push.wait_connected(2, Duration::from_secs(1))
+        .await
+        .expect("push did not keep both pipes");
+}
+
+#[tokio::test]
 async fn push_pull_single_peer() {
     let ep = inproc_ep("pp-single");
     let pull = Socket::new(SocketType::Pull, Options::default());

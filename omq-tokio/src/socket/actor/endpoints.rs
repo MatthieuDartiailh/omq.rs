@@ -10,6 +10,24 @@ use super::{
 use crate::socket::actor::lifecycle::PeerLifecycle;
 
 impl SocketDriver {
+    pub(super) fn socket_type_ignores_duplicate_connect(&self) -> bool {
+        matches!(
+            self.socket_type,
+            SocketType::Dealer | SocketType::Sub | SocketType::Pub | SocketType::Req
+        )
+    }
+
+    pub(super) fn should_ignore_duplicate_connect(&self, endpoint: &Endpoint) -> bool {
+        if !self.socket_type_ignores_duplicate_connect() {
+            return false;
+        }
+        self.dialers.iter().any(|d| &d.endpoint == endpoint)
+            || self
+                .peers
+                .values()
+                .any(|peer| peer.is_client && &peer.endpoint == endpoint)
+    }
+
     pub(super) fn unbind(&mut self, endpoint: &Endpoint) -> Result<()> {
         let before = self.listeners.len() + self.udp_listeners.len();
         self.listeners.retain(|l| {
@@ -433,7 +451,11 @@ impl SocketDriver {
                         .await;
                 }
                 Err(Canceled::Token | Canceled::PolicyDisabled | Canceled::StoppedConnRefused) => {
-                    let _ = tx.send(InternalEvent::ConnectGaveUp).await;
+                    let _ = tx
+                        .send(InternalEvent::ConnectGaveUp {
+                            endpoint: dialer_ep,
+                        })
+                        .await;
                 }
             }
         });

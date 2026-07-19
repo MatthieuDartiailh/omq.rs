@@ -43,6 +43,50 @@ async fn bind_lz4_loopback(sock: &Socket) -> Endpoint {
     }
 }
 
+#[tokio::test]
+async fn sub_duplicate_lz4_tcp_connect_is_ignored() {
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let ep = bind_lz4_loopback(&publisher).await;
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    subscriber.connect(ep.clone()).await.unwrap();
+    subscriber.connect(ep).await.unwrap();
+
+    publisher
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("publisher did not see subscriber");
+    subscriber
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("subscriber did not connect");
+    test_support::assert_no_second_connection(&publisher, "publisher").await;
+    test_support::assert_no_second_connection(&subscriber, "subscriber").await;
+
+    subscriber.subscribe(bytes::Bytes::new()).await.unwrap();
+    publisher
+        .wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
+    let second_subscribe = publisher
+        .wait_subscribed(2, Duration::from_millis(250))
+        .await;
+    assert!(
+        second_subscribe.is_err(),
+        "duplicate lz4+tcp connect replayed subscription twice"
+    );
+
+    publisher.send(Message::single("hello")).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
+        .await
+        .expect("subscriber did not receive message")
+        .unwrap();
+    assert_eq!(msg, Message::single("hello"));
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(250), subscriber.recv()).await;
+    assert!(duplicate.is_err(), "subscriber received duplicate message");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pub_sub_lz4_sharded_fan_out_ships_dict_to_late_subscriber() {
     use omq_proto::proto::transform::lz4::DictTrainer;

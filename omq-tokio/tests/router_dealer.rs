@@ -5,6 +5,8 @@
 //! round-robin over peers (same as Phase 5's PUSH/PULL) and fair-queued
 //! on recv.
 
+mod test_support;
+
 use std::time::Duration;
 
 use omq_tokio::{
@@ -13,6 +15,35 @@ use omq_tokio::{
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
+}
+
+#[tokio::test]
+async fn dealer_duplicate_tcp_connect_is_ignored() {
+    let router = Socket::new(SocketType::Router, Options::default());
+    let port = test_support::bind_loopback(&router).await;
+    let ep = test_support::tcp_loopback(port);
+
+    let dealer = Socket::new(SocketType::Dealer, Options::default());
+    dealer.connect(ep.clone()).await.unwrap();
+    dealer.connect(ep).await.unwrap();
+
+    router
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("router did not see dealer");
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer did not connect");
+    test_support::assert_no_second_connection(&router, "router").await;
+    test_support::assert_no_second_connection(&dealer, "dealer").await;
+
+    dealer.send(Message::single("hello")).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), router.recv())
+        .await
+        .expect("router did not receive")
+        .unwrap();
+    assert_eq!(got.part_bytes(1).unwrap(), &b"hello"[..]);
 }
 
 #[tokio::test]
