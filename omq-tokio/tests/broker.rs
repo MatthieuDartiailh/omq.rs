@@ -8,12 +8,47 @@
 //! Message envelope at the DEALER/REP level: [`client_id` | "" | body]
 //! REP delivers [body] to the application and re-wraps on reply.
 
+use std::net::{Ipv4Addr, TcpListener};
 use std::time::Duration;
 
+use bytes::Bytes;
+use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn inproc(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
+}
+
+fn free_tcp_port() -> u16 {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn tcp(port: u16) -> Endpoint {
+    Endpoint::Tcp {
+        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
+        port,
+    }
+}
+
+#[cfg(feature = "lz4")]
+fn lz4_tcp(port: u16) -> Endpoint {
+    Endpoint::Lz4Tcp {
+        host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
+        port,
+    }
+}
+
+#[cfg(unix)]
+fn ipc(name: &str) -> Endpoint {
+    Endpoint::Ipc(omq_proto::endpoint::IpcPath::Abstract(format!(
+        "omq-broker-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )))
 }
 
 #[tokio::test]
@@ -21,6 +56,53 @@ async fn router_dealer_rep_single_cycle() {
     let frontend = inproc("broker-fe-tok");
     let backend = inproc("broker-be-tok");
 
+    router_dealer_rep_single_cycle_with(frontend, backend).await;
+}
+
+#[tokio::test]
+async fn router_dealer_rep_single_cycle_tcp() {
+    let frontend = tcp(free_tcp_port());
+    let backend = tcp(free_tcp_port());
+
+    router_dealer_rep_single_cycle_with(frontend, backend).await;
+}
+
+#[tokio::test]
+async fn router_dealer_rep_multi_hop_envelope_tcp() {
+    let frontend = tcp(free_tcp_port());
+    let backend = tcp(free_tcp_port());
+
+    router_dealer_rep_multi_hop_envelope_with(frontend, backend).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "lz4")]
+async fn router_dealer_rep_single_cycle_lz4_tcp() {
+    let frontend = lz4_tcp(free_tcp_port());
+    let backend = lz4_tcp(free_tcp_port());
+
+    router_dealer_rep_single_cycle_with(frontend, backend).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "lz4")]
+async fn router_dealer_rep_multi_hop_envelope_lz4_tcp() {
+    let frontend = lz4_tcp(free_tcp_port());
+    let backend = lz4_tcp(free_tcp_port());
+
+    router_dealer_rep_multi_hop_envelope_with(frontend, backend).await;
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn router_dealer_rep_single_cycle_ipc() {
+    let frontend = ipc("fe");
+    let backend = ipc("be");
+
+    router_dealer_rep_single_cycle_with(frontend, backend).await;
+}
+
+async fn router_dealer_rep_single_cycle_with(frontend: Endpoint, backend: Endpoint) {
     let router = Socket::new(SocketType::Router, Options::default());
     router.bind(frontend.clone()).await.unwrap();
 
@@ -64,6 +146,62 @@ async fn router_dealer_rep_single_cycle() {
         .unwrap()
         .unwrap();
     assert_eq!(reply, Message::single("done"));
+
+    broker.await.unwrap();
+}
+
+async fn router_dealer_rep_multi_hop_envelope_with(frontend: Endpoint, backend: Endpoint) {
+    let router = Socket::new(SocketType::Router, Options::default());
+    router.bind(frontend.clone()).await.unwrap();
+
+    let dealer = Socket::new(SocketType::Dealer, Options::default());
+    dealer.bind(backend.clone()).await.unwrap();
+
+    let client = Socket::new(
+        SocketType::Dealer,
+        Options::default().identity(Bytes::from_static(b"hop-a")),
+    );
+    client.connect(frontend).await.unwrap();
+
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.connect(backend).await.unwrap();
+
+    let router_c = router.clone();
+    let dealer_c = dealer.clone();
+    let broker = tokio::spawn(async move {
+        let request = tokio::time::timeout(Duration::from_secs(2), router_c.recv())
+            .await
+            .expect("router recv timed out")
+            .unwrap();
+        dealer_c.send(request).await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(2), dealer_c.recv())
+            .await
+            .expect("dealer recv timed out")
+            .unwrap();
+        router_c.send(reply).await.unwrap();
+    });
+
+    client
+        .send(Message::multipart(["hop-b", "", "work"]))
+        .await
+        .unwrap();
+
+    let work = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(work, Message::single("work"));
+    rep.send(Message::single("done")).await.unwrap();
+
+    let reply = tokio::time::timeout(Duration::from_secs(2), client.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.len(), 3);
+    assert_eq!(reply.part_bytes(0).unwrap(), &b"hop-b"[..]);
+    assert!(reply.part_bytes(1).unwrap().is_empty());
+    assert_eq!(reply.part_bytes(2).unwrap(), &b"done"[..]);
 
     broker.await.unwrap();
 }

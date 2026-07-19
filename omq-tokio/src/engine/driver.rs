@@ -22,7 +22,7 @@ use omq_proto::proto::{Command, Connection, Event};
 use super::compression_pool::CompressionPool;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
 use super::transmit_slot::PeerTransmitSlot;
-use crate::routing::fallback_queue::FallbackReceiver;
+use crate::routing::{RepEnvelope, fallback_queue::FallbackReceiver};
 use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
 use crate::socket::recv::RecvItem;
 use omq_proto::flow::{DrainBudget, max_batch_bytes};
@@ -126,8 +126,7 @@ pub enum RecvSink {
 #[derive(Debug)]
 pub struct RepRecvSink {
     sink: Box<RecvSink>,
-    identity: std::sync::Arc<std::sync::Mutex<Option<bytes::Bytes>>>,
-    pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, bytes::Bytes)>>>,
+    pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, RepEnvelope)>>>,
     peer_id: u64,
 }
 
@@ -242,21 +241,13 @@ impl YringSink {
 }
 
 impl RecvSink {
-    pub(crate) fn set_rep_identity(&mut self, identity: bytes::Bytes) {
-        if let Self::Rep(rep) = self {
-            *rep.identity.lock().expect("rep identity") = Some(identity);
-        }
-    }
-
     pub(crate) fn rep(
         sink: RecvSink,
-        identity: std::sync::Arc<std::sync::Mutex<Option<bytes::Bytes>>>,
-        pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, bytes::Bytes)>>>,
+        pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, RepEnvelope)>>>,
         peer_id: u64,
     ) -> Self {
         Self::Rep(RepRecvSink {
             sink: Box::new(sink),
-            identity,
             pending,
             peer_id,
         })
@@ -325,29 +316,14 @@ impl RecvSink {
 
     async fn send(&mut self, m: Message) -> bool {
         if let Self::Rep(rep) = self {
-            let mut m = m;
-            let identity =
-                if let Some(identity) = rep.identity.lock().expect("rep identity").clone() {
-                    if m.part_bytes(0).is_some_and(|part| part.is_empty()) {
-                        m.pop_front();
-                    }
-                    identity
-                } else if m.part_bytes(1).is_some_and(|part| part.is_empty()) {
-                    let Some(identity) = m.pop_front() else {
-                        return false;
-                    };
-                    m.pop_front();
-                    identity
-                } else {
-                    bytes::Bytes::new()
-                };
+            let Some((envelope, body)) = crate::routing::split_rep_request(&m) else {
+                return true;
+            };
             rep.pending
                 .lock()
                 .expect("rep pending")
-                .push_back((rep.peer_id, identity.clone()));
-            let wrapped =
-                Message::with_prefix(identity, Message::with_prefix(bytes::Bytes::new(), m));
-            return rep.sink.send_plain(wrapped).await;
+                .push_back((rep.peer_id, envelope));
+            return rep.sink.send_plain(body).await;
         }
         self.send_plain(m).await
     }
@@ -752,18 +728,6 @@ where
             }
 
             while let Some(ev) = codec.poll_event() {
-                if let Event::HandshakeSucceeded {
-                    peer_properties, ..
-                } = &ev
-                {
-                    let identity = peer_properties
-                        .identity
-                        .clone()
-                        .unwrap_or_else(|| omq_proto::message::generated_identity(peer_id));
-                    if let Some(sink) = recv_direct.as_mut() {
-                        sink.set_rep_identity(identity);
-                    }
-                }
                 if peer_out
                     .send((peer_id, PeerEvent::Event(ev)))
                     .await

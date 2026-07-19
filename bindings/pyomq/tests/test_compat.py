@@ -607,6 +607,8 @@ def test_proxy_req_rep(tcp_endpoint):
     backend = ctx.socket(zmq.DEALER)
     worker = ctx.socket(zmq.REP)
     client = ctx.socket(zmq.REQ)
+    worker.rcvtimeo = 2000
+    client.rcvtimeo = 2000
 
     fe_port = _free_tcp_port()
     be_port = _free_tcp_port()
@@ -629,6 +631,66 @@ def test_proxy_req_rep(tcp_endpoint):
         assert client.recv() == b"pong"
     finally:
         client.close()
+        worker.close()
+        frontend.close()
+        backend.close()
+        ctx.term()
+
+
+def test_proxy_req_rep_two_clients_preserves_routes(tcp_endpoint):
+    import socket
+    import threading
+    import time
+
+    def _free_tcp_port():
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+        finally:
+            s.close()
+
+    ctx = zmq.Context()
+    frontend = ctx.socket(zmq.ROUTER)
+    backend = ctx.socket(zmq.DEALER)
+    worker = ctx.socket(zmq.REP)
+    client_a = ctx.socket(zmq.REQ)
+    client_b = ctx.socket(zmq.REQ)
+    worker.rcvtimeo = 2000
+    client_a.rcvtimeo = 2000
+    client_b.rcvtimeo = 2000
+
+    fe_port = _free_tcp_port()
+    be_port = _free_tcp_port()
+
+    try:
+        frontend.bind(f"tcp://127.0.0.1:{fe_port}")
+        backend.bind(f"tcp://127.0.0.1:{be_port}")
+        worker.connect(f"tcp://127.0.0.1:{be_port}")
+        client_a.connect(f"tcp://127.0.0.1:{fe_port}")
+        client_b.connect(f"tcp://127.0.0.1:{fe_port}")
+
+        proxy_thread = threading.Thread(
+            target=zmq.proxy, args=(frontend, backend), daemon=True,
+        )
+        proxy_thread.start()
+
+        time.sleep(0.05)
+        client_a.send(b"from-a")
+        client_b.send(b"from-b")
+
+        first = worker.recv()
+        worker.send(b"ack-" + first)
+        second = worker.recv()
+        worker.send(b"ack-" + second)
+
+        assert {client_a.recv(), client_b.recv()} == {
+            b"ack-from-a",
+            b"ack-from-b",
+        }
+    finally:
+        client_a.close()
+        client_b.close()
         worker.close()
         frontend.close()
         backend.close()

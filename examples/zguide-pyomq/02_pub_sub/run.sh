@@ -2,9 +2,11 @@
 set -e
 cd "$(dirname "$0")"
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
+PYTHON=${PYTHON:-python3}
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}../../../bindings/pyomq/python"
 
-python publisher.py ipc://@omq-zguide-02-pubsub 20 &
+"$PYTHON" publisher.py ipc://@omq-zguide-02-pubsub 20 &
 sleep 0.3
-python subscriber.py ipc://@omq-zguide-02-pubsub weather.nyc 10 &
-python subscriber.py ipc://@omq-zguide-02-pubsub weather.sfo 10 &
+"$PYTHON" subscriber.py ipc://@omq-zguide-02-pubsub weather.nyc 10 &
+"$PYTHON" subscriber.py ipc://@omq-zguide-02-pubsub weather.sfo 10 &
 wait
