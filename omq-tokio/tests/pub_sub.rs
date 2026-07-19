@@ -443,7 +443,7 @@ async fn xpub_nodrop_delivers_all_under_backpressure() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pub_sharded_fanout_all_receive() {
+async fn pub_io_lane_fanout_all_receive() {
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;
 
@@ -481,7 +481,7 @@ async fn pub_sharded_fanout_all_receive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pub_sharded_fanout_subscription_filter() {
+async fn pub_io_lane_fanout_subscription_filter() {
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;
 
@@ -522,7 +522,7 @@ async fn pub_sharded_fanout_subscription_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pub_sharded_fanout_block_on_mute_does_not_block_slow_sub() {
+async fn pub_io_lane_fanout_block_on_mute_does_not_block_slow_sub() {
     const SUBS: usize = 6;
     const MSGS: u32 = 256;
 
@@ -556,7 +556,7 @@ async fn pub_sharded_fanout_block_on_mute_does_not_block_slow_sub() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pub_sharded_fanout_two_worker_runtime_all_receive() {
+async fn pub_io_lane_fanout_two_worker_runtime_all_receive() {
     const SUBS: usize = 8;
     const MSGS: u32 = 32;
 

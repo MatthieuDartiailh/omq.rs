@@ -1,12 +1,12 @@
-//! Fan-out send: raw message distribution into shard workers.
+//! Fan-out send: raw message distribution into IO-lane workers.
 //!
 //! PUB and XPUB filter by SUBSCRIBE-driven prefix set; RADIO filters
 //! by joined groups. The caller pushes raw `Message` values into each
-//! active shard's yring. Each shard worker encodes (and optionally
+//! active lane's yring. Each lane worker encodes (and optionally
 //! compresses) locally, then pushes into its peers' `PeerTransmitSlot`
 //! rings.
 
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -47,9 +47,7 @@ pub(crate) enum FanOutMode {
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `FrameBuffer::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
 const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
-const WORKER_SHARD_PEER_CAP: usize = 4;
-const MAX_FAN_OUT_WORKER_SHARDS: usize = 8;
-const SHARD_CTRL_RING_CAP: usize = 64;
+const LANE_CTRL_RING_CAP: usize = 64;
 
 /// Yield every N sends to keep latency bounded. Scales down with peer
 /// count and message size: fewer sends per yield when one send queues
@@ -65,20 +63,9 @@ fn yield_interval(peer_count: usize, msg_bytes: usize) -> u32 {
     peer_interval.min(byte_interval)
 }
 
-#[derive(Debug, Default)]
-struct DispatchOutcome {
-    full_targets: SmallVec<[PeerOutbound; 8]>,
-}
-
-impl DispatchOutcome {
-    fn push_full(&mut self, target: &PeerOutbound) {
-        self.full_targets.push(target.clone());
-    }
-}
-
 #[derive(Debug)]
-enum ShardControl {
-    AddPeer(ShardPeerAdd),
+enum LaneControl {
+    AddPeer(LanePeerAdd),
     RemovePeer {
         peer_id: u64,
     },
@@ -106,21 +93,21 @@ enum ShardControl {
 }
 
 #[derive(Debug)]
-struct ShardPeerAdd {
+struct LanePeerAdd {
     peer_id: u64,
     slot: Arc<PeerTransmitSlot>,
     any_groups: bool,
 }
 
 #[derive(Clone, Debug)]
-struct ShardDispatch {
+struct LaneDispatch {
     msg: Message,
     topic: Bytes,
     group: Option<String>,
 }
 
 #[derive(Debug)]
-struct ShardPeer {
+struct LanePeer {
     subscriptions: SubscriptionSet,
     groups: FxHashSet<String>,
     any_groups: bool,
@@ -128,82 +115,90 @@ struct ShardPeer {
     dict_shipped: bool,
 }
 
-struct ShardEndpoint {
-    ctrl_tx: yring::Producer<ShardControl>,
+struct LaneEndpoint {
+    ctrl_tx: yring::Producer<LaneControl>,
     ctrl_notify: Arc<Notify>,
-    load: usize,
+    peer_count: usize,
 }
 
-struct DistributorEndpoint {
-    data_tx: yring::Producer<ShardDispatch>,
+struct LaneDistributor {
+    data_tx: yring::Producer<LaneDispatch>,
     data_signal: Arc<DataSignal>,
 }
 
-struct DistributionTarget {
-    data_tx: yring::Producer<ShardDispatch>,
+struct LaneDistributionTarget {
+    lane: usize,
+    data_tx: yring::Producer<LaneDispatch>,
     data_signal: Arc<DataSignal>,
 }
 
-struct FanOutShardState {
-    endpoints: Vec<ShardEndpoint>,
-    eligible_peers: usize,
-    active_limit: usize,
+struct FanOutLaneState {
+    endpoints: Vec<LaneEndpoint>,
 }
 
-struct FanOutShards {
-    state: Mutex<FanOutShardState>,
-    active_mask: Arc<AtomicU8>,
-    distributor: Mutex<DistributorEndpoint>,
+struct FanOutLanes {
+    state: Mutex<FanOutLaneState>,
+    active_flags: Arc<Vec<AtomicBool>>,
+    distributor: Mutex<LaneDistributor>,
 }
 
-impl std::fmt::Debug for DistributorEndpoint {
+impl std::fmt::Debug for LaneDistributor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DistributorEndpoint")
+        f.debug_struct("LaneDistributor").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for LaneDistributionTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaneDistributionTarget")
             .finish_non_exhaustive()
     }
 }
 
-impl std::fmt::Debug for DistributionTarget {
+impl std::fmt::Debug for FanOutLanes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DistributionTarget").finish_non_exhaustive()
-    }
-}
-
-impl std::fmt::Debug for FanOutShards {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = self.state.lock().expect("fanout shards poisoned");
-        f.debug_struct("FanOutShards")
-            .field("shards", &state.endpoints.len())
-            .field("active_mask", &self.active_mask.load(Ordering::Relaxed))
-            .field("active_limit", &state.active_limit)
-            .field("eligible_peers", &state.eligible_peers)
+        let state = self.state.lock().expect("fanout lanes poisoned");
+        f.debug_struct("FanOutLanes")
+            .field("lanes", &state.endpoints.len())
             .field(
-                "worker_loads",
-                &state.endpoints.iter().map(|s| s.load).collect::<Vec<_>>(),
+                "active_lanes",
+                &self
+                    .active_flags
+                    .iter()
+                    .filter(|flag| flag.load(Ordering::Relaxed))
+                    .count(),
+            )
+            .field(
+                "lane_peer_counts",
+                &state
+                    .endpoints
+                    .iter()
+                    .map(|lane| lane.peer_count)
+                    .collect::<Vec<_>>(),
             )
             .finish_non_exhaustive()
     }
 }
 
-struct ShardWorker {
-    data_rx: yring::Consumer<ShardDispatch>,
-    ctrl_rx: yring::Consumer<ShardControl>,
+struct LaneWorker {
+    data_rx: yring::Consumer<LaneDispatch>,
+    ctrl_rx: yring::Consumer<LaneControl>,
     data_signal: Arc<DataSignal>,
     ctrl_notify: Arc<Notify>,
     mode: FanOutMode,
     lossy: bool,
-    peers: FxHashMap<u64, ShardPeer>,
+    peers: FxHashMap<u64, LanePeer>,
     eq: FrameBuffer,
     chunks: Vec<Bytes>,
     #[cfg(feature = "lz4")]
     encoder: Option<MessageEncoder>,
-    distribution_targets: Vec<DistributionTarget>,
-    active_mask: Option<Arc<AtomicU8>>,
+    distribution_targets: Vec<LaneDistributionTarget>,
+    active_flags: Option<Arc<Vec<AtomicBool>>>,
 }
 
-impl std::fmt::Debug for ShardWorker {
+impl std::fmt::Debug for LaneWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShardWorker")
+        f.debug_struct("LaneWorker")
             .field("mode", &self.mode)
             .field("lossy", &self.lossy)
             .field("peers", &self.peers.len())
@@ -229,8 +224,8 @@ impl std::fmt::Debug for DictTraining {
 
 #[derive(Debug)]
 pub(crate) struct Submitter {
-    shards: Option<Arc<FanOutShards>>,
-    sharded_peer_count: Arc<AtomicUsize>,
+    lanes: Arc<FanOutLanes>,
+    lane_peer_count: Arc<AtomicUsize>,
     fallback_peer_count: Arc<AtomicUsize>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
@@ -245,8 +240,8 @@ pub(crate) struct Submitter {
 impl Clone for Submitter {
     fn clone(&self) -> Self {
         Self {
-            shards: self.shards.clone(),
-            sharded_peer_count: self.sharded_peer_count.clone(),
+            lanes: self.lanes.clone(),
+            lane_peer_count: self.lane_peer_count.clone(),
             fallback_peer_count: self.fallback_peer_count.clone(),
             inner: self.inner.clone(),
             generation: self.generation.clone(),
@@ -260,48 +255,52 @@ impl Clone for Submitter {
     }
 }
 
-impl FanOutShards {
+impl FanOutLanes {
     fn spawn(
         options: &Options,
         mode: FanOutMode,
         io_pool: &crate::context::IoPoolHandle,
     ) -> Arc<Self> {
         let pipe_cap = options.send_hwm.max(16) as usize;
-        let worker_shards = Self::worker_shard_count(io_pool.thread_count());
+        let lane_count = io_pool.thread_count().max(1);
         let lossy = fan_out_is_lossy(options);
-        let active_mask = Arc::new(AtomicU8::new(0));
+        let active_flags = Arc::new(
+            (0..lane_count)
+                .map(|_| AtomicBool::new(false))
+                .collect::<Vec<_>>(),
+        );
 
         // Create all channels up front.
-        let mut data_channels: Vec<_> = (0..worker_shards)
+        let mut data_channels: Vec<_> = (0..lane_count)
             .map(|_| {
                 let (tx, rx) = yring::spsc(pipe_cap);
                 let sig = Arc::new(DataSignal::new());
                 (tx, rx, sig)
             })
             .collect();
-        let mut ctrl_channels: Vec<_> = (0..worker_shards)
+        let mut ctrl_channels: Vec<_> = (0..lane_count)
             .map(|_| {
-                let (tx, rx) = yring::spsc(SHARD_CTRL_RING_CAP);
+                let (tx, rx) = yring::spsc(LANE_CTRL_RING_CAP);
                 let notify = Arc::new(Notify::new());
                 (tx, rx, notify)
             })
             .collect();
 
-        // Channel 0 (shard 1): data Producer goes into the distributor
-        // endpoint. Channels 1..N-1 (shards 2..N): data Producers go
-        // into distribution targets owned by shard worker 1.
+        // Lane 0 receives user sends. It copies each batch to active
+        // secondary lanes first, then processes its own peers.
         let (dist_tx, dist_rx, dist_signal) = data_channels.remove(0);
-        let distributor = DistributorEndpoint {
+        let distributor = LaneDistributor {
             data_tx: dist_tx,
             data_signal: Arc::clone(&dist_signal),
         };
 
-        let mut distribution_targets: Vec<DistributionTarget> =
+        let mut distribution_targets: Vec<LaneDistributionTarget> =
             Vec::with_capacity(data_channels.len());
-        let mut secondary_data: Vec<(yring::Consumer<ShardDispatch>, Arc<DataSignal>)> =
+        let mut secondary_data: Vec<(yring::Consumer<LaneDispatch>, Arc<DataSignal>)> =
             Vec::with_capacity(data_channels.len());
-        for (tx, rx, sig) in data_channels {
-            distribution_targets.push(DistributionTarget {
+        for (i, (tx, rx, sig)) in data_channels.into_iter().enumerate() {
+            distribution_targets.push(LaneDistributionTarget {
+                lane: i + 1,
                 data_tx: tx,
                 data_signal: Arc::clone(&sig),
             });
@@ -311,16 +310,16 @@ impl FanOutShards {
         // Build endpoints (ctrl only) and spawn workers.
         let mut dist_rx = Some(dist_rx);
         let mut dist_signal = Some(dist_signal);
-        let mut endpoints = Vec::with_capacity(worker_shards);
-        for i in 0..worker_shards {
+        let mut endpoints = Vec::with_capacity(lane_count);
+        for i in 0..lane_count {
             let (ctrl_tx, ctrl_rx, ctrl_notify) = ctrl_channels.remove(0);
 
-            let (data_rx, data_signal, dist_targets, mask) = if i == 0 {
+            let (data_rx, data_signal, dist_targets, flags) = if i == 0 {
                 (
-                    dist_rx.take().expect("shard 0 data_rx"),
-                    dist_signal.take().expect("shard 0 data_signal"),
+                    dist_rx.take().expect("lane 0 data_rx"),
+                    dist_signal.take().expect("lane 0 data_signal"),
                     std::mem::take(&mut distribution_targets),
-                    Some(Arc::clone(&active_mask)),
+                    Some(Arc::clone(&active_flags)),
                 )
             } else {
                 let (rx, sig) = secondary_data.remove(0);
@@ -329,7 +328,7 @@ impl FanOutShards {
 
             io_pool.spawn_on(
                 i,
-                ShardWorker {
+                LaneWorker {
                     data_rx,
                     ctrl_rx,
                     data_signal,
@@ -342,70 +341,39 @@ impl FanOutShards {
                     #[cfg(feature = "lz4")]
                     encoder: None,
                     distribution_targets: dist_targets,
-                    active_mask: mask,
+                    active_flags: flags,
                 }
                 .run(),
             );
-            endpoints.push(ShardEndpoint {
+            endpoints.push(LaneEndpoint {
                 ctrl_tx,
                 ctrl_notify,
-                load: 0,
+                peer_count: 0,
             });
         }
         Arc::new(Self {
-            state: Mutex::new(FanOutShardState {
-                endpoints,
-                eligible_peers: 0,
-                active_limit: 0,
-            }),
-            active_mask,
+            state: Mutex::new(FanOutLaneState { endpoints }),
+            active_flags,
             distributor: Mutex::new(distributor),
         })
     }
 
-    fn desired_active_shards(eligible_peers: usize, max_shards: usize) -> usize {
-        if eligible_peers == 0 || max_shards == 0 {
-            return 0;
-        }
-        let worker_shards =
-            eligible_peers.saturating_add(WORKER_SHARD_PEER_CAP - 1) / WORKER_SHARD_PEER_CAP;
-        1usize.saturating_add(worker_shards).min(max_shards)
+    fn lane_count(&self) -> usize {
+        self.active_flags.len()
     }
 
-    fn worker_shard_count(runtime_workers: usize) -> usize {
-        runtime_workers.clamp(1, MAX_FAN_OUT_WORKER_SHARDS)
+    fn normalize_lane(&self, lane: usize) -> usize {
+        let lane_count = self.lane_count();
+        debug_assert!(lane < lane_count, "fanout lane out of range");
+        lane.min(lane_count.saturating_sub(1))
     }
 
-    fn max_shards(state: &FanOutShardState) -> usize {
-        state.endpoints.len() + 1
-    }
-
-    fn shard_load(state: &FanOutShardState, shard: usize) -> usize {
-        state.endpoints[shard - 1].load
-    }
-
-    fn increment_shard_load(state: &mut FanOutShardState, shard: usize) {
-        state.endpoints[shard - 1].load += 1;
-    }
-
-    fn decrement_shard_load(state: &mut FanOutShardState, shard: usize) {
-        if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
-            endpoint.load = endpoint.load.saturating_sub(1);
-        }
-    }
-
-    fn least_loaded_shard(state: &FanOutShardState, active_limit: usize) -> usize {
-        (1..active_limit)
-            .min_by_key(|&shard| Self::shard_load(state, shard))
-            .unwrap_or(1)
-    }
-
-    fn push_control(endpoint: &mut ShardEndpoint, cmd: ShardControl) {
+    fn push_control(endpoint: &mut LaneEndpoint, cmd: LaneControl) {
         Self::push_control_spinning(endpoint, cmd);
     }
 
-    /// Spin-loop until the shard worker's control ring has space.
-    fn push_control_spinning(endpoint: &mut ShardEndpoint, mut cmd: ShardControl) {
+    /// Spin-loop until the lane worker's control ring has space.
+    fn push_control_spinning(endpoint: &mut LaneEndpoint, mut cmd: LaneControl) {
         loop {
             match endpoint.ctrl_tx.push(cmd) {
                 Ok(()) => {
@@ -423,58 +391,40 @@ impl FanOutShards {
         }
     }
 
-    fn assign_peer(&self) -> usize {
-        let mut state = self.state.lock().expect("fanout shards poisoned");
-        state.eligible_peers += 1;
-        let max_shards = Self::max_shards(&state);
-        let desired = Self::desired_active_shards(state.eligible_peers, max_shards);
-        state.active_limit = state.active_limit.max(desired);
-        let active_limit = state.active_limit.max(1).min(max_shards);
-        let shard = Self::least_loaded_shard(&state, active_limit);
-        Self::increment_shard_load(&mut state, shard);
-        self.active_mask
-            .fetch_or(1 << (shard - 1), Ordering::Release);
-        shard
+    fn add_lane_peer(&self, lane: usize, add: LanePeerAdd) -> usize {
+        let lane = self.normalize_lane(lane);
+        let mut state = self.state.lock().expect("fanout lanes poisoned");
+        if let Some(endpoint) = state.endpoints.get_mut(lane) {
+            endpoint.peer_count += 1;
+            self.active_flags[lane].store(true, Ordering::Release);
+            Self::push_control(endpoint, LaneControl::AddPeer(add));
+        }
+        lane
     }
 
-    fn add_worker_peer(&self, shard: usize, add: ShardPeerAdd) {
-        if shard == 0 {
-            return;
-        }
-        let mut state = self.state.lock().expect("fanout shards poisoned");
-        if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
-            Self::push_control(endpoint, ShardControl::AddPeer(add));
-        }
-    }
-
-    fn send_to_shard(&self, shard: usize, cmd: ShardControl) {
-        if shard == 0 {
-            return;
-        }
-        let mut state = self.state.lock().expect("fanout shards poisoned");
-        if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
+    fn send_to_lane(&self, lane: usize, cmd: LaneControl) {
+        let lane = self.normalize_lane(lane);
+        let mut state = self.state.lock().expect("fanout lanes poisoned");
+        if let Some(endpoint) = state.endpoints.get_mut(lane) {
             Self::push_control(endpoint, cmd);
         }
     }
 
-    fn remove_peer(&self, shard: usize, peer_id: u64) {
-        let mut state = self.state.lock().expect("fanout shards poisoned");
-        state.eligible_peers = state.eligible_peers.saturating_sub(1);
-        Self::decrement_shard_load(&mut state, shard);
-        if shard > 0 {
-            if state.endpoints.get(shard - 1).is_some_and(|e| e.load == 0) {
-                self.active_mask
-                    .fetch_and(!(1 << (shard - 1)), Ordering::Release);
+    fn remove_peer(&self, lane: usize, peer_id: u64) {
+        let lane = self.normalize_lane(lane);
+        let mut state = self.state.lock().expect("fanout lanes poisoned");
+        if let Some(endpoint) = state.endpoints.get_mut(lane) {
+            endpoint.peer_count = endpoint.peer_count.saturating_sub(1);
+            if endpoint.peer_count == 0 {
+                self.active_flags[lane].store(false, Ordering::Release);
             }
-            if let Some(endpoint) = state.endpoints.get_mut(shard - 1) {
-                Self::push_control(endpoint, ShardControl::RemovePeer { peer_id });
-            }
+            Self::push_control(endpoint, LaneControl::RemovePeer { peer_id });
         }
     }
 
-    /// Push a raw message into shard 1's data ring. Shard worker 1
-    /// distributes to secondary shards in batches.
-    fn dispatch(&self, dispatch: &ShardDispatch) {
+    /// Push a raw message into lane 0's data ring. Lane 0 distributes
+    /// to secondary lanes in batches.
+    fn dispatch(&self, dispatch: &LaneDispatch) {
         let mut dist = self.distributor.lock().expect("distributor poisoned");
         if dist.data_tx.push(dispatch.clone()).is_ok() {
             dist.data_tx.flush();
@@ -483,14 +433,14 @@ impl FanOutShards {
     }
 
     fn shutdown(&self) {
-        let mut state = self.state.lock().expect("fanout shards poisoned");
+        let mut state = self.state.lock().expect("fanout lanes poisoned");
         for endpoint in &mut state.endpoints {
-            Self::push_control(endpoint, ShardControl::Shutdown);
-            endpoint.load = 0;
+            Self::push_control(endpoint, LaneControl::Shutdown);
+            endpoint.peer_count = 0;
         }
-        state.eligible_peers = 0;
-        state.active_limit = 0;
-        self.active_mask.store(0, Ordering::Release);
+        for flag in self.active_flags.iter() {
+            flag.store(false, Ordering::Release);
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -501,7 +451,7 @@ impl FanOutShards {
             && self
                 .state
                 .lock()
-                .expect("fanout shards poisoned")
+                .expect("fanout lanes poisoned")
                 .endpoints
                 .iter()
                 .all(|endpoint| endpoint.ctrl_tx.is_empty())
@@ -514,7 +464,7 @@ fn fan_out_is_lossy(options: &Options) -> bool {
     !options.xpub_nodrop
 }
 
-impl ShardWorker {
+impl LaneWorker {
     async fn run(mut self) {
         let mut budget = DrainBudget::WORKER;
         loop {
@@ -536,15 +486,15 @@ impl ShardWorker {
                 return;
             }
 
-            // 2. Data up to budget. The distributor shard drains into
-            //    a batch, distributes to secondary shards FIRST (so
+            // 2. Data up to budget. Lane 0 drains into
+            //    a batch, distributes to secondary lanes FIRST (so
             //    they can start encoding in parallel), then processes
             //    its own peers.
             budget.reset();
             let mut drained = false;
             let is_distributor = !self.distribution_targets.is_empty();
             if is_distributor {
-                let mut batch: SmallVec<[ShardDispatch; 32]> = SmallVec::new();
+                let mut batch: SmallVec<[LaneDispatch; 32]> = SmallVec::new();
                 self.data_rx.prefetch();
                 while let Some(dispatch) = self.data_rx.pop() {
                     drained = true;
@@ -589,14 +539,12 @@ impl ShardWorker {
         }
     }
 
-    fn distribute_batch(&mut self, batch: &[ShardDispatch]) {
-        let Some(ref active_mask) = self.active_mask else {
+    fn distribute_batch(&mut self, batch: &[LaneDispatch]) {
+        let Some(ref active_flags) = self.active_flags else {
             return;
         };
-        let mask = active_mask.load(Ordering::Acquire);
-        for (i, target) in self.distribution_targets.iter_mut().enumerate() {
-            // targets[0] = shard 2 (bit 1), targets[1] = shard 3 (bit 2), ...
-            if mask & (1 << (i + 1)) == 0 {
+        for target in &mut self.distribution_targets {
+            if !active_flags[target.lane].load(Ordering::Acquire) {
                 continue;
             }
             for dispatch in batch {
@@ -607,12 +555,12 @@ impl ShardWorker {
         }
     }
 
-    fn handle_control(&mut self, cmd: ShardControl) -> bool {
+    fn handle_control(&mut self, cmd: LaneControl) -> bool {
         match cmd {
-            ShardControl::AddPeer(add) => {
+            LaneControl::AddPeer(add) => {
                 self.peers.insert(
                     add.peer_id,
-                    ShardPeer {
+                    LanePeer {
                         subscriptions: SubscriptionSet::new(),
                         groups: FxHashSet::default(),
                         any_groups: add.any_groups,
@@ -621,37 +569,37 @@ impl ShardWorker {
                     },
                 );
             }
-            ShardControl::RemovePeer { peer_id } => {
+            LaneControl::RemovePeer { peer_id } => {
                 self.peers.remove(&peer_id);
             }
-            ShardControl::Subscribe { peer_id, prefix } => {
+            LaneControl::Subscribe { peer_id, prefix } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.subscriptions.add(&prefix);
                 }
             }
-            ShardControl::Cancel { peer_id, prefix } => {
+            LaneControl::Cancel { peer_id, prefix } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.subscriptions.remove(&prefix);
                 }
             }
-            ShardControl::Join { peer_id, group } => {
+            LaneControl::Join { peer_id, group } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
                     && let Ok(s) = std::str::from_utf8(&group)
                 {
                     peer.groups.insert(s.to_string());
                 }
             }
-            ShardControl::Leave { peer_id, group } => {
+            LaneControl::Leave { peer_id, group } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
                     && let Ok(s) = std::str::from_utf8(&group)
                 {
                     peer.groups.remove(s);
                 }
             }
-            ShardControl::SetCompression { options, dict } => {
+            LaneControl::SetCompression { options, dict } => {
                 self.init_encoder(&options, dict.as_ref());
             }
-            ShardControl::Shutdown => return true,
+            LaneControl::Shutdown => return true,
         }
         false
     }
@@ -679,10 +627,10 @@ impl ShardWorker {
         }
     }
 
-    async fn dispatch(&mut self, dispatch: &ShardDispatch, touched: &mut SmallVec<[u64; 32]>) {
+    async fn dispatch(&mut self, dispatch: &LaneDispatch, touched: &mut SmallVec<[u64; 32]>) {
         let mut peer_ids = SmallVec::<[u64; 32]>::new();
         for (&peer_id, peer) in &self.peers {
-            if peer.slot.fanout_active() && shard_peer_matches(self.mode, peer, dispatch) {
+            if peer.slot.fanout_active() && lane_peer_matches(self.mode, peer, dispatch) {
                 peer_ids.push(peer_id);
             }
         }
@@ -775,7 +723,7 @@ impl ShardWorker {
     async fn push_frame_to_peer(
         lossy: bool,
         peer_id: u64,
-        peer: &mut ShardPeer,
+        peer: &mut LanePeer,
         frame: &FanOutFrame<'_>,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
@@ -834,7 +782,7 @@ impl ShardWorker {
     }
 }
 
-fn shard_peer_matches(mode: FanOutMode, peer: &ShardPeer, dispatch: &ShardDispatch) -> bool {
+fn lane_peer_matches(mode: FanOutMode, peer: &LanePeer, dispatch: &LaneDispatch) -> bool {
     match (mode, dispatch.group.as_deref()) {
         (FanOutMode::Group, Some(grp)) => peer.any_groups || peer.groups.contains(grp),
         (FanOutMode::SubscriptionPrefix, _) => peer.subscriptions.matches(&dispatch.topic),
@@ -861,9 +809,7 @@ fn deactivate_fanout_target(
 
 impl Submitter {
     pub(crate) fn shutdown(&self) {
-        if let Some(ref shards) = self.shards {
-            shards.shutdown();
-        }
+        self.lanes.shutdown();
     }
 
     fn validate_group(msg: Message) -> core::result::Result<(Message, Option<String>), Error> {
@@ -895,20 +841,20 @@ impl Submitter {
 
     fn dispatch_raw(
         &self,
-        shards: &FanOutShards,
+        lanes: &FanOutLanes,
         msg: &Message,
         group: Option<String>,
     ) -> Result<()> {
-        // Fast path: no fallback peers, push raw message directly to shards.
+        // Fast path: no fallback peers, push raw message directly to lanes.
         if self.fallback_peer_count.load(Ordering::Relaxed) == 0 {
-            let sharded_count = self.sharded_peer_count.load(Ordering::Acquire);
-            if sharded_count > 0 {
-                let dispatch = ShardDispatch {
+            let lane_count = self.lane_peer_count.load(Ordering::Acquire);
+            if lane_count > 0 {
+                let dispatch = LaneDispatch {
                     msg: msg.clone(),
                     topic: first_frame_bytes(msg),
                     group,
                 };
-                shards.dispatch(&dispatch);
+                lanes.dispatch(&dispatch);
             }
             return Ok(());
         }
@@ -918,7 +864,7 @@ impl Submitter {
         let fallback_targets: SmallVec<[PeerOutbound; 8]> = g
             .peers
             .values()
-            .filter(|p| p.shard.unwrap_or(0) == 0)
+            .filter(|p| p.lane.is_none())
             .filter(|p| p.fanout_active)
             .filter(|p| match (self.mode, group.as_deref()) {
                 (FanOutMode::Group, Some(grp)) => p.any_groups || p.groups.contains(grp),
@@ -929,10 +875,7 @@ impl Submitter {
             })
             .map(|p| p.target.clone())
             .collect();
-        let has_sharded = g
-            .peers
-            .values()
-            .any(|p| p.shard.is_some_and(|shard| shard > 0));
+        let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
         drop(g);
 
         if !fallback_targets.is_empty() {
@@ -940,13 +883,13 @@ impl Submitter {
             dispatch_to_targets(&fallback_targets, msg, true, &mut deactivate)?;
         }
 
-        if has_sharded {
-            let dispatch = ShardDispatch {
+        if has_lane_peers {
+            let dispatch = LaneDispatch {
                 msg: msg.clone(),
                 topic: first_frame_bytes(msg),
                 group,
             };
-            shards.dispatch(&dispatch);
+            lanes.dispatch(&dispatch);
         }
         Ok(())
     }
@@ -966,10 +909,8 @@ impl Submitter {
             .prepare(msg)
             .map_err(omq_proto::error::TrySendError::Error)?;
 
-        if let Some(ref shards) = self.shards {
-            self.dispatch_raw(shards, &forwarded, group)
-                .map_err(omq_proto::error::TrySendError::Error)?;
-        }
+        self.dispatch_raw(&self.lanes, &forwarded, group)
+            .map_err(omq_proto::error::TrySendError::Error)?;
         Ok(())
     }
 
@@ -980,12 +921,10 @@ impl Submitter {
         #[cfg(feature = "lz4")]
         self.feed_dict_training(&forwarded);
 
-        if let Some(ref shards) = self.shards {
-            self.dispatch_raw(shards, &forwarded, group)?;
-            let target_count = self.sharded_peer_count.load(Ordering::Relaxed)
-                + self.fallback_peer_count.load(Ordering::Relaxed);
-            self.maybe_yield(target_count, msg_bytes).await;
-        }
+        self.dispatch_raw(&self.lanes, &forwarded, group)?;
+        let target_count = self.lane_peer_count.load(Ordering::Relaxed)
+            + self.fallback_peer_count.load(Ordering::Relaxed);
+        self.maybe_yield(target_count, msg_bytes).await;
         Ok(())
     }
 
@@ -1014,17 +953,15 @@ impl Submitter {
         g.compression_dict = Some(dict.clone());
         let options = g.options.clone();
         drop(g);
-        if let Some(ref shards) = self.shards {
-            let mut state = shards.state.lock().expect("fanout shards poisoned");
-            for endpoint in &mut state.endpoints {
-                FanOutShards::push_control(
-                    endpoint,
-                    ShardControl::SetCompression {
-                        options: Box::new(options.clone()),
-                        dict: Some(dict.clone()),
-                    },
-                );
-            }
+        let mut state = self.lanes.state.lock().expect("fanout lanes poisoned");
+        for endpoint in &mut state.endpoints {
+            FanOutLanes::push_control(
+                endpoint,
+                LaneControl::SetCompression {
+                    options: Box::new(options.clone()),
+                    dict: Some(dict.clone()),
+                },
+            );
         }
     }
 }
@@ -1032,8 +969,8 @@ impl Submitter {
 /// Fan-out send strategy.
 #[derive(Debug)]
 pub(crate) struct FanOutSend {
-    shards: Option<Arc<FanOutShards>>,
-    sharded_peer_count: Arc<AtomicUsize>,
+    lanes: Arc<FanOutLanes>,
+    lane_peer_count: Arc<AtomicUsize>,
     fallback_peer_count: Arc<AtomicUsize>,
     inner: Arc<Mutex<FanOutInner>>,
     generation: Arc<AtomicU64>,
@@ -1046,9 +983,6 @@ pub(crate) struct FanOutSend {
 
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
-    all_subscribe_all: bool,
-    all_targets: SmallVec<[PeerOutbound; 8]>,
-    active_all_targets: SmallVec<[PeerOutbound; 8]>,
     has_compression: bool,
     compression_dict: Option<Bytes>,
     options: Options,
@@ -1058,7 +992,6 @@ impl std::fmt::Debug for FanOutInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FanOutInner")
             .field("peers", &self.peers.len())
-            .field("all_subscribe_all", &self.all_subscribe_all)
             .finish_non_exhaustive()
     }
 }
@@ -1069,31 +1002,11 @@ struct FanOutPeer {
     groups: FxHashSet<String>,
     any_groups: bool,
     target: PeerOutbound,
-    shard: Option<usize>,
+    lane: Option<usize>,
     fanout_active: bool,
 }
 
 impl FanOutInner {
-    fn recompute_subscribe_all(&mut self) {
-        self.all_subscribe_all = !self.peers.is_empty()
-            && self
-                .peers
-                .values()
-                .all(|p| p.subscriptions.is_subscribe_all());
-        if self.all_subscribe_all {
-            self.all_targets = self.peers.values().map(|p| p.target.clone()).collect();
-            self.active_all_targets = self
-                .peers
-                .values()
-                .filter(|p| p.fanout_active)
-                .map(|p| p.target.clone())
-                .collect();
-        } else {
-            self.all_targets.clear();
-            self.active_all_targets.clear();
-        }
-    }
-
     fn deactivate_fanout_peer(&mut self, peer_id: u64) -> bool {
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return false;
@@ -1102,7 +1015,6 @@ impl FanOutInner {
             return false;
         }
         peer.fanout_active = false;
-        self.recompute_subscribe_all();
         true
     }
 
@@ -1114,7 +1026,6 @@ impl FanOutInner {
             return false;
         }
         peer.fanout_active = true;
-        self.recompute_subscribe_all();
         true
     }
 }
@@ -1125,22 +1036,19 @@ impl FanOutSend {
         mode: FanOutMode,
         io_pool: &crate::context::IoPoolHandle,
     ) -> Self {
-        let shards = Some(FanOutShards::spawn(options, mode, io_pool));
+        let lanes = FanOutLanes::spawn(options, mode, io_pool);
         let inner = Arc::new(Mutex::new(FanOutInner {
             peers: FxHashMap::default(),
-            all_subscribe_all: false,
-            all_targets: SmallVec::new(),
-            active_all_targets: SmallVec::new(),
             has_compression: false,
             compression_dict: options.compression_dict.clone(),
             options: options.clone(),
         }));
         let generation = Arc::new(AtomicU64::new(0));
-        let sharded_peer_count = Arc::new(AtomicUsize::new(0));
+        let lane_peer_count = Arc::new(AtomicUsize::new(0));
         let fallback_peer_count = Arc::new(AtomicUsize::new(0));
         Self {
-            shards,
-            sharded_peer_count,
+            lanes,
+            lane_peer_count,
             fallback_peer_count,
             inner,
             generation,
@@ -1169,8 +1077,8 @@ impl FanOutSend {
 
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
-            shards: self.shards.clone(),
-            sharded_peer_count: self.sharded_peer_count.clone(),
+            lanes: self.lanes.clone(),
+            lane_peer_count: self.lane_peer_count.clone(),
             fallback_peer_count: self.fallback_peer_count.clone(),
             inner: self.inner.clone(),
             generation: self.generation.clone(),
@@ -1183,16 +1091,32 @@ impl FanOutSend {
         }
     }
 
-    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: PeerDriverHandle) {
-        self.add_peer(peer_id, handle, false);
+    pub(crate) fn connection_added(
+        &mut self,
+        peer_id: u64,
+        handle: PeerDriverHandle,
+        io_thread: usize,
+    ) {
+        self.add_peer(peer_id, handle, false, io_thread);
     }
 
-    pub(crate) fn connection_added_any_groups(&mut self, peer_id: u64, handle: PeerDriverHandle) {
-        self.add_peer(peer_id, handle, true);
+    pub(crate) fn connection_added_any_groups(
+        &mut self,
+        peer_id: u64,
+        handle: PeerDriverHandle,
+        io_thread: usize,
+    ) {
+        self.add_peer(peer_id, handle, true, io_thread);
     }
 
     #[expect(clippy::needless_pass_by_value)]
-    fn add_peer(&mut self, peer_id: u64, handle: PeerDriverHandle, any_groups: bool) {
+    fn add_peer(
+        &mut self,
+        peer_id: u64,
+        handle: PeerDriverHandle,
+        any_groups: bool,
+        io_thread: usize,
+    ) {
         let has_transform = handle
             .transmit_slot
             .as_ref()
@@ -1204,19 +1128,16 @@ impl FanOutSend {
         #[cfg(not(feature = "ws"))]
         let target_is_ws = false;
 
-        let shard_eligible = !target_is_ws
+        let lane_eligible = !target_is_ws
             && matches!(target, PeerOutbound::Wire { .. })
             && handle.transmit_slot.is_some();
 
-        let shard = if !shard_eligible {
+        let lane = if !lane_eligible {
             None
-        } else if let (Some(shards), PeerOutbound::Wire { slot, .. }) =
-            (self.shards.as_ref(), &target)
-        {
-            let shard = shards.assign_peer();
-            shards.add_worker_peer(
-                shard,
-                ShardPeerAdd {
+        } else if let PeerOutbound::Wire { slot, .. } = &target {
+            let lane = self.lanes.add_lane_peer(
+                io_thread,
+                LanePeerAdd {
                     peer_id,
                     slot: slot.clone(),
                     any_groups,
@@ -1229,9 +1150,9 @@ impl FanOutSend {
             if g.has_compression {
                 let options = g.options.clone();
                 let dict = g.compression_dict.clone();
-                shards.send_to_shard(
-                    shard,
-                    ShardControl::SetCompression {
+                self.lanes.send_to_lane(
+                    lane,
+                    LaneControl::SetCompression {
                         options: Box::new(options),
                         dict,
                     },
@@ -1239,13 +1160,15 @@ impl FanOutSend {
             } else {
                 drop(g);
             }
-            Some(shard)
+            Some(lane)
         } else {
             None
         };
 
-        if shard.is_none() {
+        if lane.is_none() {
             self.fallback_peer_count.fetch_add(1, Ordering::Release);
+        } else {
+            self.lane_peer_count.fetch_add(1, Ordering::Release);
         }
 
         if let PeerOutbound::Wire { slot, .. } = &target {
@@ -1262,9 +1185,6 @@ impl FanOutSend {
                 }
             }));
         }
-        if shard.is_some_and(|shard| shard > 0) {
-            self.sharded_peer_count.fetch_add(1, Ordering::Release);
-        }
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.insert(
             peer_id,
@@ -1273,27 +1193,24 @@ impl FanOutSend {
                 groups: FxHashSet::default(),
                 any_groups,
                 target,
-                shard,
+                lane,
                 fanout_active: true,
             },
         );
-        g.recompute_subscribe_all();
         self.bump_generation();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(peer) = g.peers.remove(&peer_id) {
-            if peer.shard.is_some_and(|shard| shard > 0) {
-                self.sharded_peer_count.fetch_sub(1, Ordering::Release);
-            }
-            if peer.shard.is_none() {
+            if peer.lane.is_some() {
+                self.lane_peer_count.fetch_sub(1, Ordering::Release);
+            } else {
                 self.fallback_peer_count.fetch_sub(1, Ordering::Release);
             }
-            g.recompute_subscribe_all();
             drop(g);
-            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), peer.shard) {
-                shards.remove_peer(shard, peer_id);
+            if let Some(lane) = peer.lane {
+                self.lanes.remove_peer(lane, peer_id);
             }
             self.bump_generation();
         }
@@ -1304,13 +1221,12 @@ impl FanOutSend {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
             p.subscriptions.add(&prefix);
-            let shard = p.shard;
-            g.recompute_subscribe_all();
+            let lane = p.lane;
             drop(g);
-            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
-                shards.send_to_shard(
-                    shard,
-                    ShardControl::Subscribe {
+            if let Some(lane) = lane {
+                self.lanes.send_to_lane(
+                    lane,
+                    LaneControl::Subscribe {
                         peer_id,
                         prefix: prefix.clone(),
                     },
@@ -1324,13 +1240,12 @@ impl FanOutSend {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
             p.subscriptions.remove(prefix);
-            let shard = p.shard;
-            g.recompute_subscribe_all();
+            let lane = p.lane;
             drop(g);
-            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
-                shards.send_to_shard(
-                    shard,
-                    ShardControl::Cancel {
+            if let Some(lane) = lane {
+                self.lanes.send_to_lane(
+                    lane,
+                    LaneControl::Cancel {
                         peer_id,
                         prefix: Bytes::copy_from_slice(prefix),
                     },
@@ -1346,12 +1261,12 @@ impl FanOutSend {
             && let Ok(s) = std::str::from_utf8(group)
         {
             p.groups.insert(s.to_string());
-            let shard = p.shard;
+            let lane = p.lane;
             drop(g);
-            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
-                shards.send_to_shard(
-                    shard,
-                    ShardControl::Join {
+            if let Some(lane) = lane {
+                self.lanes.send_to_lane(
+                    lane,
+                    LaneControl::Join {
                         peer_id,
                         group: Bytes::copy_from_slice(group),
                     },
@@ -1367,12 +1282,12 @@ impl FanOutSend {
             && let Ok(s) = std::str::from_utf8(group)
         {
             p.groups.remove(s);
-            let shard = p.shard;
+            let lane = p.lane;
             drop(g);
-            if let (Some(shards), Some(shard)) = (self.shards.as_ref(), shard) {
-                shards.send_to_shard(
-                    shard,
-                    ShardControl::Leave {
+            if let Some(lane) = lane {
+                self.lanes.send_to_lane(
+                    lane,
+                    LaneControl::Leave {
                         peer_id,
                         group: Bytes::copy_from_slice(group),
                     },
@@ -1383,23 +1298,19 @@ impl FanOutSend {
     }
 
     pub(crate) fn shutdown(&self) {
-        if let Some(ref shards) = self.shards {
-            shards.shutdown();
-        }
+        self.lanes.shutdown();
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.clear();
-        g.all_subscribe_all = false;
-        g.all_targets.clear();
-        g.active_all_targets.clear();
         drop(g);
-        self.sharded_peer_count.store(0, Ordering::Release);
+        self.lane_peer_count.store(0, Ordering::Release);
+        self.fallback_peer_count.store(0, Ordering::Release);
         self.bump_generation();
     }
 
     pub(crate) fn is_drained(&self) -> bool {
-        let shards_empty = self.shards.as_ref().is_none_or(|shards| shards.is_empty());
+        let lanes_empty = self.lanes.is_empty();
         let g = self.inner.lock().expect("fanout inner poisoned");
-        shards_empty && g.peers.values().all(|p| p.target.is_empty())
+        lanes_empty && g.peers.values().all(|p| p.target.is_empty())
     }
 }
 
@@ -1408,35 +1319,29 @@ fn dispatch_to_targets(
     msg: &Message,
     drop_on_full: bool,
     deactivate: &mut impl FnMut(&PeerOutbound),
-) -> Result<DispatchOutcome> {
+) -> Result<()> {
     use std::cell::RefCell;
 
     match targets.len() {
-        0 => Ok(DispatchOutcome::default()),
+        0 => Ok(()),
         1 => match targets[0].try_encode(msg) {
             TryFrameResult::Full => {
                 if drop_on_full {
                     deactivate(&targets[0]);
                 }
-                let mut outcome = DispatchOutcome::default();
-                outcome.push_full(&targets[0]);
-                Ok(outcome)
+                Ok(())
             }
-            _ => Ok(DispatchOutcome::default()),
+            _ => Ok(()),
         },
         _ => {
             #[cfg(feature = "ws")]
             if targets.iter().any(PeerOutbound::is_ws) {
-                let mut outcome = DispatchOutcome::default();
                 for t in targets {
-                    if t.try_encode(msg) == TryFrameResult::Full {
-                        if drop_on_full {
-                            deactivate(t);
-                        }
-                        outcome.push_full(t);
+                    if t.try_encode(msg) == TryFrameResult::Full && drop_on_full {
+                        deactivate(t);
                     }
                 }
-                return Ok(outcome);
+                return Ok(());
             }
 
             thread_local! {
@@ -1449,14 +1354,15 @@ fn dispatch_to_targets(
                 let eq = &mut *cell.borrow_mut();
                 encode_fan_out_message(eq, msg, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET);
                 CHUNKS.with(|drain| {
-                    Ok(dispatch_encoded(
+                    dispatch_encoded(
                         eq,
                         targets,
                         msg,
                         &mut drain.borrow_mut(),
                         drop_on_full,
                         deactivate,
-                    ))
+                    );
+                    Ok(())
                 })
             })
         }
@@ -1468,30 +1374,20 @@ fn push_to_peers(
     msg: &Message,
     drop_on_full: bool,
     deactivate: &mut impl FnMut(&PeerOutbound),
-    outcome: &mut DispatchOutcome,
     push_wire: impl Fn(&PeerTransmitSlot) -> TryFrameResult,
 ) {
     for t in targets {
         match t {
             PeerOutbound::Wire { slot, .. } => {
                 if drop_on_full && !slot.fanout_active() {
-                    outcome.push_full(t);
                     continue;
                 }
-                if push_wire(slot) == TryFrameResult::Full {
-                    if drop_on_full {
-                        deactivate(t);
-                    }
-                    outcome.push_full(t);
+                if push_wire(slot) == TryFrameResult::Full && drop_on_full {
+                    deactivate(t);
                 }
             }
             PeerOutbound::Inbox(tx) => {
-                if tx
-                    .try_send(PeerDriverCommand::SendMessage(msg.clone()))
-                    .is_err()
-                {
-                    outcome.push_full(t);
-                }
+                let _ = tx.try_send(PeerDriverCommand::SendMessage(msg.clone()));
             }
         }
     }
@@ -1504,18 +1400,12 @@ fn dispatch_encoded(
     chunks: &mut Vec<Bytes>,
     drop_on_full: bool,
     deactivate: &mut impl FnMut(&PeerOutbound),
-) -> DispatchOutcome {
-    let mut outcome = DispatchOutcome::default();
+) {
     match finish_fan_out_frame(eq, chunks, targets.len(), FAN_OUT_TOTAL_COPY_BUDGET) {
         FanOutFrame::Arena(raw) => {
-            push_to_peers(
-                targets,
-                msg,
-                drop_on_full,
-                deactivate,
-                &mut outcome,
-                |slot| slot.try_push_pre_framed_no_signal(raw),
-            );
+            push_to_peers(targets, msg, drop_on_full, deactivate, |slot| {
+                slot.try_push_pre_framed_no_signal(raw)
+            });
             for t in targets {
                 if let PeerOutbound::Wire { slot, .. } = t {
                     slot.signal_encoded();
@@ -1523,18 +1413,12 @@ fn dispatch_encoded(
             }
         }
         FanOutFrame::Chunks(encoded) => {
-            push_to_peers(
-                targets,
-                msg,
-                drop_on_full,
-                deactivate,
-                &mut outcome,
-                |slot| slot.try_push_encoded(encoded),
-            );
+            push_to_peers(targets, msg, drop_on_full, deactivate, |slot| {
+                slot.try_push_encoded(encoded)
+            });
         }
     }
     clear_fan_out_frame(eq, chunks);
-    outcome
 }
 
 fn first_frame_bytes(msg: &Message) -> Bytes {
@@ -1543,21 +1427,15 @@ fn first_frame_bytes(msg: &Message) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     use tokio::sync::Notify;
 
     use super::{
-        DistributorEndpoint, FanOutShardState, FanOutShards, MAX_FAN_OUT_WORKER_SHARDS,
-        ShardDispatch, ShardEndpoint, WORKER_SHARD_PEER_CAP, yield_interval,
+        FanOutLaneState, FanOutLanes, LaneDispatch, LaneDistributor, LaneEndpoint, LanePeerAdd,
+        yield_interval,
     };
-
-    const TEST_MAX_LOGICAL_SHARDS: usize = MAX_FAN_OUT_WORKER_SHARDS + 1;
-    const TEST_SINGLE_LOGICAL_SHARD: usize = 1;
-    const TEST_LOW_WORKER_COUNT: usize = 2;
-    const TEST_HIGH_WORKER_COUNT: usize = 64;
-    const TEST_WIDE_PEER_COUNT: usize = 32;
 
     #[test]
     fn yield_interval_scales_with_message_size() {
@@ -1575,127 +1453,100 @@ mod tests {
     }
 
     #[test]
-    fn desired_active_shards_ramps_monotonically() {
-        assert_eq!(
-            FanOutShards::desired_active_shards(0, TEST_MAX_LOGICAL_SHARDS),
-            0
+    fn add_peer_uses_supplied_lane_and_marks_it_active() {
+        let lanes = test_lanes(3);
+
+        let assigned = lanes.add_lane_peer(
+            2,
+            LanePeerAdd {
+                peer_id: 7,
+                slot: test_slot(7),
+                any_groups: false,
+            },
         );
-        assert_eq!(
-            FanOutShards::desired_active_shards(1, TEST_MAX_LOGICAL_SHARDS),
-            2
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(WORKER_SHARD_PEER_CAP, TEST_MAX_LOGICAL_SHARDS),
-            2
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(WORKER_SHARD_PEER_CAP + 1, TEST_MAX_LOGICAL_SHARDS),
-            3
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(TEST_WIDE_PEER_COUNT, TEST_MAX_LOGICAL_SHARDS),
-            9
-        );
+
+        assert_eq!(assigned, 2);
+        assert!(!lanes.active_flags[0].load(std::sync::atomic::Ordering::Acquire));
+        assert!(!lanes.active_flags[1].load(std::sync::atomic::Ordering::Acquire));
+        assert!(lanes.active_flags[2].load(std::sync::atomic::Ordering::Acquire));
+        let state = lanes.state.lock().expect("lanes poisoned");
+        assert_eq!(state.endpoints[2].peer_count, 1);
     }
 
     #[test]
-    fn desired_active_shards_is_capped_by_runtime_workers() {
-        assert_eq!(
-            FanOutShards::desired_active_shards(0, TEST_LOW_WORKER_COUNT),
-            0
+    fn remove_peer_clears_lane_when_last_peer_leaves() {
+        let lanes = test_lanes(2);
+        lanes.add_lane_peer(
+            1,
+            LanePeerAdd {
+                peer_id: 11,
+                slot: test_slot(11),
+                any_groups: false,
+            },
         );
-        assert_eq!(
-            FanOutShards::desired_active_shards(1, TEST_LOW_WORKER_COUNT),
-            2
+        lanes.add_lane_peer(
+            1,
+            LanePeerAdd {
+                peer_id: 12,
+                slot: test_slot(12),
+                any_groups: false,
+            },
         );
-        assert_eq!(
-            FanOutShards::desired_active_shards(WORKER_SHARD_PEER_CAP + 1, TEST_LOW_WORKER_COUNT),
-            TEST_LOW_WORKER_COUNT
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(TEST_HIGH_WORKER_COUNT, TEST_LOW_WORKER_COUNT),
-            TEST_LOW_WORKER_COUNT
-        );
-        assert_eq!(
-            FanOutShards::desired_active_shards(TEST_HIGH_WORKER_COUNT, TEST_SINGLE_LOGICAL_SHARD),
-            TEST_SINGLE_LOGICAL_SHARD
-        );
+
+        lanes.remove_peer(1, 11);
+        assert!(lanes.active_flags[1].load(std::sync::atomic::Ordering::Acquire));
+        lanes.remove_peer(1, 12);
+        assert!(!lanes.active_flags[1].load(std::sync::atomic::Ordering::Acquire));
+        let state = lanes.state.lock().expect("lanes poisoned");
+        assert_eq!(state.endpoints[1].peer_count, 0);
     }
 
-    #[test]
-    fn worker_shard_count_is_capped() {
-        assert_eq!(FanOutShards::worker_shard_count(0), 1);
-        assert_eq!(
-            FanOutShards::worker_shard_count(TEST_LOW_WORKER_COUNT),
-            TEST_LOW_WORKER_COUNT
-        );
-        assert_eq!(
-            FanOutShards::worker_shard_count(TEST_HIGH_WORKER_COUNT),
-            MAX_FAN_OUT_WORKER_SHARDS
-        );
-    }
-
-    #[test]
-    fn assign_peer_distributes_to_workers() {
-        let shards = FanOutShards {
-            state: std::sync::Mutex::new(FanOutShardState {
-                endpoints: test_endpoints(TEST_LOW_WORKER_COUNT),
-                eligible_peers: 0,
-                active_limit: 0,
+    fn test_lanes(count: usize) -> FanOutLanes {
+        FanOutLanes {
+            state: std::sync::Mutex::new(FanOutLaneState {
+                endpoints: test_endpoints(count),
             }),
-            active_mask: Arc::new(AtomicU8::new(0)),
+            active_flags: Arc::new(
+                (0..count)
+                    .map(|_| AtomicBool::new(false))
+                    .collect::<Vec<_>>(),
+            ),
             distributor: test_distributor(),
-        };
-
-        let assigned: Vec<_> = (0..WORKER_SHARD_PEER_CAP)
-            .map(|_| shards.assign_peer())
-            .collect();
-        assert!(
-            assigned.iter().all(|&s| s > 0),
-            "all peers go to worker shards"
-        );
-    }
-
-    #[test]
-    fn assign_peer_round_robins_across_workers() {
-        let shards = FanOutShards {
-            state: std::sync::Mutex::new(FanOutShardState {
-                endpoints: test_endpoints(WORKER_SHARD_PEER_CAP),
-                eligible_peers: 0,
-                active_limit: 0,
-            }),
-            active_mask: Arc::new(AtomicU8::new(0)),
-            distributor: test_distributor(),
-        };
-
-        let mut loads = [0usize; WORKER_SHARD_PEER_CAP + 1];
-        for _ in 0..TEST_WIDE_PEER_COUNT {
-            loads[shards.assign_peer()] += 1;
         }
-
-        assert_eq!(loads[0], 0, "shard 0 gets no peers");
-        assert!(
-            loads[1..].iter().all(|&l| l > 0),
-            "all worker shards get peers"
-        );
     }
 
-    fn test_endpoints(count: usize) -> Vec<ShardEndpoint> {
+    fn test_endpoints(count: usize) -> Vec<LaneEndpoint> {
         (0..count).map(|_| test_endpoint()).collect()
     }
 
-    fn test_endpoint() -> ShardEndpoint {
+    fn test_endpoint() -> LaneEndpoint {
         let (ctrl_tx, _ctrl_rx) = yring::spsc(4);
-        ShardEndpoint {
+        LaneEndpoint {
             ctrl_tx,
             ctrl_notify: Arc::new(Notify::new()),
-            load: 0,
+            peer_count: 0,
         }
     }
 
-    fn test_distributor() -> Mutex<DistributorEndpoint> {
-        let (data_tx, _data_rx) = yring::spsc::<ShardDispatch>(4);
-        Mutex::new(DistributorEndpoint {
+    fn test_slot(peer_id: u64) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {
+        crate::engine::transmit_slot::PeerTransmitSlot::new(
+            peer_id,
+            false,
+            None,
+            4096,
+            16 * 1024,
+            64 * 1024,
+            16,
+            #[cfg(feature = "ws")]
+            false,
+            #[cfg(feature = "ws")]
+            false,
+        )
+    }
+
+    fn test_distributor() -> Mutex<LaneDistributor> {
+        let (data_tx, _data_rx) = yring::spsc::<LaneDispatch>(4);
+        Mutex::new(LaneDistributor {
             data_tx,
             data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
         })
