@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-07-19
+
+### Fixed
+
+- Duplicate connects to the same endpoint now match libzmq behavior:
+  `DEALER`, `PUB`, `SUB`, and `REQ` treat the second connect as a no-op,
+  while `PUSH` keeps separate weighted pipes.
+- `Socket::disconnect()` closes every duplicate connection for a `PUSH`
+  endpoint before later reconnects.
+- Duplicate-connect behavior is covered for TCP and lz4+tcp transports.
+
 ## [0.19.0] - 2026-07-19
 
 ### Added

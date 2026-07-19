@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-07-19
+
+### Fixed
+
+- Duplicate endpoint connects now follow libzmq-compatible behavior through
+  `omq-tokio` 0.19.1.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.19.1.
+
 ## [0.5.3] - 2026-07-19
 
 ### Added
