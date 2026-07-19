@@ -9,8 +9,10 @@ mod test_support;
 
 use std::time::Duration;
 
+#[cfg(unix)]
+use omq_tokio::IpcPath;
 use omq_tokio::options::ReconnectPolicy;
-use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
     test_support::ipc_endpoint(&format!("ipc-{name}"))
