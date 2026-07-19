@@ -43,6 +43,36 @@ while let Some(val) = consumer.pop() {
 consumer.release(); // one Release store frees slots for producer
 ```
 
+## Sharing the producer handle
+
+`Producer` is `Send` but not `Sync`. When a producer handle must be stored in
+an `Arc` or shared with another owner, wrap it in `ProducerOwner`:
+
+```rust
+use std::sync::Arc;
+
+let (producer, mut consumer) = yring::spsc(1024);
+let producer = Arc::new(yring::ProducerOwner::new(producer));
+
+let producer_thread = producer.clone();
+std::thread::spawn(move || {
+    producer_thread.push(42).unwrap();
+    producer_thread.flush();
+})
+.join()
+.unwrap();
+
+consumer.prefetch();
+assert_eq!(consumer.pop(), Some(42));
+consumer.release();
+```
+
+`ProducerOwner` preserves the producer's non-atomic cursor while allowing the
+handle itself to be shared. The first producer call binds it to the current
+thread. Later calls from another thread panic. Multiple owners are fine, but
+all producer calls must come from the same thread. For producer access from
+multiple threads, use a channel with a multi-producer API instead.
+
 The key advantage over chunk-based batching APIs (like `rtrb`'s
 `write_chunk_uninit`): you keep the simple per-item `push()`/`pop()`
 API. No upfront batch size, no slice management, no restructuring your

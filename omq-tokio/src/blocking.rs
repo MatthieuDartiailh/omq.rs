@@ -1,7 +1,7 @@
 //! Blocking socket API for sync callers.
 //!
 //! [`Socket`] wraps an async [`crate::socket::handle::Socket`] and a
-//! [`Context`](crate::Context). Each method blocks the calling thread
+//! [`Context`]. Each method blocks the calling thread
 //! via [`Context::block_on`](crate::Context::block_on).
 //!
 //! ```no_run

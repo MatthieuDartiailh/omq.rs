@@ -239,7 +239,7 @@ impl Connection {
         self.transmit_chunks_capped(self.out_chunks.len())
     }
 
-    /// Like [`transmit_chunks`] but returns at most `max` iovecs.
+    /// Like [`Self::transmit_chunks`] but returns at most `max` iovecs.
     /// Prevents heap-spilling the `SmallVec` when hundreds of chunks
     /// accumulate in a large batch.
     pub fn transmit_chunks_capped(&self, max: usize) -> SmallVec<[IoSlice<'_>; 8]> {
@@ -257,7 +257,7 @@ impl Connection {
         out
     }
 
-    /// Owned counterpart to [`transmit_chunks`]: refcount-bumps each
+    /// Owned counterpart to [`Self::transmit_chunks`]: refcount-bumps each
     /// pending `Bytes` and slices the first by `front_consumed`. Lets
     /// callers hand the chunks to APIs that demand `'static` ownership
     /// without a coalescing memcpy.
@@ -315,7 +315,8 @@ impl Connection {
 
     /// Encode `msg` as ZMTP DATA frames directly into `flat_buf` without
     /// touching `out_chunks`. Only valid post-handshake and when no
-    /// frame-level transform is active (use [`has_frame_transform`] to check).
+    /// frame-level transform is active (use [`Self::has_frame_transform`]
+    /// to check).
     /// The caller is responsible for writing `flat_buf` contents to the wire.
     ///
     /// This path copies header + payload bytes contiguously, amortizing many

@@ -1,6 +1,6 @@
 use super::common::{
-    self, C_LIBZMQ, C_OMQ_1T, C_OMQ_2T, C_OMQ_CT, COMPARISON_SIZES, Impl,
-    draw_latency_single_panel, draw_throughput_dual_panel, load_latency, load_tput, out_dir,
+    self, C_LIBZMQ, C_OMQ_1T, C_OMQ_CT, COMPARISON_SIZES, Impl, draw_latency_single_panel,
+    draw_throughput_dual_panel, load_latency, load_tput, out_dir,
 };
 
 const TCP_TPUT_IMPLS: &[Impl] = &[
@@ -50,7 +50,7 @@ const INPROC_TPUT_IMPLS: &[Impl] = &[
         key: "omq-tokio-2ut",
         label: "omq",
         threads: "2 UT",
-        color: C_OMQ_2T,
+        color: C_OMQ_1T,
     },
 ];
 

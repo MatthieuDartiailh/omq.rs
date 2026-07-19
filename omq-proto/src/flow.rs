@@ -65,21 +65,25 @@ impl DrainBudget {
     }
 
     #[must_use]
+    /// Returns whether either cap has been reached.
     pub fn exhausted(&self) -> bool {
         self.msgs >= self.max_msgs || self.bytes >= self.max_bytes
     }
 
+    /// Clear the accounted message and byte counts.
     pub fn reset(&mut self) {
         self.msgs = 0;
         self.bytes = 0;
     }
 
     #[must_use]
+    /// Number of accounted items in the current batch.
     pub fn msgs(&self) -> usize {
         self.msgs
     }
 
     #[must_use]
+    /// Number of accounted bytes in the current batch.
     pub fn bytes(&self) -> usize {
         self.bytes
     }

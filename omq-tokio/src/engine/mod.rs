@@ -1,5 +1,5 @@
 //! Connection driver: tokio glue between a `Transport`'s stream and the
-//! sans-I/O ZMTP [`Connection`].
+//! sans-I/O ZMTP [`omq_proto::proto::Connection`].
 //!
 //! The driver owns the stream and the codec and runs a `tokio::select!`
 //! loop over (socket read, socket write, command inbox, cancellation).

@@ -5,9 +5,9 @@
 //! This module is just protocol layout + state machine.
 //!
 //!
-//! Internally split into [`CurveClient`] and [`CurveServer`] so each
+//! Internally split into `CurveClient` and `CurveServer` so each
 //! role carries only the fields it needs. Ephemeral key availability
-//! is encoded in the state-enum variants: [`CurveServerState::AwaitingInitiate`]
+//! is encoded in the state-enum variants: `CurveServerState::AwaitingInitiate`
 //! has no ephemeral key fields, enforcing the stateless-server invariant
 //! at compile time.
 //!

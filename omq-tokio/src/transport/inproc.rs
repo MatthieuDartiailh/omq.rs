@@ -92,6 +92,10 @@ fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
     // messages from the same ring, causing messages to reach the
     // wrong socket. PUSH/PULL is safe because only the PULL side
     // consumes.
+    // OPTIMIZE: REQ/REP inproc currently falls back to the mpsc/IO-driver
+    // path because both sockets receive and REP needs peer metadata.
+    // A dedicated bidirectional fast path could carry peer id with each
+    // message and remove the extra IO-thread hop in blocking latency runs.
     matches!(
         (a, b),
         (SocketType::Push, SocketType::Pull) | (SocketType::Pull, SocketType::Push)

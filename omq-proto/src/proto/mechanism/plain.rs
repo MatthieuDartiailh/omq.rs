@@ -3,7 +3,7 @@
 //! Four-command handshake providing username/password authentication
 //! with no encryption. No frame transform is installed post-handshake.
 //!
-//! Internally split into [`PlainClient`] and [`PlainServer`] so each
+//! Internally split into `PlainClient` and `PlainServer` so each
 //! role carries only the fields it needs and `our_props` lives on the
 //! struct instead of inside state-enum variants.
 

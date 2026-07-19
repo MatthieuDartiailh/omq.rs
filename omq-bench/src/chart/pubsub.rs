@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::common::{
     C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, Impl, ValMap,
-    draw_multirow_throughput, draw_throughput_dual_panel, load_tput, out_dir,
+    draw_multirow_throughput, draw_throughput_dual_panel, load_tput, merge_cpu_data, out_dir,
 };
 
 const PUBSUB_IMPLS: &[Impl] = &[
@@ -76,15 +76,7 @@ pub(crate) fn generate() {
         }
     }
     if !panel_data.is_empty() {
-        let mut merged_cpu: BTreeMap<String, CpuData> = BTreeMap::new();
-        for (_, _, _, cpu) in &panel_data {
-            for (k, v) in cpu {
-                merged_cpu.entry(k.clone()).or_insert_with(|| CpuData {
-                    sender: v.sender,
-                    receiver: v.receiver,
-                });
-            }
-        }
+        let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu)| cpu));
         let rows: Vec<(u64, &ValMap, &ValMap)> =
             panel_data.iter().map(|(p, t, m, _)| (*p, t, m)).collect();
         let out = sub.join("tcp.svg");
@@ -102,8 +94,8 @@ pub(crate) fn generate() {
                     format!("{peers} subscribers")
                 }
             },
-            "pub CPU%",
-            "sub CPU%",
+            "snd CPU%",
+            "",
             None,
         )
         .expect("draw pubsub chart");

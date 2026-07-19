@@ -13,44 +13,68 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Endpoint syntax is invalid.
     #[error("invalid endpoint: {0}")]
     InvalidEndpoint(String),
 
+    /// The endpoint scheme is not supported by this build.
     #[error("unsupported transport scheme: {0}")]
     UnsupportedScheme(String),
 
+    /// The peer selected an unsupported ZMTP version.
     #[error("unsupported ZMTP version: {major}.{minor}")]
-    UnsupportedZmtpVersion { major: u8, minor: u8 },
+    UnsupportedZmtpVersion {
+        /// Unsupported major version.
+        major: u8,
+        /// Unsupported minor version.
+        minor: u8,
+    },
 
+    /// The peer violated the wire protocol.
     #[error("protocol violation: {0}")]
     Protocol(String),
 
+    /// The security handshake failed.
     #[error("handshake failed: {0}")]
     HandshakeFailed(String),
 
+    /// The socket or connection is closed.
     #[error("socket closed")]
     Closed,
 
+    /// An operation exceeded its deadline.
     #[error("operation timed out")]
     Timeout,
 
+    /// The message exceeds the configured size limit.
     #[error("message too large: {size} bytes exceeds max {max}")]
-    MessageTooLarge { size: usize, max: usize },
+    MessageTooLarge {
+        /// Actual message size.
+        size: usize,
+        /// Configured maximum size.
+        max: usize,
+    },
 
+    /// No connected peer can accept the message.
     #[error("no route to peer")]
     Unroutable,
 
+    /// The operation cannot complete without blocking.
     #[error("operation would block")]
     WouldBlock,
 
+    /// A configuration value is invalid.
     #[error("invalid configuration: {0}")]
     Config(String),
 
+    /// An underlying I/O operation failed.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
 
 impl Error {
+    /// Returns whether this is an OS-level connection-refused error.
+    #[must_use]
     pub fn is_connection_refused(&self) -> bool {
         matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::ConnectionRefused)
     }

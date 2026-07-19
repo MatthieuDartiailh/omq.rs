@@ -100,7 +100,8 @@ fn main() {
         Some("push") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
-            run_push(&ctx, ep, size);
+            let peers: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            run_push(&ctx, ep, size, peers);
         }
         Some("pull") => {
             let ep = parse_ep(&args[2]);
@@ -173,7 +174,7 @@ fn main() {
             run_inproc_latency(&ctx, name, size, iterations, warmup);
         }
         _ => {
-            eprintln!("usage: bench_peer_blocking push <addr> <size>");
+            eprintln!("usage: bench_peer_blocking push <addr> <size> [peers]");
             eprintln!("       bench_peer_blocking pull <addr> <size> <duration_secs>");
             eprintln!("       bench_peer_blocking pull-bind <addr> <size> <duration_secs>");
             eprintln!(
@@ -275,12 +276,30 @@ fn wait_for_start_barrier() {
     else {
         return;
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64());
+    let now = wall_secs();
     if start_at > now {
         std::thread::sleep(Duration::from_secs_f64(start_at - now));
     }
+}
+
+fn wait_for_warmup_barrier() {
+    let Some(start_at) = std::env::var("OMQ_BENCH_START_AT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    else {
+        return;
+    };
+    let warmup_at = start_at - warmup_duration().as_secs_f64();
+    let now = wall_secs();
+    if warmup_at > now {
+        std::thread::sleep(Duration::from_secs_f64(warmup_at - now));
+    }
+}
+
+fn wall_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
 }
 
 fn warmup_duration() -> Duration {
@@ -325,12 +344,24 @@ fn drain_warmup(sock: &blocking::Socket) {
 
 // --- Subcommands -------------------------------------------------------------
 
-fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize) {
+fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
     let push = ctx.blocking_socket(SocketType::Push, bench_options_server(size));
     let bound = push.bind(ep).expect("push bind");
     report_bound_port(ctx, &bound);
+    if peers > 0 {
+        let timeout = if peers > 64 { 20 } else { 10 };
+        push.wait_connected(peers, Duration::from_secs(timeout))
+            .expect("wait for pull peers");
+    }
 
     let payload = bench_payload(size);
+    wait_for_warmup_barrier();
+    let warmup_deadline = Instant::now() + warmup_duration();
+    while Instant::now() < warmup_deadline {
+        send_fast(&push, Message::from_slice(&payload));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    wait_for_start_barrier();
     if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
         loop {
             send_fast(&push, Message::from_slice(&payload));
@@ -548,6 +579,7 @@ fn run_pub(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
     }
 
     let payload = bench_payload(size);
+    wait_for_warmup_barrier();
     let warmup_deadline = Instant::now() + warmup_duration();
     while Instant::now() < warmup_deadline {
         send_fast(&pub_, Message::from_slice(&payload));
@@ -584,7 +616,23 @@ fn run_multi_sub(
         sockets.push(s);
     }
 
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for_warmup_barrier();
+    let warmup_deadline = Instant::now() + warmup_duration();
+    let warmup_handles: Vec<_> = sockets
+        .iter()
+        .cloned()
+        .map(|sock| {
+            std::thread::spawn(move || {
+                while Instant::now() < warmup_deadline {
+                    while sock.try_recv().is_ok() {}
+                    std::thread::yield_now();
+                }
+            })
+        })
+        .collect();
+    for handle in warmup_handles {
+        handle.join().unwrap();
+    }
     wait_for_start_barrier();
 
     let counters: Vec<Arc<AtomicU64>> = (0..socket_count)

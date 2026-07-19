@@ -396,10 +396,10 @@ Replaces `scripts/gen_comparison_chart.py` (1914 lines). Produces:
 |--------|-----------|
 | `pushpull/{tcp,ipc,inproc}.svg` | split: small msg/s + large GB/s |
 | `reqrep/{tcp,ipc,inproc}.svg` | single: p50 latency |
-| `pubsub/tcp.svg` | multi-panel: 4p + 64p, split msg/s + GB/s |
+| `pubsub/tcp.svg` | multi-panel: 4p + 32p, split msg/s + GB/s |
 | `pubsub/curve_tcp.svg` | multi-panel: 16p, split msg/s + GB/s |
-| `pushpull/fanout/tcp.svg` | multi-panel: 4p + 64p, split msg/s + GB/s |
-| `pushpull/fanin/tcp.svg` | multi-panel: 4p + 64p, split msg/s + GB/s |
+| `pushpull/fanout/tcp.svg` | multi-panel: 4p + 32p, split msg/s + GB/s |
+| `pushpull/fanin/tcp.svg` | multi-panel: 4p + 32p, split msg/s + GB/s |
 
 Data loading: read `comparisons.jsonl`, dedup by `(impl, size)` keeping
 the latest row by file position. Group by transport/kind/peers.

@@ -328,8 +328,8 @@ impl Connection {
 
     /// Whether a frame-level crypto transform (CURVE) is active.
     /// When false, frames are plain ZMTP DATA; callers may encode directly
-    /// into their own flat buffer via [`send_message_flat`] rather than going
-    /// through [`send_message`] + [`transmit_chunks`].
+    /// into their own flat buffer via [`Self::send_message_flat`] rather than
+    /// going through [`Self::send_message`] + [`Self::transmit_chunks`].
     pub fn has_frame_transform(&self) -> bool {
         #[cfg(feature = "curve")]
         {
@@ -343,13 +343,13 @@ impl Connection {
 
     /// Temporarily remove the frame transform so the caller can run
     /// encryption on a blocking thread. Must be restored via
-    /// [`restore_transform`] before the next `send_message` call.
+    /// [`Self::restore_transform`] before the next `send_message` call.
     #[cfg(feature = "curve")]
     pub fn take_transform(&mut self) -> Option<FrameTransform> {
         self.transform.take()
     }
 
-    /// Put back a transform previously removed by [`take_transform`].
+    /// Put back a transform previously removed by [`Self::take_transform`].
     #[cfg(feature = "curve")]
     pub fn restore_transform(&mut self, tx: FrameTransform) {
         self.transform = Some(tx);

@@ -209,7 +209,12 @@ impl<T> Drop for Ring<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushResult {
     /// Items were flushed. The consumer may have been idle and needs waking.
-    Flushed { count: usize, was_empty: bool },
+    Flushed {
+        /// Number of items made visible.
+        count: usize,
+        /// Whether the consumer had no visible items before this flush.
+        was_empty: bool,
+    },
     /// Nothing to flush (cursor == tail already).
     NothingToFlush,
 }
@@ -382,21 +387,25 @@ impl<T> Producer<T> {
     }
 
     #[inline]
+    /// Return whether the ring cannot accept another item.
     pub fn is_full(&mut self) -> bool {
         self.ring.is_full(self.cursor, &mut self.cached_head)
     }
 
     #[inline]
+    /// Return the ring capacity after power-of-two rounding.
     pub fn capacity(&self) -> usize {
         self.ring.capacity()
     }
 
     #[inline]
+    /// Return the number of flushed and pending items owned by the producer.
     pub fn len(&self) -> usize {
         self.ring.producer_len(self.cursor)
     }
 
     #[inline]
+    /// Return whether the producer has no pending or flushed items.
     pub fn is_empty(&self) -> bool {
         self.ring.producer_is_empty(self.cursor)
     }
@@ -463,6 +472,7 @@ impl<T> Consumer<T> {
     }
 
     #[inline]
+    /// Return whether the consumer has no visible items.
     pub fn is_empty(&self) -> bool {
         self.ring.consumer_is_empty(self.head, self.cached_tail)
     }
@@ -476,11 +486,13 @@ impl<T> Consumer<T> {
     }
 
     #[inline]
+    /// Return the ring capacity after power-of-two rounding.
     pub fn capacity(&self) -> usize {
         self.ring.capacity()
     }
 
     #[inline]
+    /// Return the number of items visible to the consumer.
     pub fn len(&self) -> usize {
         self.ring.consumer_len(self.head)
     }

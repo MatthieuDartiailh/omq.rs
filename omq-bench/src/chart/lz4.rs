@@ -4,8 +4,8 @@ use std::fmt::Write as _;
 use plotters::prelude::*;
 
 use super::common::{
-    AXIS_COLOR, GRID_COLOR, Impl, ValMap, detect_hardware, fmt_gbps, fmt_msgs, fmt_size, nice_step,
-    out_dir, postprocess_svg,
+    AXIS_COLOR, BACKGROUND_COLOR, GRID_COLOR, Impl, MUTED_TEXT_COLOR, TEXT_COLOR, TITLE_FILL,
+    ValMap, detect_hardware, fmt_gbps, fmt_msgs, fmt_size, nice_step, out_dir, postprocess_svg,
 };
 use crate::jsonl::{self, PushpullLz4Row};
 
@@ -19,7 +19,7 @@ const LZ4_SERIES: &[Series] = &[
     Series {
         key: "tcp",
         label: "tcp (no compression)",
-        color: RGBColor(234, 179, 8),
+        color: RGBColor(250, 204, 21),
     },
     Series {
         key: "lz4+tcp",
@@ -29,7 +29,7 @@ const LZ4_SERIES: &[Series] = &[
     Series {
         key: "lz4+tcp+dict",
         label: "lz4+tcp + dict",
-        color: RGBColor(29, 78, 216),
+        color: RGBColor(167, 139, 250),
     },
 ];
 
@@ -176,7 +176,7 @@ pub(crate) fn generate() {
     let n_ticks = 6usize;
 
     let root = SVGBackend::new(&out, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE).unwrap();
+    root.fill(&BACKGROUND_COLOR).unwrap();
 
     let mut row_titles: Vec<(u32, String)> = Vec::new();
 
@@ -230,8 +230,8 @@ pub(crate) fn generate() {
             })
             .y_labels(n_ticks + 1)
             .y_label_formatter(&|v| fmt_msgs(*v))
-            .y_label_style(("sans-serif", 10))
-            .x_label_style(("sans-serif", 10))
+            .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+            .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
             .light_line_style(TRANSPARENT)
             .bold_line_style(GRID_COLOR)
             .axis_style(AXIS_COLOR)
@@ -242,7 +242,7 @@ pub(crate) fn generate() {
             .configure_secondary_axes()
             .y_labels(n_ticks + 1)
             .y_label_formatter(&|v| fmt_gbps(*v))
-            .label_style(("sans-serif", 10))
+            .label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
             .axis_style(AXIS_COLOR)
             .draw()
             .unwrap();
@@ -333,10 +333,8 @@ pub(crate) fn generate() {
 
     // Legend: swatch + label, plus line-style notes.
     let table_area = root.clone().shrink((0, chart_total), (width, table_h));
-    let style_val = ("sans-serif", 11).into_font().color(&RGBColor(55, 65, 81));
-    let style_dim = ("sans-serif", 10)
-        .into_font()
-        .color(&RGBColor(156, 163, 175));
+    let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
+    let style_dim = ("sans-serif", 10).into_font().color(&MUTED_TEXT_COLOR);
     let col_swatch = 78i32;
     let col_name = col_swatch + 20;
     let col_note = 380i32;
@@ -390,7 +388,7 @@ pub(crate) fn generate() {
             extra,
             "\n<text x=\"{mid}\" y=\"{y}\" text-anchor=\"middle\" \
              font-family=\"sans-serif\" font-size=\"13\" font-weight=\"bold\" \
-             fill=\"#111827\">{label}</text>",
+             fill=\"{TITLE_FILL}\">{label}</text>",
         )
         .unwrap();
     }

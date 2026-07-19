@@ -8,8 +8,13 @@ pub(crate) const COMPARISON_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
 pub(crate) const SMALL_CUTOFF: u64 = 1024;
 pub(crate) const LARGE_START: u64 = 256;
 
-pub(crate) const GRID_COLOR: RGBColor = RGBColor(229, 231, 235);
-pub(crate) const AXIS_COLOR: RGBColor = RGBColor(107, 114, 128);
+pub(crate) const BACKGROUND_COLOR: RGBColor = RGBColor(0, 0, 0);
+pub(crate) const GRID_COLOR: RGBColor = RGBColor(55, 65, 81);
+pub(crate) const AXIS_COLOR: RGBColor = RGBColor(156, 163, 175);
+pub(crate) const TEXT_COLOR: RGBColor = RGBColor(229, 231, 235);
+pub(crate) const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
+pub(crate) const TITLE_FILL: &str = "#F9FAFB";
+pub(crate) const MUTED_FILL: &str = "#9CA3AF";
 
 pub(crate) struct Impl {
     pub key: &'static str,
@@ -37,14 +42,14 @@ pub(crate) type FairnessMap = BTreeMap<u64, BTreeMap<String, FairnessEntry>>;
 
 // ── colors ─────────────────────────────────────────────────────
 
-pub(crate) const C_LIBZMQ: RGBColor = RGBColor(234, 179, 8);
-pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(161, 98, 7);
-pub(crate) const C_OMQ_1T: RGBColor = RGBColor(249, 115, 22);
+pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
+pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
+pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
 pub(crate) const C_OMQ_2T: RGBColor = RGBColor(185, 28, 28);
-pub(crate) const C_ZMQRS: RGBColor = RGBColor(37, 99, 235);
-pub(crate) const C_RZMQ: RGBColor = RGBColor(22, 163, 74);
-pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(21, 128, 61);
+pub(crate) const C_ZMQRS: RGBColor = RGBColor(96, 165, 250);
+pub(crate) const C_RZMQ: RGBColor = RGBColor(74, 222, 128);
+pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 
 // ── formatting ─────────────────────────────────────────────────
 
@@ -108,6 +113,16 @@ pub(crate) fn nice_step(max_val: f64, target_lines: usize) -> f64 {
         }
     }
     mag * 10.0
+}
+
+pub(crate) fn nice_axis(max_val: f64, target_lines: usize) -> (f64, usize) {
+    let step = nice_step(max_val, target_lines);
+    if max_val <= 0.0 {
+        return (step * target_lines as f64, target_lines);
+    }
+
+    let ticks = (max_val / step).ceil().max(1.0) as usize;
+    (step * ticks as f64, ticks)
 }
 
 // ── hardware detection ─────────────────────────────────────────
@@ -190,14 +205,14 @@ pub(crate) fn postprocess_svg(
     let mut header = format!(
         "\n<text x=\"{mid}\" y=\"17\" text-anchor=\"middle\" \
          font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" \
-         fill=\"#111827\">{title}</text>",
+         fill=\"{TITLE_FILL}\">{title}</text>",
     );
     if let Some(hw) = hw_label {
         write!(
             header,
             "\n<text x=\"{mid}\" y=\"31\" text-anchor=\"middle\" \
              font-family=\"sans-serif\" font-size=\"10\" \
-             fill=\"#9ca3af\">{hw}</text>",
+             fill=\"{MUTED_FILL}\">{hw}</text>",
         )
         .unwrap();
     }
@@ -224,13 +239,9 @@ pub(crate) fn draw_legend_table(
     snd_label: &str,
     rcv_label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style_hdr = ("sans-serif", 11)
-        .into_font()
-        .color(&RGBColor(107, 114, 128));
-    let style_val = ("sans-serif", 11).into_font().color(&RGBColor(55, 65, 81));
-    let style_dim = ("sans-serif", 11)
-        .into_font()
-        .color(&RGBColor(156, 163, 175));
+    let style_hdr = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
+    let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
+    let style_dim = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
 
     let col_swatch = 78;
     let col_name = col_swatch + 20;
@@ -240,8 +251,12 @@ pub(crate) fn draw_legend_table(
     let row_h = 16i32;
 
     table_area.draw_text("threads", &style_hdr, (col_threads, 4))?;
-    table_area.draw_text(snd_label, &style_hdr, (col_snd, 4))?;
-    table_area.draw_text(rcv_label, &style_hdr, (col_rcv, 4))?;
+    if !snd_label.is_empty() {
+        table_area.draw_text(snd_label, &style_hdr, (col_snd, 4))?;
+    }
+    if !rcv_label.is_empty() {
+        table_area.draw_text(rcv_label, &style_hdr, (col_rcv, 4))?;
+    }
 
     let cores = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
 
@@ -263,10 +278,14 @@ pub(crate) fn draw_legend_table(
         table_area.draw_text(&threads, &style_dim, (col_threads, y))?;
 
         if let Some(cd) = cpu.get(imp.key) {
-            if let Some(v) = cd.sender {
+            if !snd_label.is_empty()
+                && let Some(v) = cd.sender
+            {
                 table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_snd, y))?;
             }
-            if let Some(v) = cd.receiver {
+            if !rcv_label.is_empty()
+                && let Some(v) = cd.receiver
+            {
                 table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_rcv, y))?;
             }
         }
@@ -275,6 +294,65 @@ pub(crate) fn draw_legend_table(
 }
 
 // ── data loading ───────────────────────────────────────────────
+
+#[derive(Default)]
+struct CpuAccum {
+    sender_sum: f64,
+    receiver_sum: f64,
+    sender_count: u32,
+    receiver_count: u32,
+}
+
+impl CpuAccum {
+    fn add_sender_pct(&mut self, pct: f64) {
+        self.sender_sum += pct;
+        self.sender_count += 1;
+    }
+
+    fn add_receiver_pct(&mut self, pct: f64) {
+        self.receiver_sum += pct;
+        self.receiver_count += 1;
+    }
+
+    fn add_sender(&mut self, cpu_time: f64, elapsed: f64) {
+        self.add_sender_pct(cpu_time / elapsed * 100.0);
+    }
+
+    fn add_receiver(&mut self, cpu_time: f64, elapsed: f64) {
+        self.add_receiver_pct(cpu_time / elapsed * 100.0);
+    }
+
+    fn into_data(self) -> CpuData {
+        CpuData {
+            sender: (self.sender_count > 0).then(|| self.sender_sum / f64::from(self.sender_count)),
+            receiver: (self.receiver_count > 0)
+                .then(|| self.receiver_sum / f64::from(self.receiver_count)),
+        }
+    }
+}
+
+pub(crate) fn merge_cpu_data<'a>(
+    panel_cpus: impl IntoIterator<Item = &'a BTreeMap<String, CpuData>>,
+) -> BTreeMap<String, CpuData> {
+    let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
+
+    for cpu in panel_cpus {
+        for (name, data) in cpu {
+            let accum = cpu_sums.entry(name.clone()).or_default();
+            if let Some(sender) = data.sender {
+                accum.add_sender_pct(sender);
+            }
+            if let Some(receiver) = data.receiver {
+                accum.add_receiver_pct(receiver);
+            }
+        }
+    }
+
+    cpu_sums
+        .into_iter()
+        .map(|(name, accum)| (name, accum.into_data()))
+        .collect()
+}
 
 pub(crate) fn load_tput(
     kind: &str,
@@ -290,10 +368,9 @@ pub(crate) fn load_tput(
 
     let mut tput: ValMap = BTreeMap::new();
     let mut msgs: ValMap = BTreeMap::new();
-    let mut seen: BTreeMap<(String, u64), usize> = BTreeMap::new();
-    let mut cpu_sums: BTreeMap<String, (f64, f64, u32)> = BTreeMap::new();
+    let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
 
-    for (seq, row) in &rows {
+    for (_, row) in rows {
         if row.transport != transport || row.kind != kind {
             continue;
         }
@@ -306,10 +383,12 @@ pub(crate) fn load_tput(
             continue;
         }
         let key = (row.impl_name.clone(), row.msg_size);
-        if seen.get(&key).is_some_and(|&prev| *seq < prev) {
-            continue;
-        }
-        seen.insert(key, *seq);
+        latest.insert(key, row);
+    }
+
+    let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
+
+    for row in latest.into_values() {
         if let Some(v) = row.mbps {
             tput.entry(row.msg_size)
                 .or_default()
@@ -325,31 +404,21 @@ pub(crate) fn load_tput(
         {
             let e = cpu_sums.entry(row.impl_name.clone()).or_default();
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
-                e.0 += push / elapsed * 100.0;
-                e.2 += 1;
+                e.add_sender(push, elapsed);
             }
             if let Some(pull) = row.pull_cpu_time {
-                e.1 += pull / elapsed * 100.0;
+                e.add_receiver(pull, elapsed);
             } else if let (Some(total), Some(push)) =
                 (row.cpu_time, row.push_cpu_time.or(row.pub_cpu_time))
             {
-                e.1 += (total - push) / elapsed * 100.0;
+                e.add_receiver(total - push, elapsed);
             }
         }
     }
 
     let cpu = cpu_sums
         .into_iter()
-        .map(|(name, (snd, rcv, count))| {
-            let n = f64::from(count.max(1));
-            (
-                name,
-                CpuData {
-                    sender: Some(snd / n),
-                    receiver: Some(rcv / n),
-                },
-            )
-        })
+        .map(|(name, accum)| (name, accum.into_data()))
         .collect();
 
     (tput, msgs, cpu)
@@ -423,10 +492,9 @@ pub(crate) fn load_latency(
     let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
 
     let mut lat: ValMap = BTreeMap::new();
-    let mut seen: BTreeMap<(String, u64), usize> = BTreeMap::new();
-    let mut cpu_sums: BTreeMap<String, (f64, f64, u32)> = BTreeMap::new();
+    let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
 
-    for (seq, row) in &rows {
+    for (_, row) in rows {
         if row.transport != transport || row.kind != "latency" {
             continue;
         }
@@ -437,10 +505,12 @@ pub(crate) fn load_latency(
             continue;
         }
         let key = (row.impl_name.clone(), row.msg_size);
-        if seen.get(&key).is_some_and(|&prev| *seq < prev) {
-            continue;
-        }
-        seen.insert(key, *seq);
+        latest.insert(key, row);
+    }
+
+    let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
+
+    for row in latest.into_values() {
         if let Some(v) = row.p50_us {
             lat.entry(row.msg_size)
                 .or_default()
@@ -451,27 +521,17 @@ pub(crate) fn load_latency(
         {
             let e = cpu_sums.entry(row.impl_name.clone()).or_default();
             if let Some(req) = row.req_cpu_time {
-                e.0 += req / elapsed * 100.0;
-                e.2 += 1;
+                e.add_sender(req, elapsed);
             }
             if let (Some(total), Some(req)) = (row.cpu_time, row.req_cpu_time) {
-                e.1 += (total - req) / elapsed * 100.0;
+                e.add_receiver(total - req, elapsed);
             }
         }
     }
 
     let cpu = cpu_sums
         .into_iter()
-        .map(|(name, (snd, rcv, count))| {
-            let n = f64::from(count.max(1));
-            (
-                name,
-                CpuData {
-                    sender: Some(snd / n),
-                    receiver: Some(rcv / n),
-                },
-            )
-        })
+        .map(|(name, accum)| (name, accum.into_data()))
         .collect();
 
     (lat, cpu)
@@ -581,7 +641,7 @@ pub(crate) fn draw_throughput_dual_panel(
     let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&BACKGROUND_COLOR)?;
     let (chart_area, table_area) = root.split_vertically(chart_h);
     let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
 
@@ -592,8 +652,7 @@ pub(crate) fn draw_throughput_dual_panel(
         .flat_map(|m| m.values())
         .map(|v| v / 1000.0)
         .fold(0.0_f64, f64::max);
-    let gbs_step = nice_step(gbs_raw, n_ticks);
-    let gbs_max = gbs_step * n_ticks as f64;
+    let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, n_ticks);
 
     let msgs_raw = small
         .iter()
@@ -601,14 +660,23 @@ pub(crate) fn draw_throughput_dual_panel(
         .flat_map(|m| m.values())
         .copied()
         .fold(0.0_f64, f64::max);
-    let msgs_step = nice_step(msgs_raw, n_ticks);
-    let msgs_max = msgs_step * n_ticks as f64;
+    let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
 
     if !small.is_empty() {
-        draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks, None)?;
+        draw_msgs_panel(
+            &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
+        )?;
     }
     if !large.is_empty() {
-        draw_gbs_panel(&right_area, &large, &present, tput, gbs_max, n_ticks, None)?;
+        draw_gbs_panel(
+            &right_area,
+            &large,
+            &present,
+            tput,
+            gbs_max,
+            gbs_ticks,
+            None,
+        )?;
     }
 
     draw_legend_table(&table_area, &present, cpu, snd_label, rcv_label)?;
@@ -628,7 +696,10 @@ pub(crate) fn draw_msgs_panel(
     fairness: Option<&FairnessMap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut chart = ChartBuilder::on(area)
-        .caption("small messages (higher is better)", ("sans-serif", 12))
+        .caption(
+            "small messages (higher is better)",
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
+        )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Left, 70)
         .margin_top(36)
@@ -646,8 +717,8 @@ pub(crate) fn draw_msgs_panel(
         })
         .y_labels(n_ticks + 1)
         .y_label_formatter(&|v| fmt_msgs(*v))
-        .y_label_style(("sans-serif", 10))
-        .x_label_style(("sans-serif", 10))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
@@ -692,7 +763,7 @@ pub(crate) fn draw_gbs_panel(
     let mut chart = ChartBuilder::on(area)
         .caption(
             "medium/large messages (higher is better)",
-            ("sans-serif", 12),
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Right, 62)
@@ -711,8 +782,8 @@ pub(crate) fn draw_gbs_panel(
         })
         .y_labels(n_ticks + 1)
         .y_label_formatter(&|v| fmt_gbps(*v))
-        .y_label_style(("sans-serif", 10))
-        .x_label_style(("sans-serif", 10))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
@@ -774,14 +845,14 @@ pub(crate) fn draw_latency_single_panel(
     let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&BACKGROUND_COLOR)?;
     let (chart_area, table_area) = root.split_vertically(chart_h);
 
     let n = sizes.len();
     let mut chart = ChartBuilder::on(&chart_area)
         .caption(
             "p50 round-trip latency (lower is better)",
-            ("sans-serif", 12),
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Left, 60)
@@ -799,8 +870,8 @@ pub(crate) fn draw_latency_single_panel(
                 .map_or(String::new(), |&s| fmt_size(s))
         })
         .y_label_formatter(&|v| fmt_us(*v))
-        .y_label_style(("sans-serif", 10))
-        .x_label_style(("sans-serif", 10))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
@@ -871,7 +942,7 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
     let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&BACKGROUND_COLOR)?;
     let (chart_area, table_area) = root.split_vertically(chart_h);
     let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
 
@@ -882,11 +953,12 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
         .flat_map(|m| m.values())
         .copied()
         .fold(0.0_f64, f64::max);
-    let msgs_step = nice_step(msgs_raw, n_ticks);
-    let msgs_max = msgs_step * n_ticks as f64;
+    let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
 
     if !small.is_empty() {
-        draw_msgs_panel(&left_area, &small, &present, msgs, msgs_max, n_ticks, None)?;
+        draw_msgs_panel(
+            &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
+        )?;
     }
     if !large.is_empty() {
         draw_gbs_panel_log(&right_area, &large, &present, tput)?;
@@ -928,7 +1000,7 @@ fn draw_gbs_panel_log(
     let mut chart = ChartBuilder::on(area)
         .caption(
             "medium/large messages (higher is better)",
-            ("sans-serif", 12),
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Right, 62)
@@ -949,8 +1021,8 @@ fn draw_gbs_panel_log(
             let gbs = 10.0_f64.powf(*v);
             fmt_gbps(gbs)
         })
-        .y_label_style(("sans-serif", 10))
-        .x_label_style(("sans-serif", 10))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
@@ -1042,7 +1114,7 @@ pub(crate) fn draw_multirow_throughput(
     let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&WHITE)?;
+    root.fill(&BACKGROUND_COLOR)?;
 
     let n_ticks = 6usize;
 
@@ -1063,8 +1135,7 @@ pub(crate) fn draw_multirow_throughput(
             .flat_map(|m| m.values())
             .map(|v| v / 1000.0)
             .fold(0.0_f64, f64::max);
-        let gbs_step = nice_step(gbs_raw, n_ticks);
-        let gbs_max = gbs_step * n_ticks as f64;
+        let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, n_ticks);
 
         let msgs_raw = small
             .iter()
@@ -1072,13 +1143,12 @@ pub(crate) fn draw_multirow_throughput(
             .flat_map(|m| m.values())
             .copied()
             .fold(0.0_f64, f64::max);
-        let msgs_step = nice_step(msgs_raw, n_ticks);
-        let msgs_max = msgs_step * n_ticks as f64;
+        let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
 
         let row_fair = fairness.and_then(|f| f.get(idx).copied());
         if !small.is_empty() && msgs_max > 0.0 {
             draw_msgs_panel(
-                &left_area, &small, &present, msgs, msgs_max, n_ticks, row_fair,
+                &left_area, &small, &present, msgs, msgs_max, msgs_ticks, row_fair,
             )?;
         }
         if !large.is_empty() && gbs_max > 0.0 {
@@ -1088,7 +1158,7 @@ pub(crate) fn draw_multirow_throughput(
                 &present,
                 tput,
                 gbs_max,
-                n_ticks,
+                gbs_ticks,
                 row_fair,
             )?;
         }
@@ -1128,7 +1198,7 @@ fn postprocess_multirow_svg(
             extra,
             "\n<text x=\"{mid}\" y=\"{y}\" text-anchor=\"middle\" \
              font-family=\"sans-serif\" font-size=\"13\" font-weight=\"bold\" \
-             fill=\"#111827\">{label}</text>",
+             fill=\"{TITLE_FILL}\">{label}</text>",
         )
         .unwrap();
     }

@@ -200,17 +200,15 @@ impl FallbackReceiver {
     pub(crate) async fn recv(&self) -> Option<Message> {
         loop {
             let notified = self.inner.data_signal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(msg) = self.try_pop() {
                 return Some(msg);
             }
             if self.inner.queue.is_closed() && self.inner.queue.is_empty() {
                 return None;
             }
-            tokio::select! {
-                biased;
-                () = notified => {}
-                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-            }
+            notified.await;
         }
     }
 }

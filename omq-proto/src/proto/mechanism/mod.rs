@@ -2,7 +2,7 @@
 //!
 //! Each mechanism runs a small state machine that consumes [`Command`]s and
 //! may emit more. When the peer's properties have been accepted, the
-//! mechanism returns [`MechanismStep::Complete`] and the [`Connection`]
+//! mechanism returns `MechanismStep::Complete` and the [`crate::proto::Connection`]
 //! transitions to `Ready`.
 
 #[cfg(feature = "curve")]
@@ -23,7 +23,7 @@ pub mod plain;
 #[cfg(feature = "plain")]
 pub(crate) use plain::PlainMechanism;
 
-/// Security-mechanism configuration passed to [`Connection::new`] and
+/// Security-mechanism configuration passed to [`crate::proto::Connection::new`] and
 /// stored in [`Options`](crate::options::Options). NULL is the default;
 /// CURVE is available behind the `curve` feature.
 #[derive(Clone, Debug, Default)]
@@ -348,7 +348,7 @@ pub enum FrameTransform {
 #[cfg(feature = "curve")]
 impl FrameTransform {
     /// Encrypt all parts of a message, returning `(flags, encrypted_payload)`
-    /// pairs ready for [`Connection::emit_encrypted_frames`]. Advances the
+    /// pairs ready for [`crate::proto::Connection::emit_encrypted_frames`]. Advances the
     /// internal counter. The caller must hold `&mut self` exclusively.
     pub fn encrypt_message(
         &mut self,

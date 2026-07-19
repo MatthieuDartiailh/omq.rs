@@ -264,8 +264,10 @@ async fn run_pub(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usi
     if peers > 0 {
         wait_for_subscribes(&pub_, monitor, peers).await;
     }
-    wait_for_start_barrier().await;
     let payload = bench_payload(size);
+    wait_for_warmup_barrier().await;
+    run_push_warmup(&pub_, &payload).await;
+    wait_for_start_barrier().await;
     if payload.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
         loop {
             pub_.send(Message::from_slice(&payload)).await.unwrap();
@@ -834,8 +836,26 @@ async fn run_multi_sub(
         sockets.push(s);
     }
 
+    wait_for_warmup_barrier().await;
+    let warmup_deadline = Instant::now()
+        + std::env::var("OMQ_BENCH_WARMUP_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(Duration::ZERO, Duration::from_millis);
+    let mut warmup_handles = Vec::with_capacity(socket_count);
+    for sock in &sockets {
+        let sock = sock.clone();
+        warmup_handles.push(tokio::spawn(async move {
+            while Instant::now() < warmup_deadline {
+                while sock.try_recv().is_ok() {}
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+    for h in warmup_handles {
+        let _ = h.await;
+    }
     wait_for_start_barrier().await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let counters: Vec<_> = (0..socket_count)
         .map(|_| std::sync::Arc::new(AtomicU64::new(0)))
