@@ -1090,9 +1090,11 @@ async fn drain_transmit_slot<W: AsyncWrite + Unpin>(
     arena_buf: &mut Vec<u8>,
     writer: &mut W,
 ) -> io::Result<()> {
-    // Fast path: all content is in the FrameBuffer arena (inline
-    // messages). Copy into the reusable staging buffer and write
-    // directly, preserving the arena capacity.
+    // NOTE: copy arena bytes into a reusable owned buffer before awaiting the
+    // write. The slot mutex guards the arena borrow, so writing directly from
+    // arena_bytes() would hold the lock across `.await`.
+    // Fast path: all content is in the FrameBuffer arena (inline messages).
+    // Preserve the arena capacity while releasing the slot lock for IO.
     arena_buf.clear();
     if let Some(drain) = slot.try_drain_arena_only(arena_buf) {
         if !arena_buf.is_empty() {
