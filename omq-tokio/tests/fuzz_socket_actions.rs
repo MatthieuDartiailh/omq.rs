@@ -12,14 +12,14 @@
 //!
 //! Set `OMQ_FUZZ_SEED` to reproduce a specific run.
 
+mod test_support;
+
 use std::time::Duration;
 
 use bytes::Bytes;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
 
-#[cfg(unix)]
-use omq_tokio::IpcPath;
 use omq_tokio::{Endpoint, Message, OnMute, Options, Socket, SocketType};
 
 fn rng() -> StdRng {
@@ -52,10 +52,7 @@ fn random_inproc(rng: &mut StdRng) -> Endpoint {
 #[cfg(unix)]
 fn random_ipc(rng: &mut StdRng) -> Endpoint {
     let id: u64 = rng.random();
-    Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-fuzz-{}-{id:x}",
-        std::process::id()
-    )))
+    test_support::ipc_endpoint(&format!("fuzz-{id:x}"))
 }
 
 #[cfg(not(unix))]

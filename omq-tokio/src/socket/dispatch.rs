@@ -25,62 +25,27 @@ use crate::engine::signal::DataSignal;
 #[derive(Debug, Clone)]
 pub(crate) struct DirectTcpWriter {
     stream: Arc<Mutex<std::net::TcpStream>>,
-    pending: Arc<Mutex<Vec<u8>>>,
-    scratch: Arc<Mutex<Vec<u8>>>,
 }
 
 impl DirectTcpWriter {
     pub(crate) fn new(stream: std::net::TcpStream) -> Self {
         Self {
             stream: Arc::new(Mutex::new(stream)),
-            pending: Arc::new(Mutex::new(Vec::new())),
-            scratch: Arc::new(Mutex::new(Vec::with_capacity(4096))),
         }
     }
 
-    pub(crate) fn try_write(&self, bytes: &[u8]) -> io::Result<bool> {
-        let mut pending = self.pending.lock().expect("direct writer pending");
-        if !pending.is_empty() {
-            let n = self
-                .stream
-                .lock()
-                .expect("direct writer stream")
-                .write(&pending)?;
-            pending.drain(..n);
-            if !pending.is_empty() {
-                return Ok(false);
-            }
+    pub(crate) fn try_write(&self, bytes: &[u8]) -> io::Result<usize> {
+        match self
+            .stream
+            .lock()
+            .expect("direct writer stream")
+            .write(bytes)
+        {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "tcp write")),
+            Ok(n) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(e) => Err(e),
         }
-        let mut offset = 0;
-        while offset < bytes.len() {
-            match self
-                .stream
-                .lock()
-                .expect("direct writer stream")
-                .write(&bytes[offset..])
-            {
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "tcp write")),
-                Ok(n) => offset += n,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    pending.extend_from_slice(&bytes[offset..]);
-                    return Ok(false);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(true)
-    }
-
-    pub(crate) fn try_write_buffer(
-        &self,
-        fill: impl FnOnce(&mut Vec<u8>) -> bool,
-    ) -> io::Result<bool> {
-        let mut scratch = self.scratch.lock().expect("direct writer scratch");
-        scratch.clear();
-        if !fill(&mut scratch) {
-            return Ok(true);
-        }
-        self.try_write(&scratch)
     }
 }
 

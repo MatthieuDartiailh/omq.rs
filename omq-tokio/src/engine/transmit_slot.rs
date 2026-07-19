@@ -5,6 +5,7 @@
 // in-flight message may still be in the inbox while the next message
 // takes the wire slot fast path and reaches the wire first.
 
+use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -262,6 +263,53 @@ impl PeerTransmitSlot {
             cb(self.peer_id);
         }
         Some(DrainOutcome { space_available })
+    }
+
+    pub(crate) fn try_direct_write_arena_only(
+        &self,
+        direct: &crate::socket::dispatch::DirectTcpWriter,
+    ) -> io::Result<bool> {
+        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if !eq.has_arena_only() {
+            return Ok(false);
+        }
+
+        let n = direct.try_write(eq.arena_bytes())?;
+        if n > 0 {
+            eq.advance_arena(n);
+        }
+        let eq_empty = eq.is_empty();
+        let eq_bytes = eq.total_bytes();
+        drop(eq);
+
+        if eq_empty {
+            self.data_signal.clear();
+            self.queued_msgs.store(0, Ordering::Relaxed);
+        } else {
+            self.data_signal.reschedule();
+        }
+
+        let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
+        let below_lwm = self.is_below_lwm(eq_bytes, queued_msgs);
+        let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
+        if space_available {
+            self.space_available.notify_waiters();
+        }
+        if below_lwm
+            && self
+                .fanout_active
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            && let Some(cb) = self
+                .fanout_reactivation
+                .lock()
+                .expect("transmit_slot fanout_reactivation poisoned")
+                .clone()
+        {
+            cb(self.peer_id);
+        }
+
+        Ok(true)
     }
 
     pub(crate) fn drain(&self, buf: &mut Vec<Bytes>, max_chunks: usize) -> DrainOutcome {

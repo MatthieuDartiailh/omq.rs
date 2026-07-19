@@ -9,36 +9,13 @@ mod test_support;
 
 use std::time::Duration;
 
+#[cfg(unix)]
+use omq_tokio::IpcPath;
 use omq_tokio::options::ReconnectPolicy;
-use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    #[cfg(target_os = "linux")]
-    {
-        Endpoint::Ipc(IpcPath::Abstract(format!(
-            "omq-ipc-test-{name}-{}",
-            std::process::id()
-        )))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Endpoint::Ipc(IpcPath::NamedPipe(format!(
-            "omq-ipc-test-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )))
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("omq-ipc-test-{name}-{}.sock", std::process::id()));
-        Endpoint::Ipc(IpcPath::Filesystem(dir))
-    }
+    test_support::ipc_endpoint(&format!("ipc-{name}"))
 }
 
 #[tokio::test]
@@ -135,8 +112,7 @@ async fn ipc_connect_before_bind() {
 #[cfg(unix)]
 #[tokio::test]
 async fn ipc_socket_file_cleaned_on_close() {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("omq-ipc-cleanup-{}.sock", std::process::id()));
+    let dir = std::path::PathBuf::from(format!("/tmp/omq-ipc-clean-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&dir);
     let ep = Endpoint::Ipc(IpcPath::Filesystem(dir.clone()));
     let path = dir;

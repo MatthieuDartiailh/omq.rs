@@ -22,11 +22,13 @@ pub(crate) trait NotifyHandle: Send + Sync {
 #[cfg(unix)]
 mod unix {
     use super::NotifyHandle;
+    #[cfg(target_os = "linux")]
     use crate::socket::DEFAULT_HWM;
 
     #[derive(Clone, Copy)]
     pub(crate) struct RecvNotify {
-        fd: std::os::unix::io::RawFd,
+        poll_fd: std::os::unix::io::RawFd,
+        signal_fd: std::os::unix::io::RawFd,
     }
 
     // SAFETY: RawFd is just an i32 handle; syscalls are thread-safe.
@@ -36,7 +38,7 @@ mod unix {
     impl RecvNotify {
         #[inline]
         pub(crate) fn signal(self) {
-            if self.fd < 0 {
+            if self.signal_fd < 0 {
                 return;
             }
             #[cfg(target_os = "linux")]
@@ -44,7 +46,7 @@ mod unix {
                 let val: u64 = 1;
                 // SAFETY: fd is a valid eventfd; writing 8 bytes atomically increments.
                 unsafe {
-                    libc::write(self.fd, (&raw const val).cast::<libc::c_void>(), 8);
+                    libc::write(self.signal_fd, (&raw const val).cast::<libc::c_void>(), 8);
                 }
             }
             #[cfg(not(target_os = "linux"))]
@@ -52,13 +54,13 @@ mod unix {
                 let b: u8 = 1;
                 // SAFETY: fd is a valid pipe write end; writing 1 byte signals.
                 unsafe {
-                    libc::write(self.fd, (&raw const b).cast::<libc::c_void>(), 1);
+                    libc::write(self.signal_fd, (&raw const b).cast::<libc::c_void>(), 1);
                 }
             }
         }
 
         pub(crate) fn drain(self) {
-            if self.fd < 0 {
+            if self.poll_fd < 0 {
                 return;
             }
             #[cfg(target_os = "linux")]
@@ -66,7 +68,7 @@ mod unix {
                 let mut buf = 0u64;
                 // SAFETY: fd is a valid eventfd; 8-byte read drains the counter.
                 unsafe {
-                    libc::read(self.fd, (&raw mut buf).cast::<libc::c_void>(), 8);
+                    libc::read(self.poll_fd, (&raw mut buf).cast::<libc::c_void>(), 8);
                 }
             }
             #[cfg(not(target_os = "linux"))]
@@ -75,7 +77,11 @@ mod unix {
                 loop {
                     // SAFETY: fd is a valid pipe read end; draining signal bytes.
                     let n = unsafe {
-                        libc::read(self.fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
+                        libc::read(
+                            self.poll_fd,
+                            buf.as_mut_ptr().cast::<libc::c_void>(),
+                            buf.len(),
+                        )
                     };
                     if n <= 0 {
                         break;
@@ -85,11 +91,11 @@ mod unix {
         }
 
         pub(crate) fn wait_for_readable(self, timeout_ms: std::os::raw::c_int) -> bool {
-            if self.fd < 0 {
+            if self.poll_fd < 0 {
                 return false;
             }
             let mut pfd = libc::pollfd {
-                fd: self.fd,
+                fd: self.poll_fd,
                 events: libc::POLLIN,
                 revents: 0,
             };
@@ -273,7 +279,27 @@ mod unix {
         }
 
         fn recv_notifier(&self) -> RecvNotify {
-            RecvNotify { fd: self.recv_fd() }
+            #[cfg(target_os = "linux")]
+            {
+                let fd = self.recv_fd();
+                RecvNotify {
+                    poll_fd: fd,
+                    signal_fd: fd,
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                self.0.as_ref().map_or(
+                    RecvNotify {
+                        poll_fd: -1,
+                        signal_fd: -1,
+                    },
+                    |u| RecvNotify {
+                        poll_fd: u.recv_read,
+                        signal_fd: u.recv_write,
+                    },
+                )
+            }
         }
     }
 

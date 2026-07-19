@@ -1,7 +1,7 @@
 //! Fast local performance gate for the core TCP paths.
 //!
 //! Thresholds are read from `.perf_hw`, which is intentionally ignored.
-//! Without that file, this command reports measurements but does not fail.
+//! Without that file, this command runs a smaller smoke gate.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +22,18 @@ struct Sample {
     unit: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ThresholdMode {
+    Hardware,
+    Smoke,
+}
+
+#[derive(Debug)]
+struct ThresholdConfig {
+    mode: ThresholdMode,
+    values: HashMap<String, f64>,
+}
+
 fn payload(size: usize) -> Message {
     let bytes = vec![0x5a; size];
     if size <= omq_tokio::message::MAX_INLINE_MESSAGE {
@@ -39,9 +51,21 @@ fn inproc_endpoint() -> Endpoint {
     "inproc://perf-gate".parse().expect("valid inproc endpoint")
 }
 
-fn read_thresholds() -> HashMap<String, f64> {
+fn smoke_thresholds() -> HashMap<String, f64> {
+    HashMap::from([
+        ("reqrep_ct.p50_256b_us".to_string(), 1_000.0),
+        ("pushpull_1io.16b_msgs_s".to_string(), 1_000_000.0),
+        ("pubsub_1io.16b_msgs_s".to_string(), 500_000.0),
+        ("inproc_pushpull_1io.16b_msgs_s".to_string(), 1_000_000.0),
+    ])
+}
+
+fn read_thresholds() -> ThresholdConfig {
     let Ok(contents) = std::fs::read_to_string(".perf_hw") else {
-        return HashMap::new();
+        return ThresholdConfig {
+            mode: ThresholdMode::Smoke,
+            values: smoke_thresholds(),
+        };
     };
     let mut section = String::new();
     let mut thresholds = HashMap::new();
@@ -61,7 +85,14 @@ fn read_thresholds() -> HashMap<String, f64> {
             thresholds.insert(format!("{section}.{}", key.trim()), value);
         }
     }
-    thresholds
+    ThresholdConfig {
+        mode: ThresholdMode::Hardware,
+        values: thresholds,
+    }
+}
+
+fn should_measure(name: &str, config: &ThresholdConfig) -> bool {
+    config.mode == ThresholdMode::Hardware || config.values.contains_key(name)
 }
 
 async fn reqrep_latency() -> f64 {
@@ -291,50 +322,62 @@ fn verify(sample: &Sample, thresholds: &HashMap<String, f64>) -> bool {
 async fn main() {
     let thresholds = read_thresholds();
     let mut ok = true;
-    let latency = reqrep_latency().await;
-    ok &= verify(
-        &Sample {
-            name: "reqrep_ct.p50_256b_us".to_string(),
-            value: latency,
-            unit: "us",
-        },
-        &thresholds,
-    );
+    let name = "reqrep_ct.p50_256b_us";
+    if should_measure(name, &thresholds) {
+        let latency = reqrep_latency().await;
+        ok &= verify(
+            &Sample {
+                name: name.to_string(),
+                value: latency,
+                unit: "us",
+            },
+            &thresholds.values,
+        );
+    }
     for io_threads in [1, 2] {
         for (size, suffix) in [(16, "16b"), (1024, "1k"), (16 * 1024, "16k")] {
-            let value = pushpull(size, io_threads, tcp_zero()).await;
-            ok &= verify(
-                &Sample {
-                    name: format!("pushpull_{io_threads}io.{suffix}_msgs_s"),
-                    value,
-                    unit: "msg/s",
-                },
-                &thresholds,
-            );
+            let name = format!("pushpull_{io_threads}io.{suffix}_msgs_s");
+            if should_measure(&name, &thresholds) {
+                let value = pushpull(size, io_threads, tcp_zero()).await;
+                ok &= verify(
+                    &Sample {
+                        name,
+                        value,
+                        unit: "msg/s",
+                    },
+                    &thresholds.values,
+                );
+            }
         }
         for (size, suffix) in [(16, "16b"), (4096, "4k")] {
-            let value = pubsub(size, io_threads).await;
-            ok &= verify(
-                &Sample {
-                    name: format!("pubsub_{io_threads}io.{suffix}_msgs_s"),
-                    value,
-                    unit: "msg/s",
-                },
-                &thresholds,
-            );
+            let name = format!("pubsub_{io_threads}io.{suffix}_msgs_s");
+            if should_measure(&name, &thresholds) {
+                let value = pubsub(size, io_threads).await;
+                ok &= verify(
+                    &Sample {
+                        name,
+                        value,
+                        unit: "msg/s",
+                    },
+                    &thresholds.values,
+                );
+            }
         }
     }
-    let value = pushpull(16, 1, inproc_endpoint()).await;
-    ok &= verify(
-        &Sample {
-            name: "inproc_pushpull_1io.16b_msgs_s".to_string(),
-            value,
-            unit: "msg/s",
-        },
-        &thresholds,
-    );
-    if thresholds.is_empty() {
-        eprintln!("warning: .perf_hw missing; measurements not threshold-checked");
+    let name = "inproc_pushpull_1io.16b_msgs_s";
+    if should_measure(name, &thresholds) {
+        let value = pushpull(16, 1, inproc_endpoint()).await;
+        ok &= verify(
+            &Sample {
+                name: name.to_string(),
+                value,
+                unit: "msg/s",
+            },
+            &thresholds.values,
+        );
+    }
+    if thresholds.mode == ThresholdMode::Smoke {
+        eprintln!("warning: .perf_hw missing; using smoke thresholds");
     }
     if !ok {
         std::process::exit(1);

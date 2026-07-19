@@ -30,18 +30,9 @@ async fn bind_lz4(sock: &Socket) -> u16 {
 }
 
 async fn wait_handshake(sock: &Socket) {
-    let mut mon = sock.monitor();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match mon.recv().await {
-                Ok(MonitorEvent::HandshakeSucceeded { .. }) => return,
-                Ok(_) => {}
-                Err(e) => panic!("monitor closed before handshake: {e:?}"),
-            }
-        }
-    })
-    .await
-    .expect("handshake did not complete within 5s");
+    sock.wait_connected(1, Duration::from_secs(5))
+        .await
+        .expect("handshake did not complete within 5s");
 }
 
 // ---- ROUTER / DEALER ----

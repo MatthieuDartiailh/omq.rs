@@ -8,8 +8,6 @@ use std::time::Duration;
 mod test_support;
 
 use bytes::Bytes;
-#[cfg(unix)]
-use omq_proto::endpoint::IpcPath;
 use omq_tokio::endpoint::Host;
 use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
@@ -49,14 +47,7 @@ fn inproc_ep(name: &str) -> Endpoint {
 
 #[cfg(unix)]
 fn ipc_ep(name: &str) -> Endpoint {
-    Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-cbb-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )))
+    test_support::ipc_endpoint(&format!("cbb-{name}"))
 }
 
 const TIMEOUT: Duration = Duration::from_secs(5);

@@ -3,6 +3,8 @@
 
 #![cfg(feature = "plain")]
 
+mod test_support;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -13,11 +15,7 @@ use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 // IPC on Unix, TCP :0 on Windows.
 #[cfg(unix)]
 fn auth_ep(name: &str) -> Endpoint {
-    use omq_tokio::IpcPath;
-    Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-plain-{name}-{}",
-        std::process::id()
-    )))
+    test_support::ipc_endpoint(&format!("plain-{name}"))
 }
 
 #[cfg(not(unix))]

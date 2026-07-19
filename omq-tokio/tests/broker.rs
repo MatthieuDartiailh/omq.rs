@@ -8,6 +8,8 @@
 //! Message envelope at the DEALER/REP level: [`client_id` | "" | body]
 //! REP delivers [body] to the application and re-wraps on reply.
 
+mod test_support;
+
 use std::net::{Ipv4Addr, TcpListener};
 use std::time::Duration;
 
@@ -41,14 +43,7 @@ fn lz4_tcp(port: u16) -> Endpoint {
 
 #[cfg(unix)]
 fn ipc(name: &str) -> Endpoint {
-    Endpoint::Ipc(omq_proto::endpoint::IpcPath::Abstract(format!(
-        "omq-broker-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )))
+    test_support::ipc_endpoint(&format!("broker-{name}"))
 }
 
 #[tokio::test]

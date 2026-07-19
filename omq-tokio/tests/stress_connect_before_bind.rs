@@ -6,8 +6,6 @@ mod test_support;
 use std::time::Duration;
 
 use bytes::Bytes;
-#[cfg(unix)]
-use omq_tokio::endpoint::IpcPath;
 use omq_tokio::{Endpoint, Message, Options, ReconnectPolicy, Socket, SocketType};
 
 const DEFAULT_ROUNDS: usize = 40;
@@ -42,11 +40,7 @@ fn inproc_ep(tag: &str, round: usize) -> Endpoint {
 
 #[cfg(unix)]
 fn ipc_ep(tag: &str, round: usize) -> Endpoint {
-    Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-stress-cbb-{tag}-{round}-{}-{}",
-        std::process::id(),
-        rand::random::<u32>(),
-    )))
+    test_support::ipc_endpoint(&format!("stress-cbb-{tag}-{round}"))
 }
 
 enum Transport {

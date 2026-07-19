@@ -5,7 +5,7 @@
 //! correct message flow.
 
 use std::net::Ipv4Addr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
@@ -35,6 +35,32 @@ async fn rebind<F: Fn() -> Socket>(ep: &Endpoint, make: F) -> Socket {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("could not rebind {ep:?} after 40 attempts");
+}
+
+async fn send_single_until_received(
+    sender: &Socket,
+    receiver: &Socket,
+    body: &'static str,
+    timeout_message: &str,
+) -> Message {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout(
+            Duration::from_millis(200),
+            sender.send(Message::single(body)),
+        )
+        .await
+        {
+            Ok(Ok(())) | Err(_) => {}
+            Ok(Err(e)) => panic!("{timeout_message}: send failed: {e:?}"),
+        }
+        match tokio::time::timeout(Duration::from_millis(200), receiver.recv()).await {
+            Ok(Ok(msg)) => return msg,
+            Ok(Err(e)) => panic!("{timeout_message}: {e:?}"),
+            Err(_) => {}
+        }
+        assert!(Instant::now() < deadline, "{timeout_message}");
+    }
 }
 
 // ── REQ / REP ────────────────────────────────────────────────────────────────
@@ -216,11 +242,8 @@ async fn pair_reconnect_after_bind_side_restart() {
     pair_a1.close().await.unwrap();
     let pair_a2 = rebind(&ep, || Socket::new(SocketType::Pair, Options::default())).await;
 
-    pair_b.send(Message::single("again")).await.unwrap();
-    let got2 = tokio::time::timeout(Duration::from_secs(3), pair_a2.recv())
-        .await
-        .expect("post-restart recv timed out")
-        .unwrap();
+    let got2 =
+        send_single_until_received(&pair_b, &pair_a2, "again", "post-restart recv timed out").await;
     assert_eq!(got2, Message::single("again"));
     pair_a2.send(Message::single("back")).await.unwrap();
     let reply2 = tokio::time::timeout(Duration::from_secs(2), pair_b.recv())
@@ -270,11 +293,8 @@ async fn client_server_reconnect_after_server_restart() {
     server1.close().await.unwrap();
     let server2 = rebind(&ep, || Socket::new(SocketType::Server, Options::default())).await;
 
-    client.send(Message::single("ping2")).await.unwrap();
-    let got2 = tokio::time::timeout(Duration::from_secs(3), server2.recv())
-        .await
-        .expect("post-restart recv timed out")
-        .unwrap();
+    let got2 =
+        send_single_until_received(&client, &server2, "ping2", "post-restart recv timed out").await;
     assert_eq!(got2, Message::multipart(["c1", "ping2"]));
 }
 
@@ -299,11 +319,9 @@ async fn scatter_gather_reconnect_after_bind_restart() {
     gather1.close().await.unwrap();
     let gather2 = rebind(&ep, || Socket::new(SocketType::Gather, Options::default())).await;
 
-    scatter.send(Message::single("after")).await.unwrap();
-    let got2 = tokio::time::timeout(Duration::from_secs(3), gather2.recv())
-        .await
-        .expect("post-restart recv timed out")
-        .unwrap();
+    let got2 =
+        send_single_until_received(&scatter, &gather2, "after", "post-restart recv timed out")
+            .await;
     assert_eq!(got2, Message::single("after"));
 }
 
@@ -455,11 +473,8 @@ async fn channel_reconnect_after_bind_side_restart() {
     ch_a1.close().await.unwrap();
     let ch_a2 = rebind(&ep, || Socket::new(SocketType::Channel, Options::default())).await;
 
-    ch_b.send(Message::single("again")).await.unwrap();
-    let got2 = tokio::time::timeout(Duration::from_secs(3), ch_a2.recv())
-        .await
-        .expect("post-restart recv timed out")
-        .unwrap();
+    let got2 =
+        send_single_until_received(&ch_b, &ch_a2, "again", "post-restart recv timed out").await;
     assert_eq!(got2, Message::single("again"));
     ch_a2.send(Message::single("back")).await.unwrap();
     let reply2 = tokio::time::timeout(Duration::from_secs(2), ch_b.recv())

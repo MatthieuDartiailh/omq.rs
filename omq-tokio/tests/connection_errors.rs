@@ -93,13 +93,9 @@ async fn server_survives_mid_session_abrupt_drop() {
 async fn reconnect_after_ipc_peer_restarts() {
     // Dialer must reconnect when the IPC listener goes away and a new
     // one appears at the same path.
-    use omq_tokio::IpcPath;
     use std::time::Instant;
 
-    let ep = Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-test-ipc-{}",
-        std::process::id()
-    )));
+    let ep = test_support::ipc_endpoint("ipc-reconnect");
 
     let pull1 = Socket::new(SocketType::Pull, Options::default());
     pull1.bind(ep.clone()).await.unwrap();

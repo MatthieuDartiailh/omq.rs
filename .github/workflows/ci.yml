@@ -15,6 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      test_matrix: ${{ steps.matrix.outputs.test_matrix }}
+      os_matrix: ${{ steps.matrix.outputs.os_matrix }}
+      run_pyomq: ${{ steps.matrix.outputs.run_pyomq }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -28,6 +31,11 @@ jobs:
               - '!**/*.svg'
               - '!**/*.py'
               - '!doc/**'
+      - id: matrix
+        run: |
+          echo 'test_matrix={"include":[{"toolchain":"stable","os":"ubuntu-latest"},{"toolchain":"stable","os":"ubuntu-24.04-arm"},{"toolchain":"stable","os":"macos-15-intel"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
+          echo 'os_matrix={"os":["ubuntu-latest","macos-15-intel","macos-15","windows-latest"]}' >> "$GITHUB_OUTPUT"
+          echo 'run_pyomq=true' >> "$GITHUB_OUTPUT"
 
   test:
     name: cargo test (${{ matrix.toolchain }}, ${{ matrix.os }})
@@ -36,17 +44,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - toolchain: stable
-            os: ubuntu-latest
-          - toolchain: stable
-            os: ubuntu-24.04-arm
-          - toolchain: "1.93"
-            os: ubuntu-latest
-          - toolchain: stable
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
+      matrix: ${{ fromJSON(needs.changes.outputs.test_matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -54,7 +52,12 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --no-fail-fast
+      - name: cargo test
+        if: runner.os != 'macOS'
+        run: cargo test --workspace --no-fail-fast
+      - name: cargo test (macOS)
+        if: runner.os == 'macOS'
+        run: cargo test --workspace --no-fail-fast -- --test-threads=1
 
   encryption:
     name: encryption (curve, ${{ matrix.os }})
@@ -63,13 +66,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p omq-tokio --features curve
+      - name: cargo test (curve)
+        if: runner.os != 'macOS'
+        run: cargo test -p omq-tokio --features curve
+      - name: cargo test (curve, macOS)
+        if: runner.os == 'macOS'
+        run: cargo test -p omq-tokio --features curve -- --test-threads=1
 
   compression:
     name: compression (${{ matrix.os }})
@@ -78,13 +85,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p omq-tokio --features lz4
+      - name: cargo test (lz4)
+        if: runner.os != 'macOS'
+        run: cargo test -p omq-tokio --features lz4
+      - name: cargo test (lz4, macOS)
+        if: runner.os == 'macOS'
+        run: cargo test -p omq-tokio --features lz4 -- --test-threads=1
 
   lint:
     name: fmt + clippy
@@ -93,12 +104,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-        with: { components: rustfmt, clippy }
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - name: clippy (Linux)
@@ -107,11 +118,14 @@ jobs:
       - name: clippy (Windows)
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets --all-features
+      - name: clippy (macOS)
+        if: runner.os == 'macOS'
+        run: cargo clippy --workspace --all-targets --all-features
 
   pyomq:
     name: pyomq
     needs: [changes, lint]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_pyomq == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

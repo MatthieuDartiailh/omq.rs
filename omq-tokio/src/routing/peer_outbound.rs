@@ -59,10 +59,8 @@ impl PeerOutbound {
                     }
                     TryFrameResult::Ok if direct.is_some() => {
                         let direct = direct.as_ref().unwrap();
-                        match direct
-                            .try_write_buffer(|buf| slot.try_drain_arena_only(buf).is_some())
-                        {
-                            // External frame entries remain queued for the IO
+                        match slot.try_direct_write_arena_only(direct) {
+                            // Gather-framed entries remain queued for the IO
                             // driver; false does not mean the slot was full.
                             Ok(true | false) => TryFrameResult::Ok,
                             Err(_) => TryFrameResult::Dead,

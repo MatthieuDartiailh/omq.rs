@@ -13,10 +13,10 @@
 //! `handle_peer_event(HandshakeSucceeded)` covers them once they
 //! transition to Ready.
 
+mod test_support;
+
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use omq_tokio::IpcPath;
 use omq_tokio::{Endpoint, OnMute, Options, Socket, SocketType};
 
 fn inproc(name: &str) -> Endpoint {
@@ -25,10 +25,7 @@ fn inproc(name: &str) -> Endpoint {
 
 #[cfg(unix)]
 fn ipc_ep(name: &str) -> Endpoint {
-    Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-subside-{name}-{}",
-        std::process::id()
-    )))
+    test_support::ipc_endpoint(&format!("subside-{name}"))
 }
 
 fn tcp_ep() -> Endpoint {
