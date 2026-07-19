@@ -13,6 +13,10 @@ uv pip install 'pyomq[test]'   # adds pytest, pyzmq for the interop suite
 The published wheel includes optional features: plain, curve, lz4.
 Use `pyomq.has("curve")` at runtime to check availability.
 
+Published wheels currently target Linux. Other platforms can build from
+sdist when the local Rust/Python toolchain supports them. Windows pyomq
+support is not complete on `main` yet.
+
 ## Usage
 
 ```python

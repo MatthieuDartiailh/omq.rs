@@ -47,7 +47,19 @@ Full sweep:
 ```sh
 ./scripts/test-all.sh
 OMQ_SKIP_PYOMQ=1 ./scripts/test-all.sh
+OMQ_SKIP_PERF=1 ./scripts/test-all.sh
 ```
+
+The full sweep runs `omq_perf_verify` locally. With `.perf_hw` present,
+it uses machine-specific hardware thresholds. Without `.perf_hw`, it
+runs a smaller smoke gate for obvious TCP/inproc regressions. The perf
+gate skips when `CI` or `GITHUB_ACTIONS` is set.
+
+GitHub CI runs `cargo fmt` and clippy on Linux, macOS Intel, macOS
+ARM64, and Windows. It runs workspace tests on Linux x86_64, Linux
+ARM64, macOS Intel, macOS ARM64, Windows, and MSRV 1.93 on Linux.
+Feature jobs cover CURVE and LZ4 on Linux, macOS Intel, macOS ARM64,
+and Windows. macOS test jobs run serially with `--test-threads=1`.
 
 ## Fuzz Tests
 

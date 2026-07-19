@@ -36,10 +36,13 @@ p50_256b_us=50
 [pubsub_2io]
 16b_msgs_s=1100000
 4k_msgs_s=430000
+
+[inproc_pushpull_1io]
+16b_msgs_s=1000000
 ```
 
-Use measured local baselines for the ten throughput values. A missing
-file runs a smaller smoke gate with loose thresholds:
+Use measured local baselines for the eleven throughput values. A
+missing file runs a smaller smoke gate with loose thresholds:
 
 ```text
 [reqrep_ct]
@@ -55,5 +58,5 @@ p50_256b_us=1000
 16b_msgs_s=1000000
 ```
 
-`scripts/test-all.sh` runs the verifier locally and skips it when `CI`
-or `GITHUB_ACTIONS` is set.
+`scripts/test-all.sh` runs the verifier locally, skips it when `CI` or
+`GITHUB_ACTIONS` is set, and can skip it locally with `OMQ_SKIP_PERF=1`.

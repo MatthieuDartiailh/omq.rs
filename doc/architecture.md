@@ -99,9 +99,10 @@ events, `send_message` queues frames, and `poll_transmit` exposes wire bytes.
 WS/WSS, reconnect supervisors, monitor events, socket actors, connection
 drivers, and hot-path send/recv shortcuts.
 
-`omq-libzmq` exposes a libzmq-compatible C ABI. `bindings/pyomq` exposes sync
-and asyncio Python APIs through PyO3. `yring` and `blume` provide hot-path
-queues used by inproc and routing.
+`omq-libzmq` exposes a libzmq-compatible C ABI. `omq-bench` drives
+cross-implementation benchmark peers and SVG chart generation.
+`bindings/pyomq` exposes sync and asyncio Python APIs through PyO3.
+`yring` and `blume` provide hot-path queues used by inproc and routing.
 
 ## Socket Model
 
@@ -166,6 +167,19 @@ flag plus `Notify` that coalesces wakes so only the `false`-to-`true`
 transition fires `notify_one`. The consumer clears the flag before draining,
 then calls `rearm_if_nonempty` to self-wake if data remains. For
 budget-interrupted drains, `reschedule` fires unconditionally.
+
+Latency-profile TCP peers also carry a stateless `DirectTcpWriter` with a
+duplicated nonblocking descriptor. After `PeerOutbound` encodes an arena-only
+message into the peer slot, it may try one direct `write()` from
+`FrameBuffer::arena_bytes()` on the caller side. The writer reports the actual
+byte count. `PeerTransmitSlot` advances the arena by that count and leaves any
+remainder queued under normal `DataSignal` readiness, so partial writes are
+finished by the connection driver and never live in a side buffer.
+
+The async driver has a separate arena-only path. It copies slot arena bytes
+into a reusable owned buffer before `write_all().await`, because the slot mutex
+guards the `arena_bytes()` borrow and must not be held across await. Gather
+entries still use `Bytes` and vectored writes.
 
 CURVE keeps per-connection nonce state, so encrypted traffic uses
 per-connection ordered transforms. CURVE encrypts and decrypts in place

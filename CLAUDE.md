@@ -2,7 +2,7 @@
 
 ## Workspace layout
 
-Five-crate Cargo workspace; `bindings/` is excluded and built
+Six-crate Cargo workspace; `bindings/` is excluded and built
 out-of-tree (maturin etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
@@ -10,12 +10,16 @@ out-of-tree (maturin etc.).
   handshakes (NULL / PLAIN / CURVE), compression transforms
   (lz4), endpoint parsing, options, subscription matcher. No async, no I/O.
 - **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
-  Works on Linux and macOS (and likely other mio targets).
+  Works on Linux, macOS, and Windows.
 - **`blume`** -- batching MPSC channel for same-thread inproc delivery.
 - **`yring`** -- bounded SPSC ring buffer for inproc transport based on
   libzmq's `ypipe_t`. One atomic per batch.
-- **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq.so` /
-  `.a`). Drop-in replacement: ships `zmq.h`, implements the `zmq_*` API.
+- **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq`
+  dynamic/static library). Drop-in replacement: ships `zmq.h`,
+  implements the `zmq_*` API.
+- **`omq-bench`** -- benchmark runner and SVG chart generator. Drives
+  cross-implementation peers and reads/writes append-only JSONL data in
+  `~/.cache/omq/`.
 - **`bindings/pyomq`** -- PyO3 wrapper over `omq-tokio`.
 
 `omq-tokio` re-exports `omq-proto`'s public API. Its public `Socket` API
@@ -61,7 +65,10 @@ via `SendSubmitter` (flume MPMC). Per-peer `PeerTransmitSlot`
 (`FrameBuffer` under `std::sync::Mutex`, nanosecond hold): handle
 frames, driver flushes via `DataSignal` select arm. `PeerOutbound`
 enum (`Wire`/`Inbox`) dispatches fan-out/identity/exclusive to
-per-peer slots without pump tasks. Recv bypass: `ConnectionDriver`
+per-peer slots without pump tasks. Latency-profile TCP peers may use
+a stateless `DirectTcpWriter` for one immediate nonblocking write from
+the slot arena; partial writes stay in `PeerTransmitSlot` and are
+flushed by the driver. Recv bypass: `ConnectionDriver`
 pushes straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER
 go through actor for identity routing. PUB fan-out shard workers
 (`ShardWorker`) use split channels: a `yring` control channel
@@ -91,7 +98,8 @@ Quick reference:
 cargo build --workspace
 cargo fmt                                # pre-commit hook checks this
 cargo clippy --workspace --all-targets   # pre-commit hook checks this
-./scripts/test-all.sh                    # full sweep
+./scripts/test-all.sh                    # full sweep + local perf gate
+OMQ_SKIP_PERF=1 ./scripts/test-all.sh    # skip local perf gate
 ```
 
 **HARD RULE:** Clippy must pass under all three configurations before
