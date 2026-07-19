@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-19
+
+### Fixed
+
+- Build PyPI wheels without inheriting the repo-local `target-cpu=native`
+  rustflags, so release artifacts stay portable across Linux CPUs.
+
 ## [0.16.0] - 2026-07-19
 
 ### Fixed
