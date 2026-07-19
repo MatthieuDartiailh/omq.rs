@@ -96,15 +96,16 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 ## Workspace
 
-Six crates, one repo.
+Six Cargo workspace crates plus the Python binding.
 
 | Crate | What it does | Unsafe policy |
 |-------|--------------|---------------|
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions | `#![forbid(unsafe_code)]` |
 | [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows) | `#![forbid(unsafe_code)]` |
-| [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) | Unsafe C ABI boundary |
+| [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq` dynamic/static library) | Unsafe C ABI boundary |
 | [`blume`](blume/) | Batching MPSC channel with swap-drain consumer | `#![forbid(unsafe_code)]` |
 | [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch | Unsafe ring core, Miri-tested |
+| [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator | Bench-only process control and CPU accounting |
 | [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) | PyO3 FFI boundary |
 
 ## Testing
@@ -129,9 +130,10 @@ covered by integration tests. The suite is layered:
 - **Release semver review** through `release-plz`.
 
 ```sh
-./scripts/test-all.sh              # standard sweep
+./scripts/test-all.sh              # standard sweep with local perf gate
 OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 OMQ_SKIP_PYOMQ=1 ./scripts/test-all.sh
+OMQ_SKIP_PERF=1 ./scripts/test-all.sh
 ```
 
 Soak tests are intentionally separate from the full sweep:
@@ -154,18 +156,22 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
 
 ## Platform and requirements
 
-**Linux is the primary platform.** All development, testing, and
-benchmarking happens on Linux. CI is Linux-only for required checks.
+**Linux is the primary development and benchmarking platform.** CI
+required checks cover Linux x86_64, Linux ARM64, macOS Intel, macOS
+ARM64, and Windows. macOS jobs run the Rust tests serially because
+socket/timer timing is more sensitive on hosted runners.
 
-**macOS** should work (`omq-tokio` via mio / kqueue) but is
-experimental. The test suite has not been run on macOS recently.
+**macOS** is covered in CI for both Intel and ARM64 runners.
+`omq-tokio` uses mio / kqueue. `omq-libzmq` uses a pipe-backed
+notification fd for `zmq_poll`/`ZMQ_FD` readiness.
 
-**Windows** support is substantially complete. `omq-tokio` fully
-works with TCP, IPC (named pipes), inproc, UDP, and WebSocket
-transports. Windows CI is required for merge. Known limitations:
+**Windows** is covered in CI. `omq-tokio` supports TCP, IPC named
+pipes, inproc, UDP, and WebSocket transports. `omq-libzmq` builds and
+tests on Windows for the supported C API surface.
 
-- `omq-libzmq` is excluded (Unix-only C API surface).
-- Some tests are flaky (timer-sensitive assertions).
+`pyomq` currently publishes Linux wheels and an sdist. Windows pyomq
+support is separate from the Rust backend and is not complete on
+`main` yet.
 
 Requirements:
 

@@ -3,8 +3,9 @@
 ## Purpose
 
 PyO3 binding for `omq-tokio`. Drop-in pyzmq API for Python: sync
-(`pyomq`) and async (`pyomq.asyncio`). Single stable-ABI wheel
-(`abi3-py39`, Python 3.9+) via maturin. Linux and macOS.
+(`pyomq`) and async (`pyomq.asyncio`). Stable ABI (`abi3-py39`,
+Python 3.9+) via maturin. Release workflow publishes Linux wheels and
+an sdist. Windows pyomq support is pending.
 
 See [`doc/architecture.md`](../../doc/architecture.md) for internals:
 threading model, queue relay, send/recv paths, zero-copy conversions,
