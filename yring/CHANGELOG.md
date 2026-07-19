@@ -7,10 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-07-19
+
+### Added
+
+- `ProducerOwner` for mutex-free single-thread producer access.
+- Loom test covering async drop wake race.
+
+### Fixed
+
+- `ProducerOwner` thread-affinity race: bind access to first caller
+  thread with `OnceLock`.
+- Async drop wake race: recheck consumer shutdown after waker
+  registration.
+
 ### Changed
 
 - Deny `unsafe_op_in_unsafe_fn` lint. All unsafe function bodies now
   require explicit `unsafe` blocks.
+- Rename `prefetch_upto` to `prefetch_up_to`.
+- Remove bounded prefetch API (replaced by size-class draining in
+  `omq-tokio`).
 
 ## [0.3.6] - 2026-07-10
 

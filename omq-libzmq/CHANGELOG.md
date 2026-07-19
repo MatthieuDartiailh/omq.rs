@@ -7,11 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-19
+
+### Added
+
+- Lazy and zero-thread context support.
+
+### Fixed
+
+- Bounded inproc backpressure in the C API layer.
+- REP broker envelopes through byte-stream ROUTER/DEALER proxies preserve
+  all routing frames via `omq-tokio` 0.19.0.
+
 ### Changed
 
 - Deny `unsafe_op_in_unsafe_fn` lint. All unsafe function bodies now
   require explicit `unsafe` blocks.
-- *(deps)* Bump `omq-tokio` to 0.18.0, `yring` to 0.3.7.
+- Port to `Context` API. Force throughput workload profile to avoid
+  REP latency recv sink.
+- *(deps)* Bump `omq-tokio` to 0.19.0, `yring` to 0.3.8.
 
 ## [0.5.1] - 2026-07-10
 
