@@ -31,6 +31,66 @@ async fn push_duplicate_tcp_connect_keeps_separate_pipes() {
 }
 
 #[tokio::test]
+async fn push_duplicate_tcp_connect_weights_round_robin() {
+    const N: usize = 90;
+
+    let pull_a = Socket::new(SocketType::Pull, Options::default());
+    let port_a = test_support::bind_loopback(&pull_a).await;
+    let ep_a = test_support::tcp_loopback(port_a);
+
+    let pull_b = Socket::new(SocketType::Pull, Options::default());
+    let port_b = test_support::bind_loopback(&pull_b).await;
+    let ep_b = test_support::tcp_loopback(port_b);
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(ep_a.clone()).await.unwrap();
+    push.connect(ep_a).await.unwrap();
+    push.connect(ep_b).await.unwrap();
+
+    pull_a
+        .wait_connected(2, Duration::from_secs(1))
+        .await
+        .expect("first pull did not get duplicate pipes");
+    pull_b
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("second pull did not connect");
+    push.wait_connected(3, Duration::from_secs(1))
+        .await
+        .expect("push did not keep three pipes");
+
+    let drain_a = tokio::spawn(async move { drain_until_idle(pull_a).await });
+    let drain_b = tokio::spawn(async move { drain_until_idle(pull_b).await });
+
+    for i in 0..N {
+        push.send(Message::single(format!("weighted-{i}")))
+            .await
+            .unwrap();
+    }
+
+    let count_a = drain_a.await.unwrap();
+    let count_b = drain_b.await.unwrap();
+
+    assert_eq!(count_a + count_b, N, "every message must arrive");
+    assert_eq!(
+        count_a, 60,
+        "first pull should receive two thirds via two pipes"
+    );
+    assert_eq!(
+        count_b, 30,
+        "second pull should receive one third via one pipe"
+    );
+}
+
+async fn drain_until_idle(socket: Socket) -> usize {
+    let mut count = 0;
+    while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), socket.recv()).await {
+        count += 1;
+    }
+    count
+}
+
+#[tokio::test]
 async fn push_pull_single_peer() {
     let ep = inproc_ep("pp-single");
     let pull = Socket::new(SocketType::Pull, Options::default());

@@ -92,3 +92,45 @@ async fn disconnect_after_connect_succeeds() {
         .unwrap();
     assert_eq!(m.part_bytes(0).unwrap(), &b"again"[..]);
 }
+
+#[tokio::test]
+async fn disconnect_after_duplicate_connect_closes_all_pipes() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let ep = pull.bind(tcp_loopback(0)).await.unwrap();
+
+    push.connect(ep.clone()).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
+
+    push.wait_connected(2, Duration::from_secs(1))
+        .await
+        .expect("push did not keep both pipes");
+    pull.wait_connected(2, Duration::from_secs(1))
+        .await
+        .expect("pull did not see both pipes");
+
+    push.disconnect(ep.clone()).await.unwrap();
+    wait_no_connections(&push).await;
+    wait_no_connections(&pull).await;
+
+    let r = push.disconnect(ep.clone()).await;
+    assert!(matches!(r, Err(Error::Unroutable)), "got {r:?}");
+
+    push.connect(ep).await.unwrap();
+    push.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("push did not reconnect one pipe");
+    pull.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("pull did not see reconnected pipe");
+
+    let extra = push.wait_connected(2, Duration::from_millis(250)).await;
+    assert!(extra.is_err(), "duplicate pipe survived disconnect");
+
+    push.send(Message::single("again")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap(), &b"again"[..]);
+}
