@@ -74,7 +74,11 @@ impl Submitter {
             Some(producer) => match producer.try_send(msg) {
                 Ok(()) => Ok(()),
                 Err(SendPipeError::Full(m)) => Err(omq_proto::error::TrySendError::Full(m)),
-                Err(SendPipeError::Closed(_)) => Err(omq_proto::error::TrySendError::Closed),
+                Err(SendPipeError::Closed(m)) => {
+                    *guard = None;
+                    self.peer_ready.notify_waiters();
+                    Err(omq_proto::error::TrySendError::Full(m))
+                }
             },
             None => Err(omq_proto::error::TrySendError::Full(msg)),
         }
@@ -128,5 +132,48 @@ impl ExclusiveSend {
     pub(crate) fn is_drained(&self) -> bool {
         let guard = self.pipe.lock().expect("exclusive pipe");
         guard.as_ref().is_none_or(SendPipeProducer::is_empty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExclusiveSend;
+    use crate::engine::{PeerDriverHandle, send_pipe};
+    use omq_proto::error::TrySendError;
+    use omq_proto::message::Message;
+
+    #[test]
+    fn closed_peer_pipe_is_treated_as_unavailable() {
+        let mut send = ExclusiveSend::new();
+        let submitter = send.submitter();
+        let (tx, rx) = send_pipe(1);
+        drop(rx);
+
+        send.connection_added(
+            1,
+            PeerDriverHandle {
+                inbox: tokio::sync::mpsc::channel(1).0,
+                cancel: tokio_util::sync::CancellationToken::new(),
+                transmit_slot: None,
+                direct_tcp_writer: None,
+                send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
+            },
+        );
+
+        let msg = Message::single("retry");
+        match submitter.try_send(msg) {
+            Err(TrySendError::Full(returned)) => {
+                assert_eq!(returned, Message::single("retry"));
+            }
+            other => panic!("expected retryable full, got {other:?}"),
+        }
+
+        let retry = Message::single("retry");
+        match submitter.try_send(retry) {
+            Err(TrySendError::Full(returned)) => {
+                assert_eq!(returned, Message::single("retry"));
+            }
+            other => panic!("expected no-peer full, got {other:?}"),
+        }
     }
 }
