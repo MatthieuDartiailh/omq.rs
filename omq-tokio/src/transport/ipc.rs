@@ -396,9 +396,12 @@ mod tests {
 
     #[cfg(unix)]
     fn temp_ipc(name: &str) -> Endpoint {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("omq-ipc-{name}-{}.sock", std::process::id()));
-        Endpoint::Ipc(IpcPath::Filesystem(dir))
+        let short_name: String = name.chars().take(8).collect();
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/omq-ipc-{short_name}-{}.sock",
+            std::process::id()
+        ));
+        Endpoint::Ipc(IpcPath::Filesystem(path))
     }
 
     #[cfg(unix)]

@@ -34,16 +34,16 @@ fn ipc_ep(name: &str) -> Endpoint {
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn ipc_ep(name: &str) -> Endpoint {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "omq-tokio-cov-{name}-{}-{}.sock",
+    let short_name: String = name.chars().take(8).collect();
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/omq-cov-{short_name}-{}-{:x}.sock",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    Endpoint::Ipc(IpcPath::Filesystem(dir))
+    Endpoint::Ipc(IpcPath::Filesystem(path))
 }
 
 fn inproc_ep(name: &str) -> Endpoint {

@@ -36,9 +36,9 @@ pub fn ipc_endpoint(name: &str) -> Endpoint {
 
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "omq-test-{name}-{}-{nanos}.sock",
+        let short_name: String = name.chars().take(8).collect();
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/omq-{short_name}-{}-{nanos:x}.sock",
             std::process::id()
         ));
         Endpoint::Ipc(omq_tokio::IpcPath::Filesystem(path))

@@ -35,9 +35,12 @@ fn temp_ipc(name: &str) -> Endpoint {
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("omq-ipc-test-{name}-{}.sock", std::process::id()));
-        Endpoint::Ipc(IpcPath::Filesystem(dir))
+        let short_name: String = name.chars().take(8).collect();
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/omq-ipc-{short_name}-{}.sock",
+            std::process::id()
+        ));
+        Endpoint::Ipc(IpcPath::Filesystem(path))
     }
 }
 
@@ -135,8 +138,7 @@ async fn ipc_connect_before_bind() {
 #[cfg(unix)]
 #[tokio::test]
 async fn ipc_socket_file_cleaned_on_close() {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("omq-ipc-cleanup-{}.sock", std::process::id()));
+    let dir = std::path::PathBuf::from(format!("/tmp/omq-ipc-clean-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&dir);
     let ep = Endpoint::Ipc(IpcPath::Filesystem(dir.clone()));
     let path = dir;
