@@ -77,7 +77,7 @@ Tokio integration mode.
 FEATURES="soak lz4 plain curve ws"
 cargo test -p omq-tokio --features "$FEATURES" --release --no-run
 OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
-  --features "$FEATURES" --release --test soak_peer_churn -- --nocapture
+  --features "$FEATURES" --release --test omq_soak_peer_churn -- --nocapture
 ```
 
 ### pyomq Soak Tests
