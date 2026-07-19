@@ -56,7 +56,12 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --no-fail-fast
+      - name: cargo test
+        if: runner.os != 'macOS'
+        run: cargo test --workspace --no-fail-fast
+      - name: cargo test (macOS)
+        if: runner.os == 'macOS'
+        run: cargo test --workspace --no-fail-fast -- --test-threads=1
 
   encryption:
     name: encryption (curve, ${{ matrix.os }})
@@ -71,7 +76,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p omq-tokio --features curve
+      - name: cargo test (curve)
+        if: runner.os != 'macOS'
+        run: cargo test -p omq-tokio --features curve
+      - name: cargo test (curve, macOS)
+        if: runner.os == 'macOS'
+        run: cargo test -p omq-tokio --features curve -- --test-threads=1
 
   compression:
     name: compression (${{ matrix.os }})
@@ -86,7 +96,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p omq-tokio --features lz4
+      - name: cargo test (lz4)
+        if: runner.os != 'macOS'
+        run: cargo test -p omq-tokio --features lz4
+      - name: cargo test (lz4, macOS)
+        if: runner.os == 'macOS'
+        run: cargo test -p omq-tokio --features lz4 -- --test-threads=1
 
   lint:
     name: fmt + clippy
