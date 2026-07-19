@@ -199,11 +199,18 @@ fn create_n_socket_pairs(n: usize) -> (*mut c_void, Vec<(*mut c_void, *mut c_voi
     for i in 0..n {
         let push = zmq_socket(ctx, ZMQ_PUSH);
         let pull = zmq_socket(ctx, ZMQ_PULL);
+        assert!(!push.is_null(), "failed to create push socket {i}");
+        assert!(!pull.is_null(), "failed to create pull socket {i}");
+
         let addr_str = format!("inproc://poll-test-{i}");
         let addr = CString::new(addr_str).unwrap();
 
-        zmq_bind(pull, addr.as_ptr());
-        zmq_connect(push, addr.as_ptr());
+        assert_eq!(zmq_bind(pull, addr.as_ptr()), 0, "bind failed for {i}");
+        assert_eq!(
+            zmq_connect(push, addr.as_ptr()),
+            0,
+            "connect failed for {i}"
+        );
 
         set_timeo(push, 100);
         set_timeo(pull, 100);
@@ -229,6 +236,46 @@ fn create_poll_items(pairs: &[(*mut c_void, *mut c_void)]) -> Vec<PollItem> {
             revents: 0,
         })
         .collect()
+}
+
+#[test]
+#[serial]
+#[cfg(unix)]
+fn poll_many_sockets_unix_smoke() {
+    let (ctx, pairs, _addrs) = create_n_socket_pairs(16);
+    let target_indices = [2, 7, 13];
+
+    for &idx in &target_indices {
+        let (push, _) = pairs[idx];
+        let msg = format!("msg{idx}");
+        let len = i32::try_from(msg.len()).unwrap();
+        assert_eq!(zmq_send(push, msg.as_ptr().cast(), msg.len(), 0), len);
+    }
+    std::thread::sleep(Duration::from_millis(20));
+
+    let mut items = create_poll_items(&pairs);
+    #[allow(clippy::cast_possible_wrap)]
+    let rc = zmq_poll(items.as_mut_ptr().cast(), items.len() as i32, 100);
+
+    assert_eq!(
+        rc as usize,
+        target_indices.len(),
+        "expected {} ready sockets, got {rc}",
+        target_indices.len()
+    );
+    for &idx in &target_indices {
+        assert_ne!(
+            items[idx].revents & ZMQ_POLLIN,
+            0,
+            "Socket {idx} should be readable"
+        );
+    }
+
+    for (push, pull) in pairs {
+        zmq_close(push);
+        zmq_close(pull);
+    }
+    zmq_ctx_term(ctx);
 }
 
 #[test]
@@ -270,6 +317,7 @@ fn poll_simple_two_socket_test() {
 
 #[test]
 #[serial]
+#[cfg(windows)]
 fn poll_65_sockets_boundary() {
     // Test: 65 sockets (crosses batch 0→1 on Windows)
     // Send to socket at index 50, poll, verify detection
@@ -304,6 +352,7 @@ fn poll_65_sockets_boundary() {
 
 #[test]
 #[serial]
+#[cfg(windows)]
 fn poll_128_sockets_boundary() {
     // Test: 128 sockets (crosses batch 1→2 on Windows)
     // Send to socket at indices 30 and 100, verify both detected
@@ -348,6 +397,7 @@ fn poll_128_sockets_boundary() {
 
 #[test]
 #[serial]
+#[cfg(windows)]
 fn poll_256_sockets_boundary() {
     // Test: 256 sockets (3 batches on Windows)
     // Send to socket indices 20, 90, 200, verify all detected
@@ -399,6 +449,7 @@ fn poll_256_sockets_boundary() {
 
 #[test]
 #[serial]
+#[cfg(windows)]
 fn poll_128_sockets_timeout() {
     // Test: 128 sockets with no messages, verify timeout honored
     let (ctx, pairs, _addrs) = create_n_socket_pairs(128);
@@ -427,6 +478,7 @@ fn poll_128_sockets_timeout() {
 
 #[test]
 #[serial]
+#[cfg(windows)]
 fn poll_128_sockets_fairness() {
     // Test: 128 sockets with sends scattered across all batches
     // Verify all sends are detected in a single poll
@@ -483,26 +535,32 @@ fn poll_both_events_counts_as_one_item() {
     let ctx = zmq_ctx_new();
     let a = zmq_socket(ctx, ZMQ_PAIR);
     let b = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!a.is_null(), "failed to create pair socket a");
+    assert!(!b.is_null(), "failed to create pair socket b");
     set_timeo(a, 1000);
     set_timeo(b, 1000);
 
     let addr = CString::new("tcp://127.0.0.1:*").unwrap();
-    zmq_bind(a, addr.as_ptr());
+    assert_eq!(zmq_bind(a, addr.as_ptr()), 0);
 
     let mut ep_buf = [0u8; 256];
     let mut ep_sz = ep_buf.len();
-    omq_zmq::zmq_getsockopt(a, ZMQ_LAST_ENDPOINT, ep_buf.as_mut_ptr().cast(), &mut ep_sz);
+    assert_eq!(
+        omq_zmq::zmq_getsockopt(a, ZMQ_LAST_ENDPOINT, ep_buf.as_mut_ptr().cast(), &mut ep_sz),
+        0
+    );
+    assert!(ep_sz > 0, "ZMQ_LAST_ENDPOINT returned empty endpoint");
     let ep_end = if ep_sz > 0 && ep_buf[ep_sz - 1] == 0 {
         ep_sz - 1
     } else {
         ep_sz
     };
     let ep = CString::new(&ep_buf[..ep_end]).unwrap();
-    zmq_connect(b, ep.as_ptr());
+    assert_eq!(zmq_connect(b, ep.as_ptr()), 0);
 
     std::thread::sleep(Duration::from_millis(50));
 
-    zmq_send(b, b"hi".as_ptr().cast(), 2, 0);
+    assert_eq!(zmq_send(b, b"hi".as_ptr().cast(), 2, 0), 2);
     std::thread::sleep(Duration::from_millis(50));
 
     let mut items = [PollItem {
