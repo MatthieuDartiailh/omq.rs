@@ -6,11 +6,11 @@ Run the fast TCP core-path gate with:
 cargo run --release -p omq-tokio --bin omq_perf_verify
 ```
 
-The verifier measures CT REQ/REP latency at 256B, canonical 1-IO
-PUSH/PULL at 16B, 1KiB, and 16KiB, and canonical 1-IO PUB/SUB with four
-subscribers at 16B and 4KiB. It uses separate OMQ contexts and loopback TCP.
-Warmup and measurement windows are bounded. The normal run must finish in
-under 10 seconds.
+With `.perf_hw` present, the verifier measures CT REQ/REP latency at
+256B, canonical 1-IO PUSH/PULL at 16B, 1KiB, and 16KiB, and canonical
+1-IO PUB/SUB with four subscribers at 16B and 4KiB. It also checks the
+2-IO variants and 16B inproc PUSH/PULL. It uses separate OMQ contexts
+and loopback TCP. Warmup and measurement windows are bounded.
 
 Thresholds are machine-specific. Create the ignored `.perf_hw` file in the
 repository root. Keys match the measurement names printed by the verifier:
@@ -38,5 +38,22 @@ p50_256b_us=50
 4k_msgs_s=430000
 ```
 
-Use measured local baselines for the ten throughput values. A missing file
-prints measurements without applying thresholds.
+Use measured local baselines for the ten throughput values. A missing
+file runs a smaller smoke gate with loose thresholds:
+
+```text
+[reqrep_ct]
+p50_256b_us=1000
+
+[pushpull_1io]
+16b_msgs_s=1000000
+
+[pubsub_1io]
+16b_msgs_s=500000
+
+[inproc_pushpull_1io]
+16b_msgs_s=1000000
+```
+
+`scripts/test-all.sh` runs the verifier locally and skips it when `CI`
+or `GITHUB_ACTIONS` is set.

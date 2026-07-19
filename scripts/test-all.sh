@@ -10,7 +10,7 @@
 #                       a few timing-sensitive tests may need one
 #                       retry on heavily loaded runners.
 #   OMQ_TEST_JOBS=N     max parallel test steps (default 2)
-#   OMQ_PERF=1          run hardware-sensitive perf verification
+#   OMQ_SKIP_PERF=1     skip the local perf smoke/hardware gate
 #   OMQ_STRESS_ROUNDS=N connect-before-bind stress rounds (default 40)
 set -euo pipefail
 
@@ -48,8 +48,13 @@ run() {
 # Run a function in the background, keeping at most $jobs parallel workers.
 # Usage: par <func> [args...]
 _par_pids=()
+_par_count=0
 _par_rc=0
 _foreground_pid=0
+
+_par_has_pids() {
+    [[ $_par_count -gt 0 ]]
+}
 
 _kill_tree() {
     local pid=$1
@@ -61,13 +66,16 @@ _kill_tree() {
 }
 
 _kill_workers() {
-    for pid in "${_par_pids[@]}"; do
-        _kill_tree "$pid"
-    done
-    for pid in "${_par_pids[@]}"; do
-        wait "$pid" 2>/dev/null || true
-    done
+    if _par_has_pids; then
+        for pid in "${_par_pids[@]}"; do
+            _kill_tree "$pid"
+        done
+        for pid in "${_par_pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+    fi
     _par_pids=()
+    _par_count=0
 }
 
 _handle_interrupt() {
@@ -84,14 +92,23 @@ trap _handle_interrupt INT TERM
 par() {
     # Reap any finished workers.
     local new_pids=()
-    for pid in "${_par_pids[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            new_pids+=("$pid")
-        else
-            wait "$pid" || _par_rc=$?
-        fi
-    done
-    _par_pids=("${new_pids[@]}")
+    local new_count=0
+    if _par_has_pids; then
+        for pid in "${_par_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                new_pids+=("$pid")
+                new_count=$((new_count + 1))
+            else
+                wait "$pid" || _par_rc=$?
+            fi
+        done
+    fi
+    if [[ $new_count -gt 0 ]]; then
+        _par_pids=("${new_pids[@]}")
+    else
+        _par_pids=()
+    fi
+    _par_count=$new_count
 
     if [[ $_par_rc -ne 0 ]]; then
         _kill_workers
@@ -99,9 +116,15 @@ par() {
     fi
 
     # Block until a slot is free.
-    while [[ ${#_par_pids[@]} -ge $jobs ]]; do
+    while _par_has_pids && [[ ${#_par_pids[@]} -ge $jobs ]]; do
         wait "${_par_pids[0]}" || _par_rc=$?
-        _par_pids=("${_par_pids[@]:1}")
+        if [[ ${#_par_pids[@]} -gt 1 ]]; then
+            _par_pids=("${_par_pids[@]:1}")
+            _par_count=$((_par_count - 1))
+        else
+            _par_pids=()
+            _par_count=0
+        fi
         if [[ $_par_rc -ne 0 ]]; then
             _kill_workers
             exit "$_par_rc"
@@ -110,17 +133,21 @@ par() {
 
     "$@" &
     _par_pids+=($!)
+    _par_count=$((_par_count + 1))
 }
 
 par_wait() {
-    for pid in "${_par_pids[@]}"; do
-        wait "$pid" || {
-            _par_rc=$?
-            _kill_workers
-            exit "$_par_rc"
-        }
-    done
+    if _par_has_pids; then
+        for pid in "${_par_pids[@]}"; do
+            wait "$pid" || {
+                _par_rc=$?
+                _kill_workers
+                exit "$_par_rc"
+            }
+        done
+    fi
     _par_pids=()
+    _par_count=0
 }
 
 # ---------------------------------------------------------------- #
@@ -136,10 +163,12 @@ run cargo clippy -p omq-libzmq --all-targets --no-deps -- -D warnings
 run cargo test
 run cargo test -p omq-libzmq
 
-if [[ "${OMQ_PERF:-}" == "1" && -f .perf_hw ]]; then
-    run cargo run --release -q -p omq-tokio --bin omq_perf_verify
+if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "skip: perf gate disabled on CI"
+elif [[ "${OMQ_SKIP_PERF:-}" == "1" ]]; then
+    echo "skip: OMQ_SKIP_PERF=1"
 else
-    echo "skip: .perf_hw not set up; see doc/perf-verification.md"
+    run cargo run --release -q -p omq-tokio --bin omq_perf_verify
 fi
 
 # ---------------------------------------------------------------- #
