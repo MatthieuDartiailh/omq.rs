@@ -2,12 +2,21 @@
 
 mod test_support;
 
+use std::net::TcpListener as StdTcpListener;
 use std::time::Duration;
 
+use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, OnMute, Options, Socket, SocketType};
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
+}
+
+fn free_tcp_port() -> u16 {
+    let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    port
 }
 
 #[tokio::test]
@@ -50,6 +59,147 @@ async fn pub_sub_simple_prefix_match() {
     // No third message -- 'weather' was filtered.
     let third = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(third.is_err(), "non-matching message must not be delivered");
+}
+
+#[tokio::test]
+async fn sub_duplicate_tcp_connect_is_ignored() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let port = test_support::bind_loopback(&pub_).await;
+    let ep = test_support::tcp_loopback(port);
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.connect(ep.clone()).await.unwrap();
+    sub.connect(ep).await.unwrap();
+
+    pub_.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("publisher did not see subscriber");
+    sub.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("subscriber did not connect");
+    test_support::assert_no_second_connection(&pub_, "publisher").await;
+    test_support::assert_no_second_connection(&sub, "subscriber").await;
+
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
+    let second_subscribe = pub_.wait_subscribed(2, Duration::from_millis(250)).await;
+    assert!(
+        second_subscribe.is_err(),
+        "duplicate connect replayed subscription twice"
+    );
+
+    pub_.send(Message::single("hello")).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(1), sub.recv())
+        .await
+        .expect("subscriber did not receive message")
+        .unwrap();
+    assert_eq!(msg, Message::single("hello"));
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(250), sub.recv()).await;
+    assert!(duplicate.is_err(), "subscriber received duplicate message");
+}
+
+#[tokio::test]
+async fn sub_duplicate_tcp_connect_before_bind_is_ignored() {
+    let ep = test_support::tcp_loopback(free_tcp_port());
+    let reconnect = Options::default().reconnect(ReconnectPolicy::Fixed(Duration::from_millis(20)));
+
+    let sub = Socket::new(SocketType::Sub, reconnect);
+    sub.connect(ep.clone()).await.unwrap();
+    sub.connect(ep.clone()).await.unwrap();
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    pub_.bind(ep).await.unwrap();
+
+    pub_.wait_connected(1, Duration::from_secs(5))
+        .await
+        .expect("publisher did not see subscriber");
+    sub.wait_connected(1, Duration::from_secs(5))
+        .await
+        .expect("subscriber did not connect");
+    pub_.wait_subscribed(1, Duration::from_secs(5))
+        .await
+        .expect("subscription did not arrive");
+
+    test_support::assert_no_second_connection(&pub_, "publisher").await;
+    test_support::assert_no_second_connection(&sub, "subscriber").await;
+    let second_subscribe = pub_.wait_subscribed(2, Duration::from_millis(250)).await;
+    assert!(
+        second_subscribe.is_err(),
+        "duplicate dialer replayed subscription twice"
+    );
+}
+
+#[tokio::test]
+async fn sub_duplicate_inproc_connect_is_ignored() {
+    let ep = inproc_ep("ps-duplicate-inproc");
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    pub_.bind(ep.clone()).await.unwrap();
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.connect(ep.clone()).await.unwrap();
+    sub.connect(ep).await.unwrap();
+
+    pub_.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("publisher did not see subscriber");
+    sub.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("subscriber did not connect");
+    test_support::assert_no_second_connection(&pub_, "publisher").await;
+    test_support::assert_no_second_connection(&sub, "subscriber").await;
+
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
+
+    pub_.send(Message::single("hello")).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(1), sub.recv())
+        .await
+        .expect("subscriber did not receive message")
+        .unwrap();
+    assert_eq!(msg, Message::single("hello"));
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(250), sub.recv()).await;
+    assert!(duplicate.is_err(), "subscriber received duplicate message");
+}
+
+#[tokio::test]
+async fn pub_duplicate_tcp_connect_is_ignored() {
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    let port = test_support::bind_loopback(&sub).await;
+    let ep = test_support::tcp_loopback(port);
+
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    pub_.connect(ep.clone()).await.unwrap();
+    pub_.connect(ep).await.unwrap();
+
+    sub.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("subscriber did not see publisher");
+    pub_.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("publisher did not connect");
+    test_support::assert_no_second_connection(&sub, "subscriber").await;
+    test_support::assert_no_second_connection(&pub_, "publisher").await;
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
+
+    pub_.send(Message::single("hello")).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(1), sub.recv())
+        .await
+        .expect("subscriber did not receive message")
+        .unwrap();
+    assert_eq!(msg, Message::single("hello"));
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(250), sub.recv()).await;
+    assert!(duplicate.is_err(), "subscriber received duplicate message");
 }
 
 #[tokio::test]

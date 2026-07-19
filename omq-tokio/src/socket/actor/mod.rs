@@ -111,7 +111,9 @@ enum InternalEvent {
         conn: AnyConn,
         endpoint: Endpoint,
     },
-    ConnectGaveUp,
+    ConnectGaveUp {
+        endpoint: Endpoint,
+    },
     ConnectDelayed {
         endpoint: Endpoint,
         retry_in: Duration,
@@ -343,6 +345,8 @@ impl SocketDriver {
                     let _ = ack.send(res);
                 } else if let Err(e) = reject_encrypted_inproc(&endpoint, &self.options.mechanism) {
                     let _ = ack.send(Err(e));
+                } else if self.should_ignore_duplicate_connect(&endpoint) {
+                    let _ = ack.send(Ok(()));
                 } else {
                     self.start_dial(endpoint);
                     let _ = ack.send(Ok(()));

@@ -28,6 +28,32 @@ fn inproc_ep(name: &str) -> Endpoint {
 }
 
 #[tokio::test]
+async fn req_duplicate_tcp_connect_is_ignored() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep.clone()).await.unwrap();
+    req.connect(ep).await.unwrap();
+
+    rep.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("rep did not see req");
+    req.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("req did not connect");
+    test_support::assert_no_second_connection(&rep, "rep").await;
+    test_support::assert_no_second_connection(&req, "req").await;
+
+    req.send(Message::single("hello")).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), rep.recv())
+        .await
+        .expect("rep did not receive request")
+        .unwrap();
+    assert_eq!(got, Message::single("hello"));
+}
+
+#[tokio::test]
 async fn req_rep_basic_roundtrip() {
     let ep = inproc_ep("rr-basic");
     let rep = Socket::new(SocketType::Rep, Options::default());

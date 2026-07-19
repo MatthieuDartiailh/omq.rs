@@ -61,3 +61,8 @@ pub async fn wait_for_join(sock: &Socket) {
         .await
         .expect("join did not propagate within 5s");
 }
+
+pub async fn assert_no_second_connection(sock: &Socket, context: &str) {
+    let second = sock.wait_connected(2, Duration::from_millis(250)).await;
+    assert!(second.is_err(), "{context}: duplicate connection appeared");
+}
