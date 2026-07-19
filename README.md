@@ -110,24 +110,36 @@ Six crates, one repo.
 ## Testing
 
 Every socket type, transport, mechanism, and feature combination is
-covered by integration tests. The full suite:
+covered by integration tests. The suite is layered:
 
-- **700+ integration tests** across socket types, transports, and mechanisms.
-- **Protocol fuzzing** (~10M iterations per suite): hand-rolled fuzz of
-  the wire parser and the socket-action state machine.
-- **29 soak test scenarios**: peer churn, reconnect storms, PUB/SUB
-  churn, ROUTER/DEALER churn, HWM reconnect, cancel safety, compression
-  (lz4), PLAIN / CURVE auth, mechanism reconnect, large-message
-  throughput, multi-socket, inproc cross-thread, WebSocket throughput
-  and reconnect. Each scenario samples RSS and FD counts to detect leaks.
+- **700+ Rust tests** across socket types, transports, mechanisms, and
+  libzmq-compatible C API behavior.
+- **Feature-gated coverage** for PLAIN, CURVE, LZ4, and pyzmq/libzmq
+  interop. WebSocket has dedicated tests and soak coverage.
+- **Protocol fuzzing** (~1M iterations in the default opt-in run, with
+  longer runs configurable): hand-rolled fuzz of the wire parser and the
+  socket-action state machine.
+- **20+ soak scenarios** across Rust and pyomq: peer churn, reconnect
+  storms, PUB/SUB churn, ROUTER/DEALER churn, HWM reconnect, cancel
+  safety, compression (lz4), PLAIN / CURVE auth, mechanism reconnect,
+  large-message throughput, multi-socket, inproc cross-thread,
+  WebSocket throughput and reconnect. Soak runs sample RSS and FD counts.
 - **Loom** coverage for lock-free inproc queue behavior.
 - **Miri** on `yring`.
-- **Strict SemVer** because it matters.
-- **Wire interop** with libzmq and pyzmq.
+- **Release semver review** through `release-plz`.
 
 ```sh
-./scripts/test-all.sh             # full sweep
-OMQ_FUZZ=1 ./scripts/test-all.sh  # include fuzz suites
+./scripts/test-all.sh              # standard sweep
+OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
+OMQ_SKIP_PYOMQ=1 ./scripts/test-all.sh
+```
+
+Soak tests are intentionally separate from the full sweep:
+
+```sh
+FEATURES="soak lz4 plain curve ws"
+OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
+  --features "$FEATURES" --release --test omq_soak_peer_churn -- --nocapture
 ```
 
 ## Further reading
@@ -137,7 +149,6 @@ OMQ_FUZZ=1 ./scripts/test-all.sh  # include fuzz suites
   throughput on bandwidth-limited links.
 - [doc/architecture.md](doc/architecture.md): architecture and tokio
   backend internals.
-  wire format and security properties.
 - [doc/lz4-rfc.md](doc/lz4-rfc.md): LZ4 compression transport wire
   format and dictionary shipping rules.
 

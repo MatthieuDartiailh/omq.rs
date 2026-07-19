@@ -6,13 +6,13 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
-### Performance
+## [omq-proto 0.23.0] - 2026-07-19
 
-- Reduce the default shared-queue batch byte cap from 1 MiB to 128 KiB.
-  This bounds encode-before-write bursts. Refreshed turbo-off comparison
-  charts show steadier, slightly higher throughput in the current run.
+### Added
 
-## [omq-proto 0.22.0]
+- `Options::workload_profile` for latency vs throughput tuning.
+- CURVE authenticators receive peer routing identity in
+  `MechanismPeerInfo`.
 
 ### Performance
 
@@ -22,13 +22,23 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   64 KiB (IPC).
 - Per-shard fan-out encoding: shard workers encode and compress
   independently.
+- Shared batch cap reduced from 1 MiB to 128 KiB.
 
 ### Changed
 
 - **Breaking:** `FrameBuffer::with_arena_threshold` renamed to
   `FrameBuffer::with_config`.
+- **Breaking:** BLAKE3ZMQ mechanism removed. Use CURVE.
+- *(deps)* Bump `lz4rip` 0.9 to 0.11.1.
 
-## [omq-tokio 0.18.0]
+## [omq-tokio 0.19.0] - 2026-07-19
+
+### Added
+
+- `Context` API: `Context::new()`, `Context::with_config()`,
+  `Context::current()`, and `Context::blocking_socket()`.
+- `Socket::dispatch()` for recv-loop multiplexing.
+- Lazy and zero-thread context support.
 
 ### Performance
 
@@ -37,26 +47,60 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 - Fan-out always via shard workers; direct dispatch removed.
 - `TransmitSlotCache` caller-side encode bypass removed. All sends
   via send pipes or shard workers.
+- Mutex-free inproc producer path.
+- Coalesced inproc receive notifications.
 
 ### Fixed
 
 - Fan-out LZ4 dict frame ordering with per-shard encoding.
+- REP broker routing over byte-stream transports preserves all identity
+  frames before the empty delimiter. Fixes multi-hop TCP and lz4+tcp
+  replies.
 
 ### Removed
 
 - **Breaking:** `ConnectionDriver::with_recv_direct`.
+- **Breaking:** BLAKE3ZMQ support removed. Use CURVE.
+- **Breaking:** `rt-multi-thread` feature removed.
 
-## [yring 0.3.7]
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.23.0, `yring` to 0.3.8.
+
+## [yring 0.3.8] - 2026-07-19
+
+### Added
+
+- `ProducerOwner` for mutex-free single-thread producer access.
+- Loom test coverage for async drop wake races.
+
+### Fixed
+
+- `ProducerOwner` thread-affinity race.
+- Async drop wake race.
 
 ### Changed
 
 - Deny `unsafe_op_in_unsafe_fn` lint.
+- Rename `prefetch_upto` to `prefetch_up_to`.
 
-## [omq-libzmq 0.5.2]
+## [omq-libzmq 0.5.3] - 2026-07-19
+
+### Added
+
+- Lazy and zero-thread context support.
+
+### Fixed
+
+- Bounded inproc backpressure in the C API layer.
+- REP broker envelopes through byte-stream ROUTER/DEALER proxies preserve
+  all routing frames via `omq-tokio` 0.19.0.
 
 ### Changed
 
 - Deny `unsafe_op_in_unsafe_fn` lint.
+- Port to `Context` API.
+- *(deps)* Bump `omq-tokio` to 0.19.0, `yring` to 0.3.8.
 
 ## [omq-proto 0.21.0] - 2026-07-10
 

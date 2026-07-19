@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-19
+
+### Added
+
+- `Context` API: `Context::new()`, `Context::with_config()`, and
+  `Context::current()`. Each `Context` owns one or more
+  `current_thread` tokio runtimes on dedicated OS threads.
+  `Context::socket()` creates async sockets;
+  `Context::blocking_socket()` creates sync sockets with background
+  IO for callers with no async runtime.
+- `Socket::dispatch()` for recv-loop multiplexing.
+- Lazy and zero-thread context support: `ZMQ_IO_THREADS=0` for
+  inproc-only operation.
+- CURVE peer identity exposed to authenticator via
+  `MechanismPeerInfo::identity`.
+
+### Removed
+
+- **Breaking:** `ConnectionDriver::with_recv_direct`. Replaced by
+  the `yring` recv pipe.
+- **Breaking:** BLAKE3ZMQ feature and support removed. Use CURVE.
+- **Breaking:** `rt-multi-thread` feature removed. Multi-thread
+  runtimes are now configured through `Context` IO thread count.
+- **Breaking:** `transport::inproc::InprocSpsc` struct,
+  `transport::inproc::connect`/`bind` functions removed (internal
+  restructure).
+
+### Fixed
+
+- Fan-out LZ4 dict frame ordering when shard workers compress
+  independently.
+- Refresh fan-out encoders after dictionary training so late
+  subscribers receive correct LZ4D frames.
+- Bounded inproc backpressure: full rings apply backpressure instead
+  of routing through a second producer path.
+- Wake blocking inproc receivers on direct `yring` delivery.
+- REP broker routing over byte-stream transports preserves all identity
+  frames before the empty delimiter. Fixes multi-hop TCP and lz4+tcp
+  replies.
+
 ### Performance
 
 - Recv pipe: `yring`-based receive pipe replaces `async_channel`.
@@ -21,20 +61,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce TCP read buffer and per-connection arena allocations.
 - Reduce recv path allocations: merge `DrainState`, hoist channel
   future creation out of drain loop.
-
-### Fixed
-
-- Fan-out LZ4 dict frame ordering when shard workers compress
-  independently.
-
-### Removed
-
-- **Breaking:** `ConnectionDriver::with_recv_direct`. Replaced by
-  the `yring` recv pipe.
+- Mutex-free inproc producer path via `ProducerOwner`.
+- Coalesced inproc receive notifications via `DataSignal`.
+- Fair receive source rotation prevents a busy peer from consuming
+  the entire drain budget.
+- Recv drains bounded by message size class.
+- Timer-based queue wakeups removed; armed notifications with
+  predicate rechecks replace them.
 
 ### Changed
 
-- *(deps)* Bump `omq-proto` to 0.22.0.
+- **Breaking:** `InprocConn` fields changed (`tx`/`rx` replace
+  `spsc`).
+- **Breaking:** `RecvSink` gains `Rep` variant.
+- **Breaking:** `Socket` no longer implements `UnwindSafe`/
+  `RefUnwindSafe`.
+- Rename `prefetch_upto` to `prefetch_up_to`.
+- *(deps)* Bump `omq-proto` to 0.23.0, `yring` to 0.3.8.
 
 ## [0.17.0] - 2026-07-10
 

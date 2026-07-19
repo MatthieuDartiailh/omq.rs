@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-19
+
+### Added
+
+- `Options::workload_profile` field for latency vs throughput tuning.
+- `MechanismPeerInfo::identity` field exposes CURVE peer identity to
+  the authenticator.
+- `WorkloadProfile` enum.
+
+### Removed
+
+- **Breaking:** BLAKE3ZMQ mechanism removed entirely (experimental,
+  non-standard). Use CURVE (RFC 26) instead. Removes the `blake3zmq`
+  feature, all `Blake3Zmq*` types, `MechanismSetup::Blake3Zmq*`
+  variants, `Options::blake3zmq_server`/`blake3zmq_client`, and the
+  `MechanismName::BLAKE3` constant.
+- **Breaking:** `Options::unbounded_send`/`unbounded_recv` removed.
+
+### Fixed
+
+- Bounded inproc backpressure: full rings apply backpressure instead
+  of routing through a second producer path.
+
 ### Performance
 
 - `Message` shrunk from 80 B to 64 B. Inline threshold reduced from
@@ -16,13 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   64 KiB (IPC). Lower per-connection memory footprint.
 - Per-shard fan-out encoding: shard workers encode and compress
   independently, eliminating shared-encoder contention.
+- Shared batch cap tuned from 1 MiB to 128 KiB.
 
 ### Changed
 
 - **Breaking:** `FrameBuffer::with_arena_threshold` renamed to
   `FrameBuffer::with_config`. The user-facing `Options::arena_threshold`
   setter is unchanged.
+- **Breaking:** `MechanismSetup` discriminant values changed due to
+  removed BLAKE3ZMQ variants.
 - *(deps)* Bump `lz4rip` 0.9 to 0.11.1.
+- *(deps)* Bump `x25519-dalek` to 3.0.
 
 ## [0.21.0] - 2026-07-10
 

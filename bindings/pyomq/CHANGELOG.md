@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-19
+
+### Fixed
+
+- Native proxy preserves full REP routing envelopes across byte-stream
+  ROUTER/DEALER brokers. Multiple identity hops now round-trip over TCP
+  and lz4+tcp.
+
+### Changed
+
+- Port to `Context` API and sync sockets. `Context::blocking_socket()`
+  with `dispatch()` for recv-loop multiplexing.
+- Remove BLAKE3ZMQ support (mechanism removed upstream).
+- *(deps)* Bump `omq-tokio` to 0.19.0, `omq-proto` to 0.23.0,
+  `x25519-dalek` to 3.0.
+
 ## [0.15.0] - 2026-07-10
 
 ### Fixed
