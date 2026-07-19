@@ -63,6 +63,17 @@ impl FrameBuffer {
         }
     }
 
+    pub fn with_config_lazy(arena_threshold: usize, arena_cap: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            total_bytes: 0,
+            arena: BytesMut::new(),
+            arena_threshold,
+            arena_mark: 0,
+            arena_peak_cap: arena_cap,
+        }
+    }
+
     pub fn one_shot() -> Self {
         Self {
             entries: VecDeque::new(),
@@ -131,8 +142,15 @@ impl FrameBuffer {
     }
 
     pub fn push_pre_framed(&mut self, data: &[u8]) {
+        self.reserve_arena(data.len());
         self.arena.extend_from_slice(data);
         self.total_bytes += data.len();
+    }
+
+    fn reserve_arena(&mut self, additional: usize) {
+        if self.arena.capacity() == 0 && self.arena_peak_cap > 0 {
+            self.arena.reserve(self.arena_peak_cap.max(additional));
+        }
     }
 
     /// Commits the pending arena range (`arena_mark..arena.len()`) as an
@@ -152,6 +170,7 @@ impl FrameBuffer {
 
     #[inline]
     pub fn frame_inline(&mut self, msg: &Message) {
+        self.reserve_arena(msg.byte_len() + msg.len() * 9);
         let before = self.arena.len();
         frame::encode_message_flat(msg, &mut self.arena);
         self.total_bytes += self.arena.len() - before;
@@ -160,6 +179,7 @@ impl FrameBuffer {
     pub fn frame_gather(&mut self, msg: &Message) {
         let parts = msg.parts_payload();
         let n = parts.len();
+        self.reserve_arena(n * 9);
         for (i, part) in parts.iter().enumerate() {
             let before = self.arena.len();
             frame::write_frame_header(&mut self.arena, i + 1 < n, part.len());
@@ -175,6 +195,7 @@ impl FrameBuffer {
 
     #[cfg(feature = "ws")]
     pub fn frame_ws(&mut self, msg: &Message, masked: bool) {
+        self.reserve_arena(msg.byte_len() + msg.len() * 14);
         let before = self.arena.len();
         if masked {
             frame::encode_message_flat_ws_masked(msg, &mut self.arena);
@@ -185,6 +206,7 @@ impl FrameBuffer {
     }
 
     pub fn frame_prefixed_inline(&mut self, prefix: &Bytes, msg: &Message) {
+        self.reserve_arena(msg.byte_len() + prefix.len() * msg.len() + msg.len() * 9);
         let before = self.arena.len();
         frame::encode_message_prefixed_flat(prefix, msg, &mut self.arena);
         self.total_bytes += self.arena.len() - before;
@@ -207,6 +229,7 @@ impl FrameBuffer {
     }
 
     fn frame_rep_gather(&mut self, msg: &Message) {
+        self.reserve_arena((msg.len() + 1) * 9);
         let before = self.arena.len();
         frame::write_frame_header(&mut self.arena, !msg.is_empty(), 0);
         self.total_bytes += self.arena.len() - before;
@@ -238,6 +261,7 @@ impl FrameBuffer {
     pub fn frame_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
         let parts = msg.parts_payload();
         let n = parts.len();
+        self.reserve_arena(n * 9);
         for (i, part) in parts.iter().enumerate() {
             let payload_len = prefix.len() + part.len();
             let before = self.arena.len();
@@ -353,6 +377,17 @@ impl Default for FrameBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_config_defers_arena_allocation_until_encode() {
+        let mut eq = FrameBuffer::with_config_lazy(ARENA_THRESHOLD, ARENA_INITIAL_CAP);
+        assert_eq!(eq.arena.capacity(), 0);
+
+        eq.frame(&Message::single("abc"));
+
+        assert!(eq.arena.capacity() >= ARENA_INITIAL_CAP);
+        assert!(!eq.arena_bytes().is_empty());
+    }
 
     #[test]
     fn put_back_partial_write() {

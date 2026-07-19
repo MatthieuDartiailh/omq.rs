@@ -296,6 +296,22 @@ impl SendStrategy {
         }
     }
 
+    pub(crate) fn needs_peer_send_pipe(&self) -> bool {
+        match self {
+            Self::RoundRobin(_) | Self::Exclusive(_) => true,
+            Self::Identity(s) => s.needs_peer_send_pipe(),
+            Self::None | Self::Latency(_) | Self::FanOut(_) => false,
+        }
+    }
+
+    pub(crate) fn needs_transmit_slot(&self) -> bool {
+        match self {
+            Self::Latency(_) | Self::FanOut(_) => true,
+            Self::Identity(s) => s.needs_transmit_slot(),
+            Self::None | Self::RoundRobin(_) | Self::Exclusive(_) => false,
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         match self {
             Self::None => {}
