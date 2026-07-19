@@ -28,11 +28,19 @@ const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_TYPE: i32 = 16;
 const ZMQ_IDENTITY: i32 = 5;
 
-#[repr(C, align(8))]
-struct ZmqMsg([u8; 64]);
+const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
+
+#[repr(C)]
+struct ZmqMsg([usize; ZMQ_MSG_WORDS]);
+
+impl ZmqMsg {
+    fn zeroed() -> Self {
+        Self([0; ZMQ_MSG_WORDS])
+    }
+}
 
 fn radio_send(sock: *mut c_void, group: &std::ffi::CStr, data: &[u8]) -> i32 {
-    let mut m = ZmqMsg([0u8; 64]);
+    let mut m = ZmqMsg::zeroed();
     zmq_msg_init_buffer(m.0.as_mut_ptr().cast(), data.as_ptr().cast(), data.len());
     zmq_msg_set_group(m.0.as_mut_ptr().cast(), group.as_ptr());
     let rc = zmq_msg_send(m.0.as_mut_ptr().cast(), sock, 0);

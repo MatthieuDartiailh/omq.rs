@@ -2,9 +2,9 @@
 //! Bounded SPSC ring with ypipe-style batched flush/prefetch.
 //!
 //! Three pointers:
-//! - `head`: consumer read position (`AtomicUsize`, consumer-owned)
-//! - `cursor`: writer position (plain usize, producer-only, no atomic)
-//! - `tail`: last flushed position (`AtomicUsize`, producer writes, consumer reads)
+//! - `head`: consumer read position (`AtomicU64`, consumer-owned)
+//! - `cursor`: writer position (plain u64, producer-only, no atomic)
+//! - `tail`: last flushed position (`AtomicU64`, producer writes, consumer reads)
 //!
 //! `push` writes to the ring with zero atomics. `flush` makes all
 //! pending writes visible with one Release store. `pop` reads with
@@ -16,8 +16,8 @@ mod r#async;
 #[cfg(feature = "async")]
 pub use r#async::{AsyncConsumer, AsyncProducer, async_spsc};
 
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!("yring requires a 64-bit target (AtomicUsize must not wrap in practice)");
+#[cfg(not(target_has_atomic = "64"))]
+compile_error!("yring requires target_has_atomic = \"64\"");
 
 mod compat;
 
@@ -26,7 +26,9 @@ use std::sync::OnceLock;
 
 #[cfg(not(loom))]
 use compat::UnsafeCellExt;
-use compat::{Arc, AtomicBool, AtomicUsize, Ordering, UnsafeCell};
+use compat::{Arc, AtomicBool, AtomicU64, Ordering, UnsafeCell};
+
+type Cursor = u64;
 
 #[repr(align(128))]
 pub(crate) struct Padded<T>(pub(crate) T);
@@ -35,9 +37,9 @@ pub(crate) struct Ring<T> {
     pub(crate) buf: Box<[UnsafeCell<MaybeUninit<T>>]>,
     pub(crate) mask: usize,
     /// Consumer read position. Written by consumer, read by producer.
-    pub(crate) head: Padded<AtomicUsize>,
+    pub(crate) head: Padded<AtomicU64>,
     /// Last flushed position. Written by producer, read by consumer.
-    pub(crate) tail: Padded<AtomicUsize>,
+    pub(crate) tail: Padded<AtomicU64>,
     /// Set by `Producer::drop`. Lets the consumer detect that no more
     /// data will ever arrive.
     pub(crate) producer_dropped: AtomicBool,
@@ -66,8 +68,8 @@ impl<T> Ring<T> {
         Self {
             buf: buf.into_boxed_slice(),
             mask: cap - 1,
-            head: Padded(AtomicUsize::new(0)),
-            tail: Padded(AtomicUsize::new(0)),
+            head: Padded(AtomicU64::new(0)),
+            tail: Padded(AtomicU64::new(0)),
             producer_dropped: AtomicBool::new(false),
             consumer_dropped: AtomicBool::new(false),
         }
@@ -78,26 +80,37 @@ impl<T> Ring<T> {
     }
 
     #[inline]
-    fn distance(from: usize, to: usize) -> usize {
+    fn distance(from: Cursor, to: Cursor) -> Cursor {
         from.wrapping_sub(to)
+    }
+
+    #[inline]
+    fn count(n: Cursor) -> usize {
+        debug_assert!(n <= usize::MAX as Cursor);
+        n as usize
+    }
+
+    #[inline]
+    fn index(&self, cursor: Cursor) -> usize {
+        (cursor as usize) & self.mask
     }
 
     #[inline]
     pub(crate) fn push(
         &self,
-        cursor: &mut usize,
-        cached_head: &mut usize,
+        cursor: &mut Cursor,
+        cached_head: &mut Cursor,
         val: T,
     ) -> Result<(), T> {
-        if Self::distance(*cursor, *cached_head) >= self.capacity() {
+        if Self::distance(*cursor, *cached_head) >= self.capacity() as Cursor {
             *cached_head = self.head.0.load(Ordering::Acquire);
-            if Self::distance(*cursor, *cached_head) >= self.capacity() {
+            if Self::distance(*cursor, *cached_head) >= self.capacity() as Cursor {
                 return Err(val);
             }
         }
         // SAFETY: capacity check above guarantees this slot is not
         // visible to the consumer (cursor < head + capacity).
-        self.buf[*cursor & self.mask].with_mut(|ptr| unsafe {
+        self.buf[self.index(*cursor)].with_mut(|ptr| unsafe {
             (*ptr).write(val);
         });
         *cursor = cursor.wrapping_add(1);
@@ -105,7 +118,7 @@ impl<T> Ring<T> {
     }
 
     #[inline]
-    pub(crate) fn flush_to(&self, cursor: usize, cached_head: &mut usize) -> FlushResult {
+    pub(crate) fn flush_to(&self, cursor: Cursor, cached_head: &mut Cursor) -> FlushResult {
         let prev_tail = self.tail.0.load(Ordering::Relaxed);
         if cursor == prev_tail {
             return FlushResult::NothingToFlush;
@@ -114,62 +127,65 @@ impl<T> Ring<T> {
         *cached_head = self.head.0.load(Ordering::Acquire);
         let was_empty = prev_tail == *cached_head;
         self.tail.0.store(cursor, Ordering::Release);
-        FlushResult::Flushed { count, was_empty }
+        FlushResult::Flushed {
+            count: Self::count(count),
+            was_empty,
+        }
     }
 
     #[inline]
-    pub(crate) fn is_full(&self, cursor: usize, cached_head: &mut usize) -> bool {
-        if Self::distance(cursor, *cached_head) >= self.capacity() {
+    pub(crate) fn is_full(&self, cursor: Cursor, cached_head: &mut Cursor) -> bool {
+        if Self::distance(cursor, *cached_head) >= self.capacity() as Cursor {
             *cached_head = self.head.0.load(Ordering::Acquire);
-            Self::distance(cursor, *cached_head) >= self.capacity()
+            Self::distance(cursor, *cached_head) >= self.capacity() as Cursor
         } else {
             false
         }
     }
 
     #[inline]
-    pub(crate) fn producer_len(&self, cursor: usize) -> usize {
-        cursor.wrapping_sub(self.head.0.load(Ordering::Acquire))
+    pub(crate) fn producer_len(&self, cursor: Cursor) -> usize {
+        Self::count(cursor.wrapping_sub(self.head.0.load(Ordering::Acquire)))
     }
 
     #[inline]
-    pub(crate) fn producer_is_empty(&self, cursor: usize) -> bool {
+    pub(crate) fn producer_is_empty(&self, cursor: Cursor) -> bool {
         cursor == self.head.0.load(Ordering::Acquire)
     }
 
     #[inline]
-    pub(crate) fn pop(&self, head: &mut usize, cached_tail: usize) -> Option<T> {
+    pub(crate) fn pop(&self, head: &mut Cursor, cached_tail: Cursor) -> Option<T> {
         if *head == cached_tail {
             return None;
         }
         // SAFETY: head < cached_tail, so this slot was written by the
         // producer and made visible via flush (Release store).
-        let val = self.buf[*head & self.mask].with_mut(|ptr| unsafe { (*ptr).assume_init_read() });
+        let val = self.buf[self.index(*head)].with_mut(|ptr| unsafe { (*ptr).assume_init_read() });
         *head = head.wrapping_add(1);
         Some(val)
     }
 
     #[inline]
-    pub(crate) fn release(&self, head: usize) {
+    pub(crate) fn release(&self, head: Cursor) {
         self.head.0.store(head, Ordering::Release);
     }
 
     #[inline]
-    pub(crate) fn prefetch(&self, cached_tail: &mut usize) -> usize {
+    pub(crate) fn prefetch(&self, cached_tail: &mut Cursor) -> usize {
         let new_tail = self.tail.0.load(Ordering::Acquire);
         let count = new_tail.wrapping_sub(*cached_tail);
         *cached_tail = new_tail;
-        count
+        Self::count(count)
     }
 
     #[inline]
-    pub(crate) fn consumer_is_empty(&self, head: usize, cached_tail: usize) -> bool {
+    pub(crate) fn consumer_is_empty(&self, head: Cursor, cached_tail: Cursor) -> bool {
         head == cached_tail && self.tail.0.load(Ordering::Acquire) == head
     }
 
     #[inline]
-    pub(crate) fn consumer_len(&self, head: usize) -> usize {
-        self.tail.0.load(Ordering::Acquire).wrapping_sub(head)
+    pub(crate) fn consumer_len(&self, head: Cursor) -> usize {
+        Self::count(self.tail.0.load(Ordering::Acquire).wrapping_sub(head))
     }
 
     /// Drop all items between head and tail. Must only be called with
@@ -191,7 +207,7 @@ impl<T> Ring<T> {
         while i != tail {
             // SAFETY: &mut self guarantees exclusive access. Slots
             // [head..tail] were written by the producer and flushed.
-            self.buf[i & self.mask].with_mut(|ptr| unsafe {
+            self.buf[self.index(i)].with_mut(|ptr| unsafe {
                 (*ptr).assume_init_drop();
             });
             i = i.wrapping_add(1);
@@ -223,9 +239,9 @@ pub enum FlushResult {
 pub struct Producer<T> {
     ring: Arc<Ring<T>>,
     /// Private write position. No atomic; only the producer touches it.
-    cursor: usize,
+    cursor: Cursor,
     /// Cached copy of the consumer's `head` to avoid Acquire loads.
-    cached_head: usize,
+    cached_head: Cursor,
 }
 
 impl<T> Producer<T> {
@@ -319,9 +335,9 @@ impl<T> std::fmt::Debug for ProducerOwner<T> {
 pub struct Consumer<T> {
     ring: Arc<Ring<T>>,
     /// Private read position. Only the consumer touches it.
-    head: usize,
+    head: Cursor,
     /// Cached copy of `tail`. Updated by `prefetch()`.
-    cached_tail: usize,
+    cached_tail: Cursor,
 }
 
 impl<T> Consumer<T> {
@@ -690,12 +706,13 @@ mod tests {
     #[test]
     fn counters_wrap_without_panicking() {
         let (mut p, mut c) = spsc::<u32>(4);
-        p.cursor = usize::MAX - 1;
-        p.cached_head = usize::MAX - 1;
-        c.head = usize::MAX - 1;
-        c.cached_tail = usize::MAX - 1;
-        p.ring.head.0.store(usize::MAX - 1, Ordering::Relaxed);
-        p.ring.tail.0.store(usize::MAX - 1, Ordering::Relaxed);
+        let base: Cursor = u64::MAX - 1;
+        p.cursor = base;
+        p.cached_head = base;
+        c.head = base;
+        c.cached_tail = base;
+        p.ring.head.0.store(base, Ordering::Relaxed);
+        p.ring.tail.0.store(base, Ordering::Relaxed);
 
         p.push(1).unwrap();
         p.push(2).unwrap();
@@ -712,6 +729,38 @@ mod tests {
         assert_eq!(c.pop(), Some(1));
         assert_eq!(c.pop(), Some(2));
         assert_eq!(c.pop(), Some(3));
+        assert_eq!(c.pop(), None);
+        c.release();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn counters_cross_u32_boundary_without_aliasing() {
+        let (mut p, mut c) = spsc::<u32>(4);
+        let base: Cursor = u64::from(u32::MAX) - 1;
+        p.cursor = base;
+        p.cached_head = base;
+        c.head = base;
+        c.cached_tail = base;
+        p.ring.head.0.store(base, Ordering::Relaxed);
+        p.ring.tail.0.store(base, Ordering::Relaxed);
+
+        for i in 0..4 {
+            p.push(i).unwrap();
+        }
+        assert_eq!(p.push(99), Err(99));
+        assert_eq!(
+            p.flush_and_check(),
+            FlushResult::Flushed {
+                count: 4,
+                was_empty: true
+            }
+        );
+
+        assert_eq!(c.prefetch(), 4);
+        for i in 0..4 {
+            assert_eq!(c.pop(), Some(i));
+        }
         assert_eq!(c.pop(), None);
         c.release();
         assert!(p.is_empty());
@@ -753,12 +802,13 @@ mod tests {
 
         DROPS.store(0, Ordering::Relaxed);
         let (mut p, mut c) = spsc::<Counted>(4);
-        p.cursor = usize::MAX - 1;
-        p.cached_head = usize::MAX - 1;
-        c.head = usize::MAX - 1;
-        c.cached_tail = usize::MAX - 1;
-        p.ring.head.0.store(usize::MAX - 1, Ordering::Relaxed);
-        p.ring.tail.0.store(usize::MAX - 1, Ordering::Relaxed);
+        let base: Cursor = u64::MAX - 1;
+        p.cursor = base;
+        p.cached_head = base;
+        c.head = base;
+        c.cached_tail = base;
+        p.ring.head.0.store(base, Ordering::Relaxed);
+        p.ring.tail.0.store(base, Ordering::Relaxed);
 
         p.push(Counted).unwrap();
         p.push(Counted).unwrap();

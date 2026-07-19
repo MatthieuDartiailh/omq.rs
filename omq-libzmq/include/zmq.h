@@ -232,7 +232,21 @@ extern "C" {
 
 /*  Handle to a message. Opaque 64-byte struct matching the layout used      */
 /*  by omq-libzmq internally.                                                */
-typedef struct zmq_msg_t { unsigned char _[64]; } zmq_msg_t;
+typedef struct zmq_msg_t
+{
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
+    __declspec(align(8)) unsigned char _[64];
+#elif defined(_MSC_VER) && \
+    (defined(_M_IX86) || defined(_M_ARM_ARMV7VE) || defined(_M_ARM))
+    __declspec(align(4)) unsigned char _[64];
+#elif defined(__GNUC__) || defined(__INTEL_COMPILER) || \
+    (defined(__SUNPRO_C) && __SUNPRO_C >= 0x590) || \
+    (defined(__SUNPRO_CC) && __SUNPRO_CC >= 0x590)
+    unsigned char _[64] __attribute__((aligned(sizeof(void *))));
+#else
+    unsigned char _[64];
+#endif
+} zmq_msg_t;
 
 /*  Free function for zmq_msg_init_data.                                     */
 typedef void (zmq_free_fn) (void *data_, void *hint_);

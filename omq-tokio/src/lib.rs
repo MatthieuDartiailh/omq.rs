@@ -10,6 +10,9 @@
 //! transport implementations, and the public `Socket` actor.
 #![forbid(unsafe_code)]
 
+#[cfg(not(target_has_atomic = "64"))]
+compile_error!("omq-tokio requires target_has_atomic = \"64\"");
+
 pub mod blocking;
 pub mod context;
 pub mod engine;

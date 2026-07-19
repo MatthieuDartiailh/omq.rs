@@ -14,7 +14,7 @@ use std::task::{Context, Poll};
 use atomic_waker::AtomicWaker;
 use futures_core::Stream;
 
-use crate::{Padded, Ring};
+use crate::{Cursor, Padded, Ring};
 
 struct AsyncRing<T> {
     ring: Ring<T>,
@@ -41,8 +41,8 @@ impl<T> Drop for AsyncRing<T> {
 /// Async sending half. Wakes the consumer on flush when the ring was empty.
 pub struct AsyncProducer<T> {
     ring: Arc<AsyncRing<T>>,
-    cursor: usize,
-    cached_head: usize,
+    cursor: Cursor,
+    cached_head: Cursor,
 }
 
 // SAFETY: AsyncProducer<T> is Send because it is single-owner (not Sync) and
@@ -52,8 +52,8 @@ unsafe impl<T: Send> Send for AsyncProducer<T> {}
 /// Async receiving half. Implements [`Stream`].
 pub struct AsyncConsumer<T> {
     ring: Arc<AsyncRing<T>>,
-    head: usize,
-    cached_tail: usize,
+    head: Cursor,
+    cached_tail: Cursor,
 }
 
 // SAFETY: AsyncConsumer<T> is Send because it is single-owner (not Sync) and

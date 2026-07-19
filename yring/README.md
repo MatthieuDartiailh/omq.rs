@@ -12,9 +12,9 @@ atomics become the bottleneck.
 
 Three pointers instead of two:
 
-- `head`: consumer read position (AtomicUsize, consumer-owned)
-- `cursor`: producer write position (plain usize, producer-private, no atomic)
-- `tail`: last flushed position (AtomicUsize, producer writes / consumer reads)
+- `head`: consumer read position (AtomicU64, consumer-owned)
+- `cursor`: producer write position (plain u64, producer-private, no atomic)
+- `tail`: last flushed position (AtomicU64, producer writes / consumer reads)
 
 `push()` writes to the ring with zero atomics. `flush()` makes all
 pending writes visible with a single Release store. `pop()` reads with

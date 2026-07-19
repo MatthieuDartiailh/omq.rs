@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ZMQ_MSG_T_SIZE` support through `zmq_ctx_get`.
+
+### Changed
+
+- `zmq_msg_t` storage now matches libzmq's 64-byte, pointer-aligned ABI on
+  both 64-bit and 32-bit targets.
+- Inproc bypass cursors now use 64-bit atomics so 32-bit targets do not alias
+  at the 4 GiB cursor boundary.
+
 ## [0.5.4] - 2026-07-19
 
 ### Fixed

@@ -12,6 +12,7 @@ const ZMQ_PULL: i32 = 7;
 const ZMQ_IO_THREADS: i32 = 1;
 const ZMQ_MAX_SOCKETS: i32 = 2;
 const ZMQ_MAX_MSGSZ: i32 = 5;
+const ZMQ_MSG_T_SIZE: i32 = 6;
 
 #[test]
 fn ctx_new_term() {
@@ -46,6 +47,13 @@ fn ctx_get_io_threads_default() {
     let ctx = zmq_ctx_new();
     let n = zmq_ctx_get(ctx, ZMQ_IO_THREADS);
     assert_eq!(n, 1);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_get_msg_t_size() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_MSG_T_SIZE), 64);
     zmq_ctx_term(ctx);
 }
 

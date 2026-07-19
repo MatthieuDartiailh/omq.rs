@@ -13,6 +13,9 @@
 // #[expect] would be pure noise for a C API crate.
 #![expect(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(not(target_has_atomic = "64"))]
+compile_error!("omq-libzmq requires target_has_atomic = \"64\"");
+
 mod consts;
 mod context;
 pub mod curve;
@@ -57,3 +60,4 @@ pub use util::{
 pub use opts::{zmq_getsockopt, zmq_setsockopt};
 
 const _: () = assert!(std::mem::size_of::<msg::OmqMsgRepr>() == 64);
+const _: () = assert!(std::mem::align_of::<msg::OmqMsgRepr>() == std::mem::align_of::<usize>());
