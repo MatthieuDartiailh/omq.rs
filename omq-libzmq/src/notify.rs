@@ -22,6 +22,7 @@ pub(crate) trait NotifyHandle: Send + Sync {
 #[cfg(unix)]
 mod unix {
     use super::NotifyHandle;
+    #[cfg(target_os = "linux")]
     use crate::socket::DEFAULT_HWM;
 
     #[derive(Clone, Copy)]
