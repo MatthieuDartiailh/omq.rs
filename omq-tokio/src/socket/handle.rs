@@ -18,7 +18,7 @@ use omq_proto::type_state::TypeState;
 use super::actor::{SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
 use super::recv::{SpscAwareRecv, SpscHandles, SpscPush};
-use crate::routing::{SendStrategy, SendSubmitter};
+use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
 
 pub use omq_proto::error::TrySendError;
 
@@ -51,9 +51,9 @@ struct Inner {
     send_submitter: SendSubmitter,
     /// Shared with the actor for REP `pre_send` / `post_recv`.
     type_state: Arc<Mutex<TypeState>>,
-    /// Shared request identity for the latency REP path.
-    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, Bytes)>>>,
-    rep_current: Arc<Mutex<Option<(u64, Bytes)>>>,
+    /// Shared request envelope for the latency REP path.
+    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
+    rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
     rep_latency: bool,
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.

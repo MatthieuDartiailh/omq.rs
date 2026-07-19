@@ -2,12 +2,14 @@
 set -e
 cd "$(dirname "$0")"
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
+PYTHON=${PYTHON:-python3}
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}../../../bindings/pyomq/python"
 
-python sink.py &
+"$PYTHON" sink.py &
 sleep 0.3
-python worker.py ipc://@omq-zguide-03-ventilator ipc://@omq-zguide-03-sink 0 &
-python worker.py ipc://@omq-zguide-03-ventilator ipc://@omq-zguide-03-sink 1 &
-python worker.py ipc://@omq-zguide-03-ventilator ipc://@omq-zguide-03-sink 2 &
+"$PYTHON" worker.py ipc://@omq-zguide-03-ventilator ipc://@omq-zguide-03-sink 0 &
+"$PYTHON" worker.py ipc://@omq-zguide-03-ventilator ipc://@omq-zguide-03-sink 1 &
+"$PYTHON" worker.py ipc://@omq-zguide-03-ventilator ipc://@omq-zguide-03-sink 2 &
 sleep 0.3
-python ventilator.py
+"$PYTHON" ventilator.py
 wait

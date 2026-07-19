@@ -29,6 +29,7 @@ pub(crate) use omq_proto::subscription;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use smallvec::SmallVec;
 
 use crate::engine::PeerDriverHandle;
 use omq_proto::error::{Error, Result};
@@ -48,6 +49,34 @@ pub(crate) use fan_out::{FanOutMode, FanOutSend, Submitter as FanOutSubmitter};
 pub(crate) use identity::{IdentityRecv, IdentitySend, Submitter as IdentitySubmitter};
 pub(crate) use latency::{LatencySend, Submitter as LatencySubmitter};
 pub(crate) use round_robin::{RoundRobinSend, Submitter as RoundRobinSubmitter};
+
+pub(crate) type RepEnvelope = SmallVec<[Bytes; 2]>;
+
+pub(crate) fn split_rep_request(msg: &Message) -> Option<(RepEnvelope, Message)> {
+    let mut envelope = RepEnvelope::new();
+    let mut body = Vec::new();
+    let mut seen_delimiter = false;
+
+    for part in msg {
+        if seen_delimiter {
+            body.push(part);
+        } else if part.is_empty() {
+            seen_delimiter = true;
+        } else {
+            envelope.push(part);
+        }
+    }
+
+    seen_delimiter.then(|| (envelope, Message::multipart(body)))
+}
+
+pub(crate) fn rep_reply_with_envelope(envelope: &RepEnvelope, body: &Message) -> Message {
+    let mut parts = Vec::with_capacity(envelope.len() + 1 + body.len());
+    parts.extend(envelope.iter().cloned());
+    parts.push(Bytes::new());
+    parts.extend(body.iter());
+    Message::multipart(parts)
+}
 
 /// Send-side policy.
 #[derive(Debug)]
@@ -96,11 +125,11 @@ impl SendSubmitter {
     pub(crate) async fn send_rep_to_peer(
         &self,
         peer_id: u64,
-        identity: &Bytes,
+        envelope: &RepEnvelope,
         msg: Message,
     ) -> Result<()> {
         match self {
-            Self::Identity(s) => s.send_rep(peer_id, identity, msg).await,
+            Self::Identity(s) => s.send_rep(peer_id, envelope, msg).await,
             _ => Err(Error::Protocol("REP latency route unavailable".into())),
         }
     }
@@ -108,11 +137,11 @@ impl SendSubmitter {
     pub(crate) fn send_rep_try_to_peer(
         &self,
         peer_id: u64,
-        identity: &Bytes,
+        envelope: &RepEnvelope,
         msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         match self {
-            Self::Identity(s) => s.try_send_rep(peer_id, identity, msg),
+            Self::Identity(s) => s.try_send_rep(peer_id, envelope, msg),
             _ => Err(omq_proto::error::TrySendError::Error(Error::Protocol(
                 "REP latency route unavailable".into(),
             ))),

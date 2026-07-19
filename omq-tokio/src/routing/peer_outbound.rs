@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
@@ -77,68 +76,6 @@ impl PeerOutbound {
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => TryFrameResult::Full,
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => TryFrameResult::Dead,
             },
-        }
-    }
-
-    pub(crate) fn try_encode_rep(&self, identity: &Bytes, msg: &Message) -> TryFrameResult {
-        match self {
-            Self::Wire {
-                slot,
-                inbox,
-                direct,
-            } => {
-                if direct.is_none() {
-                    let wrapped = Message::with_prefix(Bytes::new(), msg.clone());
-                    return match inbox.try_send(PeerDriverCommand::SendMessage(wrapped)) {
-                        Ok(()) => TryFrameResult::Ok,
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            TryFrameResult::Full
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            TryFrameResult::Dead
-                        }
-                    };
-                }
-                match slot.try_encode_rep(identity, msg) {
-                    TryFrameResult::Ineligible => {
-                        // This target is already bound to the selected peer;
-                        // identity is routing metadata, never a wire frame.
-                        let wrapped = Message::with_prefix(Bytes::new(), msg.clone());
-                        match inbox.try_send(PeerDriverCommand::SendMessage(wrapped)) {
-                            Ok(()) => TryFrameResult::Ok,
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                TryFrameResult::Full
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                TryFrameResult::Dead
-                            }
-                        }
-                    }
-                    TryFrameResult::Ok if direct.is_some() => {
-                        let direct = direct.as_ref().unwrap();
-                        match direct
-                            .try_write_buffer(|buf| slot.try_drain_arena_only(buf).is_some())
-                        {
-                            // External frame entries remain queued for the IO
-                            // driver; false does not mean the slot was full.
-                            Ok(true | false) => TryFrameResult::Ok,
-                            Err(_) => TryFrameResult::Dead,
-                        }
-                    }
-                    other => other,
-                }
-            }
-            Self::Inbox(tx) => {
-                let wrapped = Message::with_prefix(
-                    identity.clone(),
-                    Message::with_prefix(Bytes::new(), msg.clone()),
-                );
-                match tx.try_send(PeerDriverCommand::SendMessage(wrapped)) {
-                    Ok(()) => TryFrameResult::Ok,
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => TryFrameResult::Full,
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => TryFrameResult::Dead,
-                }
-            }
         }
     }
 

@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::Bytes;
 use futures::FutureExt;
 use omq_tokio::Socket as InnerSocket;
 use pyo3::prelude::*;
@@ -491,7 +490,6 @@ pub fn proxy_handles(
     let cap = cap.map(|s| Arc::new(s.into_async()));
     let ctrl = ctrl.map(|s| Arc::new(s.into_async()));
     ctx.spawn_blocking(async move {
-        let mut route_id: Option<Bytes> = None;
         loop {
             tokio::select! {
                 biased;
@@ -515,25 +513,11 @@ pub fn proxy_handles(
                 }
                 msg = fe.recv() => {
                     let Ok(msg) = msg else { return; };
-                    let parts: Vec<Bytes> = msg.iter().collect();
-                    let msg = if parts.len() >= 3 && parts[1].is_empty() {
-                        route_id = Some(parts[0].clone());
-                        omq_tokio::Message::multipart(parts[2..].to_vec())
-                    } else { msg };
                     if let Some(cap) = &cap { let _ = cap.send(msg.clone()).await; }
                     if be.send(msg).await.is_err() { return; }
                 }
                 msg = be.recv() => {
                     let Ok(msg) = msg else { return; };
-                    let msg = if let Some(id) = &route_id {
-                        let mut parts: Vec<Bytes> = msg.iter().collect();
-                        if parts.first().is_some_and(Bytes::is_empty) {
-                            parts.remove(0);
-                        }
-                        let mut routed = vec![id.clone(), Bytes::new()];
-                        routed.extend(parts);
-                        omq_tokio::Message::multipart(routed)
-                    } else { msg };
                     if let Some(cap) = &cap { let _ = cap.send(msg.clone()).await; }
                     if fe.send(msg).await.is_err() { return; }
                 }

@@ -23,6 +23,7 @@ use bytes::Bytes;
 use crate::engine::transmit_slot::TryFrameResult;
 use crate::engine::{PeerDriverCommand, PeerDriverHandle, SendPipeError, SendPipeProducer};
 use crate::routing::peer_outbound::PeerOutbound;
+use crate::routing::{RepEnvelope, rep_reply_with_envelope};
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -67,45 +68,6 @@ impl PeerTarget {
             Self::Pipe(p) | Self::RepInproc(p) => Some(p.space_available()),
             Self::Direct(target) => target.space_available(),
             Self::Inbox(_) => None,
-        }
-    }
-
-    pub(crate) fn try_send_rep(
-        &mut self,
-        identity: &Bytes,
-        msg: Message,
-    ) -> core::result::Result<(), SendPipeError> {
-        match self {
-            Self::Direct(target) => match target.try_encode_rep(identity, &msg) {
-                TryFrameResult::Ok => Ok(()),
-                TryFrameResult::Full => Err(SendPipeError::Full(msg)),
-                TryFrameResult::Dead => Err(SendPipeError::Closed(msg)),
-                TryFrameResult::Ineligible => unreachable!(),
-            },
-            Self::Pipe(p) => {
-                let wrapped =
-                    Message::with_prefix(identity.clone(), Message::with_prefix(Bytes::new(), msg));
-                p.try_send(wrapped)
-            }
-            Self::RepInproc(p) => {
-                let msg = if identity.is_empty() {
-                    Message::with_prefix(Bytes::new(), msg)
-                } else {
-                    Message::with_prefix(identity.clone(), Message::with_prefix(Bytes::new(), msg))
-                };
-                p.try_send(msg)
-            }
-            Self::Inbox(tx) => {
-                let wrapped =
-                    Message::with_prefix(identity.clone(), Message::with_prefix(Bytes::new(), msg));
-                match tx.try_send(PeerDriverCommand::SendMessage(wrapped)) {
-                    Ok(()) => Ok(()),
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(
-                        PeerDriverCommand::SendMessage(m),
-                    )) => Err(SendPipeError::Full(m)),
-                    Err(_) => Err(SendPipeError::Closed(Message::default())),
-                }
-            }
         }
     }
 
@@ -188,11 +150,12 @@ impl Submitter {
     pub(crate) async fn send_rep(
         &self,
         peer_id: u64,
-        identity: &Bytes,
+        envelope: &RepEnvelope,
         mut msg: Message,
     ) -> Result<()> {
+        msg = rep_reply_with_envelope(envelope, &msg);
         loop {
-            match self.try_send_rep(peer_id, identity, msg) {
+            match self.try_send_rep_wire(peer_id, msg) {
                 Ok(()) => return Ok(()),
                 Err(TrySendError::Full(returned)) => msg = returned,
                 Err(TrySendError::Error(error)) => return Err(error),
@@ -205,19 +168,30 @@ impl Submitter {
     pub(crate) fn try_send_rep(
         &self,
         peer_id: u64,
-        identity: &Bytes,
+        envelope: &RepEnvelope,
+        msg: Message,
+    ) -> core::result::Result<(), TrySendError> {
+        let wire = rep_reply_with_envelope(envelope, &msg);
+        match self.try_send_rep_wire(peer_id, wire) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(TrySendError::Full(msg)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn try_send_rep_wire(
+        &self,
+        peer_id: u64,
         msg: Message,
     ) -> core::result::Result<(), TrySendError> {
         let mut g = self.inner.lock().expect("identity inner poisoned");
         let Some(peer) = g.peers.get_mut(&peer_id) else {
             return Err(TrySendError::Error(Error::Unroutable));
         };
-        peer.target
-            .try_send_rep(identity, msg)
-            .map_err(|e| match e {
-                SendPipeError::Full(m) => TrySendError::Full(m),
-                SendPipeError::Closed(_) => TrySendError::Closed,
-            })
+        peer.target.try_send(msg).map_err(|e| match e {
+            SendPipeError::Full(m) => TrySendError::Full(m),
+            SendPipeError::Closed(_) => TrySendError::Closed,
+        })
     }
 
     fn try_send_to(

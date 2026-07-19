@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -e
+cd "$(dirname "$0")"
 STORE=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$STORE"' EXIT
 

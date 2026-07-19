@@ -318,7 +318,6 @@ impl SocketDriver {
         // from the connection driver into the user-facing recv channel,
         // skipping the actor's event loop.
         let rep_latency = self.socket_type == SocketType::Rep && self.uses_latency_profile();
-        let rep_identity = Arc::new(std::sync::Mutex::new(None));
         let driver = if can_bypass_actor_recv(self.socket_type) || rep_latency {
             let can_use_yring =
                 can_bypass_actor_recv(self.socket_type) && self.socket_type != SocketType::Req;
@@ -331,7 +330,6 @@ impl SocketDriver {
                     if rep_latency {
                         driver.with_recv_sink(crate::engine::RecvSink::rep(
                             sink,
-                            rep_identity.clone(),
                             self.rep_pending.clone(),
                             peer_id,
                         ))
@@ -356,7 +354,6 @@ impl SocketDriver {
                     if rep_latency {
                         driver.with_recv_sink(crate::engine::RecvSink::rep(
                             sink,
-                            rep_identity.clone(),
                             self.rep_pending.clone(),
                             peer_id,
                         ))
@@ -367,7 +364,6 @@ impl SocketDriver {
             } else if rep_latency {
                 driver.with_recv_sink(crate::engine::RecvSink::rep(
                     crate::engine::RecvSink::Channel(self.recv_tx.clone()),
-                    rep_identity,
                     self.rep_pending.clone(),
                     peer_id,
                 ))
@@ -616,15 +612,12 @@ impl SocketDriver {
                 if self.socket_type == SocketType::Rep
                     && self.uses_latency_profile()
                     && self.peers.contains_key(&peer_id)
+                    && let Some((envelope, _)) = crate::routing::split_rep_request(&msg)
                 {
-                    let envelope_identity = msg
-                        .part_bytes(0)
-                        .filter(|part| !part.is_empty())
-                        .unwrap_or_default();
                     self.rep_pending
                         .lock()
                         .expect("rep pending")
-                        .push_back((peer_id, envelope_identity));
+                        .push_back((peer_id, envelope));
                 }
                 if self.handle_legacy_subscribe(peer_id, &msg) {
                     return;

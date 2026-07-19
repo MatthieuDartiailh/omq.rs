@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -e
+cd "$(dirname "$0")"
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
 cargo build --bins 2>&1
-BIN="$(dirname "$0")/../target/debug"
+BIN="../target/debug"
 
 "$BIN/zg03_sink" &
 SINK_PID=$!

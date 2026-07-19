@@ -31,7 +31,7 @@ use super::udp::{
     spawn_dish_listener, spawn_radio_sender,
 };
 use crate::routing::{
-    RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
+    RecvStrategy, RepEnvelope, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
 };
 use crate::transport::{
     Canceled, InboundFrame, InprocConn, InprocPeerSnapshot, PeerIdent, dial_with_backoff,
@@ -185,9 +185,9 @@ pub(crate) struct SocketDriver {
     /// REQ / REP envelope + alternation state. Shared with the socket
     /// handle so `Socket::send` can call `pre_send` without an actor hop.
     type_state: Arc<Mutex<TypeState>>,
-    /// REP latency route: identity of the request currently being served.
-    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, bytes::Bytes)>>>,
-    rep_current: Arc<Mutex<Option<(u64, bytes::Bytes)>>>,
+    /// REP latency route: envelope of the request currently being served.
+    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
+    rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
     /// REQ alternation flag. Shared with the socket handle for lock-free
     /// send/recv on REQ. Actor resets on peer disconnect.
     req_awaiting_reply: Arc<AtomicBool>,
@@ -226,8 +226,8 @@ impl SocketDriver {
         send_strategy: SendStrategy,
         spsc: super::recv::SpscHandles,
         type_state: Arc<Mutex<TypeState>>,
-        rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, bytes::Bytes)>>>,
-        rep_current: Arc<Mutex<Option<(u64, bytes::Bytes)>>>,
+        rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
+        rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
         req_awaiting_reply: Arc<AtomicBool>,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         subscribe_count: Arc<AtomicU64>,
