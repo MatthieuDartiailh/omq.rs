@@ -5,45 +5,10 @@ mod test_support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_proto::endpoint::IpcPath;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
-#[cfg(target_os = "linux")]
 fn ipc_ep(name: &str) -> Endpoint {
-    Endpoint::Ipc(IpcPath::Abstract(format!(
-        "omq-tokio-cov-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )))
-}
-
-#[cfg(target_os = "windows")]
-fn ipc_ep(name: &str) -> Endpoint {
-    Endpoint::Ipc(IpcPath::NamedPipe(format!(
-        "omq-tokio-cov-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn ipc_ep(name: &str) -> Endpoint {
-    let short_name: String = name.chars().take(8).collect();
-    let path = std::path::PathBuf::from(format!(
-        "/tmp/omq-cov-{short_name}-{}-{:x}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    Endpoint::Ipc(IpcPath::Filesystem(path))
+    test_support::ipc_endpoint(&format!("cov-{name}"))
 }
 
 fn inproc_ep(name: &str) -> Endpoint {

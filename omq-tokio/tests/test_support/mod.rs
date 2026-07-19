@@ -13,15 +13,14 @@ pub fn tcp_loopback(port: u16) -> Endpoint {
 }
 
 pub fn ipc_endpoint(name: &str) -> Endpoint {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    static NEXT_IPC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let id = NEXT_IPC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     #[cfg(target_os = "linux")]
     {
         Endpoint::Ipc(omq_tokio::IpcPath::Abstract(format!(
-            "omq-test-{name}-{}-{nanos}",
+            "omq-test-{name}-{}-{id:x}",
             std::process::id()
         )))
     }
@@ -29,7 +28,7 @@ pub fn ipc_endpoint(name: &str) -> Endpoint {
     #[cfg(target_os = "windows")]
     {
         Endpoint::Ipc(omq_tokio::IpcPath::NamedPipe(format!(
-            "omq-test-{name}-{}-{nanos}",
+            "omq-test-{name}-{}-{id:x}",
             std::process::id()
         )))
     }
@@ -38,7 +37,7 @@ pub fn ipc_endpoint(name: &str) -> Endpoint {
     {
         let short_name: String = name.chars().take(8).collect();
         let path = std::path::PathBuf::from(format!(
-            "/tmp/omq-{short_name}-{}-{nanos:x}.sock",
+            "/tmp/omq-{short_name}-{}-{id:x}.sock",
             std::process::id()
         ));
         Endpoint::Ipc(omq_tokio::IpcPath::Filesystem(path))

@@ -13,35 +13,7 @@ use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
-    #[cfg(target_os = "linux")]
-    {
-        Endpoint::Ipc(IpcPath::Abstract(format!(
-            "omq-ipc-test-{name}-{}",
-            std::process::id()
-        )))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Endpoint::Ipc(IpcPath::NamedPipe(format!(
-            "omq-ipc-test-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )))
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        let short_name: String = name.chars().take(8).collect();
-        let path = std::path::PathBuf::from(format!(
-            "/tmp/omq-ipc-{short_name}-{}.sock",
-            std::process::id()
-        ));
-        Endpoint::Ipc(IpcPath::Filesystem(path))
-    }
+    test_support::ipc_endpoint(&format!("ipc-{name}"))
 }
 
 #[tokio::test]
