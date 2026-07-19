@@ -15,6 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      test_matrix: ${{ steps.matrix.outputs.test_matrix }}
+      os_matrix: ${{ steps.matrix.outputs.os_matrix }}
+      run_pyomq: ${{ steps.matrix.outputs.run_pyomq }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -28,6 +31,20 @@ jobs:
               - '!**/*.svg'
               - '!**/*.py'
               - '!doc/**'
+      - id: matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" && "$HEAD_REF" == "ci/darwin" ]]; then
+            echo 'test_matrix={"include":[{"toolchain":"stable","os":"macos-15-intel"}]}'
+            echo 'os_matrix={"os":["macos-15-intel"]}'
+            echo 'run_pyomq=false'
+          else
+            echo 'test_matrix={"include":[{"toolchain":"stable","os":"ubuntu-latest"},{"toolchain":"stable","os":"ubuntu-24.04-arm"},{"toolchain":"stable","os":"macos-15-intel"},{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+            echo 'os_matrix={"os":["ubuntu-latest","macos-15-intel","windows-latest"]}'
+            echo 'run_pyomq=true'
+          fi >> "$GITHUB_OUTPUT"
 
   test:
     name: cargo test (${{ matrix.toolchain }}, ${{ matrix.os }})
@@ -36,19 +53,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - toolchain: stable
-            os: ubuntu-latest
-          - toolchain: stable
-            os: ubuntu-24.04-arm
-          - toolchain: stable
-            os: macos-15-intel
-          - toolchain: "1.93"
-            os: ubuntu-latest
-          - toolchain: stable
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
+      matrix: ${{ fromJSON(needs.changes.outputs.test_matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -70,8 +75,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15-intel, windows-latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -90,8 +94,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15-intel, windows-latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -110,8 +113,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15-intel, windows-latest]
+      matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -132,7 +134,7 @@ jobs:
   pyomq:
     name: pyomq
     needs: [changes, lint]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_pyomq == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

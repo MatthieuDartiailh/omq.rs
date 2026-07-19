@@ -68,7 +68,9 @@ async fn large_multipart_over_tcp() {
     let part_size = 256 * 1024;
     let rep = Socket::new(SocketType::Rep, Options::default());
     let ep = rep.bind(tcp_ep(0)).await.unwrap();
-    let req = Socket::new(SocketType::Req, Options::default());
+    // Keep the sender buffer small enough to force partial direct writes on
+    // loopback. The IO driver must flush the queued remainder.
+    let req = Socket::new(SocketType::Req, Options::default().send_buffer_size(4096));
     req.connect(ep).await.unwrap();
     test_support::wait_for_handshake(&req).await;
     test_support::wait_for_handshake(&rep).await;
