@@ -64,8 +64,9 @@ pub async fn bind_loopback(sock: &Socket) -> u16 {
 }
 
 pub async fn wait_for_handshake(sock: &Socket) {
-    let mut mon = sock.monitor();
-    wait_for_handshake_on(&mut mon).await;
+    sock.wait_connected(1, Duration::from_secs(5))
+        .await
+        .expect("handshake did not complete within 5s");
 }
 
 pub async fn wait_for_handshake_on(mon: &mut MonitorStream) {

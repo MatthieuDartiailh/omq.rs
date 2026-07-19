@@ -24,9 +24,9 @@ async fn push_pull_large(size_bytes: usize) {
     let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    let mut push_mon = push.monitor();
     push.connect(ep).await.unwrap();
-    test_support::wait_for_handshake_on(&mut push_mon).await;
+    test_support::wait_for_handshake(&push).await;
+    test_support::wait_for_handshake(&pull).await;
 
     let payload: Vec<u8> = (0..size_bytes).map(|i| (i & 0xFF) as u8).collect();
     push.send(Message::single(payload.clone())).await.unwrap();
@@ -69,9 +69,9 @@ async fn large_multipart_over_tcp() {
     let rep = Socket::new(SocketType::Rep, Options::default());
     let ep = rep.bind(tcp_ep(0)).await.unwrap();
     let req = Socket::new(SocketType::Req, Options::default());
-    let mut req_mon = req.monitor();
     req.connect(ep).await.unwrap();
-    test_support::wait_for_handshake_on(&mut req_mon).await;
+    test_support::wait_for_handshake(&req).await;
+    test_support::wait_for_handshake(&rep).await;
 
     let part_a: Vec<u8> = vec![0xAA; part_size];
     let part_b: Vec<u8> = vec![0xBB; part_size];
@@ -100,9 +100,9 @@ async fn huge_messages_xxhash() {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let ep = pull.bind(tcp_ep(0)).await.unwrap();
     let push = Socket::new(SocketType::Push, Options::default());
-    let mut push_mon = push.monitor();
     push.connect(ep).await.unwrap();
-    test_support::wait_for_handshake_on(&mut push_mon).await;
+    test_support::wait_for_handshake(&push).await;
+    test_support::wait_for_handshake(&pull).await;
 
     let mut hashes = [0u128; 3];
     for (i, &size) in SIZES.iter().enumerate() {
@@ -135,9 +135,9 @@ async fn large_message_back_to_back() {
     let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    let mut push_mon = push.monitor();
     push.connect(ep).await.unwrap();
-    test_support::wait_for_handshake_on(&mut push_mon).await;
+    test_support::wait_for_handshake(&push).await;
+    test_support::wait_for_handshake(&pull).await;
 
     let p1: Vec<u8> = vec![0x11; size];
     let p2: Vec<u8> = vec![0x22; size];
