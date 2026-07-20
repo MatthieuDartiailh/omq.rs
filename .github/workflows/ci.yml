@@ -127,10 +127,10 @@ jobs:
         run: cross test --target ${{ matrix.target }} -p omq-proto --features lz4 --lib
       - name: libzmq ABI and inproc tests
         run: |
-          cross test --target ${{ matrix.target }} -p omq-libzmq --test ctx
-          cross test --target ${{ matrix.target }} -p omq-libzmq --test multipart
-          cross test --target ${{ matrix.target }} -p omq-libzmq --test proxy
-          cross test --target ${{ matrix.target }} -p omq-libzmq --test draft
+          cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_ctx
+          cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_multipart
+          cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_proxy
+          cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_draft
 
   lint:
     name: fmt + clippy
