@@ -218,13 +218,14 @@ impl SendStrategy {
         handle: PeerDriverHandle,
         peer_identity: Bytes,
         is_inproc: bool,
+        io_thread: usize,
     ) {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => s.connection_added(peer_id, &handle, is_inproc),
             Self::Latency(s) => s.connection_added(peer_id, &handle),
             Self::Exclusive(s) => s.connection_added(peer_id, handle),
-            Self::FanOut(s) => s.connection_added(peer_id, handle),
+            Self::FanOut(s) => s.connection_added(peer_id, handle, io_thread),
             Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity, is_inproc),
         }
     }
@@ -232,9 +233,14 @@ impl SendStrategy {
     /// FanOut-only: register a peer that matches every group / every
     /// subscription. UDP RADIO uses this since DISH never sends JOIN
     /// over the wire. No-op for non-FanOut strategies.
-    pub(crate) fn connection_added_any_groups(&mut self, peer_id: u64, handle: PeerDriverHandle) {
+    pub(crate) fn connection_added_any_groups(
+        &mut self,
+        peer_id: u64,
+        handle: PeerDriverHandle,
+        io_thread: usize,
+    ) {
         if let Self::FanOut(s) = self {
-            s.connection_added_any_groups(peer_id, handle);
+            s.connection_added_any_groups(peer_id, handle, io_thread);
         }
     }
 

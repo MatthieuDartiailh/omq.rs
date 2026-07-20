@@ -1,8 +1,8 @@
 #![cfg(all(feature = "soak", feature = "lz4"))]
-//! Soak: sharded PUB/SUB over lz4+tcp:// with fan-out dictionaries.
+//! Soak: IO-lane PUB/SUB over lz4+tcp:// with fan-out dictionaries.
 //!
 //! Trains the PUB fan-out encoder through sustained traffic, keeps enough
-//! decoded SUB peers alive to activate shard workers, and repeatedly adds
+//! decoded SUB peers alive to activate lane workers, and repeatedly adds
 //! raw TCP late subscribers. Each raw late subscriber must receive one
 //! dictionary shipment before dictionary-compressed payloads.
 
@@ -114,7 +114,7 @@ async fn assert_raw_dict_then_payloads(raw: &Socket) {
 }
 
 #[test]
-fn soak_pub_sub_lz4_dict_sharded_fanout() {
+fn soak_pub_sub_lz4_dict_io_lane_fanout() {
     let duration = soak_common::soak_duration();
     let monitor = soak_common::ResourceMonitor::start();
 

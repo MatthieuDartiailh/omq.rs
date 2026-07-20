@@ -70,11 +70,11 @@ a stateless `DirectTcpWriter` for one immediate nonblocking write from
 the slot arena; partial writes stay in `PeerTransmitSlot` and are
 flushed by the driver. Recv bypass: `ConnectionDriver`
 pushes straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER
-go through actor for identity routing. PUB fan-out shard workers
-(`ShardWorker`) use split channels: a `yring` control channel
+go through actor for identity routing. PUB fan-out lane workers
+(`LaneWorker`) use split channels: a `yring` control channel
 (drained unconditionally) and a `yring` data channel (drained up to
 `DrainBudget::WORKER`). All producer-to-consumer signaling uses
-`DataSignal` (transmit slot, send pipe, fallback queue, shard
+`DataSignal` (transmit slot, send pipe, fallback queue, lane
 workers).
 
 **Inproc.** No ZMTP. Inproc and byte-stream round-robin peers both
@@ -223,14 +223,15 @@ convenience. Core guarantees:
 ## Performance invariants
 
 **Caller thread: enqueue only.** The caller thread pushes raw
-`Message` values into send pipes or shard rings. Encoding, framing,
-compression, and wire I/O happen on driver or shard worker tasks.
+`Message` values into send pipes or lane rings. Encoding, framing,
+compression, and wire I/O happen on driver or lane worker tasks.
 Never add encoding or compression work to the caller's send path.
 
-**Per-shard encoding and compression.** Fan-out shard workers encode
-and compress independently. Duplicating compression across S shards
-(typically 2-3) is cheaper than serializing through a shared encoder
-mutex or adding scheduling hops to a single compression worker.
+**Per-lane encoding and compression.** Fan-out lane workers encode
+and compress independently. With owned `Context` IO threads, one
+fan-out lane runs on each IO thread. Duplicating compression across
+lanes is cheaper than serializing through a shared encoder mutex or
+adding scheduling hops to a single compression worker.
 
 **LZ4 dict: one shipment per direction per connection.** The LZ4
 RFC (doc/lz4-rfc.md Sec. 7.2) requires at most one LZ4D dict

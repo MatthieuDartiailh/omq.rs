@@ -88,7 +88,7 @@ async fn sub_duplicate_lz4_tcp_connect_is_ignored() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pub_sub_lz4_sharded_fan_out_ships_dict_to_late_subscriber() {
+async fn pub_sub_lz4_io_lane_fan_out_ships_dict_to_late_subscriber() {
     use omq_proto::proto::transform::lz4::DictTrainer;
 
     const N_DECODED_SUBS: usize = 4;
@@ -184,7 +184,7 @@ async fn pub_sub_lz4_sharded_fan_out_ships_dict_to_late_subscriber() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pub_sub_lz4_sharded_fan_out_auto_trains_dict_for_late_subscriber() {
+async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
     const N_DECODED_SUBS: usize = 4;
     const N_TRAINING_MSGS: usize = 100;
 
@@ -270,7 +270,7 @@ async fn pub_sub_lz4_sharded_fan_out_auto_trains_dict_for_late_subscriber() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pub_sub_lz4_sharded_fan_out_deferred_large_message_preserves_order() {
+async fn pub_sub_lz4_io_lane_fan_out_deferred_large_message_preserves_order() {
     use omq_proto::proto::transform::lz4::DictTrainer;
 
     const N_SUBS: usize = 4;

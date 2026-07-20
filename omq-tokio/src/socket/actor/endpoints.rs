@@ -188,7 +188,7 @@ impl SocketDriver {
         // any-groups RADIO target - UDP DISH never sends JOIN, so the
         // sender must fan out unconditionally. The receiver filters.
         self.send_strategy
-            .connection_added_any_groups(peer_id, handle);
+            .connection_added_any_groups(peer_id, handle, 0);
 
         // Synthesise Connected so users see the same monitor signal
         // they'd get for any other transport. PeerIdent is the

@@ -231,10 +231,7 @@ impl IoPoolHandle {
     /// Number of IO threads.
     pub(crate) fn thread_count(&self) -> usize {
         match &self.pool {
-            None => tokio::runtime::Handle::current()
-                .metrics()
-                .num_workers()
-                .max(1),
+            None => 1,
             Some(pool) => pool.thread_count(),
         }
     }

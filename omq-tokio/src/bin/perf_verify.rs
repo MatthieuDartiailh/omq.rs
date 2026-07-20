@@ -4,8 +4,10 @@
 //! Without that file, this command runs a smaller smoke gate.
 
 use std::collections::HashMap;
+use std::io::{BufRead, Write};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +16,8 @@ use omq_tokio::{Context, ContextConfig, Endpoint, Message, Options, SocketType};
 
 const WARMUP: Duration = Duration::from_millis(100);
 const MEASURE: Duration = Duration::from_millis(750);
+const PUBSUB_32P_WARMUP: Duration = Duration::from_millis(500);
+const PUBSUB_32P_MEASURE: Duration = Duration::from_secs(3);
 
 #[derive(Clone)]
 struct Sample {
@@ -222,14 +226,13 @@ async fn pushpull(size: usize, io_threads: usize, endpoint: Endpoint) -> f64 {
     .expect("PUSH/PULL task")
 }
 
-async fn pubsub(size: usize, io_threads: usize) -> f64 {
-    const PEERS: usize = 4;
+async fn pubsub(size: usize, io_threads: usize, peers: usize) -> f64 {
     let pub_ctx = Context::with_config(ContextConfig { io_threads });
     let sub_ctx = Context::with_config(ContextConfig { io_threads });
     let publisher = pub_ctx.socket(SocketType::Pub, Options::default());
     let endpoint = publisher.bind(tcp_zero()).await.expect("PUB bind");
-    let mut subscribers = Vec::with_capacity(PEERS);
-    for _ in 0..PEERS {
+    let mut subscribers = Vec::with_capacity(peers);
+    for _ in 0..peers {
         let subscriber = sub_ctx.socket(SocketType::Sub, Options::default());
         subscriber
             .connect(endpoint.clone())
@@ -242,11 +245,11 @@ async fn pubsub(size: usize, io_threads: usize) -> f64 {
         subscribers.push(subscriber);
     }
     publisher
-        .wait_subscribed(PEERS as u64, Duration::from_secs(1))
+        .wait_subscribed(peers as u64, Duration::from_secs(1))
         .await
         .expect("SUB subscribe timeout");
 
-    let mut receivers = Vec::with_capacity(PEERS);
+    let mut receivers = Vec::with_capacity(peers);
     for subscriber in subscribers {
         receivers.push(tokio::spawn(count_messages(
             subscriber,
@@ -287,6 +290,135 @@ async fn pubsub(size: usize, io_threads: usize) -> f64 {
     rx_count as f64 / MEASURE.as_secs_f64()
 }
 
+fn send_blocking_retry(sock: &omq_tokio::blocking::Socket, mut msg: Message) {
+    loop {
+        match sock.try_send(msg) {
+            Ok(()) => return,
+            Err(omq_tokio::TrySendError::Full(returned)) => {
+                msg = returned;
+                thread::yield_now();
+            }
+            Err(error) => panic!("PUB send failed: {error}"),
+        }
+    }
+}
+
+fn run_pubsub_pub_child(size: usize, io_threads: usize, peers: usize) {
+    let ctx = Context::with_config(ContextConfig { io_threads });
+    let options = Options {
+        xpub_nodrop: true,
+        ..Options::default()
+    };
+    let publisher = ctx.blocking_socket(SocketType::Pub, options);
+    let endpoint = publisher.bind(tcp_zero()).expect("PUB bind");
+    println!("{endpoint}");
+    std::io::stdout().flush().expect("flush PUB endpoint");
+    publisher
+        .wait_subscribed(peers as u64, Duration::from_secs(10))
+        .expect("SUB subscribe timeout");
+    let msg = payload(size);
+    loop {
+        send_blocking_retry(&publisher, msg.clone());
+    }
+}
+
+fn run_pubsub_sub_child(endpoint: &Endpoint, size: usize, duration: Duration, peers: usize) {
+    let ctx = Context::with_config(ContextConfig { io_threads: 2 });
+    let drain_batch = if size <= 1024 { 64 } else { 256 };
+    let mut subscribers = Vec::with_capacity(peers);
+    for _ in 0..peers {
+        let subscriber = ctx.blocking_socket(SocketType::Sub, Options::default());
+        subscriber
+            .connect((*endpoint).clone())
+            .expect("SUB connect");
+        subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
+        subscribers.push(subscriber);
+    }
+
+    thread::sleep(PUBSUB_32P_WARMUP);
+    let counters: Vec<_> = (0..peers).map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let deadline = Instant::now() + duration;
+    let started = Instant::now();
+    let receivers: Vec<_> = subscribers
+        .into_iter()
+        .zip(counters.iter().cloned())
+        .map(|(subscriber, counter)| {
+            thread::spawn(move || {
+                let mut count = 0_u64;
+                while Instant::now() < deadline {
+                    if subscriber.try_recv().is_ok() {
+                        count += 1;
+                        for _ in 1..drain_batch {
+                            if subscriber.try_recv().is_err() {
+                                break;
+                            }
+                            count += 1;
+                        }
+                    } else {
+                        thread::yield_now();
+                    }
+                }
+                counter.store(count, Ordering::Relaxed);
+            })
+        })
+        .collect();
+    for receiver in receivers {
+        receiver.join().expect("SUB thread");
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    let total: u64 = counters
+        .iter()
+        .map(|counter| counter.load(Ordering::Relaxed))
+        .sum();
+    ctx.term();
+    println!("{total} {elapsed:.6}");
+}
+
+fn pubsub_process_published_rate(size: usize, io_threads: usize, peers: usize) -> f64 {
+    let exe = std::env::current_exe().expect("current executable");
+    let mut publisher = Command::new(&exe)
+        .arg("--pubsub-pub-child")
+        .arg(size.to_string())
+        .arg(io_threads.to_string())
+        .arg(peers.to_string())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn PUB child");
+    let stdout = publisher.stdout.take().expect("PUB stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut endpoint = String::new();
+    reader.read_line(&mut endpoint).expect("read PUB endpoint");
+    let endpoint = endpoint.trim();
+    assert!(!endpoint.is_empty(), "PUB child did not report endpoint");
+
+    let output = Command::new(&exe)
+        .arg("--pubsub-sub-child")
+        .arg(endpoint)
+        .arg(size.to_string())
+        .arg(PUBSUB_32P_MEASURE.as_secs_f64().to_string())
+        .arg(peers.to_string())
+        .output()
+        .expect("run SUB child");
+    let _ = publisher.kill();
+    let _ = publisher.wait();
+    assert!(
+        output.status.success(),
+        "SUB child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("SUB stdout utf8");
+    let mut fields = stdout.split_whitespace();
+    let total: f64 = fields
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("SUB total count");
+    let elapsed: f64 = fields
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("SUB elapsed");
+    total / elapsed / peers as f64
+}
+
 fn verify(sample: &Sample, thresholds: &HashMap<String, f64>) -> bool {
     let key = &sample.name;
     println!("{:<24} {:>12.2} {}", sample.name, sample.value, sample.unit);
@@ -320,6 +452,26 @@ fn verify(sample: &Sample, thresholds: &HashMap<String, f64>) -> bool {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("--pubsub-pub-child") => {
+            let size = args[2].parse().expect("size");
+            let io_threads = args[3].parse().expect("io_threads");
+            let peers = args[4].parse().expect("peers");
+            run_pubsub_pub_child(size, io_threads, peers);
+            return;
+        }
+        Some("--pubsub-sub-child") => {
+            let endpoint = args[2].parse().expect("endpoint");
+            let size = args[3].parse().expect("size");
+            let duration = Duration::from_secs_f64(args[4].parse().expect("duration"));
+            let peers = args[5].parse().expect("peers");
+            run_pubsub_sub_child(&endpoint, size, duration, peers);
+            return;
+        }
+        _ => {}
+    }
+
     let thresholds = read_thresholds();
     let mut ok = true;
     let name = "reqrep_ct.p50_256b_us";
@@ -349,10 +501,10 @@ async fn main() {
                 );
             }
         }
-        for (size, suffix) in [(16, "16b"), (4096, "4k")] {
+        for (size, suffix, peers) in [(16, "16b", 4), (4096, "4k", 4)] {
             let name = format!("pubsub_{io_threads}io.{suffix}_msgs_s");
             if should_measure(&name, &thresholds) {
-                let value = pubsub(size, io_threads).await;
+                let value = pubsub(size, io_threads, peers).await;
                 ok &= verify(
                     &Sample {
                         name,
@@ -363,6 +515,18 @@ async fn main() {
                 );
             }
         }
+    }
+    let name = "pubsub_2io.256b_32p_msgs_s";
+    if should_measure(name, &thresholds) {
+        let value = pubsub_process_published_rate(256, 2, 32);
+        ok &= verify(
+            &Sample {
+                name: name.to_string(),
+                value,
+                unit: "msg/s",
+            },
+            &thresholds.values,
+        );
     }
     let name = "inproc_pushpull_1io.16b_msgs_s";
     if should_measure(name, &thresholds) {

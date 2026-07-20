@@ -395,8 +395,8 @@ async fn batch_encode(
     Ok(count)
 }
 
-const READ_BUF_INITIAL_LATENCY: usize = 1024;
-const READ_BUF_INITIAL_THROUGHPUT: usize = 1024;
+const READ_BUF_INITIAL_LATENCY: usize = 4 * 1024;
+const READ_BUF_INITIAL_THROUGHPUT: usize = 4 * 1024;
 const READ_BUF_MAX: usize = 128 * 1024;
 const READ_BUF_GROW_FULL_READS: usize = 2;
 

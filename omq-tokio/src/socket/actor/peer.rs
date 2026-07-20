@@ -466,7 +466,7 @@ impl SocketDriver {
         }
 
         self.send_strategy
-            .connection_added(peer_id, handle, identity.clone(), false);
+            .connection_added(peer_id, handle, identity.clone(), false, 0);
         self.recv_strategy.connection_added(peer_id, identity);
     }
 
@@ -676,7 +676,7 @@ impl SocketDriver {
         {
             self.evict_peer_for_handover(old_id);
         }
-        let (handle, subs_replay, peer_ident) = {
+        let (handle, subs_replay, peer_ident, io_thread) = {
             let Some(p) = self.peers.get_mut(&peer_id) else {
                 return;
             };
@@ -697,6 +697,7 @@ impl SocketDriver {
                 p.handle.clone(),
                 self.subscriptions.clone(),
                 p.ident.clone(),
+                p.io_thread,
             )
         };
         self.send_strategy.connection_added(
@@ -704,6 +705,7 @@ impl SocketDriver {
             handle.clone(),
             identity.clone(),
             matches!(peer_ident, PeerIdent::Inproc(_)),
+            io_thread,
         );
         self.recv_strategy.connection_added(peer_id, identity);
         self.replay_state_to_peer(&handle, subs_replay).await;

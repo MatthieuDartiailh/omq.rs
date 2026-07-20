@@ -19,20 +19,20 @@ omq-proto core: Connection, frames, mechanisms, messages, options
 `Context` owns one or more independent `current_thread` tokio runtimes,
 each on its own OS thread. Each runtime has its own IO reactor (epoll /
 kqueue), timer wheel, and task scheduler. There is no cross-thread work
-stealing and no shared scheduler lock. Connections pinned to a thread
-run with zero contention from connections on other threads.
+stealing and no shared scheduler lock. Connections assigned to one
+thread run with zero contention from connections on other threads.
 
 - `Context::new()`: one IO thread. Default.
 - `Context::with_config(cfg)`: N IO threads. Each IO thread is a
   separate `current_thread` runtime on a dedicated OS thread.
   Connections are distributed across threads by least-load assignment.
-  Fan-out sockets (`PUB`, `XPUB`, `RADIO`) create one shard worker
+  Fan-out sockets (`PUB`, `XPUB`, `RADIO`) create one lane worker
   per IO thread for parallel subscription matching and encoding.
 - `Context::current()`: wraps the caller's active tokio runtime
   (works with both `current_thread` and `multi_thread`). No background
   threads, no IO pool. All connections share the caller's runtime.
-  Shard count is always 1. This mode is useful for embedding omq in an
-  existing async application, and for single-connection benchmarks
+  Fan-out lane count is always 1. This mode is useful for embedding
+  omq in an existing async application, and for single-connection benchmarks
   where a `multi_thread` runtime can push a single TCP pipe to its
   limit. It does not scale fan-out across threads.
 
@@ -198,22 +198,22 @@ waits on a rotating peer and `try_send` reports HWM backpressure.
 it before newer pipe-fed sends, so messages queued before handshake are not
 overtaken.
 
-Fan-out sockets (`PUB`, `XPUB`, `RADIO`) use shard workers for parallel
-subscription matching and encoding. With N IO threads, N shard workers run,
-one per IO thread. The caller pushes each message once to shard 1 (the
-distributor). Shard 1 processes its own peers, then distributes the batch to
-secondary shards. This keeps the caller's send path to a single `yring` push
-regardless of shard count. Each shard has split channels: a `yring` control
-channel for subscribe, cancel, add-peer, remove-peer, and shutdown commands,
-and a `yring` data channel for encoded dispatches. The worker drains all
-control commands unconditionally every iteration, then drains data dispatches
-up to `DrainBudget::WORKER` (256 messages / 2 MiB). This separation
+Fan-out sockets (`PUB`, `XPUB`, `RADIO`) use lane workers for parallel
+subscription matching and encoding. With N owned IO threads, N lane workers run,
+one per IO thread. The caller pushes each message once to lane 0 (the
+distributor). Lane 0 distributes the batch to active secondary lanes first,
+then processes its own peers. This keeps the caller's send path to a single
+`yring` push regardless of lane count. Each lane has split channels: a
+`yring` control channel for subscribe, cancel, add-peer, remove-peer, and
+shutdown commands, and a `yring` data channel for encoded dispatches. The
+worker drains all control commands unconditionally every iteration, then drains
+data dispatches up to `DrainBudget::WORKER` (256 messages / 2 MiB). This separation
 guarantees control commands are reachable within bounded time regardless of
 data throughput. Fan-out sockets drop on mute; `OnMute::Block` does not make
 `PUB` or `XPUB` wait. `xpub_nodrop` stays on the direct backpressure path.
 
 With `Context::current()` (borrowed runtime), fan-out always uses a single
-shard regardless of the runtime's thread count.
+lane regardless of the runtime's thread count.
 
 Identity-routed sockets (`ROUTER`, `REP`, `SERVER`, `PEER`) route by peer
 identity. Exclusive sockets (`PAIR`, `CHANNEL`) target one peer. Fair-queue
@@ -232,7 +232,7 @@ connect-before-bind.
 Every loop that drains a channel or queue is capped by `DrainBudget`: both a
 message count and a byte count. Unbounded drains would starve the tokio runtime
 and other tasks. Standard presets: `DrainBudget::WORKER` (256 messages / 2 MiB)
-for shard workers and deferred fan-out, `DrainBudget::WIRE_DRAIN` (1024 / 1
+for lane workers and deferred fan-out, `DrainBudget::WIRE_DRAIN` (1024 / 1
 MiB) for wire-slot drain.
 
 All producer-to-consumer signaling uses `DataSignal`, an atomic flag plus
@@ -240,10 +240,10 @@ All producer-to-consumer signaling uses `DataSignal`, an atomic flag plus
 The consumer `clear()`s before draining, then `rearm_if_nonempty()` to self-wake
 if data remains. `reschedule()` fires unconditionally for budget-interrupted
 drains where the consumer already knows data remains. Wire slot, send pipe,
-drop queue, and shard workers all use `DataSignal`.
+drop queue, and lane workers all use `DataSignal`.
 
 Control commands (subscribe, cancel, add-peer, remove-peer, shutdown) travel on
-dedicated channels separate from data. Shard workers, for example, drain all
+dedicated channels separate from data. Lane workers, for example, drain all
 control commands unconditionally before draining data up to budget. This
 guarantees control latency is bounded by one data budget drain, not by queue
 depth.
