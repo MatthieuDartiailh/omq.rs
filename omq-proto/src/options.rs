@@ -103,7 +103,7 @@ pub struct Options {
     /// Must be 1..=8192 bytes.
     pub compression_dict: Option<Bytes>,
 
-    /// Auto-trained dictionaries. Defaults to **on**.
+    /// Auto-trained dictionaries. Defaults to off.
     /// When no `compression_dict` is configured on an `lz4+tcp://`
     /// connection, the encoder feeds outbound message parts to a
     /// `DictTrainer` until it saturates (bloom-filter diversity
