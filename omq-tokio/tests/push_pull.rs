@@ -112,6 +112,45 @@ async fn push_pull_single_peer() {
 }
 
 #[tokio::test]
+async fn push_tcp_single_pull_preserves_startup_order() {
+    const N_MSG: u32 = 2048;
+    const TRIALS: u32 = 32;
+
+    for trial in 0..TRIALS {
+        let pull = Socket::new(SocketType::Pull, Options::default());
+        let port = test_support::bind_loopback(&pull).await;
+
+        let push = Socket::new(SocketType::Push, Options::default());
+        push.connect(test_support::tcp_loopback(port))
+            .await
+            .unwrap();
+
+        let sender = tokio::spawn(async move {
+            for i in 0..N_MSG {
+                push.send(Message::from(i.to_be_bytes().to_vec()))
+                    .await
+                    .unwrap();
+            }
+            push
+        });
+
+        for expected in 0..N_MSG {
+            let msg = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+                .await
+                .unwrap_or_else(|_| panic!("trial {trial}: timed out at {expected}"))
+                .unwrap();
+            let bytes = msg.part_bytes(0).unwrap();
+            let got = u32::from_be_bytes(bytes.as_ref().try_into().unwrap());
+            assert_eq!(got, expected, "trial {trial}: message reordered");
+        }
+
+        let push = sender.await.unwrap();
+        push.close().await.unwrap();
+        pull.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn push_pull_multi_peer_distributes() {
     const N: usize = 300;
     // One PUSH socket, three PULL sockets all connected to it. Work

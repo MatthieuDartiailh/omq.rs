@@ -731,6 +731,10 @@ where
         let hb_sleep = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX));
         tokio::pin!(hb_sleep);
         let mut hb_ping_sent = false;
+        // Keep fallback before yring until yring wins once; after that,
+        // empty fallback waiting would add a Notify waiter-list lock on the
+        // hot select path.
+        let mut prioritize_shared_rx = shared_msg_rx.is_some();
         loop {
             if handshake_deadline.is_some() && codec.is_ready() {
                 handshake_deadline = None;
@@ -966,7 +970,7 @@ where
                     } else {
                         std::future::pending().await
                     }
-                }, if codec.is_ready() => {
+                }, if prioritize_shared_rx && codec.is_ready() => {
                     match msg {
                         None => {
                             drain_writes(&mut writer, &mut codec).await.ok();
@@ -1001,6 +1005,7 @@ where
                             };
                             if let Some(ref rx) = shared_msg_rx {
                                 rx.release_permits(popped);
+                                rx.finish_drain();
                             }
                             result?;
                         }
@@ -1037,6 +1042,7 @@ where
                         }
                         continue;
                     }
+                    prioritize_shared_rx = false;
                     drain_send_pipe_batch(
                         &mut pipe_batch,
                         &mut encoder, &mut codec, &mut eq,
