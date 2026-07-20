@@ -1,4 +1,4 @@
-#![cfg(loom)]
+#![cfg(all(loom, target_pointer_width = "64"))]
 
 use loom::thread;
 

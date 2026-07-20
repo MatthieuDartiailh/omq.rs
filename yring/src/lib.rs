@@ -24,7 +24,7 @@ mod compat;
 use std::mem::MaybeUninit;
 use std::sync::OnceLock;
 
-#[cfg(not(loom))]
+#[cfg(not(all(loom, target_pointer_width = "64")))]
 use compat::UnsafeCellExt;
 use compat::{Arc, AtomicBool, AtomicUsize, Ordering, UnsafeCell};
 
@@ -374,7 +374,7 @@ pub fn spsc<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     )
 }
 
-#[cfg(loom)]
+#[cfg(all(loom, target_pointer_width = "64"))]
 #[doc(hidden)]
 pub fn loom_spsc_with_cursors<T>(capacity: usize, cursor: usize) -> (Producer<T>, Consumer<T>) {
     let ring = Arc::new(Ring::new(capacity));
