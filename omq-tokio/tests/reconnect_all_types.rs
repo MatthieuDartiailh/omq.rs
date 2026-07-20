@@ -4,6 +4,8 @@
 //! every socket-type pair survives a listener restart and resumes
 //! correct message flow.
 
+mod test_support;
+
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -71,7 +73,9 @@ async fn req_rep_reconnect_after_server_restart() {
     let ep = rep1.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, fast_reconnect());
+    let mut req_mon = req.monitor();
     req.connect(ep.clone()).await.unwrap();
+    test_support::wait_for_handshake_on(&mut req_mon).await;
 
     req.send(Message::single("ping1")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), rep1.recv())
@@ -88,6 +92,7 @@ async fn req_rep_reconnect_after_server_restart() {
     rep1.close().await.unwrap();
     let rep2 = rebind(&ep, || Socket::new(SocketType::Rep, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut req_mon).await;
     req.send(Message::single("ping2")).await.unwrap();
     let got2 = tokio::time::timeout(Duration::from_secs(3), rep2.recv())
         .await
@@ -108,7 +113,9 @@ async fn req_state_machine_survives_drop_mid_cycle() {
     let ep = rep1.bind(tcp_ep(0)).await.unwrap();
 
     let req = Socket::new(SocketType::Req, fast_reconnect());
+    let mut req_mon = req.monitor();
     req.connect(ep.clone()).await.unwrap();
+    test_support::wait_for_handshake_on(&mut req_mon).await;
 
     req.send(Message::single("a")).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), rep1.recv())
@@ -127,6 +134,7 @@ async fn req_state_machine_survives_drop_mid_cycle() {
 
     let rep2 = rebind(&ep, || Socket::new(SocketType::Rep, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut req_mon).await;
     req.send(Message::single("c")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_secs(3), rep2.recv())
         .await
@@ -151,7 +159,9 @@ async fn pub_sub_reconnect_replays_subscriptions() {
     let sub = Socket::new(SocketType::Sub, fast_reconnect());
     sub.connect(ep.clone()).await.unwrap();
     sub.subscribe("x.").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    pub1.wait_subscribed(1, Duration::from_secs(5))
+        .await
+        .expect("initial subscription not propagated");
 
     pub1.send(Message::single("x.hello")).await.unwrap();
     let m1 = tokio::time::timeout(Duration::from_millis(500), sub.recv())
@@ -163,7 +173,9 @@ async fn pub_sub_reconnect_replays_subscriptions() {
     pub1.close().await.unwrap();
     let pub2 = rebind(&ep, || Socket::new(SocketType::Pub, Options::default())).await;
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    pub2.wait_subscribed(1, Duration::from_secs(5))
+        .await
+        .expect("subscription replay not propagated");
 
     pub2.send(Message::single("x.world")).await.unwrap();
     pub2.send(Message::single("y.ignored")).await.unwrap();
@@ -195,8 +207,9 @@ async fn dealer_router_reconnect_after_router_restart() {
             ..Options::default().identity(bytes::Bytes::from_static(b"d1"))
         },
     );
+    let mut dealer_mon = dealer.monitor();
     dealer.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake_on(&mut dealer_mon).await;
 
     dealer.send(Message::single("hello")).await.unwrap();
     let got1 = tokio::time::timeout(Duration::from_secs(2), router1.recv())
@@ -208,6 +221,7 @@ async fn dealer_router_reconnect_after_router_restart() {
     router1.close().await.unwrap();
     let router2 = rebind(&ep, || Socket::new(SocketType::Router, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut dealer_mon).await;
     dealer.send(Message::single("after")).await.unwrap();
     let got2 = tokio::time::timeout(Duration::from_secs(3), router2.recv())
         .await
@@ -224,8 +238,9 @@ async fn pair_reconnect_after_bind_side_restart() {
     let ep = pair_a1.bind(tcp_ep(0)).await.unwrap();
 
     let pair_b = Socket::new(SocketType::Pair, fast_reconnect());
+    let mut pair_mon = pair_b.monitor();
     pair_b.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake_on(&mut pair_mon).await;
 
     pair_b.send(Message::single("hi")).await.unwrap();
     let got1 = tokio::time::timeout(Duration::from_secs(2), pair_a1.recv())
@@ -242,6 +257,7 @@ async fn pair_reconnect_after_bind_side_restart() {
     pair_a1.close().await.unwrap();
     let pair_a2 = rebind(&ep, || Socket::new(SocketType::Pair, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut pair_mon).await;
     let got2 =
         send_single_until_received(&pair_b, &pair_a2, "again", "post-restart recv timed out").await;
     assert_eq!(got2, Message::single("again"));
@@ -267,8 +283,9 @@ async fn client_server_reconnect_after_server_restart() {
             ..Options::default().identity(Bytes::from_static(b"c1"))
         },
     );
+    let mut client_mon = client.monitor();
     client.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake_on(&mut client_mon).await;
 
     client.send(Message::single("ping1")).await.unwrap();
     let got1 = tokio::time::timeout(Duration::from_secs(2), server1.recv())
@@ -293,6 +310,7 @@ async fn client_server_reconnect_after_server_restart() {
     server1.close().await.unwrap();
     let server2 = rebind(&ep, || Socket::new(SocketType::Server, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut client_mon).await;
     let got2 =
         send_single_until_received(&client, &server2, "ping2", "post-restart recv timed out").await;
     assert_eq!(got2, Message::multipart(["c1", "ping2"]));
@@ -306,8 +324,9 @@ async fn scatter_gather_reconnect_after_bind_restart() {
     let ep = gather1.bind(tcp_ep(0)).await.unwrap();
 
     let scatter = Socket::new(SocketType::Scatter, fast_reconnect());
+    let mut scatter_mon = scatter.monitor();
     scatter.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake_on(&mut scatter_mon).await;
 
     scatter.send(Message::single("before")).await.unwrap();
     let got1 = tokio::time::timeout(Duration::from_secs(2), gather1.recv())
@@ -319,6 +338,7 @@ async fn scatter_gather_reconnect_after_bind_restart() {
     gather1.close().await.unwrap();
     let gather2 = rebind(&ep, || Socket::new(SocketType::Gather, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut scatter_mon).await;
     let got2 =
         send_single_until_received(&scatter, &gather2, "after", "post-restart recv timed out")
             .await;
@@ -455,8 +475,9 @@ async fn channel_reconnect_after_bind_side_restart() {
     let ep = ch_a1.bind(tcp_ep(0)).await.unwrap();
 
     let ch_b = Socket::new(SocketType::Channel, fast_reconnect());
+    let mut ch_mon = ch_b.monitor();
     ch_b.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake_on(&mut ch_mon).await;
 
     ch_b.send(Message::single("hi")).await.unwrap();
     let got1 = tokio::time::timeout(Duration::from_secs(2), ch_a1.recv())
@@ -473,6 +494,7 @@ async fn channel_reconnect_after_bind_side_restart() {
     ch_a1.close().await.unwrap();
     let ch_a2 = rebind(&ep, || Socket::new(SocketType::Channel, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut ch_mon).await;
     let got2 =
         send_single_until_received(&ch_b, &ch_a2, "again", "post-restart recv timed out").await;
     assert_eq!(got2, Message::single("again"));

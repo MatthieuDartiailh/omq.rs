@@ -64,7 +64,9 @@ async fn reconnect_after_peer_restart() {
             ..Default::default()
         },
     );
+    let mut mon = push.monitor();
     push.connect(ep.clone()).await.unwrap();
+    test_support::wait_for_handshake_on(&mut mon).await;
 
     // Confirm the session is live before simulating the peer restart.
     push.send(Message::single("before")).await.unwrap();
@@ -89,6 +91,7 @@ async fn reconnect_after_peer_restart() {
     }
     assert!(bound, "pull2 failed to bind after pull1 closed");
 
+    test_support::wait_for_handshake_on(&mut mon).await;
     push.send(Message::single("after")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(5), pull2.recv())
         .await
