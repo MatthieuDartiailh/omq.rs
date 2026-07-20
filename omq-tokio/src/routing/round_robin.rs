@@ -9,7 +9,6 @@
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
@@ -35,11 +34,7 @@ struct ActivePipes {
     cursor: usize,
     random_state: u64,
     inactive_cursor: usize,
-    last_reactivation_probe: Instant,
 }
-
-const REACTIVATION_PROBE_INTERVAL: Duration = Duration::from_millis(1);
-const REACTIVATION_PROBE_BATCH: usize = 8;
 
 impl Default for ActivePipes {
     fn default() -> Self {
@@ -55,7 +50,6 @@ impl Default for ActivePipes {
             cursor: 0,
             random_state: seed,
             inactive_cursor: 0,
-            last_reactivation_probe: Instant::now(),
         }
     }
 }
@@ -74,7 +68,6 @@ impl ActivePipes {
         self.fallback_peers.clear();
         self.cursor = 0;
         self.inactive_cursor = 0;
-        self.last_reactivation_probe = Instant::now();
     }
 
     fn deactivate(&mut self, pos: usize) {
@@ -96,18 +89,6 @@ impl ActivePipes {
         }
     }
 
-    fn reactivation_probe_due(&mut self) -> bool {
-        if self.inactive.is_empty() {
-            return false;
-        }
-        if self.last_reactivation_probe.elapsed() >= REACTIVATION_PROBE_INTERVAL {
-            self.last_reactivation_probe = Instant::now();
-            true
-        } else {
-            false
-        }
-    }
-
     fn try_reactivate_one(&mut self) {
         let Some(len) = (!self.inactive.is_empty()).then_some(self.inactive.len()) else {
             return;
@@ -123,15 +104,6 @@ impl ActivePipes {
             self.inactive_cursor = 0;
         } else if i < self.inactive_cursor {
             self.inactive_cursor -= 1;
-        }
-    }
-
-    fn try_reactivate_batch(&mut self) {
-        for _ in 0..REACTIVATION_PROBE_BATCH {
-            if self.inactive.is_empty() {
-                break;
-            }
-            self.try_reactivate_one();
         }
     }
 
@@ -189,6 +161,7 @@ impl ActivePipes {
 pub(crate) struct Submitter {
     queue: FallbackQueue,
     active: Arc<Mutex<ActivePipes>>,
+    active_changed: Arc<Notify>,
 }
 
 impl Submitter {
@@ -196,6 +169,7 @@ impl Submitter {
         self.queue.shutdown();
         let mut active = self.active.lock().expect("round_robin active");
         active.clear();
+        self.active_changed.notify_waiters();
     }
 
     pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
@@ -221,7 +195,32 @@ impl Submitter {
             };
 
             let Some(space_available) = space_available else {
-                return self.queue.send(msg).await;
+                if self.queue.is_closed() {
+                    return Err(omq_proto::error::Error::Closed);
+                }
+                let queue_space = self.queue.space_notified();
+                let active_changed = self.active_changed.notified();
+                tokio::pin!(queue_space);
+                tokio::pin!(active_changed);
+                queue_space.as_mut().enable();
+                active_changed.as_mut().enable();
+
+                match self.try_send(msg) {
+                    Ok(()) => return Ok(()),
+                    Err(omq_proto::error::TrySendError::Full(returned)) => {
+                        msg = returned;
+                    }
+                    Err(omq_proto::error::TrySendError::Error(e)) => return Err(e),
+                    Err(omq_proto::error::TrySendError::Closed) => {
+                        return Err(omq_proto::error::Error::Closed);
+                    }
+                }
+
+                tokio::select! {
+                    () = queue_space => {}
+                    () = active_changed => {}
+                }
+                continue;
             };
 
             let notified = space_available.notified();
@@ -257,8 +256,8 @@ impl Submitter {
             // No pipe can make progress until one inactive pipe crosses LWM.
             // Probe the whole rotating list only in this stalled state.
             active.try_reactivate_when_empty();
-        } else if active.reactivation_probe_due() {
-            active.try_reactivate_batch();
+        } else if !active.inactive.is_empty() {
+            active.try_reactivate_one();
         }
 
         let mut scanned = 0usize;
@@ -347,6 +346,7 @@ pub(crate) struct RoundRobinSend {
     queue: FallbackQueue,
     shared_rx: FallbackReceiver,
     active: Arc<Mutex<ActivePipes>>,
+    active_changed: Arc<Notify>,
     peer_count: usize,
 }
 
@@ -358,6 +358,7 @@ impl RoundRobinSend {
             queue,
             shared_rx,
             active: Arc::new(Mutex::new(ActivePipes::default())),
+            active_changed: Arc::new(Notify::new()),
             peer_count: 0,
         }
     }
@@ -391,9 +392,11 @@ impl RoundRobinSend {
                 active.random_index(len)
             };
             active.active.insert(pos, ActivePipe { peer_id, tx });
+            self.active_changed.notify_waiters();
             return;
         }
         active.fallback_peers.insert(peer_id);
+        self.active_changed.notify_waiters();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
@@ -403,6 +406,7 @@ impl RoundRobinSend {
             .lock()
             .expect("round_robin active")
             .remove_peer(peer_id);
+        self.active_changed.notify_waiters();
     }
 
     /// Cloneable handle for enqueuing from a spawned task. Lets the socket
@@ -412,6 +416,7 @@ impl RoundRobinSend {
         Submitter {
             queue: self.queue.clone(),
             active: self.active.clone(),
+            active_changed: self.active_changed.clone(),
         }
     }
 
@@ -419,6 +424,7 @@ impl RoundRobinSend {
         self.queue.shutdown();
         let mut active = self.active.lock().expect("round_robin active");
         active.clear();
+        self.active_changed.notify_waiters();
     }
 
     pub(crate) fn is_drained(&self) -> bool {
@@ -431,8 +437,12 @@ impl RoundRobinSend {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivePipe, ActivePipes};
+    use super::{ActivePipe, ActivePipes, RoundRobinSend};
+    use crate::engine::PeerDriverHandle;
     use crate::engine::send_pipe::send_pipe;
+    use omq_proto::message::Message;
+    use omq_proto::options::Options;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn deactivation_preserves_active_peer_order() {
@@ -456,5 +466,76 @@ mod tests {
             vec![0, 2, 3]
         );
         assert_eq!(pipes.cursor, 1);
+    }
+
+    #[test]
+    fn inactive_pipe_reactivates_without_timer() {
+        let (tx0, mut rx0) = send_pipe(2);
+        let (tx1, _rx1) = send_pipe(2);
+        let mut pipes = ActivePipes::default();
+        pipes.active.push(ActivePipe {
+            peer_id: 0,
+            tx: tx0,
+        });
+        pipes.active.push(ActivePipe {
+            peer_id: 1,
+            tx: tx1,
+        });
+
+        pipes.active[0].tx.try_send(Message::single("a")).unwrap();
+        pipes.active[0].tx.try_send(Message::single("b")).unwrap();
+        assert!(matches!(
+            pipes.active[0].tx.try_send(Message::single("c")),
+            Err(crate::engine::SendPipeError::Full(_))
+        ));
+        pipes.deactivate(0);
+        assert_eq!(pipes.inactive.len(), 1);
+
+        let mut batch = Vec::new();
+        assert_eq!(rx0.drain_into(&mut batch, 1, usize::MAX), 1);
+        pipes.try_reactivate_one();
+
+        assert_eq!(pipes.inactive.len(), 0);
+        assert!(pipes.active.iter().any(|pipe| pipe.peer_id == 0));
+    }
+
+    #[tokio::test]
+    async fn blocked_fallback_send_retries_pipe_on_activation() {
+        let mut send = RoundRobinSend::new(&Options::default().send_hwm(1));
+        let submitter = send.submitter();
+        submitter.send(Message::single("fallback")).await.unwrap();
+
+        let mut blocked = {
+            let submitter = submitter.clone();
+            tokio::spawn(async move { submitter.send(Message::single("pipe")).await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut blocked)
+                .await
+                .is_err(),
+            "second send should wait while fallback queue is full"
+        );
+
+        let (send_pipe, mut send_pipe_rx) = send_pipe(1);
+        let (inbox, _inbox_rx) = tokio::sync::mpsc::channel(1);
+        let handle = PeerDriverHandle {
+            inbox,
+            cancel: CancellationToken::new(),
+            transmit_slot: None,
+            direct_tcp_writer: None,
+            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+        };
+        send.connection_added(7, &handle, false);
+
+        blocked.await.unwrap().unwrap();
+
+        let shared_rx = send.shared_rx();
+        let first = shared_rx.try_pop().unwrap();
+        assert_eq!(first.part_bytes(0).unwrap(), &b"fallback"[..]);
+        assert!(shared_rx.try_pop().is_none(), "retry must skip fallback");
+
+        let mut batch = Vec::new();
+        assert_eq!(send_pipe_rx.drain_into(&mut batch, 1, usize::MAX), 1);
+        assert_eq!(batch[0].part_bytes(0).unwrap(), &b"pipe"[..]);
     }
 }

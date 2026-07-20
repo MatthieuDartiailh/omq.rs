@@ -904,6 +904,10 @@ async fn inproc_peer_driver(
     } = ctx;
     let mut shared_batch = Vec::new();
     let mut send_pipe_batch = Vec::new();
+    // Keep fallback before yring until yring wins once; after that,
+    // empty fallback waiting would add a Notify waiter-list lock on the
+    // hot select path.
+    let mut prioritize_shared_rx = shared_rx.is_some();
 
     #[expect(clippy::items_after_statements)]
     async fn emit_event(
@@ -958,7 +962,7 @@ async fn inproc_peer_driver(
                     } else {
                         std::future::pending().await
                     }
-                } => {
+                }, if prioritize_shared_rx => {
                     let Some(first) = msg else { return; };
                     shared_batch.push(first);
                     let batch_limit = shared_rx
@@ -982,12 +986,14 @@ async fn inproc_peer_driver(
                         if out.send(InboundFrame::Message(msg)).await.is_err() {
                             if let Some(ref rx) = shared_rx {
                                 rx.release_permits(popped);
+                                rx.finish_drain();
                             }
                             return;
                         }
                     }
                     if let Some(ref rx) = shared_rx {
                         rx.release_permits(popped);
+                        rx.finish_drain();
                     }
                 },
                 () = async {
@@ -1005,6 +1011,7 @@ async fn inproc_peer_driver(
                         }
                         continue;
                     }
+                    prioritize_shared_rx = false;
                     for msg in send_pipe_batch.drain(..) {
                         if out.send(InboundFrame::Message(msg)).await.is_err() {
                             return;

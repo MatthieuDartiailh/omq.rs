@@ -20,6 +20,7 @@ use crate::engine::signal::DataSignal;
 struct Inner {
     queue: ConcurrentQueue<Message>,
     data_signal: DataSignal,
+    space_available: tokio::sync::Notify,
     slots: Option<Semaphore>,
 }
 
@@ -63,6 +64,7 @@ impl FallbackQueue {
         let inner = Arc::new(Inner {
             queue,
             data_signal: DataSignal::new(),
+            space_available: tokio::sync::Notify::new(),
             slots,
         });
         let receiver = FallbackReceiver {
@@ -151,6 +153,14 @@ impl FallbackQueue {
         self.inner.queue.len()
     }
 
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.queue.is_closed()
+    }
+
+    pub(crate) fn space_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.inner.space_available.notified()
+    }
+
     pub(crate) fn shutdown(&self) {
         self.inner.queue.close();
         let mut drained = 0usize;
@@ -163,14 +173,15 @@ impl FallbackQueue {
             slots.add_permits(drained);
         }
         self.inner.data_signal.wake_all();
+        self.inner.space_available.notify_waiters();
     }
 }
 
 impl FallbackReceiver {
     /// Non-blocking pop. Returns the next message, or `None` if empty.
     ///
-    /// For `Block`-policy queues, also releases one write slot so any sender
-    /// waiting in `FallbackQueue::send` can proceed.
+    /// Callers that pop a batch must call [`Self::release_permits`] and
+    /// [`Self::finish_drain`] when that batch is consumed.
     pub(crate) fn try_pop(&self) -> Option<Message> {
         self.inner.queue.pop().ok()
     }
@@ -179,6 +190,18 @@ impl FallbackReceiver {
         if let Some(ref slots) = self.inner.slots {
             slots.add_permits(n);
         }
+        if n > 0 {
+            self.inner.space_available.notify_waiters();
+        }
+    }
+
+    /// Complete one consumer drain pass. This clears the coalesced signal
+    /// and rearms it if producers filled the queue during the drain.
+    pub(crate) fn finish_drain(&self) {
+        self.inner.data_signal.clear();
+        self.inner
+            .data_signal
+            .rearm_if_nonempty(self.inner.queue.is_empty());
     }
 
     /// Fair share of the current queue for one driver.
@@ -264,6 +287,23 @@ mod tests {
         q.send(Message::single("hello")).await.unwrap();
         let msg = recv_task.await.unwrap().unwrap();
         assert_eq!(msg.part_bytes(0).unwrap(), &b"hello"[..]);
+    }
+
+    #[tokio::test]
+    async fn recv_wakes_after_empty_refill() {
+        let (q, rx) = FallbackQueue::new(2, OnMute::Block);
+        q.send(Message::single("a")).await.unwrap();
+        let got = rx.recv().await.unwrap();
+        assert_eq!(got.part_bytes(0).unwrap(), &b"a"[..]);
+        rx.release_permits(1);
+        rx.finish_drain();
+
+        q.send(Message::single("b")).await.unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("refill must wake receiver")
+            .unwrap();
+        assert_eq!(got.part_bytes(0).unwrap(), &b"b"[..]);
     }
 
     #[tokio::test]
