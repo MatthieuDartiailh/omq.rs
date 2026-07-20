@@ -72,5 +72,5 @@ pub(super) fn feed_dict_training(
         g.compression_dict = Some(dict.clone());
         g.options.clone()
     };
-    lanes.set_compression_all(&options, Some(dict));
+    lanes.set_compression_all(&options, Some(&dict));
 }

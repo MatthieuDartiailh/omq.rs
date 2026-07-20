@@ -351,14 +351,14 @@ impl FanOutLanes {
     }
 
     #[cfg(feature = "lz4")]
-    pub(super) fn set_compression_all(&self, options: &Options, dict: Option<Bytes>) {
+    pub(super) fn set_compression_all(&self, options: &Options, dict: Option<&Bytes>) {
         let mut state = self.state.lock().expect("fanout lanes poisoned");
         for endpoint in &mut state.endpoints {
             Self::push_control(
                 endpoint,
                 LaneControl::SetCompression {
                     options: Box::new(options.clone()),
-                    dict: dict.clone(),
+                    dict: dict.cloned(),
                 },
             );
         }

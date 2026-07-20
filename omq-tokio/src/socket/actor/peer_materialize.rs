@@ -80,8 +80,7 @@ pub(super) fn spawn_byte_stream_connection(
         peer_id,
         has_transform,
         passthrough_info,
-        arena.threshold,
-        arena.cap,
+        arena,
         #[cfg(feature = "ws")]
         is_ws,
         #[cfg(feature = "ws")]
@@ -388,8 +387,7 @@ fn build_transmit_slot(
     peer_id: u64,
     has_transform: bool,
     passthrough_info: Option<(bytes::Bytes, usize)>,
-    arena_threshold: usize,
-    arena_cap: usize,
+    arena: ArenaConfig,
     #[cfg(feature = "ws")] is_ws: bool,
     #[cfg(feature = "ws")] ws_masked: bool,
 ) -> Option<Arc<crate::engine::transmit_slot::PeerTransmitSlot>> {
@@ -406,8 +404,8 @@ fn build_transmit_slot(
         peer_id,
         has_transform,
         passthrough_info,
-        arena_threshold,
-        arena_cap,
+        arena.threshold,
+        arena.cap,
         transmit_slot_cap,
         transmit_slot_msg_cap,
         #[cfg(feature = "ws")]
