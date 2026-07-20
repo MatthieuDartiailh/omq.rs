@@ -2,6 +2,8 @@
 //! re-register correctly after the bind side restarts, and that multiple
 //! identity-bearing peers all survive a router/server restart.
 
+mod test_support;
+
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -46,8 +48,9 @@ async fn dealer_identity_survives_reconnect() {
     let ep = router1.bind(tcp_ep(0)).await.unwrap();
 
     let dealer = Socket::new(SocketType::Dealer, fast_reconnect_with_id(b"d1"));
+    let mut dealer_mon = dealer.monitor();
     dealer.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake_on(&mut dealer_mon).await;
 
     dealer.send(Message::single("before")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, router1.recv())
@@ -72,6 +75,7 @@ async fn dealer_identity_survives_reconnect() {
     router1.close().await.unwrap();
     let router2 = rebind(&ep, || Socket::new(SocketType::Router, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut dealer_mon).await;
     dealer.send(Message::single("after")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, router2.recv())
         .await
@@ -110,10 +114,13 @@ async fn multi_dealer_reconnect_to_restarted_router() {
             )
         })
         .collect();
+    let mut dealer_mons: Vec<_> = dealers.iter().map(Socket::monitor).collect();
     for d in &dealers {
         d.connect(ep.clone()).await.unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for mon in &mut dealer_mons {
+        test_support::wait_for_handshake_on(mon).await;
+    }
 
     for (i, d) in dealers.iter().enumerate() {
         d.send(Message::single(format!("msg-{i}"))).await.unwrap();
@@ -131,6 +138,9 @@ async fn multi_dealer_reconnect_to_restarted_router() {
     router1.close().await.unwrap();
     let router2 = rebind(&ep, || Socket::new(SocketType::Router, Options::default())).await;
 
+    for mon in &mut dealer_mons {
+        test_support::wait_for_handshake_on(mon).await;
+    }
     for (i, d) in dealers.iter().enumerate() {
         d.send(Message::single(format!("after-{i}"))).await.unwrap();
     }
@@ -172,8 +182,9 @@ async fn client_identity_survives_reconnect_to_server() {
     let ep = server1.bind(tcp_ep(0)).await.unwrap();
 
     let client = Socket::new(SocketType::Client, fast_reconnect_with_id(b"c1"));
+    let mut client_mon = client.monitor();
     client.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_handshake_on(&mut client_mon).await;
 
     client.send(Message::single("ping1")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, server1.recv())
@@ -198,6 +209,7 @@ async fn client_identity_survives_reconnect_to_server() {
     server1.close().await.unwrap();
     let server2 = rebind(&ep, || Socket::new(SocketType::Server, Options::default())).await;
 
+    test_support::wait_for_handshake_on(&mut client_mon).await;
     client.send(Message::single("ping2")).await.unwrap();
     let m = tokio::time::timeout(TIMEOUT, server2.recv())
         .await
