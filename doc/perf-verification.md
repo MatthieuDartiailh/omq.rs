@@ -9,8 +9,9 @@ cargo run --release -p omq-tokio --bin omq_perf_verify
 With `.perf_hw` present, the verifier measures CT REQ/REP latency at
 256B, canonical 1-IO PUSH/PULL at 16B, 1KiB, and 16KiB, and canonical
 1-IO PUB/SUB with four subscribers at 16B and 4KiB. It also checks the
-2-IO variants and 16B inproc PUSH/PULL. It uses separate OMQ contexts
-and loopback TCP. Warmup and measurement windows are bounded.
+2-IO variants, a 32-subscriber 2-IO PUB/SUB 256B fan-out gate, and
+16B inproc PUSH/PULL. It uses separate OMQ contexts and loopback TCP.
+Warmup and measurement windows are bounded.
 
 Thresholds are machine-specific. Create the ignored `.perf_hw` file in the
 repository root. Keys match the measurement names printed by the verifier:
@@ -35,13 +36,14 @@ p50_256b_us=50
 
 [pubsub_2io]
 16b_msgs_s=1100000
+256b_32p_msgs_s=250000
 4k_msgs_s=430000
 
 [inproc_pushpull_1io]
 16b_msgs_s=1000000
 ```
 
-Use measured local baselines for the eleven throughput values. A
+Use measured local baselines for the twelve throughput values. A
 missing file runs a smaller smoke gate with loose thresholds:
 
 ```text

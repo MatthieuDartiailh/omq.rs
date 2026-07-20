@@ -552,7 +552,7 @@ fn draw_whiskers<DB: DrawingBackend>(
 ) {
     let cap_hw = 0.06;
 
-    for imp in present {
+    for imp in present.iter().rev() {
         let fill = RGBAColor(imp.color.0, imp.color.1, imp.color.2, 0.15);
         let stroke = RGBAColor(imp.color.0, imp.color.1, imp.color.2, 0.5);
 
@@ -728,7 +728,7 @@ pub(crate) fn draw_msgs_panel(
         draw_whiskers(&mut chart, sizes, present, msgs, fair);
     }
 
-    for imp in present {
+    for imp in present.iter().rev() {
         let pts: Vec<(f64, f64)> = sizes
             .iter()
             .enumerate()
@@ -801,7 +801,7 @@ pub(crate) fn draw_gbs_panel(
         draw_whiskers(&mut chart, sizes, present, &gbs_tput, fair);
     }
 
-    for imp in present {
+    for imp in present.iter().rev() {
         let pts: Vec<(f64, f64)> = sizes
             .iter()
             .enumerate()
@@ -877,7 +877,7 @@ pub(crate) fn draw_latency_single_panel(
         .axis_style(AXIS_COLOR)
         .draw()?;
 
-    for imp in &present {
+    for imp in present.iter().rev() {
         let pts: Vec<(f64, f64)> = sizes
             .iter()
             .enumerate()
@@ -1028,7 +1028,7 @@ fn draw_gbs_panel_log(
         .axis_style(AXIS_COLOR)
         .draw()?;
 
-    for imp in present {
+    for imp in present.iter().rev() {
         let pts: Vec<(f64, f64)> = sizes
             .iter()
             .enumerate()
