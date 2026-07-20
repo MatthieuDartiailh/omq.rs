@@ -53,6 +53,13 @@ fn block_recv<T>(
     if rcvtimeo > 0 {
         let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
         loop {
+            if sock
+                .ctx
+                .terminated
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(ETERM);
+            }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(libc::EAGAIN);
@@ -60,14 +67,35 @@ fn block_recv<T>(
             let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
             let recv_notify = sock.notify.recv_notifier();
             let _ = recv_notify.wait_for_readable(ms);
+            if sock
+                .ctx
+                .terminated
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(ETERM);
+            }
             if let Some(val) = try_pop() {
                 return Ok(val);
             }
         }
     }
     loop {
+        if sock
+            .ctx
+            .terminated
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ETERM);
+        }
         let recv_notify = sock.notify.recv_notifier();
         let _ = recv_notify.wait_for_readable(-1);
+        if sock
+            .ctx
+            .terminated
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ETERM);
+        }
         if let Some(val) = try_pop() {
             return Ok(val);
         }
@@ -82,6 +110,13 @@ fn block_recv_result<T>(
     if rcvtimeo > 0 {
         let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
         loop {
+            if sock
+                .ctx
+                .terminated
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(ETERM);
+            }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(libc::EAGAIN);
@@ -89,14 +124,35 @@ fn block_recv_result<T>(
             let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
             let recv_notify = sock.notify.recv_notifier();
             let _ = recv_notify.wait_for_readable(ms);
+            if sock
+                .ctx
+                .terminated
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(ETERM);
+            }
             if let Some(val) = try_pop()? {
                 return Ok(val);
             }
         }
     }
     loop {
+        if sock
+            .ctx
+            .terminated
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ETERM);
+        }
         let recv_notify = sock.notify.recv_notifier();
         let _ = recv_notify.wait_for_readable(-1);
+        if sock
+            .ctx
+            .terminated
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ETERM);
+        }
         if let Some(val) = try_pop()? {
             return Ok(val);
         }
@@ -163,14 +219,15 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
             let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
             if dontwait {
-                return if bypass.push(data) {
-                    ret_len
-                } else {
-                    fail(libc::EAGAIN)
+                return match bypass.push(data) {
+                    Ok(()) => ret_len,
+                    Err(e) => fail(e),
                 };
             }
-            bypass.push_blocking(data);
-            return ret_len;
+            return match bypass.push_blocking(data) {
+                Ok(()) => ret_len,
+                Err(e) => fail(e),
+            };
         }
     }
 
@@ -562,6 +619,13 @@ fn try_recv_bypass_or_yring(
         copy_to_buf(buf, buf_len, data);
         stash_remaining_parts(sock, &m, 0);
         return checked_c_int_len(frame_len).map(Some);
+    }
+    if bypass
+        .pipe
+        .closed
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err(ETERM);
     }
     Ok(None)
 }

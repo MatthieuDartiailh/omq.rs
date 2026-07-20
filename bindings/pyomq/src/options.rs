@@ -262,6 +262,19 @@ fn as_ms(d: Option<Duration>) -> i64 {
     }
 }
 
+fn parse_hwm(value: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
+    match value.extract::<i64>()? {
+        n if n < 0 => Err(pyo3::exceptions::PyValueError::new_err(
+            "HWM must be non-negative",
+        )),
+        0 => Ok(None),
+        n if n > u32::MAX as i64 => Err(pyo3::exceptions::PyValueError::new_err(
+            "HWM exceeds u32::MAX",
+        )),
+        n => Ok(Some(n as u32)),
+    }
+}
+
 pub fn setsockopt(
     sock: &crate::socket::SocketInner,
     py: Python<'_>,
@@ -274,16 +287,10 @@ pub fn setsockopt(
             ov.linger = ms(value.extract::<i64>()?);
         }
         constants::SNDHWM => {
-            ov.send_hwm = match value.extract::<i64>()? {
-                0 => None,
-                n => Some(n as u32),
-            };
+            ov.send_hwm = parse_hwm(value)?;
         }
         constants::RCVHWM => {
-            ov.recv_hwm = match value.extract::<i64>()? {
-                0 => None,
-                n => Some(n as u32),
-            };
+            ov.recv_hwm = parse_hwm(value)?;
         }
         constants::IDENTITY => {
             let v: &[u8] = value.extract()?;

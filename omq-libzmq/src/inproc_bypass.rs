@@ -12,6 +12,8 @@ use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::error::ETERM;
+
 /// Shared state between the sender and receiver halves of an inproc bypass.
 pub(crate) struct InprocPipe {
     pub(crate) closed: AtomicBool,
@@ -30,6 +32,24 @@ impl std::fmt::Debug for InprocPipe {
         f.debug_struct("InprocPipe")
             .field("closed", &self.closed.load(Ordering::Relaxed))
             .finish_non_exhaustive()
+    }
+}
+
+impl InprocPipe {
+    fn close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.recv_notify.signal();
+        }
+        self.unpark_sender();
+    }
+
+    fn unpark_sender(&self) {
+        if self.sender_waiting.load(Ordering::Acquire)
+            && let Ok(guard) = self.sender_thread.lock()
+            && let Some(t) = guard.as_ref()
+        {
+            t.unpark();
+        }
     }
 }
 
@@ -312,13 +332,13 @@ impl Drop for RingProducer {
 
 impl Drop for BypassSend {
     fn drop(&mut self) {
-        self.pipe.closed.store(true, Ordering::Release);
+        self.pipe.close();
     }
 }
 
 impl Drop for BypassRecv {
     fn drop(&mut self) {
-        self.pipe.closed.store(true, Ordering::Release);
+        self.pipe.close();
     }
 }
 
@@ -364,27 +384,43 @@ impl BypassSend {
     /// Try to push raw payload bytes. Returns false if full.
     /// Signals the receiver's event on empty-to-non-empty transitions.
     #[inline]
-    pub(crate) fn push(&mut self, data: &[u8]) -> bool {
+    pub(crate) fn push(&mut self, data: &[u8]) -> Result<(), i32> {
+        if self.pipe.closed.load(Ordering::Acquire) {
+            return Err(ETERM);
+        }
         if !self.producer.try_push(data) {
-            return false;
+            return if self.pipe.closed.load(Ordering::Acquire) {
+                Err(ETERM)
+            } else {
+                Err(libc::EAGAIN)
+            };
         }
         if self.producer.flush() {
             self.pipe.recv_notify.signal();
         }
-        true
+        Ok(())
     }
 
     /// Blocking push: parks the sender thread until ring space is available.
-    pub(crate) fn push_blocking(&mut self, data: &[u8]) {
-        if self.push(data) {
-            return;
+    pub(crate) fn push_blocking(&mut self, data: &[u8]) -> Result<(), i32> {
+        match self.push(data) {
+            Ok(()) => return Ok(()),
+            Err(libc::EAGAIN) => {}
+            Err(e) => return Err(e),
         }
         loop {
+            if self.pipe.closed.load(Ordering::Acquire) {
+                return Err(ETERM);
+            }
             {
                 let mut guard = self.pipe.sender_thread.lock().unwrap();
                 *guard = Some(std::thread::current());
             }
             self.pipe.sender_waiting.store(true, Ordering::Release);
+            if self.pipe.closed.load(Ordering::Acquire) {
+                self.pipe.sender_waiting.store(false, Ordering::Relaxed);
+                return Err(ETERM);
+            }
             if !self.producer.try_push(data) {
                 std::thread::park();
                 self.pipe.sender_waiting.store(false, Ordering::Relaxed);
@@ -394,7 +430,7 @@ impl BypassSend {
             if self.producer.flush() {
                 self.pipe.recv_notify.signal();
             }
-            return;
+            return Ok(());
         }
     }
 }
@@ -414,12 +450,7 @@ impl BypassRecv {
     #[inline]
     pub(crate) fn advance(&mut self, len: usize) {
         self.consumer.advance_and_release(len);
-        if self.pipe.sender_waiting.load(Ordering::Acquire)
-            && let Ok(guard) = self.pipe.sender_thread.lock()
-            && let Some(t) = guard.as_ref()
-        {
-            t.unpark();
-        }
+        self.pipe.unpark_sender();
         if self.consumer.is_empty() {
             self.pipe.recv_notify.drain();
         }
@@ -434,6 +465,8 @@ impl BypassRecv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notify::NotifyHandle;
+    use std::time::Duration;
 
     #[test]
     fn entry_size_rejects_wrap_sentinel_length() {
@@ -460,5 +493,37 @@ mod tests {
         assert_eq!(got, b"abcd");
         consumer.advance_and_release(len);
         assert!(consumer.is_empty());
+    }
+
+    #[test]
+    fn receiver_drop_wakes_blocked_sender() {
+        let notify = crate::notify::create_notify().expect("notify");
+        let (mut sender, receiver) = create_bypass(64, notify.recv_notifier());
+        let payload = [7u8; 32];
+        sender.push(&payload).expect("initial push fills ring");
+
+        let pipe = sender.pipe.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let result = sender.push_blocking(&payload);
+            tx.send(result).expect("send result");
+        });
+
+        for _ in 0..1000 {
+            if pipe.sender_waiting.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(pipe.sender_waiting.load(Ordering::Acquire));
+
+        drop(receiver);
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("sender should wake"),
+            Err(ETERM)
+        );
+        handle.join().expect("sender thread");
     }
 }
