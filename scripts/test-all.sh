@@ -14,7 +14,47 @@
 #   OMQ_STRESS_ROUNDS=N connect-before-bind stress rounds (default 40)
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+_repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+_tool_dir="$_repo_root/target/omq-test-tools"
+
+if [[ "${OMQ_TEST_ALL_REEXEC:-}" != "1" ]]; then
+    mkdir -p "$_tool_dir"
+    ln -sfn "$(command -v bash)" "$_tool_dir/omq_test_all"
+    export OMQ_TEST_ALL_REEXEC=1
+    exec "$_tool_dir/omq_test_all" "$0" "$@"
+fi
+
+cd "$_repo_root"
+
+
+_resolve_rustup_tool() {
+    local tool=$1
+    rustup which "$tool" 2>/dev/null || command -v "$tool"
+}
+
+_setup_tool_wrappers() {
+    mkdir -p "$_tool_dir"
+    ln -sfn "$(_resolve_rustup_tool cargo)" "$_tool_dir/omq_cargo"
+    ln -sfn "$(_resolve_rustup_tool rustc)" "$_tool_dir/omq_rustc"
+    ln -sfn "$(_resolve_rustup_tool rustdoc)" "$_tool_dir/omq_rustdoc"
+    if command -v python3 >/dev/null 2>&1; then
+        ln -sfn "$(command -v python3)" "$_tool_dir/omq_python3"
+        export OMQ_PYTHON3="$_tool_dir/omq_python3"
+    fi
+    export PATH="$_tool_dir:$PATH"
+    export CARGO="$_tool_dir/omq_cargo"
+    export OMQ_RUSTC="$_tool_dir/omq_rustc"
+    export OMQ_RUSTDOC="$_tool_dir/omq_rustdoc"
+}
+
+_setup_python_tools() {
+    if command -v maturin >/dev/null 2>&1; then
+        ln -sfn "$(command -v maturin)" "$_tool_dir/omq_maturin"
+    fi
+    hash -r
+}
+
+_setup_tool_wrappers
 
 
 retries="${OMQ_TEST_RETRIES:-2}"
@@ -43,6 +83,10 @@ run() {
         fi
         echo "::: retry $attempt/$retries: $*" >&2
     done
+}
+
+omq_cargo_with_rust_tools() {
+    RUSTC="$OMQ_RUSTC" RUSTDOC="$OMQ_RUSTDOC" exec omq_cargo "$@"
 }
 
 # Run a function in the background, keeping at most $jobs parallel workers.
@@ -158,17 +202,17 @@ par_wait() {
 # ---------------------------------------------------------------- #
 # Clippy compiles all targets; a separate all-target build only duplicates
 # that work before the test suite.
-run cargo clippy --all-targets --no-deps -- -D warnings
-run cargo clippy -p omq-libzmq --all-targets --no-deps -- -D warnings
-run cargo test
-run cargo test -p omq-libzmq
+run omq_cargo clippy --all-targets --no-deps -- -D warnings
+run omq_cargo clippy -p omq-libzmq --all-targets --no-deps -- -D warnings
+run omq_cargo_with_rust_tools test
+run omq_cargo_with_rust_tools test -p omq-libzmq
 
 if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
     echo "skip: perf gate disabled on CI"
 elif [[ "${OMQ_SKIP_PERF:-}" == "1" ]]; then
     echo "skip: OMQ_SKIP_PERF=1"
 else
-    run cargo run --release -q -p omq-tokio --bin omq_perf_verify
+    run omq_cargo_with_rust_tools run --release -q -p omq-tokio --bin omq_perf_verify
 fi
 
 # ---------------------------------------------------------------- #
@@ -179,11 +223,11 @@ fi
 #    cross-feature interactions.
 # ---------------------------------------------------------------- #
 for feature in plain curve; do
-    par run cargo test -p omq-tokio  --features "$feature" --test "$feature"
+    par run omq_cargo_with_rust_tools test -p omq-tokio  --features "$feature" --test "omq_$feature"
 done
-par run cargo test -p omq-tokio  --features lz4 --test lz4_tcp --test lz4_pub_sub
-par run cargo test -p omq-tokio  --features plain --test interop_pyzmq_plain
-par run cargo test -p omq-tokio  --features curve --test interop_pyzmq_curve
+par run omq_cargo_with_rust_tools test -p omq-tokio  --features lz4 --test omq_lz4_tcp --test omq_lz4_pub_sub
+par run omq_cargo_with_rust_tools test -p omq-tokio  --features plain --test omq_interop_pyzmq_plain
+par run omq_cargo_with_rust_tools test -p omq-tokio  --features curve --test omq_interop_pyzmq_curve
 par_wait
 
 # ---------------------------------------------------------------- #
@@ -192,8 +236,8 @@ par_wait
 #    inside otherwise-ungated test files (connect_before_bind lz4).
 # ---------------------------------------------------------------- #
 all_features='plain curve lz4'
-par run cargo test -p omq-proto  --features "$all_features"
-par run cargo test -p omq-tokio  --features "$all_features"
+par run omq_cargo_with_rust_tools test -p omq-proto  --features "$all_features"
+par run omq_cargo_with_rust_tools test -p omq-tokio  --features "$all_features"
 par_wait
 
 # ---------------------------------------------------------------- #
@@ -201,7 +245,7 @@ par_wait
 #    `OMQ_FUZZ=1`.
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
-    par run cargo test -p omq-tokio  --features fuzz --release
+    par run omq_cargo_with_rust_tools test -p omq-tokio  --features fuzz --release
     par_wait
 fi
 
@@ -216,10 +260,12 @@ elif [[ -d bindings/pyomq/.venv ]]; then
     pushd bindings/pyomq >/dev/null
     # shellcheck disable=SC1091
     source .venv/bin/activate
-    run maturin develop --release
+    pyomq_venv="$(realpath .venv)"
+    _setup_python_tools
+    run omq_maturin develop --release
     # The checked-in venv may have been copied from another worktree; invoke
     # pytest through the active interpreter so its path cannot escape here.
-    run python -m pytest -v
+    run "$pyomq_venv/bin/python" -m pytest -v
     deactivate
     popd >/dev/null
 else

@@ -15,8 +15,12 @@ use std::time::Duration;
 use omq_proto::endpoint::Host;
 use omq_tokio::{CurveKeypair, Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
+fn python3_command() -> Command {
+    Command::new(std::env::var_os("OMQ_PYTHON3").unwrap_or_else(|| "python3".into()))
+}
+
 fn pyzmq_curve_available() -> bool {
-    Command::new("python3")
+    python3_command()
         .args([
             "-c",
             "import sys, zmq; sys.exit(0 if zmq.has('curve') else 1)",
@@ -118,7 +122,7 @@ s.close(linger=2000)
 ctx.term()
 "#;
 
-    let child = Command::new("python3")
+    let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
         .env("SRV_PUB", &server_pub_z85)
@@ -186,7 +190,7 @@ assert s.recv() == b"curve-rep"
 s.close(linger=2000)
 ctx.term()
 "#;
-    let child = Command::new("python3")
+    let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
         .env("SRV_PUB", &server_pub_z85)
@@ -248,7 +252,7 @@ s.close(linger=0)
 ctx.term()
 "#;
 
-    let mut child = Command::new("python3")
+    let mut child = python3_command()
         .args(["-c", script])
         .env("SRV_PUB", &server_pub_z85)
         .env("SRV_SEC", &server_sec_z85)
@@ -346,7 +350,7 @@ s.close(linger=200)
 ctx.term()
 "#;
 
-    let child = Command::new("python3")
+    let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
         .stdout(Stdio::null())
@@ -404,7 +408,7 @@ s.close(linger=0)
 ctx.term()
 "#;
 
-    let child = Command::new("python3")
+    let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
         .env("SRV_PUB", &server_pub_z85)
@@ -475,7 +479,7 @@ s.close(linger=0)
 ctx.term()
 "#;
 
-    let mut child = Command::new("python3")
+    let mut child = python3_command()
         .args(["-c", script])
         .env("SRV_PUB", &server_pub_z85)
         .env("SRV_SEC", &server_sec_z85)

@@ -3,6 +3,7 @@ name = "omq-proto"
 version = "0.23.0"
 edition.workspace = true
 rust-version.workspace = true
+autotests = false
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -49,6 +50,14 @@ optional = true
 name = "mechanism_frame"
 harness = false
 required-features = ["curve"]
+
+[[test]]
+name = "omq_proto_connection"
+path = "tests/connection.rs"
+
+[[test]]
+name = "omq_proto_endpoint"
+path = "tests/endpoint.rs"
 
 [package.metadata.docs.rs]
 all-features = true
