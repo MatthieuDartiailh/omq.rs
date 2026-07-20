@@ -122,7 +122,7 @@ jobs:
       - name: yring tests
         run: cross test --target ${{ matrix.target }} -p yring --all-features
       - name: tokio tcp smoke tests
-        run: cross test --target ${{ matrix.target }} -p omq-tokio --test tcp_smoke
+        run: cross test --target ${{ matrix.target }} -p omq-tokio --test omq_tcp_smoke
       - name: proto lz4 tests
         run: cross test --target ${{ matrix.target }} -p omq-proto --features lz4 --lib
       - name: libzmq ABI and inproc tests
