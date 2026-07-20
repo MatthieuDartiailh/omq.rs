@@ -46,7 +46,7 @@ use omq_proto::proto::connection::{ConnectionConfig, Role};
 use omq_proto::proto::transform::MessageEncoder;
 use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
 
-use crate::engine::{ConnectionDriver, PeerDriverConfig, PeerDriverHandle};
+use crate::engine::{ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverHandle};
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP and IPC).
 /// Inproc does NOT go through this - it skips the ZMTP codec entirely
@@ -98,7 +98,14 @@ pub(crate) enum SocketCommand {
     },
     Close {
         ack: Option<oneshot::Sender<Result<()>>>,
+        linger: CloseLinger,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CloseLinger {
+    Configured,
+    Override(Option<Duration>),
 }
 
 /// Events produced inside the driver (listeners accepting, connections
@@ -208,6 +215,7 @@ pub(crate) struct SocketDriver {
     /// UDP RADIO outbound dialers.
     udp_dialers: Vec<UdpDialerEntry>,
     closing: bool,
+    close_peers_requested: bool,
     close_deadline: Option<Instant>,
     close_ack: Option<oneshot::Sender<Result<()>>>,
     spsc: super::recv::SpscHandles,
@@ -265,6 +273,7 @@ impl SocketDriver {
             udp_listeners: Vec::new(),
             udp_dialers: Vec::new(),
             closing: false,
+            close_peers_requested: false,
             close_deadline: None,
             close_ack: None,
             spsc,
@@ -277,6 +286,11 @@ impl SocketDriver {
 
     async fn run(mut self) {
         loop {
+            if self.request_peer_close_if_drained().await {
+                self.teardown().await;
+                return;
+            }
+
             if self.should_exit() {
                 self.teardown().await;
                 return;
@@ -285,6 +299,9 @@ impl SocketDriver {
             let linger_sleep = self
                 .close_deadline
                 .map(|t| tokio::time::sleep_until(t.into()));
+            let should_poll_close = self.closing && !self.close_peers_requested;
+            let close_poll_sleep =
+                should_poll_close.then(|| tokio::time::sleep(Duration::from_millis(1)));
 
             tokio::select! {
                 biased;
@@ -296,6 +313,7 @@ impl SocketDriver {
                     self.teardown().await;
                     return;
                 }
+                () = async { close_poll_sleep.unwrap().await }, if should_poll_close => {}
                 cmd = self.cmd_rx.recv(), if !self.closing => match cmd {
                     Some(c) => self.handle_command(c).await,
                     None => {
@@ -325,9 +343,7 @@ impl SocketDriver {
         if !self.closing {
             return false;
         }
-        // Close completes when the strategy's queue is drained and all peers
-        // have torn down.
-        self.send_strategy.is_drained() && self.peers.is_empty()
+        self.close_peers_requested && self.peers.is_empty()
     }
 
     async fn handle_command(&mut self, cmd: SocketCommand) {
@@ -387,8 +403,12 @@ impl SocketDriver {
                     .collect();
                 let _ = ack.send(snapshot);
             }
-            SocketCommand::Close { ack } => {
-                self.begin_close(ack, self.options.linger);
+            SocketCommand::Close { ack, linger } => {
+                let linger = match linger {
+                    CloseLinger::Configured => self.options.linger,
+                    CloseLinger::Override(value) => value,
+                };
+                self.begin_close(ack, linger);
             }
         }
     }
@@ -401,6 +421,7 @@ impl SocketDriver {
             return;
         }
         self.closing = true;
+        self.close_peers_requested = false;
         self.close_ack = ack;
         // Close the recv channel so any awaiting recv() returns Closed.
         self.recv_tx.close();
@@ -418,6 +439,63 @@ impl SocketDriver {
         if matches!(linger, Some(Duration::ZERO)) {
             self.send_strategy.shutdown();
         }
+    }
+
+    async fn request_peer_close_if_drained(&mut self) -> bool {
+        if !self.closing || self.close_peers_requested || !self.send_strategy.is_drained() {
+            return false;
+        }
+
+        let targets: Vec<_> = self
+            .peers
+            .iter()
+            .map(|(&peer_id, peer)| (peer_id, peer.handle.inbox.clone()))
+            .collect();
+        if targets.is_empty() {
+            self.close_peers_requested = true;
+            return false;
+        }
+
+        let cancel = self.cancel.clone();
+        let mut disconnected = Vec::new();
+        for (peer_id, inbox) in targets {
+            let send = inbox.send(PeerDriverCommand::Close);
+            let result = match self.close_deadline {
+                Some(deadline) => {
+                    let deadline = tokio::time::Instant::from_std(deadline);
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return true,
+                        res = tokio::time::timeout_at(deadline, send) => res,
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return true,
+                        res = send => Ok(res),
+                    }
+                }
+            };
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => disconnected.push(peer_id),
+                Err(_) => return true,
+            }
+        }
+
+        for peer_id in disconnected {
+            if let Some(mut peer) = lifecycle::PeerLifecycle::new(self)
+                .remove_peer(peer_id, DisconnectReason::PeerClosed)
+                && let Some(task) = peer.task.take()
+            {
+                let _ = task.await;
+            }
+        }
+
+        self.close_peers_requested = true;
+        false
     }
 
     async fn teardown(&mut self) {

@@ -15,7 +15,7 @@ use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 use omq_proto::type_state::TypeState;
 
-use super::actor::{SocketCommand, SocketDriver, spawn_driver};
+use super::actor::{CloseLinger, SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
 use super::recv::{SpscAwareRecv, SpscHandles, SpscPush};
 use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
@@ -707,11 +707,27 @@ impl Socket {
     /// clones remain valid until they also drop (subsequent calls on them
     /// return `Error::Closed`).
     pub async fn close(self) -> Result<()> {
+        self.close_inner(CloseLinger::Configured).await
+    }
+
+    /// Graceful close with a one-shot linger override.
+    ///
+    /// `None` waits forever; `Some(Duration::ZERO)` drops immediately.
+    /// This is mainly for compatibility layers whose close call accepts a
+    /// per-call linger value.
+    pub async fn close_with_linger(self, linger: Option<std::time::Duration>) -> Result<()> {
+        self.close_inner(CloseLinger::Override(linger)).await
+    }
+
+    async fn close_inner(self, linger: CloseLinger) -> Result<()> {
         let (ack, rx) = oneshot::channel();
         let _ = self
             .inner
             .cmd_tx
-            .send(SocketCommand::Close { ack: Some(ack) })
+            .send(SocketCommand::Close {
+                ack: Some(ack),
+                linger,
+            })
             .await;
         // Even if the driver is already gone, the channel may be closed; we
         // treat that as "already closed" (success).

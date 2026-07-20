@@ -5,6 +5,7 @@ mod helpers;
 
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::time::{Duration, Instant};
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_recv,
@@ -25,6 +26,7 @@ const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_LINGER: i32 = 17;
+const ZMQ_DONTWAIT: i32 = 1;
 const ZMQ_IDENTITY: i32 = 5;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_TYPE: i32 = 16;
@@ -145,6 +147,41 @@ fn linger_roundtrip() {
 
     zmq_close(s);
     zmq_ctx_term(ctx);
+}
+
+#[test]
+fn linger_delays_context_term_after_close() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_DEALER);
+    set_i32(s, ZMQ_LINGER, 200);
+
+    let endpoint = std::ffi::CString::new("inproc://linger-delays-term").unwrap();
+    assert_eq!(zmq_bind(s, endpoint.as_ptr()), 0);
+
+    let payload = b"queued";
+    assert_eq!(
+        zmq_send(s, payload.as_ptr().cast(), payload.len(), ZMQ_DONTWAIT),
+        i32::try_from(payload.len()).unwrap()
+    );
+
+    let close_start = Instant::now();
+    assert_eq!(zmq_close(s), 0);
+    assert!(
+        close_start.elapsed() < Duration::from_millis(100),
+        "zmq_close blocked on linger"
+    );
+
+    let term_start = Instant::now();
+    assert_eq!(zmq_ctx_term(ctx), 0);
+    let elapsed = term_start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "ctx_term did not wait for linger: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "ctx_term linger wait took too long: {elapsed:?}"
+    );
 }
 
 #[test]

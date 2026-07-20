@@ -16,6 +16,7 @@ pub(crate) struct OmqContext {
     pub(crate) configured_io_threads: AtomicI32,
     pub terminated: Arc<AtomicBool>,
     pub socket_count: AtomicI32,
+    linger_count: AtomicI32,
     socket_notify: (Mutex<()>, Condvar),
     sockets: Mutex<Vec<Weak<crate::socket::OmqSocket>>>,
     pub max_sockets: AtomicI32,
@@ -41,6 +42,7 @@ impl OmqContext {
             configured_io_threads: AtomicI32::new(i32::try_from(n).unwrap_or(i32::MAX)),
             terminated: Arc::new(AtomicBool::new(false)),
             socket_count: AtomicI32::new(0),
+            linger_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
             sockets: Mutex::new(Vec::new()),
             max_sockets: AtomicI32::new(1023),
@@ -88,6 +90,18 @@ impl OmqContext {
         }
     }
 
+    pub(crate) fn linger_started(&self) {
+        self.linger_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn linger_finished(&self) {
+        let prev = self.linger_count.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            let (_, cvar) = &self.socket_notify;
+            cvar.notify_all();
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         self.terminated.store(true, Ordering::Release);
         let notifies = self
@@ -117,6 +131,7 @@ impl std::fmt::Debug for OmqContext {
             .field("ctx", &self.ctx)
             .field("terminated", &self.terminated.load(Ordering::Relaxed))
             .field("socket_count", &self.socket_count.load(Ordering::Relaxed))
+            .field("linger_count", &self.linger_count.load(Ordering::Relaxed))
             .field("max_sockets", &self.max_sockets.load(Ordering::Relaxed))
             .field("max_msg_size", &self.max_msg_size.load(Ordering::Relaxed))
             .finish_non_exhaustive()
@@ -167,7 +182,10 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
             return crate::error::fail(crate::error::ETERM);
         };
         if cvar
-            .wait_while(guard, |()| arc.socket_count.load(Ordering::Acquire) > 0)
+            .wait_while(guard, |()| {
+                arc.socket_count.load(Ordering::Acquire) > 0
+                    || arc.linger_count.load(Ordering::Acquire) > 0
+            })
             .is_err()
         {
             return crate::error::fail(crate::error::ETERM);

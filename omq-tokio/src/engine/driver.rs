@@ -767,14 +767,12 @@ where
     ///
     /// In every exit path (success or error) the driver sends one final
     /// `PeerEvent::Closed` on the shared peer-event channel so the
-    /// `SocketDriver` can clean up its peer entry. The notification is
-    /// best-effort because actor teardown joins peer tasks while it no
-    /// longer drains this channel.
+    /// `SocketDriver` can clean up its peer entry.
     pub async fn run(self) -> Result<()> {
         let peer_out = self.peer_out.clone();
         let peer_id = self.peer_id;
         let result = self.run_inner_body().await;
-        let _ = peer_out.try_send((peer_id, PeerEvent::Closed));
+        let _ = peer_out.send((peer_id, PeerEvent::Closed)).await;
         result
     }
 

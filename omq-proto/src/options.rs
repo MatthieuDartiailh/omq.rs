@@ -1,7 +1,7 @@
 //! Socket options: typed builder.
 //!
-//! Defaults differ from libzmq in two places: per-socket HWM semantics
-//! and conflate restricted to `FanOut` patterns.
+//! Defaults differ from libzmq in a few places: linger defaults to zero,
+//! HWM is per-socket, and conflate is restricted to `FanOut` patterns.
 
 use std::time::Duration;
 

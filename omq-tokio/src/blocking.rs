@@ -170,4 +170,10 @@ impl Socket {
         let s = self.inner;
         self.ctx.block_on(async move { s.close().await })
     }
+
+    pub fn close_with_linger(self, linger: Option<Duration>) -> Result<()> {
+        let s = self.inner;
+        self.ctx
+            .block_on(async move { s.close_with_linger(linger).await })
+    }
 }

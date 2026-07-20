@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import time
 
 import pytest
 
@@ -113,6 +114,26 @@ async def test_async_mixed_with_sync(tcp_endpoint):
     finally:
         push.close()
         pull.close()
+
+
+@pytest.mark.asyncio
+async def test_async_close_linger_arg_overrides_socket_linger():
+    ctx = zmq_async.Context()
+    push = ctx.socket(pyomq.PUSH)
+    try:
+        push.linger = -1
+        push.bind("inproc://async-close-linger-override")
+        push.send(b"queued")
+        await asyncio.sleep(0.05)
+
+        start = time.monotonic()
+        push.close(linger=0)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.5
+    finally:
+        push.close(linger=0)
+        ctx.term()
 
 
 @pytest.mark.asyncio

@@ -629,7 +629,7 @@ pub(super) async fn inproc_peer_driver(
         ring.recv_notify.wake_all();
     }
     blocking_recv_waker.wake();
-    let _ = peer_out.try_send((peer_id, PeerEvent::Closed));
+    let _ = peer_out.send((peer_id, PeerEvent::Closed)).await;
 }
 
 /// Route a message to `recv_direct` or through the actor via `emit_event`.

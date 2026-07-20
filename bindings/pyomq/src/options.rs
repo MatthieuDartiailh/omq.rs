@@ -248,7 +248,7 @@ impl Overlay {
     }
 }
 
-fn ms(value: i64) -> Option<Duration> {
+pub(crate) fn duration_from_millis(value: i64) -> Option<Duration> {
     match value {
         v if v < 0 => None,
         v => Some(Duration::from_millis(v as u64)),
@@ -284,7 +284,7 @@ pub fn setsockopt(
     let mut ov = sock.overlay.lock().unwrap();
     match option {
         constants::LINGER => {
-            ov.linger = ms(value.extract::<i64>()?);
+            ov.linger = duration_from_millis(value.extract::<i64>()?);
         }
         constants::SNDHWM => {
             ov.send_hwm = parse_hwm(value)?;
@@ -337,10 +337,10 @@ pub fn setsockopt(
             return r.map_err(map_err);
         }
         constants::RCVTIMEO => {
-            ov.rcvtimeo = ms(value.extract::<i64>()?);
+            ov.rcvtimeo = duration_from_millis(value.extract::<i64>()?);
         }
         constants::SNDTIMEO => {
-            ov.sndtimeo = ms(value.extract::<i64>()?);
+            ov.sndtimeo = duration_from_millis(value.extract::<i64>()?);
         }
         constants::ROUTER_MANDATORY => {
             ov.router_mandatory = value.extract::<i64>()? != 0;
@@ -352,22 +352,22 @@ pub fn setsockopt(
             };
         }
         constants::RECONNECT_IVL => {
-            ov.reconnect_ivl = ms(value.extract::<i64>()?);
+            ov.reconnect_ivl = duration_from_millis(value.extract::<i64>()?);
         }
         constants::RECONNECT_IVL_MAX => {
-            ov.reconnect_ivl_max = ms(value.extract::<i64>()?);
+            ov.reconnect_ivl_max = duration_from_millis(value.extract::<i64>()?);
         }
         constants::HEARTBEAT_IVL => {
-            ov.heartbeat_ivl = ms(value.extract::<i64>()?);
+            ov.heartbeat_ivl = duration_from_millis(value.extract::<i64>()?);
         }
         constants::HEARTBEAT_TTL => {
-            ov.heartbeat_ttl = ms(value.extract::<i64>()?);
+            ov.heartbeat_ttl = duration_from_millis(value.extract::<i64>()?);
         }
         constants::HEARTBEAT_TIMEOUT => {
-            ov.heartbeat_timeout = ms(value.extract::<i64>()?);
+            ov.heartbeat_timeout = duration_from_millis(value.extract::<i64>()?);
         }
         constants::HANDSHAKE_IVL => {
-            ov.handshake_ivl = ms(value.extract::<i64>()?);
+            ov.handshake_ivl = duration_from_millis(value.extract::<i64>()?);
         }
         constants::CONFLATE => {
             ov.conflate = value.extract::<i64>()? != 0;

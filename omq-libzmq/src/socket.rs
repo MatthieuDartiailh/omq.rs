@@ -387,16 +387,29 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     }
     *arc.bypass_send.get() = None;
     *arc.bypass_recv.get() = None;
+    let linger = arc
+        .overlay
+        .lock()
+        .map_or(Some(std::time::Duration::ZERO), |overlay| overlay.linger);
+    let close_socket = arc.inner.get().map(|inner| inner.as_ref().clone());
 
     // Enter the tokio runtime context so that dropping OmqSocket (and
     // the Arc<omq_tokio::Socket> it holds) doesn't panic from missing
     // reactor.
-    let Some(handle) = arc.ctx.handle() else {
+    let Some(handle) = arc.ctx.handle().cloned() else {
         arc.notify.close();
         arc.ctx.socket_closed();
         drop(arc);
         return 0;
     };
+    if let Some(socket) = close_socket {
+        let ctx = arc.ctx.clone();
+        ctx.linger_started();
+        handle.spawn(async move {
+            let _ = socket.close_with_linger(linger).await;
+            ctx.linger_finished();
+        });
+    }
     let _guard = handle.enter();
 
     arc.notify.close();
