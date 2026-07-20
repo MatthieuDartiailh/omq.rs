@@ -3,6 +3,7 @@ name = "omq-tokio"
 version = "0.19.1"
 edition.workspace = true
 rust-version.workspace = true
+autotests = false
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -120,6 +121,326 @@ required-features = ["plain"]
 [[bench]]
 name = "compression"
 harness = false
+
+[[test]]
+name = "omq_broker"
+path = "tests/broker.rs"
+
+[[test]]
+name = "omq_conflate"
+path = "tests/conflate.rs"
+
+[[test]]
+name = "omq_connect_before_bind"
+path = "tests/connect_before_bind.rs"
+
+[[test]]
+name = "omq_connection_errors"
+path = "tests/connection_errors.rs"
+
+[[test]]
+name = "omq_context"
+path = "tests/context.rs"
+
+[[test]]
+name = "omq_coverage_matrix"
+path = "tests/coverage_matrix.rs"
+
+[[test]]
+name = "omq_curve"
+path = "tests/curve.rs"
+
+[[test]]
+name = "omq_double_close"
+path = "tests/double_close.rs"
+
+[[test]]
+name = "omq_draft_types"
+path = "tests/draft_types.rs"
+
+[[test]]
+name = "omq_fuzz_parsers"
+path = "tests/fuzz_parsers.rs"
+
+[[test]]
+name = "omq_fuzz_socket_actions"
+path = "tests/fuzz_socket_actions.rs"
+
+[[test]]
+name = "omq_handshake_timeout"
+path = "tests/handshake_timeout.rs"
+
+[[test]]
+name = "omq_heartbeat"
+path = "tests/heartbeat.rs"
+
+[[test]]
+name = "omq_inproc_rebind"
+path = "tests/inproc_rebind.rs"
+
+[[test]]
+name = "omq_inproc_recv_race"
+path = "tests/inproc_recv_race.rs"
+
+[[test]]
+name = "omq_inproc_subside"
+path = "tests/inproc_subside.rs"
+
+[[test]]
+name = "omq_interop_libzmq_ws"
+path = "tests/interop_libzmq_ws.rs"
+
+[[test]]
+name = "omq_interop_pyzmq_curve"
+path = "tests/interop_pyzmq_curve.rs"
+
+[[test]]
+name = "omq_interop_pyzmq_plain"
+path = "tests/interop_pyzmq_plain.rs"
+
+[[test]]
+name = "omq_ipc"
+path = "tests/ipc.rs"
+
+[[test]]
+name = "omq_ipv6"
+path = "tests/ipv6.rs"
+
+[[test]]
+name = "omq_large_messages"
+path = "tests/large_messages.rs"
+
+[[test]]
+name = "omq_linger"
+path = "tests/linger.rs"
+
+[[test]]
+name = "omq_lz4_pub_sub"
+path = "tests/lz4_pub_sub.rs"
+
+[[test]]
+name = "omq_lz4_socket_types"
+path = "tests/lz4_socket_types.rs"
+
+[[test]]
+name = "omq_lz4_tcp"
+path = "tests/lz4_tcp.rs"
+
+[[test]]
+name = "omq_lz4_ws"
+path = "tests/lz4_ws.rs"
+
+[[test]]
+name = "omq_mixed_transports"
+path = "tests/mixed_transports.rs"
+
+[[test]]
+name = "omq_monitor"
+path = "tests/monitor.rs"
+
+[[test]]
+name = "omq_multi_peer"
+path = "tests/multi_peer.rs"
+
+[[test]]
+name = "omq_soak_cancel_safety"
+path = "tests/omq_soak_cancel_safety.rs"
+
+[[test]]
+name = "omq_soak_compression_lz4"
+path = "tests/omq_soak_compression_lz4.rs"
+
+[[test]]
+name = "omq_soak_curve"
+path = "tests/omq_soak_curve.rs"
+
+[[test]]
+name = "omq_soak_hwm_reconnect"
+path = "tests/omq_soak_hwm_reconnect.rs"
+
+[[test]]
+name = "omq_soak_inproc_cross_thread"
+path = "tests/omq_soak_inproc_cross_thread.rs"
+
+[[test]]
+name = "omq_soak_large_throughput"
+path = "tests/omq_soak_large_throughput.rs"
+
+[[test]]
+name = "omq_soak_mechanism_reconnect"
+path = "tests/omq_soak_mechanism_reconnect.rs"
+
+[[test]]
+name = "omq_soak_multi_socket"
+path = "tests/omq_soak_multi_socket.rs"
+
+[[test]]
+name = "omq_soak_peer_churn"
+path = "tests/omq_soak_peer_churn.rs"
+
+[[test]]
+name = "omq_soak_plain"
+path = "tests/omq_soak_plain.rs"
+
+[[test]]
+name = "omq_soak_pub_sub_churn"
+path = "tests/omq_soak_pub_sub_churn.rs"
+
+[[test]]
+name = "omq_soak_pub_sub_churn_tcp"
+path = "tests/omq_soak_pub_sub_churn_tcp.rs"
+
+[[test]]
+name = "omq_soak_pub_sub_lz4_dict"
+path = "tests/omq_soak_pub_sub_lz4_dict.rs"
+
+[[test]]
+name = "omq_soak_pub_sub_realworld_churn_tcp"
+path = "tests/omq_soak_pub_sub_realworld_churn_tcp.rs"
+
+[[test]]
+name = "omq_soak_reconnect_all_types"
+path = "tests/omq_soak_reconnect_all_types.rs"
+
+[[test]]
+name = "omq_soak_reconnect_storm"
+path = "tests/omq_soak_reconnect_storm.rs"
+
+[[test]]
+name = "omq_soak_router_dealer_churn"
+path = "tests/omq_soak_router_dealer_churn.rs"
+
+[[test]]
+name = "omq_soak_ws"
+path = "tests/omq_soak_ws.rs"
+
+[[test]]
+name = "omq_soak_xpub_xsub_churn"
+path = "tests/omq_soak_xpub_xsub_churn.rs"
+
+[[test]]
+name = "omq_options_polish"
+path = "tests/options_polish.rs"
+
+[[test]]
+name = "omq_peer_churn"
+path = "tests/peer_churn.rs"
+
+[[test]]
+name = "omq_plain"
+path = "tests/plain.rs"
+
+[[test]]
+name = "omq_pub_sub"
+path = "tests/pub_sub.rs"
+
+[[test]]
+name = "omq_push_pull"
+path = "tests/push_pull.rs"
+
+[[test]]
+name = "omq_radio_dish"
+path = "tests/radio_dish.rs"
+
+[[test]]
+name = "omq_random_sizes"
+path = "tests/random_sizes.rs"
+
+[[test]]
+name = "omq_reconnect"
+path = "tests/reconnect.rs"
+
+[[test]]
+name = "omq_reconnect_all_types"
+path = "tests/reconnect_all_types.rs"
+
+[[test]]
+name = "omq_reconnect_connect_side"
+path = "tests/reconnect_connect_side.rs"
+
+[[test]]
+name = "omq_reconnect_identity"
+path = "tests/reconnect_identity.rs"
+
+[[test]]
+name = "omq_reconnect_stop"
+path = "tests/reconnect_stop.rs"
+
+[[test]]
+name = "omq_req_rep"
+path = "tests/req_rep.rs"
+
+[[test]]
+name = "omq_router_dealer"
+path = "tests/router_dealer.rs"
+
+[[test]]
+name = "omq_socket_combos"
+path = "tests/socket_combos.rs"
+
+[[test]]
+name = "omq_spsc_recovery"
+path = "tests/spsc_recovery.rs"
+
+[[test]]
+name = "omq_stream"
+path = "tests/stream.rs"
+
+[[test]]
+name = "omq_stress_connect_before_bind"
+path = "tests/stress_connect_before_bind.rs"
+
+[[test]]
+name = "omq_tcp_smoke"
+path = "tests/tcp_smoke.rs"
+
+[[test]]
+name = "omq_transmit_slot_stress"
+path = "tests/transmit_slot_stress.rs"
+
+[[test]]
+name = "omq_udp"
+path = "tests/udp.rs"
+
+[[test]]
+name = "omq_unbind_disconnect"
+path = "tests/unbind_disconnect.rs"
+
+[[test]]
+name = "omq_ws_basic"
+path = "tests/ws_basic.rs"
+
+[[test]]
+name = "omq_ws_multi_peer"
+path = "tests/ws_multi_peer.rs"
+
+[[test]]
+name = "omq_ws_plain"
+path = "tests/ws_plain.rs"
+
+[[test]]
+name = "omq_ws_pub_sub"
+path = "tests/ws_pub_sub.rs"
+
+[[test]]
+name = "omq_ws_radio_dish"
+path = "tests/ws_radio_dish.rs"
+
+[[test]]
+name = "omq_ws_reconnect"
+path = "tests/ws_reconnect.rs"
+
+[[test]]
+name = "omq_wss_basic"
+path = "tests/wss_basic.rs"
+
+[[test]]
+name = "omq_wss_cert_reject"
+path = "tests/wss_cert_reject.rs"
+
+[[test]]
+name = "omq_xpub_xsub"
+path = "tests/xpub_xsub.rs"
 
 [package.metadata.docs.rs]
 all-features = true

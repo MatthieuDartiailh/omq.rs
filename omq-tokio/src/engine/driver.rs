@@ -346,7 +346,7 @@ async fn batch_encode(
     mut try_recv: impl FnMut() -> Option<Message>,
     max_msgs: usize,
     encoder: &mut Option<MessageEncoder>,
-    codec: &mut Connection,
+    connection: &mut Connection,
     eq: &mut FrameBuffer,
     passthrough: Option<&(Bytes, usize)>,
     pool: Option<&Arc<CompressionPool>>,
@@ -365,7 +365,7 @@ async fn batch_encode(
             pipeline,
         );
     } else {
-        encode_msg(first, encoder, codec, eq, passthrough)?;
+        encode_msg(first, encoder, connection, eq, passthrough)?;
     }
     let mut count = 1usize;
     let mut bytes = first.byte_len();
@@ -382,7 +382,7 @@ async fn batch_encode(
                         pipeline,
                     );
                 } else {
-                    encode_msg(&next, encoder, codec, eq, passthrough)?;
+                    encode_msg(&next, encoder, connection, eq, passthrough)?;
                 }
                 count += 1;
             }
@@ -390,7 +390,7 @@ async fn batch_encode(
         }
     }
     if use_pipeline {
-        drain_pipeline(pipeline, pool, codec, eq).await?;
+        drain_pipeline(pipeline, pool, connection, eq).await?;
     }
     Ok(count)
 }
@@ -418,7 +418,7 @@ pub struct PeerDriverConfig {
     pub heartbeat_ttl: Option<Duration>,
     /// Recv frames whose payload exceeds this threshold via a single
     /// `read_exact` into a pre-sized buffer, bypassing the fixed
-    /// `read_buf` → codec copy path. `0` disables.
+    /// `read_buf` -> `Connection` buffering path. `0` disables.
     pub large_message_threshold: usize,
 }
 
@@ -459,15 +459,115 @@ pub enum PeerEvent {
     Closed,
 }
 
-/// A single-connection driver: reads bytes from the stream, feeds the codec,
-/// forwards events out, accepts commands in, writes codec-produced bytes out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriverStep {
+    Continue,
+    Yield,
+    Close,
+}
+
+struct OutboundState {
+    encoder: Option<MessageEncoder>,
+    passthrough: Option<(Bytes, usize)>,
+    compression_pool: Option<Arc<CompressionPool>>,
+    offload_threshold: usize,
+    offload_pipeline: OffloadPipeline,
+}
+
+impl std::fmt::Debug for OutboundState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundState")
+            .field("has_encoder", &self.encoder.is_some())
+            .field("has_passthrough", &self.passthrough.is_some())
+            .field("has_compression_pool", &self.compression_pool.is_some())
+            .field("offload_threshold", &self.offload_threshold)
+            .field("offload_pipeline_len", &self.offload_pipeline.len())
+            .finish()
+    }
+}
+
+impl OutboundState {
+    fn new(
+        encoder: Option<MessageEncoder>,
+        compression_pool: Option<Arc<CompressionPool>>,
+        offload_threshold: usize,
+    ) -> Self {
+        let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
+        Self {
+            encoder,
+            passthrough,
+            compression_pool,
+            offload_threshold,
+            offload_pipeline: FuturesOrdered::new(),
+        }
+    }
+
+    async fn batch_encode(
+        &mut self,
+        first: &Message,
+        try_recv: impl FnMut() -> Option<Message>,
+        max_msgs: usize,
+        connection: &mut Connection,
+        eq: &mut FrameBuffer,
+    ) -> Result<usize> {
+        let Self {
+            encoder,
+            passthrough,
+            compression_pool,
+            offload_threshold,
+            offload_pipeline,
+        } = self;
+        batch_encode(
+            first,
+            try_recv,
+            max_msgs,
+            encoder,
+            connection,
+            eq,
+            passthrough.as_ref(),
+            compression_pool.as_ref(),
+            *offload_threshold,
+            offload_pipeline,
+        )
+        .await
+    }
+
+    fn has_pending_offload(&self) -> bool {
+        !self.offload_pipeline.is_empty()
+    }
+
+    async fn next_offload(&mut self) -> Option<(Option<MessageEncoder>, Result<TransformedOut>)> {
+        use futures::StreamExt;
+        self.offload_pipeline.next().await
+    }
+
+    fn drain_offload_result(
+        &mut self,
+        pool_enc: Option<MessageEncoder>,
+        frames: Result<TransformedOut>,
+        connection: &Connection,
+        eq: &mut FrameBuffer,
+    ) -> Result<()> {
+        drain_offload_result(
+            pool_enc,
+            frames,
+            self.compression_pool.as_ref(),
+            connection,
+            eq,
+        )
+    }
+}
+
+/// A single-connection driver: reads bytes from the stream, feeds the
+/// `Connection` state machine, forwards events out, accepts commands in,
+/// writes bytes produced by the connection.
 #[derive(Debug)]
 pub struct ConnectionDriver<T>
 where
     T: DriverStream,
 {
     stream: T,
-    codec: Connection,
+    connection: Connection,
     inbox: mpsc::Receiver<PeerDriverCommand>,
     /// Shared multi-producer channel feeding the `SocketDriver`'s
     /// per-peer event loop. Each entry is tagged with the `peer_id`
@@ -511,7 +611,7 @@ where
 {
     pub fn new(
         stream: T,
-        codec: Connection,
+        connection: Connection,
         inbox: mpsc::Receiver<PeerDriverCommand>,
         peer_out: mpsc::Sender<(u64, PeerEvent)>,
         peer_id: u64,
@@ -519,7 +619,7 @@ where
     ) -> Self {
         Self::with_config(
             stream,
-            codec,
+            connection,
             inbox,
             peer_out,
             peer_id,
@@ -530,7 +630,7 @@ where
 
     pub fn with_config(
         stream: T,
-        codec: Connection,
+        connection: Connection,
         inbox: mpsc::Receiver<PeerDriverCommand>,
         peer_out: mpsc::Sender<(u64, PeerEvent)>,
         peer_id: u64,
@@ -539,7 +639,7 @@ where
     ) -> Self {
         Self {
             stream,
-            codec,
+            connection,
             inbox,
             peer_out,
             peer_id,
@@ -663,18 +763,16 @@ where
     /// Run the driver to completion. Returns:
     /// - `Ok(())` on clean shutdown (peer EOF, canceled, `Close` command,
     ///   inbox dropped).
-    /// - `Err(_)` on protocol violations, I/O errors, or codec errors.
+    /// - `Err(_)` on protocol violations, I/O errors, or connection errors.
     ///
     /// In every exit path (success or error) the driver sends one final
     /// `PeerEvent::Closed` on the shared peer-event channel so the
-    /// `SocketDriver` can clean up its peer entry. The notification is
-    /// best-effort because actor teardown joins peer tasks while it no
-    /// longer drains this channel.
+    /// `SocketDriver` can clean up its peer entry.
     pub async fn run(self) -> Result<()> {
         let peer_out = self.peer_out.clone();
         let peer_id = self.peer_id;
         let result = self.run_inner_body().await;
-        let _ = peer_out.try_send((peer_id, PeerEvent::Closed));
+        let _ = peer_out.send((peer_id, PeerEvent::Closed)).await;
         result
     }
 
@@ -682,13 +780,13 @@ where
     async fn run_inner_body(self) -> Result<()> {
         let Self {
             stream,
-            mut codec,
+            mut connection,
             mut inbox,
             peer_out,
             peer_id,
             cancel,
             config,
-            mut encoder,
+            encoder,
             mut decoder,
             shared_msg_rx,
             mut recv_direct,
@@ -700,8 +798,7 @@ where
             arena_cap,
             receive_profile,
         } = self;
-        let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
-        let mut offload_pipeline: OffloadPipeline = FuturesOrdered::new();
+        let mut outbound = OutboundState::new(encoder, compression_pool, offload_threshold);
         let latency_profile = !matches!(receive_profile, ReceiveProfile::Throughput);
         let (mut reader, mut writer) = stream.split(latency_profile);
         let mut read_buf_target = if latency_profile {
@@ -736,67 +833,38 @@ where
         // hot select path.
         let mut prioritize_shared_rx = shared_msg_rx.is_some();
         loop {
-            if handshake_deadline.is_some() && codec.is_ready() {
+            if handshake_deadline.is_some() && connection.is_ready() {
                 handshake_deadline = None;
             }
 
-            while let Some(ev) = codec.poll_event() {
-                if peer_out
-                    .send((peer_id, PeerEvent::Event(ev)))
-                    .await
-                    .is_err()
-                {
-                    return Ok(());
-                }
+            if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
+                return Ok(());
             }
-            let recv_batch_start = Instant::now();
-            let mut recv_budget = None;
-            let mut recv_batch_time = None;
-            let mut recv_budget_exhausted = false;
-            while let Some(m) = codec.poll_message() {
-                let m = match decoder.as_mut() {
-                    Some(dec) => match dec.decode(m)? {
-                        Some(plain) => plain,
-                        None => continue,
-                    },
-                    None => m,
-                };
-                let msg_bytes = m.byte_len();
-                let budget = recv_budget.get_or_insert_with(|| {
-                    recv_batch_time = receive_profile.time(msg_bytes);
-                    receive_profile.budget(msg_bytes)
-                });
-                if !route_message(m, &mut recv_direct, &peer_out, peer_id).await {
-                    return Ok(());
+            match drain_decoded_messages(
+                &mut connection,
+                &mut decoder,
+                receive_profile,
+                &mut recv_direct,
+                &peer_out,
+                peer_id,
+            )
+            .await?
+            {
+                DriverStep::Continue => {}
+                DriverStep::Yield => {
+                    tokio::task::yield_now().await;
+                    continue;
                 }
-                let budget_remains = budget.account(msg_bytes);
-                let time_check = budget.msgs().is_multiple_of(32);
-                if !budget_remains
-                    || (time_check
-                        && recv_batch_time.is_some_and(|limit| recv_batch_start.elapsed() >= limit))
-                {
-                    recv_budget_exhausted = true;
-                    break;
-                }
-            }
-            if recv_budget_exhausted {
-                tokio::task::yield_now().await;
-                continue;
+                DriverStep::Close => return Ok(()),
             }
 
             // Set handshake_done on the encode slot once the handshake
             // completes and there's no frame transform (CURVE).
             // The slot stays disabled for crypto connections.
-            if let Some(ref slot) = transmit_slot
-                && codec.is_ready()
-                && !slot.handshake_done.load(Ordering::Relaxed)
-                && !codec.has_frame_transform()
-            {
-                slot.handshake_done.store(true, Ordering::Release);
-            }
+            enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
 
-            let want_write = codec.has_pending_transmit() || !eq.is_empty();
-            let hb_enabled = hb_interval.is_some() && codec.is_ready();
+            let want_write = connection.has_pending_transmit() || !eq.is_empty();
+            let hb_enabled = hb_interval.is_some() && connection.is_ready();
 
             // Latency-routed REQ/REP sends are encoded into the wire slot by
             // the caller. Drain that already-queued work before polling the
@@ -844,116 +912,53 @@ where
                 }
 
                 res = reader.read_buf(&mut read_buf), if !latency_profile || inbox.is_empty() => {
-                    last_input = Instant::now();
                     let n = res?;
                     if n == 0 {
-                        if let Some(ref slot) = transmit_slot {
-                            slot.mark_dead();
-                        }
+                        mark_peer_dead(transmit_slot.as_deref());
                         cancel.cancel();
                         inbox.close();
                         return Ok(());
                     }
-                    if n >= read_buf_target && read_buf_target < READ_BUF_MAX {
-                        read_buf_full_reads += 1;
-                        if read_buf_full_reads >= READ_BUF_GROW_FULL_READS {
-                            read_buf_target = (read_buf_target * 2).min(READ_BUF_MAX);
-                            read_buf_full_reads = 0;
-                        }
-                    } else {
-                        read_buf_full_reads = 0;
-                    }
-                    let chunk = read_buf.split().freeze();
-                    read_buf.reserve(read_buf_target.saturating_sub(read_buf.capacity()));
-                    if let Err(e) = codec.handle_input(chunk) {
-                        while let Some(ev) = codec.poll_event() {
-                            let _ = peer_out
-                                .send((peer_id, PeerEvent::Event(ev)))
-                                .await;
-                        }
-                        return Err(e);
-                    }
-                    handle_large_messages(
-                        &mut codec, &mut reader, &config, &mut last_input,
+                    read_stream_input(
+                        n,
+                        &mut reader,
+                        &mut connection,
+                        &mut read_buf,
+                        &mut read_buf_target,
+                        &mut read_buf_full_reads,
+                        &config,
+                        &mut last_input,
                         &recv_pool,
+                        &peer_out,
+                        peer_id,
                     ).await?;
                 }
 
                 // Drain completed offloaded compressions and flush.
-                Some((pool_enc, frames)) = async {
-                    use futures::StreamExt;
-                    offload_pipeline.next().await
-                }, if !offload_pipeline.is_empty() => {
-                    drain_offload_result(pool_enc, frames, compression_pool.as_ref(), &codec, &mut eq)?;
-                    flush_all(&mut writer, &mut eq, &mut drain_buf, &mut codec).await?;
+                Some((pool_enc, frames)) = outbound.next_offload(), if outbound.has_pending_offload() => {
+                    outbound.drain_offload_result(pool_enc, frames, &connection, &mut eq)?;
+                    flush_all(&mut writer, &mut eq, &mut drain_buf, &mut connection).await?;
                 }
 
                 res = async {
                     flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf).await?;
-                    flush_once(&mut writer, &mut codec).await
+                    flush_once(&mut writer, &mut connection).await
                 }, if want_write => {
                     res?;
                 }
 
                 cmd = inbox.recv() => {
-                    match cmd {
-                    Some(PeerDriverCommand::SendMessage(first)) => {
-                        // TODO: Give driver control commands an explicit
-                        // msg/byte/time budget. Current mixed inbox batches
-                        // data first, then handles controls found after the
-                        // batch.
-                        let mut closing = false;
-                        let mut deferred: SmallVec<[PeerDriverCommand; 4]> =
-                            SmallVec::new();
-                        let _ = batch_encode(
-                            &first,
-                            || match inbox.try_recv() {
-                                Ok(PeerDriverCommand::SendMessage(m)) => Some(m),
-                                Ok(cmd) => { deferred.push(cmd); None }
-                                Err(_) => None,
-                            },
-                            SHARED_MAX_BATCH_MSGS,
-                            &mut encoder, &mut codec, &mut eq,
-                            passthrough.as_ref(), compression_pool.as_ref(),
-                            offload_threshold, &mut offload_pipeline,
-                        ).await?;
-                        for cmd in deferred {
-                            match cmd {
-                                PeerDriverCommand::SendEncoded(chunks) => {
-                                    eq.push_shared_chunks(&chunks);
-                                }
-                                PeerDriverCommand::SendCommand(c) => {
-                                    codec.send_command(&c)?;
-                                }
-                                PeerDriverCommand::Close => closing = true,
-                                PeerDriverCommand::SendMessage(_) => unreachable!(),
-                            }
-                        }
-                        flush_all(
-                            &mut writer, &mut eq, &mut drain_buf, &mut codec,
-                        ).await?;
-                        if closing {
-                            drain_writes(&mut writer, &mut codec).await.ok();
-                            return Ok(());
-                        }
-                        if latency_profile {
-                        }
-                    }
-                    Some(PeerDriverCommand::SendEncoded(chunks)) => {
-                        eq.push_shared_chunks(&chunks);
-                        flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf).await?;
-                        if latency_profile {
-                        }
-                    }
-                    Some(PeerDriverCommand::SendCommand(c)) => {
-                        codec.send_command(&c)?;
-                        if latency_profile {
-                        }
-                    }
-                    Some(PeerDriverCommand::Close) | None => {
-                        drain_writes(&mut writer, &mut codec).await.ok();
+                    if handle_inbox_command(
+                        cmd,
+                        &mut inbox,
+                        &mut outbound,
+                        &mut connection,
+                        &mut eq,
+                        &mut drain_buf,
+                        &mut writer,
+                    ).await? == DriverStep::Close {
+                        drain_writes(&mut writer, &mut connection).await.ok();
                         return Ok(());
-                    }
                     }
                 },
 
@@ -970,45 +975,18 @@ where
                     } else {
                         std::future::pending().await
                     }
-                }, if prioritize_shared_rx && codec.is_ready() => {
-                    match msg {
-                        None => {
-                            drain_writes(&mut writer, &mut codec).await.ok();
-                            return Ok(());
-                        }
-                        Some(first) => {
-                            let batch_limit = shared_msg_rx
-                                .as_ref()
-                                .map_or(SHARED_MAX_BATCH_MSGS, FallbackReceiver::batch_limit);
-                            let mut popped = 1usize;
-                            let encode_result = batch_encode(
-                                &first,
-                                || {
-                                    let msg = shared_msg_rx.as_ref()
-                                        .and_then(FallbackReceiver::try_pop);
-                                    if msg.is_some() {
-                                        popped += 1;
-                                    }
-                                    msg
-                                },
-                                batch_limit,
-                                &mut encoder, &mut codec, &mut eq,
-                                passthrough.as_ref(), compression_pool.as_ref(),
-                                offload_threshold, &mut offload_pipeline,
-                            ).await;
-                            let result: Result<()> = match encode_result {
-                                Ok(_) => flush_all(
-                                    &mut writer, &mut eq, &mut drain_buf,
-                                    &mut codec,
-                                ).await.map_err(Into::into),
-                                Err(e) => Err(e),
-                            };
-                            if let Some(ref rx) = shared_msg_rx {
-                                rx.release_permits(popped);
-                                rx.finish_drain();
-                            }
-                            result?;
-                        }
+                }, if prioritize_shared_rx && connection.is_ready() => {
+                    if handle_shared_queue_message(
+                        msg,
+                        shared_msg_rx.as_ref(),
+                        &mut outbound,
+                        &mut connection,
+                        &mut eq,
+                        &mut drain_buf,
+                        &mut writer,
+                    ).await? == DriverStep::Close {
+                        drain_writes(&mut writer, &mut connection).await.ok();
+                        return Ok(());
                     }
                 },
 
@@ -1030,29 +1008,22 @@ where
                 // messages to this driver, which encodes and writes locally.
                 () = async {
                     send_pipe_rx.as_ref().unwrap().notified().await;
-                }, if send_pipe_rx.is_some() && codec.is_ready() => {
-                    let drained = send_pipe_rx
-                        .as_mut()
-                        .unwrap()
-                        .drain_into(&mut pipe_batch, SHARED_MAX_BATCH_MSGS, max_batch_bytes());
-                    if drained == 0 {
-                        if send_pipe_rx.as_ref().unwrap().is_disconnected() {
-                            drain_writes(&mut writer, &mut codec).await.ok();
+                }, if send_pipe_rx.is_some() && connection.is_ready() => {
+                    match handle_send_pipe_ready(
+                        &mut send_pipe_rx,
+                        &mut pipe_batch,
+                        &mut outbound,
+                        &mut connection,
+                        &mut eq,
+                        &mut drain_buf,
+                        &mut writer,
+                    ).await? {
+                        DriverStep::Continue => prioritize_shared_rx = false,
+                        DriverStep::Yield => {}
+                        DriverStep::Close => {
+                            drain_writes(&mut writer, &mut connection).await.ok();
                             return Ok(());
                         }
-                        continue;
-                    }
-                    prioritize_shared_rx = false;
-                    drain_send_pipe_batch(
-                        &mut pipe_batch,
-                        &mut encoder, &mut codec, &mut eq,
-                        passthrough.as_ref(), compression_pool.as_ref(),
-                        offload_threshold, &mut offload_pipeline,
-                        &mut drain_buf, &mut writer,
-                    ).await?;
-                    if send_pipe_rx.as_ref().unwrap().is_disconnected() {
-                        drain_writes(&mut writer, &mut codec).await.ok();
-                        return Ok(());
                     }
                 },
 
@@ -1072,7 +1043,7 @@ where
                         ttl_deciseconds: hb_ttl_deciseconds,
                         context: Bytes::new(),
                     };
-                    let _ = codec.send_command(&ping);
+                    let _ = connection.send_command(&ping);
                     hb_ping_sent = true;
                     hb_sleep.as_mut().reset(
                         tokio::time::Instant::now() + hb_interval.unwrap(),
@@ -1084,6 +1055,256 @@ where
     }
 }
 
+async fn emit_connection_events(
+    connection: &mut Connection,
+    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
+    peer_id: u64,
+) -> bool {
+    while let Some(ev) = connection.poll_event() {
+        if peer_out
+            .send((peer_id, PeerEvent::Event(ev)))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+async fn emit_connection_events_best_effort(
+    connection: &mut Connection,
+    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
+    peer_id: u64,
+) {
+    while let Some(ev) = connection.poll_event() {
+        let _ = peer_out.send((peer_id, PeerEvent::Event(ev))).await;
+    }
+}
+
+async fn drain_decoded_messages(
+    connection: &mut Connection,
+    decoder: &mut Option<MessageDecoder>,
+    receive_profile: ReceiveProfile,
+    recv_direct: &mut Option<RecvSink>,
+    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
+    peer_id: u64,
+) -> Result<DriverStep> {
+    let recv_batch_start = Instant::now();
+    let mut recv_budget = None;
+    let mut recv_batch_time = None;
+    while let Some(m) = connection.poll_message() {
+        let m = match decoder.as_mut() {
+            Some(dec) => match dec.decode(m)? {
+                Some(plain) => plain,
+                None => continue,
+            },
+            None => m,
+        };
+        let msg_bytes = m.byte_len();
+        let budget = recv_budget.get_or_insert_with(|| {
+            recv_batch_time = receive_profile.time(msg_bytes);
+            receive_profile.budget(msg_bytes)
+        });
+        if !route_message(m, recv_direct, peer_out, peer_id).await {
+            return Ok(DriverStep::Close);
+        }
+        let budget_remains = budget.account(msg_bytes);
+        let time_check = budget.msgs().is_multiple_of(32);
+        if !budget_remains
+            || (time_check
+                && recv_batch_time.is_some_and(|limit| recv_batch_start.elapsed() >= limit))
+        {
+            return Ok(DriverStep::Yield);
+        }
+    }
+    Ok(DriverStep::Continue)
+}
+
+fn enable_transmit_slot_after_handshake(slot: Option<&PeerTransmitSlot>, connection: &Connection) {
+    if let Some(slot) = slot
+        && connection.is_ready()
+        && !slot.handshake_done.load(Ordering::Relaxed)
+        && !connection.has_frame_transform()
+    {
+        slot.handshake_done.store(true, Ordering::Release);
+    }
+}
+
+fn mark_peer_dead(slot: Option<&PeerTransmitSlot>) {
+    if let Some(slot) = slot {
+        slot.mark_dead();
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn read_stream_input<R: AsyncRead + Unpin>(
+    n: usize,
+    reader: &mut R,
+    connection: &mut Connection,
+    read_buf: &mut BytesMut,
+    read_buf_target: &mut usize,
+    read_buf_full_reads: &mut usize,
+    config: &PeerDriverConfig,
+    last_input: &mut Instant,
+    recv_pool: &Arc<RecvBufPool>,
+    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
+    peer_id: u64,
+) -> Result<()> {
+    *last_input = Instant::now();
+    if n >= *read_buf_target && *read_buf_target < READ_BUF_MAX {
+        *read_buf_full_reads += 1;
+        if *read_buf_full_reads >= READ_BUF_GROW_FULL_READS {
+            *read_buf_target = (*read_buf_target * 2).min(READ_BUF_MAX);
+            *read_buf_full_reads = 0;
+        }
+    } else {
+        *read_buf_full_reads = 0;
+    }
+
+    let chunk = read_buf.split().freeze();
+    read_buf.reserve(read_buf_target.saturating_sub(read_buf.capacity()));
+    if let Err(e) = connection.handle_input(chunk) {
+        emit_connection_events_best_effort(connection, peer_out, peer_id).await;
+        return Err(e);
+    }
+    handle_large_messages(connection, reader, config, last_input, recv_pool).await
+}
+
+async fn handle_inbox_command<W: AsyncWrite + Unpin>(
+    cmd: Option<PeerDriverCommand>,
+    inbox: &mut mpsc::Receiver<PeerDriverCommand>,
+    outbound: &mut OutboundState,
+    connection: &mut Connection,
+    eq: &mut FrameBuffer,
+    drain_buf: &mut Vec<Bytes>,
+    writer: &mut W,
+) -> Result<DriverStep> {
+    match cmd {
+        Some(PeerDriverCommand::SendMessage(first)) => {
+            // TODO: Give driver control commands an explicit msg/byte/time
+            // budget. Current mixed inbox batches data first, then handles
+            // controls found after the batch.
+            let mut closing = false;
+            let mut deferred: SmallVec<[PeerDriverCommand; 4]> = SmallVec::new();
+            outbound
+                .batch_encode(
+                    &first,
+                    || match inbox.try_recv() {
+                        Ok(PeerDriverCommand::SendMessage(m)) => Some(m),
+                        Ok(cmd) => {
+                            deferred.push(cmd);
+                            None
+                        }
+                        Err(_) => None,
+                    },
+                    SHARED_MAX_BATCH_MSGS,
+                    connection,
+                    eq,
+                )
+                .await?;
+            for cmd in deferred {
+                match cmd {
+                    PeerDriverCommand::SendEncoded(chunks) => {
+                        eq.push_shared_chunks(&chunks);
+                    }
+                    PeerDriverCommand::SendCommand(c) => {
+                        connection.send_command(&c)?;
+                    }
+                    PeerDriverCommand::Close => closing = true,
+                    PeerDriverCommand::SendMessage(_) => unreachable!(),
+                }
+            }
+            flush_all(writer, eq, drain_buf, connection).await?;
+            if closing {
+                return Ok(DriverStep::Close);
+            }
+            Ok(DriverStep::Continue)
+        }
+        Some(PeerDriverCommand::SendEncoded(chunks)) => {
+            eq.push_shared_chunks(&chunks);
+            flush_frame_buffer(writer, eq, drain_buf).await?;
+            Ok(DriverStep::Continue)
+        }
+        Some(PeerDriverCommand::SendCommand(c)) => {
+            connection.send_command(&c)?;
+            Ok(DriverStep::Continue)
+        }
+        Some(PeerDriverCommand::Close) | None => Ok(DriverStep::Close),
+    }
+}
+
+async fn handle_shared_queue_message<W: AsyncWrite + Unpin>(
+    msg: Option<Message>,
+    shared_msg_rx: Option<&FallbackReceiver>,
+    outbound: &mut OutboundState,
+    connection: &mut Connection,
+    eq: &mut FrameBuffer,
+    drain_buf: &mut Vec<Bytes>,
+    writer: &mut W,
+) -> Result<DriverStep> {
+    let Some(first) = msg else {
+        return Ok(DriverStep::Close);
+    };
+    let batch_limit = shared_msg_rx.map_or(SHARED_MAX_BATCH_MSGS, FallbackReceiver::batch_limit);
+    let mut popped = 1usize;
+    let encode_result = outbound
+        .batch_encode(
+            &first,
+            || {
+                let msg = shared_msg_rx.and_then(FallbackReceiver::try_pop);
+                if msg.is_some() {
+                    popped += 1;
+                }
+                msg
+            },
+            batch_limit,
+            connection,
+            eq,
+        )
+        .await;
+    let result: Result<()> = match encode_result {
+        Ok(_) => flush_all(writer, eq, drain_buf, connection)
+            .await
+            .map_err(Into::into),
+        Err(e) => Err(e),
+    };
+    if let Some(rx) = shared_msg_rx {
+        rx.release_permits(popped);
+        rx.finish_drain();
+    }
+    result?;
+    Ok(DriverStep::Continue)
+}
+
+async fn handle_send_pipe_ready<W: AsyncWrite + Unpin>(
+    send_pipe_rx: &mut Option<SendPipeConsumer>,
+    pipe_batch: &mut Vec<Message>,
+    outbound: &mut OutboundState,
+    connection: &mut Connection,
+    eq: &mut FrameBuffer,
+    drain_buf: &mut Vec<Bytes>,
+    writer: &mut W,
+) -> Result<DriverStep> {
+    let rx = send_pipe_rx.as_mut().expect("send pipe select guard");
+    let drained = rx.drain_into(pipe_batch, SHARED_MAX_BATCH_MSGS, max_batch_bytes());
+    if drained == 0 {
+        if rx.is_disconnected() {
+            return Ok(DriverStep::Close);
+        }
+        return Ok(DriverStep::Yield);
+    }
+    drain_send_pipe_batch(pipe_batch, outbound, connection, eq, drain_buf, writer).await?;
+    if send_pipe_rx
+        .as_ref()
+        .expect("send pipe select guard")
+        .is_disconnected()
+    {
+        return Ok(DriverStep::Close);
+    }
+    Ok(DriverStep::Continue)
+}
+
 /// Sleep until an `Option<Instant>`. Returns immediately if `None`, which
 /// paired with a select `if` guard means this branch won't fire.
 async fn sleep_until_opt(deadline: Option<Instant>) {
@@ -1093,17 +1314,17 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-/// Flush `FrameBuffer` to the writer, then drain any pending codec
+/// Flush `FrameBuffer` to the writer, then drain any pending connection
 /// transmits (command frames queued during encoding).
 async fn flush_all<W: AsyncWrite + Unpin>(
     writer: &mut W,
     eq: &mut FrameBuffer,
     drain_buf: &mut Vec<Bytes>,
-    codec: &mut Connection,
+    connection: &mut Connection,
 ) -> io::Result<()> {
     flush_frame_buffer(writer, eq, drain_buf).await?;
-    while codec.has_pending_transmit() {
-        flush_once(writer, codec).await?;
+    while connection.has_pending_transmit() {
+        flush_once(writer, connection).await?;
     }
     Ok(())
 }
@@ -1151,35 +1372,26 @@ async fn drain_transmit_slot<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-#[expect(clippy::too_many_arguments)]
 async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
     batch: &mut Vec<Message>,
-    encoder: &mut Option<MessageEncoder>,
-    codec: &mut Connection,
+    outbound: &mut OutboundState,
+    connection: &mut Connection,
     eq: &mut FrameBuffer,
-    passthrough: Option<&(Bytes, usize)>,
-    compression_pool: Option<&Arc<CompressionPool>>,
-    offload_threshold: usize,
-    offload_pipeline: &mut OffloadPipeline,
     drain_buf: &mut Vec<Bytes>,
     writer: &mut W,
 ) -> Result<()> {
     batch.reverse();
     while let Some(first) = batch.pop() {
-        batch_encode(
-            &first,
-            || batch.pop(),
-            SHARED_MAX_BATCH_MSGS,
-            encoder,
-            codec,
-            eq,
-            passthrough,
-            compression_pool,
-            offload_threshold,
-            offload_pipeline,
-        )
-        .await?;
-        flush_all(writer, eq, drain_buf, codec).await?;
+        outbound
+            .batch_encode(
+                &first,
+                || batch.pop(),
+                SHARED_MAX_BATCH_MSGS,
+                connection,
+                eq,
+            )
+            .await?;
+        flush_all(writer, eq, drain_buf, connection).await?;
     }
     Ok(())
 }
@@ -1235,27 +1447,27 @@ impl Drop for PooledRecvBuf {
 }
 
 /// Read large frames directly into pooled buffers (bypasses the fixed
-/// `read_buf` -> codec copy path). The pool recycles allocations so
-/// pages stay warm across messages.
+/// `read_buf` -> `Connection` buffering path). The pool recycles allocations
+/// so pages stay warm across messages.
 async fn handle_large_messages<R: AsyncRead + Unpin>(
-    codec: &mut Connection,
+    connection: &mut Connection,
     reader: &mut R,
     config: &PeerDriverConfig,
     last_input: &mut Instant,
     recv_pool: &Arc<RecvBufPool>,
 ) -> Result<()> {
     #[cfg(feature = "ws")]
-    let skip_large = codec.is_ws();
+    let skip_large = connection.is_ws();
     #[cfg(not(feature = "ws"))]
     let skip_large = false;
-    if config.large_message_threshold == 0 || codec.has_frame_transform() || skip_large {
+    if config.large_message_threshold == 0 || connection.has_frame_transform() || skip_large {
         return Ok(());
     }
-    while let Some(info) = codec.peek_next_frame_payload_size()? {
+    while let Some(info) = connection.peek_next_frame_payload_size()? {
         if info.payload_len < config.large_message_threshold {
             break;
         }
-        let Some((plen, prefix)) = codec.begin_supplied_payload_with_prefix() else {
+        let Some((plen, prefix)) = connection.begin_supplied_payload_with_prefix() else {
             break;
         };
         let mut buf = recv_pool.take(plen);
@@ -1269,7 +1481,7 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
             buf,
             pool: Arc::clone(recv_pool),
         });
-        codec.supply_payload(payload)?;
+        connection.supply_payload(payload)?;
     }
     Ok(())
 }
@@ -1322,12 +1534,12 @@ fn submit_to_pipeline(
 async fn drain_pipeline(
     pipeline: &mut OffloadPipeline,
     pool: Option<&Arc<CompressionPool>>,
-    codec: &Connection,
+    connection: &Connection,
     eq: &mut FrameBuffer,
 ) -> Result<()> {
     use futures::StreamExt;
     while let Some((pool_enc, frames)) = pipeline.next().await {
-        drain_offload_result(pool_enc, frames, pool, codec, eq)?;
+        drain_offload_result(pool_enc, frames, pool, connection, eq)?;
     }
     Ok(())
 }
@@ -1337,7 +1549,7 @@ fn drain_offload_result(
     pool_enc: Option<MessageEncoder>,
     frames: Result<TransformedOut>,
     pool: Option<&Arc<CompressionPool>>,
-    codec: &Connection,
+    connection: &Connection,
     eq: &mut FrameBuffer,
 ) -> Result<()> {
     #[cfg(feature = "lz4")]
@@ -1345,9 +1557,9 @@ fn drain_offload_result(
         pool.put(enc);
     }
     #[cfg(feature = "ws")]
-    let ws = codec.is_ws().then(|| {
+    let ws = connection.is_ws().then(|| {
         matches!(
-            codec.ws_role(),
+            connection.ws_role(),
             Some(omq_proto::proto::connection::WsRole::Client)
         )
     });
@@ -1369,20 +1581,20 @@ fn drain_offload_result(
 /// transports take a sentinel-prefix fast path that avoids the encoder
 /// entirely.
 ///
-/// The only path that still goes through `codec.send_message` is when a
+/// The only path that still goes through `connection.send_message` is when a
 /// frame-level transform (CURVE) is active, since those
-/// encrypt at the ZMTP frame layer and need the codec's internal state.
+/// encrypt at the ZMTP frame layer and need the connection's internal state.
 fn encode_msg(
     msg: &Message,
     encoder: &mut Option<MessageEncoder>,
-    codec: &mut Connection,
+    connection: &mut Connection,
     eq: &mut FrameBuffer,
     passthrough: Option<&(Bytes, usize)>,
 ) -> Result<()> {
     #[cfg(feature = "ws")]
-    if codec.is_ws() && !codec.has_frame_transform() {
+    if connection.is_ws() && !connection.has_frame_transform() {
         let masked = matches!(
-            codec.ws_role(),
+            connection.ws_role(),
             Some(omq_proto::proto::connection::WsRole::Client)
         );
         if let Some(enc) = encoder.as_mut() {
@@ -1394,13 +1606,13 @@ fn encode_msg(
         }
         return Ok(());
     }
-    if codec.has_frame_transform() {
+    if connection.has_frame_transform() {
         if let Some(enc) = encoder.as_mut() {
             for wire in enc.encode(msg)? {
-                codec.send_message(&wire)?;
+                connection.send_message(&wire)?;
             }
         } else {
-            codec.send_message(msg)?;
+            connection.send_message(msg)?;
         }
         return Ok(());
     }
@@ -1525,11 +1737,11 @@ where
 /// payloads (compression sentinels, CURVE nonces, etc.) hit the kernel
 /// as a single gather-write - no userspace memcpy. Partial writes are
 /// fine; we loop and try again.
-async fn flush_once<W>(writer: &mut W, codec: &mut Connection) -> io::Result<()>
+async fn flush_once<W>(writer: &mut W, connection: &mut Connection) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let chunks = codec.transmit_chunks_capped(128);
+    let chunks = connection.transmit_chunks_capped(128);
     if chunks.is_empty() {
         return Ok(());
     }
@@ -1538,17 +1750,17 @@ where
     if n == 0 {
         return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
     }
-    codec.advance_transmit(n);
+    connection.advance_transmit(n);
     Ok(())
 }
 
 /// Best-effort flush of remaining outbound bytes on shutdown.
-async fn drain_writes<W>(writer: &mut W, codec: &mut Connection) -> io::Result<()>
+async fn drain_writes<W>(writer: &mut W, connection: &mut Connection) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    while codec.has_pending_transmit() {
-        flush_once(writer, codec).await?;
+    while connection.has_pending_transmit() {
+        flush_once(writer, connection).await?;
     }
     writer.flush().await
 }
@@ -1595,7 +1807,7 @@ mod tests {
     /// over T: AsyncRead+AsyncWrite, so a `tokio::io::duplex` pair
     /// is the simplest way to test it without involving the inproc
     /// transport (which since the inproc fast-path landed bypasses
-    /// the codec entirely).
+    /// the connection entirely).
     #[expect(clippy::unused_async)]
     async fn inproc_pair(
         _name: &str,
@@ -1607,8 +1819,9 @@ mod tests {
     ) {
         let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
 
-        let server_codec = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
-        let client_codec = Connection::new(
+        let server_connection =
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+        let client_connection = Connection::new(
             ConnectionConfig::new(Role::Client, SocketType::Push)
                 .identity(Bytes::from_static(b"c")),
         );
@@ -1622,7 +1835,7 @@ mod tests {
 
         let s_driver = ConnectionDriver::new(
             server_stream,
-            server_codec,
+            server_connection,
             s_inbox_rx,
             s_evt_tx,
             0,
@@ -1630,7 +1843,7 @@ mod tests {
         );
         let c_driver = ConnectionDriver::new(
             client_stream,
-            client_codec,
+            client_connection,
             c_inbox_rx,
             c_evt_tx,
             0,
@@ -1728,8 +1941,10 @@ mod tests {
         let (server_stream, _peer) = listener.accept().await.unwrap();
         let client_stream = connect_task.await.unwrap().unwrap();
 
-        let server_codec = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
-        let client_codec = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
+        let server_connection =
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+        let client_connection =
+            Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
 
         let (c_inbox_tx, c_inbox_rx) = mpsc::channel(16);
         let (s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
@@ -1740,7 +1955,7 @@ mod tests {
 
         let s = ConnectionDriver::new(
             server_stream,
-            server_codec,
+            server_connection,
             s_inbox_rx,
             s_evt_tx,
             0,
@@ -1748,7 +1963,7 @@ mod tests {
         );
         let c = ConnectionDriver::new(
             client_stream,
-            client_codec,
+            client_connection,
             c_inbox_rx,
             c_evt_tx,
             0,
@@ -1781,12 +1996,13 @@ mod tests {
         let (server_stream, mut client_stream) = tokio::io::duplex(64 * 1024);
 
         // Server driver on one end of the duplex.
-        let server_codec = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+        let server_connection =
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
         let (_s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
         let (s_evt_tx, mut s_evt_rx) = mpsc::channel::<(u64, PeerEvent)>(16);
         let s_driver = ConnectionDriver::new(
             server_stream,
-            server_codec,
+            server_connection,
             s_inbox_rx,
             s_evt_tx,
             0,
@@ -1794,35 +2010,35 @@ mod tests {
         );
         tokio::spawn(async move { s_driver.run().await });
 
-        // Manual client: use a codec to generate correct wire bytes.
-        let mut client_codec = Connection::new(
+        // Manual client: use a connection to generate correct wire bytes.
+        let mut client_connection = Connection::new(
             ConnectionConfig::new(Role::Client, SocketType::Push)
                 .identity(Bytes::from_static(b"x")),
         );
 
         // Write client greeting.
-        let greeting = drain_transmit(&mut client_codec);
+        let greeting = drain_transmit(&mut client_connection);
         client_stream.write_all(&greeting).await.unwrap();
 
         // Read server greeting + READY from the duplex and feed to
-        // client codec until it reaches Ready state.
+        // client connection until it reaches Ready state.
         let mut buf = vec![0u8; 4096];
-        while !client_codec.is_ready() {
+        while !client_connection.is_ready() {
             let n = client_stream.read(&mut buf).await.unwrap();
             assert!(n > 0, "server closed before handshake");
-            client_codec
+            client_connection
                 .handle_input(Bytes::copy_from_slice(&buf[..n]))
                 .unwrap();
         }
 
-        // Client codec has produced READY. Also encode ERROR.
-        let ready_bytes = drain_transmit(&mut client_codec);
-        client_codec
+        // Client connection has produced READY. Also encode ERROR.
+        let ready_bytes = drain_transmit(&mut client_connection);
+        client_connection
             .send_command(&Command::Error {
                 reason: "boom".into(),
             })
             .unwrap();
-        let error_bytes = drain_transmit(&mut client_codec);
+        let error_bytes = drain_transmit(&mut client_connection);
 
         // Write READY + ERROR in a single write so the server driver
         // reads them in one handle_input call.
@@ -1850,14 +2066,14 @@ mod tests {
         );
     }
 
-    fn drain_transmit(codec: &mut Connection) -> Vec<u8> {
+    fn drain_transmit(connection: &mut Connection) -> Vec<u8> {
         let mut out = Vec::new();
-        while codec.has_pending_transmit() {
+        while connection.has_pending_transmit() {
             let len_before = out.len();
-            for chunk in codec.transmit_chunks_capped(128) {
+            for chunk in connection.transmit_chunks_capped(128) {
                 out.extend_from_slice(&chunk);
             }
-            codec.advance_transmit(out.len() - len_before);
+            connection.advance_transmit(out.len() - len_before);
         }
         out
     }

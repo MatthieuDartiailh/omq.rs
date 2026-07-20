@@ -3,6 +3,7 @@ name = "omq-libzmq"
 version = "0.5.4"
 edition.workspace = true
 rust-version.workspace = true
+autotests = false
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -40,3 +41,87 @@ windows = { version = "0.62", features = [
 omq-tokio = { path = "../omq-tokio" }
 libc = "0.2"
 serial_test = "3.2"
+
+[[test]]
+name = "omq_libzmq_basic"
+path = "tests/basic.rs"
+
+[[test]]
+name = "omq_libzmq_ctx"
+path = "tests/ctx.rs"
+
+[[test]]
+name = "omq_libzmq_draft"
+path = "tests/draft.rs"
+
+[[test]]
+name = "omq_libzmq_fast_path_recovery"
+path = "tests/fast_path_recovery.rs"
+
+[[test]]
+name = "omq_libzmq_fd"
+path = "tests/fd.rs"
+
+[[test]]
+name = "omq_libzmq_helpers"
+path = "tests/helpers.rs"
+
+[[test]]
+name = "omq_libzmq_libzmq_dealer_router"
+path = "tests/libzmq_dealer_router.rs"
+
+[[test]]
+name = "omq_libzmq_libzmq_inproc"
+path = "tests/libzmq_inproc.rs"
+
+[[test]]
+name = "omq_libzmq_libzmq_pair_tcp"
+path = "tests/libzmq_pair_tcp.rs"
+
+[[test]]
+name = "omq_libzmq_libzmq_pub_sub"
+path = "tests/libzmq_pub_sub.rs"
+
+[[test]]
+name = "omq_libzmq_libzmq_push_pull"
+path = "tests/libzmq_push_pull.rs"
+
+[[test]]
+name = "omq_libzmq_libzmq_req_rep"
+path = "tests/libzmq_req_rep.rs"
+
+[[test]]
+name = "omq_libzmq_monitor"
+path = "tests/monitor.rs"
+
+[[test]]
+name = "omq_libzmq_multipart"
+path = "tests/multipart.rs"
+
+[[test]]
+name = "omq_libzmq_opts"
+path = "tests/opts.rs"
+
+[[test]]
+name = "omq_libzmq_poll"
+path = "tests/poll.rs"
+
+[[test]]
+name = "omq_libzmq_proxy"
+path = "tests/proxy.rs"
+
+[[test]]
+name = "omq_libzmq_security"
+path = "tests/security.rs"
+
+[[test]]
+name = "omq_libzmq_transports"
+path = "tests/transports.rs"
+
+[[test]]
+name = "omq_libzmq_util"
+path = "tests/util.rs"
+
+[[test]]
+name = "omq_libzmq_xpub_xsub"
+path = "tests/xpub_xsub.rs"

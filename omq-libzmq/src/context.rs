@@ -4,9 +4,11 @@ use std::ffi::c_int;
 
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use tokio::runtime::Handle;
+
+use crate::notify::NotifyHandle;
 
 /// Per-context: lazily-created `omq_tokio::Context` and ZMQ state.
 pub(crate) struct OmqContext {
@@ -14,7 +16,9 @@ pub(crate) struct OmqContext {
     pub(crate) configured_io_threads: AtomicI32,
     pub terminated: Arc<AtomicBool>,
     pub socket_count: AtomicI32,
+    linger_count: AtomicI32,
     socket_notify: (Mutex<()>, Condvar),
+    sockets: Mutex<Vec<Weak<crate::socket::OmqSocket>>>,
     pub max_sockets: AtomicI32,
     pub max_msg_size: AtomicI64,
     /// Zmq-layer inproc registry. Maps inproc name to the bound `OmqSocket`.
@@ -38,7 +42,9 @@ impl OmqContext {
             configured_io_threads: AtomicI32::new(i32::try_from(n).unwrap_or(i32::MAX)),
             terminated: Arc::new(AtomicBool::new(false)),
             socket_count: AtomicI32::new(0),
+            linger_count: AtomicI32::new(0),
             socket_notify: (Mutex::new(()), Condvar::new()),
+            sockets: Mutex::new(Vec::new()),
             max_sockets: AtomicI32::new(1023),
             max_msg_size: AtomicI64::new(-1),
             inproc_binds: Mutex::new(FxHashMap::default()),
@@ -69,12 +75,53 @@ impl OmqContext {
         self.socket_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn register_socket(&self, sock: &Arc<crate::socket::OmqSocket>) {
+        if let Ok(mut sockets) = self.sockets.lock() {
+            sockets.retain(|s| s.strong_count() > 0);
+            sockets.push(Arc::downgrade(sock));
+        }
+    }
+
     pub(crate) fn socket_closed(&self) {
         let prev = self.socket_count.fetch_sub(1, Ordering::AcqRel);
         if prev == 1 {
             let (_, cvar) = &self.socket_notify;
             cvar.notify_all();
         }
+    }
+
+    pub(crate) fn linger_started(&self) {
+        self.linger_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn linger_finished(&self) {
+        let prev = self.linger_count.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            let (_, cvar) = &self.socket_notify;
+            cvar.notify_all();
+        }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.terminated.store(true, Ordering::Release);
+        let notifies = self
+            .sockets
+            .lock()
+            .map(|mut sockets| {
+                sockets.retain(|s| s.strong_count() > 0);
+                sockets
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .map(|s| s.notify.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for notify in notifies {
+            notify.signal_recv();
+            notify.signal_send();
+        }
+        let (_, cvar) = &self.socket_notify;
+        cvar.notify_all();
     }
 }
 
@@ -84,6 +131,7 @@ impl std::fmt::Debug for OmqContext {
             .field("ctx", &self.ctx)
             .field("terminated", &self.terminated.load(Ordering::Relaxed))
             .field("socket_count", &self.socket_count.load(Ordering::Relaxed))
+            .field("linger_count", &self.linger_count.load(Ordering::Relaxed))
             .field("max_sockets", &self.max_sockets.load(Ordering::Relaxed))
             .field("max_msg_size", &self.max_msg_size.load(Ordering::Relaxed))
             .finish_non_exhaustive()
@@ -112,7 +160,7 @@ pub extern "C" fn zmq_ctx_shutdown(ctx_ptr: *mut libc::c_void) -> c_int {
     }
     // SAFETY: caller guarantees ctx_ptr is a valid context from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
-    ctx.terminated.store(true, Ordering::Release);
+    ctx.shutdown();
     0
 }
 
@@ -124,8 +172,8 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     // SAFETY: ctx_ptr came from Box::into_raw in zmq_ctx_new; reclaiming ownership.
     let arc = unsafe { *Box::from_raw(ctx_ptr.cast::<Arc<OmqContext>>()) };
 
-    // Signal termination to all io threads.
-    arc.terminated.store(true, Ordering::Release);
+    // Signal termination to all io threads and wake blocking socket calls.
+    arc.shutdown();
 
     // Wait until all sockets are closed.
     {
@@ -134,7 +182,10 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
             return crate::error::fail(crate::error::ETERM);
         };
         if cvar
-            .wait_while(guard, |()| arc.socket_count.load(Ordering::Acquire) > 0)
+            .wait_while(guard, |()| {
+                arc.socket_count.load(Ordering::Acquire) > 0
+                    || arc.linger_count.load(Ordering::Acquire) > 0
+            })
             .is_err()
         {
             return crate::error::fail(crate::error::ETERM);

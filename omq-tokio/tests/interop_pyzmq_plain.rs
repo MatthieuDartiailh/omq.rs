@@ -12,8 +12,12 @@ use std::time::Duration;
 use omq_proto::endpoint::Host;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
+fn python3_command() -> Command {
+    Command::new(std::env::var_os("OMQ_PYTHON3").unwrap_or_else(|| "python3".into()))
+}
+
 fn pyzmq_available() -> bool {
-    Command::new("python3")
+    python3_command()
         .args(["-c", "import zmq"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -99,7 +103,7 @@ s.close(linger=2000)
 ctx.term()
 "#;
 
-    let child = Command::new("python3")
+    let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
         .stdout(Stdio::piped())
@@ -159,7 +163,7 @@ auth.stop()
 ctx.term()
 "#;
 
-    let mut child = Command::new("python3")
+    let mut child = python3_command()
         .args(["-c", script])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -253,7 +257,7 @@ s.close(linger=200)
 ctx.term()
 "#;
 
-    let child = Command::new("python3")
+    let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
         .stdout(Stdio::null())
@@ -293,7 +297,7 @@ s.close(linger=200)
 ctx.term()
 "#;
 
-    let child = Command::new("python3")
+    let child = python3_command()
         .args(["-c", script])
         .env("PORT", port.to_string())
         .stdout(Stdio::null())

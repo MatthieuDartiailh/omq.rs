@@ -42,6 +42,24 @@ def test_sndhwm_rcvhwm():
         ctx.term()
 
 
+def test_hwm_rejects_negative():
+    ctx, s = _push()
+    try:
+        s.setsockopt(zmq.SNDHWM, 64)
+        s.setsockopt(zmq.RCVHWM, 32)
+
+        with pytest.raises(ValueError):
+            s.setsockopt(zmq.SNDHWM, -1)
+        with pytest.raises(ValueError):
+            s.setsockopt(zmq.RCVHWM, -1)
+
+        assert s.getsockopt(zmq.SNDHWM) == 64
+        assert s.getsockopt(zmq.RCVHWM) == 32
+    finally:
+        s.close()
+        ctx.term()
+
+
 def test_identity_round_trip():
     ctx, s = _push()
     try:

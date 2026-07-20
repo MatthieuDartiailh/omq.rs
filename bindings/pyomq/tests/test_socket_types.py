@@ -37,14 +37,6 @@ ALL_TYPES = [
 ]
 
 
-def _free_tcp() -> str:
-    s = stdsocket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return f"tcp://127.0.0.1:{p}"
-
-
 def _inproc(name: str) -> str:
     return f"inproc://socket-types-{name}-{time.monotonic_ns()}"
 
@@ -71,11 +63,10 @@ def test_push_pull():
 
 
 def test_pub_sub():
-    ep = _free_tcp()
     ctx = pyomq.Context()
     pub = ctx.socket(pyomq.PUB)
     sub = ctx.socket(pyomq.SUB)
-    pub.bind(ep)
+    ep = pub.bind("tcp://127.0.0.1:0")
     sub.connect(ep)
     sub.subscribe(b"")
     time.sleep(0.05)
@@ -94,11 +85,10 @@ def test_pub_sub():
 
 def test_xpub_xsub():
     """XSUB → XPUB subscribe surfaces; XPUB → XSUB publish round-trips."""
-    ep = _free_tcp()
     ctx = pyomq.Context()
     xpub = ctx.socket(pyomq.XPUB)
     xsub = ctx.socket(pyomq.XSUB)
-    xpub.bind(ep)
+    ep = xpub.bind("tcp://127.0.0.1:0")
     xsub.connect(ep)
     xsub.subscribe(b"")
     # Drain the subscribe notification at XPUB. RFC says it surfaces as
@@ -262,10 +252,9 @@ def test_radio_dish_udp_with_groups():
 
 def test_stream_raw_tcp():
     """STREAM socket accepts raw TCP and echoes data back."""
-    ep = _free_tcp()
     ctx = pyomq.Context()
     stream = ctx.socket(pyomq.STREAM)
-    stream.bind(ep)
+    ep = stream.bind("tcp://127.0.0.1:0")
     stream.setsockopt(pyomq.RCVTIMEO, 1000)
 
     raw = stdsocket.socket(stdsocket.AF_INET, stdsocket.SOCK_STREAM)

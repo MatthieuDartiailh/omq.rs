@@ -87,14 +87,6 @@ N-to-1 PUSH/PULL over TCP.
   <img src="doc/charts/pushpull/fanin/tcp.svg" alt="PUSH fan-in: TCP" width="850">
 </p>
 
-### LZ4 Compression
-
-PUSH/PULL throughput with TCP compression projections.
-
-<p align="center">
-  <img src="doc/charts/pushpull/lz4_tcp.svg" alt="PUSH/PULL LZ4 compression: TCP" width="850">
-</p>
-
 ## REQ/REP Latency
 
 <p align="center">

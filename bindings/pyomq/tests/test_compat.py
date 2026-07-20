@@ -590,17 +590,8 @@ def test_zmq_version_error():
 # ── proxy ────────────────────────────────────────────────────────────
 
 def test_proxy_req_rep(tcp_endpoint):
-    import socket
     import threading
     import time
-
-    def _free_tcp_port():
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-        finally:
-            s.close()
 
     ctx = zmq.Context()
     frontend = ctx.socket(zmq.ROUTER)
@@ -610,14 +601,11 @@ def test_proxy_req_rep(tcp_endpoint):
     worker.rcvtimeo = 2000
     client.rcvtimeo = 2000
 
-    fe_port = _free_tcp_port()
-    be_port = _free_tcp_port()
-
     try:
-        frontend.bind(f"tcp://127.0.0.1:{fe_port}")
-        backend.bind(f"tcp://127.0.0.1:{be_port}")
-        worker.connect(f"tcp://127.0.0.1:{be_port}")
-        client.connect(f"tcp://127.0.0.1:{fe_port}")
+        fe_ep = frontend.bind(tcp_endpoint)
+        be_ep = backend.bind(tcp_endpoint)
+        worker.connect(be_ep)
+        client.connect(fe_ep)
 
         proxy_thread = threading.Thread(
             target=zmq.proxy, args=(frontend, backend), daemon=True,
@@ -638,17 +626,8 @@ def test_proxy_req_rep(tcp_endpoint):
 
 
 def test_proxy_req_rep_two_clients_preserves_routes(tcp_endpoint):
-    import socket
     import threading
     import time
-
-    def _free_tcp_port():
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-        finally:
-            s.close()
 
     ctx = zmq.Context()
     frontend = ctx.socket(zmq.ROUTER)
@@ -660,15 +639,12 @@ def test_proxy_req_rep_two_clients_preserves_routes(tcp_endpoint):
     client_a.rcvtimeo = 2000
     client_b.rcvtimeo = 2000
 
-    fe_port = _free_tcp_port()
-    be_port = _free_tcp_port()
-
     try:
-        frontend.bind(f"tcp://127.0.0.1:{fe_port}")
-        backend.bind(f"tcp://127.0.0.1:{be_port}")
-        worker.connect(f"tcp://127.0.0.1:{be_port}")
-        client_a.connect(f"tcp://127.0.0.1:{fe_port}")
-        client_b.connect(f"tcp://127.0.0.1:{fe_port}")
+        fe_ep = frontend.bind(tcp_endpoint)
+        be_ep = backend.bind(tcp_endpoint)
+        worker.connect(be_ep)
+        client_a.connect(fe_ep)
+        client_b.connect(fe_ep)
 
         proxy_thread = threading.Thread(
             target=zmq.proxy, args=(frontend, backend), daemon=True,
@@ -698,17 +674,8 @@ def test_proxy_req_rep_two_clients_preserves_routes(tcp_endpoint):
 
 
 def test_proxy_with_capture(tcp_endpoint):
-    import socket
     import threading
     import time
-
-    def _free_tcp_port():
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-        finally:
-            s.close()
 
     ctx = zmq.Context()
     frontend = ctx.socket(zmq.ROUTER)
@@ -718,17 +685,13 @@ def test_proxy_with_capture(tcp_endpoint):
     worker = ctx.socket(zmq.REP)
     client = ctx.socket(zmq.REQ)
 
-    fe_port = _free_tcp_port()
-    be_port = _free_tcp_port()
-    cap_port = _free_tcp_port()
-
     try:
-        frontend.bind(f"tcp://127.0.0.1:{fe_port}")
-        backend.bind(f"tcp://127.0.0.1:{be_port}")
-        capture_recv.bind(f"tcp://127.0.0.1:{cap_port}")
-        capture.connect(f"tcp://127.0.0.1:{cap_port}")
-        worker.connect(f"tcp://127.0.0.1:{be_port}")
-        client.connect(f"tcp://127.0.0.1:{fe_port}")
+        fe_ep = frontend.bind(tcp_endpoint)
+        be_ep = backend.bind(tcp_endpoint)
+        cap_ep = capture_recv.bind(tcp_endpoint)
+        capture.connect(cap_ep)
+        worker.connect(be_ep)
+        client.connect(fe_ep)
 
         proxy_thread = threading.Thread(
             target=zmq.proxy, args=(frontend, backend, capture),
@@ -757,17 +720,8 @@ def test_proxy_with_capture(tcp_endpoint):
 
 
 def test_proxy_steerable(tcp_endpoint):
-    import socket
     import threading
     import time
-
-    def _free_tcp_port():
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-        finally:
-            s.close()
 
     ctx = zmq.Context()
     frontend = ctx.socket(zmq.PULL)
@@ -777,17 +731,13 @@ def test_proxy_steerable(tcp_endpoint):
     receiver = ctx.socket(zmq.PULL)
     controller = ctx.socket(zmq.PUSH)
 
-    fe_port = _free_tcp_port()
-    be_port = _free_tcp_port()
-    ctrl_port = _free_tcp_port()
-
     try:
-        frontend.bind(f"tcp://127.0.0.1:{fe_port}")
-        backend.bind(f"tcp://127.0.0.1:{be_port}")
-        control.bind(f"tcp://127.0.0.1:{ctrl_port}")
-        sender.connect(f"tcp://127.0.0.1:{fe_port}")
-        receiver.connect(f"tcp://127.0.0.1:{be_port}")
-        controller.connect(f"tcp://127.0.0.1:{ctrl_port}")
+        fe_ep = frontend.bind(tcp_endpoint)
+        be_ep = backend.bind(tcp_endpoint)
+        ctrl_ep = control.bind(tcp_endpoint)
+        sender.connect(fe_ep)
+        receiver.connect(be_ep)
+        controller.connect(ctrl_ep)
 
         proxy_thread = threading.Thread(
             target=zmq.proxy_steerable,

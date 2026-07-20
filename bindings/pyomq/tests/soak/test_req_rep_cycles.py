@@ -16,11 +16,10 @@ def test_req_rep_cycles():
     duration = soak_duration()
     monitor = ResourceMonitor()
 
-    ep = tcp_ep()
     ctx = zmq.Context()
     rep = ctx.socket(zmq.REP)
     req = ctx.socket(zmq.REQ)
-    rep.bind(ep)
+    ep = rep.bind(tcp_ep())
     req.connect(ep)
     rep.setsockopt(zmq.RCVTIMEO, 5000)
     rep.setsockopt(zmq.SNDTIMEO, 5000)

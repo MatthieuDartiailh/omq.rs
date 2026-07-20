@@ -26,12 +26,11 @@ def test_peer_churn():
     duration = soak_duration()
     monitor = ResourceMonitor()
 
-    ep = tcp_ep()
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     push.setsockopt(zmq.SNDTIMEO, 1)
     push.setsockopt(zmq.SNDHWM, 1024)
-    push.bind(ep)
+    ep = push.bind(tcp_ep())
 
     peers: list[tuple[object, bool]] = []
     for _ in range(NUM_PEERS):

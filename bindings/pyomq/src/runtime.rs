@@ -228,6 +228,7 @@ impl ContextInner {
         send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
         send_pump: JoinHandle<()>,
         recv_pump: JoinHandle<()>,
+        linger: Option<Duration>,
     ) {
         recv_pump.abort();
         drop(send_prod);
@@ -237,13 +238,30 @@ impl ContextInner {
         };
         let (otx, orx) = flume::bounded(1);
         handle.spawn(async move {
-            let _ = tokio::time::timeout(Duration::from_secs(1), recv_pump).await;
-            let _ = tokio::time::timeout(Duration::from_secs(1), send_pump).await;
+            let started = tokio::time::Instant::now();
+            let _ = recv_pump.await;
+            let mut send_pump = send_pump;
+            match linger {
+                Some(Duration::ZERO) => {
+                    send_pump.abort();
+                    let _ = send_pump.await;
+                }
+                Some(limit) => {
+                    if tokio::time::timeout(limit, &mut send_pump).await.is_err() {
+                        send_pump.abort();
+                        let _ = send_pump.await;
+                    }
+                }
+                None => {
+                    let _ = send_pump.await;
+                }
+            }
+            let linger = linger.map(|limit| limit.saturating_sub(started.elapsed()));
             let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone());
-            let _ = tokio::time::timeout(Duration::from_secs(1), s.close()).await;
+            let _ = s.close_with_linger(linger).await;
             let _ = otx.send(());
         });
-        let _ = orx.recv_timeout(Duration::from_secs(3));
+        let _ = orx.recv();
     }
 
     /// Run an async op against a socket and return the result.

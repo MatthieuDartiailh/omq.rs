@@ -143,6 +143,23 @@ async fn linger_forever_waits_until_drained() {
 }
 
 #[tokio::test]
+async fn linger_forever_returns_when_connected_idle() {
+    let ep = inproc_ep("linger-forever-idle-tok");
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(ep.clone()).await.unwrap();
+
+    let push = Socket::new(SocketType::Push, Options::default().linger_forever());
+    push.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    tokio::time::timeout(Duration::from_millis(500), push.close())
+        .await
+        .expect("idle close with linger_forever hung")
+        .unwrap();
+    pull.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn linger_zero_returns_immediately_on_close() {
     // Default linger (ZERO): close() does not wait for pending queue;
     // messages that have not yet been delivered are silently dropped.
@@ -165,6 +182,28 @@ async fn linger_zero_returns_immediately_on_close() {
     assert!(
         elapsed < Duration::from_millis(500),
         "linger=0 close took too long: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn close_with_linger_zero_overrides_configured_forever() {
+    let ep = inproc_ep("linger-override-zero-tok");
+
+    let push = Socket::new(SocketType::Push, Options::default().linger_forever());
+    push.bind(ep).await.unwrap();
+
+    let _ = tokio::time::timeout(
+        Duration::from_millis(10),
+        push.send(Message::single("queued")),
+    )
+    .await;
+
+    let t0 = std::time::Instant::now();
+    push.close_with_linger(Some(Duration::ZERO)).await.unwrap();
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "close_with_linger(0) took too long: {elapsed:?}"
     );
 }
 

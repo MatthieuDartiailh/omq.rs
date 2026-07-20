@@ -1,7 +1,7 @@
 //! Socket options: typed builder.
 //!
-//! Defaults differ from libzmq in two places: per-socket HWM semantics
-//! and conflate restricted to `FanOut` patterns.
+//! Defaults differ from libzmq in a few places: linger defaults to zero,
+//! HWM is per-socket, and conflate is restricted to `FanOut` patterns.
 
 use std::time::Duration;
 
@@ -103,7 +103,7 @@ pub struct Options {
     /// Must be 1..=8192 bytes.
     pub compression_dict: Option<Bytes>,
 
-    /// Auto-trained dictionaries. Defaults to **on**.
+    /// Auto-trained dictionaries. Defaults to off.
     /// When no `compression_dict` is configured on an `lz4+tcp://`
     /// connection, the encoder feeds outbound message parts to a
     /// `DictTrainer` until it saturates (bloom-filter diversity

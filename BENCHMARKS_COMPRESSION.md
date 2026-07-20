@@ -15,7 +15,7 @@ on a constrained link). Charts show projected throughput at 1 Gbps,
 - **Pure Rust:** lz4+tcp uses lz4rip, no C compiler required.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/lz4_tcp.svg" alt="PUB/SUB lz4+tcp fan-out: projected throughput at link speed" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/lz4_tcp.svg" alt="PUSH/PULL lz4+tcp: projected throughput at link speed" width="850">
 </p>
 
 ### Compression thresholds

@@ -411,6 +411,13 @@ impl SocketInner {
         self.closed.store(true, Ordering::Relaxed);
         self.blocking_materialized.write().unwrap().take()
     }
+
+    pub fn close_linger(&self, linger: Option<i64>) -> Option<Duration> {
+        linger.map_or_else(
+            || self.overlay.lock().unwrap().linger,
+            options::duration_from_millis,
+        )
+    }
 }
 
 /// Monitor event stream returned by `Socket.monitor()`. Delivers
@@ -776,14 +783,16 @@ impl Socket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
-    #[pyo3(signature = (_linger=None))]
-    fn close(&self, py: Python<'_>, _linger: Option<i64>) -> PyResult<()> {
+    #[pyo3(signature = (linger=None))]
+    fn close(&self, py: Python<'_>, linger: Option<i64>) -> PyResult<()> {
+        let linger = self.inner.close_linger(linger);
         if let Some(m) = self.inner.take_blocking_materialized() {
-            py.detach(|| m.socket.close()).map_err(map_err)?;
+            py.detach(|| m.socket.close_with_linger(linger))
+                .map_err(map_err)?;
         }
         if let Some(m) = self.inner.take_materialized() {
             let ctx = self.inner.ctx.clone();
-            py.detach(|| ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump));
+            py.detach(|| ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump, linger));
         }
         Ok(())
     }

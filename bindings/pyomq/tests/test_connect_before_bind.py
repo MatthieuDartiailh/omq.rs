@@ -5,6 +5,7 @@ Tested across inproc, IPC, and TCP for both sync and async APIs,
 with PUSH/PULL, REQ/REP, and PAIR.
 """
 
+import errno
 import time
 
 import pytest
@@ -14,17 +15,50 @@ import pyomq.asyncio as zmq_async
 
 
 BIND_DELAYS = [0, 0.05, 0.25]
+TCP_BIND_RETRIES = 20
 
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-def _free_tcp():
+def _unbound_tcp_endpoint():
     import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
     return f"tcp://127.0.0.1:{port}"
+
+
+def _is_eaddrinuse(exc):
+    return (
+        getattr(exc, "errno", None) == errno.EADDRINUSE
+        or "Address already in use" in str(exc)
+    )
+
+
+def _run_tcp_cbb(run, delay):
+    last_exc = None
+    for _ in range(TCP_BIND_RETRIES):
+        try:
+            return run(_unbound_tcp_endpoint(), delay)
+        except zmq.ZMQError as exc:
+            if not _is_eaddrinuse(exc):
+                raise
+            last_exc = exc
+    assert last_exc is not None
+    raise last_exc
+
+
+async def _run_tcp_cbb_async(run, delay):
+    last_exc = None
+    for _ in range(TCP_BIND_RETRIES):
+        try:
+            return await run(_unbound_tcp_endpoint(), delay)
+        except zmq.ZMQError as exc:
+            if not _is_eaddrinuse(exc):
+                raise
+            last_exc = exc
+    assert last_exc is not None
+    raise last_exc
 
 
 # ── sync PUSH/PULL ──────────────────────────────────────────────────
@@ -57,7 +91,7 @@ def test_sync_push_pull_cbb_ipc(ipc_endpoint, delay):
 
 @pytest.mark.parametrize("delay", BIND_DELAYS)
 def test_sync_push_pull_cbb_tcp(delay):
-    _sync_push_pull_cbb(_free_tcp(), delay)
+    _run_tcp_cbb(_sync_push_pull_cbb, delay)
 
 
 # ── sync REQ/REP ────────────────────────────────────────────────────
@@ -92,7 +126,7 @@ def test_sync_req_rep_cbb_ipc(ipc_endpoint, delay):
 
 @pytest.mark.parametrize("delay", BIND_DELAYS)
 def test_sync_req_rep_cbb_tcp(delay):
-    _sync_req_rep_cbb(_free_tcp(), delay)
+    _run_tcp_cbb(_sync_req_rep_cbb, delay)
 
 
 # ── sync PAIR ───────────────────────────────────────────────────────
@@ -127,7 +161,7 @@ def test_sync_pair_cbb_ipc(ipc_endpoint, delay):
 
 @pytest.mark.parametrize("delay", BIND_DELAYS)
 def test_sync_pair_cbb_tcp(delay):
-    _sync_pair_cbb(_free_tcp(), delay)
+    _run_tcp_cbb(_sync_pair_cbb, delay)
 
 
 # ── async PUSH/PULL ─────────────────────────────────────────────────
@@ -163,7 +197,7 @@ async def test_async_push_pull_cbb_ipc(ipc_endpoint, delay):
 @pytest.mark.parametrize("delay", BIND_DELAYS)
 @pytest.mark.asyncio
 async def test_async_push_pull_cbb_tcp(delay):
-    await _async_push_pull_cbb(_free_tcp(), delay)
+    await _run_tcp_cbb_async(_async_push_pull_cbb, delay)
 
 
 # ── async REQ/REP ───────────────────────────────────────────────────
@@ -201,7 +235,7 @@ async def test_async_req_rep_cbb_ipc(ipc_endpoint, delay):
 @pytest.mark.parametrize("delay", BIND_DELAYS)
 @pytest.mark.asyncio
 async def test_async_req_rep_cbb_tcp(delay):
-    await _async_req_rep_cbb(_free_tcp(), delay)
+    await _run_tcp_cbb_async(_async_req_rep_cbb, delay)
 
 
 # ── async PAIR ──────────────────────────────────────────────────────
@@ -239,4 +273,4 @@ async def test_async_pair_cbb_ipc(ipc_endpoint, delay):
 @pytest.mark.parametrize("delay", BIND_DELAYS)
 @pytest.mark.asyncio
 async def test_async_pair_cbb_tcp(delay):
-    await _async_pair_cbb(_free_tcp(), delay)
+    await _run_tcp_cbb_async(_async_pair_cbb, delay)

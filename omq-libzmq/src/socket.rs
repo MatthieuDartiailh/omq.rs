@@ -256,12 +256,9 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
     };
     let id = next_socket_id();
 
-    let ctx_arc = ctx.clone();
-    ctx_arc.socket_opened();
-
     let sock = Arc::new(OmqSocket {
         id,
-        ctx: ctx_arc,
+        ctx: ctx.clone(),
         socket_type,
         overlay: Mutex::new(SocketOverlay::default()),
         sndtimeo_ms: AtomicI64::new(-1),
@@ -280,6 +277,8 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         bound_or_connected: AtomicBool::new(false),
         recv_pump: std::sync::OnceLock::new(),
     });
+    sock.ctx.socket_opened();
+    sock.ctx.register_socket(&sock);
 
     Box::into_raw(Box::new(sock)).cast()
 }
@@ -386,16 +385,31 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if let Some(h) = arc.recv_pump.get() {
         h.abort();
     }
+    *arc.bypass_send.get() = None;
+    *arc.bypass_recv.get() = None;
+    let linger = arc
+        .overlay
+        .lock()
+        .map_or(Some(std::time::Duration::ZERO), |overlay| overlay.linger);
+    let close_socket = arc.inner.get().map(|inner| inner.as_ref().clone());
 
     // Enter the tokio runtime context so that dropping OmqSocket (and
     // the Arc<omq_tokio::Socket> it holds) doesn't panic from missing
     // reactor.
-    let Some(handle) = arc.ctx.handle() else {
+    let Some(handle) = arc.ctx.handle().cloned() else {
         arc.notify.close();
         arc.ctx.socket_closed();
         drop(arc);
         return 0;
     };
+    if let Some(socket) = close_socket {
+        let ctx = arc.ctx.clone();
+        ctx.linger_started();
+        handle.spawn(async move {
+            let _ = socket.close_with_linger(linger).await;
+            ctx.linger_finished();
+        });
+    }
     let _guard = handle.enter();
 
     arc.notify.close();

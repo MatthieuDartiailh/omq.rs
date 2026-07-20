@@ -9,8 +9,8 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_recv,
-    zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_shutdown, zmq_ctx_term, zmq_getsockopt,
+    zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -26,6 +26,7 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_RCVMORE: i32 = 13;
+const ZMQ_ETERM: i32 = 156_384_765;
 
 fn set_rcvtimeo(sock: *mut c_void, ms: i32) {
     let v = ms;
@@ -71,6 +72,47 @@ fn send_recv_null_nonzero_buffer_returns_efault() {
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_shutdown_wakes_blocking_recv() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    assert!(!pull.is_null());
+
+    let addr = caddr("inproc://test-basic-ctx-shutdown-wakes-recv");
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+
+    let pull_addr = pull as usize;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut buf = [0u8; 8];
+        entered_tx.send(()).expect("entered");
+        let rc = zmq_recv(
+            pull_addr as *mut c_void,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+        );
+        done_tx.send((rc, omq_zmq::zmq_errno())).expect("done");
+    });
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("recv thread entered");
+    std::thread::sleep(Duration::from_millis(50));
+
+    assert_eq!(zmq_ctx_shutdown(ctx), 0);
+    let (rc, errno) = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("recv should wake on context shutdown");
+    assert_eq!(rc, -1);
+    assert_eq!(errno, ZMQ_ETERM);
+    handle.join().expect("recv thread");
+
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
 #[test]

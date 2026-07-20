@@ -15,11 +15,10 @@ def test_push_pull_sustained():
     duration = soak_duration()
     monitor = ResourceMonitor()
 
-    ep = tcp_ep()
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     push = ctx.socket(zmq.PUSH)
-    pull.bind(ep)
+    ep = pull.bind(tcp_ep())
     push.connect(ep)
     push.setsockopt(zmq.SNDTIMEO, 2000)
     pull.setsockopt(zmq.RCVTIMEO, 2000)

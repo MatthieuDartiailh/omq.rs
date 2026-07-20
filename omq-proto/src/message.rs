@@ -1,6 +1,6 @@
 //! Message, Frame, and Payload types.
 //!
-//! `Payload` represents a frame's byte content in one of four forms:
+//! `Payload` represents a frame's byte content in one of three forms:
 //!
 //! - **Empty**: zero bytes, no backing storage.
 //! - **Inline**: ≤ 62 bytes stored directly in the struct, no heap
@@ -8,8 +8,6 @@
 //!   frames on the recv hot path.
 //! - **Single**: one `Bytes` chunk (overwhelmingly common on the send
 //!   side). User `Bytes`, encrypted ciphertext, compression output.
-//! - **Multi**: 2+ `Bytes` chunks (rare). Coalesced via `writev` on
-//!   the send path.
 //!
 //! A `Frame` is one ZMTP wire unit: flags plus a `Payload`. A `Message` is a
 //! logical sequence of parts where each part maps to one data Frame on the wire.
@@ -34,11 +32,11 @@ pub const MAX_INLINE_PAYLOAD: usize = 62;
 
 const _: () = assert!(std::mem::size_of::<Payload>() == 64);
 
-/// A frame payload, possibly composed of multiple `Bytes` chunks that are
-/// concatenated on the wire.
+/// A frame payload.
 ///
-/// Small payloads (≤ [`MAX_INLINE_PAYLOAD`] bytes) produced by the codec
-/// are stored inline with zero refcounting overhead.
+/// Small payloads (≤ [`MAX_INLINE_PAYLOAD`] bytes) produced by the codec are
+/// stored inline with zero refcounting overhead. Larger payloads hold one
+/// `Bytes` chunk.
 pub struct Payload {
     inner: PayloadInner,
 }

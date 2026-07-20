@@ -1,12 +1,8 @@
-use std::sync::Arc;
-
 use super::{
-    AnyConn, AnyStream, ConnectionConfig, ConnectionDriver, DisconnectReason, Duration, Endpoint,
-    InboundFrame, InprocConn, InprocPeerSnapshot, InternalEvent, Message, MessageEncoder,
-    MonitorEvent, PeerCommandKind, PeerDriverConfig, PeerDriverHandle, PeerEntry, PeerIdent,
-    PeerInfo, ReconnectPolicy, Result, Role, SocketDriver, SocketType, ZmtpConnection, ZmtpEvent,
-    generated_identity, max_peer_count, mpsc, peer_ident_socket_addr, supports_groups,
-    supports_subscribe,
+    AnyConn, AnyStream, DisconnectReason, Duration, Endpoint, InboundFrame, InprocConn,
+    InprocPeerSnapshot, InternalEvent, Message, MonitorEvent, PeerCommandKind, PeerEntry,
+    PeerIdent, PeerInfo, ReconnectPolicy, Result, SocketDriver, SocketType, ZmtpEvent,
+    generated_identity, mpsc, peer_ident_socket_addr, supports_groups, supports_subscribe,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use omq_proto::WorkloadProfile;
@@ -128,304 +124,17 @@ impl SocketDriver {
         }
     }
 
-    #[expect(clippy::too_many_lines)]
     fn spawn_byte_stream_connection(
         &mut self,
-        mut stream: AnyStream,
+        stream: AnyStream,
         peer_ident: PeerIdent,
         endpoint: Endpoint,
         is_server: bool,
         leftover: bytes::Bytes,
     ) {
-        // Enforce the socket type's peer cap (PAIR / CHANNEL are 1:1).
-        if let Some(max) = max_peer_count(self.socket_type)
-            && self.peers.len() >= max
-        {
-            // Drop the stream; let the shim never get spawned.
-            drop(stream);
-            drop(peer_ident);
-            return;
-        }
-        let peer_id = self.next_peer_id;
-        self.next_peer_id += 1;
-
-        let role = if is_server {
-            Role::Server
-        } else {
-            Role::Client
-        };
-        let mut cfg = ConnectionConfig::new(role, self.socket_type)
-            .identity(self.options.identity.clone())
-            .mechanism(self.options.mechanism.clone());
-        if let Some(n) = self.options.max_message_size {
-            cfg = cfg.max_message_size(n);
-        }
-        #[cfg(feature = "ws")]
-        let is_ws = matches!(&stream, AnyStream::Ws(_));
-        #[cfg(feature = "ws")]
-        let ws_masked = is_ws && !is_server;
-        #[cfg(feature = "ws")]
-        if is_ws {
-            let ws_role = if is_server {
-                omq_proto::proto::connection::WsRole::Server
-            } else {
-                omq_proto::proto::connection::WsRole::Client
-            };
-            cfg = cfg.ws_role(ws_role);
-        }
-        let mut codec = ZmtpConnection::new(cfg);
-        if !leftover.is_empty() && codec.handle_input(leftover).is_err() {
-            return;
-        }
-
-        // Per-connection driver inbox: bounded so control traffic cannot
-        // grow without limit behind a stuck TCP write.
-        let inbox_cap = 64usize;
-        let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
-        let child_cancel = self.cancel.child_token();
-
-        let driver_cfg = PeerDriverConfig {
-            handshake_timeout: self.options.handshake_timeout,
-            heartbeat_interval: self.options.heartbeat_interval,
-            heartbeat_timeout: self.options.heartbeat_timeout,
-            heartbeat_ttl: self.options.heartbeat_ttl,
-            large_message_threshold: self.options.large_message_threshold.unwrap_or(0),
-        };
-        let workload_profile = self.options.workload_profile.unwrap_or(
-            if matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
-                WorkloadProfile::Latency
-            } else {
-                WorkloadProfile::Throughput
-            },
+        super::peer_materialize::spawn_byte_stream_connection(
+            self, stream, peer_ident, endpoint, is_server, leftover,
         );
-        let has_encoder = MessageEncoder::for_endpoint(&endpoint, &self.options);
-        let has_transform = has_encoder.is_some();
-        let latency_profile = workload_profile == WorkloadProfile::Latency
-            && !self.options.mechanism.has_frame_transform();
-        let direct_tcp_writer = if latency_profile
-            && matches!(self.socket_type, SocketType::Req | SocketType::Rep)
-            && matches!(endpoint, Endpoint::Tcp { .. })
-            && !has_transform
-        {
-            match stream {
-                AnyStream::Tcp(tcp) => {
-                    let Ok(std_tcp) = tcp.into_std() else {
-                        return;
-                    };
-                    let Ok(direct_tcp) = std_tcp.try_clone() else {
-                        return;
-                    };
-                    let Ok(driver_tcp) = tokio::net::TcpStream::from_std(std_tcp) else {
-                        return;
-                    };
-                    let direct =
-                        Arc::new(crate::socket::dispatch::DirectTcpWriter::new(direct_tcp));
-                    stream = AnyStream::Tcp(driver_tcp);
-                    Some(direct)
-                }
-                AnyStream::Ipc(_) => None,
-                #[cfg(feature = "ws")]
-                AnyStream::Ws(_) => None,
-            }
-        } else {
-            None
-        };
-        let passthrough_info = has_encoder
-            .as_ref()
-            .and_then(|(enc, _)| enc.passthrough_info())
-            .map(|(s, t)| (s.clone(), t));
-        let driver = ConnectionDriver::with_config(
-            stream,
-            codec,
-            inbox_rx,
-            self.peer_out_tx.clone(),
-            peer_id,
-            child_cancel.clone(),
-            driver_cfg,
-        )
-        .with_receive_profile(
-            crate::engine::driver::ReceiveProfile::from_workload_for_socket(
-                workload_profile,
-                self.socket_type,
-            ),
-        );
-        let driver = match has_encoder {
-            Some((enc, dec)) => {
-                let mut d = driver.with_encoder(enc).with_decoder(dec);
-                if let Some(threshold) = self.options.compression_offload_threshold {
-                    let pool = self
-                        .compression_pool
-                        .get_or_insert_with(|| {
-                            Arc::new(crate::engine::compression_pool::CompressionPool::new())
-                        })
-                        .clone();
-                    d = d.with_compression_pool(pool, threshold);
-                }
-                d
-            }
-            None => driver,
-        };
-        let driver = match self.send_strategy.shared_rx() {
-            Some(rx) => driver.with_shared_rx(rx),
-            None => driver,
-        };
-
-        let arena_threshold = self.options.arena_threshold.unwrap_or(if latency_profile {
-            usize::MAX
-        } else {
-            omq_proto::frame_buffer::ARENA_THRESHOLD
-        });
-        let arena_cap = if matches!(endpoint, Endpoint::Ipc(_)) {
-            omq_proto::frame_buffer::ARENA_INITIAL_CAP_IPC
-        } else if latency_profile {
-            4 * 1024
-        } else {
-            omq_proto::frame_buffer::ARENA_INITIAL_CAP
-        };
-        let uses_crypto = self.options.mechanism.has_frame_transform();
-        let slot = if !uses_crypto && self.send_strategy.needs_transmit_slot() {
-            let transmit_slot_cap = self
-                .options
-                .transmit_slot_cap
-                .unwrap_or(crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT);
-            let transmit_slot_msg_cap = self.options.send_hwm.max(1) as usize;
-            Some(crate::engine::transmit_slot::PeerTransmitSlot::new(
-                peer_id,
-                has_transform,
-                passthrough_info,
-                arena_threshold,
-                arena_cap,
-                transmit_slot_cap,
-                transmit_slot_msg_cap,
-                #[cfg(feature = "ws")]
-                is_ws,
-                #[cfg(feature = "ws")]
-                ws_masked,
-            ))
-        } else {
-            None
-        };
-        let driver = driver
-            .with_arena_threshold(arena_threshold)
-            .with_arena_cap(arena_cap);
-        let driver = match slot {
-            Some(ref s) => driver.with_transmit_slot(s.clone()),
-            None => driver,
-        };
-        let (send_pipe, driver) = if self.send_strategy.needs_peer_send_pipe() {
-            let pipe_cap = self.options.send_hwm.max(16) as usize;
-            let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
-            (
-                Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
-                driver.with_send_pipe(send_pipe_rx),
-            )
-        } else {
-            (None, driver)
-        };
-
-        // Recv bypass: for socket types whose recv path is a plain fair-queue
-        // delivery with no per-type post-processing, route messages directly
-        // from the connection driver into the user-facing recv channel,
-        // skipping the actor's event loop.
-        let rep_latency = self.socket_type == SocketType::Rep && self.uses_latency_profile();
-        let driver = if can_bypass_actor_recv(self.socket_type) || rep_latency {
-            let can_use_yring =
-                can_bypass_actor_recv(self.socket_type) && self.socket_type != SocketType::Req;
-            if can_use_yring {
-                let from_slot = self
-                    .recv_sink_config
-                    .as_ref()
-                    .and_then(|cfg| cfg.take_sink());
-                if let Some(sink) = from_slot {
-                    if rep_latency {
-                        driver.with_recv_sink(crate::engine::RecvSink::rep(
-                            sink,
-                            self.rep_pending.clone(),
-                            peer_id,
-                        ))
-                    } else {
-                        driver.with_recv_sink(sink)
-                    }
-                } else {
-                    let cap = self.options.recv_hwm.max(16) as usize;
-                    let (prod, cons) = yring::spsc(cap);
-                    let recv_notify = self.spsc.recv_notify.clone();
-                    let blocking_waker = self.spsc.blocking_recv_waker.clone();
-                    let space = std::sync::Arc::new(tokio::sync::Notify::new());
-                    let sink = crate::engine::RecvSink::Yring(crate::engine::YringSink {
-                        producer: prod,
-                        signal: Box::new(move || {
-                            recv_notify.mark();
-                            blocking_waker.wake();
-                        }),
-                        space: space.clone(),
-                    });
-                    PeerLifecycle::new(self).register_tcp_consumer(cons, space, peer_id);
-                    if rep_latency {
-                        driver.with_recv_sink(crate::engine::RecvSink::rep(
-                            sink,
-                            self.rep_pending.clone(),
-                            peer_id,
-                        ))
-                    } else {
-                        driver.with_recv_sink(sink)
-                    }
-                }
-            } else if rep_latency {
-                driver.with_recv_sink(crate::engine::RecvSink::rep(
-                    crate::engine::RecvSink::Channel(self.recv_tx.clone()),
-                    self.rep_pending.clone(),
-                    peer_id,
-                ))
-            } else {
-                driver.with_recv_direct(self.recv_tx.clone())
-            }
-        } else {
-            driver
-        };
-
-        // Assign this connection to an IO thread.
-        let io_thread = self.io_pool.assign_thread();
-
-        // Insert the peer BEFORE spawning the driver task.
-        self.peers.insert(
-            peer_id,
-            PeerEntry {
-                ident: peer_ident,
-                handle: PeerDriverHandle {
-                    inbox: inbox_tx,
-                    cancel: child_cancel,
-                    transmit_slot: slot.clone(),
-                    direct_tcp_writer: direct_tcp_writer.clone(),
-                    send_pipe,
-                },
-                identity: bytes::Bytes::new(),
-                info: None,
-                endpoint,
-                is_client: !is_server,
-                spsc: None,
-                task: None,
-                io_thread,
-            },
-        );
-
-        PeerLifecycle::new(self).after_peer_inserted();
-
-        let needs_migration = io_thread != 0;
-        let task = self.io_pool.spawn_on(io_thread, async move {
-            let driver = if needs_migration {
-                match driver.migrate_stream() {
-                    Ok(d) => d,
-                    Err(_) => return,
-                }
-            } else {
-                driver
-            };
-            let _ = driver.run().await;
-        });
-        if let Some(peer) = self.peers.get_mut(&peer_id) {
-            peer.task = Some(task);
-        }
     }
 
     fn spawn_stream_connection(
@@ -483,135 +192,7 @@ impl SocketDriver {
         endpoint: Endpoint,
         is_server: bool,
     ) {
-        // Honor peer caps just like the byte-stream path.
-        if let Some(max) = max_peer_count(self.socket_type)
-            && self.peers.len() >= max
-        {
-            return;
-        }
-
-        // Reject incompatible peer socket types up front so the user
-        // sees a clear failure instead of silent message-routing
-        // weirdness. Mirrors `is_compatible` from greeting/codec.
-        if !omq_proto::proto::is_compatible(self.socket_type, conn.peer.socket_type) {
-            // Surface as a closed-immediately connection. Drop the
-            // channel halves so the partner sees its in_rx return None.
-            return;
-        }
-
-        let peer_id = self.next_peer_id;
-        self.next_peer_id += 1;
-
-        let inbox_cap = 64usize;
-        let (inbox_tx, inbox_rx) = mpsc::channel(inbox_cap);
-        let child_cancel = self.cancel.child_token();
-        let (send_pipe, send_pipe_rx) = if self.send_strategy.needs_peer_send_pipe() {
-            let pipe_cap = self.options.send_hwm.max(16) as usize;
-            let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
-            (
-                Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
-                Some(send_pipe_rx),
-            )
-        } else {
-            (None, None)
-        };
-
-        // Pre-build the synthesised PeerProperties from the
-        // connect-time snapshot. The handshake-replay code in
-        // handle_peer_event expects this shape.
-        let peer_props = omq_proto::proto::command::PeerProperties::default()
-            .with_socket_type(conn.peer.socket_type)
-            .with_identity(conn.peer.identity.clone());
-
-        let InprocConn {
-            out,
-            in_rx,
-            peer: _peer,
-            tx,
-            rx,
-        } = conn;
-
-        // Extract recv_sink for poll() message detection, similar to wire path.
-        // Only inproc peers with yring-backed recv bypass can use this.
-        let can_use_yring =
-            can_bypass_actor_recv(self.socket_type) && self.socket_type != SocketType::Req;
-        let recv_sink = if can_bypass_actor_recv(self.socket_type) && can_use_yring {
-            self.recv_sink_config
-                .as_ref()
-                .and_then(|cfg| cfg.take_sink())
-        } else {
-            None
-        };
-
-        // Insert the peer BEFORE spawning the driver - same race
-        // protection as in the byte-stream path. `info` stays None
-        // until the synthesised HandshakeSucceeded lands; that
-        // event runs through the same handle_peer_event path that
-        // sets `info = Some(...)`, calls strategy.connection_added,
-        // and replays subscriptions / joined groups.
-        let io_thread = self.io_pool.assign_thread();
-
-        self.peers.insert(
-            peer_id,
-            PeerEntry {
-                ident: peer_ident,
-                handle: PeerDriverHandle {
-                    inbox: inbox_tx,
-                    cancel: child_cancel.clone(),
-                    transmit_slot: None,
-                    direct_tcp_writer: None,
-                    send_pipe,
-                },
-                identity: bytes::Bytes::new(),
-                info: None,
-                endpoint,
-                is_client: !is_server,
-                spsc: tx.clone(),
-                task: None,
-                io_thread,
-            },
-        );
-
-        let recv_direct = if can_bypass_actor_recv(self.socket_type) {
-            Some(self.recv_tx.clone())
-        } else {
-            None
-        };
-        let recv_spsc = rx
-            .clone()
-            .filter(|_| can_bypass_actor_recv(self.socket_type));
-
-        // Per-peer SPSC recv bypass only applies to plain fair-queue socket
-        // types. REP latency receives need actor bookkeeping for routing.
-        if let Some(ref s) = recv_spsc {
-            PeerLifecycle::new(self).register_inproc_consumer(s, true);
-        }
-        PeerLifecycle::new(self).update_send_ring();
-
-        let task = self.io_pool.spawn_on(
-            io_thread,
-            inproc_peer_driver(
-                inbox_rx,
-                in_rx,
-                out,
-                InprocDriverCtx {
-                    peer_out: self.peer_out_tx.clone(),
-                    peer_id,
-                    cancel: child_cancel,
-                    peer_props,
-                    max_message_size: self.options.max_message_size,
-                    recv_direct,
-                    spsc: recv_spsc,
-                    recv_sink,
-                    shared_rx: self.send_strategy.shared_rx(),
-                    send_pipe_rx,
-                    blocking_recv_waker: self.spsc.blocking_recv_waker.clone(),
-                },
-            ),
-        );
-        if let Some(peer) = self.peers.get_mut(&peer_id) {
-            peer.task = Some(task);
-        }
+        super::peer_materialize::spawn_inproc_peer(self, conn, peer_ident, endpoint, is_server);
     }
 
     async fn handle_peer_event(&mut self, peer_id: u64, event: ZmtpEvent) {
@@ -832,21 +413,6 @@ impl SocketDriver {
     }
 }
 
-fn can_bypass_actor_recv(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Pull
-            | SocketType::Dealer
-            | SocketType::Req
-            | SocketType::Sub
-            | SocketType::XSub
-            | SocketType::Pair
-            | SocketType::Client
-            | SocketType::Channel
-            | SocketType::Gather
-    )
-}
-
 impl SocketDriver {
     pub(super) fn uses_latency_profile(&self) -> bool {
         self.options.workload_profile.unwrap_or(
@@ -862,25 +428,25 @@ impl SocketDriver {
 
 /// Inproc fast path connection driver context. Replaces the
 /// `engine::ConnectionDriver` / ZMTP codec stack for in-process peers.
-struct InprocDriverCtx {
-    peer_out: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
-    peer_id: u64,
-    cancel: tokio_util::sync::CancellationToken,
-    peer_props: omq_proto::proto::command::PeerProperties,
-    max_message_size: Option<usize>,
-    recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
-    spsc: Option<std::sync::Arc<crate::transport::inproc::InprocRx>>,
-    recv_sink: Option<crate::engine::RecvSink>,
-    shared_rx: Option<crate::routing::fallback_queue::FallbackReceiver>,
-    send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
-    blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
+pub(super) struct InprocDriverCtx {
+    pub(super) peer_out: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+    pub(super) peer_id: u64,
+    pub(super) cancel: tokio_util::sync::CancellationToken,
+    pub(super) peer_props: omq_proto::proto::command::PeerProperties,
+    pub(super) max_message_size: Option<usize>,
+    pub(super) recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
+    pub(super) spsc: Option<std::sync::Arc<crate::transport::inproc::InprocRx>>,
+    pub(super) recv_sink: Option<crate::engine::RecvSink>,
+    pub(super) shared_rx: Option<crate::routing::fallback_queue::FallbackReceiver>,
+    pub(super) send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
+    pub(super) blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
 }
 
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
 /// then forwards Messages and Commands between the `SocketDriver`'s
 /// inbox and the partner's channels until either side drops.
 #[expect(clippy::too_many_lines)]
-async fn inproc_peer_driver(
+pub(super) async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::PeerDriverCommand>,
     mut in_rx: mpsc::Receiver<InboundFrame>,
     out: mpsc::Sender<InboundFrame>,
@@ -1063,7 +629,7 @@ async fn inproc_peer_driver(
         ring.recv_notify.wake_all();
     }
     blocking_recv_waker.wake();
-    let _ = peer_out.try_send((peer_id, PeerEvent::Closed));
+    let _ = peer_out.send((peer_id, PeerEvent::Closed)).await;
 }
 
 /// Route a message to `recv_direct` or through the actor via `emit_event`.
