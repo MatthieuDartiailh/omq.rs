@@ -3,6 +3,7 @@
 mod endpoints;
 mod lifecycle;
 mod peer;
+mod peer_materialize;
 
 pub(crate) use peer::spawn_driver;
 
