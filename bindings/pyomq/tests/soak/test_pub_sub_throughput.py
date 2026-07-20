@@ -22,11 +22,10 @@ def test_pub_sub_throughput():
     duration = soak_duration()
     monitor = ResourceMonitor()
 
-    ep = tcp_ep()
     ctx = zmq.Context()
     pub = ctx.socket(zmq.PUB)
     pub.setsockopt(zmq.SNDHWM, 1000)
-    pub.bind(ep)
+    ep = pub.bind(tcp_ep())
 
     subs = []
     for i in range(NUM_SUBS):

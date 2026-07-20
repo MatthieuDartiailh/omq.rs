@@ -5,24 +5,38 @@ closes. New PULL rebinds, PUSH reconnects. Repeated for the full
 duration. Exercises the PyO3 socket creation/teardown path.
 """
 
+import errno
 import time
 
 import pyomq as zmq
 
-from conftest import ResourceMonitor, free_tcp_port, soak_duration
+from conftest import ResourceMonitor, soak_duration, tcp_ep
+
+
+def _is_eaddrinuse(exc):
+    return (
+        getattr(exc, "errno", None) == errno.EADDRINUSE
+        or "Address already in use" in str(exc)
+    )
+
+
+def _new_pull(ctx):
+    pull = ctx.socket(zmq.PULL)
+    pull.setsockopt(zmq.RCVTIMEO, 5000)
+    return pull
 
 
 def test_reconnect_storm():
     duration = soak_duration()
     monitor = ResourceMonitor()
 
-    port = free_tcp_port()
-    ep = f"tcp://127.0.0.1:{port}"
-
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     push.setsockopt(zmq.SNDTIMEO, 5000)
     push.setsockopt(zmq.RECONNECT_IVL, 10)
+
+    pull = _new_pull(ctx)
+    ep = pull.bind(tcp_ep())
     push.connect(ep)
 
     start = time.monotonic()
@@ -31,26 +45,30 @@ def test_reconnect_storm():
     last_log = start
 
     while time.monotonic() - start < duration:
-        pull = ctx.socket(zmq.PULL)
-        pull.setsockopt(zmq.RCVTIMEO, 5000)
-
-        bound = False
-        for _ in range(40):
-            try:
-                pull.bind(ep)
-                bound = True
-                break
-            except zmq.ZMQError:
-                time.sleep(0.025)
-        if not bound:
-            pull.close()
-            continue
+        if pull is None:
+            pull = _new_pull(ctx)
+            bound = False
+            for _ in range(40):
+                try:
+                    pull.bind(ep)
+                    bound = True
+                    break
+                except zmq.ZMQError as exc:
+                    if not _is_eaddrinuse(exc):
+                        pull.close()
+                        raise
+                    time.sleep(0.025)
+            if not bound:
+                pull.close()
+                pull = None
+                continue
 
         tag = f"c-{cycles}".encode()
         try:
             push.send(tag)
         except zmq.Again:
             pull.close()
+            pull = None
             cycles += 1
             continue
 
@@ -62,6 +80,7 @@ def test_reconnect_storm():
             pass
 
         pull.close()
+        pull = None
         cycles += 1
 
         if time.monotonic() - last_log >= 30:
@@ -72,6 +91,8 @@ def test_reconnect_storm():
             )
             last_log = time.monotonic()
 
+    if pull is not None:
+        pull.close()
     push.close()
     ctx.term()
 

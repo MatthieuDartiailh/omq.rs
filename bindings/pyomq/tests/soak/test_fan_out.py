@@ -21,11 +21,10 @@ def test_fan_out():
     duration = soak_duration()
     monitor = ResourceMonitor()
 
-    ep = tcp_ep()
     ctx = zmq.Context()
     pub = ctx.socket(zmq.PUB)
     pub.setsockopt(zmq.SNDHWM, 500)
-    pub.bind(ep)
+    ep = pub.bind(tcp_ep())
 
     subs = []
     for _ in range(NUM_SUBS):

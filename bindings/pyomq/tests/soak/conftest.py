@@ -1,7 +1,6 @@
 """Shared helpers for pyomq soak tests."""
 
 import os
-import socket
 import time
 
 
@@ -9,17 +8,8 @@ def soak_duration() -> float:
     return float(os.environ.get("OMQ_SOAK_DURATION_SECS", "120"))
 
 
-def free_tcp_port() -> int:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-    finally:
-        s.close()
-
-
 def tcp_ep() -> str:
-    return f"tcp://127.0.0.1:{free_tcp_port()}"
+    return "tcp://127.0.0.1:0"
 
 
 _inproc_counter = 0

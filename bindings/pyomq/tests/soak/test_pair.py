@@ -18,7 +18,6 @@ def test_pair_bidirectional():
     duration = soak_duration()
     monitor = ResourceMonitor()
 
-    ep = tcp_ep()
     ctx = zmq.Context()
     a = ctx.socket(zmq.PAIR)
     b = ctx.socket(zmq.PAIR)
@@ -26,7 +25,7 @@ def test_pair_bidirectional():
     a.setsockopt(zmq.RCVTIMEO, 1)
     b.setsockopt(zmq.SNDTIMEO, 1000)
     b.setsockopt(zmq.RCVTIMEO, 1)
-    a.bind(ep)
+    ep = a.bind(tcp_ep())
     b.connect(ep)
 
     time.sleep(0.1)

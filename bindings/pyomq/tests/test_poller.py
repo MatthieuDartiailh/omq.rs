@@ -62,8 +62,8 @@ def test_poll_multiple_ready(tcp_endpoint):
         ep = pull1.bind(tcp_endpoint)
         push1.connect(ep)
 
-        port2 = pull2.bind_to_random_port("tcp://127.0.0.1")
-        push2.connect(f"tcp://127.0.0.1:{port2}")
+        ep2 = pull2.bind(tcp_endpoint)
+        push2.connect(ep2)
 
         push1.send(b"msg1")
         push2.send(b"msg2")

@@ -18,11 +18,10 @@ def test_pub_sub_churn():
     duration = soak_duration()
     monitor = ResourceMonitor()
 
-    ep = tcp_ep()
     ctx = zmq.Context()
     pub = ctx.socket(zmq.PUB)
     pub.setsockopt(zmq.SNDTIMEO, 100)
-    pub.bind(ep)
+    ep = pub.bind(tcp_ep())
 
     subs: list = []
     pub_count = 0
