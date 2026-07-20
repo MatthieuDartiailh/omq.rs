@@ -23,12 +23,18 @@ fn set_timeo(sock: *mut c_void, opt: i32, ms: i32) {
     zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
 }
 
-#[repr(C, align(8))]
-struct ZmqMsg([u8; 64]);
+const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
+
+#[repr(C)]
+struct ZmqMsg([usize; ZMQ_MSG_WORDS]);
 
 impl ZmqMsg {
+    fn zeroed() -> Self {
+        Self([0; ZMQ_MSG_WORDS])
+    }
+
     fn new() -> Self {
-        let mut m = Self([0u8; 64]);
+        let mut m = Self::zeroed();
         zmq_msg_init(m.0.as_mut_ptr().cast());
         m
     }
@@ -145,7 +151,7 @@ fn proxy_large_message() {
     let size = 128 * 1024;
     let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
 
-    let mut msg = ZmqMsg([0u8; 64]);
+    let mut msg = ZmqMsg::zeroed();
     omq_zmq::zmq_msg_init_size(msg.0.as_mut_ptr().cast(), size);
     let data = zmq_msg_data(msg.0.as_mut_ptr().cast());
     unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), data.cast::<u8>(), size) };

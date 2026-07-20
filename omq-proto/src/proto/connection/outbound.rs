@@ -334,17 +334,8 @@ impl Connection {
             let more = i + 1 < n;
             let payload_len = p.len();
             if payload_len > frame::MAX_SHORT_FRAME_SIZE {
-                flat_buf.extend_from_slice(&[
-                    frame::FLAG_LONG | u8::from(more),
-                    (payload_len >> 56) as u8,
-                    (payload_len >> 48) as u8,
-                    (payload_len >> 40) as u8,
-                    (payload_len >> 32) as u8,
-                    (payload_len >> 24) as u8,
-                    (payload_len >> 16) as u8,
-                    (payload_len >> 8) as u8,
-                    payload_len as u8,
-                ]);
+                flat_buf.extend_from_slice(&[frame::FLAG_LONG | u8::from(more)]);
+                flat_buf.extend_from_slice(&(payload_len as u64).to_be_bytes());
             } else {
                 flat_buf.extend_from_slice(&[u8::from(more), payload_len as u8]);
             }

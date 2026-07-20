@@ -4,6 +4,10 @@
 //! Short frames (payload <= 255 bytes) use a single-byte size; long frames use
 //! 8-byte big-endian. The flags byte carries MORE (0x01), LONG (0x02), and
 //! COMMAND (0x04). The remaining bits are reserved and must be zero.
+//!
+//! On 32-bit targets, 64-bit wire lengths are accepted only when they fit
+//! platform allocation limits. Practical per-frame/per-message payload size
+//! is therefore below 4 GiB, and usually bounded further by `isize::MAX`.
 
 use std::collections::VecDeque;
 
@@ -94,17 +98,8 @@ pub fn encode_frame_into(frame: &Frame, out: &mut VecDeque<Bytes>, scratch: &mut
 pub(crate) fn write_frame_header(buf: &mut BytesMut, more: bool, payload_len: usize) {
     let flags = u8::from(more);
     if payload_len > MAX_SHORT_FRAME_SIZE {
-        buf.extend_from_slice(&[
-            flags | FLAG_LONG,
-            (payload_len >> 56) as u8,
-            (payload_len >> 48) as u8,
-            (payload_len >> 40) as u8,
-            (payload_len >> 32) as u8,
-            (payload_len >> 24) as u8,
-            (payload_len >> 16) as u8,
-            (payload_len >> 8) as u8,
-            payload_len as u8,
-        ]);
+        buf.put_u8(flags | FLAG_LONG);
+        buf.extend_from_slice(&(payload_len as u64).to_be_bytes());
     } else {
         buf.extend_from_slice(&[flags, payload_len as u8]);
     }

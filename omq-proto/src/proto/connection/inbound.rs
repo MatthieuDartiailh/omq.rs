@@ -565,6 +565,11 @@ impl Connection {
                     ws_hdr.payload_len
                 ))
             })?;
+            if payload_len > isize::MAX as usize {
+                return Err(Error::Protocol(format!(
+                    "WS payload length {payload_len} exceeds maximum allocation"
+                )));
+            }
             let total_frame = ws_hdr
                 .header_len
                 .checked_add(payload_len)

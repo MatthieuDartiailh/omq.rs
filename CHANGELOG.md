@@ -6,6 +6,19 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- CI coverage for `i686-unknown-linux-gnu` and
+  `armv7-unknown-linux-gnueabihf`.
+
+### Changed
+
+- `yring` cursors and libzmq inproc bypass cursors now use 64-bit atomics
+  on 32-bit targets.
+- 32-bit builds are supported on targets with native 64-bit atomics. Per-frame
+  and per-message payloads remain bounded by platform allocation limits
+  (below 4 GiB on 32-bit Linux).
+
 ## [omq-proto 0.23.0] - 2026-07-19
 
 ### Added

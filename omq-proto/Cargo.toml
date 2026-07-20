@@ -32,13 +32,18 @@ crypto_box = { version = "0.9", optional = true }
 crypto_secretbox = { version = "0.1", optional = true }
 subtle = { version = "2.6", optional = true }
 x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"], optional = true }
-lz4rip = { version = "0.11.1", default-features = false, features = ["std"], optional = true }
 rand = "0.10"
 patricia_tree = "0.10"
 smallvec = { version = "1", features = ["const_generics", "union"] }
 socket2 = { version = "0.6", features = ["all"] }
 thiserror = "2.0.18"
 zeroize = { version = "1.8.0", features = ["zeroize_derive"], optional = true }
+
+[dependencies.lz4rip]
+version = "0.11.2"
+default-features = false
+features = ["std"]
+optional = true
 
 [[bench]]
 name = "mechanism_frame"

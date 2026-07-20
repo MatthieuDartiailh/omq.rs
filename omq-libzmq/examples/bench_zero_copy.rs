@@ -21,13 +21,14 @@ use omq_zmq::{
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
 const ZMQ_RCVTIMEO: i32 = 27;
+const ZMQ_MSG_WORDS: usize = 64 / std::mem::size_of::<usize>();
 
-#[repr(C, align(8))]
-struct Msg([u8; 64]);
+#[repr(C)]
+struct Msg([usize; ZMQ_MSG_WORDS]);
 
 impl Msg {
     fn new() -> Self {
-        let mut m = Self([0u8; 64]);
+        let mut m = Self([0; ZMQ_MSG_WORDS]);
         zmq_msg_init(m.0.as_mut_ptr().cast());
         m
     }

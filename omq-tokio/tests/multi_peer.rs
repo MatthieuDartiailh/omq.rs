@@ -95,15 +95,18 @@ async fn push_distributes_fairly_over_tcp() {
 
     // Spawn concurrent drainers BEFORE sending so the push side stays hot.
     let counts: Vec<Arc<AtomicUsize>> = (0..N).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    let total_received = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
     for (p, c) in pulls.into_iter().zip(counts.iter().cloned()) {
+        let total_received = total_received.clone();
         handles.push(tokio::spawn(async move {
             loop {
-                match tokio::time::timeout(Duration::from_millis(500), p.recv()).await {
-                    Ok(Ok(_)) => {
+                match p.recv().await {
+                    Ok(_) => {
                         c.fetch_add(1, Ordering::SeqCst);
+                        total_received.fetch_add(1, Ordering::SeqCst);
                     }
-                    _ => return,
+                    Err(e) => panic!("pull receiver failed before test finished: {e:?}"),
                 }
             }
         }));
@@ -112,11 +115,22 @@ async fn push_distributes_fairly_over_tcp() {
     for i in 0..M {
         push.send(Message::single(format!("m{i}"))).await.unwrap();
     }
-    for h in handles {
-        let _ = h.await;
-    }
+    let all_arrived = tokio::time::timeout(Duration::from_secs(10), async {
+        while total_received.load(Ordering::SeqCst) < M {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
 
     let total: usize = counts.iter().map(|c| c.load(Ordering::SeqCst)).sum();
+    for h in handles {
+        h.abort();
+        let _ = h.await;
+    }
+    assert!(
+        all_arrived.is_ok(),
+        "every message must reach exactly one pull; got {total} / {M}"
+    );
     assert_eq!(total, M, "every message must reach exactly one pull");
     // No peer may be starved. With direct round-robin the split is even
     // (~M/N each); the shared-queue regression let one connection driver

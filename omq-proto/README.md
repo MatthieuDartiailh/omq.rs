@@ -6,6 +6,10 @@ Backend-agnostic foundation for `omq-tokio`. Use this crate directly
 only when building a custom backend or embedding the ZMTP codec into a
 non-standard transport.
 
+On 32-bit targets, 64-bit ZMTP/WebSocket/LZ4 wire lengths are accepted only
+when they fit platform allocation limits. Practical per-frame/per-message
+payloads are below 4 GiB.
+
 ## What's inside
 
 | Module | What it does |

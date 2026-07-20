@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Remove the blanket 32-bit target rejection. 32-bit Linux targets with
+  native 64-bit atomics are supported.
+- Document and enforce platform allocation bounds for 64-bit ZMTP, WebSocket,
+  and LZ4 declared lengths.
+
 ## [0.23.0] - 2026-07-19
 
 ### Added

@@ -52,6 +52,11 @@ The Rust backend is [`omq-tokio`](omq-tokio/): tokio + mio on Linux,
 macOS, and Windows. It works on single-thread and multi-thread tokio
 runtimes.
 
+Supported 32-bit Linux targets are `i686-unknown-linux-gnu` and
+`armv7-unknown-linux-gnueabihf`. They require native 64-bit atomics. ZMTP wire
+length fields stay 64-bit, but practical frame/message size is bounded by
+platform allocation limits (below 4 GiB on 32-bit).
+
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
 
 ```rust

@@ -10,7 +10,7 @@
 
 use std::cell::UnsafeCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Shared state between the sender and receiver halves of an inproc bypass.
 pub(crate) struct InprocPipe {
@@ -53,13 +53,24 @@ const fn aligned_entry_size(payload_len: usize) -> usize {
     (HEADER_SIZE + payload_len + ALIGN_MASK) & !ALIGN_MASK
 }
 
+#[inline]
+fn checked_aligned_entry_size(payload_len: usize) -> Option<usize> {
+    if payload_len >= WRAP_SENTINEL as usize {
+        return None;
+    }
+    HEADER_SIZE
+        .checked_add(payload_len)?
+        .checked_add(ALIGN_MASK)
+        .map(|n| n & !ALIGN_MASK)
+}
+
 struct RingBuf {
     buf: Box<[UnsafeCell<u8>]>,
     capacity: usize,
     /// Producer write position (mod capacity).
-    tail: AtomicUsize,
+    tail: AtomicU64,
     /// Consumer read position (mod capacity).
-    head: AtomicUsize,
+    head: AtomicU64,
 }
 
 impl std::fmt::Debug for RingBuf {
@@ -79,27 +90,32 @@ impl RingBuf {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             capacity: cap,
-            tail: AtomicUsize::new(0),
-            head: AtomicUsize::new(0),
+            tail: AtomicU64::new(0),
+            head: AtomicU64::new(0),
         }
     }
 
     #[inline]
-    fn free_space(&self, tail: usize, head: usize) -> usize {
-        self.capacity - (tail - head)
+    fn free_space(&self, tail: u64, head: u64) -> usize {
+        let used = tail.wrapping_sub(head);
+        if used >= self.capacity as u64 {
+            0
+        } else {
+            (self.capacity as u64 - used) as usize
+        }
     }
 }
 
 pub(crate) struct RingProducer {
     ring: Arc<RingBuf>,
-    tail: usize,
-    cached_head: usize,
+    tail: u64,
+    cached_head: u64,
 }
 
 pub(crate) struct RingConsumer {
     ring: Arc<RingBuf>,
-    head: usize,
-    cached_tail: usize,
+    head: u64,
+    cached_tail: u64,
 }
 
 impl std::fmt::Debug for RingProducer {
@@ -142,11 +158,13 @@ impl RingProducer {
     /// Returns false if not enough space.
     #[inline]
     fn try_push(&mut self, data: &[u8]) -> bool {
-        let entry_size = aligned_entry_size(data.len());
+        let Some(entry_size) = checked_aligned_entry_size(data.len()) else {
+            return false;
+        };
         let cap = self.ring.capacity;
         let mask = cap - 1;
         let tail = self.tail;
-        let tail_offset = tail & mask;
+        let tail_offset = (tail as usize) & mask;
 
         // Check if we have enough total free space.
         let mut free = self.ring.free_space(tail, self.cached_head);
@@ -180,7 +198,7 @@ impl RingProducer {
                     HEADER_SIZE,
                 );
             }
-            self.tail = tail + contiguous;
+            self.tail = tail.wrapping_add(contiguous as u64);
             self.write_entry(data);
         } else {
             self.write_entry(data);
@@ -192,7 +210,7 @@ impl RingProducer {
     fn write_entry(&mut self, data: &[u8]) {
         let cap = self.ring.capacity;
         let mask = cap - 1;
-        let offset = self.tail & mask;
+        let offset = (self.tail as usize) & mask;
         let len = data.len() as u32;
         // SAFETY: caller guaranteed sufficient contiguous space.
         unsafe {
@@ -200,7 +218,9 @@ impl RingProducer {
             std::ptr::copy_nonoverlapping(len.to_ne_bytes().as_ptr(), base, HEADER_SIZE);
             std::ptr::copy_nonoverlapping(data.as_ptr(), base.add(HEADER_SIZE), data.len());
         }
-        self.tail += aligned_entry_size(data.len());
+        self.tail = self
+            .tail
+            .wrapping_add(aligned_entry_size(data.len()) as u64);
     }
 
     /// Publish all written entries to the consumer. Returns true if
@@ -228,7 +248,7 @@ impl RingConsumer {
         }
         let cap = self.ring.capacity;
         let mask = cap - 1;
-        let offset = self.head & mask;
+        let offset = (self.head as usize) & mask;
         // SAFETY: head..head+4 is within published region.
         let len = unsafe {
             let mut bytes = [0u8; HEADER_SIZE];
@@ -241,8 +261,8 @@ impl RingConsumer {
         };
         if len == WRAP_SENTINEL {
             let contiguous = cap - offset;
-            self.head += contiguous;
-            let new_offset = self.head & mask;
+            self.head = self.head.wrapping_add(contiguous as u64);
+            let new_offset = (self.head as usize) & mask;
             debug_assert_eq!(new_offset, 0);
             if self.head == self.cached_tail {
                 self.cached_tail = self.ring.tail.load(Ordering::Acquire);
@@ -275,7 +295,7 @@ impl RingConsumer {
     /// Advance past the last peeked entry and publish the new head.
     #[inline]
     fn advance_and_release(&mut self, len: usize) {
-        self.head += aligned_entry_size(len);
+        self.head = self.head.wrapping_add(aligned_entry_size(len) as u64);
         self.ring.head.store(self.head, Ordering::Release);
     }
 
@@ -408,5 +428,37 @@ impl BypassRecv {
     /// Check if the ring is empty.
     pub(crate) fn is_empty(&self) -> bool {
         self.consumer.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_size_rejects_wrap_sentinel_length() {
+        assert_eq!(checked_aligned_entry_size(0), Some(HEADER_SIZE));
+        assert!(checked_aligned_entry_size(WRAP_SENTINEL as usize).is_none());
+    }
+
+    #[test]
+    fn byte_ring_crosses_u32_boundary_without_aliasing() {
+        let (mut producer, mut consumer) = ring_pair(64);
+        let base = u64::from(u32::MAX) - 3;
+        producer.tail = base;
+        producer.cached_head = base;
+        consumer.head = base;
+        consumer.cached_tail = base;
+        producer.ring.head.store(base, Ordering::Relaxed);
+        producer.ring.tail.store(base, Ordering::Relaxed);
+
+        assert!(producer.try_push(b"abcd"));
+        assert!(producer.flush());
+
+        let (ptr, len) = consumer.try_peek().expect("entry visible");
+        let got = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(got, b"abcd");
+        consumer.advance_and_release(len);
+        assert!(consumer.is_empty());
     }
 }

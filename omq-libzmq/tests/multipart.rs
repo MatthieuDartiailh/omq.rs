@@ -23,13 +23,19 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_MORE: i32 = 1;
 const ZMQ_ROUTING_ID: i32 = 5;
 
-// 64-byte opaque zmq_msg_t, aligned to pointer size (OmqMsgRepr has *mut u8 fields).
-#[repr(C, align(8))]
-struct ZmqMsg([u8; 64]);
+const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
+
+// 64-byte opaque zmq_msg_t, aligned to pointer size.
+#[repr(C)]
+struct ZmqMsg([usize; ZMQ_MSG_WORDS]);
 
 impl ZmqMsg {
+    fn zeroed() -> Self {
+        Self([0; ZMQ_MSG_WORDS])
+    }
+
     fn new() -> Self {
-        let mut m = Self([0u8; 64]);
+        let mut m = Self::zeroed();
         zmq_msg_init(m.0.as_mut_ptr().cast());
         m
     }
@@ -58,7 +64,7 @@ fn msg_init_close() {
 /// `zmq_msg_init_size` allocates writable memory
 #[test]
 fn msg_init_size() {
-    let mut m = ZmqMsg([0u8; 64]);
+    let mut m = ZmqMsg::zeroed();
     assert_eq!(zmq_msg_init_size(m.0.as_mut_ptr().cast(), 16), 0);
     assert_eq!(zmq_msg_size(m.0.as_ptr().cast()), 16);
 
@@ -72,7 +78,7 @@ fn msg_init_size() {
 
 #[test]
 fn msg_init_data_and_buffer_reject_null_nonzero_payload() {
-    let mut m = ZmqMsg([0u8; 64]);
+    let mut m = ZmqMsg::zeroed();
     assert_eq!(
         zmq_msg_init_data(
             m.0.as_mut_ptr().cast(),
@@ -95,7 +101,7 @@ fn msg_init_data_and_buffer_reject_null_nonzero_payload() {
 #[test]
 fn msg_move_and_copy_self_alias_are_noops() {
     let payload = b"alias";
-    let mut m = ZmqMsg([0u8; 64]);
+    let mut m = ZmqMsg::zeroed();
     assert_eq!(
         zmq_msg_init_buffer(
             m.0.as_mut_ptr().cast(),
@@ -152,7 +158,7 @@ fn msg_set_handles_supported_and_invalid_properties() {
 #[test]
 fn msg_init_buffer() {
     let payload = b"hello buffer";
-    let mut m = ZmqMsg([0u8; 64]);
+    let mut m = ZmqMsg::zeroed();
     assert_eq!(
         zmq_msg_init_buffer(
             m.0.as_mut_ptr().cast(),
@@ -184,7 +190,7 @@ fn msg_init_data_with_free_fn() {
     assert!(!buf.is_null());
     unsafe { std::ptr::write_bytes(buf.cast::<u8>(), 0x55, 8) };
 
-    let mut m = ZmqMsg([0u8; 64]);
+    let mut m = ZmqMsg::zeroed();
     assert_eq!(
         zmq_msg_init_data(
             m.0.as_mut_ptr().cast(),
@@ -204,7 +210,7 @@ fn msg_init_data_with_free_fn() {
 /// `zmq_msg_move` transfers ownership; src becomes empty
 #[test]
 fn msg_move() {
-    let mut src = ZmqMsg([0u8; 64]);
+    let mut src = ZmqMsg::zeroed();
     zmq_msg_init_buffer(src.0.as_mut_ptr().cast(), b"move-me".as_ptr().cast(), 7);
 
     let mut dst = ZmqMsg::new();
@@ -223,7 +229,7 @@ fn msg_move() {
 /// `zmq_msg_copy` makes an independent copy
 #[test]
 fn msg_copy() {
-    let mut src = ZmqMsg([0u8; 64]);
+    let mut src = ZmqMsg::zeroed();
     zmq_msg_init_buffer(src.0.as_mut_ptr().cast(), b"copy-me".as_ptr().cast(), 7);
 
     let mut dst = ZmqMsg::new();
@@ -253,7 +259,7 @@ fn msg_send_recv_roundtrip() {
     set_timeo(pull, ZMQ_RCVTIMEO, 1000);
 
     let payload = b"msg api roundtrip";
-    let mut out_m = ZmqMsg([0u8; 64]);
+    let mut out_m = ZmqMsg::zeroed();
     zmq_msg_init_buffer(
         out_m.0.as_mut_ptr().cast(),
         payload.as_ptr().cast(),
@@ -345,7 +351,7 @@ fn msg_send_then_raw_recv() {
     std::thread::sleep(Duration::from_millis(20));
     set_timeo(pull, ZMQ_RCVTIMEO, 1000);
 
-    let mut m = ZmqMsg([0u8; 64]);
+    let mut m = ZmqMsg::zeroed();
     zmq_msg_init_buffer(m.0.as_mut_ptr().cast(), b"raw recv".as_ptr().cast(), 8);
     zmq_msg_send(m.0.as_mut_ptr().cast(), push, 0);
 
@@ -398,7 +404,11 @@ fn kind_bytes_arc_stolen_on_zmq_msg_send() {
         assert_eq!(rc as usize, payload.len());
 
         // zmq_msg_send zeros the msg on success.
-        assert_eq!(msg.0, [0u8; 64], "msg must be zeroed after zmq_msg_send");
+        assert_eq!(
+            msg.0,
+            ZmqMsg::zeroed().0,
+            "msg must be zeroed after zmq_msg_send"
+        );
 
         // Verify forwarded data arrived intact.
         let mut out = ZmqMsg::new();

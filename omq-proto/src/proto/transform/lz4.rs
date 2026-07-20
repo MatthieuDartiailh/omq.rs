@@ -17,6 +17,10 @@
 //! silently and uses the installed dict on its receive side. Per RFC §6.2,
 //! dicts are 1..=8192 bytes and shipped at most once per direction per
 //! connection.
+//!
+//! 32-bit targets can parse the 64-bit wire length fields, but decoded
+//! plaintext is bounded by platform allocation size (`isize::MAX`) and
+//! by configured message limits.
 
 use bytes::Bytes;
 pub use lz4rip::block::DictTrainer;
@@ -65,6 +69,17 @@ pub const MAX_DICT_BYTES: usize = 8192;
 
 /// Default auto-train dictionary capacity in bytes.
 const DEFAULT_DICT_CAPACITY: usize = 2048;
+
+fn decode_len(declared: u64, label: &str) -> Result<usize> {
+    let size = usize::try_from(declared)
+        .map_err(|_| Error::Protocol(format!("{label} declared size exceeds usize")))?;
+    if size > isize::MAX as usize {
+        return Err(Error::Protocol(format!(
+            "{label} declared size exceeds maximum allocation"
+        )));
+    }
+    Ok(size)
+}
 
 pub fn is_dict_shipment(msg: &Message) -> bool {
     msg.len() == 1
@@ -508,8 +523,7 @@ fn decode_lz4b(
     }
     let declared = u64::from_le_bytes(body[..8].try_into().unwrap());
     let block = &body[8..];
-    let decompressed_size = usize::try_from(declared)
-        .map_err(|_| Error::Protocol("LZ4B declared size exceeds usize".into()))?;
+    let decompressed_size = decode_len(declared, "LZ4B")?;
     if decompressed_size > block_size {
         return Err(Error::Protocol(
             "LZ4B declared size exceeds block limit; use LZ4M for large parts".into(),
@@ -544,8 +558,7 @@ fn decode_lz4m(
         ));
     }
     let declared = u64::from_le_bytes(body[..8].try_into().unwrap());
-    let decompressed_size = usize::try_from(declared)
-        .map_err(|_| Error::Protocol("LZ4M declared size exceeds usize".into()))?;
+    let decompressed_size = decode_len(declared, "LZ4M")?;
     take_budget(budget, decompressed_size)?;
 
     // Decompression-bomb guard. `decompressed_size` is an attacker-controlled

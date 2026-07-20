@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replace the unreleased 64-bit cursor change with pointer-width cursors
+  (`AtomicUsize` + `usize`) and a half-range capacity guard so 32-bit targets
+  with pointer atomics can run safely.
+- Use 64-bit cursors (`AtomicU64` + `u64`) instead of pointer-width cursors,
+  allowing 32-bit targets with native 64-bit atomics to run without aliasing at
+  the 4 GiB cursor boundary.
+
 ## [0.3.8] - 2026-07-19
 
 ### Added

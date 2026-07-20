@@ -162,6 +162,7 @@ const ZMQ_IO_THREADS: c_int = 1;
 const ZMQ_MAX_SOCKETS: c_int = 2;
 const ZMQ_SOCKET_LIMIT: c_int = 3;
 const ZMQ_MAX_MSGSZ: c_int = 5;
+const ZMQ_MSG_T_SIZE: c_int = 6;
 const ZMQ_IPV6_CTX: c_int = 42;
 
 #[unsafe(no_mangle)]
@@ -205,6 +206,7 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
         ZMQ_IO_THREADS => ctx.configured_io_threads.load(Ordering::Acquire),
         ZMQ_MAX_SOCKETS | ZMQ_SOCKET_LIMIT => ctx.max_sockets.load(Ordering::Relaxed),
         ZMQ_MAX_MSGSZ => ctx.max_msg_size.load(Ordering::Relaxed) as c_int,
+        ZMQ_MSG_T_SIZE => c_int::try_from(crate::msg::ZMQ_MSG_T_SIZE).unwrap_or(c_int::MAX),
         ZMQ_IPV6_CTX => 0,
         _ => crate::error::fail(libc::EINVAL),
     }
