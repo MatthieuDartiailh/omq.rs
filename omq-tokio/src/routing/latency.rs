@@ -156,6 +156,31 @@ impl Submitter {
         }
     }
 
+    pub(crate) async fn wait_send_progress(&self) {
+        let notified = {
+            let state = self.state.lock().expect("latency send state");
+            if state
+                .peers
+                .iter()
+                .any(|peer| peer.target.has_direct_writer())
+            {
+                None
+            } else {
+                state
+                    .peers
+                    .iter()
+                    .find_map(|peer| peer.target.space_available())
+            }
+        };
+        if let Some(notified) = notified {
+            notified.notified().await;
+        } else if self.queue.len() != 0 {
+            self.queue.wait_space_available().await;
+        } else {
+            tokio::task::yield_now().await;
+        }
+    }
+
     pub(crate) fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         if self.queue.len() != 0 {
             return self.queue.try_send(msg).map_err(TrySendError::Full);

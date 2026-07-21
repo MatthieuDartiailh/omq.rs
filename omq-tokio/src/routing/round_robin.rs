@@ -240,6 +240,36 @@ impl Submitter {
         }
     }
 
+    pub(crate) async fn wait_send_progress(&self) {
+        let space_available = {
+            let mut active = self.active.lock().expect("round_robin active");
+            if active.should_use_fallback() {
+                None
+            } else {
+                active.next_space_notify_any()
+            }
+        };
+
+        let Some(space_available) = space_available else {
+            if self.queue.is_closed() {
+                return;
+            }
+            let queue_space = self.queue.space_notified();
+            let active_changed = self.active_changed.notified();
+            tokio::pin!(queue_space);
+            tokio::pin!(active_changed);
+            queue_space.as_mut().enable();
+            active_changed.as_mut().enable();
+            tokio::select! {
+                () = queue_space => {}
+                () = active_changed => {}
+            }
+            return;
+        };
+
+        space_available.notified().await;
+    }
+
     pub(crate) fn try_send(
         &self,
         mut msg: Message,

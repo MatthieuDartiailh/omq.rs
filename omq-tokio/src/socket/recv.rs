@@ -828,6 +828,43 @@ impl SpscAwareRecv {
         pair.wait_for_space();
         true
     }
+
+    pub(crate) async fn wait_for_spsc_space_async(&self, msg: &Message) -> bool {
+        if !self.send_ring_available.load(Ordering::Acquire) {
+            return false;
+        }
+        let pair = self.send_ring.load_full();
+        let Some(pair) = pair.as_ref() else {
+            return false;
+        };
+        if !pair.recv_ready.load(Ordering::Acquire)
+            || pair
+                .max_message_size
+                .is_some_and(|max| msg.byte_len() > max)
+            || pair.producer.is_consumer_dropped()
+        {
+            return false;
+        }
+        if !pair.producer.is_full() {
+            return true;
+        }
+
+        let notified = pair.space_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !pair.recv_ready.load(Ordering::Acquire)
+            || pair
+                .max_message_size
+                .is_some_and(|max| msg.byte_len() > max)
+            || pair.producer.is_consumer_dropped()
+        {
+            return false;
+        }
+        if pair.producer.is_full() {
+            notified.await;
+        }
+        true
+    }
 }
 
 #[cfg(test)]

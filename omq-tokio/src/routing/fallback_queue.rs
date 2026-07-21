@@ -161,6 +161,10 @@ impl FallbackQueue {
         self.inner.space_available.notified()
     }
 
+    pub(crate) async fn wait_space_available(&self) {
+        self.inner.space_available.notified().await;
+    }
+
     pub(crate) fn shutdown(&self) {
         self.inner.queue.close();
         let mut drained = 0usize;

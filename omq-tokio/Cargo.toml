@@ -330,6 +330,10 @@ name = "omq_plain"
 path = "tests/plain.rs"
 
 [[test]]
+name = "omq_proxy"
+path = "tests/proxy.rs"
+
+[[test]]
 name = "omq_pub_sub"
 path = "tests/pub_sub.rs"
 
