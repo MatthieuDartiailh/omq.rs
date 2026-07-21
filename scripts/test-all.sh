@@ -17,7 +17,9 @@
 #   OMQ_PERF_QUIESCE_SECS=N
 #                       quiet sleep before perf gate after no test/build
 #                       procs remain (default 10)
+#   OMQ_STRESS=1        run ignored local stress tests
 #   OMQ_STRESS_ROUNDS=N connect-before-bind stress rounds (default 40)
+#   OMQ_LOOM=1          run yring loom tests
 set -euo pipefail
 
 _repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -93,6 +95,11 @@ run() {
 
 omq_cargo_with_rust_tools() {
     RUSTC="$OMQ_RUSTC" RUSTDOC="$OMQ_RUSTDOC" exec omq_cargo "$@"
+}
+
+omq_cargo_with_loom() {
+    export RUSTFLAGS="--cfg loom ${RUSTFLAGS:-}"
+    omq_cargo_with_rust_tools "$@"
 }
 
 # Run a function in the background, keeping at most $jobs parallel workers.
@@ -309,7 +316,24 @@ if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
 fi
 
 # ---------------------------------------------------------------- #
-# 5) pyomq sync + asyncio + cross-impl interop. Built out-of-tree
+# 5) Local stress / exhaustive scheduling checks. Opt in because these
+#    are slow or expensive on developer machines.
+# ---------------------------------------------------------------- #
+if [[ "${OMQ_STRESS:-}" == "1" ]]; then
+    run omq_cargo_with_rust_tools test -p omq-tokio --test omq_stress_connect_before_bind -- --ignored
+    run omq_cargo_with_rust_tools test -p omq-tokio --test omq_transmit_slot_stress -- --ignored
+else
+    echo "skip: OMQ_STRESS=1"
+fi
+
+if [[ "${OMQ_LOOM:-}" == "1" ]]; then
+    run omq_cargo_with_loom test -p yring --features async --test loom
+else
+    echo "skip: OMQ_LOOM=1"
+fi
+
+# ---------------------------------------------------------------- #
+# 6) pyomq sync + asyncio + cross-impl interop. Built out-of-tree
 #    (its own Cargo.lock + maturin); skip when the dev venv isn't
 #    set up. `OMQ_SKIP_PYOMQ=1` overrides.
 # ---------------------------------------------------------------- #

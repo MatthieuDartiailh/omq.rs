@@ -48,8 +48,9 @@ impl DataSignal {
     /// Consumer: if the source is non-empty after `clear()`, re-fire
     /// the notification to cover the race where a producer pushes
     /// between `clear` and the next `notified().await`.
+    /// Returns `true` when this call fired a wake.
     #[inline]
-    pub(crate) fn rearm_if_nonempty(&self, is_empty: bool) {
+    pub(crate) fn rearm_if_nonempty(&self, is_empty: bool) -> bool {
         if !is_empty
             && self
                 .pending
@@ -57,6 +58,9 @@ impl DataSignal {
                 .is_ok()
         {
             self.notify.notify_one();
+            true
+        } else {
+            false
         }
     }
 
@@ -128,7 +132,7 @@ mod tests {
         let s = sig.clone();
         let _ = timeout(Duration::from_secs(1), s.notified()).await;
         sig.clear();
-        sig.rearm_if_nonempty(false);
+        assert!(sig.rearm_if_nonempty(false));
 
         let s2 = sig.clone();
         let handle =
@@ -143,7 +147,7 @@ mod tests {
         let s = sig.clone();
         let _ = timeout(Duration::from_secs(1), s.notified()).await;
         sig.clear();
-        sig.rearm_if_nonempty(true);
+        assert!(!sig.rearm_if_nonempty(true));
 
         let s2 = sig.clone();
         let handle =

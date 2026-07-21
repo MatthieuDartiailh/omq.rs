@@ -445,7 +445,7 @@ fn drain_yring(
 ) -> usize {
     let mut drained = 0;
     while !budget.exhausted() {
-        let (item, _) = drain_yring_one(consumer, batch_remaining);
+        let (item, _) = drain_yring_one_up_to(consumer, batch_remaining, budget.remaining_msgs());
         let Some(item) = item else {
             break;
         };
@@ -465,6 +465,32 @@ fn drain_yring_one(
     loop {
         if *batch_remaining == 0 {
             *batch_remaining = consumer.prefetch();
+            if *batch_remaining == 0 {
+                return (None, false);
+            }
+        }
+        if let Some(item) = consumer.pop() {
+            *batch_remaining -= 1;
+            if *batch_remaining == 0 {
+                consumer.release();
+                return (Some(item), true);
+            }
+            return (Some(item), false);
+        }
+        consumer.release();
+        *batch_remaining = 0;
+    }
+}
+
+/// Pop one message from a prefetched window capped by caller budget.
+fn drain_yring_one_up_to(
+    consumer: &mut yring::Consumer<RecvItem>,
+    batch_remaining: &mut usize,
+    prefetch_limit: usize,
+) -> (Option<RecvItem>, bool) {
+    loop {
+        if *batch_remaining == 0 {
+            *batch_remaining = consumer.prefetch_up_to(prefetch_limit);
             if *batch_remaining == 0 {
                 return (None, false);
             }
@@ -536,9 +562,20 @@ impl SpscAwareRecv {
                     self.blocking_recv_waker.cancel_sleep();
                     return Err(Error::Closed);
                 }
-                DrainResult::Empty => std::thread::park(),
+                DrainResult::Empty => {
+                    if !self.buffered_sources_empty() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        continue;
+                    }
+                    std::thread::park();
+                }
             }
         }
+    }
+
+    fn buffered_sources_empty(&self) -> bool {
+        let guard = self.drain_state.lock().unwrap();
+        Self::state_is_empty(&guard)
     }
 
     fn try_drain(&self) -> DrainResult {
@@ -561,8 +598,12 @@ impl SpscAwareRecv {
         let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
         if result.is_none() && Self::state_is_empty(state) {
             self.recv_notify.clear();
-            self.recv_notify
-                .rearm_if_nonempty(Self::state_is_empty(state));
+            if self
+                .recv_notify
+                .rearm_if_nonempty(Self::state_is_empty(state))
+            {
+                self.blocking_recv_waker.wake();
+            }
         }
         drop(guard);
 
@@ -870,7 +911,8 @@ impl SpscAwareRecv {
 #[cfg(test)]
 mod tests {
     use super::{
-        RECV_BATCH_BYTES, RecvItem, RecvSource, drain_yring, drain_yring_one, recv_source_at,
+        RECV_BATCH_BYTES, RECV_BATCH_MESSAGES, RecvItem, RecvSource, drain_yring, drain_yring_one,
+        recv_source_at,
     };
     use omq_proto::Message;
     use omq_proto::flow::DrainBudget;
@@ -954,6 +996,34 @@ mod tests {
             1
         );
         assert_eq!(batch.len(), 5);
+    }
+
+    #[test]
+    fn throughput_drain_prefetches_only_message_budget() {
+        let (mut producer, mut consumer) = yring::spsc(RECV_BATCH_MESSAGES + 1);
+        for _ in 0..RECV_BATCH_MESSAGES {
+            producer
+                .push(RecvItem::new(Message::from_slice(b"batch")))
+                .unwrap();
+        }
+        producer
+            .push(RecvItem::new(Message::from_slice(b"next")))
+            .unwrap();
+        producer.flush();
+
+        let mut batch = std::collections::VecDeque::new();
+        let mut budget = DrainBudget::new(RECV_BATCH_MESSAGES, usize::MAX);
+        let mut remaining = 0;
+        assert_eq!(
+            drain_yring(&mut consumer, &mut batch, &mut remaining, &mut budget),
+            RECV_BATCH_MESSAGES
+        );
+        assert_eq!(batch.len(), RECV_BATCH_MESSAGES);
+        assert_eq!(remaining, 0);
+        assert!(!consumer.is_empty());
+
+        let next = consumer.prefetch_and_pop().unwrap();
+        assert_eq!(next.message.part_bytes(0).unwrap(), &b"next"[..]);
     }
 
     #[test]

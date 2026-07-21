@@ -83,6 +83,12 @@ impl DrainBudget {
     }
 
     #[must_use]
+    /// Remaining item count before the message cap is exhausted.
+    pub fn remaining_msgs(&self) -> usize {
+        self.max_msgs.saturating_sub(self.msgs)
+    }
+
+    #[must_use]
     /// Number of accounted bytes in the current batch.
     pub fn bytes(&self) -> usize {
         self.bytes
