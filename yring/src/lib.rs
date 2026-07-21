@@ -183,18 +183,6 @@ impl<T> Ring<T> {
     }
 
     #[inline]
-    pub(crate) fn prefetch_up_to(&self, cached_tail: &mut Cursor, limit: usize) -> usize {
-        if limit == 0 {
-            return 0;
-        }
-        let new_tail = self.tail.0.load(Ordering::Acquire);
-        let available = new_tail.wrapping_sub(*cached_tail);
-        let count = available.min(limit);
-        *cached_tail = cached_tail.wrapping_add(count);
-        Self::count(count)
-    }
-
-    #[inline]
     pub(crate) fn consumer_is_empty(&self, head: Cursor, cached_tail: Cursor) -> bool {
         head == cached_tail && self.tail.0.load(Ordering::Acquire) == head
     }
@@ -512,16 +500,6 @@ impl<T> Consumer<T> {
         self.ring.prefetch(&mut self.cached_tail)
     }
 
-    /// Load up to `limit` items flushed since the last prefetch. One
-    /// Acquire load. Returns the count of newly prefetched items.
-    ///
-    /// This only extends the local visible window. It does not consume
-    /// items and does not release slots to the producer.
-    #[inline]
-    pub fn prefetch_up_to(&mut self, limit: usize) -> usize {
-        self.ring.prefetch_up_to(&mut self.cached_tail, limit)
-    }
-
     /// Convenience: prefetch + pop + release. For callers that don't
     /// need batching.
     #[inline]
@@ -678,42 +656,14 @@ mod tests {
     }
 
     #[test]
-    fn prefetch_up_to_limits_visible_window() {
-        let (mut p, mut c) = spsc::<u32>(8);
-        for i in 0..5 {
-            p.push(i).unwrap();
-        }
-
-        assert_eq!(c.prefetch_up_to(0), 0);
-        assert!(c.pop().is_none());
-
-        p.flush();
-        assert_eq!(c.prefetch_up_to(2), 2);
-        assert_eq!(c.pop(), Some(0));
-        assert_eq!(c.pop(), Some(1));
-        assert!(c.pop().is_none());
-        c.release();
-
-        assert_eq!(c.prefetch_up_to(2), 2);
-        assert_eq!(c.pop(), Some(2));
-        assert_eq!(c.pop(), Some(3));
-        c.release();
-
-        assert_eq!(c.prefetch_up_to(2), 1);
-        assert_eq!(c.pop(), Some(4));
-        c.release();
-        assert_eq!(c.prefetch_up_to(2), 0);
-    }
-
-    #[test]
-    fn release_after_prefetch_up_to_releases_only_popped_items() {
+    fn release_after_prefetch_releases_only_popped_items() {
         let (mut p, mut c) = spsc::<u32>(2);
 
         p.push(10).unwrap();
         p.push(20).unwrap();
         p.flush();
 
-        assert_eq!(c.prefetch_up_to(2), 2);
+        assert_eq!(c.prefetch(), 2);
         assert_eq!(c.pop(), Some(10));
         c.release();
 
@@ -726,30 +676,9 @@ mod tests {
         p.push(40).unwrap();
         p.flush();
 
-        assert_eq!(c.prefetch_up_to(2), 2);
+        assert_eq!(c.prefetch(), 2);
         assert_eq!(c.pop(), Some(30));
         assert_eq!(c.pop(), Some(40));
-        assert_eq!(c.pop(), None);
-        c.release();
-    }
-
-    #[test]
-    fn prefetch_up_to_extends_existing_visible_window() {
-        let (mut p, mut c) = spsc::<u32>(8);
-        for i in 0..5 {
-            p.push(i).unwrap();
-        }
-        p.flush();
-
-        assert_eq!(c.prefetch_up_to(2), 2);
-        assert_eq!(c.prefetch_up_to(2), 2);
-        for i in 0..4 {
-            assert_eq!(c.pop(), Some(i));
-        }
-        assert_eq!(c.pop(), None);
-
-        assert_eq!(c.prefetch_up_to(2), 1);
-        assert_eq!(c.pop(), Some(4));
         assert_eq!(c.pop(), None);
         c.release();
     }
@@ -864,33 +793,6 @@ mod tests {
         assert_eq!(c.pop(), None);
         c.release();
         assert!(p.is_empty());
-    }
-
-    #[test]
-    fn prefetch_up_to_handles_wrapped_counters() {
-        let (mut p, mut c) = spsc::<u32>(4);
-        let base: Cursor = usize::MAX - 1;
-        p.cursor = base;
-        p.cached_head = base;
-        c.head = base;
-        c.cached_tail = base;
-        p.ring.head.0.store(base, Ordering::Relaxed);
-        p.ring.tail.0.store(base, Ordering::Relaxed);
-
-        p.push(1).unwrap();
-        p.push(2).unwrap();
-        p.push(3).unwrap();
-        p.flush();
-
-        assert_eq!(c.prefetch_up_to(2), 2);
-        assert_eq!(c.pop(), Some(1));
-        assert_eq!(c.pop(), Some(2));
-        c.release();
-
-        assert_eq!(c.prefetch_up_to(2), 1);
-        assert_eq!(c.pop(), Some(3));
-        assert_eq!(c.pop(), None);
-        c.release();
     }
 
     #[test]

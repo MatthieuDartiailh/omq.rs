@@ -56,36 +56,7 @@ fn push_full_release_retry() {
 }
 
 #[test]
-fn prefetch_up_to_drains_in_bounded_windows() {
-    loom::model(|| {
-        let (mut p, mut c) = yring::spsc::<u32>(2);
-
-        let h = thread::spawn(move || {
-            p.push(10).unwrap();
-            p.push(20).unwrap();
-            p.flush();
-        });
-
-        let mut received = Vec::new();
-        while received.len() < 2 {
-            if c.prefetch_up_to(1) > 0 {
-                if let Some(v) = c.pop() {
-                    received.push(v);
-                }
-                assert_eq!(c.pop(), None);
-                c.release();
-            } else {
-                thread::yield_now();
-            }
-        }
-
-        h.join().unwrap();
-        assert_eq!(received, [10, 20]);
-    });
-}
-
-#[test]
-fn release_after_prefetch_up_to_releases_only_popped_items() {
+fn release_after_prefetch_releases_only_popped_items() {
     use loom::sync::Arc;
     use loom::sync::atomic::{AtomicBool, Ordering};
 
@@ -121,7 +92,7 @@ fn release_after_prefetch_up_to_releases_only_popped_items() {
             p.flush();
         });
 
-        assert_eq!(c.prefetch_up_to(2), 2);
+        assert_eq!(c.prefetch(), 2);
         assert_eq!(c.pop(), Some(10));
         c.release();
         released_one.store(true, Ordering::Release);
@@ -134,7 +105,7 @@ fn release_after_prefetch_up_to_releases_only_popped_items() {
         c.release();
 
         loop {
-            if c.prefetch_up_to(2) > 0 {
+            if c.prefetch() > 0 {
                 assert_eq!(c.pop(), Some(30));
                 assert_eq!(c.pop(), Some(40));
                 assert_eq!(c.pop(), None);
@@ -213,42 +184,6 @@ fn pointer_width_cursor_wrap_boundary() {
         loop {
             if c.prefetch() > 0 {
                 assert_eq!(c.pop(), Some(10));
-                assert_eq!(c.pop(), Some(20));
-                assert_eq!(c.pop(), None);
-                c.release();
-                break;
-            }
-            thread::yield_now();
-        }
-
-        h.join().unwrap();
-    });
-}
-
-#[test]
-fn prefetch_up_to_pointer_width_cursor_wrap_boundary() {
-    loom::model(|| {
-        let base = usize::MAX - 1;
-        let (mut p, mut c) = yring::loom_spsc_with_cursors::<u32>(2, base);
-
-        let h = thread::spawn(move || {
-            p.push(10).unwrap();
-            p.push(20).unwrap();
-            p.flush();
-        });
-
-        loop {
-            if c.prefetch_up_to(1) > 0 {
-                assert_eq!(c.pop(), Some(10));
-                assert_eq!(c.pop(), None);
-                c.release();
-                break;
-            }
-            thread::yield_now();
-        }
-
-        loop {
-            if c.prefetch_up_to(1) > 0 {
                 assert_eq!(c.pop(), Some(20));
                 assert_eq!(c.pop(), None);
                 c.release();

@@ -445,7 +445,7 @@ fn drain_yring(
 ) -> usize {
     let mut drained = 0;
     while !budget.exhausted() {
-        let (item, _) = drain_yring_one_up_to(consumer, batch_remaining, budget.remaining_msgs());
+        let (item, _) = drain_yring_one(consumer, batch_remaining);
         let Some(item) = item else {
             break;
         };
@@ -465,32 +465,6 @@ fn drain_yring_one(
     loop {
         if *batch_remaining == 0 {
             *batch_remaining = consumer.prefetch();
-            if *batch_remaining == 0 {
-                return (None, false);
-            }
-        }
-        if let Some(item) = consumer.pop() {
-            *batch_remaining -= 1;
-            if *batch_remaining == 0 {
-                consumer.release();
-                return (Some(item), true);
-            }
-            return (Some(item), false);
-        }
-        consumer.release();
-        *batch_remaining = 0;
-    }
-}
-
-/// Pop one message from a prefetched window capped by caller budget.
-fn drain_yring_one_up_to(
-    consumer: &mut yring::Consumer<RecvItem>,
-    batch_remaining: &mut usize,
-    prefetch_limit: usize,
-) -> (Option<RecvItem>, bool) {
-    loop {
-        if *batch_remaining == 0 {
-            *batch_remaining = consumer.prefetch_up_to(prefetch_limit);
             if *batch_remaining == 0 {
                 return (None, false);
             }
@@ -999,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn throughput_drain_prefetches_only_message_budget() {
+    fn throughput_drain_tracks_prefetched_remainder() {
         let (mut producer, mut consumer) = yring::spsc(RECV_BATCH_MESSAGES + 1);
         for _ in 0..RECV_BATCH_MESSAGES {
             producer
@@ -1019,7 +993,7 @@ mod tests {
             RECV_BATCH_MESSAGES
         );
         assert_eq!(batch.len(), RECV_BATCH_MESSAGES);
-        assert_eq!(remaining, 0);
+        assert_eq!(remaining, 1);
         assert!(!consumer.is_empty());
 
         let next = consumer.prefetch_and_pop().unwrap();

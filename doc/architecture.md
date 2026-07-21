@@ -36,9 +36,12 @@ thread run with zero contention from connections on other threads.
   where a `multi_thread` runtime can push a single TCP pipe to its
   limit. It does not scale fan-out across threads.
 
-`Context::socket()` creates sockets whose driver tasks run on the
-context's runtime. `Context::block_on()` runs a future on the owned
-runtime and blocks the caller (not available on `Context::current()`).
+`Context::socket()` creates async sockets whose driver tasks run on the
+context's runtime. With an owned context, callers await socket futures
+from their own async runtime while OMQ IO stays on the context's runtime
+threads. `Context::block_on()` is a plain-`fn main()` helper that runs a
+future on the owned runtime and blocks the caller (not available on
+`Context::current()`).
 
 ## Blocking API (background IO)
 

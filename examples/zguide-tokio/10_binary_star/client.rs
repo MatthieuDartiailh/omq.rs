@@ -8,68 +8,70 @@
 
 use std::time::Duration;
 
-use omq_tokio::{Context, Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Context, Endpoint, Message, Options, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
+    args.get(index).map_or_else(
+        || default.parse().unwrap(),
+        |s| s.parse().expect("invalid endpoint"),
+    )
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {
     String::from_utf8_lossy(&msg.part_bytes(idx).unwrap()).to_string()
 }
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let ctx = Context::new();
-    ctx.block_on(async move {
-        let args: Vec<String> = std::env::args().collect();
-        let primary_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-10-primary");
-        let backup_ep = endpoint_or(&args, 2, "ipc://@omq-zguide-10-backup");
-        let n: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
+    let args: Vec<String> = std::env::args().collect();
+    let primary_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-10-primary");
+    let backup_ep = endpoint_or(&args, 2, "ipc://@omq-zguide-10-backup");
+    let n: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
 
-        for i in 0..n {
-            let body = format!("req-{i}");
+    for i in 0..n {
+        let body = format!("req-{i}");
 
-            // Try primary first.
-            let req = Socket::new(SocketType::Req, Options::default());
-            req.connect(primary_ep.clone()).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        // Try primary first.
+        let req = ctx.socket(SocketType::Req, Options::default());
+        req.connect(primary_ep.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
 
-            req.send(Message::single(body.clone())).await.unwrap();
+        req.send(Message::single(body.clone())).await.unwrap();
 
-            match tokio::time::timeout(Duration::from_millis(200), req.recv()).await {
-                Ok(Ok(reply)) => {
-                    println!("client: {body} -> {}", msg_str(&reply, 0));
-                    continue;
-                }
-                Ok(Err(e)) => {
-                    eprintln!("client: recv error from primary: {e}");
-                }
-                Err(_) => {
-                    println!("client: primary timeout for {body}, trying backup");
-                }
+        match tokio::time::timeout(Duration::from_millis(200), req.recv()).await {
+            Ok(Ok(reply)) => {
+                println!("client: {body} -> {}", msg_str(&reply, 0));
+                continue;
             }
-            drop(req);
-
-            // Fallback to backup.
-            let req = Socket::new(SocketType::Req, Options::default());
-            req.connect(backup_ep.clone()).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(20)).await;
-
-            req.send(Message::single(body.clone())).await.unwrap();
-
-            match tokio::time::timeout(Duration::from_secs(1), req.recv()).await {
-                Ok(Ok(reply)) => {
-                    println!("client: {body} -> {}", msg_str(&reply, 0));
-                }
-                Ok(Err(e)) => {
-                    eprintln!("client: recv error from backup: {e}");
-                }
-                Err(_) => {
-                    eprintln!("client: backup also timed out for {body}");
-                }
+            Ok(Err(e)) => {
+                eprintln!("client: recv error from primary: {e}");
+            }
+            Err(_) => {
+                println!("client: primary timeout for {body}, trying backup");
             }
         }
+        drop(req);
 
-        println!("client: done ({n} requests)");
-    });
+        // Fallback to backup.
+        let req = ctx.socket(SocketType::Req, Options::default());
+        req.connect(backup_ep.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        req.send(Message::single(body.clone())).await.unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(1), req.recv()).await {
+            Ok(Ok(reply)) => {
+                println!("client: {body} -> {}", msg_str(&reply, 0));
+            }
+            Ok(Err(e)) => {
+                eprintln!("client: recv error from backup: {e}");
+            }
+            Err(_) => {
+                eprintln!("client: backup also timed out for {body}");
+            }
+        }
+    }
+
+    println!("client: done ({n} requests)");
 }

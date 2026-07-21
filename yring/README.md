@@ -17,9 +17,11 @@ Three pointers instead of two:
 - `tail`: last flushed position (AtomicUsize, producer writes / consumer reads)
 
 `push()` writes to the ring with zero atomics. `flush()` makes all
-pending writes visible with a single Release store. `pop()` reads with
-zero atomics. `prefetch()` loads all available items with a single
-Acquire load. Result: 2 atomic ops per batch, not per item.
+pending writes visible with a single Release store. `prefetch()` loads
+all available items with a single Acquire load. `pop()` reads with zero
+atomics. `release()` publishes consumed slots back to the producer with
+a single Release store. Result: atomic synchronization happens per
+batch, not per item.
 
 This is the core ypipe innovation from ZeroMQ, applied to a fixed-capacity
 ring buffer instead of a linked list.
