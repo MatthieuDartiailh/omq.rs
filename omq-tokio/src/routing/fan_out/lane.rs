@@ -150,6 +150,7 @@ struct LaneWorker {
     mode: FanOutMode,
     lossy: bool,
     peers: FxHashMap<u64, LanePeer>,
+    subscribe_all_count: usize,
     eq: FrameBuffer,
     chunks: Vec<Bytes>,
     #[cfg(feature = "lz4")]
@@ -250,6 +251,7 @@ impl FanOutLanes {
                     mode,
                     lossy,
                     peers: FxHashMap::default(),
+                    subscribe_all_count: 0,
                     eq: FrameBuffer::one_shot(),
                     chunks: Vec::new(),
                     #[cfg(feature = "lz4")]
@@ -431,6 +433,7 @@ impl LaneWorker {
             if shutdown {
                 self.flush_touched(&mut touched);
                 self.peers.clear();
+                self.subscribe_all_count = 0;
                 return;
             }
 
@@ -518,16 +521,24 @@ impl LaneWorker {
                 );
             }
             LaneControl::RemovePeer { peer_id } => {
-                self.peers.remove(&peer_id);
+                if let Some(peer) = self.peers.remove(&peer_id)
+                    && peer.subscriptions.is_subscribe_all()
+                {
+                    self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
+                }
             }
             LaneControl::Subscribe { peer_id, prefix } => {
-                if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.subscriptions.add(&prefix);
+                if let Some(peer) = self.peers.get_mut(&peer_id)
+                    && filter::add_subscription(&mut peer.subscriptions, &prefix)
+                {
+                    self.subscribe_all_count += 1;
                 }
             }
             LaneControl::Cancel { peer_id, prefix } => {
-                if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.subscriptions.remove(&prefix);
+                if let Some(peer) = self.peers.get_mut(&peer_id)
+                    && filter::remove_subscription(&mut peer.subscriptions, &prefix)
+                {
+                    self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
                 }
             }
             LaneControl::Join { peer_id, group } => {
@@ -577,16 +588,19 @@ impl LaneWorker {
 
     async fn dispatch(&mut self, dispatch: &LaneDispatch, touched: &mut SmallVec<[u64; 32]>) {
         let mut peer_ids = SmallVec::<[u64; 32]>::new();
+        let all_subscribe_all =
+            filter::all_peers_subscribe_all(self.mode, self.subscribe_all_count, self.peers.len());
         for (&peer_id, peer) in &self.peers {
             if peer.slot.fanout_active()
-                && filter::peer_matches(
-                    self.mode,
-                    &peer.subscriptions,
-                    &peer.groups,
-                    peer.any_groups,
-                    &dispatch.topic,
-                    dispatch.group.as_deref(),
-                )
+                && (all_subscribe_all
+                    || filter::peer_matches(
+                        self.mode,
+                        &peer.subscriptions,
+                        &peer.groups,
+                        peer.any_groups,
+                        &dispatch.topic,
+                        dispatch.group.as_deref(),
+                    ))
             {
                 peer_ids.push(peer_id);
             }

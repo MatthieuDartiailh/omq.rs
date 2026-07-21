@@ -207,7 +207,6 @@ def libzmq_version() -> str:
 
 MEASURED_CPU = "0,1,2,3"
 OTHER_CPU = "3,4,5"
-SINK_IO_THREADS = "3"
 
 
 def spawn_process(binary: str, *args: str, env: dict | None = None,
@@ -495,7 +494,7 @@ def _run_throughput_once(
     dur = str(duration)
     issues: list = []
     cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
-    recv_env = {**cell_env, "OMQ_IO_THREADS": "1"}
+    recv_env = cell_env
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
         timeout_s = max(int(duration) + 5, 8)
@@ -586,9 +585,7 @@ def _run_pubsub_once(
     else:
         addr = _fresh_addr(addr)
         cleanup_ipc_socket(addr)
-        recv_env = {**cell_env,
-                    "OMQ_IO_THREADS": SINK_IO_THREADS,
-                    "ZMQ_IO_THREADS": SINK_IO_THREADS}
+        recv_env = cell_env
         pub_args = [binary, "pub", addr, str(size)]
         if pub_needs_peers:
             pub_args.append(str(peers))
@@ -659,9 +656,7 @@ def _run_fanout_once(
     cleanup_ipc_socket(addr)
     issues: list = []
     cell_env = {**(env or {}), "OMQ_BENCH_START_AT": f"{time.time() + 2.0:.6f}"}
-    recv_env = {**cell_env,
-                "OMQ_IO_THREADS": SINK_IO_THREADS,
-                "ZMQ_IO_THREADS": SINK_IO_THREADS}
+    recv_env = cell_env
     push_args = [binary, fanout_subcmd, addr, str(size)]
     if fanout_needs_peers:
         push_args.append(str(peers))
@@ -914,7 +909,7 @@ IMPLS = {
         "supports_pubsub": True,
     },
     "omq-tokio-2t": {
-        "binary_from": "omq-tokio",
+        "binary_from": "omq-tokio-1t",
         "prefix": "u",
         "class": "classic",
         "transports": ["tcp", "inproc", "ipc", "ws"],
@@ -979,7 +974,7 @@ IMPLS = {
         "env": {"RZMQ_IO_URING": "1"},
     },
     "omq-tokio-1t": {
-        "binary_from": "omq-tokio",
+        "binary_from": "omq-tokio-1t",
         "prefix": "s1",
         "transports": ["tcp", "ipc"],
         "pub_needs_peer_count": True,
@@ -989,7 +984,7 @@ IMPLS = {
         "env": {"OMQ_IO_THREADS": "1"},
     },
     "omq-tokio-4t": {
-        "binary_from": "omq-tokio",
+        "binary_from": "omq-tokio-1t",
         "prefix": "s4",
         "transports": ["tcp", "ipc"],
         "pub_needs_peer_count": True,
@@ -1023,7 +1018,7 @@ IMPLS = {
         "env": {"ZMQ_IO_THREADS": "4", "ZMQ_BENCH_CURVE": "1"},
     },
     "omq-curve-1t": {
-        "binary_from": "omq-tokio",
+        "binary_from": "omq-tokio-1t",
         "prefix": "oc1",
         "class": "curve",
         "transports": ["tcp"],
@@ -1032,7 +1027,7 @@ IMPLS = {
         "env": {"OMQ_IO_THREADS": "1", "OMQ_BENCH_MECHANISM": "curve"},
     },
     "omq-curve-2t": {
-        "binary_from": "omq-tokio",
+        "binary_from": "omq-tokio-1t",
         "prefix": "oc2",
         "class": "curve",
         "transports": ["tcp"],
@@ -1041,7 +1036,7 @@ IMPLS = {
         "env": {"OMQ_IO_THREADS": "2", "OMQ_BENCH_MECHANISM": "curve"},
     },
     "omq-curve-4t": {
-        "binary_from": "omq-tokio",
+        "binary_from": "omq-tokio-1t",
         "prefix": "oc4",
         "class": "curve",
         "transports": ["tcp"],
@@ -1062,16 +1057,22 @@ def build_peers(impl_names: set[str], ws_needed: bool):
 
     omq_io_names = {"omq-tokio-1t", "omq-tokio-2t", "omq-tokio-4t"}
     curve_omq_names = {"omq-curve-1t", "omq-curve-2t", "omq-curve-4t"}
-    omq_all = {"omq-tokio", "omq-tokio-2t"} | omq_io_names | curve_omq_names
-    if impl_names & omq_all:
-        print("==> building omq-tokio omq_bench_peer...", file=sys.stderr)
+    if "omq-tokio" in impl_names:
+        print("==> building omq-tokio omq_bench_peer_tokio...", file=sys.stderr)
         tokio_features = list(features) if features else []
-        if impl_names & curve_omq_names:
-            tokio_features.append("curve")
         cargo_build("omq-tokio", "omq_bench_peer_tokio", features=tokio_features)
-        tokio_bin = str(ROOT / "target" / "release" / "omq_bench_peer_tokio")
-        for name in omq_all & impl_names:
-            binaries[name] = tokio_bin
+        binaries["omq-tokio"] = str(ROOT / "target" / "release" / "omq_bench_peer_tokio")
+
+    blocking_omq_names = omq_io_names | curve_omq_names
+    if impl_names & blocking_omq_names:
+        print("==> building omq-tokio omq_bench_peer_blocking...", file=sys.stderr)
+        blocking_features = list(features) if features else []
+        if impl_names & curve_omq_names:
+            blocking_features.append("curve")
+        cargo_build("omq-tokio", "omq_bench_peer_blocking", features=blocking_features)
+        blocking_bin = str(ROOT / "target" / "release" / "omq_bench_peer_blocking")
+        for name in blocking_omq_names & impl_names:
+            binaries[name] = blocking_bin
 
     curve_libzmq_names = {"libzmq-curve-1t", "libzmq-curve-2t", "libzmq-curve-4t"}
     if impl_names & ({"libzmq", "libzmq-2t", "libzmq-mt"} | curve_libzmq_names):

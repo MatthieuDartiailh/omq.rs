@@ -137,20 +137,23 @@ impl Submitter {
 
         // Slow path: fallback peers exist, acquire inner mutex.
         let g = self.inner.lock().expect("fanout inner poisoned");
+        let all_subscribe_all =
+            filter::all_peers_subscribe_all(self.mode, g.subscribe_all_count, g.peers.len());
         let fallback_targets: SmallVec<[PeerOutbound; 8]> = g
             .peers
             .values()
             .filter(|p| p.lane.is_none())
             .filter(|p| p.fanout_active)
             .filter(|p| {
-                filter::peer_matches(
-                    self.mode,
-                    &p.subscriptions,
-                    &p.groups,
-                    p.any_groups,
-                    &topic,
-                    group.as_deref(),
-                )
+                all_subscribe_all
+                    || filter::peer_matches(
+                        self.mode,
+                        &p.subscriptions,
+                        &p.groups,
+                        p.any_groups,
+                        &topic,
+                        group.as_deref(),
+                    )
             })
             .map(|p| p.target.clone())
             .collect();
@@ -223,6 +226,7 @@ pub(crate) struct FanOutSend {
 
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
+    subscribe_all_count: usize,
     has_compression: bool,
     compression_dict: Option<Bytes>,
     options: Options,
@@ -280,6 +284,7 @@ impl FanOutSend {
         let lanes = FanOutLanes::spawn(options, mode, lossy, io_pool);
         let inner = Arc::new(Mutex::new(FanOutInner {
             peers: FxHashMap::default(),
+            subscribe_all_count: 0,
             has_compression: false,
             compression_dict: options.compression_dict.clone(),
             options: options.clone(),
@@ -428,6 +433,9 @@ impl FanOutSend {
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(peer) = g.peers.remove(&peer_id) {
+            if peer.subscriptions.is_subscribe_all() {
+                g.subscribe_all_count = g.subscribe_all_count.saturating_sub(1);
+            }
             if peer.lane.is_some() {
                 self.lane_peer_count.fetch_sub(1, Ordering::Release);
             } else {
@@ -445,8 +453,11 @@ impl FanOutSend {
     pub(crate) fn peer_subscribe(&self, peer_id: u64, prefix: Bytes) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
-            p.subscriptions.add(&prefix);
+            let became_subscribe_all = filter::add_subscription(&mut p.subscriptions, &prefix);
             let lane = p.lane;
+            if became_subscribe_all {
+                g.subscribe_all_count += 1;
+            }
             drop(g);
             if let Some(lane) = lane {
                 self.lanes.send_subscribe(lane, peer_id, prefix.clone());
@@ -458,8 +469,11 @@ impl FanOutSend {
     pub(crate) fn peer_cancel(&self, peer_id: u64, prefix: &[u8]) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
-            p.subscriptions.remove(prefix);
+            let stopped_subscribe_all = filter::remove_subscription(&mut p.subscriptions, prefix);
             let lane = p.lane;
+            if stopped_subscribe_all {
+                g.subscribe_all_count = g.subscribe_all_count.saturating_sub(1);
+            }
             drop(g);
             if let Some(lane) = lane {
                 self.lanes
@@ -505,6 +519,7 @@ impl FanOutSend {
         self.lanes.shutdown();
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.clear();
+        g.subscribe_all_count = 0;
         drop(g);
         self.lane_peer_count.store(0, Ordering::Release);
         self.fallback_peer_count.store(0, Ordering::Release);

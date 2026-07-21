@@ -99,7 +99,7 @@ static IMPLS: &[ImplDef] = &[
     },
     ImplDef {
         name: "omq-tokio-2t",
-        binary_from: Some("omq-tokio-ct"),
+        binary_from: Some("omq-tokio-1t"),
         prefix: "u",
         class: Some(ImplClass::Classic),
         main: false,
@@ -259,7 +259,7 @@ static IMPLS: &[ImplDef] = &[
     },
     ImplDef {
         name: "omq-curve-2t",
-        binary_from: Some("omq-tokio-ct"),
+        binary_from: Some("omq-tokio-1t"),
         prefix: "oc2",
         class: Some(ImplClass::Curve),
         main: false,
@@ -279,50 +279,12 @@ fn find_impl(name: &str) -> Option<&'static ImplDef> {
     IMPLS.iter().find(|i| i.name == name)
 }
 
-fn canonical_peer_binary<'a>(
-    binary: &'a Path,
-    def: &ImplDef,
-    binaries: &'a HashMap<String, PathBuf>,
-) -> &'a Path {
-    if def.binary_from.unwrap_or(def.name) == "omq-tokio-ct" {
-        &binaries["omq-tokio-1t"]
-    } else {
-        binary
-    }
-}
-
-fn io_bench_binary<'a>(impl_name: &str, binaries: &'a HashMap<String, PathBuf>) -> &'a Path {
-    if matches!(impl_name, "omq-tokio-2t" | "omq-curve-2t") {
-        &binaries["omq-tokio-1t"]
-    } else {
-        &binaries[impl_name]
-    }
-}
-
+#[cfg(test)]
 fn impl_io_threads(def: &ImplDef) -> &'static str {
     def.env
         .iter()
         .find_map(|&(k, v)| matches!(k, "OMQ_IO_THREADS" | "ZMQ_IO_THREADS").then_some(v))
         .unwrap_or("1")
-}
-
-fn non_io_env(def: &ImplDef) -> Vec<(&'static str, &'static str)> {
-    def.env
-        .iter()
-        .copied()
-        .filter(|(k, _)| *k != "OMQ_IO_THREADS" && *k != "ZMQ_IO_THREADS")
-        .collect()
-}
-
-fn latency_client_io_threads(def: &ImplDef, override_threads: Option<&str>) -> Option<String> {
-    if let Some(threads) = override_threads {
-        return Some(threads.to_string());
-    }
-    if def.name == "omq-tokio-ct" {
-        None
-    } else {
-        Some(impl_io_threads(def).to_string())
-    }
 }
 
 fn all_chart_sizes() -> Vec<u64> {
@@ -398,17 +360,13 @@ fn addr_for(
 fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMap<String, PathBuf> {
     let mut binaries: HashMap<String, PathBuf> = HashMap::new();
     let mut built: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut sources: Vec<&str> = impl_names
+    let sources: Vec<&str> = impl_names
         .iter()
         .map(|&name| {
             let def = find_impl(name).unwrap();
             def.binary_from.unwrap_or(def.name)
         })
         .collect();
-    if sources.contains(&"omq-tokio-ct") && !sources.contains(&"omq-tokio-1t") {
-        sources.push("omq-tokio-1t");
-    }
-
     for source in sources {
         if built.contains(source) {
             continue;
@@ -447,6 +405,13 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                 );
             }
             "omq-tokio-1t" => {
+                let mut features = Vec::new();
+                if needs_ws {
+                    features.push("ws");
+                }
+                if needs_curve {
+                    features.push("curve");
+                }
                 let mut cmd = vec![
                     "cargo",
                     "build",
@@ -457,9 +422,11 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                     "omq_bench_peer_blocking",
                     "-q",
                 ];
-                if needs_curve {
+                let feat_str;
+                if !features.is_empty() {
+                    feat_str = features.join(",");
                     cmd.push("--features");
-                    cmd.push("curve");
+                    cmd.push(&feat_str);
                 }
                 run_build(&cmd);
                 binaries.insert(
@@ -708,11 +675,7 @@ fn run_throughput_once(
     let connect_addr;
 
     let push_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut pull_env: Vec<(&str, &str)> = non_io_env(def);
-    let pull_io_threads = std::env::var("OMQ_BENCH_RECEIVER_IO_THREADS")
-        .unwrap_or_else(|_| impl_io_threads(def).to_string());
-    pull_env.push(("OMQ_IO_THREADS", &pull_io_threads));
-    pull_env.push(("ZMQ_IO_THREADS", &pull_io_threads));
+    let pull_env: Vec<(&str, &str)> = def.env.to_vec();
 
     let push_cmd: Vec<&str>;
     let mut push_proc;
@@ -865,11 +828,7 @@ fn run_pubsub_once(
     let connect_addr;
 
     let mut pub_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut sub_env: Vec<(&str, &str)> = non_io_env(def);
-    let receiver_io_threads = std::env::var("OMQ_BENCH_RECEIVER_IO_THREADS")
-        .unwrap_or_else(|_| impl_io_threads(def).to_string());
-    sub_env.push(("OMQ_IO_THREADS", &receiver_io_threads));
-    sub_env.push(("ZMQ_IO_THREADS", &receiver_io_threads));
+    let mut sub_env: Vec<(&str, &str)> = def.env.to_vec();
     let start_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
@@ -1002,11 +961,7 @@ fn run_fanout_once(
     let connect_addr;
 
     let mut push_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut pull_env: Vec<(&str, &str)> = non_io_env(def);
-    let pull_io_threads = std::env::var("OMQ_BENCH_RECEIVER_IO_THREADS")
-        .unwrap_or_else(|_| impl_io_threads(def).to_string());
-    pull_env.push(("OMQ_IO_THREADS", &pull_io_threads));
-    pull_env.push(("ZMQ_IO_THREADS", &pull_io_threads));
+    let mut pull_env: Vec<(&str, &str)> = def.env.to_vec();
     let start_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
@@ -1172,11 +1127,7 @@ fn run_fanin_once(
     let connect_addr;
 
     let mut pull_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut push_env: Vec<(&str, &str)> = non_io_env(def);
-    let push_io_threads = std::env::var("OMQ_BENCH_SENDER_IO_THREADS")
-        .unwrap_or_else(|_| impl_io_threads(def).to_string());
-    push_env.push(("OMQ_IO_THREADS", &push_io_threads));
-    push_env.push(("ZMQ_IO_THREADS", &push_io_threads));
+    let mut push_env: Vec<(&str, &str)> = def.env.to_vec();
     let start_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
@@ -1333,13 +1284,7 @@ fn run_latency_cell(
     let connect_addr;
 
     let rep_env: Vec<(&str, &str)> = def.env.to_vec();
-    let mut req_env: Vec<(&str, &str)> = non_io_env(def);
-    let req_io_threads_override = std::env::var("OMQ_BENCH_CLIENT_IO_THREADS").ok();
-    let req_io_threads = latency_client_io_threads(def, req_io_threads_override.as_deref());
-    if let Some(req_io_threads) = req_io_threads.as_deref() {
-        req_env.push(("OMQ_IO_THREADS", req_io_threads));
-        req_env.push(("ZMQ_IO_THREADS", req_io_threads));
-    }
+    let req_env: Vec<(&str, &str)> = def.env.to_vec();
 
     let mut rep_cmd = vec![peer_binary_str, "rep"];
     if transport == TransportKind::Tcp {
@@ -1580,8 +1525,8 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 let mut cells = Vec::with_capacity(active_impls.len());
                 for &impl_name in &active_impls {
                     let def = find_impl(impl_name).unwrap();
-                    let binary = io_bench_binary(impl_name, &binaries);
-                    let peer_binary = canonical_peer_binary(binary, def, &binaries);
+                    let binary = binaries[impl_name].as_path();
+                    let peer_binary = binary;
 
                     let result = run_throughput_cell(
                         binary,
@@ -1655,7 +1600,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 let mut cells = Vec::with_capacity(active_impls.len());
                 for &impl_name in &active_impls {
                     let def = find_impl(impl_name).unwrap();
-                    let binary = io_bench_binary(impl_name, &binaries);
+                    let binary = binaries[impl_name].as_path();
 
                     let result = run_latency_cell(
                         binary,
@@ -1737,8 +1682,8 @@ pub(crate) fn run(args: ComparisonsArgs) {
                     let mut cells = Vec::with_capacity(pubsub_impls.len());
                     for &impl_name in &pubsub_impls {
                         let def = find_impl(impl_name).unwrap();
-                        let binary = io_bench_binary(impl_name, &binaries);
-                        let peer_binary = canonical_peer_binary(binary, def, &binaries);
+                        let binary = binaries[impl_name].as_path();
+                        let peer_binary = binary;
 
                         let result = run_pubsub_cell(
                             binary,
@@ -1829,8 +1774,8 @@ pub(crate) fn run(args: ComparisonsArgs) {
                     let mut cells = Vec::with_capacity(fanout_impls.len());
                     for &impl_name in &fanout_impls {
                         let def = find_impl(impl_name).unwrap();
-                        let binary = io_bench_binary(impl_name, &binaries);
-                        let peer_binary = canonical_peer_binary(binary, def, &binaries);
+                        let binary = binaries[impl_name].as_path();
+                        let peer_binary = binary;
 
                         let result = run_fanout_cell(
                             binary,
@@ -1915,8 +1860,8 @@ pub(crate) fn run(args: ComparisonsArgs) {
                     let mut cells = Vec::with_capacity(fanin_impls.len());
                     for &impl_name in &fanin_impls {
                         let def = find_impl(impl_name).unwrap();
-                        let binary = io_bench_binary(impl_name, &binaries);
-                        let peer_binary = canonical_peer_binary(binary, def, &binaries);
+                        let binary = binaries[impl_name].as_path();
+                        let peer_binary = binary;
 
                         let result = run_fanin_cell(
                             binary,
@@ -2007,8 +1952,8 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 let mut cells = Vec::with_capacity(curve_impls.len());
                 for &impl_name in &curve_impls {
                     let def = find_impl(impl_name).unwrap();
-                    let binary = io_bench_binary(impl_name, &binaries);
-                    let peer_binary = canonical_peer_binary(binary, def, &binaries);
+                    let binary = binaries[impl_name].as_path();
+                    let peer_binary = binary;
 
                     let result = run_pubsub_cell(
                         binary,
@@ -2127,20 +2072,47 @@ fn fmt_gbps(val: f64) -> String {
 mod tests {
     use super::*;
 
+    fn io_threads_from_env<'a>(env: &'a [(&'a str, &'a str)]) -> &'a str {
+        env.iter()
+            .find_map(|&(k, v)| matches!(k, "OMQ_IO_THREADS" | "ZMQ_IO_THREADS").then_some(v))
+            .unwrap_or("1")
+    }
+
     #[test]
-    fn latency_client_keeps_ct_embedded_by_default() {
+    fn two_io_omq_impls_use_blocking_binary_source() {
         let ct = find_impl("omq-tokio-ct").unwrap();
         let two_thread = find_impl("omq-tokio-2t").unwrap();
+        let curve_two_thread = find_impl("omq-curve-2t").unwrap();
 
-        assert_eq!(latency_client_io_threads(ct, None), None);
-        assert_eq!(
-            latency_client_io_threads(ct, Some("2")).as_deref(),
-            Some("2")
-        );
-        assert_eq!(
-            latency_client_io_threads(two_thread, None).as_deref(),
-            Some("2")
-        );
+        assert_eq!(ct.binary_from, None);
+        assert_eq!(two_thread.binary_from, Some("omq-tokio-1t"));
+        assert_eq!(curve_two_thread.binary_from, Some("omq-tokio-1t"));
+    }
+
+    #[test]
+    fn paired_benchmark_envs_match_exactly() {
+        for def in IMPLS {
+            let sender_env = def.env.to_vec();
+            let receiver_env = def.env.to_vec();
+            let sender_io = io_threads_from_env(&sender_env);
+            let receiver_io = io_threads_from_env(&receiver_env);
+
+            assert_eq!(sender_env, receiver_env, "{}", def.name);
+            assert_eq!(sender_io, receiver_io, "{}", def.name);
+        }
+    }
+
+    #[test]
+    fn two_io_impls_configure_two_io_threads() {
+        for name in [
+            "omq-tokio-2t",
+            "libzmq-2t",
+            "omq-curve-2t",
+            "libzmq-curve-2t",
+        ] {
+            let def = find_impl(name).unwrap();
+            assert_eq!(impl_io_threads(def), "2", "{name}");
+        }
     }
 
     #[test]
