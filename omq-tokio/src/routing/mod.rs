@@ -163,6 +163,16 @@ impl SendSubmitter {
             Self::Identity(s) => s.try_send(msg),
         }
     }
+
+    pub(crate) async fn wait_send_progress(&self, msg: &Message) {
+        match self {
+            Self::None | Self::FanOut(_) => tokio::task::yield_now().await,
+            Self::RoundRobin(s) => s.wait_send_progress().await,
+            Self::Latency(s) => s.wait_send_progress().await,
+            Self::Exclusive(s) => s.wait_send_progress().await,
+            Self::Identity(s) => s.wait_send_progress(msg).await,
+        }
+    }
 }
 
 impl SendStrategy {

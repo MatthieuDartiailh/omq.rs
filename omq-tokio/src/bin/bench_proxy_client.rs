@@ -1,7 +1,7 @@
 //! Proxy benchmark client: connects PUSH to a proxy frontend and PULL
 //! to its backend, runs a warmup exchange, then measures throughput.
 //!
-//! Usage: `bench_proxy_client` `fe_port` `be_port` `msg_size` `duration_secs`
+//! Usage: `omq_bench_proxy_client` `fe_port` `be_port` `msg_size` `duration_secs`
 //!
 //! Output (stdout): `count` `elapsed_secs` `msg_size`
 

@@ -154,18 +154,36 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
 }
 
 #[tokio::test]
-async fn xsub_send_returns_protocol_error() {
-    // XSUB has no send strategy for normal messages; send() should error.
-    // This documents the current limitation: the XSUB-as-proxy pattern
-    // (forwarding \x01<topic> messages via xsub.send()) is not yet supported.
-    let xsub = omq_tokio::Socket::new(omq_tokio::SocketType::XSub, omq_tokio::Options::default());
-    let r = xsub
-        .send(omq_tokio::Message::single(b"\x01topic".as_ref()))
-        .await;
-    assert!(
-        matches!(r, Err(omq_tokio::Error::Protocol(_))),
-        "XSUB send should return Protocol error; got {r:?}"
-    );
+async fn xsub_send_raw_subscribe_commands() {
+    let publisher_side = Socket::new(SocketType::XPub, Options::default());
+    let subscriber_side = Socket::new(SocketType::XSub, Options::default());
+    let endpoint = "inproc://xsub-send-raw-subscribe".parse().unwrap();
+
+    publisher_side.bind(endpoint).await.unwrap();
+    subscriber_side
+        .connect("inproc://xsub-send-raw-subscribe".parse().unwrap())
+        .await
+        .unwrap();
+
+    subscriber_side
+        .send(Message::single(b"\x01topic".as_ref()))
+        .await
+        .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), publisher_side.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&msg.part_bytes(0).unwrap()[..], b"\x01topic");
+
+    subscriber_side
+        .send(Message::single(b"\x00topic".as_ref()))
+        .await
+        .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), publisher_side.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&msg.part_bytes(0).unwrap()[..], b"\x00topic");
 }
 
 // Raw ZMTP bytes for a ZMTP 3.0 SUB greeting and READY command.

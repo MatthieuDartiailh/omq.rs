@@ -219,6 +219,24 @@ Identity-routed sockets (`ROUTER`, `REP`, `SERVER`, `PEER`) route by peer
 identity. Exclusive sockets (`PAIR`, `CHANNEL`) target one peer. Fair-queue
 recv preserves per-peer ordering while rotating across peers.
 
+## Proxy
+
+`omq-tokio::Proxy` composes two existing sockets. It has no socket type of
+its own and no forwarding yring; local buffering is limited to one pending
+message per direction when a target reports HWM backpressure. Socket HWMs,
+routing policies, and drop/block behavior remain the source of truth.
+
+The loop drains at most `burst_size` complete messages from one direction
+before rechecking control and the opposite direction. Default burst is 64:
+large enough to avoid one `select!` per message under load, bounded enough
+that a hot frontend cannot indefinitely starve backend-to-frontend traffic.
+When a target is full, the proxy retries the pending message before reading
+more from that source.
+
+Steerable control supports `PAUSE`, `RESUME`, `TERMINATE`, and `KILL`.
+`STATISTICS` is omitted. Capture sockets receive best-effort copies via
+nonblocking send and never backpressure data forwarding.
+
 ## Inproc
 
 Inproc bypasses ZMTP framing and kernel I/O. Cross-thread peers use `yring`

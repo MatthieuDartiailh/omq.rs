@@ -152,9 +152,9 @@ on PUSH/PULL proxy (TCP-bound, not async-loop-bound).
 The proxy benchmark previously used Python sender/receiver in one
 subprocess. Python's per-message send/recv overhead (~1.5M msg/s)
 bottlenecked the measurement. Switching to a native omq-compio
-sender/receiver (`bench_proxy_client`) reveals the true proxy throughput:
-~2.4M msg/s for pyomq vs ~1.85M for pyzmq (1.3x). REQ/REP: ~9.5k vs
-~5.3k (1.8x).
+sender/receiver (`omq_bench_proxy_client`) reveals the true proxy
+throughput: ~2.81M msg/s for pyomq vs ~1.53M for pyzmq (1.83x).
+REQ/REP: ~8.4k vs ~4.5k (1.86x).
 
 ### Materialized slot: Mutex -> RwLock
 

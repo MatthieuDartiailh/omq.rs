@@ -305,6 +305,7 @@ impl Socket {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
                 self.inner.send_submitter.send(msg).await
             }
+            SocketType::XSub => self.send_xsub_raw_command(&msg).await,
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
                 self.send_spsc_or_submit(msg).await
@@ -362,6 +363,7 @@ impl Socket {
                     .map_err(TrySendError::Error)?;
                 self.inner.send_submitter.try_send(msg)
             }
+            SocketType::XSub => self.try_send_xsub_raw_command(msg),
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
@@ -376,6 +378,22 @@ impl Socket {
 
     pub(crate) fn wait_for_spsc_space(&self, msg: &Message) -> bool {
         self.inner.recv_rx.wait_for_spsc_space(msg)
+    }
+
+    #[doc(hidden)]
+    pub async fn wait_send_progress_for(&self, msg: &Message) {
+        if self.inner.socket_type == SocketType::XSub && xsub_raw_command(msg).is_ok() {
+            let _ = self.inner.cmd_tx.reserve().await;
+            return;
+        }
+        if self.inner.recv_rx.wait_for_spsc_space_async(msg).await {
+            return;
+        }
+        self.inner.send_submitter.wait_send_progress(msg).await;
+    }
+
+    pub(crate) fn same_socket(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Receive the next message. Blocks until one is available or the socket
@@ -797,6 +815,34 @@ impl omq_proto::socket_api::SocketApi for Socket {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XSubRawCommand {
+    Subscribe,
+    Unsubscribe,
+}
+
+fn xsub_raw_command(msg: &Message) -> Result<(XSubRawCommand, Bytes)> {
+    if msg.len() != 1 {
+        return Err(Error::Protocol(
+            "XSUB raw command must be a single frame".into(),
+        ));
+    }
+    let part = msg.part_bytes(0).unwrap_or_default();
+    let Some((&tag, prefix)) = part.split_first() else {
+        return Err(Error::Protocol("XSUB raw command cannot be empty".into()));
+    };
+    let command = match tag {
+        0x01 => XSubRawCommand::Subscribe,
+        0x00 => XSubRawCommand::Unsubscribe,
+        _ => {
+            return Err(Error::Protocol(
+                "XSUB raw command must start with 0x01 or 0x00".into(),
+            ));
+        }
+    };
+    Ok((command, Bytes::copy_from_slice(prefix)))
+}
+
 /// Validate frame count for socket types that enforce a fixed count but whose
 /// `TypeState::pre_send` has no mutable side effects. This mirrors the check
 /// inside `TypeState::pre_send` for the relevant types so the actor-bypass
@@ -819,6 +865,28 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
 }
 
 impl Socket {
+    async fn send_xsub_raw_command(&self, msg: &Message) -> Result<()> {
+        let (command, prefix) = xsub_raw_command(msg)?;
+        match command {
+            XSubRawCommand::Subscribe => self.subscribe(prefix).await,
+            XSubRawCommand::Unsubscribe => self.unsubscribe(prefix).await,
+        }
+    }
+
+    fn try_send_xsub_raw_command(&self, msg: Message) -> core::result::Result<(), TrySendError> {
+        let (command, prefix) = xsub_raw_command(&msg).map_err(TrySendError::Error)?;
+        let (ack, _rx) = oneshot::channel();
+        let command = match command {
+            XSubRawCommand::Subscribe => SocketCommand::Subscribe { prefix, ack },
+            XSubRawCommand::Unsubscribe => SocketCommand::Unsubscribe { prefix, ack },
+        };
+        match self.inner.cmd_tx.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TrySendError::Full(msg)),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TrySendError::Closed),
+        }
+    }
+
     async fn send_spsc_or_submit(&self, mut msg: Message) -> Result<()> {
         loop {
             match self.inner.recv_rx.try_push_spsc_or_full(msg) {

@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::consts::{ZMQ_DONTWAIT, ZMQ_SNDMORE};
-use crate::error::{ETERM, fail};
+use crate::error::{ETERM, fail, map_omq_err};
 use crate::notify::NotifyHandle;
 use crate::socket::OmqSocket;
 
@@ -42,6 +42,97 @@ impl HasPipeClosed for crate::inproc_bypass::BypassSend {
 impl HasPipeClosed for crate::inproc_bypass::BypassRecv {
     fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool {
         &self.pipe.closed
+    }
+}
+
+pub(crate) enum SendMessageAttempt {
+    Sent,
+    Full(omq_tokio::Message),
+}
+
+/// Non-blocking full-message receive used by `zmq_proxy`.
+///
+/// This reads the same libzmq-facing queues as `zmq_recv`: the direct yring
+/// consumers, plus the inproc byte bypass where applicable. It must not call
+/// `omq_tokio::Socket::try_recv`, because libzmq sockets install a custom
+/// recv sink and the async socket recv pipe is not the owner of that hot path.
+pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Message>, c_int> {
+    use std::sync::atomic::Ordering;
+
+    if sock.drain_nonempty.load(Ordering::Relaxed) {
+        let Ok(mut drain) = sock.recv_drain.lock() else {
+            return Err(ETERM);
+        };
+        if !drain.is_empty() {
+            let parts: Vec<Bytes> = drain.drain(..).collect();
+            sock.drain_nonempty.store(false, Ordering::Relaxed);
+            return Ok(Some(omq_tokio::Message::multipart(parts)));
+        }
+        sock.drain_nonempty.store(false, Ordering::Relaxed);
+    }
+
+    clear_stale_bypass(&sock.bypass_recv);
+    if let Some(bypass) = sock.bypass_recv.get() {
+        if let Some(cons) = sock.recv_cons.get()
+            && let Some(m) = try_pop_dual(cons, sock)
+        {
+            signal_recv_space(sock);
+            return Ok(Some(m));
+        }
+        if let Some((ptr, len)) = bypass.peek() {
+            let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+            let msg = omq_tokio::Message::single(Bytes::copy_from_slice(slice));
+            bypass.advance(len);
+            return Ok(Some(msg));
+        }
+        if bypass.pipe.closed.load(Ordering::Acquire) {
+            return Err(ETERM);
+        }
+        return Ok(None);
+    }
+
+    let Some(cons) = sock.recv_cons.get() else {
+        return Err(ETERM);
+    };
+    if let Some(m) = try_pop_dual(cons, sock) {
+        signal_recv_space(sock);
+        return Ok(Some(m));
+    }
+    Ok(None)
+}
+
+/// Non-blocking full-message send used by `zmq_proxy`.
+///
+/// Single-frame PUSH/PULL inproc messages take the byte bypass. Other
+/// messages go through the materialized omq-tokio socket so type-specific
+/// send behavior, including XSUB raw subscribe commands, stays in one place.
+pub(crate) fn try_send_message(
+    sock: &Arc<OmqSocket>,
+    msg: omq_tokio::Message,
+) -> Result<SendMessageAttempt, c_int> {
+    if msg.len() == 1 {
+        clear_stale_bypass(&sock.bypass_send);
+        if let Some(bypass) = sock.bypass_send.get() {
+            let result = {
+                let data = msg.get(0).unwrap_or(&[]);
+                bypass.push(data)
+            };
+            return match result {
+                Ok(()) => Ok(SendMessageAttempt::Sent),
+                Err(libc::EAGAIN) => Ok(SendMessageAttempt::Full(msg)),
+                Err(e) => Err(e),
+            };
+        }
+    }
+
+    let Some(inner) = sock.inner.get() else {
+        return Err(ETERM);
+    };
+    match inner.try_send(msg) {
+        Ok(()) => Ok(SendMessageAttempt::Sent),
+        Err(omq_tokio::TrySendError::Full(msg)) => Ok(SendMessageAttempt::Full(msg)),
+        Err(omq_tokio::TrySendError::Closed) => Err(ETERM),
+        Err(omq_tokio::TrySendError::Error(e)) => Err(map_omq_err(&e)),
     }
 }
 

@@ -781,3 +781,59 @@ def test_proxy_steerable(tcp_endpoint):
         backend.close()
         control.close()
         ctx.term()
+
+
+def test_proxy_xsub_xpub_forwards_subscriptions():
+    import threading
+    import time
+
+    ctx = zmq.Context()
+    frontend = ctx.socket(zmq.XSUB)
+    backend = ctx.socket(zmq.XPUB)
+    control = ctx.socket(zmq.REP)
+    publisher = ctx.socket(zmq.PUB)
+    subscriber = ctx.socket(zmq.SUB)
+    controller = ctx.socket(zmq.REQ)
+
+    base = f"inproc://proxy-xsub-xpub-{time.time_ns()}"
+    try:
+        frontend.bind(base + "-fe")
+        backend.bind(base + "-be")
+        control.bind(base + "-ctrl")
+        publisher.connect(base + "-fe")
+        subscriber.connect(base + "-be")
+        controller.connect(base + "-ctrl")
+
+        proxy_thread = threading.Thread(
+            target=zmq.proxy_steerable,
+            args=(frontend, backend, None, control),
+            daemon=True,
+        )
+        proxy_thread.start()
+
+        subscriber.subscribe(b"news.")
+        subscriber.rcvtimeo = 200
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            publisher.send(b"news.alpha")
+            publisher.send(b"sports.beta")
+            try:
+                assert subscriber.recv() == b"news.alpha"
+                break
+            except zmq.Again:
+                pass
+        else:
+            raise AssertionError("subscriber never received proxied topic")
+
+        controller.send(b"TERMINATE")
+        assert controller.recv() == b""
+        proxy_thread.join(timeout=2)
+        assert not proxy_thread.is_alive()
+    finally:
+        publisher.close()
+        subscriber.close()
+        controller.close()
+        frontend.close()
+        backend.close()
+        control.close()
+        ctx.term()

@@ -16,6 +16,7 @@ compile_error!("omq-tokio requires target_has_atomic = \"64\"");
 pub mod blocking;
 pub mod context;
 pub mod engine;
+pub mod proxy;
 pub(crate) mod routing;
 pub mod socket;
 pub mod transport;
@@ -44,6 +45,7 @@ pub use omq_proto::options;
 pub use omq_proto::proto;
 
 pub use context::{Context, ContextConfig};
+pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket,

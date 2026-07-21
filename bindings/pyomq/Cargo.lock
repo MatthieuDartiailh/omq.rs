@@ -37,13 +37,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "blume"
-version = "0.4.5"
-dependencies = [
- "event-listener",
-]
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -199,17 +192,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "event-listener"
-version = "5.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
-dependencies = [
- "concurrent-queue",
- "parking",
- "pin-project-lite",
 ]
 
 [[package]]
@@ -514,7 +496,6 @@ name = "omq-tokio"
 version = "0.19.1"
 dependencies = [
  "arc-swap",
- "blume",
  "bytes",
  "concurrent-queue",
  "futures",
@@ -541,12 +522,6 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
-
-[[package]]
-name = "parking"
-version = "2.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
 name = "patricia_tree"

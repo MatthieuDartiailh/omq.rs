@@ -147,6 +147,26 @@ impl Submitter {
         }
     }
 
+    pub(crate) async fn wait_send_progress(&self, msg: &Message) {
+        let Some(identity) = msg.part_bytes(0) else {
+            tokio::task::yield_now().await;
+            return;
+        };
+        let identity = Bytes::copy_from_slice(identity.as_ref());
+        let notified = {
+            let g = self.inner.lock().expect("identity inner poisoned");
+            g.identity_to_peer
+                .get(&identity)
+                .and_then(|id| g.peers.get(id))
+                .and_then(|peer| peer.target.space_available())
+        };
+        if let Some(notified) = notified {
+            notified.notified().await;
+        } else {
+            tokio::task::yield_now().await;
+        }
+    }
+
     pub(crate) async fn send_rep(
         &self,
         peer_id: u64,

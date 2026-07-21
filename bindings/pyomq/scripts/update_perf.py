@@ -74,6 +74,17 @@ def save_results(run_id, impl, tp_inproc, tp_tcp, atp_tcp, lat, alat, proxy_pp, 
     print(f"  appended {len(rows)} rows to {JSONL_FILE}")
 
 
+def save_proxy_results(run_id, impl, proxy_pp, proxy_rr):
+    rows = [
+        {"run_id": run_id, "impl": impl, "kind": "proxy",
+         "pattern": "pushpull", "msgs_s": proxy_pp},
+        {"run_id": run_id, "impl": impl, "kind": "proxy",
+         "pattern": "reqrep", "msgs_s": proxy_rr},
+    ]
+    append_jsonl(rows)
+    print(f"  appended {len(rows)} rows to {JSONL_FILE}")
+
+
 def chart_data_from_jsonl():
     rows = load_jsonl()
 
@@ -689,13 +700,22 @@ sys.stdout.flush(); os._exit(0)
         proxy_proc.wait(timeout=5)
 
 
-BENCH_PROXY_CLIENT = os.path.join(
-    os.path.dirname(__file__), "..", "target", "release",
-    "bench_proxy_client",
-)
+_SCRIPT_DIR = os.path.dirname(__file__)
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
+BENCH_PROXY_CLIENTS = [
+    os.path.join(_REPO_ROOT, "target", "release", "omq_bench_proxy_client"),
+    os.path.join(_SCRIPT_DIR, "..", "target", "release", "bench_proxy_client"),
+]
 
 
-def _measure_proxy_native(lib_name, duration=2.0):
+def _bench_proxy_client():
+    for path in BENCH_PROXY_CLIENTS:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _measure_proxy_native(lib_name, client, duration=2.0):
     if lib_name == "pyzmq":
         lib_import = "import zmq as lib"
     else:
@@ -738,7 +758,7 @@ except Exception:
 
     try:
         r = subprocess.run(
-            [BENCH_PROXY_CLIENT, str(fe_port), str(be_port), "128",
+            [client, str(fe_port), str(be_port), "128",
              str(duration)],
             capture_output=True, text=True,
             timeout=duration + 10,
@@ -756,13 +776,14 @@ except Exception:
 
 
 def run_proxy(lib_name):
-    use_native = os.path.isfile(BENCH_PROXY_CLIENT)
+    client = _bench_proxy_client()
 
     sys.stdout.write("  PUSH/PULL ...")
     sys.stdout.flush()
-    if use_native:
-        _measure_proxy_native(lib_name, 1.0)
-        pp = max(_measure_proxy_native(lib_name) for _ in range(N_ROUNDS))
+    if client is not None:
+        _measure_proxy_native(lib_name, client, 1.0)
+        pp = max(_measure_proxy_native(lib_name, client)
+                 for _ in range(N_ROUNDS))
     else:
         _measure_proxy_subprocess(lib_name, "pushpull", 200_000)
         pp = max(_measure_proxy_subprocess(lib_name, "pushpull", 200_000)
@@ -815,13 +836,31 @@ def _fmt_y_us(val):
 
 def _fmt_mbps(val):
     if val >= 1000:
-        return f"{val / 1000:.1f} GB/s"
+        return f"{val / 1000:g} GB/s"
     if val >= 10:
         return f"{val:.0f} MB/s"
     return f"{val:.1f} MB/s"
 
 
+def _read_chart_hw():
+    config = {}
+    path = os.path.join(os.path.dirname(__file__), "..", ".chart_hw")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, sep, value = line.partition("=")
+                if sep:
+                    config[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return config
+
+
 def _detect_hardware():
+    hw_conf = _read_chart_hw()
     try:
         cpu = None
         for line in open("/proc/cpuinfo"):
@@ -832,28 +871,17 @@ def _detect_hardware():
         cores = os.cpu_count()
         if cpu and cores:
             label = f"{cpu}, {cores} cores"
-            extras = []
-            try:
-                gov = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").read().strip()
-                if gov == "performance":
-                    extras.append("performance governor")
-            except OSError:
-                pass
-            for path, off_val in [
-                ("/sys/devices/system/cpu/intel_pstate/no_turbo", "1"),
-                ("/sys/devices/system/cpu/cpufreq/boost", "0"),
-            ]:
-                try:
-                    if open(path).read().strip() == off_val:
-                        extras.append("turbo off")
-                    break
-                except OSError:
-                    continue
+            prefix = os.environ.get("OMQ_HW_PREFIX") or hw_conf.get("prefix")
+            postfix = os.environ.get("OMQ_HW_POSTFIX") or hw_conf.get("postfix")
+            extras = [e.strip() for e in postfix.split(",")] if postfix else []
             hw_extras = os.environ.get("OMQ_HW_EXTRAS")
             if hw_extras:
                 extras.extend(hw_extras.split(","))
+            extras = [e.strip() for e in extras if e.strip()]
             if extras:
                 label += ", " + ", ".join(extras)
+            if prefix:
+                label = f"{prefix}, {label}"
             return label
     except OSError:
         pass
@@ -884,8 +912,8 @@ def gen_combined_chart(data, path):
     async_omq_tp = data["async_omq_tp"]
     async_pz_tp = data["async_pz_tp"]
 
-    msg_max = 4_000_000
-    mbps_max = 4_000
+    msg_max = 5_000_000
+    mbps_max = 5_000
 
     def y_msg(v):
         frac = v / msg_max if msg_max > 0 else 0
@@ -921,10 +949,12 @@ def gen_combined_chart(data, path):
             f' fill="#9ca3af" font-size="10">{hw_label}</text>'
         )
 
-    msg_tick = 500_000
-    mbps_tick = 500
-    for val in range(msg_tick, msg_max + 1, msg_tick):
-        yy = y_msg(val)
+    tick_count = 10
+    for i in range(1, tick_count + 1):
+        frac = i / tick_count
+        msg_val = int(msg_max * frac)
+        mbps_val = mbps_max * frac
+        yy = t1_bot - frac * t1_h
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
             f' stroke="#e5e7eb" stroke-width="1"/>'
@@ -932,9 +962,8 @@ def gen_combined_chart(data, path):
         L.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
             f' dominant-baseline="middle" fill="#374151"'
-            f' font-size="10">{_fmt_y_rate(val)}</text>'
+            f' font-size="10">{_fmt_y_rate(msg_val)}</text>'
         )
-        mbps_val = (val // msg_tick) * mbps_tick
         L.append(
             f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
             f' dominant-baseline="middle" fill="#6b7280"'
@@ -1158,6 +1187,16 @@ def update_marker(content, marker, table):
     return new_content
 
 
+def update_readme_proxy_table():
+    proxy_table = build_proxy_table()
+    with open(README) as f:
+        content = f.read()
+    content = update_marker(content, "PROXY_PERF", proxy_table)
+    with open(README, "w") as f:
+        f.write(content)
+    print(f"\nUpdated {README}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--impl", action="append", dest="impls",
@@ -1165,7 +1204,12 @@ def main():
                         help="implementation(s) to benchmark (default: both)")
     parser.add_argument("--chart-only", action="store_true",
                         help="regenerate SVG from existing JSONL, no benchmarking")
+    parser.add_argument("--proxy-only", action="store_true",
+                        help="benchmark proxy only and update README proxy table")
     args = parser.parse_args()
+
+    if args.chart_only and args.proxy_only:
+        parser.error("--chart-only and --proxy-only are mutually exclusive")
 
     if args.chart_only:
         print("Generating chart from existing JSONL...")
@@ -1180,6 +1224,13 @@ def main():
         print(f"\n{'=' * 40}")
         print(f"Benchmarking {impl}")
         print(f"{'=' * 40}")
+
+        if args.proxy_only:
+            print(f"\n{impl} zmq.proxy() forwarding...")
+            proxy_pp, proxy_rr = run_proxy(impl)
+            print("\nSaving proxy results...")
+            save_proxy_results(run_id, impl, proxy_pp, proxy_rr)
+            continue
 
         print(f"\n{impl} sync PUSH/PULL throughput...")
         tp_inproc, tp_tcp = run_throughput(impl)
@@ -1200,13 +1251,10 @@ def main():
         save_results(run_id, impl, tp_inproc, tp_tcp, atp_tcp, lat, alat,
                      proxy_pp, proxy_rr)
 
-    proxy_table = build_proxy_table()
-    with open(README) as f:
-        content = f.read()
-    content = update_marker(content, "PROXY_PERF", proxy_table)
-    with open(README, "w") as f:
-        f.write(content)
-    print(f"\nUpdated {README}")
+    update_readme_proxy_table()
+
+    if args.proxy_only:
+        return
 
     print("\nGenerating chart...")
     data = chart_data_from_jsonl()

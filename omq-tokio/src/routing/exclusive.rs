@@ -62,6 +62,19 @@ impl Submitter {
         }
     }
 
+    pub(crate) async fn wait_send_progress(&self) {
+        let space = {
+            let guard = self.pipe.lock().expect("exclusive pipe");
+            guard.as_ref().map(SendPipeProducer::space_available)
+        };
+
+        if let Some(space) = space {
+            space.notified().await;
+        } else {
+            self.peer_ready.notified().await;
+        }
+    }
+
     pub(crate) fn try_send(
         &self,
         msg: Message,
