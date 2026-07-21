@@ -12,7 +12,7 @@ const COMPARISON_CHART_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
 const MAIN_EXTRA_CHART_SIZES: &[u64] = &[32, 128, 512, 2048, 8192, 32768, 262_144, 4_194_304];
 const QUICK_SIZES: &[u64] = &[64, 1024, 4096];
 
-const LATENCY_MAX_SIZE: u64 = 32768;
+const LATENCY_MAX_SIZE: u64 = 4096;
 
 const DEFAULT_DURATION: f64 = 3.0;
 const QUICK_DURATION: f64 = 1.5;
@@ -314,12 +314,31 @@ fn non_io_env(def: &ImplDef) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+fn latency_client_io_threads(def: &ImplDef, override_threads: Option<&str>) -> Option<String> {
+    if let Some(threads) = override_threads {
+        return Some(threads.to_string());
+    }
+    if def.name == "omq-tokio-ct" {
+        None
+    } else {
+        Some(impl_io_threads(def).to_string())
+    }
+}
+
 fn all_chart_sizes() -> Vec<u64> {
     let mut sizes: Vec<u64> = COMPARISON_CHART_SIZES.to_vec();
     sizes.extend(MAIN_EXTRA_CHART_SIZES);
     sizes.sort_unstable();
     sizes.dedup();
     sizes
+}
+
+fn latency_sizes_from(sizes: &[u64]) -> Vec<u64> {
+    sizes
+        .iter()
+        .copied()
+        .filter(|&s| s <= LATENCY_MAX_SIZE)
+        .collect()
 }
 
 // ---- Address generation ---------------------------------------------------
@@ -1315,10 +1334,12 @@ fn run_latency_cell(
 
     let rep_env: Vec<(&str, &str)> = def.env.to_vec();
     let mut req_env: Vec<(&str, &str)> = non_io_env(def);
-    let req_io_threads = std::env::var("OMQ_BENCH_CLIENT_IO_THREADS")
-        .unwrap_or_else(|_| impl_io_threads(def).to_string());
-    req_env.push(("OMQ_IO_THREADS", &req_io_threads));
-    req_env.push(("ZMQ_IO_THREADS", &req_io_threads));
+    let req_io_threads_override = std::env::var("OMQ_BENCH_CLIENT_IO_THREADS").ok();
+    let req_io_threads = latency_client_io_threads(def, req_io_threads_override.as_deref());
+    if let Some(req_io_threads) = req_io_threads.as_deref() {
+        req_env.push(("OMQ_IO_THREADS", req_io_threads));
+        req_env.push(("ZMQ_IO_THREADS", req_io_threads));
+    }
 
     let mut rep_cmd = vec![peer_binary_str, "rep"];
     if transport == TransportKind::Tcp {
@@ -1626,11 +1647,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
 
         // Latency
         if !args.no_latency {
-            let latency_sizes: Vec<u64> = sizes
-                .iter()
-                .copied()
-                .filter(|&s| s <= LATENCY_MAX_SIZE)
-                .collect();
+            let latency_sizes = latency_sizes_from(&sizes);
             eprintln!("\n=== Latency / {transport_str} ===");
             print_latency_header(&active_impls);
 
@@ -2103,5 +2120,34 @@ fn fmt_gbps(val: f64) -> String {
         format!("{:.2} GB/s", val / 1000.0)
     } else {
         format!("{val:.0} MB/s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_client_keeps_ct_embedded_by_default() {
+        let ct = find_impl("omq-tokio-ct").unwrap();
+        let two_thread = find_impl("omq-tokio-2t").unwrap();
+
+        assert_eq!(latency_client_io_threads(ct, None), None);
+        assert_eq!(
+            latency_client_io_threads(ct, Some("2")).as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            latency_client_io_threads(two_thread, None).as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn latency_runner_caps_sizes_at_4kib() {
+        assert_eq!(
+            latency_sizes_from(&[16, 1024, 4096, 8192, 16384]),
+            vec![16, 1024, 4096]
+        );
     }
 }

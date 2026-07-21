@@ -67,53 +67,6 @@ small messages (higher is better)
 1 KiB
 </text>
 <polyline fill="none" opacity="1" stroke="#9CA3AF" stroke-width="1" points="444,312 444,317 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="80,183 86,185 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="88,186 94,188 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="97,189 102,191 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="105,192 111,195 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="114,196 119,198 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="122,199 128,201 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="131,202 136,204 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="139,205 145,207 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="147,208 153,210 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="156,211 162,213 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="164,214 170,216 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="173,218 178,220 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="181,221 187,223 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="190,224 195,226 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="198,227 201,228 204,229 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="207,230 212,232 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="215,233 221,235 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="224,236 229,238 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="232,239 238,241 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="240,242 246,244 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="249,245 255,247 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="257,248 263,250 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="266,251 272,253 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="274,254 280,256 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="283,257 289,259 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="291,260 297,262 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="300,263 306,265 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="308,266 314,268 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="317,269 322,271 322,271 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="325,272 331,273 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="334,273 340,274 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="343,275 349,276 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="352,276 358,277 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="361,278 367,279 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="370,279 376,280 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="379,281 385,282 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="388,282 393,283 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="396,284 402,285 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="405,285 411,286 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="414,287 420,288 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="423,288 429,289 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="432,290 438,291 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="441,291 444,292 "/>
-<circle cx="80" cy="183" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
-<circle cx="201" cy="228" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
-<circle cx="322" cy="271" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
-<circle cx="444" cy="292" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="80,59 85,63 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="87,65 91,69 "/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="94,71 98,75 "/>
@@ -165,6 +118,53 @@ small messages (higher is better)
 <circle cx="201" cy="162" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="322" cy="177" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="444" cy="246" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="80,183 86,185 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="88,186 94,188 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="97,189 102,191 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="105,192 111,195 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="114,196 119,198 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="122,199 128,201 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="131,202 136,204 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="139,205 145,207 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="147,208 153,210 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="156,211 162,213 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="164,214 170,216 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="173,218 178,220 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="181,221 187,223 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="190,224 195,226 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="198,227 201,228 204,229 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="207,230 212,232 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="215,233 221,235 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="224,236 229,238 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="232,239 238,241 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="240,242 246,244 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="249,245 255,247 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="257,248 263,250 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="266,251 272,253 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="274,254 280,256 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="283,257 289,259 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="291,260 297,262 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="300,263 306,265 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="308,266 314,268 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="317,269 322,271 322,271 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="325,272 331,273 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="334,273 340,274 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="343,275 349,276 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="352,276 358,277 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="361,278 367,279 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="370,279 376,280 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="379,281 385,282 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="388,282 393,283 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="396,284 402,285 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="405,285 411,286 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="414,287 420,288 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="423,288 429,289 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="432,290 438,291 "/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="441,291 444,292 "/>
+<circle cx="80" cy="183" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
+<circle cx="201" cy="228" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
+<circle cx="322" cy="271" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
+<circle cx="444" cy="292" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
 <text x="712" y="41" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 medium/large messages (higher is better)
 </text>
@@ -230,16 +230,16 @@ medium/large messages (higher is better)
 7 GB/s
 </text>
 <polyline fill="none" opacity="1" stroke="#9CA3AF" stroke-width="1" points="878,56 883,56 "/>
-<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="485,291 615,272 746,261 877,249 "/>
-<circle cx="485" cy="291" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
-<circle cx="615" cy="272" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
-<circle cx="746" cy="261" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
-<circle cx="877" cy="249" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="485,243 615,177 746,131 877,78 "/>
 <circle cx="485" cy="243" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="615" cy="177" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="746" cy="131" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="877" cy="78" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#FACC15" stroke-width="2" points="485,291 615,272 746,261 877,249 "/>
+<circle cx="485" cy="291" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
+<circle cx="615" cy="272" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
+<circle cx="746" cy="261" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
+<circle cx="877" cy="249" r="2.5" opacity="1" fill="#FACC15" stroke="none" stroke-width="1"/>
 <text x="230" y="344" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 threads
 </text>

@@ -453,7 +453,7 @@ fn attach_recv_bypass(
     }
 
     let can_use_yring =
-        can_bypass_actor_recv(socket.socket_type) && socket.socket_type != SocketType::Req;
+        can_use_yring_recv_bypass(socket.socket_type, socket.uses_latency_profile());
     if can_use_yring {
         attach_yring_recv_bypass(socket, peer_driver, peer_id, rep_latency)
     } else if rep_latency {
@@ -552,4 +552,20 @@ fn can_bypass_actor_recv(t: SocketType) -> bool {
             | SocketType::Channel
             | SocketType::Gather
     )
+}
+
+fn can_use_yring_recv_bypass(t: SocketType, latency_profile: bool) -> bool {
+    can_bypass_actor_recv(t) && (t != SocketType::Req || latency_profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn req_uses_yring_recv_bypass_only_for_latency_profile() {
+        assert!(can_use_yring_recv_bypass(SocketType::Req, true));
+        assert!(!can_use_yring_recv_bypass(SocketType::Req, false));
+        assert!(can_use_yring_recv_bypass(SocketType::Pull, false));
+    }
 }
