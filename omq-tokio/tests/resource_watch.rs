@@ -2,16 +2,23 @@
 
 mod test_support;
 
+#[cfg(target_os = "linux")]
 use std::net::{IpAddr, SocketAddr};
+#[cfg(target_os = "linux")]
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use bytes::Bytes;
+#[cfg(target_os = "linux")]
 use omq_tokio::endpoint::Host;
 use omq_tokio::{
     Endpoint, Message, MonitorTryRecvError, Options, ReconnectPolicy, Socket, SocketType,
 };
+#[cfg(target_os = "linux")]
 use tokio::io::AsyncWriteExt;
+#[cfg(target_os = "linux")]
 use tokio::net::TcpStream;
 
 #[cfg(target_os = "linux")]
@@ -22,6 +29,7 @@ fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
+#[cfg(target_os = "linux")]
 fn socket_addr(ep: &Endpoint) -> SocketAddr {
     match ep {
         Endpoint::Tcp {
@@ -32,6 +40,7 @@ fn socket_addr(ep: &Endpoint) -> SocketAddr {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_connections_at_most(sock: &Socket, max: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
