@@ -380,7 +380,8 @@ impl Socket {
         self.inner.recv_rx.wait_for_spsc_space(msg)
     }
 
-    pub(crate) async fn wait_send_progress_for(&self, msg: &Message) {
+    #[doc(hidden)]
+    pub async fn wait_send_progress_for(&self, msg: &Message) {
         if self.inner.socket_type == SocketType::XSub && xsub_raw_command(msg).is_ok() {
             let _ = self.inner.cmd_tx.reserve().await;
             return;
