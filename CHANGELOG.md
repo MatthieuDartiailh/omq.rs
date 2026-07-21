@@ -99,7 +99,6 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 ### Changed
 
 - Deny `unsafe_op_in_unsafe_fn` lint.
-- Rename `prefetch_upto` to `prefetch_up_to`.
 
 ## [omq-libzmq 0.5.3] - 2026-07-19
 

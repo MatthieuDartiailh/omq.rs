@@ -96,7 +96,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `RecvSink` gains `Rep` variant.
 - **Breaking:** `Socket` no longer implements `UnwindSafe`/
   `RefUnwindSafe`.
-- Rename `prefetch_upto` to `prefetch_up_to`.
 - *(deps)* Bump `omq-proto` to 0.23.0, `yring` to 0.3.8.
 
 ## [0.17.0] - 2026-07-10

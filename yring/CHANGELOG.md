@@ -7,11 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `Consumer::prefetch_up_to()` and `AsyncConsumer::prefetch_up_to()` for
-  bounded local prefetch without releasing unpopped items.
-
 ### Changed
 
 - Replace the unreleased 64-bit cursor change with pointer-width cursors
@@ -39,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Deny `unsafe_op_in_unsafe_fn` lint. All unsafe function bodies now
   require explicit `unsafe` blocks.
-- Rename `prefetch_upto` to `prefetch_up_to`.
 - Remove bounded prefetch API (replaced by size-class draining in
   `omq-tokio`).
 
