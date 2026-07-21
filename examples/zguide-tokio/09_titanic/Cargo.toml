@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 omq-tokio = { version = "0.19.1", path = "../../../omq-tokio" }
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 bytes = "1"
 
 [[bin]]

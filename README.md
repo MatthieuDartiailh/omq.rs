@@ -57,8 +57,14 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 > The API is still evolving and may change between minor versions. Bug reports and testing in real workloads are welcome.
 
 The Rust backend is [`omq-tokio`](omq-tokio/): tokio + mio on Linux,
-macOS, and Windows. It works on single-thread and multi-thread tokio
-runtimes.
+macOS, and Windows. It can run socket IO on OMQ-owned runtime threads or
+inside an existing tokio runtime.
+
+| API | Runtime placement | Scaling model |
+|-----|-------------------|---------------|
+| `Context::new().socket(...)` | Async socket, OMQ-owned IO threads | Linear IO-lane scaling; PUB peers are sharded across lanes |
+| `Context::current().socket(...)` | Async socket, caller's active tokio runtime | Tokio scheduler/work stealing; PUB fan-out stays on one OMQ lane |
+| `Context::new().blocking_socket(...)` | Sync socket, OMQ-owned IO threads | Linear IO-lane scaling; caller thread stays out of IO |
 
 Supported 32-bit Linux targets are `i686-unknown-linux-gnu` and
 `armv7-unknown-linux-gnueabihf`. They require native 64-bit atomics. ZMTP wire
@@ -68,13 +74,15 @@ platform allocation limits (below 4 GiB on 32-bit).
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
 
 ```rust
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Context, Message, Options, SocketType};
 
-let push = Socket::new(SocketType::Push, Options::default());
+let ctx = Context::new();
+
+let push = ctx.socket(SocketType::Push, Options::default());
 push.connect("tcp://127.0.0.1:5555".parse()?).await?;
 push.send(Message::single("hello")).await?;
 
-let pull = Socket::new(SocketType::Pull, Options::default());
+let pull = ctx.socket(SocketType::Pull, Options::default());
 pull.bind("tcp://127.0.0.1:5555".parse()?).await?;
 let msg = pull.recv().await?;
 assert_eq!(&msg[0], b"hello");

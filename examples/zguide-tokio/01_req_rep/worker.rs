@@ -5,34 +5,36 @@
 //!
 //!     cargo run -p zguide-tokio-01-req-rep --bin worker [backend] [id]
 
-use omq_tokio::{Context, Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{Context, Endpoint, Message, Options, SocketType};
 
 fn endpoint_or(args: &[String], index: usize, default: &str) -> Endpoint {
-    args.get(index).map_or_else(|| default.parse().unwrap(), |s| s.parse().expect("invalid endpoint"))
+    args.get(index).map_or_else(
+        || default.parse().unwrap(),
+        |s| s.parse().expect("invalid endpoint"),
+    )
 }
 
 fn msg_str(msg: &Message, idx: usize) -> String {
     String::from_utf8_lossy(&msg.part_bytes(idx).unwrap()).to_string()
 }
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let ctx = Context::new();
-    ctx.block_on(async move {
-        let args: Vec<String> = std::env::args().collect();
-        let backend_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-01-backend");
-        let id = args.get(2).map_or("0", |s| s.as_str());
+    let args: Vec<String> = std::env::args().collect();
+    let backend_ep = endpoint_or(&args, 1, "ipc://@omq-zguide-01-backend");
+    let id = args.get(2).map_or("0", |s| s.as_str());
 
-        let rep = Socket::new(SocketType::Rep, Options::default());
-        rep.connect(backend_ep).await.unwrap();
+    let rep = ctx.socket(SocketType::Rep, Options::default());
+    rep.connect(backend_ep).await.unwrap();
 
-        println!("worker-{id}: ready");
+    println!("worker-{id}: ready");
 
-        loop {
-            let msg = rep.recv().await.unwrap();
-            let body = msg_str(&msg, 0);
-            let reply = format!("worker-{id}:{body}");
-            println!("worker-{id}: {body} -> {reply}");
-            rep.send(Message::single(reply)).await.unwrap();
-        }
-    });
+    loop {
+        let msg = rep.recv().await.unwrap();
+        let body = msg_str(&msg, 0);
+        let reply = format!("worker-{id}:{body}");
+        println!("worker-{id}: {body} -> {reply}");
+        rep.send(Message::single(reply)).await.unwrap();
+    }
 }

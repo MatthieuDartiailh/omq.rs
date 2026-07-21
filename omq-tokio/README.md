@@ -22,17 +22,23 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 ## Usage
 
 ```rust
-use omq_tokio::{Socket, SocketType, Options, Message};
+use omq_tokio::{Context, SocketType, Options, Message};
 
-let push = Socket::new(SocketType::Push, Options::default());
+let ctx = Context::new();
+
+let push = ctx.socket(SocketType::Push, Options::default());
 push.bind("tcp://127.0.0.1:5555".parse()?).await?;
 
-let pull = Socket::new(SocketType::Pull, Options::default());
+let pull = ctx.socket(SocketType::Pull, Options::default());
 pull.connect("tcp://127.0.0.1:5555".parse()?).await?;
 
 push.send(Message::single("hello")).await?;
 let msg = pull.recv().await?;
 ```
+
+Use `Socket::new(...)` when you want the socket driver on the caller's
+active tokio runtime. Use `ctx.socket(...)` when OMQ should own IO runtime
+threads.
 
 `cargo add omq` picks this backend by default.
 

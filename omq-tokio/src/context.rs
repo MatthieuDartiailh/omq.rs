@@ -247,18 +247,21 @@ impl IoPoolHandle {
 /// threads, each running an independent `current_thread` tokio runtime.
 /// Sockets created via [`Context::socket()`] have their driver tasks on
 /// those runtimes. The user does not need tokio in their own
-/// `Cargo.toml`.
+/// `Cargo.toml` for OMQ IO work.
 ///
 /// ```no_run
 /// use omq_tokio::{Context, SocketType, Options, Message};
 ///
+/// # async fn example() {
 /// let ctx = Context::new();
 /// let sock = ctx.socket(SocketType::Push, Options::default());
-/// ctx.block_on(async move {
-///     sock.bind("tcp://*:5555".parse().unwrap()).await.unwrap();
-///     sock.send(Message::from("hello")).await.unwrap();
-/// });
+/// sock.bind("tcp://*:5555".parse().unwrap()).await.unwrap();
+/// sock.send(Message::from("hello")).await.unwrap();
+/// # }
 /// ```
+///
+/// In a plain `fn main()`, either use [`blocking_socket`](Self::blocking_socket)
+/// or [`block_on`](Self::block_on) as a small executor helper.
 ///
 /// # Embedded in an existing runtime
 ///
@@ -405,6 +408,8 @@ impl Context {
     /// Run a future on this context's runtime, blocking the calling
     /// thread until it completes. The future runs inline on the
     /// primary IO thread with the same priority as spawned driver tasks.
+    /// If the caller already has an async runtime, await socket futures
+    /// directly instead.
     ///
     /// # Panics
     ///
