@@ -2,7 +2,7 @@
 
 ## Workspace layout
 
-Six-crate Cargo workspace; `bindings/` is excluded and built
+Five-crate Cargo workspace; `bindings/` is excluded and built
 out-of-tree (maturin etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
@@ -11,7 +11,6 @@ out-of-tree (maturin etc.).
   (lz4), endpoint parsing, options, subscription matcher. No async, no I/O.
 - **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
   Works on Linux, macOS, and Windows.
-- **`blume`** -- batching MPSC channel for same-thread inproc delivery.
 - **`yring`** -- bounded SPSC ring buffer for inproc transport based on
   libzmq's `ypipe_t`. One atomic per batch.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq`
@@ -80,9 +79,9 @@ workers).
 **Inproc.** No ZMTP. Inproc and byte-stream round-robin peers both
 register `yring` send pipes. Byte-stream consumers drain in
 `ConnectionDriver`; inproc consumers drain in `inproc_peer_driver` and
-forward to the socket inbound queue. Same-thread delivery still uses
-`blume` where applicable. `FallbackQueue` is only the
-no-peer/pre-connect fallback; peer tasks drain it before newer
+forward to the socket inbound queue. Same-thread delivery uses direct
+`yring::ProducerOwner` access where applicable. `FallbackQueue` is only
+the no-peer/pre-connect fallback; peer tasks drain it before newer
 pipe-fed sends.
 
 ## Build / test / bench / charts / releasing

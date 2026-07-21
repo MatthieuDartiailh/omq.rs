@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 32-bit Linux targets with native 64-bit atomics are supported. Per-frame and
   per-message payloads remain bounded by platform allocation limits.
 
+### Removed
+
+- Unused `blume` dependency.
+
 ## [0.19.1] - 2026-07-19
 
 ### Fixed

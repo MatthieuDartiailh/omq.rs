@@ -102,7 +102,7 @@ drivers, and hot-path send/recv shortcuts.
 `omq-libzmq` exposes a libzmq-compatible C ABI. `omq-bench` drives
 cross-implementation benchmark peers and SVG chart generation.
 `bindings/pyomq` exposes sync and asyncio Python APIs through PyO3.
-`yring` and `blume` provide hot-path queues used by inproc and routing.
+`yring` provides hot-path queues used by inproc and routing.
 
 ## Socket Model
 
@@ -223,9 +223,9 @@ recv preserves per-peer ordering while rotating across peers.
 
 Inproc bypasses ZMTP framing and kernel I/O. Cross-thread peers use `yring`
 send pipes and deliver `InboundFrame::Message` through `inproc_peer_driver`.
-Same-thread paths use `blume` batching where applicable. Public semantics
-remain the same: HWM backpressure, round-robin fairness, and
-connect-before-bind.
+Same-thread paths use direct `yring::ProducerOwner` access where applicable.
+Public semantics remain the same: HWM backpressure, round-robin fairness,
+and connect-before-bind.
 
 ## Drain Budgets And Signaling
 

@@ -125,7 +125,7 @@ down and reconnects.
 | Pipe termination FSM | 6-state machine with delimiter protocol | Channel close + CancellationToken | **~** simpler |
 | Multi-part rollback on pipe death | unwrite() loop, _dropping mode in lb | Whole messages are queued; no mid-message rollback | **N/A** |
 | Conflate mode | HWM=-1 (unlimited) | capacity=1, DropOldest | **=** equivalent semantics |
-| Lock-free queue | ypipe (SPSC, CAS flush) | blume (MPSC, swap-drain) | **=** different design |
+| Lock-free queue | ypipe (SPSC, CAS flush) | yring (SPSC, batched flush/prefetch) | **=** equivalent design |
 
 ---
 

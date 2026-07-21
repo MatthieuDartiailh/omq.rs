@@ -19,6 +19,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   and per-message payloads remain bounded by platform allocation limits
   (below 4 GiB on 32-bit Linux).
 
+### Removed
+
+- `blume` workspace crate and unused `omq-tokio` dependency.
+
 ## [omq-proto 0.23.0] - 2026-07-19
 
 ### Added
