@@ -11,6 +11,12 @@
 #                       retry on heavily loaded runners.
 #   OMQ_TEST_JOBS=N     max parallel test steps (default 2)
 #   OMQ_SKIP_PERF=1     skip the local perf smoke/hardware gate
+#   OMQ_PERF_WAIT_SECS=N
+#                       wait this long for prior test/build procs to exit
+#                       before perf gate (default 30)
+#   OMQ_PERF_QUIESCE_SECS=N
+#                       quiet sleep before perf gate after no test/build
+#                       procs remain (default 10)
 #   OMQ_STRESS_ROUNDS=N connect-before-bind stress rounds (default 40)
 set -euo pipefail
 
@@ -194,6 +200,58 @@ par_wait() {
     _par_count=0
 }
 
+_repo_perf_busy_processes() {
+    local proc pid cmd cwd exe
+    for proc in /proc/[0-9]*; do
+        pid="${proc##*/}"
+        [[ "$pid" == "$$" ]] && continue
+        [[ "$pid" == "${BASHPID:-$$}" ]] && continue
+        cmd="$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)"
+        [[ -n "$cmd" ]] || continue
+        case "$cmd" in
+            *omq_cargo*|*cargo*|*rustc*|*rustdoc*|*maturin*|*pytest*|*target/debug/deps/*|*target/release/deps/*)
+                cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+                exe="$(readlink "$proc/exe" 2>/dev/null || true)"
+                if [[ "$cwd" == "$_repo_root"* || "$exe" == "$_repo_root"* || "$cmd" == *"$_repo_root"* ]]; then
+                    printf '%s %s\n' "$pid" "$cmd"
+                fi
+                ;;
+        esac
+    done
+}
+
+wait_for_perf_quiet() {
+    par_wait
+
+    local wait_secs="${OMQ_PERF_WAIT_SECS:-30}"
+    local quiet_secs="${OMQ_PERF_QUIESCE_SECS:-10}"
+    local deadline=$((SECONDS + wait_secs))
+    local busy
+
+    while true; do
+        busy="$(_repo_perf_busy_processes)"
+        if [[ -z "$busy" ]]; then
+            if [[ "$quiet_secs" != "0" ]]; then
+                echo "::: perf gate quiet for ${quiet_secs}s"
+                sleep "$quiet_secs"
+            fi
+            busy="$(_repo_perf_busy_processes)"
+            if [[ -z "$busy" ]]; then
+                return 0
+            fi
+        fi
+
+        if [[ $SECONDS -ge $deadline ]]; then
+            echo "::: perf gate blocked by active test/build processes:" >&2
+            echo "$busy" >&2
+            return 1
+        fi
+
+        echo "::: perf gate waiting for prior test/build processes to exit"
+        sleep 1
+    done
+}
+
 # ---------------------------------------------------------------- #
 # 1) Default workspace: NULL mechanism + tcp/ipc/inproc/udp,
 #    no compression. Smallest deploy shape.
@@ -212,6 +270,7 @@ if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
 elif [[ "${OMQ_SKIP_PERF:-}" == "1" ]]; then
     echo "skip: OMQ_SKIP_PERF=1"
 else
+    wait_for_perf_quiet
     run omq_cargo_with_rust_tools run --release -q -p omq-tokio --bin omq_perf_verify
 fi
 

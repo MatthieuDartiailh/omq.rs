@@ -9,12 +9,13 @@ use std::time::Duration;
 fn opts() -> Options {
     Options::default()
 }
-fn tcp_ep(port: u16) -> omq_proto::endpoint::Endpoint {
-    format!("tcp://127.0.0.1:{port}").parse().unwrap()
+
+fn tcp_loopback_any() -> omq_proto::endpoint::Endpoint {
+    "tcp://127.0.0.1:0".parse().unwrap()
 }
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
+
+async fn bind_loopback(sock: &Socket) -> omq_proto::endpoint::Endpoint {
+    sock.bind(tcp_loopback_any()).await.unwrap()
 }
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,10 +23,9 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// PUSH/PULL: single peer encode slot, high throughput burst.
 #[tokio::test]
 async fn push_pull_burst_single_peer() {
-    let ep = tcp_ep(free_port());
     let push = Socket::new(SocketType::Push, opts());
     let pull = Socket::new(SocketType::Pull, opts());
-    pull.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&pull).await;
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -46,10 +46,9 @@ async fn push_pull_burst_single_peer() {
 
 #[tokio::test]
 async fn try_send_single_peer_send_pipe_preserves_fifo() {
-    let ep = tcp_ep(free_port());
     let push = Socket::new(SocketType::Push, Options::default().send_hwm(2));
     let pull = Socket::new(SocketType::Pull, opts());
-    pull.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&pull).await;
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -70,10 +69,9 @@ async fn try_send_single_peer_send_pipe_preserves_fifo() {
 
 #[tokio::test]
 async fn req_try_send_uses_single_peer_transmit_slot() {
-    let ep = tcp_ep(free_port());
     let req = Socket::new(SocketType::Req, Options::default().transmit_slot_cap(1));
     let rep = Socket::new(SocketType::Rep, opts());
-    rep.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&rep).await;
     req.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -89,12 +87,11 @@ async fn req_try_send_uses_single_peer_transmit_slot() {
 /// PUSH/PULL: peer churn. Encode slot must re-enable after 2->1.
 #[tokio::test]
 async fn push_pull_peer_churn_transmit_slot() {
-    let ep = tcp_ep(free_port());
     let push = Socket::new(SocketType::Push, opts());
     let pull1 = Socket::new(SocketType::Pull, opts());
     let pull2 = Socket::new(SocketType::Pull, opts());
 
-    pull1.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&pull1).await;
     push.connect(ep.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -131,9 +128,8 @@ async fn push_pull_peer_churn_transmit_slot() {
 /// PUB/SUB: fan-out to 8 subscribers, pre-encode path.
 #[tokio::test]
 async fn pub_sub_fanout_8_peers() {
-    let ep = tcp_ep(free_port());
     let pub_sock = Socket::new(SocketType::Pub, opts());
-    pub_sock.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&pub_sock).await;
 
     let mut subs = Vec::new();
     for _ in 0..8 {
@@ -166,7 +162,6 @@ async fn pub_sub_fanout_8_peers() {
 /// ROUTER/DEALER: identity routing through `PeerTransmitSlot`.
 #[tokio::test]
 async fn router_dealer_identity_transmit_slot() {
-    let ep = tcp_ep(free_port());
     let router = Socket::new(SocketType::Router, opts());
     let dealer1 = Socket::new(
         SocketType::Dealer,
@@ -177,7 +172,7 @@ async fn router_dealer_identity_transmit_slot() {
         opts().identity(Bytes::from_static(b"d2")),
     );
 
-    router.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&router).await;
     dealer1.connect(ep.clone()).await.unwrap();
     dealer2.connect(ep.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -227,7 +222,6 @@ async fn router_dealer_identity_transmit_slot() {
 /// PAIR: Exclusive strategy send-before-connect.
 #[tokio::test]
 async fn pair_send_before_connect() {
-    let ep = tcp_ep(free_port());
     let a = Socket::new(SocketType::Pair, opts());
     let b = Socket::new(SocketType::Pair, opts());
 
@@ -237,7 +231,7 @@ async fn pair_send_before_connect() {
     };
 
     tokio::time::sleep(Duration::from_millis(20)).await;
-    b.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&b).await;
     a.connect(ep).await.unwrap();
 
     send_task.await.unwrap().unwrap();
@@ -251,10 +245,9 @@ async fn pair_send_before_connect() {
 /// REQ/REP: alternation through encode slot.
 #[tokio::test]
 async fn req_rep_alternation() {
-    let ep = tcp_ep(free_port());
     let req = Socket::new(SocketType::Req, opts());
     let rep = Socket::new(SocketType::Rep, opts());
-    rep.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&rep).await;
     req.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -277,10 +270,9 @@ async fn req_rep_alternation() {
 /// Large messages: above arena threshold, should use gather path.
 #[tokio::test]
 async fn large_message_gather_path() {
-    let ep = tcp_ep(free_port());
     let push = Socket::new(SocketType::Push, opts());
     let pull = Socket::new(SocketType::Pull, opts());
-    pull.bind(ep.clone()).await.unwrap();
+    let ep = bind_loopback(&pull).await;
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 

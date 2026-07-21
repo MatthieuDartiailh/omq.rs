@@ -47,6 +47,126 @@ async fn dealer_duplicate_tcp_connect_is_ignored() {
 }
 
 #[tokio::test]
+async fn tcp_dealer_identity_is_available_on_initial_handshake() {
+    let router = Socket::new(SocketType::Router, Options::default());
+    let port = test_support::bind_loopback(&router).await;
+    let ep = test_support::tcp_loopback(port);
+
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"alice"))
+            .reconnect(ReconnectPolicy::Disabled),
+    );
+    dealer.connect(ep).await.unwrap();
+
+    router
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("router did not see dealer");
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer did not connect");
+
+    dealer.send(Message::single("hello")).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), router.recv())
+        .await
+        .expect("router did not receive")
+        .unwrap();
+    assert_eq!(got.len(), 2, "DEALER/ROUTER must not add REQ delimiter");
+    assert_eq!(got, Message::multipart(["alice", "hello"]));
+
+    router
+        .send(Message::multipart(["alice", "pong"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(1), dealer.recv())
+        .await
+        .expect("dealer did not receive reply")
+        .unwrap();
+    assert_eq!(reply, Message::single("pong"));
+}
+
+#[tokio::test]
+async fn tcp_router_routes_two_initial_dealer_identities() {
+    let router = Socket::new(SocketType::Router, Options::default());
+    let port = test_support::bind_loopback(&router).await;
+    let ep = test_support::tcp_loopback(port);
+
+    let dealer_a = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"a"))
+            .reconnect(ReconnectPolicy::Disabled),
+    );
+    let dealer_b = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"b"))
+            .reconnect(ReconnectPolicy::Disabled),
+    );
+    dealer_a.connect(ep.clone()).await.unwrap();
+    dealer_b.connect(ep).await.unwrap();
+
+    router
+        .wait_connected(2, Duration::from_secs(1))
+        .await
+        .expect("router did not see both dealers");
+    dealer_a
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer a did not connect");
+    dealer_b
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer b did not connect");
+
+    dealer_a.send(Message::single("from-a")).await.unwrap();
+    dealer_b.send(Message::single("from-b")).await.unwrap();
+
+    let mut saw_a = false;
+    let mut saw_b = false;
+    for _ in 0..2 {
+        let msg = tokio::time::timeout(Duration::from_secs(1), router.recv())
+            .await
+            .expect("router did not receive")
+            .unwrap();
+        assert_eq!(msg.len(), 2, "DEALER/ROUTER must not add REQ delimiter");
+        match (
+            msg.part_bytes(0).unwrap().as_ref(),
+            msg.part_bytes(1).unwrap().as_ref(),
+        ) {
+            (b"a", b"from-a") => saw_a = true,
+            (b"b", b"from-b") => saw_b = true,
+            other => panic!("unexpected routed message: {other:?}"),
+        }
+    }
+    assert!(saw_a, "router did not receive dealer a identity");
+    assert!(saw_b, "router did not receive dealer b identity");
+
+    router
+        .send(Message::multipart(["a", "reply-a"]))
+        .await
+        .unwrap();
+    router
+        .send(Message::multipart(["b", "reply-b"]))
+        .await
+        .unwrap();
+
+    let reply_a = tokio::time::timeout(Duration::from_secs(1), dealer_a.recv())
+        .await
+        .expect("dealer a did not receive reply")
+        .unwrap();
+    let reply_b = tokio::time::timeout(Duration::from_secs(1), dealer_b.recv())
+        .await
+        .expect("dealer b did not receive reply")
+        .unwrap();
+    assert_eq!(reply_a, Message::single("reply-a"));
+    assert_eq!(reply_b, Message::single("reply-b"));
+}
+
+#[tokio::test]
 async fn router_prefixes_identity_on_recv() {
     let ep = inproc_ep("rd-ident");
 
