@@ -90,8 +90,9 @@ extern "C" fn exit_on_signal(_sig: libc::c_int) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if std::env::var("OMQ_IO_THREADS").is_ok() {
-        let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig::from_env());
+    let config = omq_tokio::ContextConfig::from_env();
+    if std::env::var("OMQ_IO_THREADS").is_ok() && config.io_threads != 0 {
+        let ctx = omq_tokio::Context::with_config(config);
         let n = ctx.io_threads();
         eprintln!("runtime: {n} x current_thread (dedicated)");
         let rt = tokio::runtime::Builder::new_current_thread()

@@ -166,9 +166,14 @@ async fn plain_req_rep() {
 
 #[tokio::test]
 async fn plain_dealer_router() {
+    let saw_auth = Arc::new(AtomicBool::new(false));
+    let saw_auth_cb = saw_auth.clone();
     let router = Socket::new(
         SocketType::Router,
-        Options::default().plain_server(accept_alice),
+        Options::default().plain_server(move |peer| {
+            saw_auth_cb.store(true, Ordering::SeqCst);
+            accept_alice(peer)
+        }),
     );
     let ep = router.bind(auth_ep("dealer-router")).await.unwrap();
 
@@ -179,15 +184,27 @@ async fn plain_dealer_router() {
             .plain_client("alice", "secret"),
     );
     dealer.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    test_support::wait_for_handshake(&dealer).await;
 
     dealer.send(Message::single("hi")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), router.recv())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(m.len(), 2, "DEALER/ROUTER must not add REQ delimiter");
     assert_eq!(m.part_bytes(0).unwrap(), &b"d1"[..]);
     assert_eq!(m.part_bytes(1).unwrap(), &b"hi"[..]);
+    assert!(saw_auth.load(Ordering::SeqCst), "authenticator must run");
+
+    router
+        .send(Message::multipart(["d1", "plain-reply"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), dealer.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, Message::single("plain-reply"));
 }
 
 #[tokio::test]

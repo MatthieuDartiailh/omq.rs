@@ -1,6 +1,6 @@
 use super::common::{
-    self, C_LIBZMQ, C_OMQ_1T, C_OMQ_CT, COMPARISON_SIZES, Impl, draw_latency_single_panel,
-    draw_throughput_dual_panel, load_latency, load_tput, out_dir,
+    self, C_LIBZMQ, C_OMQ_1T, C_OMQ_CT, COMPARISON_LATENCY_SIZES, COMPARISON_SIZES, Impl,
+    draw_latency_single_panel, draw_throughput_dual_panel, load_latency, load_tput, out_dir,
 };
 
 const TCP_TPUT_IMPLS: &[Impl] = &[
@@ -190,7 +190,7 @@ pub(crate) fn generate() {
         }
 
         // REQ/REP latency
-        let (lat, cpu) = load_latency(tc.transport, COMPARISON_SIZES, tc.lat_impls);
+        let (lat, cpu) = load_latency(tc.transport, COMPARISON_LATENCY_SIZES, tc.lat_impls);
         if !lat.is_empty() {
             let sub = dir.join("reqrep");
             std::fs::create_dir_all(&sub).ok();
@@ -199,7 +199,7 @@ pub(crate) fn generate() {
             draw_latency_single_panel(
                 &out,
                 &format!("REQ/REP latency: {}", tc.label),
-                COMPARISON_SIZES,
+                COMPARISON_LATENCY_SIZES,
                 tc.lat_impls,
                 &lat,
                 &cpu,

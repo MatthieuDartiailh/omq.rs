@@ -34,46 +34,21 @@ impl PeerOutbound {
                 inbox,
                 direct,
             } => {
-                if direct.is_none() {
-                    return match inbox.try_send(PeerDriverCommand::SendMessage(msg.clone())) {
-                        Ok(()) => TryFrameResult::Ok,
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            TryFrameResult::Full
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            TryFrameResult::Dead
-                        }
-                    };
-                }
+                let Some(direct) = direct else {
+                    return try_send_inbox(inbox, msg);
+                };
                 match slot.try_encode(msg) {
-                    TryFrameResult::Ineligible => {
-                        match inbox.try_send(PeerDriverCommand::SendMessage(msg.clone())) {
-                            Ok(()) => TryFrameResult::Ok,
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                TryFrameResult::Full
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                TryFrameResult::Dead
-                            }
-                        }
-                    }
-                    TryFrameResult::Ok if direct.is_some() => {
-                        let direct = direct.as_ref().unwrap();
-                        match slot.try_direct_write_arena_only(direct) {
-                            // Gather-framed entries remain queued for the IO
-                            // driver; false does not mean the slot was full.
-                            Ok(true | false) => TryFrameResult::Ok,
-                            Err(_) => TryFrameResult::Dead,
-                        }
-                    }
+                    TryFrameResult::Ineligible => try_send_inbox(inbox, msg),
+                    TryFrameResult::Ok => match slot.try_direct_write_arena_only(direct) {
+                        // Gather-framed entries remain queued for the IO
+                        // driver; false does not mean the slot was full.
+                        Ok(true | false) => TryFrameResult::Ok,
+                        Err(_) => TryFrameResult::Dead,
+                    },
                     other => other,
                 }
             }
-            Self::Inbox(tx) => match tx.try_send(PeerDriverCommand::SendMessage(msg.clone())) {
-                Ok(()) => TryFrameResult::Ok,
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => TryFrameResult::Full,
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => TryFrameResult::Dead,
-            },
+            Self::Inbox(tx) => try_send_inbox(tx, msg),
         }
     }
 
@@ -107,5 +82,16 @@ impl PeerOutbound {
                 ..
             }
         )
+    }
+}
+
+fn try_send_inbox(
+    tx: &tokio::sync::mpsc::Sender<PeerDriverCommand>,
+    msg: &Message,
+) -> TryFrameResult {
+    match tx.try_send(PeerDriverCommand::SendMessage(msg.clone())) {
+        Ok(()) => TryFrameResult::Ok,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => TryFrameResult::Full,
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => TryFrameResult::Dead,
     }
 }

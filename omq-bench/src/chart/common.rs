@@ -5,6 +5,7 @@ use std::path::Path;
 use plotters::prelude::*;
 
 pub(crate) const COMPARISON_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
+pub(crate) const COMPARISON_LATENCY_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
 pub(crate) const SMALL_CUTOFF: u64 = 1024;
 pub(crate) const LARGE_START: u64 = 256;
 

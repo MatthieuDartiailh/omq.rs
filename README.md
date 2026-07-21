@@ -28,6 +28,14 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 </p>
 </details>
 
+<details>
+<summary>LZ4 PUSH/PULL throughput</summary>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/lz4_tcp.svg" alt="LZ4 PUSH/PULL throughput over TCP" width="950">
+</p>
+</details>
+
 [Full comparison charts](COMPARISONS.md)
 
 ## The hard parts

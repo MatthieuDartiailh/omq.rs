@@ -347,6 +347,10 @@ name = "omq_random_sizes"
 path = "tests/random_sizes.rs"
 
 [[test]]
+name = "omq_resource_watch"
+path = "tests/resource_watch.rs"
+
+[[test]]
 name = "omq_reconnect"
 path = "tests/reconnect.rs"
 

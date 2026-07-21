@@ -83,7 +83,7 @@ impl ReceiveProfile {
 
     fn budget(self, msg_bytes: usize) -> DrainBudget {
         match self {
-            Self::Latency | Self::LatencyReq => DrainBudget::new(8, 16 * 1024),
+            Self::Latency | Self::LatencyReq => DrainBudget::new(1, 16 * 1024),
             Self::Throughput => {
                 let (max_msgs, max_bytes) = if msg_bytes <= RECV_SMALL_MSG {
                     (256, RECV_SMALL_BYTES)
@@ -99,7 +99,7 @@ impl ReceiveProfile {
 
     fn time(self, msg_bytes: usize) -> Option<Duration> {
         match self {
-            Self::Latency | Self::LatencyReq => Some(Duration::from_micros(5)),
+            Self::Latency | Self::LatencyReq => None,
             // The small profile already has tight message/byte bounds. Avoid
             // clock reads here; this is the hot path for tiny messages.
             Self::Throughput if msg_bytes <= RECV_SMALL_MSG => None,
@@ -1782,6 +1782,17 @@ mod tests {
 
         fn split(self, _fast_write: bool) -> (Self::Reader, Self::Writer) {
             tokio::io::split(self)
+        }
+    }
+
+    #[test]
+    fn latency_receive_profile_drains_one_message_without_timer() {
+        for profile in [ReceiveProfile::Latency, ReceiveProfile::LatencyReq] {
+            let mut budget = profile.budget(16);
+            assert!(!budget.exhausted());
+            assert!(!budget.account(16));
+            assert!(budget.exhausted());
+            assert_eq!(profile.time(16), None);
         }
     }
 
