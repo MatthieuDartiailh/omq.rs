@@ -503,44 +503,15 @@ pub fn proxy_handles(
     cap: Option<omq_tokio::blocking::Socket>,
     ctrl: Option<omq_tokio::blocking::Socket>,
 ) {
-    let fe = Arc::new(fe.into_async());
-    let be = Arc::new(be.into_async());
-    let cap = cap.map(|s| Arc::new(s.into_async()));
-    let ctrl = ctrl.map(|s| Arc::new(s.into_async()));
+    let mut proxy = omq_tokio::Proxy::new(fe.into_async(), be.into_async());
+    if let Some(cap) = cap {
+        proxy = proxy.capture(cap.into_async());
+    }
+    if let Some(ctrl) = ctrl {
+        proxy = proxy.control(ctrl.into_async());
+    }
     ctx.spawn_blocking(async move {
-        loop {
-            tokio::select! {
-                biased;
-                command = async {
-                    let Some(ctrl) = &ctrl else { futures::future::pending().await };
-                    ctrl.recv().await
-                } => {
-                    let Ok(msg) = command else { return; };
-                    let command: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
-                    match command.as_slice() {
-                        b"TERMINATE" | b"KILL" => return,
-                        b"PAUSE" => loop {
-                            let Some(ctrl) = &ctrl else { return; };
-                            let Ok(msg) = ctrl.recv().await else { return; };
-                            let command: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
-                            if command == b"RESUME" { break; }
-                            if command == b"TERMINATE" || command == b"KILL" { return; }
-                        },
-                        _ => {}
-                    }
-                }
-                msg = fe.recv() => {
-                    let Ok(msg) = msg else { return; };
-                    if let Some(cap) = &cap { let _ = cap.send(msg.clone()).await; }
-                    if be.send(msg).await.is_err() { return; }
-                }
-                msg = be.recv() => {
-                    let Ok(msg) = msg else { return; };
-                    if let Some(cap) = &cap { let _ = cap.send(msg.clone()).await; }
-                    if fe.send(msg).await.is_err() { return; }
-                }
-            }
-        }
+        let _ = proxy.run().await;
     });
 }
 
