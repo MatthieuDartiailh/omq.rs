@@ -59,3 +59,66 @@ pub(super) fn peer_matches(
         (FanOutMode::Group, None) => false,
     }
 }
+
+pub(super) fn add_subscription(subscriptions: &mut SubscriptionSet, prefix: &[u8]) -> bool {
+    let was_all = subscriptions.is_subscribe_all();
+    subscriptions.add(prefix);
+    !was_all && subscriptions.is_subscribe_all()
+}
+
+pub(super) fn remove_subscription(subscriptions: &mut SubscriptionSet, prefix: &[u8]) -> bool {
+    let was_all = subscriptions.is_subscribe_all();
+    subscriptions.remove(prefix);
+    was_all && !subscriptions.is_subscribe_all()
+}
+
+pub(super) fn all_peers_subscribe_all(
+    mode: FanOutMode,
+    subscribe_all_count: usize,
+    peer_count: usize,
+) -> bool {
+    matches!(mode, FanOutMode::SubscriptionPrefix)
+        && peer_count != 0
+        && subscribe_all_count == peer_count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscribe_all_counter_changes_only_on_empty_prefix_edges() {
+        let mut subscriptions = SubscriptionSet::new();
+
+        assert!(!add_subscription(&mut subscriptions, b"abc"));
+        assert!(!subscriptions.is_subscribe_all());
+        assert!(add_subscription(&mut subscriptions, b""));
+        assert!(subscriptions.is_subscribe_all());
+        assert!(!add_subscription(&mut subscriptions, b""));
+        assert!(!remove_subscription(&mut subscriptions, b"abc"));
+        assert!(subscriptions.is_subscribe_all());
+        assert!(remove_subscription(&mut subscriptions, b""));
+        assert!(!subscriptions.is_subscribe_all());
+        assert!(!remove_subscription(&mut subscriptions, b""));
+    }
+
+    #[test]
+    fn all_peers_subscribe_all_requires_subscription_mode_and_peers() {
+        assert!(all_peers_subscribe_all(
+            FanOutMode::SubscriptionPrefix,
+            2,
+            2
+        ));
+        assert!(!all_peers_subscribe_all(
+            FanOutMode::SubscriptionPrefix,
+            0,
+            0
+        ));
+        assert!(!all_peers_subscribe_all(
+            FanOutMode::SubscriptionPrefix,
+            1,
+            2
+        ));
+        assert!(!all_peers_subscribe_all(FanOutMode::Group, 2, 2));
+    }
+}
