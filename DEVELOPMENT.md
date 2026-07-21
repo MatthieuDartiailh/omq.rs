@@ -23,7 +23,6 @@ Lints: `missing_debug_implementations` = **deny**,
 ```sh
 cargo test -p omq-tokio
 cargo test -p omq-proto
-cargo test -p blume
 cargo test -p yring
 cargo test -p omq-tokio --test req_rep -- some_test_name
 ```
@@ -304,4 +303,4 @@ GitHub releases. Configuration lives in `release-plz.toml`.
 
 ### Crates To Check
 
-`omq-proto`, `blume`, `yring`, `omq-tokio`, `omq-libzmq`, `pyomq`.
+`omq-proto`, `yring`, `omq-tokio`, `omq-libzmq`, `pyomq`.
