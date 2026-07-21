@@ -746,6 +746,7 @@ def test_proxy_steerable(tcp_endpoint):
         )
         proxy_thread.start()
         time.sleep(0.05)
+        assert proxy_thread.is_alive()
 
         # Basic forwarding
         sender.send(b"hello")
